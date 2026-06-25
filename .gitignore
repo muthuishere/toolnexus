@@ -1,0 +1,28 @@
+# JS
+node_modules/
+js/dist/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Go
+golang/bin/
+
+# OS / editor
+.DS_Store
+*.log
+.env
+
+# compiled Go binaries (examples / CLI built in-place)
+golang/agent
+golang/openrouter
+golang/toolnexus
+golang/cmd/toolnexus/toolnexus

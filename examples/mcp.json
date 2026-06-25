@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "everything": {
+      "type": "local",
+      "command": ["npx", "-y", "@modelcontextprotocol/server-everything"],
+      "enabled": true,
+      "timeout": 30000
+    },
+    "example-remote": {
+      "type": "remote",
+      "url": "https://example.com/mcp",
+      "headers": { "Authorization": "Bearer YOUR_TOKEN_HERE" },
+      "enabled": false
+    }
+  }
+}
