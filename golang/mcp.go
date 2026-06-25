@@ -117,6 +117,23 @@ func parseMcpBytes(data []byte) (McpConfig, error) {
 	return cfg, nil
 }
 
+// ExpandEnvHeaders returns a NEW map with each header VALUE having ${ENV_VAR}
+// replaced by os.Getenv(name) (unset vars become ""). nil in ⇒ nil out. Mirrors
+// js/src/mcp.ts expandEnvHeaders. Values are never logged.
+func ExpandEnvHeaders(headers map[string]string) map[string]string {
+	if headers == nil {
+		return nil
+	}
+	out := make(map[string]string, len(headers))
+	for k, v := range headers {
+		out[k] = envVarRe.ReplaceAllStringFunc(v, func(m string) string {
+			name := envVarRe.FindStringSubmatch(m)[1]
+			return os.Getenv(name)
+		})
+	}
+	return out
+}
+
 func isTextContent(c mcp.Content) (string, bool) {
 	if tc, ok := mcp.AsTextContent(c); ok {
 		return tc.Text, true
@@ -280,10 +297,14 @@ func connectServer(name string, cfg ServerConfig) (*mcpclient.Client, error) {
 }
 
 func newRemoteClient(cfg ServerConfig) (*mcpclient.Client, error) {
+	// Expand ${ENV_VAR} in header values so tokens live in the environment, not
+	// the committed config. Values are never logged.
+	headers := ExpandEnvHeaders(cfg.Headers)
+
 	// Prefer streamable HTTP, fall back to SSE.
 	var httpOpts []transport.StreamableHTTPCOption
-	if len(cfg.Headers) > 0 {
-		httpOpts = append(httpOpts, transport.WithHTTPHeaders(cfg.Headers))
+	if len(headers) > 0 {
+		httpOpts = append(httpOpts, transport.WithHTTPHeaders(headers))
 	}
 	httpClient, err := mcpclient.NewStreamableHttpClient(cfg.URL, httpOpts...)
 	if err == nil {
@@ -296,8 +317,8 @@ func newRemoteClient(cfg ServerConfig) (*mcpclient.Client, error) {
 	}
 
 	var sseOpts []transport.ClientOption
-	if len(cfg.Headers) > 0 {
-		sseOpts = append(sseOpts, mcpclient.WithHeaders(cfg.Headers))
+	if len(headers) > 0 {
+		sseOpts = append(sseOpts, mcpclient.WithHeaders(headers))
 	}
 	sseClient, sseErr := mcpclient.NewSSEMCPClient(cfg.URL, sseOpts...)
 	if sseErr != nil {
