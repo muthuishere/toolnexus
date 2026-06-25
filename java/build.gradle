@@ -1,0 +1,83 @@
+plugins {
+    id 'java-library'
+    id 'application'
+    id 'maven-publish'
+}
+
+group = 'io.github.muthuishere'
+version = '0.1.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+    withSourcesJar()
+    withJavadocJar()
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Official MCP Java SDK (client + stdio + streamable-HTTP transports).
+    // The `mcp` aggregator pulls in mcp-core + the (Jackson 3) json mapper.
+    api 'io.modelcontextprotocol.sdk:mcp:2.0.0'
+
+    // Jackson (databind) for our own JSON: config parsing, adapters, LLM client.
+    api 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
+}
+
+// Enable -parameters so @Tool reflection can read real parameter names.
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs << '-parameters'
+    options.encoding = 'UTF-8'
+}
+
+// `application` is just a convenience host; examples are launched via JavaExec.
+application {
+    mainClass = 'io.github.muthuishere.toolnexus.examples.Basic'
+}
+
+tasks.register('runBasic', JavaExec) {
+    group = 'application'
+    description = 'Run the Basic example (MCP + skills, no API key needed).'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'io.github.muthuishere.toolnexus.examples.Basic'
+}
+
+tasks.register('runAgent', JavaExec) {
+    group = 'application'
+    description = 'Run the Agent example (native + http + mcp + skills + unified client).'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'io.github.muthuishere.toolnexus.examples.Agent'
+    // forward OPENROUTER_API_KEY / OPENROUTER_MODEL from the environment
+    environment 'OPENROUTER_API_KEY', System.getenv('OPENROUTER_API_KEY') ?: ''
+    environment 'OPENROUTER_MODEL', System.getenv('OPENROUTER_MODEL') ?: ''
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+            artifactId = 'toolnexus'
+            pom {
+                name = 'toolnexus'
+                description = 'Provider-agnostic toolkit: dynamic MCP servers + agent skills + native/http tools for any LLM.'
+                url = 'https://github.com/muthuishere/agentskillsmcp'
+                licenses {
+                    license {
+                        name = 'MIT License'
+                        url = 'https://opensource.org/licenses/MIT'
+                    }
+                }
+                developers {
+                    developer {
+                        id = 'muthuishere'
+                        name = 'Muthukumaran Navaneethakrishnan'
+                    }
+                }
+            }
+        }
+    }
+}

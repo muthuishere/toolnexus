@@ -14,7 +14,7 @@ The output is a single **Toolkit** of uniform `Tool`s plus adapters that emit th
 tool schema in OpenAI / Anthropic / Gemini formats. You wire the schema into your
 LLM call; when the model asks for a tool, you call `toolkit.execute(name, args)`.
 
-This contract is identical across the `js/`, `python/`, and `golang/`
+This contract is identical across the `js/`, `python/`, `golang/`, and `java/`
 implementations. Each builds on the most popular MCP SDK for that language:
 
 | Lang   | MCP SDK                                  |
@@ -22,6 +22,7 @@ implementations. Each builds on the most popular MCP SDK for that language:
 | JS/TS  | `@modelcontextprotocol/sdk` (same as opencode) |
 | Python | `mcp` (modelcontextprotocol/python-sdk)  |
 | Go     | `github.com/mark3labs/mcp-go`            |
+| Java   | `io.modelcontextprotocol.sdk:mcp` (official)   |
 
 > **Who reads this:** nobody, normally. End users read the per-language READMEs.
 > This file exists only so a future porter keeps JS/Python/Go byte-identical.

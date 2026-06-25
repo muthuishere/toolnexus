@@ -50,6 +50,21 @@ Then consumers: `go get github.com/muthuishere/toolnexus/golang@v0.1.0`.
 
 CLI install: `go install github.com/muthuishere/toolnexus/golang/cmd/toolnexus@latest`.
 
+## 4. Java  →  `io.github.muthuishere:toolnexus`
+
+Gradle `maven-publish` is configured. Publish manually to Maven Central (via the
+Central Portal / OSSRH) or GitHub Packages — both need credentials in
+`~/.gradle/gradle.properties` (never commit them):
+
+```sh
+cd java
+./gradlew build
+./gradlew publish          # uses the configured repository + your gradle.properties creds
+```
+
+Consumers: `implementation 'io.github.muthuishere:toolnexus:0.1.0'`.
+To bump: edit `version` in `java/build.gradle`, rebuild, republish.
+
 ## Pre-publish checklist
 
 - [ ] `js`: `npm run build` clean; `node --experimental-strip-types examples/basic.ts` works

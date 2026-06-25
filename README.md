@@ -2,7 +2,7 @@
 
 **Build an agent in a few lines.** Bring any LLM endpoint, point at an `mcp.json` and a
 `skills/` folder, and you get a working agent — system prompt, skills, tool-calling loop,
-all included. A small, **vendor-neutral** library in **JavaScript / TypeScript, Python, and Go**.
+all included. A small, **vendor-neutral** library in **JavaScript / TypeScript, Python, Go, and Java**.
 
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
 tools, agent skills, your own functions, and remote HTTP endpoints are all *the same thing*
@@ -37,7 +37,7 @@ The giants each cover *part* of this surface; none covers all of it in our lane:
 | **Spring AI** | ✅ | ❌ | ✅ | ❌ | ✅ | Java only |
 | **LangChain** | ✅ | ❌ | ✅ | ~ | ✅ | Py, JS (no Go) |
 | **Google ADK** | ✅ | ✅ | ✅ | ✅ | ✅ | Py/Java/Go/JS — Gemini-centric |
-| **toolnexus** | ✅ | ✅ | ✅ | ✅ | ✅ | **JS + Py + Go, vendor-neutral** |
+| **toolnexus** | ✅ | ✅ | ✅ | ✅ | ✅ | **JS + Py + Go + Java, vendor-neutral** |
 
 toolnexus is a **focused library**, not a platform: lightweight, vendor-neutral, with real
 parity across JS, Python, and Go (including first-class Go — where LangChain and Spring AI
@@ -49,6 +49,7 @@ is reimplemented from scratch:
 | JS/TS  | [`js/`](js/)         | `@modelcontextprotocol/sdk` (same as opencode)  |
 | Python | [`python/`](python/) | `mcp` (modelcontextprotocol/python-sdk)         |
 | Go     | [`golang/`](golang/) | `github.com/mark3labs/mcp-go`                   |
+| Java   | [`java/`](java/)     | `io.modelcontextprotocol.sdk:mcp` (official)    |
 
 The language-independent behavior is pinned in **[SPEC.md](SPEC.md)** so all three stay
 byte-compatible (especially the skill loader output).
@@ -111,7 +112,8 @@ tools, and host loop are all opt-in on top.
 
 ## Per-language docs
 
-[`js/`](js/) · [`python/`](python/) · [`golang/`](golang/) — quickstarts and API.
+[`js/`](js/) · [`python/`](python/) · [`golang/`](golang/) · [`java/`](java/) — quickstarts and API.
+Embedding in a Go app? See [`golang/GUIDE.md`](golang/GUIDE.md).
 [`examples/`](examples/) holds the shared `mcp.json` + sample skill used by every
 implementation's examples and tests.
 
