@@ -85,6 +85,26 @@ tasks.register('runHooks', JavaExec) {
     environment 'OPENROUTER_MODEL', System.getenv('OPENROUTER_MODEL') ?: ''
 }
 
+tasks.register('runStreaming', JavaExec) {
+    group = 'application'
+    description = 'Run the Streaming example (text deltas + tool_call/tool_result/usage/done events).'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'io.github.muthuishere.toolnexus.examples.Streaming'
+    // forward OPENROUTER_API_KEY / OPENROUTER_MODEL from the environment
+    environment 'OPENROUTER_API_KEY', System.getenv('OPENROUTER_API_KEY') ?: ''
+    environment 'OPENROUTER_MODEL', System.getenv('OPENROUTER_MODEL') ?: ''
+}
+
+tasks.register('runMemory', JavaExec) {
+    group = 'application'
+    description = 'Run the Memory example (Conversation retains history across send() calls).'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'io.github.muthuishere.toolnexus.examples.Memory'
+    // forward OPENROUTER_API_KEY / OPENROUTER_MODEL from the environment
+    environment 'OPENROUTER_API_KEY', System.getenv('OPENROUTER_API_KEY') ?: ''
+    environment 'OPENROUTER_MODEL', System.getenv('OPENROUTER_MODEL') ?: ''
+}
+
 publishing {
     publications {
         mavenJava(MavenPublication) {
