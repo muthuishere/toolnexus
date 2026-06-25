@@ -68,12 +68,16 @@ export class Client {
       messages.push(msg)
       const calls = msg.tool_calls ?? []
       if (calls.length === 0) return { text: msg.content ?? "", messages, toolCalls }
-      for (const call of calls) {
-        const args = safeJson(call.function.arguments)
-        toolCalls.push({ name: call.function.name, args })
-        const result = await toolkit.execute(call.function.name, args)
-        messages.push({ role: "tool", tool_call_id: call.id, content: result.output })
-      }
+      // execute all tool calls in this turn concurrently (true parallel tool calling)
+      const results = await Promise.all(
+        calls.map(async (call: any) => {
+          const args = safeJson(call.function.arguments)
+          toolCalls.push({ name: call.function.name, args })
+          const result = await toolkit.execute(call.function.name, args)
+          return { role: "tool", tool_call_id: call.id, content: result.output }
+        }),
+      )
+      messages.push(...results)
     }
     return { text: lastText(messages), messages, toolCalls }
   }
@@ -107,12 +111,14 @@ export class Client {
         const text = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
         return { text, messages, toolCalls }
       }
-      const results: any[] = []
-      for (const use of uses) {
-        toolCalls.push({ name: use.name, args: use.input ?? {} })
-        const result = await toolkit.execute(use.name, use.input ?? {})
-        results.push({ type: "tool_result", tool_use_id: use.id, content: result.output, is_error: result.isError })
-      }
+      // execute all tool_use blocks in this turn concurrently (true parallel tool calling)
+      const results = await Promise.all(
+        uses.map(async (use: any) => {
+          toolCalls.push({ name: use.name, args: use.input ?? {} })
+          const result = await toolkit.execute(use.name, use.input ?? {})
+          return { type: "tool_result", tool_use_id: use.id, content: result.output, is_error: result.isError }
+        }),
+      )
       messages.push({ role: "user", content: results })
     }
     return { text: "", messages, toolCalls }
