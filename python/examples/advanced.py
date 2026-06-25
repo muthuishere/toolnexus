@@ -92,14 +92,25 @@ async def main() -> None:
     )
     print(
         "A) parallel — tool calls:",
-        [f"{c['name']}({json.dumps(c['args'])})" for c in a.tool_calls],
+        [f"{c['name']}({json.dumps(c['args'])})={c['output']}" for c in a.tool_calls],
     )
     print(
         "A) max calls in one turn:",
         _max_parallel(a.messages),
         "| answer:",
-        a.text.replace("\n", " ")[:80],
+        a.text.replace("\n", " ")[:60],
     )
+    print(
+        "A) usage:",
+        a.usage,
+        "| tool_call_count:",
+        a.tool_call_count,
+        "| turns:",
+        a.turns,
+        "| model:",
+        a.model,
+    )
+    print("A) first tool result metadata:", a.tool_calls[0]["metadata"] if a.tool_calls else None)
 
     # ---- B) CHAIN: second call depends on an OPAQUE first result (forces a 2nd turn) ----
     b = await agent.run(

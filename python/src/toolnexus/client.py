@@ -23,11 +23,42 @@ from .toolkit import Toolkit
 ClientStyle = Literal["openai", "anthropic"]
 
 
+def _empty_usage() -> dict[str, int]:
+    return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
 @dataclass
 class RunResult:
     text: str
     messages: list[dict[str, Any]]
+    # Every tool call made, each carrying name, args, output, is_error, metadata.
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    # Total number of tool calls (= len(tool_calls)).
+    tool_call_count: int = 0
+    # Number of LLM round trips.
+    turns: int = 0
+    # Aggregated token usage across all turns.
+    usage: dict[str, int] = field(default_factory=_empty_usage)
+    # The model used.
+    model: str = ""
+
+
+def _add_usage(acc: dict[str, int], raw: Any, style: ClientStyle) -> None:
+    """Accumulate one response's token usage into ``acc`` (mirrors JS ``addUsage``)."""
+    if not raw:
+        return
+    if style == "anthropic":
+        prompt = raw.get("input_tokens") or 0
+        completion = raw.get("output_tokens") or 0
+        acc["prompt_tokens"] += prompt
+        acc["completion_tokens"] += completion
+        acc["total_tokens"] += prompt + completion
+    else:
+        prompt = raw.get("prompt_tokens") or 0
+        completion = raw.get("completion_tokens") or 0
+        acc["prompt_tokens"] += prompt
+        acc["completion_tokens"] += completion
+        acc["total_tokens"] += raw.get("total_tokens") or (prompt + completion)
 
 
 def _resolve_key(api_key: Optional[str], style: ClientStyle) -> str:
@@ -91,6 +122,24 @@ class Client:
         parts = [self.system_prompt or "", toolkit.skills_prompt()]
         return "\n\n".join(p for p in parts if p)
 
+    def _result(
+        self,
+        text: str,
+        messages: list[dict[str, Any]],
+        tool_calls: list[dict[str, Any]],
+        turns: int,
+        usage: dict[str, int],
+    ) -> RunResult:
+        return RunResult(
+            text=text,
+            messages=messages,
+            tool_calls=tool_calls,
+            tool_call_count=len(tool_calls),
+            turns=turns,
+            usage=usage,
+            model=self.model,
+        )
+
     async def run(self, prompt: str, toolkit: Toolkit) -> RunResult:
         if self.style == "anthropic":
             return await self._run_anthropic(prompt, toolkit)
@@ -112,8 +161,11 @@ class Client:
         messages.append({"role": "user", "content": prompt})
         tools = toolkit.to_openai()
         tool_calls: list[dict[str, Any]] = []
+        usage = _empty_usage()
+        turns = 0
 
         for _turn in range(self.max_turns):
+            turns += 1
             payload = {
                 "model": self.model,
                 "messages": messages,
@@ -121,33 +173,43 @@ class Client:
                 "tool_choice": "auto",
             }
             data = await asyncio.to_thread(_post, url, req_headers, payload, 120.0)
+            _add_usage(usage, data.get("usage"), "openai")
             msg = data["choices"][0]["message"]
             messages.append(msg)
             calls = msg.get("tool_calls") or []
             if not calls:
-                return RunResult(
-                    text=msg.get("content") or "", messages=messages, tool_calls=tool_calls
+                return self._result(
+                    msg.get("content") or "", messages, tool_calls, turns, usage
                 )
 
-            # Record the tool calls in order, then execute them concurrently
-            # (true parallel tool calling). Each result is mapped back to its
-            # originating call by index so tool_call_id ↔ output stays correct.
+            # Parse the tool calls in order, then execute them concurrently (true
+            # parallel tool calling). Each result is mapped back to its originating
+            # call by index so tool_call_id ↔ output stays correct. We record the
+            # tool_calls entry AFTER execute so it carries output/is_error/metadata.
             parsed = []
             for call in calls:
                 fn = call["function"]
                 args = _safe_json(fn.get("arguments"))
-                tool_calls.append({"name": fn["name"], "args": args})
                 parsed.append((call["id"], fn["name"], args))
 
             results = await asyncio.gather(
                 *(toolkit.execute(name, args) for (_id, name, args) in parsed)
             )
-            for (call_id, _name, _args), result in zip(parsed, results):
+            for (call_id, name, args), result in zip(parsed, results):
+                tool_calls.append(
+                    {
+                        "name": name,
+                        "args": args,
+                        "output": result.output,
+                        "is_error": result.is_error,
+                        "metadata": result.metadata,
+                    }
+                )
                 messages.append(
                     {"role": "tool", "tool_call_id": call_id, "content": result.output}
                 )
 
-        return RunResult(text=_last_text(messages), messages=messages, tool_calls=tool_calls)
+        return self._result(_last_text(messages), messages, tool_calls, turns, usage)
 
     # ---- Anthropic-style: POST {base_url}/messages ----
     async def _run_anthropic(self, prompt: str, toolkit: Toolkit) -> RunResult:
@@ -164,8 +226,11 @@ class Client:
         messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
         tools = toolkit.to_anthropic()
         tool_calls: list[dict[str, Any]] = []
+        usage = _empty_usage()
+        turns = 0
 
         for _turn in range(self.max_turns):
+            turns += 1
             payload = {
                 "model": self.model,
                 "max_tokens": 4096,
@@ -174,34 +239,43 @@ class Client:
                 "tools": tools,
             }
             data = await asyncio.to_thread(_post, endpoint, req_headers, payload, 120.0)
+            _add_usage(usage, data.get("usage"), "anthropic")
             content = data.get("content") or []
             messages.append({"role": "assistant", "content": content})
             uses = [b for b in content if b.get("type") == "tool_use"]
             if not uses:
                 text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
-                return RunResult(text=text, messages=messages, tool_calls=tool_calls)
+                return self._result(text, messages, tool_calls, turns, usage)
 
-            # Record the tool_use blocks in order, then execute them concurrently
-            # (true parallel tool calling). Each result is mapped back to its
-            # originating block by index so tool_use_id ↔ output stays correct.
-            for use in uses:
-                tool_calls.append({"name": use["name"], "args": use.get("input") or {}})
-
+            # Execute the tool_use blocks concurrently (true parallel tool calling).
+            # Each result is mapped back to its originating block by index so
+            # tool_use_id ↔ output stays correct. We record the tool_calls entry
+            # AFTER execute so it carries output/is_error/metadata.
             outputs = await asyncio.gather(
                 *(toolkit.execute(use["name"], use.get("input") or {}) for use in uses)
             )
-            results: list[dict[str, Any]] = [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": use["id"],
-                    "content": result.output,
-                    "is_error": result.is_error,
-                }
-                for use, result in zip(uses, outputs)
-            ]
+            results: list[dict[str, Any]] = []
+            for use, result in zip(uses, outputs):
+                tool_calls.append(
+                    {
+                        "name": use["name"],
+                        "args": use.get("input") or {},
+                        "output": result.output,
+                        "is_error": result.is_error,
+                        "metadata": result.metadata,
+                    }
+                )
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": use["id"],
+                        "content": result.output,
+                        "is_error": result.is_error,
+                    }
+                )
             messages.append({"role": "user", "content": results})
 
-        return RunResult(text="", messages=messages, tool_calls=tool_calls)
+        return self._result("", messages, tool_calls, turns, usage)
 
 
 def _last_text(messages: list[dict[str, Any]]) -> str:
