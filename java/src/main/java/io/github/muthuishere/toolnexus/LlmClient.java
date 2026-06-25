@@ -39,25 +39,88 @@ public final class LlmClient {
         public Options maxTurns(int v) { this.maxTurns = v; return this; }
     }
 
+    /** A tool call the model made, plus its result + metadata. */
     public static final class ToolCall {
         public final String name;
         public final Map<String, Object> args;
+        public final String output;
+        public final boolean isError;
+        public final Map<String, Object> metadata;
 
-        ToolCall(String name, Map<String, Object> args) {
+        ToolCall(String name, Map<String, Object> args,
+                 String output, boolean isError, Map<String, Object> metadata) {
             this.name = name;
             this.args = args;
+            this.output = output;
+            this.isError = isError;
+            this.metadata = metadata;
         }
+    }
+
+    /** Token usage, summed across every LLM round trip in the run. */
+    public static final class Usage {
+        public long promptTokens;
+        public long completionTokens;
+        public long totalTokens;
     }
 
     public static final class RunResult {
         public final String text;
         public final List<Object> messages;
+        /** Every tool call made, with its output, error flag, and metadata. */
         public final List<ToolCall> toolCalls;
+        /** Total number of tool calls (= toolCalls.size()). */
+        public final int toolCallCount;
+        /** Number of LLM round trips. */
+        public final int turns;
+        /** Aggregated token usage across all turns. */
+        public final Usage usage;
+        /** The model used. */
+        public final String model;
 
-        RunResult(String text, List<Object> messages, List<ToolCall> toolCalls) {
+        RunResult(String text, List<Object> messages, List<ToolCall> toolCalls,
+                  int turns, Usage usage, String model) {
             this.text = text;
             this.messages = messages;
             this.toolCalls = toolCalls;
+            this.toolCallCount = toolCalls.size();
+            this.turns = turns;
+            this.usage = usage;
+            this.model = model;
+        }
+    }
+
+    /**
+     * Sum the {@code usage} object from one LLM response into {@code acc}.
+     * openai reads {@code prompt_tokens}/{@code completion_tokens}/{@code total_tokens};
+     * anthropic reads {@code input_tokens}->prompt, {@code output_tokens}->completion,
+     * total=input+output.
+     */
+    static void addUsage(Usage acc, Map<String, Object> raw, String style) {
+        if (raw == null) return;
+        if ("anthropic".equals(style)) {
+            long in = asLong(raw.get("input_tokens"));
+            long out = asLong(raw.get("output_tokens"));
+            acc.promptTokens += in;
+            acc.completionTokens += out;
+            acc.totalTokens += in + out;
+        } else {
+            long in = asLong(raw.get("prompt_tokens"));
+            long out = asLong(raw.get("completion_tokens"));
+            Object total = raw.get("total_tokens");
+            acc.promptTokens += in;
+            acc.completionTokens += out;
+            acc.totalTokens += total != null ? asLong(total) : in + out;
+        }
+    }
+
+    private static long asLong(Object v) {
+        if (v instanceof Number) return ((Number) v).longValue();
+        if (v == null) return 0;
+        try {
+            return (long) Double.parseDouble(String.valueOf(v));
+        } catch (NumberFormatException e) {
+            return 0;
         }
     }
 
@@ -125,11 +188,14 @@ public final class LlmClient {
         messages.add(msg("user", prompt));
         List<Map<String, Object>> tools = toolkit.toOpenAI();
         List<ToolCall> toolCalls = new ArrayList<>();
+        Usage usage = new Usage();
+        int turns = 0;
 
         // One virtual-thread executor for the whole run; tool calls in a turn run on it.
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         try {
             for (int turn = 0; turn < maxTurns(); turn++) {
+                turns++;
                 Map<String, Object> body = new LinkedHashMap<>();
                 body.put("model", opts.model);
                 body.put("messages", messages);
@@ -143,6 +209,7 @@ public final class LlmClient {
                 if (opts.headers != null) headers.putAll(opts.headers);
 
                 Map<String, Object> data = postJson(url, headers, body);
+                addUsage(usage, (Map<String, Object>) data.get("usage"), "openai");
                 List<Object> choices = (List<Object>) data.get("choices");
                 Map<String, Object> message =
                         (Map<String, Object>) ((Map<String, Object>) choices.get(0)).get("message");
@@ -150,7 +217,8 @@ public final class LlmClient {
                 List<Object> calls = (List<Object>) message.get("tool_calls");
                 if (calls == null || calls.isEmpty()) {
                     Object content = message.get("content");
-                    return new RunResult(content == null ? "" : String.valueOf(content), messages, toolCalls);
+                    return new RunResult(content == null ? "" : String.valueOf(content),
+                            messages, toolCalls, turns, usage, opts.model);
                 }
 
                 // Execute all tool calls in this turn concurrently (true parallel tool calling).
@@ -166,9 +234,10 @@ public final class LlmClient {
                     Map<String, Object> args = Json.parseObjectLoose(
                             fn.get("arguments") == null ? "{}" : String.valueOf(fn.get("arguments")));
                     Object callId = call.get("id");
-                    recorded[idx] = new ToolCall(fnName, args);
                     futures[idx] = CompletableFuture.supplyAsync(
                             () -> toolkit.execute(fnName, args), executor).thenAccept(result -> {
+                        recorded[idx] = new ToolCall(fnName, args,
+                                result.output(), result.isError(), result.metadata());
                         Map<String, Object> toolMsg = new LinkedHashMap<>();
                         toolMsg.put("role", "tool");
                         toolMsg.put("tool_call_id", callId);
@@ -182,7 +251,7 @@ public final class LlmClient {
                 for (int i = 0; i < n; i++) toolCalls.add(recorded[i]);
                 for (int i = 0; i < n; i++) messages.add(toolMsgs[i]);
             }
-            return new RunResult(lastAssistantText(messages), messages, toolCalls);
+            return new RunResult(lastAssistantText(messages), messages, toolCalls, turns, usage, opts.model);
         } finally {
             executor.shutdown();
         }
@@ -199,11 +268,14 @@ public final class LlmClient {
         messages.add(msg("user", prompt));
         List<Map<String, Object>> tools = toolkit.toAnthropic();
         List<ToolCall> toolCalls = new ArrayList<>();
+        Usage usage = new Usage();
+        int turns = 0;
 
         // One virtual-thread executor for the whole run; tool calls in a turn run on it.
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         try {
             for (int turn = 0; turn < maxTurns(); turn++) {
+                turns++;
                 Map<String, Object> body = new LinkedHashMap<>();
                 body.put("model", opts.model);
                 body.put("max_tokens", 4096);
@@ -218,6 +290,7 @@ public final class LlmClient {
                 if (opts.headers != null) headers.putAll(opts.headers);
 
                 Map<String, Object> data = postJson(endpoint, headers, body);
+                addUsage(usage, (Map<String, Object>) data.get("usage"), "anthropic");
                 List<Object> content = (List<Object>) data.get("content");
                 if (content == null) content = new ArrayList<>();
                 Map<String, Object> assistant = new LinkedHashMap<>();
@@ -236,7 +309,7 @@ public final class LlmClient {
                         Map<String, Object> block = (Map<String, Object>) b;
                         if ("text".equals(block.get("type"))) text.append(String.valueOf(block.get("text")));
                     }
-                    return new RunResult(text.toString(), messages, toolCalls);
+                    return new RunResult(text.toString(), messages, toolCalls, turns, usage, opts.model);
                 }
 
                 // Execute all tool_use blocks in this turn concurrently (true parallel tool calling).
@@ -252,9 +325,10 @@ public final class LlmClient {
                     final Map<String, Object> useInput = input;
                     String useName = String.valueOf(use.get("name"));
                     Object useId = use.get("id");
-                    recorded[idx] = new ToolCall(useName, useInput);
                     futures[idx] = CompletableFuture.supplyAsync(
                             () -> toolkit.execute(useName, useInput), executor).thenAccept(result -> {
+                        recorded[idx] = new ToolCall(useName, useInput,
+                                result.output(), result.isError(), result.metadata());
                         Map<String, Object> tr = new LinkedHashMap<>();
                         tr.put("type", "tool_result");
                         tr.put("tool_use_id", useId);
@@ -275,7 +349,7 @@ public final class LlmClient {
                 userMsg.put("content", results);
                 messages.add(userMsg);
             }
-            return new RunResult("", messages, toolCalls);
+            return new RunResult("", messages, toolCalls, turns, usage, opts.model);
         } finally {
             executor.shutdown();
         }

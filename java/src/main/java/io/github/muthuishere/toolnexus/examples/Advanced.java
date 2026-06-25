@@ -76,6 +76,17 @@ public final class Advanced {
         System.out.println("A) parallel — tool calls: " + callsLine(a));
         System.out.println("A) max calls in one turn: " + maxParallel(a.messages)
                 + " | answer: " + clip(a.text, 80));
+        System.out.println("A) model: " + a.model + " | toolCallCount: " + a.toolCallCount
+                + " | turns: " + a.turns);
+        System.out.println("A) usage: prompt=" + a.usage.promptTokens
+                + " completion=" + a.usage.completionTokens + " total=" + a.usage.totalTokens);
+        if (!a.toolCalls.isEmpty()) {
+            LlmClient.ToolCall first = a.toolCalls.get(0);
+            System.out.println("A) first tool call: " + first.name
+                    + " | isError: " + first.isError
+                    + " | output: " + clip(first.output, 60)
+                    + " | metadata: " + first.metadata);
+        }
 
         // ---- B) CHAIN: second call depends on an OPAQUE first result (forces a 2nd turn) ----
         LlmClient.RunResult b = agent.run(
