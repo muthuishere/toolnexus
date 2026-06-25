@@ -37,6 +37,76 @@ type ClientOptions struct {
 	SystemPrompt string
 	// MaxTurns caps the tool-calling loop; 0 ⇒ 10.
 	MaxTurns int
+	// Hooks are optional lifecycle callbacks around the loop. A nil Hooks (or any
+	// nil field) is skipped. Any hook returning an error aborts the run.
+	Hooks *Hooks
+}
+
+// Hooks are lifecycle callbacks around the agent loop. Each may observe; the
+// noted ones may mutate or short-circuit. A nil field is skipped, and any hook
+// returning an error aborts the run with that error. Mirrors js Hooks
+// (src/client.ts) and SPEC.md §8.
+type Hooks struct {
+	// BeforeLLM runs before each model call. Return a non-nil LLMOverride to
+	// replace messages and/or tools (trim/inject history, swap tools).
+	BeforeLLM func(ctx context.Context, ev BeforeLLMEvent) (*LLMOverride, error)
+	// AfterLLM runs after each model call (observe: logging, cost, tracing).
+	AfterLLM func(ctx context.Context, ev AfterLLMEvent) error
+	// BeforeTool runs before a tool executes. Return an override with Result set
+	// to SHORT-CIRCUIT (deny / cache hit / dry-run — the real tool never runs),
+	// or with Args set to rewrite the call.
+	BeforeTool func(ctx context.Context, ev BeforeToolEvent) (*ToolOverride, error)
+	// AfterTool runs after a tool executes. Return an override with Result set to
+	// replace (redact / annotate) the output.
+	AfterTool func(ctx context.Context, ev AfterToolEvent) (*ToolOverride, error)
+}
+
+// BeforeLLMEvent is passed to Hooks.BeforeLLM.
+type BeforeLLMEvent struct {
+	Messages []any
+	Tools    []any
+	Model    string
+	Turn     int
+}
+
+// AfterLLMEvent is passed to Hooks.AfterLLM. Response is the raw, decoded
+// provider payload (carries usage).
+type AfterLLMEvent struct {
+	Response map[string]any
+	Model    string
+	Turn     int
+}
+
+// BeforeToolEvent is passed to Hooks.BeforeTool.
+type BeforeToolEvent struct {
+	Name string
+	Args map[string]any
+	ID   string
+	Turn int
+}
+
+// AfterToolEvent is passed to Hooks.AfterTool.
+type AfterToolEvent struct {
+	Name   string
+	Args   map[string]any
+	Result ToolResult
+	ID     string
+	Turn   int
+}
+
+// LLMOverride is returned by Hooks.BeforeLLM. A nil field leaves that value
+// unchanged; a non-nil (even empty) slice replaces it.
+type LLMOverride struct {
+	Messages []any
+	Tools    []any
+}
+
+// ToolOverride is returned by Hooks.BeforeTool / Hooks.AfterTool. In BeforeTool,
+// a non-nil Result short-circuits the tool; otherwise a non-nil Args rewrites
+// the call. In AfterTool, a non-nil Result replaces the result.
+type ToolOverride struct {
+	Args   map[string]any
+	Result *ToolResult
 }
 
 // ToolCall records a tool the model asked for, plus its result + metadata.
@@ -150,6 +220,43 @@ func (c *Client) system(tk *Toolkit) string {
 	return strings.Join(parts, "\n\n")
 }
 
+// runTool runs one tool through the BeforeTool/AfterTool hooks: BeforeTool may
+// short-circuit (Result) or rewrite (Args), then tk.Execute runs, then AfterTool
+// may replace the result. It returns the args actually used and the final
+// result. Mirrors js Client.runTool. Hook errors abort the run.
+func (c *Client) runTool(ctx context.Context, tk *Toolkit, name string, args map[string]any, id string, turn int) (map[string]any, ToolResult, error) {
+	h := c.opts.Hooks
+	a := args
+	if h != nil && h.BeforeTool != nil {
+		ov, err := h.BeforeTool(ctx, BeforeToolEvent{Name: name, Args: a, ID: id, Turn: turn})
+		if err != nil {
+			return a, ToolResult{}, err
+		}
+		if ov != nil {
+			if ov.Result != nil {
+				return a, *ov.Result, nil // short-circuit (deny / cache / dry-run)
+			}
+			if ov.Args != nil {
+				a = ov.Args
+			}
+		}
+	}
+	result, err := tk.Execute(ctx, name, a)
+	if err != nil {
+		return a, result, err
+	}
+	if h != nil && h.AfterTool != nil {
+		ov, err := h.AfterTool(ctx, AfterToolEvent{Name: name, Args: a, Result: result, ID: id, Turn: turn})
+		if err != nil {
+			return a, result, err
+		}
+		if ov != nil && ov.Result != nil {
+			result = *ov.Result
+		}
+	}
+	return a, result, nil
+}
+
 // Run executes the agent loop for one prompt against the toolkit.
 func (c *Client) Run(ctx context.Context, prompt string, tk *Toolkit) (RunResult, error) {
 	if ctx == nil {
@@ -210,6 +317,20 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit) (Run
 
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
+		if c.opts.Hooks != nil && c.opts.Hooks.BeforeLLM != nil {
+			ov, err := c.opts.Hooks.BeforeLLM(ctx, BeforeLLMEvent{Messages: messages, Tools: tools, Model: c.opts.Model, Turn: turn})
+			if err != nil {
+				return RunResult{}, err
+			}
+			if ov != nil {
+				if ov.Messages != nil {
+					messages = ov.Messages
+				}
+				if ov.Tools != nil {
+					tools = ov.Tools
+				}
+			}
+		}
 		body := map[string]any{
 			"model":       c.opts.Model,
 			"messages":    messages,
@@ -241,6 +362,11 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit) (Run
 			return RunResult{}, err
 		}
 		addUsage(&usage, data.Usage, string(StyleOpenAI))
+		if c.opts.Hooks != nil && c.opts.Hooks.AfterLLM != nil {
+			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: decodeResponse(raw), Model: c.opts.Model, Turn: turn}); err != nil {
+				return RunResult{}, err
+			}
+		}
 		if len(data.Choices) == 0 {
 			return c.result("", messages, toolCalls, turns, usage), nil
 		}
@@ -276,6 +402,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit) (Run
 		results := make([]any, len(msg.ToolCalls))
 		var wg sync.WaitGroup
 		var mu sync.Mutex
+		var hookErr error
 		for i, tc := range msg.ToolCalls {
 			wg.Add(1)
 			go func(i int, tc struct {
@@ -287,9 +414,15 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit) (Run
 				} `json:"function"`
 			}) {
 				defer wg.Done()
-				args := safeJSONArgs(tc.Function.Arguments)
-				result, _ := tk.Execute(ctx, tc.Function.Name, args)
+				args, result, err := c.runTool(ctx, tk, tc.Function.Name, safeJSONArgs(tc.Function.Arguments), tc.ID, turn)
 				mu.Lock()
+				if err != nil {
+					if hookErr == nil {
+						hookErr = err
+					}
+					mu.Unlock()
+					return
+				}
 				toolCalls = append(toolCalls, ToolCall{
 					Name:     tc.Function.Name,
 					Args:     args,
@@ -306,6 +439,9 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit) (Run
 			}(i, tc)
 		}
 		wg.Wait()
+		if hookErr != nil {
+			return RunResult{}, hookErr
+		}
 		messages = append(messages, results...)
 	}
 	return c.result("", messages, toolCalls, turns, usage), nil
@@ -350,6 +486,20 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit) (
 
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
+		if c.opts.Hooks != nil && c.opts.Hooks.BeforeLLM != nil {
+			ov, err := c.opts.Hooks.BeforeLLM(ctx, BeforeLLMEvent{Messages: messages, Tools: tools, Model: c.opts.Model, Turn: turn})
+			if err != nil {
+				return RunResult{}, err
+			}
+			if ov != nil {
+				if ov.Messages != nil {
+					messages = ov.Messages
+				}
+				if ov.Tools != nil {
+					tools = ov.Tools
+				}
+			}
+		}
 		body := map[string]any{
 			"model":      c.opts.Model,
 			"max_tokens": 4096,
@@ -377,6 +527,11 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit) (
 			return RunResult{}, err
 		}
 		addUsage(&usage, data.Usage, string(StyleAnthropic))
+		if c.opts.Hooks != nil && c.opts.Hooks.AfterLLM != nil {
+			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: decodeResponse(raw), Model: c.opts.Model, Turn: turn}); err != nil {
+				return RunResult{}, err
+			}
+		}
 
 		// Re-marshal the content blocks as the assistant message.
 		var content []any
@@ -417,6 +572,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit) (
 		results := make([]any, len(uses))
 		var wg sync.WaitGroup
 		var mu sync.Mutex
+		var hookErr error
 		for i, u := range uses {
 			wg.Add(1)
 			go func(i int, u struct {
@@ -429,11 +585,18 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit) (
 				if in == nil {
 					in = map[string]any{}
 				}
-				result, _ := tk.Execute(ctx, u.Name, in)
+				args, result, err := c.runTool(ctx, tk, u.Name, in, u.ID, turn)
 				mu.Lock()
+				if err != nil {
+					if hookErr == nil {
+						hookErr = err
+					}
+					mu.Unlock()
+					return
+				}
 				toolCalls = append(toolCalls, ToolCall{
 					Name:     u.Name,
-					Args:     in,
+					Args:     args,
 					Output:   result.Output,
 					IsError:  result.IsError,
 					Metadata: result.Metadata,
@@ -448,9 +611,22 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit) (
 			}(i, u)
 		}
 		wg.Wait()
+		if hookErr != nil {
+			return RunResult{}, hookErr
+		}
 		messages = append(messages, map[string]any{"role": "user", "content": results})
 	}
 	return c.result("", messages, toolCalls, turns, usage), nil
+}
+
+// decodeResponse decodes a raw provider response body into a map for AfterLLM.
+// Returns nil on failure (the hook still observes the model/turn).
+func decodeResponse(raw []byte) map[string]any {
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil
+	}
+	return out
 }
 
 // safeJSONArgs parses a tool-call arguments JSON string into a map, defaulting to
