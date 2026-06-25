@@ -17,6 +17,21 @@ export interface ClientOptions {
   systemPrompt?: string
   maxTurns?: number
   hooks?: Hooks
+  /** Retries on transient LLM errors (429/5xx/network). Default 2. */
+  retries?: number
+  /** Base backoff in ms (exponential + jitter). Default 500. */
+  retryBaseMs?: number
+  /** Whole-run deadline in ms; aborts the run (and its in-flight request) when exceeded. */
+  timeoutMs?: number
+}
+
+const RETRYABLE = new Set([429, 500, 502, 503, 504])
+
+function delay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(resolve, ms)
+    signal.addEventListener("abort", () => { clearTimeout(t); reject(signal.reason ?? new Error("aborted")) }, { once: true })
+  })
 }
 
 /**
@@ -101,17 +116,56 @@ function resolveKey(opts: ClientOptions): string {
 export class Client {
   constructor(private readonly opts: ClientOptions) {}
 
-  async run(prompt: string, ctx: { toolkit: Toolkit }): Promise<RunResult> {
-    return this.opts.style === "anthropic" ? this.runAnthropic(prompt, ctx.toolkit) : this.runOpenAI(prompt, ctx.toolkit)
+  async run(prompt: string, ctx: { toolkit: Toolkit; signal?: AbortSignal }): Promise<RunResult> {
+    return this.opts.style === "anthropic"
+      ? this.runAnthropic(prompt, ctx.toolkit, ctx.signal)
+      : this.runOpenAI(prompt, ctx.toolkit, ctx.signal)
   }
 
   /** Streaming variant: async-iterate live events (text deltas, tool calls/results, usage, done). */
-  stream(prompt: string, ctx: { toolkit: Toolkit }): AsyncGenerator<StreamEvent, void, unknown> {
-    return this.opts.style === "anthropic" ? this.streamAnthropic(prompt, ctx.toolkit) : this.streamOpenAI(prompt, ctx.toolkit)
+  stream(prompt: string, ctx: { toolkit: Toolkit; signal?: AbortSignal }): AsyncGenerator<StreamEvent, void, unknown> {
+    return this.opts.style === "anthropic"
+      ? this.streamAnthropic(prompt, ctx.toolkit, ctx.signal)
+      : this.streamOpenAI(prompt, ctx.toolkit, ctx.signal)
   }
 
   private system(toolkit: Toolkit): string {
     return [this.opts.systemPrompt ?? "", toolkit.skillsPrompt()].filter(Boolean).join("\n\n")
+  }
+
+  /** Build a run-scoped abort signal from the optional run-level timeout + an external signal. */
+  private makeSignal(external?: AbortSignal): AbortSignal {
+    const ctrl = new AbortController()
+    if (this.opts.timeoutMs) {
+      const t = setTimeout(() => ctrl.abort(new Error(`run timeout after ${this.opts.timeoutMs}ms`)), this.opts.timeoutMs)
+      ;(t as any).unref?.()
+    }
+    if (external) {
+      if (external.aborted) ctrl.abort(external.reason)
+      else external.addEventListener("abort", () => ctrl.abort(external.reason), { once: true })
+    }
+    return ctrl.signal
+  }
+
+  /** fetch with retry + exponential backoff on 429/5xx/network, honoring Retry-After; aborts via signal. */
+  private async llmFetch(url: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
+    const retries = this.opts.retries ?? 2
+    const base = this.opts.retryBaseMs ?? 500
+    let lastErr: unknown
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const res = await fetch(url, { ...init, signal })
+        if (res.ok || !RETRYABLE.has(res.status) || attempt === retries) return res
+        const ra = Number(res.headers.get("retry-after"))
+        await delay(ra ? ra * 1000 : base * 2 ** attempt + Math.random() * 100, signal)
+      } catch (e) {
+        if (signal.aborted) throw e // abort/timeout: don't retry
+        lastErr = e
+        if (attempt === retries) throw e
+        await delay(base * 2 ** attempt + Math.random() * 100, signal)
+      }
+    }
+    throw lastErr
   }
 
   /** Run one tool through beforeTool/afterTool hooks (mutate args, short-circuit, transform result). */
@@ -132,8 +186,9 @@ export class Client {
   }
 
   // ---- OpenAI-style: POST {baseUrl}/chat/completions ----
-  private async runOpenAI(prompt: string, toolkit: Toolkit): Promise<RunResult> {
+  private async runOpenAI(prompt: string, toolkit: Toolkit, external?: AbortSignal): Promise<RunResult> {
     const key = resolveKey(this.opts)
+    const signal = this.makeSignal(external)
     let messages: any[] = []
     const system = this.system(toolkit)
     if (system) messages.push({ role: "system", content: system })
@@ -150,11 +205,11 @@ export class Client {
         if (ov?.messages) messages = ov.messages
         if (ov?.tools) tools = ov.tools
       }
-      const res = await fetch(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      const res = await this.llmFetch(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
         headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
         body: JSON.stringify({ model: this.opts.model, messages, tools, tool_choice: "auto" }),
-      })
+      }, signal)
       if (!res.ok) throw new Error(`LLM ${res.status}: ${await res.text()}`)
       const data: any = await res.json()
       addUsage(usage, data.usage, "openai")
@@ -181,8 +236,9 @@ export class Client {
   }
 
   // ---- Anthropic-style: POST {baseUrl}/messages ----
-  private async runAnthropic(prompt: string, toolkit: Toolkit): Promise<RunResult> {
+  private async runAnthropic(prompt: string, toolkit: Toolkit, external?: AbortSignal): Promise<RunResult> {
     const key = resolveKey(this.opts)
+    const signal = this.makeSignal(external)
     const base = this.opts.baseUrl.replace(/\/$/, "")
     const endpoint = base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`
     const system = this.system(toolkit)
@@ -199,7 +255,7 @@ export class Client {
         if (ov?.messages) messages = ov.messages
         if (ov?.tools) tools = ov.tools
       }
-      const res = await fetch(endpoint, {
+      const res = await this.llmFetch(endpoint, {
         method: "POST",
         headers: {
           "x-api-key": key,
@@ -208,7 +264,7 @@ export class Client {
           ...this.opts.headers,
         },
         body: JSON.stringify({ model: this.opts.model, max_tokens: 4096, system, messages, tools }),
-      })
+      }, signal)
       if (!res.ok) throw new Error(`LLM ${res.status}: ${await res.text()}`)
       const data: any = await res.json()
       addUsage(usage, data.usage, "anthropic")
@@ -233,8 +289,9 @@ export class Client {
   }
 
   // ---- Streaming: OpenAI-style ----
-  private async *streamOpenAI(prompt: string, toolkit: Toolkit): AsyncGenerator<StreamEvent, void, unknown> {
+  private async *streamOpenAI(prompt: string, toolkit: Toolkit, external?: AbortSignal): AsyncGenerator<StreamEvent, void, unknown> {
     const key = resolveKey(this.opts)
+    const signal = this.makeSignal(external)
     let messages: any[] = []
     const system = this.system(toolkit)
     if (system) messages.push({ role: "system", content: system })
@@ -251,11 +308,11 @@ export class Client {
         if (ov?.messages) messages = ov.messages
         if (ov?.tools) tools = ov.tools
       }
-      const res = await fetch(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      const res = await this.llmFetch(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
         headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
         body: JSON.stringify({ model: this.opts.model, messages, tools, tool_choice: "auto", stream: true, stream_options: { include_usage: true } }),
-      })
+      }, signal)
       if (!res.ok || !res.body) throw new Error(`LLM ${res.status}: ${await res.text()}`)
 
       let content = ""
@@ -300,8 +357,9 @@ export class Client {
   }
 
   // ---- Streaming: Anthropic-style ----
-  private async *streamAnthropic(prompt: string, toolkit: Toolkit): AsyncGenerator<StreamEvent, void, unknown> {
+  private async *streamAnthropic(prompt: string, toolkit: Toolkit, external?: AbortSignal): AsyncGenerator<StreamEvent, void, unknown> {
     const key = resolveKey(this.opts)
+    const signal = this.makeSignal(external)
     const base = this.opts.baseUrl.replace(/\/$/, "")
     const endpoint = base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`
     const system = this.system(toolkit)
@@ -318,11 +376,11 @@ export class Client {
         if (ov?.messages) messages = ov.messages
         if (ov?.tools) tools = ov.tools
       }
-      const res = await fetch(endpoint, {
+      const res = await this.llmFetch(endpoint, {
         method: "POST",
         headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json", ...this.opts.headers },
         body: JSON.stringify({ model: this.opts.model, max_tokens: 4096, system, messages, tools, stream: true }),
-      })
+      }, signal)
       if (!res.ok || !res.body) throw new Error(`LLM ${res.status}: ${await res.text()}`)
 
       const blocks = new Map<number, { type: string; text?: string; id?: string; name?: string; json?: string }>()

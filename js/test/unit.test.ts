@@ -18,6 +18,7 @@ import {
   toAnthropic,
   toGemini,
   createToolkit,
+  createClient,
 } from "../dist/index.js"
 
 const SKILLS_DIR = path.resolve(fileURLToPath(import.meta.url), "../../../examples/skills")
@@ -133,4 +134,36 @@ test("toolkit: register, get, execute, duplicate-name keeps first", async () => 
   const miss = await tk.execute("ghost", {})
   assert.equal(miss.isError, true)
   await tk.close()
+})
+
+test("client: retries on 503 then succeeds (backoff)", async () => {
+  let hits = 0
+  const server = http.createServer((req, res) => {
+    hits++
+    if (hits < 3) { res.writeHead(503); res.end("busy"); return }
+    res.writeHead(200, { "content-type": "application/json" })
+    res.end(JSON.stringify({ choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+  })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({})
+  const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "x", apiKey: "k", retries: 3, retryBaseMs: 5 })
+  const res = await client.run("hi", { toolkit: tk })
+  assert.equal(res.text, "ok")
+  assert.equal(hits, 3, "two 503s retried, third succeeded")
+  await tk.close()
+  server.close()
+})
+
+test("client: run-level timeout aborts", async () => {
+  const server = http.createServer((req, res) => {
+    setTimeout(() => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ choices: [{ message: { content: "late" } }] })) }, 300)
+  })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({})
+  const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "x", apiKey: "k", retries: 0, timeoutMs: 40 })
+  await assert.rejects(() => client.run("hi", { toolkit: tk }), /timeout|abort/i)
+  await tk.close()
+  server.close()
 })

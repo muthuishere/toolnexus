@@ -439,6 +439,14 @@ index). Anthropic: `stream:true`, SSE `content_block_*` / `message_delta` events
 exposes the idiomatic stream type (JS async generator, Python async generator, Go channel, Java
 a callback/Stream).
 
+### Resilience (retries + timeout/cancel)
+
+`ClientOptions`: `retries` (default 2), `retryBaseMs` (default 500), `timeoutMs` (whole-run
+deadline, optional). The LLM request retries on `429`/`500`/`502`/`503`/`504` and network errors
+with exponential backoff + jitter, honoring `Retry-After`. A run-level abort signal is built from
+`timeoutMs` + an external cancel token (`run(prompt, { toolkit, signal })`) and threaded into the
+HTTP request, so a timeout or external cancel aborts the in-flight call. Aborts are not retried.
+
 ---
 
 ## 9. Go CLI (`toolnexus`)
