@@ -11,16 +11,48 @@ or the environment and is NEVER printed.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Mapping, Optional
 
 from .toolkit import Toolkit
+from .types import ToolResult
 
 ClientStyle = Literal["openai", "anthropic"]
+
+# Lifecycle hooks (see ../../SPEC.md §8 "Hooks"). ``hooks`` is any object/mapping
+# carrying optional callables under snake_case keys — each async-OR-sync:
+#   before_llm({"messages", "tools", "model", "turn"})
+#       -> optionally {"messages"?, "tools"?} to replace them.
+#   after_llm({"response", "model", "turn"})  -> observe (response carries usage).
+#   before_tool({"name", "args", "id", "turn"})
+#       -> {"result": ToolResult} to SHORT-CIRCUIT, or {"args": {...}} to rewrite.
+#   after_tool({"name", "args", "result", "id", "turn"})
+#       -> {"result": ToolResult} to replace the result.
+Hooks = Any
+
+
+def _get_hook(hooks: Any, name: str) -> Optional[Any]:
+    """Pull a hook callable off a dict/mapping OR an attribute-bearing object."""
+    if hooks is None:
+        return None
+    if isinstance(hooks, Mapping):
+        fn = hooks.get(name)
+    else:
+        fn = getattr(hooks, name, None)
+    return fn if callable(fn) else None
+
+
+async def _call_hook(fn: Any, ev: dict[str, Any]) -> Any:
+    """Invoke a hook tolerant of sync OR async callables."""
+    r = fn(ev)
+    if inspect.isawaitable(r):
+        r = await r
+    return r
 
 
 def _empty_usage() -> dict[str, int]:
@@ -109,6 +141,7 @@ class Client:
         headers: Optional[dict[str, str]] = None,
         system_prompt: Optional[str] = None,
         max_turns: int = 10,
+        hooks: Hooks = None,
     ) -> None:
         self.base_url = base_url
         self.style = style
@@ -117,6 +150,7 @@ class Client:
         self.headers = headers or {}
         self.system_prompt = system_prompt
         self.max_turns = max_turns
+        self.hooks = hooks
 
     def _system(self, toolkit: Toolkit) -> str:
         parts = [self.system_prompt or "", toolkit.skills_prompt()]
@@ -139,6 +173,36 @@ class Client:
             usage=usage,
             model=self.model,
         )
+
+    async def _run_tool(
+        self,
+        toolkit: Toolkit,
+        name: str,
+        args: dict[str, Any],
+        call_id: Optional[str],
+        turn: int,
+    ) -> tuple[dict[str, Any], ToolResult]:
+        """Run one tool through before_tool/after_tool hooks: rewrite args,
+        short-circuit, or transform the result. Mirrors JS ``runTool``."""
+        a = args
+        before = _get_hook(self.hooks, "before_tool")
+        if before is not None:
+            ov = await _call_hook(before, {"name": name, "args": a, "id": call_id, "turn": turn})
+            if ov:
+                if ov.get("result") is not None:
+                    # short-circuit (deny / cache hit / dry-run) — real tool never runs
+                    return a, ov["result"]
+                if ov.get("args") is not None:
+                    a = ov["args"]
+        result = await toolkit.execute(name, a)
+        after = _get_hook(self.hooks, "after_tool")
+        if after is not None:
+            ov = await _call_hook(
+                after, {"name": name, "args": a, "result": result, "id": call_id, "turn": turn}
+            )
+            if ov and ov.get("result") is not None:
+                result = ov["result"]
+        return a, result
 
     async def run(self, prompt: str, toolkit: Toolkit) -> RunResult:
         if self.style == "anthropic":
@@ -164,8 +228,19 @@ class Client:
         usage = _empty_usage()
         turns = 0
 
-        for _turn in range(self.max_turns):
+        for turn in range(self.max_turns):
             turns += 1
+            before = _get_hook(self.hooks, "before_llm")
+            if before is not None:
+                ov = await _call_hook(
+                    before,
+                    {"messages": messages, "tools": tools, "model": self.model, "turn": turn},
+                )
+                if ov:
+                    if ov.get("messages") is not None:
+                        messages = ov["messages"]
+                    if ov.get("tools") is not None:
+                        tools = ov["tools"]
             payload = {
                 "model": self.model,
                 "messages": messages,
@@ -174,6 +249,9 @@ class Client:
             }
             data = await asyncio.to_thread(_post, url, req_headers, payload, 120.0)
             _add_usage(usage, data.get("usage"), "openai")
+            after = _get_hook(self.hooks, "after_llm")
+            if after is not None:
+                await _call_hook(after, {"response": data, "model": self.model, "turn": turn})
             msg = data["choices"][0]["message"]
             messages.append(msg)
             calls = msg.get("tool_calls") or []
@@ -193,9 +271,12 @@ class Client:
                 parsed.append((call["id"], fn["name"], args))
 
             results = await asyncio.gather(
-                *(toolkit.execute(name, args) for (_id, name, args) in parsed)
+                *(
+                    self._run_tool(toolkit, name, args, call_id, turn)
+                    for (call_id, name, args) in parsed
+                )
             )
-            for (call_id, name, args), result in zip(parsed, results):
+            for (call_id, name, _orig_args), (args, result) in zip(parsed, results):
                 tool_calls.append(
                     {
                         "name": name,
@@ -229,8 +310,19 @@ class Client:
         usage = _empty_usage()
         turns = 0
 
-        for _turn in range(self.max_turns):
+        for turn in range(self.max_turns):
             turns += 1
+            before = _get_hook(self.hooks, "before_llm")
+            if before is not None:
+                ov = await _call_hook(
+                    before,
+                    {"messages": messages, "tools": tools, "model": self.model, "turn": turn},
+                )
+                if ov:
+                    if ov.get("messages") is not None:
+                        messages = ov["messages"]
+                    if ov.get("tools") is not None:
+                        tools = ov["tools"]
             payload = {
                 "model": self.model,
                 "max_tokens": 4096,
@@ -240,6 +332,9 @@ class Client:
             }
             data = await asyncio.to_thread(_post, endpoint, req_headers, payload, 120.0)
             _add_usage(usage, data.get("usage"), "anthropic")
+            after = _get_hook(self.hooks, "after_llm")
+            if after is not None:
+                await _call_hook(after, {"response": data, "model": self.model, "turn": turn})
             content = data.get("content") or []
             messages.append({"role": "assistant", "content": content})
             uses = [b for b in content if b.get("type") == "tool_use"]
@@ -252,14 +347,19 @@ class Client:
             # tool_use_id ↔ output stays correct. We record the tool_calls entry
             # AFTER execute so it carries output/is_error/metadata.
             outputs = await asyncio.gather(
-                *(toolkit.execute(use["name"], use.get("input") or {}) for use in uses)
+                *(
+                    self._run_tool(
+                        toolkit, use["name"], use.get("input") or {}, use.get("id"), turn
+                    )
+                    for use in uses
+                )
             )
             results: list[dict[str, Any]] = []
-            for use, result in zip(uses, outputs):
+            for use, (args, result) in zip(uses, outputs):
                 tool_calls.append(
                     {
                         "name": use["name"],
-                        "args": use.get("input") or {},
+                        "args": args,
                         "output": result.output,
                         "is_error": result.is_error,
                         "metadata": result.metadata,
@@ -294,6 +394,7 @@ def create_client(
     headers: Optional[dict[str, str]] = None,
     system_prompt: Optional[str] = None,
     max_turns: int = 10,
+    hooks: Hooks = None,
 ) -> Client:
     return Client(
         base_url=base_url,
@@ -303,4 +404,5 @@ def create_client(
         headers=headers,
         system_prompt=system_prompt,
         max_turns=max_turns,
+        hooks=hooks,
     )
