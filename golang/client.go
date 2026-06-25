@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 )
 
 // ClientStyle selects the wire format.
@@ -213,16 +214,39 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit) (Run
 			return RunResult{Text: msg.Content, Messages: messages, ToolCalls: toolCalls}, nil
 		}
 
-		for _, tc := range msg.ToolCalls {
-			args := safeJSONArgs(tc.Function.Arguments)
-			toolCalls = append(toolCalls, ToolCall{Name: tc.Function.Name, Args: args})
-			result, _ := tk.Execute(ctx, tc.Function.Name, args)
-			messages = append(messages, map[string]any{
-				"role":         "tool",
-				"tool_call_id": tc.ID,
-				"content":      result.Output,
-			})
+		// Execute all tool calls in this turn concurrently (true parallel tool
+		// calling). Each result is written to its own slot in results[], so the
+		// appended tool messages keep the same order the model emitted them
+		// (deterministic output, independent of completion order). toolCalls is
+		// appended under a mutex to avoid a data race.
+		results := make([]any, len(msg.ToolCalls))
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		for i, tc := range msg.ToolCalls {
+			wg.Add(1)
+			go func(i int, tc struct {
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			}) {
+				defer wg.Done()
+				args := safeJSONArgs(tc.Function.Arguments)
+				mu.Lock()
+				toolCalls = append(toolCalls, ToolCall{Name: tc.Function.Name, Args: args})
+				mu.Unlock()
+				result, _ := tk.Execute(ctx, tc.Function.Name, args)
+				results[i] = map[string]any{
+					"role":         "tool",
+					"tool_call_id": tc.ID,
+					"content":      result.Output,
+				}
+			}(i, tc)
 		}
+		wg.Wait()
+		messages = append(messages, results...)
 	}
 	return RunResult{Text: "", Messages: messages, ToolCalls: toolCalls}, nil
 }
@@ -309,21 +333,37 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit) (
 			return RunResult{Text: strings.Join(textParts, ""), Messages: messages, ToolCalls: toolCalls}, nil
 		}
 
-		var results []any
-		for _, u := range uses {
-			in := u.Input
-			if in == nil {
-				in = map[string]any{}
-			}
-			toolCalls = append(toolCalls, ToolCall{Name: u.Name, Args: in})
-			result, _ := tk.Execute(ctx, u.Name, in)
-			results = append(results, map[string]any{
-				"type":        "tool_result",
-				"tool_use_id": u.ID,
-				"content":     result.Output,
-				"is_error":    result.IsError,
-			})
+		// Execute all tool_use blocks in this turn concurrently. results[i] keeps
+		// the original block order so tool_result blocks map deterministically to
+		// their tool_use ids; toolCalls is appended under a mutex.
+		results := make([]any, len(uses))
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		for i, u := range uses {
+			wg.Add(1)
+			go func(i int, u struct {
+				ID    string
+				Name  string
+				Input map[string]any
+			}) {
+				defer wg.Done()
+				in := u.Input
+				if in == nil {
+					in = map[string]any{}
+				}
+				mu.Lock()
+				toolCalls = append(toolCalls, ToolCall{Name: u.Name, Args: in})
+				mu.Unlock()
+				result, _ := tk.Execute(ctx, u.Name, in)
+				results[i] = map[string]any{
+					"type":        "tool_result",
+					"tool_use_id": u.ID,
+					"content":     result.Output,
+					"is_error":    result.IsError,
+				}
+			}(i, u)
 		}
+		wg.Wait()
 		messages = append(messages, map[string]any{"role": "user", "content": results})
 	}
 	return RunResult{Text: "", Messages: messages, ToolCalls: toolCalls}, nil

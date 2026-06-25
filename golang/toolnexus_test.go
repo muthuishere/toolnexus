@@ -399,3 +399,70 @@ func TestToolkit(t *testing.T) {
 		t.Fatalf("duplicate tool overrode the first")
 	}
 }
+
+// TestClientConcurrentToolCalls drives the OpenAI-style client loop against a
+// mock LLM that returns THREE tool calls in one assistant turn, then a final
+// answer. It verifies (a) every call is executed, (b) the appended tool-result
+// messages preserve the original call order and map to the right tool_call_id,
+// and (c) ToolCalls is recorded without loss. Run with -race to confirm the
+// concurrent execution is race-free.
+func TestClientConcurrentToolCalls(t *testing.T) {
+	// A tool whose output echoes its arg, so we can check id<->result mapping.
+	echo := NativeTool("echo", "echo n",
+		JSONSchema{"type": "object", "properties": map[string]any{"n": map[string]any{"type": "number"}}},
+		func(_ context.Context, args map[string]any) (string, error) {
+			return strconv.FormatFloat(args["n"].(float64), 'f', -1, 64), nil
+		})
+
+	tk, err := CreateToolkit(context.Background(), Options{ExtraTools: []Tool{echo}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 0 {
+			turn++
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[
+				{"id":"c0","type":"function","function":{"name":"echo","arguments":"{\"n\":10}"}},
+				{"id":"c1","type":"function","function":{"name":"echo","arguments":"{\"n\":20}"}},
+				{"id":"c2","type":"function","function":{"name":"echo","arguments":"{\"n\":30}"}}
+			]}}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}]}`))
+	}))
+	defer srv.Close()
+
+	c := CreateClient(ClientOptions{BaseURL: srv.URL, Style: StyleOpenAI, Model: "m", APIKey: "k"})
+	res, err := c.Run(context.Background(), "go", tk)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Text != "done" {
+		t.Fatalf("text = %q, want done", res.Text)
+	}
+	if len(res.ToolCalls) != 3 {
+		t.Fatalf("ToolCalls len = %d, want 3", len(res.ToolCalls))
+	}
+
+	// Collect tool-result messages in appended order; verify deterministic order
+	// and that each tool_call_id maps to the matching echoed value.
+	want := map[string]string{"c0": "10", "c1": "20", "c2": "30"}
+	order := []string{}
+	for _, raw := range res.Messages {
+		m, ok := raw.(map[string]any)
+		if !ok || m["role"] != "tool" {
+			continue
+		}
+		id := m["tool_call_id"].(string)
+		order = append(order, id)
+		if got := m["content"].(string); got != want[id] {
+			t.Fatalf("tool %s content = %q, want %q", id, got, want[id])
+		}
+	}
+	if strings.Join(order, ",") != "c0,c1,c2" {
+		t.Fatalf("tool-result order = %v, want [c0 c1 c2]", order)
+	}
+}
