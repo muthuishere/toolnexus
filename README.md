@@ -28,6 +28,44 @@ behind one `Tool` interface and drives **any** model with them.
                             └─────────────────────────────────┘
 ```
 
+## From zero to agent in 3 steps
+
+No framework, no glue. Two files and one call — and your LLM now has **MCP tools and
+agent skills built in**, something no other library hands you as a drop-in.
+
+**1. Add an MCP config file** — `mcp.json`:
+```jsonc
+{ "mcpServers": {
+    "fs":   { "command": ["npx","-y","@modelcontextprotocol/server-filesystem","/data"] },
+    "acme": { "type": "remote", "url": "https://api.acme.com/mcp",
+              "headers": { "Authorization": "Bearer ${ACME_TOKEN}" } }
+} }
+```
+
+**2. Add a skills folder** — `skills/process-refund/SKILL.md`:
+```markdown
+---
+name: process-refund
+description: Use when a customer asks for a refund. Walks the policy + steps.
+---
+# Refund workflow
+1. Verify the order …
+```
+
+**3. Call any LLM — MCP + skills are already in it:**
+```ts
+const tk    = await createToolkit({ mcpConfig: "./mcp.json", skillsDir: "./skills" })
+const agent = createClient({ baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" })
+
+const { text } = await agent.run("Refund order 1234 for the customer.", { toolkit: tk })
+// the model already sees every MCP server tool + a `skill` tool, and the skills catalog
+// is injected into its system prompt — it loads `process-refund` and calls the fs/acme tools itself.
+```
+
+That's the whole thing. Bring your own loop instead? Use `tk.toOpenAI()` /
+`toAnthropic()` / `toGemini()` for the schema and `tk.execute(name, args)` to run a call.
+Same three steps in Python, Go, and Java.
+
 ## Why toolnexus (and not a framework)
 
 The giants each cover *part* of this surface; none covers all of it in our lane:
