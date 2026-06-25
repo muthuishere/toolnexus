@@ -1,5 +1,7 @@
 # toolnexus
 
+[![CI](https://github.com/muthuishere/toolnexus/actions/workflows/ci.yml/badge.svg)](https://github.com/muthuishere/toolnexus/actions/workflows/ci.yml)
+
 **Build an agent in a few lines.** Bring any LLM endpoint, point at an `mcp.json` and a
 `skills/` folder, and you get a working agent — system prompt, skills, tool-calling loop,
 all included. A small, **vendor-neutral** library in **JavaScript / TypeScript, Python, Go, and Java**.
