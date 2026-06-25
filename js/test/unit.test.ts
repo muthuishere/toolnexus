@@ -155,6 +155,44 @@ test("client: retries on 503 then succeeds (backoff)", async () => {
   server.close()
 })
 
+test("client: anthropic style — tool_use loop, headers, usage (mock)", async () => {
+  let firstReq: any = {}
+  const server = http.createServer((req, res) => {
+    let body = ""
+    req.on("data", (c) => (body += c))
+    req.on("end", () => {
+      const msg = JSON.parse(body)
+      const hasToolResult = msg.messages.some((m: any) => Array.isArray(m.content) && m.content.some((b: any) => b.type === "tool_result"))
+      if (!hasToolResult) {
+        firstReq = { url: req.url, apiKey: req.headers["x-api-key"], version: req.headers["anthropic-version"], tools: msg.tools }
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ content: [{ type: "tool_use", id: "t1", name: "add", input: { a: 21, b: 21 } }], stop_reason: "tool_use", usage: { input_tokens: 10, output_tokens: 5 } }))
+      } else {
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ content: [{ type: "text", text: "The sum is 42." }], stop_reason: "end_turn", usage: { input_tokens: 8, output_tokens: 6 } }))
+      }
+    })
+  })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({})
+  tk.register(defineTool({ name: "add", description: "add", inputSchema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] }, run: ({ a, b }) => `${(a as number) + (b as number)}` }))
+  const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "anthropic", model: "claude-x", apiKey: "k" })
+  const res = await client.run("add them", { toolkit: tk })
+
+  assert.equal(firstReq.url, "/v1/messages", "appends /v1/messages")
+  assert.equal(firstReq.apiKey, "k")
+  assert.equal(firstReq.version, "2023-06-01")
+  assert.equal(firstReq.tools[0].name, "add", "anthropic tool shape (name/input_schema)")
+  assert.match(res.text, /42/)
+  assert.equal(res.toolCalls[0].name, "add")
+  assert.equal(res.toolCalls[0].output, "42")
+  assert.equal(res.turns, 2)
+  assert.equal(res.usage.totalTokens, 29, "input+output summed across both turns")
+  await tk.close()
+  server.close()
+})
+
 test("client: run-level timeout aborts", async () => {
   const server = http.createServer((req, res) => {
     setTimeout(() => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ choices: [{ message: { content: "late" } }] })) }, 300)
