@@ -165,6 +165,24 @@ implementation's examples and tests.
 - ✅ Verified with live OpenRouter tool-calling round trips
 - ⏳ OpenAPI bulk import + MCP OAuth — follow-ups (pass a bearer token via `headers` for now)
 
+## Tests
+
+Each port has a hermetic suite (no network, no LLM — local HTTP servers for the HTTP
+tool, the shared `examples/` fixtures for skills) covering config parsing, `${ENV}`
+header expansion, the byte-exact skill block, native + HTTP tools, the provider
+adapters, and toolkit routing.
+
+```sh
+cd js     && npm test                 # node:test — 8 tests
+cd python && .venv/bin/python -m pytest -q   # pytest — 13 tests
+cd golang && go test ./...            # go test — 9 tests
+cd java   && ./gradlew test           # JUnit 5 — 22 tests
+```
+
+The end-to-end agent loop (MCP + skills + native + HTTP through the host loop) is
+additionally verified live against OpenRouter per language via the `examples/agent.*`
+runners (need `OPENROUTER_API_KEY`).
+
 ## License
 
 MIT
