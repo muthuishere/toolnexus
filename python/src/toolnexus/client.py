@@ -128,13 +128,23 @@ class Client:
                 return RunResult(
                     text=msg.get("content") or "", messages=messages, tool_calls=tool_calls
                 )
+
+            # Record the tool calls in order, then execute them concurrently
+            # (true parallel tool calling). Each result is mapped back to its
+            # originating call by index so tool_call_id ↔ output stays correct.
+            parsed = []
             for call in calls:
                 fn = call["function"]
                 args = _safe_json(fn.get("arguments"))
                 tool_calls.append({"name": fn["name"], "args": args})
-                result = await toolkit.execute(fn["name"], args)
+                parsed.append((call["id"], fn["name"], args))
+
+            results = await asyncio.gather(
+                *(toolkit.execute(name, args) for (_id, name, args) in parsed)
+            )
+            for (call_id, _name, _args), result in zip(parsed, results):
                 messages.append(
-                    {"role": "tool", "tool_call_id": call["id"], "content": result.output}
+                    {"role": "tool", "tool_call_id": call_id, "content": result.output}
                 )
 
         return RunResult(text=_last_text(messages), messages=messages, tool_calls=tool_calls)
@@ -170,19 +180,25 @@ class Client:
             if not uses:
                 text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
                 return RunResult(text=text, messages=messages, tool_calls=tool_calls)
-            results: list[dict[str, Any]] = []
+
+            # Record the tool_use blocks in order, then execute them concurrently
+            # (true parallel tool calling). Each result is mapped back to its
+            # originating block by index so tool_use_id ↔ output stays correct.
             for use in uses:
-                inp = use.get("input") or {}
-                tool_calls.append({"name": use["name"], "args": inp})
-                result = await toolkit.execute(use["name"], inp)
-                results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": use["id"],
-                        "content": result.output,
-                        "is_error": result.is_error,
-                    }
-                )
+                tool_calls.append({"name": use["name"], "args": use.get("input") or {}})
+
+            outputs = await asyncio.gather(
+                *(toolkit.execute(use["name"], use.get("input") or {}) for use in uses)
+            )
+            results: list[dict[str, Any]] = [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": use["id"],
+                    "content": result.output,
+                    "is_error": result.is_error,
+                }
+                for use, result in zip(uses, outputs)
+            ]
             messages.append({"role": "user", "content": results})
 
         return RunResult(text="", messages=messages, tool_calls=tool_calls)
