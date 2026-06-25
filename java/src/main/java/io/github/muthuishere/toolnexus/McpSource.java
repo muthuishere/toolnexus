@@ -24,6 +24,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Dynamic MCP source. Mirrors opencode's mcp/index.ts + the JS reference
@@ -36,6 +39,8 @@ public final class McpSource implements AutoCloseable {
     private static final long DEFAULT_TIMEOUT = 30_000L;
     private static final int MAX_LIST_PAGES = 1_000;
     private static final McpJsonMapper JSON_MAPPER = new JacksonMcpJsonMapperSupplier().get();
+    /** {@code ${ENV_VAR}} reference in a header value. */
+    static final Pattern ENV_VAR = Pattern.compile("\\$\\{([A-Za-z0-9_]+)}");
 
     private final List<Tool> tools;
     private final Map<String, String> status; // server -> "connected" | "disabled" | "failed"
@@ -93,6 +98,41 @@ public final class McpSource implements AutoCloseable {
         if (servers == null) servers = raw.get("mcp");
         if (servers == null) servers = raw;
         return (Map<String, Object>) servers;
+    }
+
+    /**
+     * Expand {@code ${ENV_VAR}} in each header VALUE from {@link System#getenv} so
+     * tokens live in the environment, not the committed config. Returns a new map;
+     * {@code null} in → {@code null} out. Missing vars expand to {@code ""}. Values
+     * are never logged. Mirrors the JS reference {@code expandEnvHeaders}.
+     */
+    public static Map<String, String> expandEnvHeaders(Map<String, String> headers) {
+        return expandEnvHeaders(headers, System::getenv);
+    }
+
+    /**
+     * Same as {@link #expandEnvHeaders(Map)} but with a pluggable lookup function
+     * (for testability without touching the real process environment).
+     */
+    public static Map<String, String> expandEnvHeaders(Map<String, String> headers, Function<String, String> lookup) {
+        if (headers == null) return null;
+        Map<String, String> out = new LinkedHashMap<>();
+        for (Map.Entry<String, String> e : headers.entrySet()) {
+            String value = e.getValue();
+            if (value == null) {
+                out.put(e.getKey(), null);
+                continue;
+            }
+            Matcher m = ENV_VAR.matcher(value);
+            StringBuffer sb = new StringBuffer();
+            while (m.find()) {
+                String resolved = lookup.apply(m.group(1));
+                m.appendReplacement(sb, Matcher.quoteReplacement(resolved == null ? "" : resolved));
+            }
+            m.appendTail(sb);
+            out.put(e.getKey(), sb.toString());
+        }
+        return out;
     }
 
     @SuppressWarnings("unchecked")
@@ -229,12 +269,22 @@ public final class McpSource implements AutoCloseable {
     @SuppressWarnings("unchecked")
     private static McpClientTransport buildRemoteTransport(Map<String, Object> cfg) {
         String url = String.valueOf(cfg.get("url"));
-        Map<String, Object> headers = (Map<String, Object>) cfg.get("headers");
+        Map<String, Object> rawHeaders = (Map<String, Object>) cfg.get("headers");
+        // Expand ${ENV_VAR} in header values before they reach the transport so
+        // tokens are read from the environment, not sent verbatim (never logged).
+        Map<String, String> headers = null;
+        if (rawHeaders != null) {
+            Map<String, String> stringified = new LinkedHashMap<>();
+            for (Map.Entry<String, Object> e : rawHeaders.entrySet()) {
+                stringified.put(e.getKey(), e.getValue() == null ? null : String.valueOf(e.getValue()));
+            }
+            headers = expandEnvHeaders(stringified);
+        }
 
         HttpRequest.Builder reqBuilder = HttpRequest.newBuilder();
         if (headers != null) {
-            for (Map.Entry<String, Object> e : headers.entrySet()) {
-                reqBuilder.header(e.getKey(), String.valueOf(e.getValue()));
+            for (Map.Entry<String, String> e : headers.entrySet()) {
+                if (e.getValue() != null) reqBuilder.header(e.getKey(), e.getValue());
             }
         }
         try {
@@ -246,8 +296,8 @@ public final class McpSource implements AutoCloseable {
             // Fall back to SSE transport.
             HttpRequest.Builder sseReq = HttpRequest.newBuilder();
             if (headers != null) {
-                for (Map.Entry<String, Object> e : headers.entrySet()) {
-                    sseReq.header(e.getKey(), String.valueOf(e.getValue()));
+                for (Map.Entry<String, String> e : headers.entrySet()) {
+                    if (e.getValue() != null) sseReq.header(e.getKey(), e.getValue());
                 }
             }
             return HttpClientSseClientTransport.builder(url)

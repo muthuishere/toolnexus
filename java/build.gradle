@@ -26,12 +26,21 @@ dependencies {
 
     // Jackson (databind) for our own JSON: config parsing, adapters, LLM client.
     api 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
+
+    // JUnit 5 (Jupiter) for the test suite. Hermetic — no network/LLM.
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 // Enable -parameters so @Tool reflection can read real parameter names.
 tasks.withType(JavaCompile).configureEach {
     options.compilerArgs << '-parameters'
     options.encoding = 'UTF-8'
+}
+
+test {
+    useJUnitPlatform()
 }
 
 // `application` is just a convenience host; examples are launched via JavaExec.

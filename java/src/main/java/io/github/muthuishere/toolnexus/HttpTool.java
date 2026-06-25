@@ -31,7 +31,6 @@ import java.util.regex.Pattern;
 public final class HttpTool implements Tool {
     private static final long DEFAULT_TIMEOUT = 30_000L;
     private static final Pattern PLACEHOLDER = Pattern.compile("\\{(\\w+)}");
-    private static final Pattern ENV_VAR = Pattern.compile("\\$\\{([A-Za-z0-9_]+)}");
     private static final HttpClient CLIENT = HttpClient.newHttpClient();
 
     public static final class Options {
@@ -114,7 +113,8 @@ public final class HttpTool implements Tool {
         }
 
         // 3. body
-        Map<String, String> headers = expandHeaders(opts.headers);
+        Map<String, String> expanded = McpSource.expandEnvHeaders(opts.headers);
+        Map<String, String> headers = expanded == null ? new LinkedHashMap<>() : new LinkedHashMap<>(expanded);
         String bodyInit = null;
         if (!method.equals("GET") && !method.equals("HEAD") && !a.isEmpty()) {
             String mode = opts.body == null ? "json" : opts.body;
@@ -171,23 +171,6 @@ public final class HttpTool implements Tool {
         } catch (Exception e) {
             return ToolResult.error(e.getMessage() == null ? String.valueOf(e) : e.getMessage());
         }
-    }
-
-    /** Expand ${ENV_VAR} in header values from System.getenv (never logged). */
-    private static Map<String, String> expandHeaders(Map<String, String> headers) {
-        Map<String, String> out = new LinkedHashMap<>();
-        if (headers == null) return out;
-        for (Map.Entry<String, String> e : headers.entrySet()) {
-            Matcher m = ENV_VAR.matcher(e.getValue());
-            StringBuffer sb = new StringBuffer();
-            while (m.find()) {
-                String env = System.getenv(m.group(1));
-                m.appendReplacement(sb, Matcher.quoteReplacement(env == null ? "" : env));
-            }
-            m.appendTail(sb);
-            out.put(e.getKey(), sb.toString());
-        }
-        return out;
     }
 
     private static Map<String, Object> emptySchema() {
