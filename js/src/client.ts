@@ -65,6 +65,14 @@ export interface RunResult {
   model: string
 }
 
+/** Events yielded by client.stream(). */
+export type StreamEvent =
+  | { type: "text"; delta: string }
+  | { type: "tool_call"; id: string; name: string; args: Record<string, unknown> }
+  | { type: "tool_result"; id: string; name: string; output: string; isError: boolean }
+  | { type: "usage"; usage: Usage }
+  | { type: "done"; result: RunResult }
+
 function addUsage(acc: Usage, raw: any, style: ClientStyle): void {
   if (!raw) return
   if (style === "anthropic") {
@@ -95,6 +103,11 @@ export class Client {
 
   async run(prompt: string, ctx: { toolkit: Toolkit }): Promise<RunResult> {
     return this.opts.style === "anthropic" ? this.runAnthropic(prompt, ctx.toolkit) : this.runOpenAI(prompt, ctx.toolkit)
+  }
+
+  /** Streaming variant: async-iterate live events (text deltas, tool calls/results, usage, done). */
+  stream(prompt: string, ctx: { toolkit: Toolkit }): AsyncGenerator<StreamEvent, void, unknown> {
+    return this.opts.style === "anthropic" ? this.streamAnthropic(prompt, ctx.toolkit) : this.streamOpenAI(prompt, ctx.toolkit)
   }
 
   private system(toolkit: Toolkit): string {
@@ -218,10 +231,168 @@ export class Client {
     }
     return this.result("", messages, toolCalls, turns, usage)
   }
+
+  // ---- Streaming: OpenAI-style ----
+  private async *streamOpenAI(prompt: string, toolkit: Toolkit): AsyncGenerator<StreamEvent, void, unknown> {
+    const key = resolveKey(this.opts)
+    let messages: any[] = []
+    const system = this.system(toolkit)
+    if (system) messages.push({ role: "system", content: system })
+    messages.push({ role: "user", content: prompt })
+    let tools = toolkit.toOpenAI()
+    const toolCalls: ToolCallRecord[] = []
+    const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+    let turns = 0
+
+    for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
+      turns++
+      if (this.opts.hooks?.beforeLLM) {
+        const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn })
+        if (ov?.messages) messages = ov.messages
+        if (ov?.tools) tools = ov.tools
+      }
+      const res = await fetch(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
+        body: JSON.stringify({ model: this.opts.model, messages, tools, tool_choice: "auto", stream: true, stream_options: { include_usage: true } }),
+      })
+      if (!res.ok || !res.body) throw new Error(`LLM ${res.status}: ${await res.text()}`)
+
+      let content = ""
+      const acc = new Map<number, { id: string; name: string; args: string }>()
+      for await (const line of sseLines(res.body)) {
+        if (!line.startsWith("data:")) continue
+        const payload = line.slice(5).trim()
+        if (payload === "[DONE]") break
+        const j = safeParse(payload)
+        if (j?.usage) addUsage(usage, j.usage, "openai")
+        const choice = j?.choices?.[0]
+        const d = choice?.delta
+        if (d?.content) { content += d.content; yield { type: "text", delta: d.content } }
+        for (const tc of d?.tool_calls ?? []) {
+          const slot = acc.get(tc.index) ?? { id: "", name: "", args: "" }
+          if (tc.id) slot.id = tc.id
+          if (tc.function?.name) slot.name += tc.function.name
+          if (tc.function?.arguments) slot.args += tc.function.arguments
+          acc.set(tc.index, slot)
+        }
+      }
+      if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: { streamed: true, usage }, model: this.opts.model, turn })
+
+      const calls = [...acc.values()]
+      if (calls.length === 0) {
+        messages.push({ role: "assistant", content })
+        yield { type: "usage", usage }
+        yield { type: "done", result: this.result(content, messages, toolCalls, turns, usage) }
+        return
+      }
+      messages.push({ role: "assistant", content: content || null, tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.args } })) })
+      for (const c of calls) yield { type: "tool_call", id: c.id, name: c.name, args: safeJson(c.args) }
+      const settled = await Promise.all(calls.map((c) => this.runTool(toolkit, c.name, safeJson(c.args), c.id, turn)))
+      for (let i = 0; i < calls.length; i++) {
+        const c = calls[i], { args, result } = settled[i]
+        toolCalls.push({ name: c.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
+        messages.push({ role: "tool", tool_call_id: c.id, content: result.output })
+        yield { type: "tool_result", id: c.id, name: c.name, output: result.output, isError: result.isError }
+      }
+    }
+    yield { type: "done", result: this.result(lastText(messages), messages, toolCalls, turns, usage) }
+  }
+
+  // ---- Streaming: Anthropic-style ----
+  private async *streamAnthropic(prompt: string, toolkit: Toolkit): AsyncGenerator<StreamEvent, void, unknown> {
+    const key = resolveKey(this.opts)
+    const base = this.opts.baseUrl.replace(/\/$/, "")
+    const endpoint = base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`
+    const system = this.system(toolkit)
+    let messages: any[] = [{ role: "user", content: prompt }]
+    let tools = toolkit.toAnthropic()
+    const toolCalls: ToolCallRecord[] = []
+    const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+    let turns = 0
+
+    for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
+      turns++
+      if (this.opts.hooks?.beforeLLM) {
+        const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn })
+        if (ov?.messages) messages = ov.messages
+        if (ov?.tools) tools = ov.tools
+      }
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json", ...this.opts.headers },
+        body: JSON.stringify({ model: this.opts.model, max_tokens: 4096, system, messages, tools, stream: true }),
+      })
+      if (!res.ok || !res.body) throw new Error(`LLM ${res.status}: ${await res.text()}`)
+
+      const blocks = new Map<number, { type: string; text?: string; id?: string; name?: string; json?: string }>()
+      let stopReason = ""
+      for await (const line of sseLines(res.body)) {
+        if (!line.startsWith("data:")) continue
+        const j = safeParse(line.slice(5).trim())
+        if (!j) continue
+        if (j.type === "message_start") addUsage(usage, j.message?.usage, "anthropic")
+        else if (j.type === "content_block_start") blocks.set(j.index, { type: j.content_block.type, id: j.content_block.id, name: j.content_block.name, text: "", json: "" })
+        else if (j.type === "content_block_delta") {
+          const b = blocks.get(j.index)!
+          if (j.delta.type === "text_delta") { b.text += j.delta.text; yield { type: "text", delta: j.delta.text } }
+          else if (j.delta.type === "input_json_delta") b.json += j.delta.partial_json
+        } else if (j.type === "message_delta") { stopReason = j.delta?.stop_reason ?? stopReason; addUsage(usage, j.usage, "anthropic") }
+      }
+      if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: { streamed: true, usage }, model: this.opts.model, turn })
+
+      const content = [...blocks.values()].map((b) => b.type === "tool_use" ? { type: "tool_use", id: b.id, name: b.name, input: safeJson(b.json || "{}") } : { type: "text", text: b.text })
+      messages.push({ role: "assistant", content })
+      const uses = content.filter((b: any) => b.type === "tool_use")
+      if (stopReason !== "tool_use" || uses.length === 0) {
+        const text = content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
+        yield { type: "usage", usage }
+        yield { type: "done", result: this.result(text, messages, toolCalls, turns, usage) }
+        return
+      }
+      for (const u of uses as any[]) yield { type: "tool_call", id: u.id, name: u.name, args: u.input }
+      const settled = await Promise.all((uses as any[]).map((u) => this.runTool(toolkit, u.name, u.input ?? {}, u.id, turn)))
+      const results: any[] = []
+      for (let i = 0; i < uses.length; i++) {
+        const u = uses[i] as any, { args, result } = settled[i]
+        toolCalls.push({ name: u.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
+        results.push({ type: "tool_result", tool_use_id: u.id, content: result.output, is_error: result.isError })
+        yield { type: "tool_result", id: u.id, name: u.name, output: result.output, isError: result.isError }
+      }
+      messages.push({ role: "user", content: results })
+    }
+    yield { type: "done", result: this.result("", messages, toolCalls, turns, usage) }
+  }
 }
 
 export function createClient(opts: ClientOptions): Client {
   return new Client(opts)
+}
+
+/** Read an SSE stream line-by-line from a fetch body (web ReadableStream). */
+async function* sseLines(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ""
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    let idx: number
+    while ((idx = buf.indexOf("\n")) >= 0) {
+      yield buf.slice(0, idx).replace(/\r$/, "")
+      buf = buf.slice(idx + 1)
+    }
+  }
+  if (buf) yield buf
+}
+
+function safeParse(s: string): any {
+  try {
+    return JSON.parse(s)
+  } catch {
+    return undefined
+  }
 }
 
 function safeJson(s: string): Record<string, unknown> {

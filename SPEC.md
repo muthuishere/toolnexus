@@ -423,6 +423,22 @@ observe; the noted ones may mutate or short-circuit.
 These are what make it programmable as an agent: permissions/guardrails (deny in `beforeTool`),
 caching, arg rewriting, and observability (cost/latency in `afterLLM`).
 
+### Streaming
+
+`client.stream(prompt, { toolkit })` returns an async iterator of events (same loop, hooks,
+tools, telemetry as `run()` — just incremental):
+
+- `{ type: "text", delta }` — assistant text token deltas
+- `{ type: "tool_call", id, name, args }` — a tool about to run
+- `{ type: "tool_result", id, name, output, isError }` — after it ran
+- `{ type: "usage", usage }` — token usage
+- `{ type: "done", result }` — the final `RunResult`
+
+OpenAI: `stream:true` + `stream_options.include_usage`, SSE deltas (assemble `tool_calls` by
+index). Anthropic: `stream:true`, SSE `content_block_*` / `message_delta` events. Each language
+exposes the idiomatic stream type (JS async generator, Python async generator, Go channel, Java
+a callback/Stream).
+
 ---
 
 ## 9. Go CLI (`toolnexus`)
