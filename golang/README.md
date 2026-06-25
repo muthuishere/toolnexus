@@ -1,20 +1,26 @@
 # toolnexus (Go)
 
-Give any LLM the same two dynamic capabilities opencode has:
+Build an agent in a few lines. Unify **four tool sources** behind one `Tool`
+interface and drive any LLM with them:
 
-1. **Dynamic MCP servers** — read an MCP config, connect to every server
-   (local stdio + remote streamable-HTTP/SSE), and expose each server tool as a
-   uniform `Tool`.
-2. **Dynamic agent skills** — read a skills folder (`**/SKILL.md`) and expose a
-   single `skill` tool that loads a skill's instructions + resources on demand
-   (progressive disclosure).
+1. **MCP servers** — read an MCP config, connect to every server (local stdio +
+   remote streamable-HTTP/SSE), expose each server tool.
+2. **Agent skills** — read a skills folder (`**/SKILL.md`); a `skill` tool loads
+   each skill's instructions + resources on demand (progressive disclosure).
+3. **Native tools** — a Go function → a tool (`NativeTool` / `NativeToolReflect`,
+   schema from struct tags).
+4. **HTTP/REST tools** — declare an endpoint (`HTTPTool`), `${ENV}` header expansion.
 
-The output is a single **Toolkit** of uniform `Tool`s plus adapters that emit the
-tool schema in OpenAI / Anthropic / Gemini formats. Wire the schema into your LLM
-call; when the model asks for a tool, call `toolkit.Execute(ctx, name, args)`.
+Plus a **unified client** (`CreateClient` — OpenAI- or Anthropic-style endpoints)
+that runs the whole tool-calling loop, and a **CLI** (`cmd/toolnexus`) for an
+instant interactive agent. Adapters emit OpenAI / Anthropic / Gemini tool schema,
+so you can also bring your own LLM client and just call `tk.Execute(ctx, name, args)`.
 
 This is the Go implementation of the shared [`../SPEC.md`](../SPEC.md) contract,
 built on [`github.com/mark3labs/mcp-go`](https://github.com/mark3labs/mcp-go).
+
+> **Embedding toolnexus in your own Go app?** See **[GUIDE.md](GUIDE.md)** — a
+> step-by-step on making an existing Go application MCP- and skills-enabled.
 
 ## Install
 

@@ -104,6 +104,11 @@ cd golang && go build -o toolnexus ./cmd/toolnexus
 
 All four show up as the same uniform `Tool`, in one registry, for any model.
 
+**À la carte.** Each source is usable on its own. Want *only* an MCP host — parse
+`mcp.json`, connect, get the tools, like the MCP-only libraries do? Use just
+`loadMcp` / `load_mcp` / `LoadMcp` (no skills, no loop). The skills, native/HTTP
+tools, and host loop are all opt-in on top.
+
 ## Per-language docs
 
 [`js/`](js/) · [`python/`](python/) · [`golang/`](golang/) — quickstarts and API.
