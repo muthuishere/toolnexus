@@ -116,10 +116,15 @@ function resolveKey(opts: ClientOptions): string {
 export class Client {
   constructor(private readonly opts: ClientOptions) {}
 
-  async run(prompt: string, ctx: { toolkit: Toolkit; signal?: AbortSignal }): Promise<RunResult> {
+  async run(prompt: string, ctx: { toolkit: Toolkit; signal?: AbortSignal; history?: any[] }): Promise<RunResult> {
     return this.opts.style === "anthropic"
-      ? this.runAnthropic(prompt, ctx.toolkit, ctx.signal)
-      : this.runOpenAI(prompt, ctx.toolkit, ctx.signal)
+      ? this.runAnthropic(prompt, ctx.toolkit, ctx.signal, ctx.history)
+      : this.runOpenAI(prompt, ctx.toolkit, ctx.signal, ctx.history)
+  }
+
+  /** A stateful multi-turn conversation that retains history across sends. */
+  conversation(ctx: { toolkit: Toolkit; signal?: AbortSignal }): Conversation {
+    return new Conversation(this, ctx.toolkit, ctx.signal)
   }
 
   /** Streaming variant: async-iterate live events (text deltas, tool calls/results, usage, done). */
@@ -186,12 +191,14 @@ export class Client {
   }
 
   // ---- OpenAI-style: POST {baseUrl}/chat/completions ----
-  private async runOpenAI(prompt: string, toolkit: Toolkit, external?: AbortSignal): Promise<RunResult> {
+  private async runOpenAI(prompt: string, toolkit: Toolkit, external?: AbortSignal, history?: any[]): Promise<RunResult> {
     const key = resolveKey(this.opts)
     const signal = this.makeSignal(external)
-    let messages: any[] = []
-    const system = this.system(toolkit)
-    if (system) messages.push({ role: "system", content: system })
+    let messages: any[] = history && history.length ? [...history] : []
+    if (!messages.length) {
+      const system = this.system(toolkit)
+      if (system) messages.push({ role: "system", content: system })
+    }
     messages.push({ role: "user", content: prompt })
     let tools = toolkit.toOpenAI()
     const toolCalls: ToolCallRecord[] = []
@@ -236,13 +243,13 @@ export class Client {
   }
 
   // ---- Anthropic-style: POST {baseUrl}/messages ----
-  private async runAnthropic(prompt: string, toolkit: Toolkit, external?: AbortSignal): Promise<RunResult> {
+  private async runAnthropic(prompt: string, toolkit: Toolkit, external?: AbortSignal, history?: any[]): Promise<RunResult> {
     const key = resolveKey(this.opts)
     const signal = this.makeSignal(external)
     const base = this.opts.baseUrl.replace(/\/$/, "")
     const endpoint = base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`
     const system = this.system(toolkit)
-    let messages: any[] = [{ role: "user", content: prompt }]
+    let messages: any[] = history && history.length ? [...history, { role: "user", content: prompt }] : [{ role: "user", content: prompt }]
     let tools = toolkit.toAnthropic()
     const toolCalls: ToolCallRecord[] = []
     const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
@@ -425,6 +432,25 @@ export class Client {
 
 export function createClient(opts: ClientOptions): Client {
   return new Client(opts)
+}
+
+/** Stateful multi-turn conversation: each send() continues the same transcript (memory). */
+export class Conversation {
+  /** Full running transcript (system + user + assistant + tool messages). */
+  messages: any[] = []
+  constructor(private readonly client: Client, private readonly toolkit: Toolkit, private readonly signal?: AbortSignal) {}
+
+  /** Send the next user turn; prior history is retained automatically. */
+  async send(prompt: string): Promise<RunResult> {
+    const result = await this.client.run(prompt, { toolkit: this.toolkit, signal: this.signal, history: this.messages })
+    this.messages = result.messages
+    return result
+  }
+
+  /** Reset the conversation memory. */
+  reset(): void {
+    this.messages = []
+  }
 }
 
 /** Read an SSE stream line-by-line from a fetch body (web ReadableStream). */

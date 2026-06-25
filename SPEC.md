@@ -447,6 +447,14 @@ with exponential backoff + jitter, honoring `Retry-After`. A run-level abort sig
 `timeoutMs` + an external cancel token (`run(prompt, { toolkit, signal })`) and threaded into the
 HTTP request, so a timeout or external cancel aborts the in-flight call. Aborts are not retried.
 
+### Conversation memory
+
+`run(prompt, { toolkit, history })` accepts a prior transcript and continues it; `RunResult.messages`
+is the full updated transcript to pass back next turn. `client.conversation({ toolkit })` wraps this
+as a stateful object: `convo.send(prompt)` retains history across calls (system prompt added once on
+the first turn), `convo.messages` is the transcript, `convo.reset()` clears it. Each language exposes
+the idiomatic equivalent (a Conversation/Session object).
+
 ---
 
 ## 9. Go CLI (`toolnexus`)
