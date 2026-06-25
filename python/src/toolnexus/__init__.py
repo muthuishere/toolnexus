@@ -6,7 +6,16 @@ Mirrors the JS reference implementation (``js/src/``); shared contract in
 from __future__ import annotations
 
 from .adapters import to_anthropic, to_gemini, to_openai
-from .client import Client, ClientStyle, Hooks, RunResult, create_client
+from .client import (
+    Client,
+    ClientStyle,
+    Conversation,
+    Hooks,
+    RunCancelled,
+    RunResult,
+    RunTimeout,
+    create_client,
+)
 from .http import DEFAULT_TIMEOUT as HTTP_DEFAULT_TIMEOUT
 from .http import http_tool
 from .native import define_tool, tool
@@ -78,7 +87,10 @@ __all__ = [
     # unified client
     "Client",
     "ClientStyle",
+    "Conversation",
     "Hooks",
+    "RunCancelled",
     "RunResult",
+    "RunTimeout",
     "create_client",
 ]
