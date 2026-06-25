@@ -14,6 +14,7 @@
   "files": ["dist", "src"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --experimental-strip-types --test test/unit.test.ts",
     "example": "node --experimental-strip-types examples/basic.ts"
   },
   "keywords": ["mcp", "llm", "agent", "skills", "tools", "openai", "anthropic", "gemini"],

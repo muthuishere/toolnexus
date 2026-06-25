@@ -41,6 +41,7 @@ A new language port is "correct" iff these hold. Run it against the shared
 2. **sanitize(x)** = replace `[^a-zA-Z0-9_-]` with `_`. **MCP tool name** = `sanitize(server)_sanitize(tool)`.
 3. **MCP config**: accept top-level `mcpServers` | `servers` | `mcp`. `url`⇒remote, `command`⇒local.
    `disabled`/`enabled:false` ⇒ skip. Default timeout 30000ms. A failed server is isolated (status `failed`), never fatal.
+   Remote `headers` values expand `${ENV_VAR}` from the environment (never logged).
 4. **MCP execute**: `isError`⇒error w/ joined text; `structuredContent`⇒`JSON.stringify`; else joined text parts.
 5. **Skills**: glob `**/SKILL.md`, YAML frontmatter (`name` required), body=content, first name wins.
 6. **`skill` tool** output is byte-exact:
@@ -145,8 +146,10 @@ Type inference when `type` is omitted: presence of `url` ⇒ `remote`, presence 
 - **local** → connect over **stdio** (spawn `command[0]` with `command[1:]`, merged
   env = process env + `environment`, in `cwd`).
 - **remote** → connect over **streamable-HTTP** (fall back to SSE if needed), with
-  optional static `headers`. (OAuth is out of scope for v1 — pass a bearer token
-  via `headers`.)
+  optional `headers`. Header values support `${ENV_VAR}` expansion (same as HTTP
+  tools, §7) so tokens live in the environment, not the committed config — e.g.
+  `"Authorization": "Bearer ${ACME_TOKEN}"`. Values are never logged. (OAuth is out
+  of scope for v1 — pass a bearer token via `headers`.)
 - A `disabled`/`enabled:false` server is skipped.
 - Connect with `timeout` (default **30000 ms**). On failure, record status
   `failed` and continue — one bad server never breaks the toolkit.

@@ -56,6 +56,19 @@ export function parseMcpConfig(input: string | object): McpConfig {
   return servers as McpConfig
 }
 
+/**
+ * Expand ${ENV_VAR} in header values from process.env so tokens live in the
+ * environment, not the committed config. Values are never logged.
+ */
+export function expandEnvHeaders(headers?: Record<string, string>): Record<string, string> | undefined {
+  if (!headers) return undefined
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(headers)) {
+    out[k] = v.replace(/\$\{([A-Za-z0-9_]+)\}/g, (_, name) => process.env[name] ?? "")
+  }
+  return out
+}
+
 function formatToolErrorContent(content: unknown): string {
   if (!Array.isArray(content)) return "MCP tool returned an error"
   return (
@@ -154,7 +167,8 @@ export async function loadMcp(input: string | object): Promise<McpSource> {
       try {
         if (isRemote(cfg)) {
           const url = new URL(cfg.url)
-          const requestInit = cfg.headers ? { headers: cfg.headers } : undefined
+          const expanded = expandEnvHeaders(cfg.headers)
+          const requestInit = expanded ? { headers: expanded } : undefined
           try {
             await client.connect(new StreamableHTTPClientTransport(url, { requestInit }))
           } catch {
