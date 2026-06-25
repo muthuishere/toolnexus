@@ -12,6 +12,8 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * Unified LLM client — the host loop. Give it a base URL + a style
@@ -29,6 +31,7 @@ public final class LlmClient {
         public Map<String, String> headers;
         public String systemPrompt;
         public Integer maxTurns;       // default 10
+        public Hooks hooks;            // optional lifecycle middleware; null = no hooks
 
         public Options baseUrl(String v) { this.baseUrl = v; return this; }
         public Options style(String v) { this.style = v; return this; }
@@ -37,6 +40,84 @@ public final class LlmClient {
         public Options headers(Map<String, String> v) { this.headers = v; return this; }
         public Options systemPrompt(String v) { this.systemPrompt = v; return this; }
         public Options maxTurns(int v) { this.maxTurns = v; return this; }
+        public Options hooks(Hooks v) { this.hooks = v; return this; }
+    }
+
+    // ------------------------------------------------------------------
+    // Hooks (lifecycle middleware) — see SPEC.md §8 "Hooks". Mirrors the JS
+    // `Hooks` interface (js/src/client.ts). Each callback is optional: a null
+    // field on the Hooks object = skip that callback. Where JS callbacks are
+    // async, the Java equivalents run synchronously on the calling thread.
+    // ------------------------------------------------------------------
+
+    /** Event passed to {@link Hooks#beforeLLM}: the about-to-be-sent request. */
+    public record BeforeLLMEvent(List<Object> messages, List<Map<String, Object>> tools,
+                                 String model, int turn) {}
+
+    /** Return value of {@link Hooks#beforeLLM}: non-null fields replace the request's. */
+    public record LLMOverride(List<Object> messages, List<Map<String, Object>> tools) {}
+
+    /** Event passed to {@link Hooks#afterLLM}: the raw provider response (carries usage). */
+    public record AfterLLMEvent(Map<String, Object> response, String model, int turn) {}
+
+    /** Event passed to {@link Hooks#beforeTool}: the call the model wants to make. */
+    public record BeforeToolEvent(String name, Map<String, Object> args, String id, int turn) {}
+
+    /** Event passed to {@link Hooks#afterTool}: the call plus the result it produced. */
+    public record AfterToolEvent(String name, Map<String, Object> args, ToolResult result,
+                                 String id, int turn) {}
+
+    /**
+     * Return value of {@link Hooks#beforeTool} / {@link Hooks#afterTool}.
+     * <ul>
+     *   <li>{@code result} — non-null SHORT-CIRCUITS (beforeTool: deny/cache, the real
+     *       tool never runs) or REPLACES the result (afterTool: redact/annotate).</li>
+     *   <li>{@code args} — non-null rewrites the call's arguments (beforeTool only).</li>
+     * </ul>
+     */
+    public record ToolOverride(Map<String, Object> args, ToolResult result) {
+        public static ToolOverride withResult(ToolResult result) { return new ToolOverride(null, result); }
+        public static ToolOverride withArgs(Map<String, Object> args) { return new ToolOverride(args, null); }
+    }
+
+    /**
+     * Four optional callbacks around the agent loop. Build with the static factory
+     * methods or set the public fields directly; any unset field is skipped.
+     */
+    public static final class Hooks {
+        public Function<BeforeLLMEvent, LLMOverride> beforeLLM;   // may return null
+        public Consumer<AfterLLMEvent> afterLLM;                  // observe only
+        public Function<BeforeToolEvent, ToolOverride> beforeTool; // may return null
+        public Function<AfterToolEvent, ToolOverride> afterTool;   // may return null
+
+        public Hooks beforeLLM(Function<BeforeLLMEvent, LLMOverride> v) { this.beforeLLM = v; return this; }
+        public Hooks afterLLM(Consumer<AfterLLMEvent> v) { this.afterLLM = v; return this; }
+        public Hooks beforeTool(Function<BeforeToolEvent, ToolOverride> v) { this.beforeTool = v; return this; }
+        public Hooks afterTool(Function<AfterToolEvent, ToolOverride> v) { this.afterTool = v; return this; }
+    }
+
+    /** Carries the (possibly rewritten) args and the final result of a {@link #runTool} call. */
+    private record ToolRun(Map<String, Object> args, ToolResult result) {}
+
+    /**
+     * Run one tool through the beforeTool/afterTool hooks, mirroring JS {@code runTool}:
+     * beforeTool may rewrite args or short-circuit with a result; otherwise the toolkit
+     * executes; afterTool may replace the result.
+     */
+    private ToolRun runTool(Toolkit toolkit, String name, Map<String, Object> args, String id, int turn) {
+        Hooks h = opts.hooks;
+        Map<String, Object> a = args;
+        if (h != null && h.beforeTool != null) {
+            ToolOverride ov = h.beforeTool.apply(new BeforeToolEvent(name, a, id, turn));
+            if (ov != null && ov.result() != null) return new ToolRun(a, ov.result()); // short-circuit
+            if (ov != null && ov.args() != null) a = ov.args();
+        }
+        ToolResult result = toolkit.execute(name, a);
+        if (h != null && h.afterTool != null) {
+            ToolOverride ov = h.afterTool.apply(new AfterToolEvent(name, a, result, id, turn));
+            if (ov != null && ov.result() != null) result = ov.result();
+        }
+        return new ToolRun(a, result);
     }
 
     /** A tool call the model made, plus its result + metadata. */
@@ -196,6 +277,12 @@ public final class LlmClient {
         try {
             for (int turn = 0; turn < maxTurns(); turn++) {
                 turns++;
+                if (opts.hooks != null && opts.hooks.beforeLLM != null) {
+                    LLMOverride ov = opts.hooks.beforeLLM.apply(
+                            new BeforeLLMEvent(messages, tools, opts.model, turn));
+                    if (ov != null && ov.messages() != null) messages = ov.messages();
+                    if (ov != null && ov.tools() != null) tools = ov.tools();
+                }
                 Map<String, Object> body = new LinkedHashMap<>();
                 body.put("model", opts.model);
                 body.put("messages", messages);
@@ -210,6 +297,9 @@ public final class LlmClient {
 
                 Map<String, Object> data = postJson(url, headers, body);
                 addUsage(usage, (Map<String, Object>) data.get("usage"), "openai");
+                if (opts.hooks != null && opts.hooks.afterLLM != null) {
+                    opts.hooks.afterLLM.accept(new AfterLLMEvent(data, opts.model, turn));
+                }
                 List<Object> choices = (List<Object>) data.get("choices");
                 Map<String, Object> message =
                         (Map<String, Object>) ((Map<String, Object>) choices.get(0)).get("message");
@@ -234,14 +324,17 @@ public final class LlmClient {
                     Map<String, Object> args = Json.parseObjectLoose(
                             fn.get("arguments") == null ? "{}" : String.valueOf(fn.get("arguments")));
                     Object callId = call.get("id");
+                    final int t = turn;
                     futures[idx] = CompletableFuture.supplyAsync(
-                            () -> toolkit.execute(fnName, args), executor).thenAccept(result -> {
-                        recorded[idx] = new ToolCall(fnName, args,
-                                result.output(), result.isError(), result.metadata());
+                            () -> runTool(toolkit, fnName,
+                                    args, callId == null ? null : String.valueOf(callId), t),
+                            executor).thenAccept(run -> {
+                        recorded[idx] = new ToolCall(fnName, run.args(),
+                                run.result().output(), run.result().isError(), run.result().metadata());
                         Map<String, Object> toolMsg = new LinkedHashMap<>();
                         toolMsg.put("role", "tool");
                         toolMsg.put("tool_call_id", callId);
-                        toolMsg.put("content", result.output());
+                        toolMsg.put("content", run.result().output());
                         toolMsgs[idx] = toolMsg;
                     });
                 }
@@ -276,6 +369,12 @@ public final class LlmClient {
         try {
             for (int turn = 0; turn < maxTurns(); turn++) {
                 turns++;
+                if (opts.hooks != null && opts.hooks.beforeLLM != null) {
+                    LLMOverride ov = opts.hooks.beforeLLM.apply(
+                            new BeforeLLMEvent(messages, tools, opts.model, turn));
+                    if (ov != null && ov.messages() != null) messages = ov.messages();
+                    if (ov != null && ov.tools() != null) tools = ov.tools();
+                }
                 Map<String, Object> body = new LinkedHashMap<>();
                 body.put("model", opts.model);
                 body.put("max_tokens", 4096);
@@ -291,6 +390,9 @@ public final class LlmClient {
 
                 Map<String, Object> data = postJson(endpoint, headers, body);
                 addUsage(usage, (Map<String, Object>) data.get("usage"), "anthropic");
+                if (opts.hooks != null && opts.hooks.afterLLM != null) {
+                    opts.hooks.afterLLM.accept(new AfterLLMEvent(data, opts.model, turn));
+                }
                 List<Object> content = (List<Object>) data.get("content");
                 if (content == null) content = new ArrayList<>();
                 Map<String, Object> assistant = new LinkedHashMap<>();
@@ -325,15 +427,18 @@ public final class LlmClient {
                     final Map<String, Object> useInput = input;
                     String useName = String.valueOf(use.get("name"));
                     Object useId = use.get("id");
+                    final int t = turn;
                     futures[idx] = CompletableFuture.supplyAsync(
-                            () -> toolkit.execute(useName, useInput), executor).thenAccept(result -> {
-                        recorded[idx] = new ToolCall(useName, useInput,
-                                result.output(), result.isError(), result.metadata());
+                            () -> runTool(toolkit, useName, useInput,
+                                    useId == null ? null : String.valueOf(useId), t),
+                            executor).thenAccept(run -> {
+                        recorded[idx] = new ToolCall(useName, run.args(),
+                                run.result().output(), run.result().isError(), run.result().metadata());
                         Map<String, Object> tr = new LinkedHashMap<>();
                         tr.put("type", "tool_result");
                         tr.put("tool_use_id", useId);
-                        tr.put("content", result.output());
-                        tr.put("is_error", result.isError());
+                        tr.put("content", run.result().output());
+                        tr.put("is_error", run.result().isError());
                         resultBlocks[idx] = tr;
                     });
                 }
