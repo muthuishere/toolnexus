@@ -65,6 +65,16 @@ tasks.register('runAgent', JavaExec) {
     environment 'OPENROUTER_MODEL', System.getenv('OPENROUTER_MODEL') ?: ''
 }
 
+tasks.register('runAdvanced', JavaExec) {
+    group = 'application'
+    description = 'Run the Advanced example (parallel + chained tool calling verification).'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'io.github.muthuishere.toolnexus.examples.Advanced'
+    // forward OPENROUTER_API_KEY / OPENROUTER_MODEL from the environment
+    environment 'OPENROUTER_API_KEY', System.getenv('OPENROUTER_API_KEY') ?: ''
+    environment 'OPENROUTER_MODEL', System.getenv('OPENROUTER_MODEL') ?: ''
+}
+
 publishing {
     publications {
         mavenJava(MavenPublication) {

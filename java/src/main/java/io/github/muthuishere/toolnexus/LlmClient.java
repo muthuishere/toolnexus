@@ -9,6 +9,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Unified LLM client — the host loop. Give it a base URL + a style
@@ -123,44 +126,66 @@ public final class LlmClient {
         List<Map<String, Object>> tools = toolkit.toOpenAI();
         List<ToolCall> toolCalls = new ArrayList<>();
 
-        for (int turn = 0; turn < maxTurns(); turn++) {
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("model", opts.model);
-            body.put("messages", messages);
-            body.put("tools", tools);
-            body.put("tool_choice", "auto");
+        // One virtual-thread executor for the whole run; tool calls in a turn run on it.
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+        try {
+            for (int turn = 0; turn < maxTurns(); turn++) {
+                Map<String, Object> body = new LinkedHashMap<>();
+                body.put("model", opts.model);
+                body.put("messages", messages);
+                body.put("tools", tools);
+                body.put("tool_choice", "auto");
 
-            String url = stripTrailingSlash(opts.baseUrl) + "/chat/completions";
-            Map<String, String> headers = new LinkedHashMap<>();
-            headers.put("Authorization", "Bearer " + key);
-            headers.put("Content-Type", "application/json");
-            if (opts.headers != null) headers.putAll(opts.headers);
+                String url = stripTrailingSlash(opts.baseUrl) + "/chat/completions";
+                Map<String, String> headers = new LinkedHashMap<>();
+                headers.put("Authorization", "Bearer " + key);
+                headers.put("Content-Type", "application/json");
+                if (opts.headers != null) headers.putAll(opts.headers);
 
-            Map<String, Object> data = postJson(url, headers, body);
-            List<Object> choices = (List<Object>) data.get("choices");
-            Map<String, Object> message = (Map<String, Object>) ((Map<String, Object>) choices.get(0)).get("message");
-            messages.add(message);
-            List<Object> calls = (List<Object>) message.get("tool_calls");
-            if (calls == null || calls.isEmpty()) {
-                Object content = message.get("content");
-                return new RunResult(content == null ? "" : String.valueOf(content), messages, toolCalls);
+                Map<String, Object> data = postJson(url, headers, body);
+                List<Object> choices = (List<Object>) data.get("choices");
+                Map<String, Object> message =
+                        (Map<String, Object>) ((Map<String, Object>) choices.get(0)).get("message");
+                messages.add(message);
+                List<Object> calls = (List<Object>) message.get("tool_calls");
+                if (calls == null || calls.isEmpty()) {
+                    Object content = message.get("content");
+                    return new RunResult(content == null ? "" : String.valueOf(content), messages, toolCalls);
+                }
+
+                // Execute all tool calls in this turn concurrently (true parallel tool calling).
+                int n = calls.size();
+                Map<String, Object>[] toolMsgs = new Map[n];
+                ToolCall[] recorded = new ToolCall[n];
+                CompletableFuture<Void>[] futures = new CompletableFuture[n];
+                for (int i = 0; i < n; i++) {
+                    final int idx = i;
+                    Map<String, Object> call = (Map<String, Object>) calls.get(i);
+                    Map<String, Object> fn = (Map<String, Object>) call.get("function");
+                    String fnName = String.valueOf(fn.get("name"));
+                    Map<String, Object> args = Json.parseObjectLoose(
+                            fn.get("arguments") == null ? "{}" : String.valueOf(fn.get("arguments")));
+                    Object callId = call.get("id");
+                    recorded[idx] = new ToolCall(fnName, args);
+                    futures[idx] = CompletableFuture.supplyAsync(
+                            () -> toolkit.execute(fnName, args), executor).thenAccept(result -> {
+                        Map<String, Object> toolMsg = new LinkedHashMap<>();
+                        toolMsg.put("role", "tool");
+                        toolMsg.put("tool_call_id", callId);
+                        toolMsg.put("content", result.output());
+                        toolMsgs[idx] = toolMsg;
+                    });
+                }
+                CompletableFuture.allOf(futures).join();
+
+                // Append in original order; record toolCalls in original order (after join → thread-safe).
+                for (int i = 0; i < n; i++) toolCalls.add(recorded[i]);
+                for (int i = 0; i < n; i++) messages.add(toolMsgs[i]);
             }
-            for (Object callObj : calls) {
-                Map<String, Object> call = (Map<String, Object>) callObj;
-                Map<String, Object> fn = (Map<String, Object>) call.get("function");
-                String fnName = String.valueOf(fn.get("name"));
-                Map<String, Object> args = Json.parseObjectLoose(
-                        fn.get("arguments") == null ? "{}" : String.valueOf(fn.get("arguments")));
-                toolCalls.add(new ToolCall(fnName, args));
-                ToolResult result = toolkit.execute(fnName, args);
-                Map<String, Object> toolMsg = new LinkedHashMap<>();
-                toolMsg.put("role", "tool");
-                toolMsg.put("tool_call_id", call.get("id"));
-                toolMsg.put("content", result.output());
-                messages.add(toolMsg);
-            }
+            return new RunResult(lastAssistantText(messages), messages, toolCalls);
+        } finally {
+            executor.shutdown();
         }
-        return new RunResult(lastAssistantText(messages), messages, toolCalls);
     }
 
     // ---- Anthropic-style: POST {baseUrl}/messages ----
@@ -175,61 +200,85 @@ public final class LlmClient {
         List<Map<String, Object>> tools = toolkit.toAnthropic();
         List<ToolCall> toolCalls = new ArrayList<>();
 
-        for (int turn = 0; turn < maxTurns(); turn++) {
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("model", opts.model);
-            body.put("max_tokens", 4096);
-            if (!system.isEmpty()) body.put("system", system);
-            body.put("messages", messages);
-            body.put("tools", tools);
+        // One virtual-thread executor for the whole run; tool calls in a turn run on it.
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+        try {
+            for (int turn = 0; turn < maxTurns(); turn++) {
+                Map<String, Object> body = new LinkedHashMap<>();
+                body.put("model", opts.model);
+                body.put("max_tokens", 4096);
+                if (!system.isEmpty()) body.put("system", system);
+                body.put("messages", messages);
+                body.put("tools", tools);
 
-            Map<String, String> headers = new LinkedHashMap<>();
-            headers.put("x-api-key", key);
-            headers.put("anthropic-version", "2023-06-01");
-            headers.put("Content-Type", "application/json");
-            if (opts.headers != null) headers.putAll(opts.headers);
+                Map<String, String> headers = new LinkedHashMap<>();
+                headers.put("x-api-key", key);
+                headers.put("anthropic-version", "2023-06-01");
+                headers.put("Content-Type", "application/json");
+                if (opts.headers != null) headers.putAll(opts.headers);
 
-            Map<String, Object> data = postJson(endpoint, headers, body);
-            List<Object> content = (List<Object>) data.get("content");
-            if (content == null) content = new ArrayList<>();
-            Map<String, Object> assistant = new LinkedHashMap<>();
-            assistant.put("role", "assistant");
-            assistant.put("content", content);
-            messages.add(assistant);
+                Map<String, Object> data = postJson(endpoint, headers, body);
+                List<Object> content = (List<Object>) data.get("content");
+                if (content == null) content = new ArrayList<>();
+                Map<String, Object> assistant = new LinkedHashMap<>();
+                assistant.put("role", "assistant");
+                assistant.put("content", content);
+                messages.add(assistant);
 
-            List<Map<String, Object>> uses = new ArrayList<>();
-            for (Object b : content) {
-                Map<String, Object> block = (Map<String, Object>) b;
-                if ("tool_use".equals(block.get("type"))) uses.add(block);
-            }
-            if (uses.isEmpty()) {
-                StringBuilder text = new StringBuilder();
+                List<Map<String, Object>> uses = new ArrayList<>();
                 for (Object b : content) {
                     Map<String, Object> block = (Map<String, Object>) b;
-                    if ("text".equals(block.get("type"))) text.append(String.valueOf(block.get("text")));
+                    if ("tool_use".equals(block.get("type"))) uses.add(block);
                 }
-                return new RunResult(text.toString(), messages, toolCalls);
+                if (uses.isEmpty()) {
+                    StringBuilder text = new StringBuilder();
+                    for (Object b : content) {
+                        Map<String, Object> block = (Map<String, Object>) b;
+                        if ("text".equals(block.get("type"))) text.append(String.valueOf(block.get("text")));
+                    }
+                    return new RunResult(text.toString(), messages, toolCalls);
+                }
+
+                // Execute all tool_use blocks in this turn concurrently (true parallel tool calling).
+                int n = uses.size();
+                Map<String, Object>[] resultBlocks = new Map[n];
+                ToolCall[] recorded = new ToolCall[n];
+                CompletableFuture<Void>[] futures = new CompletableFuture[n];
+                for (int i = 0; i < n; i++) {
+                    final int idx = i;
+                    Map<String, Object> use = uses.get(i);
+                    Map<String, Object> input = (Map<String, Object>) use.get("input");
+                    if (input == null) input = new LinkedHashMap<>();
+                    final Map<String, Object> useInput = input;
+                    String useName = String.valueOf(use.get("name"));
+                    Object useId = use.get("id");
+                    recorded[idx] = new ToolCall(useName, useInput);
+                    futures[idx] = CompletableFuture.supplyAsync(
+                            () -> toolkit.execute(useName, useInput), executor).thenAccept(result -> {
+                        Map<String, Object> tr = new LinkedHashMap<>();
+                        tr.put("type", "tool_result");
+                        tr.put("tool_use_id", useId);
+                        tr.put("content", result.output());
+                        tr.put("is_error", result.isError());
+                        resultBlocks[idx] = tr;
+                    });
+                }
+                CompletableFuture.allOf(futures).join();
+
+                // Record toolCalls and build the result list in original order (after join → thread-safe).
+                for (int i = 0; i < n; i++) toolCalls.add(recorded[i]);
+                List<Object> results = new ArrayList<>(n);
+                for (int i = 0; i < n; i++) results.add(resultBlocks[i]);
+
+                Map<String, Object> userMsg = new LinkedHashMap<>();
+                userMsg.put("role", "user");
+                userMsg.put("content", results);
+                messages.add(userMsg);
             }
-            List<Object> results = new ArrayList<>();
-            for (Map<String, Object> use : uses) {
-                Map<String, Object> input = (Map<String, Object>) use.get("input");
-                if (input == null) input = new LinkedHashMap<>();
-                String useName = String.valueOf(use.get("name"));
-                toolCalls.add(new ToolCall(useName, input));
-                ToolResult result = toolkit.execute(useName, input);
-                Map<String, Object> tr = new LinkedHashMap<>();
-                tr.put("type", "tool_result");
-                tr.put("tool_use_id", use.get("id"));
-                tr.put("content", result.output());
-                tr.put("is_error", result.isError());
-                results.add(tr);
-            }
-            Map<String, Object> userMsg = new LinkedHashMap<>();
-            userMsg.put("role", "user");
-            userMsg.put("content", results);
-            messages.add(userMsg);
+            return new RunResult("", messages, toolCalls);
+        } finally {
+            executor.shutdown();
         }
-        return new RunResult("", messages, toolCalls);
     }
 
     private static Map<String, Object> msg(String role, String content) {
