@@ -406,6 +406,23 @@ Loop (identical for both styles, only wire-format differs):
 This makes "bring any OpenAI- or Anthropic-style endpoint + point at mcp.json/skills =
 working agent" a few lines in any of the three languages.
 
+### Hooks (lifecycle middleware)
+
+`ClientOptions.hooks` — four optional, async-capable callbacks around the loop. Each may
+observe; the noted ones may mutate or short-circuit.
+
+- `beforeLLM({ messages, tools, model, turn })` → optionally return `{ messages?, tools? }`
+  to replace them (trim/inject history, swap tools).
+- `afterLLM({ response, model, turn })` → observe (logging, cost, tracing). `response` is
+  the raw provider payload (carries `usage`).
+- `beforeTool({ name, args, id, turn })` → return `{ result }` to **short-circuit** the tool
+  (deny / cache hit / dry-run — the real tool never runs), or `{ args }` to rewrite the call.
+- `afterTool({ name, args, result, id, turn })` → return `{ result }` to transform the output
+  (redact, annotate).
+
+These are what make it programmable as an agent: permissions/guardrails (deny in `beforeTool`),
+caching, arg rewriting, and observability (cost/latency in `afterLLM`).
+
 ---
 
 ## 9. Go CLI (`toolnexus`)
