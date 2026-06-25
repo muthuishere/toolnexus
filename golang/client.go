@@ -39,10 +39,20 @@ type ClientOptions struct {
 	MaxTurns int
 }
 
-// ToolCall records a tool the model asked for.
+// ToolCall records a tool the model asked for, plus its result + metadata.
 type ToolCall struct {
-	Name string         `json:"name"`
-	Args map[string]any `json:"args"`
+	Name     string         `json:"name"`
+	Args     map[string]any `json:"args"`
+	Output   string         `json:"output"`
+	IsError  bool           `json:"isError"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+// Usage is token usage, summed across every LLM round trip in the run.
+type Usage struct {
+	PromptTokens     int `json:"promptTokens"`
+	CompletionTokens int `json:"completionTokens"`
+	TotalTokens      int `json:"totalTokens"`
 }
 
 // RunResult is the outcome of a Run.
@@ -50,6 +60,45 @@ type RunResult struct {
 	Text      string     `json:"text"`
 	Messages  []any      `json:"messages"`
 	ToolCalls []ToolCall `json:"toolCalls"`
+	// ToolCallCount is the total number of tool calls (= len(ToolCalls)).
+	ToolCallCount int `json:"toolCallCount"`
+	// Turns is the number of LLM round trips.
+	Turns int `json:"turns"`
+	// Usage is the aggregated token usage across all turns.
+	Usage Usage `json:"usage"`
+	// Model is the model used.
+	Model string `json:"model"`
+}
+
+// addUsage sums one response's usage object into acc. Numbers arrive from JSON
+// decode as float64. openai style reads prompt_tokens/completion_tokens/
+// total_tokens; anthropic reads input_tokens→prompt, output_tokens→completion,
+// total = input + output.
+func addUsage(acc *Usage, raw map[string]any, style string) {
+	if raw == nil {
+		return
+	}
+	num := func(k string) int {
+		if v, ok := raw[k].(float64); ok {
+			return int(v)
+		}
+		return 0
+	}
+	if style == string(StyleAnthropic) {
+		in, out := num("input_tokens"), num("output_tokens")
+		acc.PromptTokens += in
+		acc.CompletionTokens += out
+		acc.TotalTokens += in + out
+		return
+	}
+	prompt, completion := num("prompt_tokens"), num("completion_tokens")
+	acc.PromptTokens += prompt
+	acc.CompletionTokens += completion
+	if total := num("total_tokens"); total != 0 {
+		acc.TotalTokens += total
+	} else {
+		acc.TotalTokens += prompt + completion
+	}
 }
 
 // Client runs the agent loop against a Toolkit.
@@ -156,8 +205,11 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit) (Run
 	messages = append(messages, map[string]any{"role": "user", "content": prompt})
 	tools := tk.ToOpenAI()
 	var toolCalls []ToolCall
+	var usage Usage
+	turns := 0
 
 	for turn := 0; turn < c.maxTurns(); turn++ {
+		turns++
 		body := map[string]any{
 			"model":       c.opts.Model,
 			"messages":    messages,
@@ -183,12 +235,14 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit) (Run
 					} `json:"tool_calls"`
 				} `json:"message"`
 			} `json:"choices"`
+			Usage map[string]any `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &data); err != nil {
 			return RunResult{}, err
 		}
+		addUsage(&usage, data.Usage, string(StyleOpenAI))
 		if len(data.Choices) == 0 {
-			return RunResult{Text: "", Messages: messages, ToolCalls: toolCalls}, nil
+			return c.result("", messages, toolCalls, turns, usage), nil
 		}
 		msg := data.Choices[0].Message
 
@@ -211,7 +265,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit) (Run
 		messages = append(messages, asst)
 
 		if len(msg.ToolCalls) == 0 {
-			return RunResult{Text: msg.Content, Messages: messages, ToolCalls: toolCalls}, nil
+			return c.result(msg.Content, messages, toolCalls, turns, usage), nil
 		}
 
 		// Execute all tool calls in this turn concurrently (true parallel tool
@@ -234,10 +288,16 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit) (Run
 			}) {
 				defer wg.Done()
 				args := safeJSONArgs(tc.Function.Arguments)
-				mu.Lock()
-				toolCalls = append(toolCalls, ToolCall{Name: tc.Function.Name, Args: args})
-				mu.Unlock()
 				result, _ := tk.Execute(ctx, tc.Function.Name, args)
+				mu.Lock()
+				toolCalls = append(toolCalls, ToolCall{
+					Name:     tc.Function.Name,
+					Args:     args,
+					Output:   result.Output,
+					IsError:  result.IsError,
+					Metadata: result.Metadata,
+				})
+				mu.Unlock()
 				results[i] = map[string]any{
 					"role":         "tool",
 					"tool_call_id": tc.ID,
@@ -248,7 +308,20 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit) (Run
 		wg.Wait()
 		messages = append(messages, results...)
 	}
-	return RunResult{Text: "", Messages: messages, ToolCalls: toolCalls}, nil
+	return c.result("", messages, toolCalls, turns, usage), nil
+}
+
+// result assembles a RunResult, filling in the derived telemetry fields.
+func (c *Client) result(text string, messages []any, toolCalls []ToolCall, turns int, usage Usage) RunResult {
+	return RunResult{
+		Text:          text,
+		Messages:      messages,
+		ToolCalls:     toolCalls,
+		ToolCallCount: len(toolCalls),
+		Turns:         turns,
+		Usage:         usage,
+		Model:         c.opts.Model,
+	}
 }
 
 // ---- Anthropic-style: POST {baseURL}/messages ----
@@ -267,6 +340,8 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit) (
 	messages := []any{map[string]any{"role": "user", "content": prompt}}
 	tools := tk.ToAnthropic()
 	var toolCalls []ToolCall
+	var usage Usage
+	turns := 0
 
 	headers := map[string]string{
 		"x-api-key":         key,
@@ -274,6 +349,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit) (
 	}
 
 	for turn := 0; turn < c.maxTurns(); turn++ {
+		turns++
 		body := map[string]any{
 			"model":      c.opts.Model,
 			"max_tokens": 4096,
@@ -295,10 +371,12 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit) (
 				Name  string         `json:"name"`
 				Input map[string]any `json:"input"`
 			} `json:"content"`
+			Usage map[string]any `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &data); err != nil {
 			return RunResult{}, err
 		}
+		addUsage(&usage, data.Usage, string(StyleAnthropic))
 
 		// Re-marshal the content blocks as the assistant message.
 		var content []any
@@ -330,7 +408,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit) (
 		messages = append(messages, map[string]any{"role": "assistant", "content": content})
 
 		if len(uses) == 0 {
-			return RunResult{Text: strings.Join(textParts, ""), Messages: messages, ToolCalls: toolCalls}, nil
+			return c.result(strings.Join(textParts, ""), messages, toolCalls, turns, usage), nil
 		}
 
 		// Execute all tool_use blocks in this turn concurrently. results[i] keeps
@@ -351,10 +429,16 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit) (
 				if in == nil {
 					in = map[string]any{}
 				}
-				mu.Lock()
-				toolCalls = append(toolCalls, ToolCall{Name: u.Name, Args: in})
-				mu.Unlock()
 				result, _ := tk.Execute(ctx, u.Name, in)
+				mu.Lock()
+				toolCalls = append(toolCalls, ToolCall{
+					Name:     u.Name,
+					Args:     in,
+					Output:   result.Output,
+					IsError:  result.IsError,
+					Metadata: result.Metadata,
+				})
+				mu.Unlock()
 				results[i] = map[string]any{
 					"type":        "tool_result",
 					"tool_use_id": u.ID,
@@ -366,7 +450,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit) (
 		wg.Wait()
 		messages = append(messages, map[string]any{"role": "user", "content": results})
 	}
-	return RunResult{Text: "", Messages: messages, ToolCalls: toolCalls}, nil
+	return c.result("", messages, toolCalls, turns, usage), nil
 }
 
 // safeJSONArgs parses a tool-call arguments JSON string into a map, defaulting to

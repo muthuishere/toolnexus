@@ -170,6 +170,14 @@ func main() {
 	}
 	fmt.Println("A) parallel — tool calls:", callDescs(a.ToolCalls))
 	fmt.Printf("A) max calls in one turn: %d | answer: %.80s\n", maxParallel(a.Messages), oneLine(a.Text))
+	fmt.Printf("A) telemetry — model: %s | toolCallCount: %d | turns: %d\n", a.Model, a.ToolCallCount, a.Turns)
+	fmt.Printf("A) usage — prompt: %d, completion: %d, total: %d\n",
+		a.Usage.PromptTokens, a.Usage.CompletionTokens, a.Usage.TotalTokens)
+	if len(a.ToolCalls) > 0 {
+		first := a.ToolCalls[0]
+		fmt.Printf("A) first tool call — %s output: %q | isError: %t | metadata: %v\n",
+			first.Name, oneLine(first.Output), first.IsError, first.Metadata)
+	}
 
 	// ---- B) CHAIN: second call depends on an OPAQUE first result (forces a 2nd turn) ----
 	b, err := agent.Run(ctx,
