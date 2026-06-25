@@ -17,10 +17,48 @@ export interface ClientOptions {
   maxTurns?: number
 }
 
+/** A tool call the model made, plus its result + metadata. */
+export interface ToolCallRecord {
+  name: string
+  args: Record<string, unknown>
+  output: string
+  isError: boolean
+  metadata?: Record<string, unknown>
+}
+
+/** Token usage, summed across every LLM round trip in the run. */
+export interface Usage {
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+}
+
 export interface RunResult {
   text: string
   messages: any[]
-  toolCalls: { name: string; args: Record<string, unknown> }[]
+  /** Every tool call made, with its output, error flag, and metadata. */
+  toolCalls: ToolCallRecord[]
+  /** Total number of tool calls (= toolCalls.length). */
+  toolCallCount: number
+  /** Number of LLM round trips. */
+  turns: number
+  /** Aggregated token usage across all turns. */
+  usage: Usage
+  /** The model used. */
+  model: string
+}
+
+function addUsage(acc: Usage, raw: any, style: ClientStyle): void {
+  if (!raw) return
+  if (style === "anthropic") {
+    acc.promptTokens += raw.input_tokens ?? 0
+    acc.completionTokens += raw.output_tokens ?? 0
+    acc.totalTokens += (raw.input_tokens ?? 0) + (raw.output_tokens ?? 0)
+  } else {
+    acc.promptTokens += raw.prompt_tokens ?? 0
+    acc.completionTokens += raw.completion_tokens ?? 0
+    acc.totalTokens += raw.total_tokens ?? (raw.prompt_tokens ?? 0) + (raw.completion_tokens ?? 0)
+  }
 }
 
 function resolveKey(opts: ClientOptions): string {
@@ -54,9 +92,12 @@ export class Client {
     if (system) messages.push({ role: "system", content: system })
     messages.push({ role: "user", content: prompt })
     const tools = toolkit.toOpenAI()
-    const toolCalls: RunResult["toolCalls"] = []
+    const toolCalls: ToolCallRecord[] = []
+    const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+    let turns = 0
 
     for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
+      turns++
       const res = await fetch(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
         headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
@@ -64,22 +105,27 @@ export class Client {
       })
       if (!res.ok) throw new Error(`LLM ${res.status}: ${await res.text()}`)
       const data: any = await res.json()
+      addUsage(usage, data.usage, "openai")
       const msg = data.choices[0].message
       messages.push(msg)
       const calls = msg.tool_calls ?? []
-      if (calls.length === 0) return { text: msg.content ?? "", messages, toolCalls }
+      if (calls.length === 0) return this.result(msg.content ?? "", messages, toolCalls, turns, usage)
       // execute all tool calls in this turn concurrently (true parallel tool calling)
       const results = await Promise.all(
         calls.map(async (call: any) => {
           const args = safeJson(call.function.arguments)
-          toolCalls.push({ name: call.function.name, args })
           const result = await toolkit.execute(call.function.name, args)
+          toolCalls.push({ name: call.function.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
           return { role: "tool", tool_call_id: call.id, content: result.output }
         }),
       )
       messages.push(...results)
     }
-    return { text: lastText(messages), messages, toolCalls }
+    return this.result(lastText(messages), messages, toolCalls, turns, usage)
+  }
+
+  private result(text: string, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage): RunResult {
+    return { text, messages, toolCalls, toolCallCount: toolCalls.length, turns, usage, model: this.opts.model }
   }
 
   // ---- Anthropic-style: POST {baseUrl}/messages ----
@@ -90,9 +136,12 @@ export class Client {
     const system = this.system(toolkit)
     const messages: any[] = [{ role: "user", content: prompt }]
     const tools = toolkit.toAnthropic()
-    const toolCalls: RunResult["toolCalls"] = []
+    const toolCalls: ToolCallRecord[] = []
+    const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+    let turns = 0
 
     for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
+      turns++
       const res = await fetch(endpoint, {
         method: "POST",
         headers: {
@@ -105,23 +154,24 @@ export class Client {
       })
       if (!res.ok) throw new Error(`LLM ${res.status}: ${await res.text()}`)
       const data: any = await res.json()
+      addUsage(usage, data.usage, "anthropic")
       messages.push({ role: "assistant", content: data.content })
       const uses = (data.content ?? []).filter((b: any) => b.type === "tool_use")
       if (uses.length === 0) {
         const text = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
-        return { text, messages, toolCalls }
+        return this.result(text, messages, toolCalls, turns, usage)
       }
       // execute all tool_use blocks in this turn concurrently (true parallel tool calling)
       const results = await Promise.all(
         uses.map(async (use: any) => {
-          toolCalls.push({ name: use.name, args: use.input ?? {} })
           const result = await toolkit.execute(use.name, use.input ?? {})
+          toolCalls.push({ name: use.name, args: use.input ?? {}, output: result.output, isError: result.isError, metadata: result.metadata })
           return { type: "tool_result", tool_use_id: use.id, content: result.output, is_error: result.isError }
         }),
       )
       messages.push({ role: "user", content: results })
     }
-    return { text: "", messages, toolCalls }
+    return this.result("", messages, toolCalls, turns, usage)
   }
 }
 

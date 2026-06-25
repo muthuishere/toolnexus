@@ -369,8 +369,24 @@ client = createClient({
   maxTurns?,          // default 10
 })
 
-client.run(prompt, { toolkit }) -> { text, messages, toolCalls }
+client.run(prompt, { toolkit }) -> RunResult
 ```
+
+`RunResult` carries the full outcome + telemetry:
+```
+RunResult {
+  text:          string        // final assistant answer
+  messages:      [...]          // full transcript
+  toolCalls:     [{ name, args, output, isError, metadata }]   // every call + its result
+  toolCallCount: number         // = toolCalls.length
+  turns:         number         // LLM round trips
+  usage:         { promptTokens, completionTokens, totalTokens }  // summed across turns
+  model:         string
+}
+```
+Token usage is summed from each response's `usage` (OpenAI `prompt/completion/total_tokens`;
+Anthropic `input_tokens`→prompt, `output_tokens`→completion). `metadata` on each tool call is
+the tool result's metadata (e.g. MCP `server`, HTTP `status`).
 
 Loop (identical for both styles, only wire-format differs):
 1. system = `systemPrompt + "\n\n" + toolkit.skillsPrompt()`, then the user prompt.

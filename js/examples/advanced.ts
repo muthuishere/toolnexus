@@ -57,8 +57,10 @@ const a = await agent.run(
   "In a single step, call the add tool twice: add 2 and 3, and add 100 and 200. Then report both sums.",
   { toolkit: tk },
 )
-console.log("A) parallel — tool calls:", a.toolCalls.map((c) => `${c.name}(${JSON.stringify(c.args)})`))
-console.log("A) max calls in one turn:", maxParallel(a.messages), "| answer:", a.text.replace(/\n/g, " ").slice(0, 80))
+console.log("A) parallel — tool calls:", a.toolCalls.map((c) => `${c.name}(${JSON.stringify(c.args)})=${c.output}`))
+console.log("A) max calls in one turn:", maxParallel(a.messages), "| answer:", a.text.replace(/\n/g, " ").slice(0, 60))
+console.log("A) usage:", a.usage, "| toolCallCount:", a.toolCallCount, "| turns:", a.turns, "| model:", a.model)
+console.log("A) first tool result metadata:", a.toolCalls[0]?.metadata)
 
 // ---- B) CHAIN: second call depends on an OPAQUE first result (forces a 2nd turn) ----
 const b = await agent.run(
