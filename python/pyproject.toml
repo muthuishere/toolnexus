@@ -16,6 +16,10 @@ dependencies = [
 
 [project.optional-dependencies]
 yaml = ["pyyaml>=6.0"]
+test = ["pytest", "pytest-asyncio"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/toolnexus"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

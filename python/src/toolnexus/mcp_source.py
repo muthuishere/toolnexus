@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
@@ -33,6 +34,23 @@ from .types import (
 
 DEFAULT_TIMEOUT = 30.0  # seconds (JS uses 30_000 ms)
 MAX_LIST_PAGES = 1_000
+
+_ENV_RE = re.compile(r"\$\{([A-Za-z0-9_]+)\}")
+
+
+def expand_env_headers(
+    headers: Optional[dict[str, str]],
+) -> Optional[dict[str, str]]:
+    """Expand ``${ENV_VAR}`` in header *values* from ``os.environ`` so tokens live
+    in the environment, not the committed config. Returns ``None`` if input is
+    ``None``. Values are never logged. Mirrors the JS ``expandEnvHeaders``.
+    """
+    if headers is None:
+        return None
+    return {
+        k: _ENV_RE.sub(lambda m: os.environ.get(m.group(1), ""), v)
+        for k, v in headers.items()
+    }
 
 # Config is a dict keyed by server name. Each value is a server config dict.
 ServerConfig = dict[str, Any]
@@ -187,7 +205,7 @@ async def _connect_session(
 
     if is_remote(cfg):
         url = cfg["url"]
-        headers = cfg.get("headers")
+        headers = expand_env_headers(cfg.get("headers"))
         try:
             read, write, _ = await stack.enter_async_context(
                 streamablehttp_client(url, headers=headers, timeout=timeout)
