@@ -8,12 +8,14 @@ publishing in lockstep.
 
 ## What Changes
 
-- Publish each port to its native registry: npm (`js/`), PyPI (`python/`), a tagged Go module
-  (`golang/`), and Maven Central (`java/`).
-- Establish **version parity**: a release publishes all four ports at one matching version.
-- Keep publishing credential-safe: registry tokens are use-only environment variables consumed
-  at publish time — never committed, printed, or baked into CI.
-- Document the manual release steps per port in `PUBLISHING.md`.
+- Publish each port to its native registry **via GitHub Actions CI**: npm (`js/`), PyPI
+  (`python/`), a tagged Go module (`golang/`), Maven Central (`java/`), and NuGet (`csharp/`).
+- Establish **version parity**: one release publishes all ports at one matching version; a
+  pre-flight job enforces it.
+- Keep publishing credential-safe: tokens live only as **GitHub Actions secrets**, referenced as
+  `${{ secrets.* }}` and masked in logs — never committed, printed, or passed through an agent.
+  Each publish job is gated on its secret so partial onboarding still yields a green run.
+- Document the CI release flow + the secrets table in `PUBLISHING.md`.
 
 No breaking changes to the library contract (`SPEC.md`) — this change is about distribution and
 release governance, not runtime behavior.
