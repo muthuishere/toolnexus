@@ -80,21 +80,25 @@ That's the whole thing. Bring your own loop instead? Use `tk.toOpenAI()` /
 `toAnthropic()` / `toGemini()` for the schema and `tk.execute(name, args)` to run a call.
 Same three steps in Python, Go, Java, and C#.
 
-## Why toolnexus (and not a framework)
+## Why toolnexus
 
-The giants each cover *part* of this surface; none covers all of it in our lane:
+The individual pieces — MCP, agent skills (`SKILL.md`), native tools, HTTP tools — each landed in
+the big frameworks during 2026: **Spring AI**, **LangChain** (Deep Agents) and **Google ADK** now
+do most of them. What none of them combine is **all four sources behind one interface,
+byte-identical across five languages, vendor-neutral, in a small à-la-carte library:**
 
-| | MCP from config | Agent Skills (SKILL.md) | native/decorator tools | HTTP/OpenAPI→tools | unified any-LLM client | languages |
-|---|:--:|:--:|:--:|:--:|:--:|---|
-| **Spring AI** | ✅ | ❌ | ✅ | ❌ | ✅ | Java only |
-| **LangChain** | ✅ | ❌ | ✅ | ~ | ✅ | Py, JS (no Go) |
-| **Google ADK** | ✅ | ✅ | ✅ | ✅ | ✅ | Py/Java/Go/JS — Gemini-centric |
-| **toolnexus** | ✅ | ✅ | ✅ | ✅ | ✅ | **JS + Py + Go + Java + C#, vendor-neutral** |
+- **Five languages, one behavior** — JS · Python · Go · Java · C#, pinned by a shared
+  [SPEC.md](SPEC.md) so they stay byte-compatible (the skill-loader output is byte-for-byte).
+  First-class **Go and C#** — where Spring AI (Java-only) and LangChain (no Go/C#) don't reach.
+- **Vendor-neutral** — a plain base URL + `openai`/`anthropic` style; not tied to one provider
+  (unlike Gemini-centric ADK).
+- **A library, not a platform** — à la carte: use just the MCP host, or add skills / native /
+  HTTP / the host loop as you like. No runtime, no orchestration server.
+- **All four sources unified** — MCP servers, agent skills, native functions, and HTTP/REST as
+  one `Tool` registry, for any model.
 
-toolnexus is a **focused library**, not a platform: lightweight, vendor-neutral, with real
-parity across JS, Python, Go, Java, and C# (including first-class Go and C# — where LangChain
-and Spring AI can't reach). Each language builds on the most popular MCP SDK for that ecosystem
-— nothing is reimplemented from scratch:
+Each language builds on the most popular MCP SDK for that ecosystem — nothing is reimplemented
+from scratch:
 
 | Lang   | Dir         | MCP SDK                                          |
 |--------|-------------|--------------------------------------------------|
