@@ -1,0 +1,106 @@
+name: Release
+
+# Publishes the language ports. OIDC-first: npm + PyPI mint short-lived tokens at
+# run time (no stored secrets); Go is a tag push. Each port is gated by a repo
+# VARIABLE (Settings -> Secrets and variables -> Actions -> Variables) so a port
+# stays off until you flip it on — partial onboarding still produces a green run.
+#
+#   ENABLE_NPM=true    ENABLE_PYPI=true    ENABLE_GO=true
+#
+# Java (Maven Central) and C# (NuGet) are Phase 2 — see openspec change
+# publishing-and-parity-watch.
+
+on:
+  release:
+    types: [published]        # cut a GitHub Release named vX.Y.Z
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, e.g. 0.1.0 (manual / dry-run)"
+        required: true
+
+permissions:
+  contents: write             # go tag push
+  id-token: write             # npm + PyPI OIDC
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Resolve + verify version parity
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${{ github.event.inputs.version }}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Releasing version: $VERSION"
+          JS=$(node -p "require('./js/package.json').version")
+          PY=$(grep -E '^version' python/pyproject.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "js=$JS python=$PY"
+          fail=0
+          [ "$JS" = "$VERSION" ] || { echo "::error::js/package.json is $JS, expected $VERSION"; fail=1; }
+          [ "$PY" = "$VERSION" ] || { echo "::error::python/pyproject.toml is $PY, expected $VERSION"; fail=1; }
+          exit $fail
+
+  npm:
+    needs: preflight
+    if: ${{ vars.ENABLE_NPM == 'true' }}
+    runs-on: ubuntu-latest
+    environment: prod          # the npm Trusted Publisher is scoped to this environment
+    permissions: { id-token: write, contents: read }
+    defaults: { run: { working-directory: js } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm install -g npm@latest    # OIDC trusted publishing needs npm >= 11.5.1
+      - run: npm ci
+      - run: npm run build
+      - run: npm publish --provenance --access public
+        # No NODE_AUTH_TOKEN: npm uses the OIDC token via the configured Trusted Publisher.
+
+  pypi:
+    needs: preflight
+    if: ${{ vars.ENABLE_PYPI == 'true' }}
+    runs-on: ubuntu-latest
+    environment: prod
+    permissions: { id-token: write }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install build
+      - run: python -m build
+        working-directory: python
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python/dist
+        # OIDC trusted publishing — no API token.
+
+  go-tag:
+    needs: preflight
+    if: ${{ vars.ENABLE_GO == 'true' }}
+    runs-on: ubuntu-latest
+    environment: prod
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Push Go module tag
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          TAG="golang/v${VERSION}"
+          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "${TAG}"; then
+            echo "Tag ${TAG} already exists — skipping."
+          else
+            git tag "${TAG}"
+            git push origin "${TAG}"
+          fi
