@@ -1,10 +1,22 @@
 # toolnexus
 
 [![CI](https://github.com/muthuishere/toolnexus/actions/workflows/ci.yml/badge.svg)](https://github.com/muthuishere/toolnexus/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/toolnexus?logo=npm&label=npm)](https://www.npmjs.com/package/toolnexus)
+[![PyPI](https://img.shields.io/pypi/v/toolnexus?logo=pypi&logoColor=white&label=PyPI)](https://pypi.org/project/toolnexus/)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**Build an agent in a few lines.** Bring any LLM endpoint, point at an `mcp.json` and a
-`skills/` folder, and you get a working agent — system prompt, skills, tool-calling loop,
-all included. A small, **vendor-neutral** library in **JavaScript / TypeScript, Python, Go, and Java**.
+### Your LLM, with MCP tools and agent skills built in — in 3 lines, in 5 languages.
+
+Point toolnexus at an `mcp.json` and a `skills/` folder and you get a **working agent**: the
+tool-calling loop, skills injection, and four unified tool sources — all included. No framework.
+Vendor-neutral. Byte-identical across **JavaScript · Python · Go · Java · C#**.
+
+```sh
+npm i toolnexus                                   # JS / TypeScript
+pip install toolnexus                             # Python
+go get github.com/muthuishere/toolnexus/golang    # Go
+dotnet add package Toolnexus                       # C#   (Java via Maven Central — coming)
+```
 
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
 tools, agent skills, your own functions, and remote HTTP endpoints are all *the same thing*
@@ -66,7 +78,7 @@ const { text } = await agent.run("Refund order 1234 for the customer.", { toolki
 
 That's the whole thing. Bring your own loop instead? Use `tk.toOpenAI()` /
 `toAnthropic()` / `toGemini()` for the schema and `tk.execute(name, args)` to run a call.
-Same three steps in Python, Go, and Java.
+Same three steps in Python, Go, Java, and C#.
 
 ## Why toolnexus (and not a framework)
 
@@ -77,12 +89,12 @@ The giants each cover *part* of this surface; none covers all of it in our lane:
 | **Spring AI** | ✅ | ❌ | ✅ | ❌ | ✅ | Java only |
 | **LangChain** | ✅ | ❌ | ✅ | ~ | ✅ | Py, JS (no Go) |
 | **Google ADK** | ✅ | ✅ | ✅ | ✅ | ✅ | Py/Java/Go/JS — Gemini-centric |
-| **toolnexus** | ✅ | ✅ | ✅ | ✅ | ✅ | **JS + Py + Go + Java, vendor-neutral** |
+| **toolnexus** | ✅ | ✅ | ✅ | ✅ | ✅ | **JS + Py + Go + Java + C#, vendor-neutral** |
 
 toolnexus is a **focused library**, not a platform: lightweight, vendor-neutral, with real
-parity across JS, Python, and Go (including first-class Go — where LangChain and Spring AI
-can't reach). Each language builds on the most popular MCP SDK for that ecosystem — nothing
-is reimplemented from scratch:
+parity across JS, Python, Go, Java, and C# (including first-class Go and C# — where LangChain
+and Spring AI can't reach). Each language builds on the most popular MCP SDK for that ecosystem
+— nothing is reimplemented from scratch:
 
 | Lang   | Dir         | MCP SDK                                          |
 |--------|-------------|--------------------------------------------------|
@@ -90,8 +102,9 @@ is reimplemented from scratch:
 | Python | [`python/`](python/) | `mcp` (modelcontextprotocol/python-sdk)         |
 | Go     | [`golang/`](golang/) | `github.com/mark3labs/mcp-go`                   |
 | Java   | [`java/`](java/)     | `io.modelcontextprotocol.sdk:mcp` (official)    |
+| C#     | [`csharp/`](csharp/) | `ModelContextProtocol` (official)               |
 
-The language-independent behavior is pinned in **[SPEC.md](SPEC.md)** so all three stay
+The language-independent behavior is pinned in **[SPEC.md](SPEC.md)** so all five stay
 byte-compatible (especially the skill loader output).
 
 ## Quick start (JS) — a full agent
@@ -152,7 +165,7 @@ tools, and host loop are all opt-in on top.
 
 ## Per-language docs
 
-[`js/`](js/) · [`python/`](python/) · [`golang/`](golang/) · [`java/`](java/) — quickstarts and API.
+[`js/`](js/) · [`python/`](python/) · [`golang/`](golang/) · [`java/`](java/) · [`csharp/`](csharp/) — quickstarts and API.
 Embedding in a Go app? See [`golang/GUIDE.md`](golang/GUIDE.md).
 [`examples/`](examples/) holds the shared `mcp.json` + sample skill used by every
 implementation's examples and tests.
@@ -164,7 +177,8 @@ implementation's examples and tests.
 - ✅ Native/decorator tools + HTTP/REST tools
 - ✅ Unified LLM client (OpenAI- and Anthropic-style endpoints) + Go CLI
 - ✅ OpenAI / Anthropic / Gemini schema adapters
-- ✅ Verified with live OpenRouter tool-calling round trips
+- ✅ Verified with live OpenRouter tool-calling round trips (every port)
+- ✅ Published: **npm** + **PyPI** + **Go module** (Java → Maven Central, C# → NuGet: coming)
 - ⏳ OpenAPI bulk import + MCP OAuth — follow-ups (pass a bearer token via `headers` for now)
 
 ## Tests
@@ -175,10 +189,11 @@ header expansion, the byte-exact skill block, native + HTTP tools, the provider
 adapters, and toolkit routing.
 
 ```sh
-cd js     && npm test                 # node:test — 8 tests
-cd python && .venv/bin/python -m pytest -q   # pytest — 13 tests
-cd golang && go test ./...            # go test — 9 tests
-cd java   && ./gradlew test           # JUnit 5 — 22 tests
+cd js     && npm test                 # node:test
+cd python && uv run pytest -q         # pytest
+cd golang && go test ./...            # go test
+cd java   && ./gradlew test           # JUnit 5
+cd csharp && dotnet test              # xUnit — 24 tests
 ```
 
 The end-to-end agent loop (MCP + skills + native + HTTP through the host loop) is
