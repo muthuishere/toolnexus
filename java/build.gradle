@@ -105,6 +105,16 @@ tasks.register('runMemory', JavaExec) {
     environment 'OPENROUTER_MODEL', System.getenv('OPENROUTER_MODEL') ?: ''
 }
 
+tasks.register('runOpenrouter', JavaExec) {
+    group = 'application'
+    description = 'Run the live OpenRouter round trip (everything_echo via the unified client).'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'io.github.muthuishere.toolnexus.examples.Openrouter'
+    // forward OPENROUTER_API_KEY / OPENROUTER_MODEL from the environment
+    environment 'OPENROUTER_API_KEY', System.getenv('OPENROUTER_API_KEY') ?: ''
+    environment 'OPENROUTER_MODEL', System.getenv('OPENROUTER_MODEL') ?: ''
+}
+
 publishing {
     publications {
         mavenJava(MavenPublication) {
