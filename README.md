@@ -20,7 +20,7 @@ byte-identical across **JavaScript · Python · Go · Java · C#**.
 npm i toolnexus                                   # JS / TypeScript
 pip install toolnexus                             # Python
 go get github.com/muthuishere/toolnexus/golang    # Go
-dotnet add package Toolnexus                       # C#   (Java via Maven Central — coming)
+# C# (NuGet) and Java (Maven Central) — coming soon
 ```
 
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
