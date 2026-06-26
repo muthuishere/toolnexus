@@ -65,3 +65,17 @@ jobs:
           distribution: temurin
           java-version: "21"
       - run: ./gradlew test --no-daemon
+
+  csharp:
+    name: C# (dotnet)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: csharp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: dotnet build
+      - run: dotnet test

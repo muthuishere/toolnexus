@@ -65,10 +65,27 @@ cd java
 Consumers: `implementation 'io.github.muthuishere:toolnexus:0.1.0'`.
 To bump: edit `version` in `java/build.gradle`, rebuild, republish.
 
+## 5. .NET / NuGet  →  `dotnet add package Toolnexus`
+
+Package id **`Toolnexus`** (metadata lives in `csharp/src/Toolnexus/Toolnexus.csproj`).
+Pack and push manually to nuget.org with an API key in the environment (never commit it):
+
+```sh
+cd csharp
+dotnet build -c Release
+dotnet pack src/Toolnexus/Toolnexus.csproj -c Release      # -> src/Toolnexus/bin/Release/Toolnexus.0.1.0.nupkg
+dotnet nuget push src/Toolnexus/bin/Release/Toolnexus.0.1.0.nupkg \
+  --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
+```
+
+Consumers: `dotnet add package Toolnexus --version 0.1.0`.
+To bump: edit `<Version>` in `csharp/src/Toolnexus/Toolnexus.csproj`, rebuild, repack, repush.
+
 ## Pre-publish checklist
 
 - [ ] `js`: `npm run build` clean; `node --experimental-strip-types examples/basic.ts` works
 - [ ] `python`: `python -m build` clean; `python examples/basic.py` works
 - [ ] `golang`: `go build ./...` + `go vet ./...` clean; `go run ./examples/basic` works
+- [ ] `csharp`: `dotnet build` + `dotnet test` clean; `dotnet run -- basic` works
 - [ ] README + SPEC version numbers bumped together
 - [ ] live OpenRouter agent example passes in at least one language

@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/examples/">
+    <Project Path="examples/Toolnexus.Examples/Toolnexus.Examples.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Toolnexus/Toolnexus.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Toolnexus.Tests/Toolnexus.Tests.csproj" />
+  </Folder>
+</Solution>
