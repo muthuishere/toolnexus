@@ -8,8 +8,13 @@
 ### Your LLM, with MCP tools and agent skills built in — in 3 lines, in 5 languages.
 
 Point toolnexus at an `mcp.json` and a `skills/` folder and you get a **working agent**: the
-tool-calling loop, skills injection, and four unified tool sources — all included. No framework.
-Vendor-neutral. Byte-identical across **JavaScript · Python · Go · Java · C#**.
+tool-calling loop, skills injection, and four unified tool sources — all included. Vendor-neutral,
+byte-identical across **JavaScript · Python · Go · Java · C#**.
+
+> **Right-sized.** Not a framework — no builders, advisors, runnables, or config to wade through.
+> Not a toy that falls over the moment you need streaming or a retry. Exactly what a real agent
+> needs — MCP, skills, native + HTTP tools, the loop, hooks, streaming, retries, memory — and
+> nothing it doesn't.
 
 ```sh
 npm i toolnexus                                   # JS / TypeScript
