@@ -1,7 +1,7 @@
 plugins {
     id 'java-library'
     id 'application'
-    id 'maven-publish'
+    id 'com.vanniktech.maven.publish' version '0.30.0'
 }
 
 group = 'io.github.muthuishere'
@@ -11,8 +11,7 @@ java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)
     }
-    withSourcesJar()
-    withJavadocJar()
+    // sources + javadoc jars are added by the maven-publish plugin
 }
 
 repositories {
@@ -115,28 +114,30 @@ tasks.register('runOpenrouter', JavaExec) {
     environment 'OPENROUTER_MODEL', System.getenv('OPENROUTER_MODEL') ?: ''
 }
 
-publishing {
-    publications {
-        mavenJava(MavenPublication) {
-            from components.java
-            artifactId = 'toolnexus'
-            pom {
-                name = 'toolnexus'
-                description = 'Provider-agnostic toolkit: dynamic MCP servers + agent skills + native/http tools for any LLM.'
-                url = 'https://github.com/muthuishere/agentskillsmcp'
-                licenses {
-                    license {
-                        name = 'MIT License'
-                        url = 'https://opensource.org/licenses/MIT'
-                    }
-                }
-                developers {
-                    developer {
-                        id = 'muthuishere'
-                        name = 'Muthukumaran Navaneethakrishnan'
-                    }
-                }
+mavenPublishing {
+    publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL)
+    signAllPublications()
+    coordinates(group.toString(), 'toolnexus', version.toString())
+    pom {
+        name = 'toolnexus'
+        description = 'Build an agent in a few lines: dynamic MCP servers + agent skills + native/http tools as one tool set for any LLM, with OpenAI/Anthropic/Gemini adapters and a unified host loop.'
+        url = 'https://github.com/muthuishere/toolnexus'
+        licenses {
+            license {
+                name = 'MIT License'
+                url = 'https://opensource.org/licenses/MIT'
             }
+        }
+        developers {
+            developer {
+                id = 'muthuishere'
+                name = 'Muthukumaran Navaneethakrishnan'
+            }
+        }
+        scm {
+            url = 'https://github.com/muthuishere/toolnexus'
+            connection = 'scm:git:https://github.com/muthuishere/toolnexus.git'
+            developerConnection = 'scm:git:ssh://git@github.com/muthuishere/toolnexus.git'
         }
     }
 }

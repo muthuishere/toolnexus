@@ -5,11 +5,11 @@ name: Release
 # VARIABLE (Settings -> Secrets and variables -> Actions -> Variables) so a port
 # stays off until you flip it on — partial onboarding still produces a green run.
 #
-#   ENABLE_NPM=true    ENABLE_PYPI=true    ENABLE_GO=true    ENABLE_NUGET=true
+#   ENABLE_NPM  ENABLE_PYPI  ENABLE_GO  ENABLE_NUGET  ENABLE_JAVA   (=true to publish)
 #
-# npm / PyPI / NuGet all use OIDC Trusted Publishing (no stored secrets); Go is a
-# tag push. Java (Maven Central) is still Phase 2 — see openspec change
-# publishing-and-parity-watch.
+# npm / PyPI / NuGet use OIDC Trusted Publishing (no stored secrets); Go is a tag
+# push; Java (Maven Central) uses the prod-environment secrets CENTRAL_USERNAME /
+# CENTRAL_PASSWORD / GPG_PRIVATE_KEY / GPG_PASSPHRASE (no OIDC available there).
 
 on:
   release:
@@ -44,11 +44,13 @@ jobs:
           JS=$(node -p "require('./js/package.json').version")
           PY=$(grep -E '^version' python/pyproject.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
           CS=$(grep -oE '<Version>[^<]+</Version>' csharp/src/Toolnexus/Toolnexus.csproj | head -1 | sed -E 's/<\/?Version>//g')
-          echo "js=$JS python=$PY csharp=$CS"
+          JAVA=$(grep -E "^version" java/build.gradle | head -1 | sed -E "s/.*'([^']+)'.*/\1/")
+          echo "js=$JS python=$PY csharp=$CS java=$JAVA"
           fail=0
           [ "$JS" = "$VERSION" ] || { echo "::error::js/package.json is $JS, expected $VERSION"; fail=1; }
           [ "$PY" = "$VERSION" ] || { echo "::error::python/pyproject.toml is $PY, expected $VERSION"; fail=1; }
           [ "$CS" = "$VERSION" ] || { echo "::error::csharp Toolnexus.csproj is $CS, expected $VERSION"; fail=1; }
+          [ "$JAVA" = "$VERSION" ] || { echo "::error::java/build.gradle is $JAVA, expected $VERSION"; fail=1; }
           exit $fail
 
   npm:
@@ -133,3 +135,23 @@ jobs:
           --source https://api.nuget.org/v3/index.json
           --skip-duplicate
         # No stored key: the API key is minted via the Trusted Publishing policy + OIDC.
+
+  maven:
+    needs: preflight
+    if: ${{ vars.ENABLE_JAVA == 'true' }}
+    runs-on: ubuntu-latest
+    environment: prod          # Central Portal token + GPG key live in this environment's secrets
+    permissions: { contents: read }
+    defaults: { run: { working-directory: java } }
+    env:
+      ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.CENTRAL_USERNAME }}
+      ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.CENTRAL_PASSWORD }}
+      ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.GPG_PRIVATE_KEY }}
+      ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.GPG_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: ./gradlew publishAndReleaseToMavenCentral --no-daemon --no-configuration-cache
