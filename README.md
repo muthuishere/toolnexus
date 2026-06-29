@@ -3,6 +3,8 @@
 [![CI](https://github.com/muthuishere/toolnexus/actions/workflows/ci.yml/badge.svg)](https://github.com/muthuishere/toolnexus/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/toolnexus?logo=npm&label=npm)](https://www.npmjs.com/package/toolnexus)
 [![PyPI](https://img.shields.io/pypi/v/toolnexus?logo=pypi&logoColor=white&label=PyPI)](https://pypi.org/project/toolnexus/)
+[![NuGet](https://img.shields.io/nuget/v/Toolnexus?logo=nuget&label=NuGet)](https://www.nuget.org/packages/Toolnexus)
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.muthuishere/toolnexus?label=Maven%20Central)](https://central.sonatype.com/artifact/io.github.muthuishere/toolnexus)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ### Your LLM, with MCP tools and agent skills built in — in 3 lines, in 5 languages.
@@ -20,7 +22,8 @@ byte-identical across **JavaScript · Python · Go · Java · C#**.
 npm i toolnexus                                   # JS / TypeScript
 pip install toolnexus                             # Python
 go get github.com/muthuishere/toolnexus/golang    # Go
-# C# (NuGet) and Java (Maven Central) — coming soon
+dotnet add package Toolnexus                       # C#
+# Java (Maven): io.github.muthuishere:toolnexus:0.1.1
 ```
 
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
@@ -187,7 +190,7 @@ implementation's examples and tests.
 - ✅ Unified LLM client (OpenAI- and Anthropic-style endpoints) + Go CLI
 - ✅ OpenAI / Anthropic / Gemini schema adapters
 - ✅ Verified with live OpenRouter tool-calling round trips (every port)
-- ✅ Published: **npm** + **PyPI** + **Go module** (Java → Maven Central, C# → NuGet: coming)
+- ✅ Published on all five registries: **npm** · **PyPI** · **Go module** · **NuGet** · **Maven Central**
 - ⏳ OpenAPI bulk import + MCP OAuth — follow-ups (pass a bearer token via `headers` for now)
 
 ## Tests
