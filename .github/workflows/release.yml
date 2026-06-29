@@ -5,9 +5,10 @@ name: Release
 # VARIABLE (Settings -> Secrets and variables -> Actions -> Variables) so a port
 # stays off until you flip it on — partial onboarding still produces a green run.
 #
-#   ENABLE_NPM=true    ENABLE_PYPI=true    ENABLE_GO=true
+#   ENABLE_NPM=true    ENABLE_PYPI=true    ENABLE_GO=true    ENABLE_NUGET=true
 #
-# Java (Maven Central) and C# (NuGet) are Phase 2 — see openspec change
+# npm / PyPI / NuGet all use OIDC Trusted Publishing (no stored secrets); Go is a
+# tag push. Java (Maven Central) is still Phase 2 — see openspec change
 # publishing-and-parity-watch.
 
 on:
@@ -42,10 +43,12 @@ jobs:
           echo "Releasing version: $VERSION"
           JS=$(node -p "require('./js/package.json').version")
           PY=$(grep -E '^version' python/pyproject.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-          echo "js=$JS python=$PY"
+          CS=$(grep -oE '<Version>[^<]+</Version>' csharp/src/Toolnexus/Toolnexus.csproj | head -1 | sed -E 's/<\/?Version>//g')
+          echo "js=$JS python=$PY csharp=$CS"
           fail=0
           [ "$JS" = "$VERSION" ] || { echo "::error::js/package.json is $JS, expected $VERSION"; fail=1; }
           [ "$PY" = "$VERSION" ] || { echo "::error::python/pyproject.toml is $PY, expected $VERSION"; fail=1; }
+          [ "$CS" = "$VERSION" ] || { echo "::error::csharp Toolnexus.csproj is $CS, expected $VERSION"; fail=1; }
           exit $fail
 
   npm:
@@ -104,3 +107,29 @@ jobs:
             git tag "${TAG}"
             git push origin "${TAG}"
           fi
+
+  nuget:
+    needs: preflight
+    if: ${{ vars.ENABLE_NUGET == 'true' }}
+    runs-on: ubuntu-latest
+    environment: prod          # the NuGet Trusted Publishing policy is scoped to this environment
+    permissions: { id-token: write, contents: read }
+    defaults: { run: { working-directory: csharp } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: dotnet pack src/Toolnexus/Toolnexus.csproj -c Release -o nupkgs
+      - name: NuGet OIDC login (mint a short-lived API key)
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: muthuishere
+      - name: Push to NuGet
+        run: >
+          dotnet nuget push nupkgs/*.nupkg
+          --api-key ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
+        # No stored key: the API key is minted via the Trusted Publishing policy + OIDC.

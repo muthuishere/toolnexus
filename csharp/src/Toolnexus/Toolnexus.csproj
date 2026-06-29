@@ -10,13 +10,21 @@
     <PackageId>Toolnexus</PackageId>
     <Version>0.1.1</Version>
     <Authors>muthuishere</Authors>
-    <Description>Provider-agnostic toolkit that gives any LLM dynamic MCP servers + agent skills, with OpenAI/Anthropic/Gemini adapters and a unified host loop. C# port of toolnexus.</Description>
+    <Description>Build an agent in a few lines: dynamic MCP servers + agent skills + native + HTTP tools as one tool set for any LLM, with OpenAI/Anthropic/Gemini adapters and a unified host loop. C# port of toolnexus.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <RepositoryUrl>https://github.com/muthuishere/agentskillsmcp</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/muthuishere/toolnexus</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/muthuishere/toolnexus</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>mcp;llm;agents;agent-skills;openai;anthropic;gemini;tools</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="ModelContextProtocol" Version="1.4.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
 </Project>
