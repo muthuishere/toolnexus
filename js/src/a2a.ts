@@ -54,6 +54,8 @@ export interface A2ATaskStatus {
 
 export interface A2ATask {
   id: string
+  /** Groups a peer's turns into one conversation (A2A contextId). */
+  contextId?: string
   status: A2ATaskStatus
   artifacts?: A2AArtifact[]
   history?: A2AMessage[]

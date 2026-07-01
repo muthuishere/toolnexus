@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "toolnexus"
-version = "0.2.1"
+version = "0.3.0"
 description = "Provider-agnostic toolkit: dynamic MCP servers + agent skills for any LLM."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -124,7 +124,9 @@ export class Toolkit {
    * Serve this toolkit as an agent over HTTP. When the `a2a` profile is present
    * (inline, or a top-level `a2a` config block the toolkit was built from), it
    * mounts the A2A Agent Card (`/.well-known/agent-card.json`, built from skills)
-   * and a JSON-RPC endpoint (`SendMessage` + `GetTask`) fulfilled by `client.run`.
+   * and a JSON-RPC endpoint (`SendMessage` + `GetTask`) fulfilled by the client.
+   * A message's A2A `contextId` keys the conversation via `client.ask`, so a
+   * peer's turns are remembered through the client's ConversationStore.
    * When `a2a` is absent, no A2A routes are mounted. Returns a stoppable handle.
    */
   serve(addr: string, opts: { client: Client; a2a?: A2AConfig; onTask?: OnTask }): Promise<ServeHandle> {
@@ -134,7 +136,10 @@ export class Toolkit {
       addr,
       a2a,
       skills,
-      runTask: (text) => opts.client.run(text, { toolkit: this }),
+      runTask: (text, contextId) =>
+        contextId
+          ? opts.client.ask(text, { toolkit: this, id: contextId })
+          : opts.client.run(text, { toolkit: this }),
       onTask: opts.onTask,
     })
   }

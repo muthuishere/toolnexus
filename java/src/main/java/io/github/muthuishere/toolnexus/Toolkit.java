@@ -177,9 +177,11 @@ public final class Toolkit implements AutoCloseable {
      * Serve this toolkit as an agent over HTTP. When the {@code a2a} profile is present
      * (inline, or a top-level {@code a2a} config block the toolkit was built from), it
      * mounts the A2A Agent Card ({@code /.well-known/agent-card.json}, built from skills)
-     * and a JSON-RPC endpoint ({@code SendMessage} + {@code GetTask}) fulfilled by
-     * {@code client.run}. When {@code a2a} is absent, no A2A routes are mounted. Returns a
-     * stoppable handle. Mirrors the JS reference {@code toolkit.serve}.
+     * and a JSON-RPC endpoint ({@code SendMessage} + {@code GetTask}) fulfilled by the client.
+     * A message's A2A {@code contextId} keys the conversation via {@code client.ask}, so a
+     * peer's turns are remembered through the client's {@link LlmClient.ConversationStore}.
+     * When {@code a2a} is absent, no A2A routes are mounted. Returns a stoppable handle.
+     * Mirrors the JS reference {@code toolkit.serve}.
      */
     public A2AServer.ServeHandle serve(String addr, ServeOptions opts) {
         A2AServer.A2AConfig a2a = opts.a2a != null ? opts.a2a : this.a2aConfig;
@@ -188,8 +190,13 @@ public final class Toolkit implements AutoCloseable {
                 : new ArrayList<>();
         LlmClient client = opts.client;
         try {
+            // A message's A2A contextId keys the conversation via client.ask, so a peer's turns
+            // are remembered through the client's ConversationStore; no contextId ⇒ stateless run.
             return A2AServer.start(addr, a2a, skills,
-                    text -> client.run(text, this), opts.onTask);
+                    (text, contextId) -> (contextId != null && !contextId.isEmpty())
+                            ? client.ask(text, this, contextId)
+                            : client.run(text, this),
+                    opts.onTask);
         } catch (java.io.IOException e) {
             throw new RuntimeException("serve failed: " + e.getMessage(), e);
         }

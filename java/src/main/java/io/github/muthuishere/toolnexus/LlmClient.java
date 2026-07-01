@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Consumer;
@@ -47,6 +48,9 @@ public final class LlmClient {
         public Integer retryBaseMs;    // default 500
         /** Whole-run deadline in ms; aborts the run (and its in-flight request) when exceeded. */
         public Long timeoutMs;         // optional; null = no deadline
+        /** Conversation provider for {@link LlmClient#ask}. Default: in-memory (process lifetime).
+         * Supply a file/db store to persist conversations across processes. */
+        public ConversationStore store; // optional; null = in-memory default
 
         public Options baseUrl(String v) { this.baseUrl = v; return this; }
         public Options style(String v) { this.style = v; return this; }
@@ -59,6 +63,42 @@ public final class LlmClient {
         public Options retries(int v) { this.retries = v; return this; }
         public Options retryBaseMs(int v) { this.retryBaseMs = v; return this; }
         public Options timeoutMs(long v) { this.timeoutMs = v; return this; }
+        public Options store(ConversationStore v) { this.store = v; return this; }
+    }
+
+    // ------------------------------------------------------------------
+    // Conversation memory (§8 "Conversation memory") — where ask() remembers
+    // transcripts. Mirrors the JS `ConversationStore` / `InMemoryConversationStore`
+    // (js/src/client.ts). Shaped like the A2A TaskStore for consistency: an
+    // interface + an in-memory default, keyed by a string id, nullable get().
+    // ------------------------------------------------------------------
+
+    /**
+     * Where {@link #ask} conversations are remembered — two methods. Ship the in-memory
+     * default; implement this for a file/db/redis provider to persist across processes.
+     */
+    public interface ConversationStore {
+        /** Return the stored transcript for {@code id}, or {@code null} if none. */
+        List<Object> get(String id);
+
+        /** Persist the (updated) transcript for {@code id}. */
+        void save(String id, List<Object> messages);
+    }
+
+    /** Default conversation provider — keeps transcripts in memory for the client's lifetime. */
+    public static final class InMemoryConversationStore implements ConversationStore {
+        private final Map<String, List<Object>> map = new ConcurrentHashMap<>();
+
+        @Override
+        public List<Object> get(String id) {
+            List<Object> m = map.get(id);
+            return m != null ? new ArrayList<>(m) : null;
+        }
+
+        @Override
+        public void save(String id, List<Object> messages) {
+            map.put(id, new ArrayList<>(messages));
+        }
     }
 
     /** Thrown when a run exceeds {@link Options#timeoutMs} (or its in-flight request times out). */
@@ -265,9 +305,12 @@ public final class LlmClient {
     }
 
     private final Options opts;
+    /** Conversation provider for {@link #ask} — from {@code opts.store}, else in-memory. */
+    private final ConversationStore store;
 
     private LlmClient(Options opts) {
         this.opts = opts;
+        this.store = opts.store != null ? opts.store : new InMemoryConversationStore();
     }
 
     public static LlmClient create(Options opts) {
@@ -276,6 +319,22 @@ public final class LlmClient {
 
     public RunResult run(String prompt, Toolkit toolkit) {
         return run(prompt, toolkit, null);
+    }
+
+    /**
+     * Stateful ask. With an {@code id}, the client's {@link ConversationStore} remembers the
+     * conversation: it loads that id's transcript, runs, saves the updated transcript, and
+     * returns the answer — so the next {@code ask} with the same {@code id} continues it.
+     * Without an {@code id} (null/empty) it is a stateless one-shot (identical to {@link #run}).
+     * Mirrors the JS {@code ask(prompt, { toolkit, id })}.
+     */
+    public RunResult ask(String prompt, Toolkit toolkit, String id) {
+        if (id == null || id.isEmpty()) return run(prompt, toolkit);
+        List<Object> history = store.get(id);
+        if (history == null) history = new ArrayList<>();
+        RunResult result = run(prompt, toolkit, history);
+        store.save(id, result.messages);
+        return result;
     }
 
     /**

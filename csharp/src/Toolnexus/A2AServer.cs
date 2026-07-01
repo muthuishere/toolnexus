@@ -248,7 +248,7 @@ public static class A2AServer
         string addr,
         A2AConfig? a2a,
         IReadOnlyList<SkillSource.SkillInfo> skills,
-        Func<string, Task<LlmClient.RunResult>> runTask,
+        Func<string, string?, Task<LlmClient.RunResult>> runTask,
         OnTask? onTask)
     {
         var (host, port) = SplitAddr(addr);
@@ -296,7 +296,7 @@ public static class A2AServer
         A2AConfig? a2a,
         ITaskStore? store,
         IReadOnlyList<SkillSource.SkillInfo> skills,
-        Func<string, Task<LlmClient.RunResult>> runTask,
+        Func<string, string?, Task<LlmClient.RunResult>> runTask,
         OnTask? onTask,
         string baseUrl)
     {
@@ -335,11 +335,12 @@ public static class A2AServer
             if (method == "SendMessage")
             {
                 var text = MessageText(rpc.Get("params"));
+                var contextId = MessageContextId(rpc.Get("params"));
                 var taskId = Guid.NewGuid().ToString();
-                var submitted = new A2ATask { Id = taskId, Status = new A2ATaskStatus { State = "submitted" } };
+                var submitted = new A2ATask { Id = taskId, ContextId = contextId, Status = new A2ATaskStatus { State = "submitted" } };
                 // Persist submitted, kick fulfilment async, return the id immediately.
                 await store.SaveAsync(submitted).ConfigureAwait(false);
-                _ = Task.Run(() => FulfilAsync(taskId, text, store, runTask, onTask));
+                _ = Task.Run(() => FulfilAsync(taskId, text, store, runTask, onTask, contextId));
                 RpcResult(ctx, id, submitted);
                 return;
             }
@@ -369,8 +370,9 @@ public static class A2AServer
         string id,
         string text,
         ITaskStore store,
-        Func<string, Task<LlmClient.RunResult>> runTask,
-        OnTask? onTask)
+        Func<string, string?, Task<LlmClient.RunResult>> runTask,
+        OnTask? onTask,
+        string? contextId = null)
     {
         A2ATask task;
         LlmClient.RunResult? result = null;
@@ -379,7 +381,9 @@ public static class A2AServer
         {
             await store.SaveAsync(new A2ATask { Id = id, Status = new A2ATaskStatus { State = "working" } })
                 .ConfigureAwait(false);
-            result = await runTask(text).ConfigureAwait(false);
+            // contextId groups a peer's turns into one conversation — thread it so the client's
+            // IConversationStore remembers across tasks in the same context.
+            result = await runTask(text, contextId).ConfigureAwait(false);
             var artifact = new A2AArtifact
             {
                 ArtifactId = Guid.NewGuid().ToString(),
@@ -440,6 +444,14 @@ public static class A2AServer
             if (pd.Get("text") is string t) sb.Append(t);
         }
         return sb.ToString();
+    }
+
+    /// <summary>Extract a JSON-RPC <c>SendMessage</c> message's A2A <c>contextId</c>, or null.</summary>
+    private static string? MessageContextId(object? @params)
+    {
+        if (@params is not IDictionary<string, object?> p) return null;
+        if (p.Get("message") is not IDictionary<string, object?> message) return null;
+        return message.Get("contextId") as string;
     }
 
     /// <summary>Convert a Task to the plain object model (null fields dropped) for the RPC envelope.</summary>

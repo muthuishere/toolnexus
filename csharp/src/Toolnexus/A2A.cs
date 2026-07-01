@@ -59,6 +59,10 @@ public sealed class A2ATaskStatus
 public sealed class A2ATask
 {
     [JsonPropertyName("id")] public string? Id { get; set; }
+
+    /// <summary>Groups a peer's turns into one conversation (A2A contextId).</summary>
+    [JsonPropertyName("contextId")] public string? ContextId { get; set; }
+
     [JsonPropertyName("status")] public A2ATaskStatus? Status { get; set; }
     [JsonPropertyName("artifacts")] public List<A2AArtifact>? Artifacts { get; set; }
     [JsonPropertyName("history")] public List<A2AMessage>? History { get; set; }

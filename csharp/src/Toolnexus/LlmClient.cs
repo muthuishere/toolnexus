@@ -1,7 +1,37 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 
 namespace Toolnexus;
+
+/// <summary>
+/// Where <see cref="LlmClient.AskAsync"/> conversations are remembered — two methods. Ship the
+/// in-memory default (<see cref="InMemoryConversationStore"/>); implement this for a
+/// file/db/redis provider to persist transcripts across processes.
+/// </summary>
+public interface IConversationStore
+{
+    /// <summary>Return the stored transcript for <paramref name="id"/>, or <c>null</c> if none.</summary>
+    Task<List<object?>?> GetAsync(string id);
+
+    /// <summary>Persist the (updated) transcript for <paramref name="id"/>.</summary>
+    Task SaveAsync(string id, List<object?> messages);
+}
+
+/// <summary>Default conversation provider — keeps transcripts in memory for the client's lifetime.</summary>
+public sealed class InMemoryConversationStore : IConversationStore
+{
+    private readonly ConcurrentDictionary<string, List<object?>> _map = new();
+
+    public Task<List<object?>?> GetAsync(string id)
+        => Task.FromResult(_map.TryGetValue(id, out var m) ? new List<object?>(m) : null);
+
+    public Task SaveAsync(string id, List<object?> messages)
+    {
+        _map[id] = new List<object?>(messages);
+        return Task.CompletedTask;
+    }
+}
 
 /// <summary>
 /// Unified LLM client — the host loop. Give it a base URL + a style
@@ -15,7 +45,14 @@ public sealed class LlmClient
 
     private readonly Options _opts;
 
-    private LlmClient(Options opts) => _opts = opts;
+    /// <summary>Conversation provider for <see cref="AskAsync"/> — from <c>opts.Store</c>, else in-memory.</summary>
+    private readonly IConversationStore _store;
+
+    private LlmClient(Options opts)
+    {
+        _opts = opts;
+        _store = opts.Store ?? new InMemoryConversationStore();
+    }
 
     public static LlmClient Create(Options opts) => new(opts);
 
@@ -35,6 +72,10 @@ public sealed class LlmClient
         public int? RetryBaseMs { get; set; }          // default 500
         public long? TimeoutMs { get; set; }           // whole-run deadline; null = none
 
+        /// <summary>Conversation provider for <see cref="AskAsync"/>. Default: in-memory (process
+        /// lifetime). Supply a file/db store to persist conversations across processes.</summary>
+        public IConversationStore? Store { get; set; }
+
         public Options WithBaseUrl(string v) { BaseUrl = v; return this; }
         public Options WithStyle(string v) { Style = v; return this; }
         public Options WithModel(string v) { Model = v; return this; }
@@ -46,6 +87,7 @@ public sealed class LlmClient
         public Options WithRetries(int v) { Retries = v; return this; }
         public Options WithRetryBaseMs(int v) { RetryBaseMs = v; return this; }
         public Options WithTimeoutMs(long v) { TimeoutMs = v; return this; }
+        public Options WithStore(IConversationStore v) { Store = v; return this; }
     }
 
     /// <summary>Thrown when a run exceeds <see cref="Options.TimeoutMs"/> (or its in-flight request times out).</summary>
@@ -156,6 +198,22 @@ public sealed class LlmClient
         return _opts.Style == "anthropic"
             ? RunAnthropicAsync(prompt, toolkit, history, deadline, cancellationToken)
             : RunOpenAIAsync(prompt, toolkit, history, deadline, cancellationToken);
+    }
+
+    /// <summary>
+    /// Stateful ask. With an <paramref name="id"/>, the client's <see cref="IConversationStore"/>
+    /// remembers the conversation: it loads that id's transcript, runs, saves the updated
+    /// transcript, and returns the answer — so the next <c>AskAsync</c> with the same id continues
+    /// it. Without an id it is a stateless one-shot (identical to <see cref="RunAsync"/>).
+    /// </summary>
+    public async Task<RunResult> AskAsync(string prompt, Toolkit toolkit, string? id = null, CancellationToken cancellationToken = default)
+    {
+        if (id == null)
+            return await RunAsync(prompt, toolkit, null, cancellationToken).ConfigureAwait(false);
+        var history = await _store.GetAsync(id).ConfigureAwait(false) ?? new List<object?>();
+        var result = await RunAsync(prompt, toolkit, history, cancellationToken).ConfigureAwait(false);
+        await _store.SaveAsync(id, result.Messages).ConfigureAwait(false);
+        return result;
     }
 
     public Conversation NewConversation(Toolkit toolkit) => new(this, toolkit);

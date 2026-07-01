@@ -17,7 +17,6 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.function.Function;
 
 /**
  * A2A (agent-to-agent) — INBOUND: serve a toolkit as a remote A2A agent. Mirrors
@@ -184,6 +183,16 @@ public final class A2AServer {
         void accept(OnTaskEvent ev);
     }
 
+    /**
+     * Runs one served Task through the client loop. {@code contextId} (from the A2A
+     * message, may be {@code null}) keys the conversation so served turns are remembered
+     * via the client's {@link LlmClient.ConversationStore}. Mirrors JS {@code runTask(text, contextId)}.
+     */
+    @FunctionalInterface
+    public interface RunTask {
+        LlmClient.RunResult run(String text, String contextId);
+    }
+
     /** Handle returned by {@code toolkit.serve} — the base URL plus a stop/close method. */
     public interface ServeHandle {
         /** Base URL of the server, e.g. {@code http://127.0.0.1:PORT}. */
@@ -248,7 +257,7 @@ public final class A2AServer {
      * is absent, the server answers 404 to everything (a minimal base for now).
      */
     public static ServeHandle start(String addr, A2AConfig a2a, List<SkillSource.SkillInfo> skills,
-                                    Function<String, LlmClient.RunResult> runTask, OnTask onTask) throws IOException {
+                                    RunTask runTask, OnTask onTask) throws IOException {
         String[] hp = splitAddr(addr);
         String host = hp[0];
         int port = Integer.parseInt(hp[1].trim());
@@ -290,12 +299,19 @@ public final class A2AServer {
                     String rpcMethod = methodObj == null ? null : String.valueOf(methodObj);
 
                     if ("SendMessage".equals(rpcMethod)) {
-                        String text = messageText(asMap(rpc.get("params")));
+                        Map<String, Object> params = asMap(rpc.get("params"));
+                        String text = messageText(params);
+                        Map<String, Object> message = params == null ? null : asMap(params.get("message"));
+                        String contextId = message != null && message.get("contextId") instanceof String
+                                ? (String) message.get("contextId") : null;
                         String id = UUID.randomUUID().toString();
                         Map<String, Object> submitted = task(id, "submitted");
+                        // contextId groups a peer's turns into one conversation — carry it on the Task.
+                        if (contextId != null) submitted.put("contextId", contextId);
+                        final String ctx = contextId;
                         // Persist submitted, kick fulfilment async, return the id immediately.
                         store.save(submitted);
-                        executor.submit(() -> fulfil(id, text, store, runTask, onTask));
+                        executor.submit(() -> fulfil(id, text, ctx, store, runTask, onTask));
                         sendJson(exchange, 200, rpcEnvelope(rpcId, okPayload(submitted)));
                         return;
                     }
@@ -347,14 +363,15 @@ public final class A2AServer {
      * Background fulfilment: submitted → working → (completed | failed). Never
      * throws — a fulfilment error becomes a {@code failed} Task, keeping the server alive.
      */
-    static void fulfil(String id, String text, TaskStore store,
-                       Function<String, LlmClient.RunResult> runTask, OnTask onTask) {
+    static void fulfil(String id, String text, String contextId, TaskStore store,
+                       RunTask runTask, OnTask onTask) {
         Map<String, Object> task;
         LlmClient.RunResult result = null;
         String state;
         try {
             store.save(task(id, "working"));
-            result = runTask.apply(text);
+            // Thread contextId so the client's ConversationStore remembers across tasks in the same context.
+            result = runTask.run(text, contextId);
             Map<String, Object> artifact = new LinkedHashMap<>();
             artifact.put("artifactId", UUID.randomUUID().toString());
             artifact.put("parts", List.of(textPart(result.text)));

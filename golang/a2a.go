@@ -71,7 +71,9 @@ type A2ATaskStatus struct {
 
 // A2ATask is the unit of work returned by SendMessage / GetTask.
 type A2ATask struct {
-	ID        string        `json:"id"`
+	ID string `json:"id"`
+	// ContextID groups a peer's turns into one conversation (A2A contextId).
+	ContextID string        `json:"contextId,omitempty"`
 	Status    A2ATaskStatus `json:"status"`
 	Artifacts []A2AArtifact `json:"artifacts,omitempty"`
 	History   []A2AMessage  `json:"history,omitempty"`

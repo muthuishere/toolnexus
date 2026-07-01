@@ -158,8 +158,9 @@ export interface StartServerOptions {
   a2a?: A2AConfig
   /** The toolkit's skills, for the card. */
   skills: SkillInfo[]
-  /** Runs one served Task through the client loop. */
-  runTask: (text: string) => Promise<RunResult>
+  /** Runs one served Task through the client loop. `contextId` (from the A2A
+   * message) keys the conversation so served turns are remembered via the store. */
+  runTask: (text: string, contextId?: string) => Promise<RunResult>
   onTask?: OnTask
 }
 
@@ -222,11 +223,12 @@ export async function startA2AServer(opts: StartServerOptions): Promise<ServeHan
         }
         if (rpc?.method === "SendMessage") {
           const text = messageText(rpc.params)
+          const contextId = typeof rpc.params?.message?.contextId === "string" ? rpc.params.message.contextId : undefined
           const id = randomUUID()
-          const submitted: A2ATask = { id, status: { state: "submitted" } }
+          const submitted: A2ATask = { id, contextId, status: { state: "submitted" } }
           // Persist submitted, kick fulfilment async, return the id immediately.
           store.save(submitted).then(() => {
-            void fulfil(id, text, store, runTask, onTask)
+            void fulfil(id, text, store, runTask, onTask, contextId)
             rpcOk(rpc.id, submitted)
           })
           return
@@ -269,15 +271,18 @@ async function fulfil(
   id: string,
   text: string,
   store: TaskStore,
-  runTask: (text: string) => Promise<RunResult>,
+  runTask: (text: string, contextId?: string) => Promise<RunResult>,
   onTask?: OnTask,
+  contextId?: string,
 ): Promise<void> {
   let task: A2ATask
   let result: RunResult | undefined
   let state: A2ATaskState
   try {
     await store.save({ id, status: { state: "working" } })
-    result = await runTask(text)
+    // contextId groups a peer's turns into one conversation — thread it so the
+    // client's ConversationStore remembers across tasks in the same context.
+    result = await runTask(text, contextId)
     const artifact: A2AArtifact = {
       artifactId: randomUUID(),
       parts: [{ kind: "text", text: result.text }],

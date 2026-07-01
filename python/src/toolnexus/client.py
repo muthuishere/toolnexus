@@ -30,7 +30,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Literal, Mapping, Optional
+from typing import Any, AsyncGenerator, Literal, Mapping, Optional, Protocol
 
 from .toolkit import Toolkit
 from .types import ToolResult
@@ -184,6 +184,38 @@ def _last_text(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
+class ConversationStore(Protocol):
+    """Where ``ask()`` conversations are remembered — two async methods. Ship the
+    in-memory default; implement this for a file/db/redis provider to persist
+    across processes. Mirrors the JS ``ConversationStore`` interface.
+    """
+
+    async def get(self, id: str) -> Optional[list[dict[str, Any]]]:  # noqa: A002
+        """Return the stored transcript for ``id``, or None if none."""
+        ...
+
+    async def save(self, id: str, messages: list[dict[str, Any]]) -> None:  # noqa: A002
+        """Persist the (updated) transcript for ``id``."""
+        ...
+
+
+class InMemoryConversationStore:
+    """Default conversation provider — keeps transcripts in memory for the client's
+    lifetime. Copies on get/save so callers can't mutate the stored transcript.
+    Mirrors the JS ``InMemoryConversationStore``.
+    """
+
+    def __init__(self) -> None:
+        self._map: dict[str, list[dict[str, Any]]] = {}
+
+    async def get(self, id: str) -> Optional[list[dict[str, Any]]]:  # noqa: A002
+        m = self._map.get(id)
+        return list(m) if m is not None else None
+
+    async def save(self, id: str, messages: list[dict[str, Any]]) -> None:  # noqa: A002
+        self._map[id] = list(messages)
+
+
 class Client:
     def __init__(
         self,
@@ -199,6 +231,7 @@ class Client:
         retries: int = 2,
         retry_base_ms: int = 500,
         timeout_ms: Optional[int] = None,
+        store: Optional[ConversationStore] = None,
     ) -> None:
         self.base_url = base_url
         self.style = style
@@ -211,6 +244,8 @@ class Client:
         self.retries = retries
         self.retry_base_ms = retry_base_ms
         self.timeout_ms = timeout_ms
+        # Conversation provider for ask() — from the `store` arg, else in-memory.
+        self.store: ConversationStore = store if store is not None else InMemoryConversationStore()
 
     def _system(self, toolkit: Toolkit) -> str:
         parts = [self.system_prompt or "", toolkit.skills_prompt()]
@@ -362,6 +397,27 @@ class Client:
         if self.style == "anthropic":
             return await self._run_anthropic(prompt, toolkit, history, cancel)
         return await self._run_openai(prompt, toolkit, history, cancel)
+
+    async def ask(
+        self,
+        prompt: str,
+        toolkit: Toolkit,
+        *,
+        id: Optional[str] = None,  # noqa: A002 — mirrors JS `ask(prompt, { id })`
+        cancel: Optional[asyncio.Event] = None,
+    ) -> RunResult:
+        """Stateful ask. With an ``id``, the client's ``store`` remembers the
+        conversation: it loads that id's transcript, runs, saves the updated
+        transcript, and returns the answer — so the next ``ask`` with the same
+        ``id`` continues it. Without an ``id`` it is a stateless one-shot
+        (identical to :meth:`run`). Mirrors the JS ``ask``.
+        """
+        if not id:
+            return await self.run(prompt, toolkit, cancel=cancel)
+        history = await self.store.get(id) or []
+        result = await self.run(prompt, toolkit, history=history, cancel=cancel)
+        await self.store.save(id, result.messages)
+        return result
 
     def conversation(self, toolkit: Toolkit, cancel: Optional[asyncio.Event] = None) -> "Conversation":
         """A stateful multi-turn conversation that retains history across sends."""
@@ -961,6 +1017,7 @@ def create_client(
     retries: int = 2,
     retry_base_ms: int = 500,
     timeout_ms: Optional[int] = None,
+    store: Optional[ConversationStore] = None,
 ) -> Client:
     return Client(
         base_url=base_url,
@@ -974,4 +1031,5 @@ def create_client(
         retries=retries,
         retry_base_ms=retry_base_ms,
         timeout_ms=timeout_ms,
+        store=store,
     )
