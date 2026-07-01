@@ -5,6 +5,14 @@ Mirrors the JS reference implementation (``js/src/``); shared contract in
 """
 from __future__ import annotations
 
+from .a2a import (
+    Agent,
+    AgentConfig,
+    AgentsConfig,
+    agent,
+    agent_tools,
+    parse_agents_config,
+)
 from .adapters import to_anthropic, to_gemini, to_openai
 from .client import (
     Client,
@@ -15,6 +23,12 @@ from .client import (
     RunResult,
     RunTimeout,
     create_client,
+)
+from .builtin import (
+    BuiltinsConfig,
+    builtins_enabled,
+    create_builtin_tools,
+    select_builtins,
 )
 from .http import DEFAULT_TIMEOUT as HTTP_DEFAULT_TIMEOUT
 from .http import http_tool
@@ -30,8 +44,20 @@ from .mcp_source import (
     load_mcp,
     parse_mcp_config,
 )
+from .serve import (
+    A2AConfig,
+    FileTaskStore,
+    InMemoryTaskStore,
+    OnTask,
+    ServeHandle,
+    TaskStore,
+    build_agent_card,
+    resolve_store,
+    start_a2a_server,
+)
 from .skill import (
     SKILL_TOOL_DESCRIPTION,
+    SKILLS_PROMPT_PREAMBLE,
     SkillInfo,
     SkillSource,
     load_skills,
@@ -68,9 +94,15 @@ __all__ = [
     "parse_mcp_config",
     # skill
     "SKILL_TOOL_DESCRIPTION",
+    "SKILLS_PROMPT_PREAMBLE",
     "SkillInfo",
     "SkillSource",
     "load_skills",
+    # builtin tools
+    "BuiltinsConfig",
+    "builtins_enabled",
+    "create_builtin_tools",
+    "select_builtins",
     # adapters
     "to_anthropic",
     "to_gemini",
@@ -84,6 +116,23 @@ __all__ = [
     # http tools
     "http_tool",
     "HTTP_DEFAULT_TIMEOUT",
+    # a2a agents (outbound)
+    "Agent",
+    "AgentConfig",
+    "AgentsConfig",
+    "agent",
+    "agent_tools",
+    "parse_agents_config",
+    # a2a serve (inbound)
+    "A2AConfig",
+    "TaskStore",
+    "InMemoryTaskStore",
+    "FileTaskStore",
+    "resolve_store",
+    "build_agent_card",
+    "start_a2a_server",
+    "ServeHandle",
+    "OnTask",
     # unified client
     "Client",
     "ClientStyle",

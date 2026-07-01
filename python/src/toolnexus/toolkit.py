@@ -7,13 +7,20 @@ call :meth:`Toolkit.close`). Mirrors the JS reference (``js/src/toolkit.ts``).
 """
 from __future__ import annotations
 
+import asyncio
 import sys
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
+from .a2a import Agent, agent_tools, parse_agents_config
 from .adapters import to_anthropic, to_gemini, to_openai
+from .builtin import BuiltinsConfig, select_builtins
 from .mcp_source import McpSource, load_mcp
+from .serve import A2AConfig, OnTask, ServeHandle, start_a2a_server
 from .skill import SkillSource, load_skills
 from .types import McpStatus, Tool, ToolContext, ToolResult
+
+if TYPE_CHECKING:  # typing-only, avoid a runtime import cycle with client.py
+    from .client import Client
 
 
 class Toolkit:
@@ -21,16 +28,28 @@ class Toolkit:
         self,
         mcp: Optional[McpSource],
         skill: Optional[SkillSource],
+        builtins: list[Tool],
+        agents: list[Tool],
         extra_tools: list[Tool],
+        a2a_config: Optional[A2AConfig] = None,
     ) -> None:
         self._mcp = mcp
         self._skill = skill
+        # A2A profile read from a top-level `a2a` config block (serve() falls back to this).
+        self._a2a_config = a2a_config
         self._by_name: dict[str, Tool] = {}
+        # Builtins are the lowest-precedence source: a host extra_tools entry with
+        # the same name shadows a builtin (SPEC §4). Drop shadowed builtins up
+        # front, then apply the normal first-wins dedupe for MCP/skill/agents/extras.
+        extra_names = {t.name for t in extra_tools}
+        active_builtins = [b for b in builtins if b.name not in extra_names]
         all_tools: list[Tool] = []
         if mcp is not None:
             all_tools.extend(mcp.tools)
         if skill is not None:
             all_tools.append(skill.tool)
+        all_tools.extend(active_builtins)
+        all_tools.extend(agents)
         all_tools.extend(extra_tools)
         for t in all_tools:
             if t.name in self._by_name:
@@ -47,10 +66,49 @@ class Toolkit:
         mcp_config: Optional[str | dict[str, Any]] = None,
         skills_dir: Optional[str | list[str]] = None,
         extra_tools: Optional[list[Tool]] = None,
+        builtins: Optional[BuiltinsConfig] = None,
+        agents: Optional[list[Agent]] = None,
     ) -> "Toolkit":
         mcp = await load_mcp(mcp_config) if mcp_config is not None else None
         skill = load_skills(skills_dir) if skills_dir is not None else None
-        return cls(mcp, skill, extra_tools or [])
+        # The toggle comes from the `builtins` option, or a top-level `builtins`
+        # key on a parsed config dict — same precedence as MCP's is_enabled.
+        builtins_cfg = builtins
+        if (
+            builtins_cfg is None
+            and isinstance(mcp_config, dict)
+            and "builtins" in mcp_config
+        ):
+            builtins_cfg = mcp_config["builtins"]
+        builtin_tools = select_builtins(builtins_cfg)
+
+        # Remote A2A agents come from the `agents=[...]` option plus a top-level
+        # `agents` block on a parsed config dict (mirrors mcpServers). Each is
+        # resolved to its skill tools; a failing agent never breaks the toolkit.
+        agent_descriptors: list[Agent] = list(agents or [])
+        if isinstance(mcp_config, dict) and "agents" in mcp_config:
+            agent_descriptors.extend(parse_agents_config(mcp_config["agents"]))
+
+        async def _resolve(ag: Agent) -> list[Tool]:
+            try:
+                return await agent_tools(ag)
+            except Exception as e:  # noqa: BLE001 — one bad agent never breaks the toolkit
+                print(
+                    f'[toolnexus] A2A agent "{ag.card}" failed: {e}',
+                    file=sys.stderr,
+                )
+                return []
+
+        agent_tool_lists = await asyncio.gather(*(_resolve(a) for a in agent_descriptors))
+        agent_tools_flat = [t for lst in agent_tool_lists for t in lst]
+
+        # A2A inbound profile: a top-level `a2a` block on a parsed config dict
+        # (mirrors builtins/agents). serve() prefers its inline `a2a` over this.
+        a2a_config: Optional[A2AConfig] = None
+        if isinstance(mcp_config, dict) and "a2a" in mcp_config:
+            a2a_config = mcp_config["a2a"]
+
+        return cls(mcp, skill, builtin_tools, agent_tools_flat, extra_tools or [], a2a_config)
 
     def register(self, *tools: Tool) -> "Toolkit":
         """Add native/http/custom tools at runtime. First-name-wins; warn on dup.
@@ -66,6 +124,60 @@ class Toolkit:
                 continue
             self._by_name[t.name] = t
         return self
+
+    async def add_agent(
+        self,
+        agent_or_card_url: "Agent | str",
+        *,
+        headers: Optional[dict[str, str]] = None,
+        timeout: Optional[int] = None,
+        poll_every: Optional[int] = None,
+    ) -> "Toolkit":
+        """Fetch a remote A2A agent's card at runtime and register its skills as
+        tools. Accepts an :class:`Agent` descriptor or a bare card URL.
+        First-name-wins dedupe. Returns ``self`` so calls can be chained.
+        """
+        if isinstance(agent_or_card_url, str):
+            ag = Agent(
+                card=agent_or_card_url,
+                headers=headers,
+                timeout=timeout,
+                poll_every=poll_every,
+            )
+        else:
+            ag = agent_or_card_url
+        tools = await agent_tools(ag)
+        return self.register(*tools)
+
+    async def serve(
+        self,
+        addr: str,
+        *,
+        client: "Client",
+        a2a: Optional[A2AConfig] = None,
+        on_task: Optional[OnTask] = None,
+    ) -> ServeHandle:
+        """Serve this toolkit as an agent over HTTP. When the ``a2a`` profile is
+        present (inline, or a top-level ``a2a`` config block the toolkit was built
+        from), it mounts the A2A Agent Card (``/.well-known/agent-card.json``, built
+        from skills) and a JSON-RPC endpoint (``SendMessage`` + ``GetTask``) fulfilled
+        by ``client.run``. When ``a2a`` is absent, no A2A routes are mounted. Returns a
+        stoppable handle.
+        """
+        cfg = a2a if a2a is not None else self._a2a_config
+        skills = list(self._skill.skills.values()) if self._skill is not None else []
+
+        async def run_task(text: str) -> Any:
+            return await client.run(text, self)
+
+        return await start_a2a_server(
+            addr=addr,
+            a2a=cfg,
+            skills=skills,
+            run_task=run_task,
+            on_task=on_task,
+            loop=asyncio.get_running_loop(),
+        )
 
     def tools(self) -> list[Tool]:
         return list(self._by_name.values())
@@ -115,8 +227,20 @@ async def create_toolkit(
     mcp_config: Optional[str | dict[str, Any]] = None,
     skills_dir: Optional[str | list[str]] = None,
     extra_tools: Optional[list[Tool]] = None,
+    builtins: Optional[BuiltinsConfig] = None,
+    agents: Optional[list[Agent]] = None,
 ) -> Toolkit:
-    """Async factory. The returned Toolkit is also an async context manager."""
+    """Async factory. The returned Toolkit is also an async context manager.
+
+    Built-in tools (§4A) are on by default; pass ``builtins=False`` /
+    ``{"disabled": True}`` / ``{"enabled": False}`` to turn the whole source off.
+    Remote A2A agents (§7A) are supplied via ``agents=[agent(...), ...]`` and/or a
+    top-level ``agents`` block on a parsed config dict.
+    """
     return await Toolkit.create(
-        mcp_config=mcp_config, skills_dir=skills_dir, extra_tools=extra_tools
+        mcp_config=mcp_config,
+        skills_dir=skills_dir,
+        extra_tools=extra_tools,
+        builtins=builtins,
+        agents=agents,
     )

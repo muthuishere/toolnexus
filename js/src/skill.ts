@@ -4,7 +4,7 @@
  * loads a skill's instructions + sampled resources on demand (progressive
  * disclosure).
  */
-import { readFileSync, readdirSync, statSync } from "node:fs"
+import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 import type { Tool, ToolResult } from "./types.js"
@@ -14,6 +14,14 @@ export const SKILL_TOOL_DESCRIPTION = `Load a specialized skill when the task at
 Use this tool to inject the skill's instructions and resources into current conversation. The output may contain detailed workflow guidance as well as references to scripts, files, etc in the same directory as the skill.
 
 The skill name must match one of the skills listed in your system prompt.`
+
+/**
+ * Instruction preamble prepended to skillsPrompt() when ≥1 described skill
+ * exists. Byte-identical across all four ports — do not reword. See SPEC.md §3.
+ */
+export const SKILLS_PROMPT_PREAMBLE =
+  "Skills provide specialized instructions and workflows for specific tasks.\n" +
+  "Use the skill tool to load a skill when a task matches its description."
 
 export interface SkillInfo {
   name: string
@@ -46,6 +54,9 @@ function parseFrontmatter(text: string): { data: Record<string, string>; content
 function walkSkillFiles(root: string): string[] {
   const out: string[] = []
   const stack = [root]
+  // Follow symlinked directories (like opencode's `symlink: true` glob); guard
+  // against symlink cycles by tracking resolved real paths already visited.
+  const seen = new Set<string>()
   while (stack.length) {
     const dir = stack.pop()!
     let entries
@@ -56,10 +67,30 @@ function walkSkillFiles(root: string): string[] {
     }
     for (const entry of entries) {
       const full = path.join(dir, entry.name)
-      if (entry.isDirectory()) {
+      let isDir = entry.isDirectory()
+      let isFile = entry.isFile()
+      if (entry.isSymbolicLink()) {
+        // Resolve the link target to decide whether to descend / collect it.
+        try {
+          const st = statSync(full)
+          isDir = st.isDirectory()
+          isFile = st.isFile()
+        } catch {
+          continue
+        }
+      }
+      if (isDir) {
         if (entry.name === "node_modules" || entry.name === ".git") continue
+        let real
+        try {
+          real = realpathSync(full)
+        } catch {
+          continue
+        }
+        if (seen.has(real)) continue
+        seen.add(real)
         stack.push(full)
-      } else if (entry.isFile() && entry.name === "SKILL.md") {
+      } else if (isFile && entry.name === "SKILL.md") {
         out.push(full)
       }
     }
@@ -70,6 +101,7 @@ function walkSkillFiles(root: string): string[] {
 function sampleSiblingFiles(dir: string, limit = 10): string[] {
   const out: string[] = []
   const stack = [dir]
+  const seen = new Set<string>()
   while (stack.length && out.length < limit) {
     const cur = stack.pop()!
     let entries
@@ -81,10 +113,29 @@ function sampleSiblingFiles(dir: string, limit = 10): string[] {
     for (const entry of entries) {
       if (out.length >= limit) break
       const full = path.join(cur, entry.name)
-      if (entry.isDirectory()) {
+      let isDir = entry.isDirectory()
+      let isFile = entry.isFile()
+      if (entry.isSymbolicLink()) {
+        try {
+          const st = statSync(full)
+          isDir = st.isDirectory()
+          isFile = st.isFile()
+        } catch {
+          continue
+        }
+      }
+      if (isDir) {
         if (entry.name === "node_modules" || entry.name === ".git") continue
+        let real
+        try {
+          real = realpathSync(full)
+        } catch {
+          continue
+        }
+        if (seen.has(real)) continue
+        seen.add(real)
         stack.push(full)
-      } else if (entry.isFile() && entry.name !== "SKILL.md") {
+      } else if (isFile && entry.name !== "SKILL.md") {
         out.push(full)
       }
     }
@@ -187,6 +238,8 @@ export function loadSkills(dirs: string | string[]): SkillSource {
         .sort((a, b) => a.name.localeCompare(b.name))
       if (described.length === 0) return "No skills are currently available."
       return [
+        SKILLS_PROMPT_PREAMBLE,
+        "",
         "## Available Skills",
         ...described.map((s) => `- **${s.name}**: ${s.description}`),
       ].join("\n")

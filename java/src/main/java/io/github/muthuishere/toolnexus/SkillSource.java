@@ -7,9 +7,11 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -28,6 +30,14 @@ public final class SkillSource {
             + "Use this tool to inject the skill's instructions and resources into current conversation. The output may contain detailed workflow guidance as well as references to scripts, files, etc in the same directory as the skill.\n"
             + "\n"
             + "The skill name must match one of the skills listed in your system prompt.";
+
+    /**
+     * Instruction preamble prepended to {@link #prompt()} when >=1 described skill
+     * exists. Byte-identical across all four ports — do not reword. See SPEC.md §3.
+     */
+    public static final String SKILLS_PROMPT_PREAMBLE =
+            "Skills provide specialized instructions and workflows for specific tasks.\n"
+            + "Use the skill tool to load a skill when a task matches its description.";
 
     private static final Pattern FRONTMATTER =
             Pattern.compile("^---\\r?\\n([\\s\\S]*?)\\r?\\n---\\r?\\n?([\\s\\S]*)$");
@@ -69,7 +79,8 @@ public final class SkillSource {
                 .sorted(Comparator.comparing(s -> s.name))
                 .collect(Collectors.toList());
         if (described.isEmpty()) return "No skills are currently available.";
-        StringBuilder sb = new StringBuilder("## Available Skills");
+        StringBuilder sb = new StringBuilder(SKILLS_PROMPT_PREAMBLE);
+        sb.append("\n\n## Available Skills");
         for (SkillInfo s : described) {
             sb.append("\n- **").append(s.name).append("**: ").append(s.description);
         }
@@ -232,16 +243,31 @@ public final class SkillSource {
         List<Path> out = new ArrayList<>();
         Deque<Path> stack = new ArrayDeque<>();
         stack.push(root);
+        // Follow symlinked directories (like opencode's `symlink: true` glob); guard
+        // against symlink cycles by tracking resolved real paths already visited.
+        Set<String> seen = new HashSet<>();
         while (!stack.isEmpty()) {
             Path dir = stack.pop();
             try (Stream<Path> entries = Files.list(dir)) {
                 List<Path> list = entries.collect(Collectors.toList());
                 for (Path entry : list) {
                     String fn = entry.getFileName().toString();
-                    if (Files.isDirectory(entry)) {
+                    // Files.isDirectory/isRegularFile follow symlinks by default, so a
+                    // symlinked directory/file is classified by its target. A broken
+                    // symlink resolves to neither, so it is skipped entirely.
+                    boolean isDir = Files.isDirectory(entry);
+                    boolean isFile = Files.isRegularFile(entry);
+                    if (isDir) {
                         if (fn.equals("node_modules") || fn.equals(".git")) continue;
+                        String real;
+                        try {
+                            real = entry.toRealPath().toString();
+                        } catch (IOException e) {
+                            continue;
+                        }
+                        if (!seen.add(real)) continue;
                         stack.push(entry);
-                    } else if (Files.isRegularFile(entry) && fn.equals("SKILL.md")) {
+                    } else if (isFile && fn.equals("SKILL.md")) {
                         out.add(entry);
                     }
                 }
@@ -255,6 +281,9 @@ public final class SkillSource {
         List<String> out = new ArrayList<>();
         Deque<Path> stack = new ArrayDeque<>();
         stack.push(dir);
+        // Follow symlinked directories/files; guard against symlink cycles by
+        // tracking resolved real paths already visited.
+        Set<String> seen = new HashSet<>();
         while (!stack.isEmpty() && out.size() < limit) {
             Path cur = stack.pop();
             try (Stream<Path> entries = Files.list(cur)) {
@@ -262,10 +291,19 @@ public final class SkillSource {
                 for (Path entry : list) {
                     if (out.size() >= limit) break;
                     String fn = entry.getFileName().toString();
-                    if (Files.isDirectory(entry)) {
+                    boolean isDir = Files.isDirectory(entry);
+                    boolean isFile = Files.isRegularFile(entry);
+                    if (isDir) {
                         if (fn.equals("node_modules") || fn.equals(".git")) continue;
+                        String real;
+                        try {
+                            real = entry.toRealPath().toString();
+                        } catch (IOException e) {
+                            continue;
+                        }
+                        if (!seen.add(real)) continue;
                         stack.push(entry);
-                    } else if (Files.isRegularFile(entry) && !fn.equals("SKILL.md")) {
+                    } else if (isFile && !fn.equals("SKILL.md")) {
                         out.add(entry.toAbsolutePath().toString());
                     }
                 }

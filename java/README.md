@@ -42,7 +42,7 @@ Toolkit tk = Toolkit.create(new Toolkit.Options()
         .skillsDir("./skills"));
 
 System.out.println(tk.mcpStatus());   // {everything=connected, ...}
-System.out.println(tk.skillsPrompt()); // ## Available Skills ...
+System.out.println(tk.skillsPrompt()); // skills catalog; opens with a preamble telling the model to use the skill tool
 
 var tools = tk.toOpenAI();            // or toAnthropic() / toGemini()
 
@@ -89,6 +89,30 @@ tk.register(NativeTool.of("echo", "Echo a message", schema,
         args -> "you said: " + args.get("message")));
 ```
 
+## Built-in tools
+
+A fifth source ships **10 built-in tools** — `bash`, `read`, `write`, `edit`,
+`grep`, `glob`, `webfetch`, `question`, `apply_patch`, `todowrite`
+(names + input schemas match opencode) — so an agent can act with zero wiring.
+They appear in the tool schema (`toOpenAI()`/`toAnthropic()`/`toGemini()`), like
+MCP tools — not the system prompt. **On by default.** One global toggle turns the
+whole source off, or a per-tool `tools` map disables individual builtins on the
+all-on baseline:
+
+```java
+Toolkit tk = Toolkit.create(new Toolkit.Options()
+        .mcpConfig("mcp.json")
+        .builtins(false));   // also accepts Map.of("disabled", true) / Map.of("enabled", false)
+
+// per-tool: drop bash, keep the other nine (unknown names ignored; whole-source-off still wins)
+Toolkit tk2 = Toolkit.create(new Toolkit.Options()
+        .mcpConfig("mcp.json")
+        .builtins(Map.of("tools", Map.of("bash", false))));
+```
+
+`bash`/`write`/`edit`/`apply_patch` run commands and mutate the filesystem — the
+toggle is the off-switch for locked-down hosts.
+
 ## HTTP / REST tools
 
 ```java
@@ -127,6 +151,51 @@ System.out.println(res.toolCalls);     // [add, ...]
 
 The system prompt is `systemPrompt + "\n\n" + toolkit.skillsPrompt()`. The loop
 runs to `maxTurns` (default 10).
+
+## A2A agents (agent-to-agent)
+
+Call **remote A2A agents** (each of their skills becomes a tool) and serve your own toolkit as an
+agent other A2A peers can call. A genuine, minimal subset of real A2A (JSON-RPC 2.0; Agent Card at
+`/.well-known/agent-card.json`; `SendMessage` → poll `GetTask`). No streaming / push / auth in v1.
+
+**Outbound — call a remote agent.** Each advertised skill becomes a tool named `<agent>_<skill>`
+(source `"a2a"`):
+
+```java
+import io.github.muthuishere.toolnexus.A2A;
+
+Toolkit tk = Toolkit.create(new Toolkit.Options()
+        .agents(A2A.agent("https://researcher.example.com/.well-known/agent-card.json")));
+
+// or add one at runtime (an A2A.Agent, or a bare card URL):
+tk.addAgent("https://writer.example.com/.well-known/agent-card.json");
+```
+
+`A2A.agent(card[, headers, timeout, pollEvery])` — `headers` support `${ENV}` expansion (never
+logged); `timeout` / `pollEvery` are milliseconds (300000 / 1000 defaults). A config file can also
+carry an `agents` block (mirrors `mcpServers`). A failing agent is isolated — contributes no tools,
+never fatal.
+
+**Inbound — serve your toolkit as an agent.** The Agent Card is built from your **SKILL.md skills**
+(never raw tools):
+
+```java
+import io.github.muthuishere.toolnexus.A2AServer;
+
+A2AServer.ServeHandle handle = tk.serve("127.0.0.1:0", new Toolkit.ServeOptions()
+        .client(agent)                         // the LlmClient host loop, above
+        .a2a(new A2AServer.A2AConfig()
+                .name("research-agent")
+                .description("Answers research questions.")
+                // .skills(List.of("hello-world"))  // subset of skills to advertise; omit ⇒ all
+                .store("memory")));                 // "memory" (default) | "file:<dir>" | a custom TaskStore
+
+System.out.println(handle.url());   // GET /.well-known/agent-card.json ; POST / (SendMessage / GetTask)
+handle.stop();
+```
+
+`serve(addr, ServeOptions)` fulfils each inbound `SendMessage` task via `client.run`. Task
+persistence is a pluggable `TaskStore` — in-memory default, `"file:<dir>"`, or your own.
 
 ## Examples
 

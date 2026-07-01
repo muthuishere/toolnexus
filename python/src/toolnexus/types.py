@@ -12,7 +12,7 @@ from typing import Any, Awaitable, Callable, Literal, Optional, Protocol
 # A JSON-Schema object: {"type": "object", "properties": {...}, ...}
 JSONSchema = dict[str, Any]
 
-ToolSource = Literal["mcp", "skill", "native", "http", "custom"]
+ToolSource = Literal["mcp", "skill", "native", "http", "builtin", "a2a", "custom"]
 McpStatus = Literal["connected", "disabled", "failed"]
 
 

@@ -17,6 +17,14 @@ public sealed partial class SkillSource
         + "\n"
         + "The skill name must match one of the skills listed in your system prompt.";
 
+    /// <summary>
+    /// Instruction preamble prepended to <see cref="Prompt"/> when ≥1 described skill exists.
+    /// Byte-identical across all ports — do not reword. See SPEC.md §3.
+    /// </summary>
+    public const string SkillsPromptPreamble =
+        "Skills provide specialized instructions and workflows for specific tasks.\n"
+        + "Use the skill tool to load a skill when a task matches its description.";
+
     [GeneratedRegex(@"^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$")]
     private static partial Regex Frontmatter();
 
@@ -41,7 +49,8 @@ public sealed partial class SkillSource
             .OrderBy(s => s.Name, StringComparer.Ordinal)
             .ToList();
         if (described.Count == 0) return "No skills are currently available.";
-        var sb = new System.Text.StringBuilder("## Available Skills");
+        var sb = new System.Text.StringBuilder(SkillsPromptPreamble);
+        sb.Append("\n\n## Available Skills");
         foreach (var s in described)
             sb.Append("\n- **").Append(s.Name).Append("**: ").Append(s.Description);
         return sb.ToString();
@@ -181,6 +190,10 @@ public sealed partial class SkillSource
         var output = new List<string>();
         var stack = new Stack<string>();
         stack.Push(root);
+        // Follow symlinked directories (like opencode's `symlink: true` glob);
+        // guard against symlink cycles by tracking resolved real paths already
+        // visited. See SPEC.md §3.
+        var seen = new HashSet<string>();
         while (stack.Count > 0)
         {
             var dir = stack.Pop();
@@ -190,12 +203,14 @@ public sealed partial class SkillSource
             foreach (var entry in entries)
             {
                 var fn = Path.GetFileName(entry);
-                if (Directory.Exists(entry))
+                var (isDir, isFile, real) = Classify(entry);
+                if (isDir)
                 {
                     if (fn is "node_modules" or ".git") continue;
+                    if (real == null || !seen.Add(real)) continue;
                     stack.Push(entry);
                 }
-                else if (fn == "SKILL.md")
+                else if (isFile && fn == "SKILL.md")
                 {
                     output.Add(entry);
                 }
@@ -209,6 +224,7 @@ public sealed partial class SkillSource
         var output = new List<string>();
         var stack = new Stack<string>();
         stack.Push(dir);
+        var seen = new HashSet<string>();
         while (stack.Count > 0 && output.Count < limit)
         {
             var cur = stack.Pop();
@@ -219,18 +235,59 @@ public sealed partial class SkillSource
             {
                 if (output.Count >= limit) break;
                 var fn = Path.GetFileName(entry);
-                if (Directory.Exists(entry))
+                var (isDir, isFile, real) = Classify(entry);
+                if (isDir)
                 {
                     if (fn is "node_modules" or ".git") continue;
+                    if (real == null || !seen.Add(real)) continue;
                     stack.Push(entry);
                 }
-                else if (fn != "SKILL.md")
+                else if (isFile && fn != "SKILL.md")
                 {
                     output.Add(Path.GetFullPath(entry));
                 }
             }
         }
         return output;
+    }
+
+    /// <summary>
+    /// Classify a filesystem entry, following symlinks. For a reparse point
+    /// (symlink) the final target is resolved and stat'd to decide dir vs file;
+    /// broken links return <c>(false, false, null)</c>. <c>Real</c> is the
+    /// resolved real path used for symlink-cycle detection.
+    /// </summary>
+    private static (bool IsDir, bool IsFile, string? Real) Classify(string entry)
+    {
+        FileAttributes attrs;
+        try { attrs = File.GetAttributes(entry); }
+        catch { return (false, false, null); }
+
+        if (attrs.HasFlag(FileAttributes.ReparsePoint))
+        {
+            // Symlink: resolve the final target, then stat it to decide.
+            try
+            {
+                FileSystemInfo fsi = new DirectoryInfo(entry);
+                var target = fsi.ResolveLinkTarget(returnFinalTarget: true);
+                if (target == null) return (false, false, null);
+                var real = target.FullName;
+                if (Directory.Exists(real)) return (true, false, real);
+                if (File.Exists(real)) return (false, true, real);
+                return (false, false, null); // broken link
+            }
+            catch { return (false, false, null); }
+        }
+
+        if (attrs.HasFlag(FileAttributes.Directory))
+            return (true, false, TryFullPath(entry));
+        return (false, true, TryFullPath(entry));
+    }
+
+    private static string? TryFullPath(string path)
+    {
+        try { return Path.GetFullPath(path); }
+        catch { return null; }
     }
 
     /// <summary>Match Node's pathToFileURL(dir).href: file://&lt;abs path&gt;, no trailing slash.</summary>

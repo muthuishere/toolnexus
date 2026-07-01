@@ -4,6 +4,7 @@ package toolnexus
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 )
@@ -17,6 +18,14 @@ type Options struct {
 	SkillsDir []string
 	// ExtraTools are your own custom tools, always added to the toolkit.
 	ExtraTools []Tool
+	// Builtins toggles the built-in tool source (§4A). Default ON. Accepts nil
+	// (default on), a bool, or a BuiltinsConfig — same precedence as MCP. When
+	// nil, a top-level `builtins` key on a parsed McpConfig map is consulted.
+	Builtins any
+	// Agents are remote A2A agents — each advertised skill becomes a tool
+	// (source:"a2a"). A top-level `agents` block on a parsed McpConfig map is
+	// merged in as well.
+	Agents []Agent
 }
 
 // Toolkit aggregates all tools and routes execution.
@@ -25,6 +34,9 @@ type Toolkit struct {
 	byName map[string]Tool
 	mcp    *McpSource
 	skill  *SkillSource
+	// a2aConfig is the A2A inbound profile from a top-level `a2a` config block;
+	// Serve() falls back to it when no inline A2A option is given.
+	a2aConfig *A2AConfig
 }
 
 // CreateToolkit builds a Toolkit from the given options.
@@ -47,6 +59,62 @@ func CreateToolkit(ctx context.Context, opts Options) (*Toolkit, error) {
 
 	tk := &Toolkit{byName: map[string]Tool{}, mcp: mcp, skill: skill}
 
+	// The toggle comes from the `Builtins` option, or a top-level `builtins` key
+	// on a parsed McpConfig map — same precedence as MCP's isEnabled.
+	builtinsCfg := opts.Builtins
+	if builtinsCfg == nil {
+		if m, ok := opts.McpConfig.(map[string]any); ok {
+			if b, exists := m["builtins"]; exists {
+				builtinsCfg = b
+			}
+		}
+	}
+	builtins := SelectBuiltins(builtinsCfg)
+
+	// Remote A2A agents come from the `Agents` option plus a top-level `agents`
+	// block on a parsed McpConfig map (mirrors mcpServers). Each is resolved to
+	// its skill tools; a failing agent is isolated and never breaks the toolkit.
+	agentDescriptors := append([]Agent{}, opts.Agents...)
+	if m, ok := opts.McpConfig.(map[string]any); ok {
+		if a, exists := m["agents"]; exists {
+			var block AgentsConfig
+			if b, err := json.Marshal(a); err == nil {
+				_ = json.Unmarshal(b, &block)
+			}
+			agentDescriptors = append(agentDescriptors, ParseAgentsConfig(block)...)
+		}
+	}
+	var agentTools []Tool
+	for _, ag := range agentDescriptors {
+		ts, err := AgentTools(ctx, ag)
+		if err != nil {
+			log.Printf("[toolnexus] A2A agent %q failed: %v", ag.Card, err)
+			continue
+		}
+		agentTools = append(agentTools, ts...)
+	}
+
+	// A2A inbound profile: a top-level `a2a` block on a parsed McpConfig map
+	// (mirrors builtins/agents). Serve() prefers an inline A2A over this.
+	if m, ok := opts.McpConfig.(map[string]any); ok {
+		if a, exists := m["a2a"]; exists {
+			var cfg A2AConfig
+			if b, err := json.Marshal(a); err == nil {
+				_ = json.Unmarshal(b, &cfg)
+			}
+			tk.a2aConfig = &cfg
+		}
+	}
+
+	// Builtins are the lowest-precedence source: a host ExtraTools entry with the
+	// same name shadows a builtin (SPEC §4). Drop shadowed builtins up front,
+	// then apply the normal first-wins dedupe. Order: MCP → skill → builtin →
+	// agents → extras.
+	extraNames := make(map[string]bool, len(opts.ExtraTools))
+	for _, t := range opts.ExtraTools {
+		extraNames[t.Name] = true
+	}
+
 	var all []Tool
 	if mcp != nil {
 		all = append(all, mcp.Tools...)
@@ -54,6 +122,12 @@ func CreateToolkit(ctx context.Context, opts Options) (*Toolkit, error) {
 	if skill != nil {
 		all = append(all, skill.Tool)
 	}
+	for _, b := range builtins {
+		if !extraNames[b.Name] {
+			all = append(all, b)
+		}
+	}
+	all = append(all, agentTools...)
 	all = append(all, opts.ExtraTools...)
 
 	for _, t := range all {
@@ -80,6 +154,61 @@ func (tk *Toolkit) Register(tools ...Tool) *Toolkit {
 		tk.order = append(tk.order, t.Name)
 	}
 	return tk
+}
+
+// AddAgent fetches a remote A2A agent's card at runtime and registers its skills
+// as tools. agentOrCardURL is an Agent value or a bare card URL string; opts
+// (may be nil) supplies headers/timeout/pollEvery when a string is given.
+// First-name-wins dedupe.
+func (tk *Toolkit) AddAgent(ctx context.Context, agentOrCardURL any, opts *Agent) (*Toolkit, error) {
+	var ag Agent
+	switch v := agentOrCardURL.(type) {
+	case string:
+		ag = Agent{Card: v}
+		if opts != nil {
+			ag.Headers = opts.Headers
+			ag.Timeout = opts.Timeout
+			ag.PollEvery = opts.PollEvery
+		}
+	case Agent:
+		ag = v
+	default:
+		return tk, fmt.Errorf("addAgent: unsupported argument type %T", agentOrCardURL)
+	}
+	tools, err := AgentTools(ctx, ag)
+	if err != nil {
+		return tk, err
+	}
+	return tk.Register(tools...), nil
+}
+
+// Serve exposes this toolkit as an agent over HTTP. When the A2A profile is
+// present (ServeOptions.A2A, or a top-level `a2a` config block the toolkit was
+// built from), it mounts the A2A Agent Card (/.well-known/agent-card.json, built
+// from skills) and a JSON-RPC endpoint (SendMessage + GetTask) fulfilled by
+// opts.Client.Run. When A2A is absent, no A2A routes are mounted. Returns a
+// stoppable handle. Mirrors js Toolkit.serve and SPEC §7B.
+func (tk *Toolkit) Serve(addr string, opts ServeOptions) (*ServeHandle, error) {
+	a2a := opts.A2A
+	if a2a == nil {
+		a2a = tk.a2aConfig
+	}
+	var skills []SkillInfo
+	if tk.skill != nil {
+		for _, s := range tk.skill.Skills {
+			skills = append(skills, s)
+		}
+	}
+	client := opts.Client
+	return startA2AServer(startServerOptions{
+		addr:   addr,
+		a2a:    a2a,
+		skills: skills,
+		runTask: func(text string) (RunResult, error) {
+			return client.Run(context.Background(), text, tk)
+		},
+		onTask: opts.OnTask,
+	})
 }
 
 // Tools returns all tools (mcp tools + skill tool + extras), in insertion order.

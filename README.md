@@ -175,6 +175,43 @@ All four show up as the same uniform `Tool`, in one registry, for any model.
 `loadMcp` / `load_mcp` / `LoadMcp` (no skills, no loop). The skills, native/HTTP
 tools, and host loop are all opt-in on top.
 
+### Built-in tools (on by default)
+
+On top of the four sources, toolnexus ships a fifth — a default toolset of **10 built-in tools**
+(`bash`, `read`, `write`, `edit`, `grep`, `glob`, `webfetch`, `question`, `apply_patch`,
+`todowrite`, names + input schemas matching opencode) so an agent can act with zero
+wiring. They surface in the tool schema (`toOpenAI`/`toAnthropic`/`toGemini`) like MCP tools —
+*not* injected into the system prompt. The whole source is **on by default** and gated by one
+global toggle — `createToolkit({ builtins: false })` / `create_toolkit(builtins=False)` /
+`Options{ Builtins: false }` / `.builtins(false)`. For finer control, a per-tool `tools`
+name→bool map drops individual builtins on the all-on baseline (e.g.
+`builtins: { tools: { bash: false } }`; other tools stay on, unknown names are ignored, and a
+whole-source-off still wins). Because `bash`/`write`/`edit`/`apply_patch` run commands and mutate
+the filesystem, these switches are the off-switch for locked-down hosts.
+
+### A2A agents (call remote agents, or be one)
+
+A sixth source closes the loop: **agent-to-agent**. Point the toolkit at a remote **A2A agent**
+and each of its skills becomes a tool (named `<agent>_<skill>`, source `"a2a"`) — an agent is just
+another tool source. And the same toolkit can **serve itself** as an A2A agent, so other agents
+(toolnexus or not) can call it. It's a genuine, minimal subset of real A2A (verified against
+`a2a-python`): JSON-RPC 2.0, the Agent Card at `/.well-known/agent-card.json`, `SendMessage` → poll
+`GetTask`. No streaming / push / auth in v1.
+
+```ts
+// outbound: a remote agent's skills become tools
+const tk = await createToolkit({ agents: [agent({ card: "https://peer.example.com/.well-known/agent-card.json" })] })
+await tk.addAgent("https://other.example.com/.well-known/agent-card.json")   // or at runtime
+
+// inbound: serve this toolkit as an agent — the card is built from your SKILL.md skills, never raw tools
+const llm = createClient({ baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" })
+const handle = await tk.serve("127.0.0.1:0", { client: llm, a2a: { name: "my-agent", store: "memory" } })
+```
+
+Both directions exist in all five ports (`agent(...)` / `Agent{...}`, an `agents` config block, and
+`serve` / `ServeAsync`). Served tasks persist through a pluggable **TaskStore** (in-memory default,
+`"file:<dir>"`, or your own). See each port's README for the full option set.
+
 ## Per-language docs
 
 [`js/`](js/) · [`python/`](python/) · [`golang/`](golang/) · [`java/`](java/) · [`csharp/`](csharp/) — quickstarts and API.
@@ -187,6 +224,8 @@ implementation's examples and tests.
 - ✅ MCP servers (stdio + streamable-HTTP / SSE)
 - ✅ Agent skills (SKILL.md discovery + progressive-disclosure `skill` tool)
 - ✅ Native/decorator tools + HTTP/REST tools
+- ✅ Built-in tools (11 opencode tools; on by default, whole-source toggle + per-tool map)
+- ✅ A2A agents — outbound (call remote agents) + inbound (`serve` your toolkit as an agent); all five ports
 - ✅ Unified LLM client (OpenAI- and Anthropic-style endpoints) + Go CLI
 - ✅ OpenAI / Anthropic / Gemini schema adapters
 - ✅ Verified with live OpenRouter tool-calling round trips (every port)

@@ -23,6 +23,13 @@ Use this tool to inject the skill's instructions and resources into current conv
 
 The skill name must match one of the skills listed in your system prompt."""
 
+# Instruction preamble prepended to prompt() when ≥1 described skill exists.
+# Byte-identical across all four ports — do not reword. See SPEC.md §3.
+SKILLS_PROMPT_PREAMBLE = (
+    "Skills provide specialized instructions and workflows for specific tasks.\n"
+    "Use the skill tool to load a skill when a task matches its description."
+)
+
 
 @dataclass
 class SkillInfo:
@@ -59,6 +66,9 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
 def _walk_skill_files(root: str) -> list[str]:
     out: list[str] = []
     stack = [root]
+    # Follow symlinked directories (like opencode's `symlink: true` glob); guard
+    # against symlink cycles by tracking resolved real paths already visited.
+    seen: set[str] = set()
     while stack:
         d = stack.pop()
         try:
@@ -66,11 +76,22 @@ def _walk_skill_files(root: str) -> list[str]:
         except OSError:
             continue
         for entry in entries:
-            if entry.is_dir(follow_symlinks=False):
+            # follow_symlinks=True stats the link target to decide dir vs file;
+            # a broken symlink raises OSError → skip that entry.
+            try:
+                is_dir = entry.is_dir(follow_symlinks=True)
+                is_file = entry.is_file(follow_symlinks=True)
+            except OSError:
+                continue
+            if is_dir:
                 if entry.name in ("node_modules", ".git"):
                     continue
+                real = os.path.realpath(entry.path)
+                if real in seen:
+                    continue
+                seen.add(real)
                 stack.append(entry.path)
-            elif entry.is_file(follow_symlinks=False) and entry.name == "SKILL.md":
+            elif is_file and entry.name == "SKILL.md":
                 out.append(entry.path)
     return out
 
@@ -78,6 +99,7 @@ def _walk_skill_files(root: str) -> list[str]:
 def _sample_sibling_files(directory: str, limit: int = 10) -> list[str]:
     out: list[str] = []
     stack = [directory]
+    seen: set[str] = set()
     while stack and len(out) < limit:
         cur = stack.pop()
         try:
@@ -87,11 +109,20 @@ def _sample_sibling_files(directory: str, limit: int = 10) -> list[str]:
         for entry in entries:
             if len(out) >= limit:
                 break
-            if entry.is_dir(follow_symlinks=False):
+            try:
+                is_dir = entry.is_dir(follow_symlinks=True)
+                is_file = entry.is_file(follow_symlinks=True)
+            except OSError:
+                continue
+            if is_dir:
                 if entry.name in ("node_modules", ".git"):
                     continue
+                real = os.path.realpath(entry.path)
+                if real in seen:
+                    continue
+                seen.add(real)
                 stack.append(entry.path)
-            elif entry.is_file(follow_symlinks=False) and entry.name != "SKILL.md":
+            elif is_file and entry.name != "SKILL.md":
                 out.append(entry.path)
     return out
 
@@ -109,7 +140,7 @@ class SkillSource:
         )
         if not described:
             return "No skills are currently available."
-        lines = ["## Available Skills"]
+        lines = [SKILLS_PROMPT_PREAMBLE, "", "## Available Skills"]
         lines.extend(f"- **{s.name}**: {s.description}" for s in described)
         return "\n".join(lines)
 

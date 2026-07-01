@@ -5,7 +5,7 @@ namespace Toolnexus;
 ///
 /// <para><see cref="InputSchema"/> is a JSON-Schema object as a plain dictionary
 /// (e.g. <c>{type:"object", properties:{...}, required:[...]}</c>). <see cref="Source"/>
-/// is one of <c>"mcp" | "skill" | "native" | "http" | "custom"</c>.</para>
+/// is one of <c>"mcp" | "skill" | "native" | "http" | "a2a" | "custom"</c>.</para>
 /// </summary>
 public interface ITool
 {

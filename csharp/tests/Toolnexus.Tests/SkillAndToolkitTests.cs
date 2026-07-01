@@ -31,6 +31,47 @@ public class SkillSourceTests
         Assert.True(miss.IsError);
         Assert.Contains("not found", miss.Output);
     }
+
+    [Fact]
+    public void DiscoveryFollowsSymlinkedSkillDirectories()
+    {
+        // Layout: root/ has a real skill (direct/) and a symlink (linked/) → an
+        // out-of-tree skill dir. The walker must discover both (opencode parity).
+        var root = TempDir();
+        var direct = Path.Combine(root, "direct");
+        Directory.CreateDirectory(direct);
+        File.WriteAllText(Path.Combine(direct, "SKILL.md"),
+            "---\nname: direct-skill\ndescription: d\n---\nbody\n");
+
+        var external = TempDir();
+        var target = Path.Combine(external, "linked-target");
+        Directory.CreateDirectory(target);
+        File.WriteAllText(Path.Combine(target, "SKILL.md"),
+            "---\nname: linked-skill\ndescription: l\n---\nbody\n");
+
+        try
+        {
+            Directory.CreateSymbolicLink(Path.Combine(root, "linked"), target);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            // Symlink creation not permitted on this runner (e.g. Windows
+            // without privilege) — treat as skipped (pass) rather than fail.
+            // xUnit v2 has no dynamic Assert.Skip, so we return early.
+            return;
+        }
+
+        var src = SkillSource.Load(root);
+        Assert.True(src.Skills.ContainsKey("direct-skill"), "real skill discovered");
+        Assert.True(src.Skills.ContainsKey("linked-skill"), "symlinked skill directory discovered");
+    }
+
+    private static string TempDir()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "tnx-skill-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
 }
 
 public class ToolkitTests

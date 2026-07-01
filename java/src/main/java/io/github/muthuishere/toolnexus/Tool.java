@@ -8,7 +8,7 @@ import java.util.regex.Pattern;
  *
  * <p>{@code inputSchema()} is a JSON-Schema object as a plain {@code Map}
  * (e.g. {@code {type:"object", properties:{...}, required:[...]}}). {@code source()}
- * is one of {@code "mcp" | "skill" | "native" | "http" | "custom"}.
+ * is one of {@code "mcp" | "skill" | "builtin" | "a2a" | "native" | "http" | "custom"}.
  */
 public interface Tool {
     String name();

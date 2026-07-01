@@ -25,6 +25,11 @@ Use this tool to inject the skill's instructions and resources into current conv
 
 The skill name must match one of the skills listed in your system prompt.`
 
+// SkillsPromptPreamble is prepended to Prompt() when ≥1 described skill exists.
+// Byte-identical across all four ports — do not reword. See SPEC.md §3.
+const SkillsPromptPreamble = "Skills provide specialized instructions and workflows for specific tasks.\n" +
+	"Use the skill tool to load a skill when a task matches its description."
+
 // SkillInfo describes one discovered skill.
 type SkillInfo struct {
 	Name        string
@@ -52,48 +57,97 @@ func parseFrontmatter(text string) (data frontmatter, content string) {
 	return fm, m[2]
 }
 
+// resolveEntry classifies a directory entry, following symlinks to their target
+// (like opencode's `symlink: true` glob). A symlink is stat'd so isDir/isFile
+// reflect the target; a broken symlink returns ok=false so the caller skips it.
+func resolveEntry(full string, entry fs.DirEntry) (isDir, isFile, ok bool) {
+	if entry.Type()&fs.ModeSymlink != 0 {
+		info, err := os.Stat(full) // follows the link
+		if err != nil {
+			return false, false, false
+		}
+		return info.IsDir(), info.Mode().IsRegular(), true
+	}
+	return entry.IsDir(), entry.Type().IsRegular(), true
+}
+
 func walkSkillFiles(root string) []string {
 	var out []string
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	stack := []string{root}
+	// Follow symlinked directories; guard against symlink cycles by tracking
+	// resolved real paths already visited.
+	seen := map[string]bool{}
+	for len(stack) > 0 {
+		dir := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		entries, err := os.ReadDir(dir)
 		if err != nil {
-			return nil
+			continue
 		}
-		if d.IsDir() {
-			if d.Name() == "node_modules" || d.Name() == ".git" {
-				return fs.SkipDir
+		for _, entry := range entries {
+			full := filepath.Join(dir, entry.Name())
+			isDir, isFile, ok := resolveEntry(full, entry)
+			if !ok {
+				continue
 			}
-			return nil
+			if isDir {
+				if entry.Name() == "node_modules" || entry.Name() == ".git" {
+					continue
+				}
+				real, rErr := filepath.EvalSymlinks(full)
+				if rErr != nil {
+					continue
+				}
+				if seen[real] {
+					continue
+				}
+				seen[real] = true
+				stack = append(stack, full)
+			} else if isFile && entry.Name() == "SKILL.md" {
+				out = append(out, full)
+			}
 		}
-		if d.Name() == "SKILL.md" {
-			out = append(out, path)
-		}
-		return nil
-	})
+	}
 	return out
 }
 
 func sampleSiblingFiles(dir string, limit int) []string {
 	var out []string
-	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	stack := []string{dir}
+	seen := map[string]bool{}
+	for len(stack) > 0 && len(out) < limit {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		entries, err := os.ReadDir(cur)
 		if err != nil {
-			return nil
+			continue
 		}
-		if len(out) >= limit {
-			return fs.SkipAll
-		}
-		if d.IsDir() {
-			if path != dir && (d.Name() == "node_modules" || d.Name() == ".git") {
-				return fs.SkipDir
+		for _, entry := range entries {
+			if len(out) >= limit {
+				break
 			}
-			return nil
+			full := filepath.Join(cur, entry.Name())
+			isDir, isFile, ok := resolveEntry(full, entry)
+			if !ok {
+				continue
+			}
+			if isDir {
+				if entry.Name() == "node_modules" || entry.Name() == ".git" {
+					continue
+				}
+				real, rErr := filepath.EvalSymlinks(full)
+				if rErr != nil {
+					continue
+				}
+				if seen[real] {
+					continue
+				}
+				seen[real] = true
+				stack = append(stack, full)
+			} else if isFile && entry.Name() != "SKILL.md" {
+				out = append(out, full)
+			}
 		}
-		if d.Name() != "SKILL.md" {
-			out = append(out, path)
-		}
-		return nil
-	})
-	if len(out) > limit {
-		out = out[:limit]
 	}
 	return out
 }
@@ -117,7 +171,7 @@ func (s *SkillSource) Prompt() string {
 		return "No skills are currently available."
 	}
 	sort.Slice(described, func(i, j int) bool { return described[i].Name < described[j].Name })
-	lines := []string{"## Available Skills"}
+	lines := []string{SkillsPromptPreamble, "", "## Available Skills"}
 	for _, s := range described {
 		lines = append(lines, fmt.Sprintf("- **%s**: %s", s.Name, s.Description))
 	}

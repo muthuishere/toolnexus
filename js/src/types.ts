@@ -10,7 +10,7 @@ export type JSONSchema = {
   [k: string]: unknown
 }
 
-export type ToolSource = "mcp" | "skill" | "native" | "http" | "custom"
+export type ToolSource = "mcp" | "skill" | "builtin" | "native" | "http" | "a2a" | "custom"
 
 export interface ToolResult {
   output: string
