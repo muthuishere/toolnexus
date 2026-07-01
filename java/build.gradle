@@ -5,7 +5,7 @@ plugins {
 }
 
 group = 'io.github.muthuishere'
-version = '0.2.0'
+version = '0.2.1'
 
 java {
     toolchain {
@@ -25,6 +25,10 @@ dependencies {
 
     // Jackson (databind) for our own JSON: config parsing, adapters, LLM client.
     api 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
+
+    // SnakeYAML — a real YAML parser for SKILL.md frontmatter, so folded (>)/
+    // literal (|) block scalars, quoting, and multi-line values resolve. SPEC.md §3.
+    implementation 'org.yaml:snakeyaml:2.3'
 
     // JUnit 5 (Jupiter) for the test suite. Hermetic — no network/LLM.
     testImplementation platform('org.junit:junit-bom:5.11.4')

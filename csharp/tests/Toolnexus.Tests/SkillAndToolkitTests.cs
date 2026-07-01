@@ -66,6 +66,96 @@ public class SkillSourceTests
         Assert.True(src.Skills.ContainsKey("linked-skill"), "symlinked skill directory discovered");
     }
 
+    // --- Frontmatter YAML block-scalar consensus matrix (SPEC.md §3) ---------
+    // The parser must use a real YAML parser (YamlDotNet), so folded/literal
+    // block scalars resolve correctly and byte-identically with the JS reference.
+
+    private static string? DescOf(string skillMd)
+    {
+        var root = TempDir();
+        Directory.CreateDirectory(Path.Combine(root, "s"));
+        File.WriteAllText(Path.Combine(root, "s", "SKILL.md"), skillMd);
+        var src = SkillSource.Load(root);
+        return src.Skills.TryGetValue("t", out var info) ? info.Description : null;
+    }
+
+    [Fact]
+    public void SingleLineDescription()
+    {
+        // No regression: a plain single-line description resolves verbatim.
+        var desc = DescOf("---\nname: t\ndescription: hello world\n---\nbody\n");
+        Assert.Equal("hello world", desc);
+    }
+
+    [Fact]
+    public void FoldedBlockScalarJoinsWithSpaces()
+    {
+        // `description: >` folds newlines into spaces — must NOT capture ">".
+        var desc = DescOf("---\nname: t\ndescription: >\n  first line\n  second line\n---\nbody\n");
+        Assert.Equal("first line second line", desc);
+        Assert.DoesNotContain(">", desc);
+    }
+
+    [Fact]
+    public void LiteralBlockScalarPreservesNewlines()
+    {
+        // `description: |` keeps newlines (trailing chomp trimmed by .Trim()).
+        var desc = DescOf("---\nname: t\ndescription: |\n  first line\n  second line\n---\nbody\n");
+        Assert.Equal("first line\nsecond line", desc);
+        Assert.DoesNotContain("|", desc);
+    }
+
+    [Fact]
+    public void EmptyDescriptionDoesNotCrash()
+    {
+        var desc = DescOf("---\nname: t\ndescription:\n---\nbody\n");
+        // Empty scalar → YAML null; not a scalar string, so no description entry.
+        Assert.Null(desc);
+    }
+
+    [Fact]
+    public void MalformedYamlDoesNotCrashDiscovery()
+    {
+        // Broken YAML must fail gracefully: empty frontmatter → skill has no name
+        // → skipped, discovery keeps running (no throw).
+        var root = TempDir();
+        Directory.CreateDirectory(Path.Combine(root, "bad"));
+        File.WriteAllText(Path.Combine(root, "bad", "SKILL.md"),
+            "---\nname: t\ndescription: \"unterminated\n  : : : broken\n\t- nope\n---\nbody\n");
+        // Also drop a valid skill alongside so we can assert discovery survived.
+        Directory.CreateDirectory(Path.Combine(root, "good"));
+        File.WriteAllText(Path.Combine(root, "good", "SKILL.md"),
+            "---\nname: good\ndescription: ok\n---\nbody\n");
+
+        var src = SkillSource.Load(root); // must not throw
+        Assert.True(src.Skills.ContainsKey("good"), "discovery survived the malformed skill");
+    }
+
+    [Fact]
+    public void RealHuddleStyleFoldedDescription()
+    {
+        // A real-world `name: huddle` + `description: >` skill (huddle, reqsume
+        // kernel use this) — the folded text must resolve, not break.
+        var skillMd =
+            "---\n" +
+            "name: huddle\n" +
+            "description: >\n" +
+            "  Runs a repo-aware expert huddle for engineering decisions,\n" +
+            "  planning, research, verification, and spec capture.\n" +
+            "---\n" +
+            "body\n";
+        var root = TempDir();
+        Directory.CreateDirectory(Path.Combine(root, "huddle"));
+        File.WriteAllText(Path.Combine(root, "huddle", "SKILL.md"), skillMd);
+        var src = SkillSource.Load(root);
+
+        Assert.True(src.Skills.ContainsKey("huddle"));
+        Assert.Equal(
+            "Runs a repo-aware expert huddle for engineering decisions, "
+            + "planning, research, verification, and spec capture.",
+            src.Skills["huddle"].Description);
+    }
+
     private static string TempDir()
     {
         var dir = Path.Combine(Path.GetTempPath(), "tnx-skill-" + Guid.NewGuid().ToString("N"));
