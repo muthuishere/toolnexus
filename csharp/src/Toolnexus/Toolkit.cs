@@ -193,7 +193,9 @@ public sealed class Toolkit : IAsyncDisposable
     /// Serve this toolkit as an agent over HTTP. When the <c>a2a</c> profile is present
     /// (inline, or a top-level <c>a2a</c> config block the toolkit was built from), it mounts
     /// the A2A Agent Card (<c>/.well-known/agent-card.json</c>, built from skills) and a
-    /// JSON-RPC endpoint (<c>SendMessage</c> + <c>GetTask</c>) fulfilled by <c>client.Run</c>.
+    /// JSON-RPC endpoint (<c>SendMessage</c> + <c>GetTask</c>) fulfilled by the client. A message's
+    /// A2A <c>contextId</c> keys the conversation via <c>client.Ask</c>, so a peer's turns are
+    /// remembered through the client's <see cref="IConversationStore"/>.
     /// When <c>a2a</c> is absent, no A2A routes are mounted. Returns a stoppable handle.
     /// </summary>
     public Task<ServeHandle> ServeAsync(string addr, ServeOptions opts)
@@ -204,7 +206,11 @@ public sealed class Toolkit : IAsyncDisposable
             addr,
             a2a,
             skills,
-            text => opts.Client.RunAsync(text, this),
+            // A message's A2A contextId keys the conversation via client.Ask, so a peer's turns
+            // are remembered through the client's IConversationStore; no contextId ⇒ stateless run.
+            (text, contextId) => contextId != null
+                ? opts.Client.AskAsync(text, this, contextId)
+                : opts.Client.RunAsync(text, this),
             opts.OnTask);
     }
 

@@ -161,13 +161,19 @@ class Toolkit:
         present (inline, or a top-level ``a2a`` config block the toolkit was built
         from), it mounts the A2A Agent Card (``/.well-known/agent-card.json``, built
         from skills) and a JSON-RPC endpoint (``SendMessage`` + ``GetTask``) fulfilled
-        by ``client.run``. When ``a2a`` is absent, no A2A routes are mounted. Returns a
+        by the client. A message's A2A ``contextId`` keys the conversation via
+        ``client.ask``, so a peer's turns are remembered through the client's
+        ConversationStore. When ``a2a`` is absent, no A2A routes are mounted. Returns a
         stoppable handle.
         """
         cfg = a2a if a2a is not None else self._a2a_config
         skills = list(self._skill.skills.values()) if self._skill is not None else []
 
-        async def run_task(text: str) -> Any:
+        async def run_task(text: str, context_id: Optional[str] = None) -> Any:
+            # contextId keys the conversation via client.ask so a peer's turns are
+            # remembered through the client's ConversationStore; absent ⇒ stateless run.
+            if context_id:
+                return await client.ask(text, self, id=context_id)
             return await client.run(text, self)
 
         return await start_a2a_server(

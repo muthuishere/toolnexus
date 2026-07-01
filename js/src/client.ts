@@ -23,6 +23,32 @@ export interface ClientOptions {
   retryBaseMs?: number
   /** Whole-run deadline in ms; aborts the run (and its in-flight request) when exceeded. */
   timeoutMs?: number
+  /** Conversation provider for `ask(prompt, { id })`. Default: in-memory (process lifetime).
+   * Supply a file/db store to persist conversations across processes. */
+  store?: ConversationStore
+}
+
+/**
+ * Where `ask()` conversations are remembered — two methods. Ship the in-memory
+ * default; implement this for a file/db/redis provider to persist across processes.
+ */
+export interface ConversationStore {
+  /** Return the stored transcript for `id`, or undefined if none. */
+  get(id: string): Promise<any[] | undefined>
+  /** Persist the (updated) transcript for `id`. */
+  save(id: string, messages: any[]): Promise<void>
+}
+
+/** Default conversation provider — keeps transcripts in memory for the client's lifetime. */
+export class InMemoryConversationStore implements ConversationStore {
+  private readonly map = new Map<string, any[]>()
+  async get(id: string): Promise<any[] | undefined> {
+    const m = this.map.get(id)
+    return m ? [...m] : undefined
+  }
+  async save(id: string, messages: any[]): Promise<void> {
+    this.map.set(id, [...messages])
+  }
 }
 
 const RETRYABLE = new Set([429, 500, 502, 503, 504])
@@ -114,12 +140,30 @@ function resolveKey(opts: ClientOptions): string {
 }
 
 export class Client {
-  constructor(private readonly opts: ClientOptions) {}
+  /** Conversation provider for `ask()` — from opts.store, else in-memory. */
+  private readonly store: ConversationStore
+  constructor(private readonly opts: ClientOptions) {
+    this.store = opts.store ?? new InMemoryConversationStore()
+  }
 
   async run(prompt: string, ctx: { toolkit: Toolkit; signal?: AbortSignal; history?: any[] }): Promise<RunResult> {
     return this.opts.style === "anthropic"
       ? this.runAnthropic(prompt, ctx.toolkit, ctx.signal, ctx.history)
       : this.runOpenAI(prompt, ctx.toolkit, ctx.signal, ctx.history)
+  }
+
+  /**
+   * Stateful ask. With an `id`, the client's `store` remembers the conversation:
+   * it loads that id's transcript, runs, saves the updated transcript, and returns
+   * the answer — so the next `ask` with the same `id` continues it. Without an
+   * `id` it is a stateless one-shot (identical to `run`).
+   */
+  async ask(prompt: string, ctx: { toolkit: Toolkit; id?: string; signal?: AbortSignal }): Promise<RunResult> {
+    if (!ctx.id) return this.run(prompt, { toolkit: ctx.toolkit, signal: ctx.signal })
+    const history = (await this.store.get(ctx.id)) ?? []
+    const result = await this.run(prompt, { toolkit: ctx.toolkit, signal: ctx.signal, history })
+    await this.store.save(ctx.id, result.messages)
+    return result
   }
 
   /** A stateful multi-turn conversation that retains history across sends. */

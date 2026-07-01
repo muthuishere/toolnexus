@@ -112,8 +112,10 @@ A2AConfig = dict[str, Any]
 # ev = { "id", "task", "result", "state" }.
 OnTask = Callable[[dict[str, Any]], Union[None, Awaitable[None]]]
 
-# runTask(text) → RunResult — runs one served Task through the client loop.
-RunTask = Callable[[str], Awaitable[Any]]
+# runTask(text, contextId?) → RunResult — runs one served Task through the client
+# loop. ``contextId`` (from the A2A message) keys the conversation so served turns
+# are remembered via the client's ConversationStore.
+RunTask = Callable[..., Awaitable[Any]]
 
 
 class ServeHandle:
@@ -193,6 +195,13 @@ def _message_text(params: Any) -> str:
     )
 
 
+def _message_context_id(params: Any) -> Optional[str]:
+    """Extract the A2A ``contextId`` off a JSON-RPC ``SendMessage`` message, if a str."""
+    msg = params.get("message") if isinstance(params, dict) else None
+    cid = msg.get("contextId") if isinstance(msg, dict) else None
+    return cid if isinstance(cid, str) else None
+
+
 class _ThreadingHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -260,13 +269,17 @@ class _A2AHandler(http.server.BaseHTTPRequestHandler):
         store = srv._store  # type: ignore[attr-defined]
 
         if method == "SendMessage":
-            text = _message_text(rpc.get("params") if isinstance(rpc, dict) else None)
+            params = rpc.get("params") if isinstance(rpc, dict) else None
+            text = _message_text(params)
+            context_id = _message_context_id(params)
             tid = str(uuid.uuid4())
             submitted: A2ATask = {"id": tid, "status": {"state": "submitted"}}
+            if context_id is not None:
+                submitted["contextId"] = context_id
             # Persist submitted, kick fulfilment async, return the id immediately.
             self._await(store.save(submitted))
             self._schedule(
-                _fulfil(tid, text, store, srv._run_task, srv._on_task)  # type: ignore[attr-defined]
+                _fulfil(tid, text, store, srv._run_task, srv._on_task, context_id)  # type: ignore[attr-defined]
             )
             return self._rpc_ok(rid, submitted)
 
@@ -314,6 +327,7 @@ async def _fulfil(
     store: TaskStore,
     run_task: RunTask,
     on_task: Optional[OnTask],
+    context_id: Optional[str] = None,
 ) -> None:
     """Background fulfilment: submitted → working → (completed | failed). Never
     throws — a fulfilment error becomes a ``failed`` Task, keeping the server alive.
@@ -321,7 +335,9 @@ async def _fulfil(
     result: Any = None
     try:
         await store.save({"id": id, "status": {"state": "working"}})
-        result = await run_task(text)
+        # contextId groups a peer's turns into one conversation — thread it so the
+        # client's ConversationStore remembers across tasks in the same context.
+        result = await run_task(text, context_id)
         artifact = {"artifactId": str(uuid.uuid4()), "parts": [{"kind": "text", "text": result.text}]}
         task: A2ATask = {"id": id, "status": {"state": "completed"}, "artifacts": [artifact]}
         state = "completed"

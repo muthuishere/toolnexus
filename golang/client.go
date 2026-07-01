@@ -51,6 +51,10 @@ type ClientOptions struct {
 	// TimeoutMs is the whole-run deadline in ms; when > 0 the run (and its
 	// in-flight request) is aborted once exceeded. 0 ⇒ no deadline.
 	TimeoutMs int
+	// Store is the conversation provider for Ask(prompt, id). Nil ⇒ in-memory
+	// (per-client, process lifetime). Supply a file/db store to persist
+	// conversations across processes. Mirrors js ClientOptions.store.
+	Store ConversationStore
 }
 
 // retryableStatus is the set of HTTP statuses worth retrying. Mirrors js RETRYABLE.
@@ -218,11 +222,18 @@ func addUsage(acc *Usage, raw map[string]any, style string) {
 type Client struct {
 	opts ClientOptions
 	http *http.Client
+	// store is the conversation provider for Ask — from opts.Store, else a fresh
+	// in-memory store.
+	store ConversationStore
 }
 
 // CreateClient builds a Client.
 func CreateClient(opts ClientOptions) *Client {
-	return &Client{opts: opts, http: http.DefaultClient}
+	store := opts.Store
+	if store == nil {
+		store = NewInMemoryConversationStore()
+	}
+	return &Client{opts: opts, http: http.DefaultClient, store: store}
 }
 
 func (c *Client) maxTurns() int {
@@ -347,6 +358,31 @@ func (c *Client) RunWithHistory(ctx context.Context, prompt string, tk *Toolkit,
 		return c.runAnthropic(ctx, prompt, tk, history)
 	}
 	return c.runOpenAI(ctx, prompt, tk, history)
+}
+
+// Ask is the stateful counterpart to Run. With a non-empty id, the client's
+// conversation store remembers the exchange: it loads that id's transcript, runs
+// the loop with it as history, saves the updated RunResult.Messages back under
+// id, and returns the result — so the next Ask with the same id continues the
+// conversation. With an empty id it is a stateless one-shot (identical to Run,
+// the store untouched). Works identically for openai and anthropic. Mirrors js
+// Client.ask and SPEC.md §8.
+func (c *Client) Ask(ctx context.Context, prompt string, tk *Toolkit, id string) (RunResult, error) {
+	if id == "" {
+		return c.Run(ctx, prompt, tk)
+	}
+	history, err := c.store.Get(id)
+	if err != nil {
+		return RunResult{}, err
+	}
+	res, err := c.RunWithHistory(ctx, prompt, tk, history)
+	if err != nil {
+		return res, err
+	}
+	if err := c.store.Save(id, res.Messages); err != nil {
+		return res, err
+	}
+	return res, nil
 }
 
 // sleep waits d, but returns ctx.Err() early if ctx is cancelled/timed out.
@@ -1312,6 +1348,56 @@ func lastText(messages []any) string {
 }
 
 // ---- Conversation memory ----
+
+// ConversationStore is where Ask(prompt, id) conversations are remembered — two
+// methods. Ship InMemoryConversationStore; implement this for a file/db/redis
+// provider to persist across processes. Mirrors js ConversationStore. Get
+// returns a nil slice (like the JS `undefined`) when id has no stored
+// transcript, and an error only on an unexpected failure a custom store wants to
+// surface.
+type ConversationStore interface {
+	// Get returns the stored transcript for id, or nil when none exists.
+	Get(id string) ([]any, error)
+	// Save persists the (updated) transcript for id.
+	Save(id string, messages []any) error
+}
+
+// InMemoryConversationStore is the default conversation provider — it keeps
+// transcripts in memory for the client's lifetime. Safe for concurrent use;
+// copies on get/save so callers can't mutate stored slices. Mirrors js
+// InMemoryConversationStore.
+type InMemoryConversationStore struct {
+	mu   sync.Mutex
+	msgs map[string][]any
+}
+
+// NewInMemoryConversationStore builds an empty in-memory conversation store.
+func NewInMemoryConversationStore() *InMemoryConversationStore {
+	return &InMemoryConversationStore{msgs: map[string][]any{}}
+}
+
+// Get returns a copy of the stored transcript for id, or (nil, nil) when absent.
+func (s *InMemoryConversationStore) Get(id string) ([]any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.msgs[id]
+	if !ok {
+		return nil, nil
+	}
+	clone := make([]any, len(m))
+	copy(clone, m)
+	return clone, nil
+}
+
+// Save stores a copy of the transcript under id.
+func (s *InMemoryConversationStore) Save(id string, messages []any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clone := make([]any, len(messages))
+	copy(clone, messages)
+	s.msgs[id] = clone
+	return nil
+}
 
 // Conversation is a stateful multi-turn conversation: each Send continues the
 // same transcript (memory). Mirrors js Conversation. Not safe for concurrent

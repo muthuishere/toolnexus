@@ -620,10 +620,27 @@ HTTP request, so a timeout or external cancel aborts the in-flight call. Aborts 
 ### Conversation memory
 
 `run(prompt, { toolkit, history })` accepts a prior transcript and continues it; `RunResult.messages`
-is the full updated transcript to pass back next turn. `client.conversation({ toolkit })` wraps this
-as a stateful object: `convo.send(prompt)` retains history across calls (system prompt added once on
-the first turn), `convo.messages` is the transcript, `convo.reset()` clears it. Each language exposes
-the idiomatic equivalent (a Conversation/Session object).
+is the full updated transcript to pass back next turn (the low-level, stateless primitive).
+`client.conversation({ toolkit })` wraps this as a stateful object: `convo.send(prompt)` retains
+history across calls, `convo.messages` is the transcript, `convo.reset()` clears it.
+
+**`ask` + `ConversationStore` (the durable path).** The client takes a conversation **provider** at
+construction — `createClient({ ..., store })`, defaulting to an **in-memory store** (per-client,
+process lifetime). A `ConversationStore` is two methods: `get(id) -> messages | undefined` and
+`save(id, messages)` — implement it for a file/db/redis provider to persist across processes.
+
+`client.ask(prompt, { toolkit, id? })`:
+- **with `id`** — loads that id's transcript from the store, `run`s the loop with it as `history`,
+  `save`s the updated `RunResult.messages` back under `id`, and returns the `RunResult`. So the next
+  `ask` with the same `id` continues the conversation. Works identically for `openai` and `anthropic`.
+- **without `id`** — a stateless one-shot, identical to `run` (the store is untouched).
+
+**A2A serve uses the same store.** The inbound `serve` (§7B) fulfils each `SendMessage` via
+`ask(text, { toolkit, id: <message.contextId> })` when the message carries an A2A `contextId`, so a
+peer's turns are remembered through the client's `ConversationStore`; no `contextId` ⇒ stateless `run`.
+
+Each language exposes the idiomatic equivalent (a `ConversationStore` interface + an in-memory default
++ `ask`).
 
 ---
 

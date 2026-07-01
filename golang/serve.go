@@ -307,10 +307,13 @@ func BuildAgentCard(cfg *A2AConfig, skills []SkillInfo, url string) servedAgentC
 // startServerOptions is the internal config for startA2AServer (Toolkit.Serve
 // delegates here).
 type startServerOptions struct {
-	addr    string
-	a2a     *A2AConfig
-	skills  []SkillInfo
-	runTask func(text string) (RunResult, error)
+	addr   string
+	a2a    *A2AConfig
+	skills []SkillInfo
+	// runTask runs one served Task through the client loop. contextId (from the
+	// A2A message) keys the conversation so served turns are remembered via the
+	// store; an empty contextId is a stateless run.
+	runTask func(text, contextID string) (RunResult, error)
 	onTask  OnTask
 }
 
@@ -349,6 +352,20 @@ func messageText(params json.RawMessage) string {
 		}
 	}
 	return b.String()
+}
+
+// messageContextID extracts a SendMessage message's A2A contextId, or "" when
+// absent. contextId groups a peer's turns into one remembered conversation.
+func messageContextID(params json.RawMessage) string {
+	var p struct {
+		Message struct {
+			ContextID string `json:"contextId"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return ""
+	}
+	return p.Message.ContextID
 }
 
 // startA2AServer starts the HTTP server. Delegated to by Toolkit.Serve. When a2a
@@ -412,11 +429,12 @@ func startA2AServer(opts startServerOptions) (*ServeHandle, error) {
 			switch rpc.Method {
 			case "SendMessage":
 				text := messageText(rpc.Params)
+				contextID := messageContextID(rpc.Params)
 				id := uuid.NewString()
-				submitted := A2ATask{ID: id, Status: A2ATaskStatus{State: "submitted"}}
+				submitted := A2ATask{ID: id, ContextID: contextID, Status: A2ATaskStatus{State: "submitted"}}
 				// Persist submitted, kick fulfilment async, return the id now.
 				_ = store.Save(submitted)
-				go fulfil(id, text, store, opts.runTask, opts.onTask)
+				go fulfil(id, text, contextID, store, opts.runTask, opts.onTask)
 				rpcOK(w, rpc.ID, submitted)
 			case "GetTask":
 				var p struct {
@@ -449,9 +467,9 @@ func startA2AServer(opts startServerOptions) (*ServeHandle, error) {
 // It never crashes the server — a fulfilment error (or panic) becomes a failed
 // Task. Mirrors the JS fulfil().
 func fulfil(
-	id, text string,
+	id, text, contextID string,
 	store TaskStore,
-	runTask func(text string) (RunResult, error),
+	runTask func(text, contextID string) (RunResult, error),
 	onTask OnTask,
 ) {
 	// A panic in the client loop must never crash the process.
@@ -462,7 +480,9 @@ func fulfil(
 	var state string
 
 	_ = store.Save(A2ATask{ID: id, Status: A2ATaskStatus{State: "working"}})
-	rr, err := runTask(text)
+	// contextId groups a peer's turns into one conversation — thread it so the
+	// client's ConversationStore remembers across tasks in the same context.
+	rr, err := runTask(text, contextID)
 	if err != nil {
 		detail := err.Error()
 		task = A2ATask{

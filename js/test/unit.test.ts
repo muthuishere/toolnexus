@@ -21,6 +21,7 @@ import {
   toGemini,
   createToolkit,
   createClient,
+  type ConversationStore,
   createBuiltinTools,
   builtinsEnabled,
   agent,
@@ -177,6 +178,106 @@ test("client: retries on 503 then succeeds (backoff)", async () => {
   assert.equal(hits, 3, "two 503s retried, third succeeded")
   await tk.close()
   server.close()
+})
+
+test("client: ask remembers by id via the conversation store", async () => {
+  // mock LLM whose reply is the number of messages it received → proves history is loaded
+  const server = http.createServer((req, res) => {
+    let body = ""
+    req.on("data", (c) => (body += c))
+    req.on("end", () => {
+      const msg = JSON.parse(body)
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({
+        choices: [{ message: { content: String(msg.messages.length) } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }))
+    })
+  })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({ builtins: false })
+  const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "x", apiKey: "k" })
+
+  const solo = await client.ask("hi", { toolkit: tk })
+  assert.equal(solo.text, "1", "no id ⇒ stateless one-shot (just the user turn)")
+
+  const a = await client.ask("first", { toolkit: tk, id: "c1" })
+  assert.equal(a.text, "1", "first turn: 1 message")
+  const b = await client.ask("second", { toolkit: tk, id: "c1" })
+  assert.equal(b.text, "3", "same id remembers: user+assistant+user = 3")
+
+  const c = await client.ask("other", { toolkit: tk, id: "c2" })
+  assert.equal(c.text, "1", "a different id is an independent conversation")
+
+  await tk.close()
+  server.close()
+})
+
+test("client: custom ConversationStore provider is used (get/save)", async () => {
+  const calls: string[] = []
+  const backing = new Map<string, any[]>()
+  const store: ConversationStore = {
+    async get(id) { calls.push(`get:${id}`); return backing.get(id) },
+    async save(id, messages) { calls.push(`save:${id}`); backing.set(id, messages) },
+  }
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" })
+    res.end(JSON.stringify({ choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+  })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({ builtins: false })
+  const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "x", apiKey: "k", store })
+  await client.ask("hi", { toolkit: tk, id: "u1" })
+  assert.deepEqual(calls, ["get:u1", "save:u1"], "custom store: get then save")
+  assert.ok(backing.has("u1"), "custom store persisted the transcript")
+  await tk.close()
+  server.close()
+})
+
+test("a2a serve: remembers a peer's turns by contextId (ask + store)", async () => {
+  // mock LLM whose reply is the number of messages it received → proves memory
+  const llm = http.createServer((req, res) => {
+    let body = ""
+    req.on("data", (c) => (body += c))
+    req.on("end", () => {
+      const msg = JSON.parse(body)
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ choices: [{ message: { content: String(msg.messages.length) } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+    })
+  })
+  await new Promise<void>((r) => llm.listen(0, r))
+  const llmPort = (llm.address() as any).port
+  // no skills ⇒ no system-prompt message, so counts are exactly the turns
+  const tk = await createToolkit({ builtins: false })
+  const client = createClient({ baseUrl: `http://127.0.0.1:${llmPort}`, style: "openai", model: "x", apiKey: "k" })
+  const handle = await tk.serve("127.0.0.1:0", { client, a2a: { name: "mem-desk" } })
+
+  const rpc = async (method: string, params: any) => {
+    const r = await fetch(handle.url + "/", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) })
+    return ((await r.json()) as any).result
+  }
+  const send = async (text: string, contextId: string) => {
+    const task = await rpc("SendMessage", { message: { role: "user", contextId, parts: [{ kind: "text", text }] } })
+    for (let i = 0; i < 100; i++) {
+      const t = await rpc("GetTask", { id: task.id })
+      if (t.status.state === "completed" || t.status.state === "failed") return t
+      await new Promise((r) => setTimeout(r, 10))
+    }
+    throw new Error("timeout")
+  }
+
+  const t1 = await send("first", "ctxA")
+  assert.equal(t1.artifacts[0].parts[0].text, "1", "first served turn: 1 message")
+  const t2 = await send("second", "ctxA")
+  assert.equal(t2.artifacts[0].parts[0].text, "3", "same contextId remembers: user+assistant+user = 3")
+  const t3 = await send("other", "ctxB")
+  assert.equal(t3.artifacts[0].parts[0].text, "1", "a different contextId is independent")
+
+  await handle.stop()
+  await tk.close()
+  llm.close()
 })
 
 test("client: anthropic style — tool_use loop, headers, usage (mock)", async () => {

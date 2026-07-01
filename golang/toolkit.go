@@ -185,9 +185,11 @@ func (tk *Toolkit) AddAgent(ctx context.Context, agentOrCardURL any, opts *Agent
 // Serve exposes this toolkit as an agent over HTTP. When the A2A profile is
 // present (ServeOptions.A2A, or a top-level `a2a` config block the toolkit was
 // built from), it mounts the A2A Agent Card (/.well-known/agent-card.json, built
-// from skills) and a JSON-RPC endpoint (SendMessage + GetTask) fulfilled by
-// opts.Client.Run. When A2A is absent, no A2A routes are mounted. Returns a
-// stoppable handle. Mirrors js Toolkit.serve and SPEC §7B.
+// from skills) and a JSON-RPC endpoint (SendMessage + GetTask) fulfilled by the
+// client. A message's A2A contextId keys the conversation via Client.Ask, so a
+// peer's turns are remembered through the client's ConversationStore; no
+// contextId ⇒ a stateless Run. When A2A is absent, no A2A routes are mounted.
+// Returns a stoppable handle. Mirrors js Toolkit.serve and SPEC §7B / §8.
 func (tk *Toolkit) Serve(addr string, opts ServeOptions) (*ServeHandle, error) {
 	a2a := opts.A2A
 	if a2a == nil {
@@ -204,7 +206,13 @@ func (tk *Toolkit) Serve(addr string, opts ServeOptions) (*ServeHandle, error) {
 		addr:   addr,
 		a2a:    a2a,
 		skills: skills,
-		runTask: func(text string) (RunResult, error) {
+		runTask: func(text, contextID string) (RunResult, error) {
+			// A message's A2A contextId keys the conversation via Client.Ask, so a
+			// peer's turns are remembered through the client's ConversationStore; no
+			// contextId ⇒ a stateless Run.
+			if contextID != "" {
+				return client.Ask(context.Background(), text, tk, contextID)
+			}
 			return client.Run(context.Background(), text, tk)
 		},
 		onTask: opts.OnTask,
