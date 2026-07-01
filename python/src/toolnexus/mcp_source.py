@@ -89,16 +89,15 @@ def parse_mcp_config(input: str | dict[str, Any]) -> McpConfig:
             raw: dict[str, Any] = json.load(f)
     else:
         raw = dict(input)
-    servers = (
-        raw.get("mcpServers")
-        if "mcpServers" in raw
-        else raw.get("servers")
-        if "servers" in raw
-        else raw.get("mcp")
-        if "mcp" in raw
-        else raw
-    )
-    return servers  # type: ignore[return-value]
+    if "mcpServers" in raw:
+        return raw["mcpServers"]  # type: ignore[return-value]
+    if "servers" in raw:
+        return raw["servers"]  # type: ignore[return-value]
+    if "mcp" in raw:
+        return raw["mcp"]  # type: ignore[return-value]
+    # Bare map of servers — but strip sibling top-level config keys (builtins/agents/
+    # a2a) so they are not mistaken for MCP servers when no wrapper key is present.
+    return {k: v for k, v in raw.items() if k not in ("builtins", "agents", "a2a")}
 
 
 def _is_text_content(item: Any) -> bool:

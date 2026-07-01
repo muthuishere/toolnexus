@@ -99,6 +99,82 @@ var res = await tk.ExecuteAsync(name, args);   // -> ToolResult(Output, IsError,
 
 All four appear as one uniform `ITool` in `tk.Tools()`.
 
+## Built-in tools
+
+A fifth source ships **10 built-in tools** — `bash`, `read`, `write`, `edit`, `grep`, `glob`,
+`webfetch`, `question`, `apply_patch`, `todowrite` (names + input schemas match
+opencode) — so an agent can act with zero wiring. They appear in the tool schema
+(`ToOpenAI()`/`ToAnthropic()`/`ToGemini()`), like MCP tools — not the system prompt.
+
+**On by default.** One global toggle turns the whole source off, or a per-tool `tools` map
+disables individual builtins on the all-on baseline:
+
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options()
+    .WithMcpConfig("./mcp.json")
+    .WithBuiltins(false));   // also accepts a Dictionary with "disabled"/"enabled"
+
+// per-tool: drop bash, keep the other nine (unknown names ignored; whole-source-off still wins)
+await using var tk2 = await Toolkit.CreateAsync(new Toolkit.Options()
+    .WithMcpConfig("./mcp.json")
+    .WithBuiltins(new Dictionary<string, object?>
+    {
+        ["tools"] = new Dictionary<string, object?> { ["bash"] = false },
+    }));
+```
+
+`bash`/`write`/`edit`/`apply_patch` run commands and mutate the filesystem — these switches are
+the off-switch for locked-down hosts.
+
+## A2A agents (agent-to-agent)
+
+Call **remote A2A agents** (each of their skills becomes a tool) and serve your own toolkit as an
+agent other A2A peers can call. A genuine, minimal subset of real A2A (JSON-RPC 2.0; Agent Card at
+`/.well-known/agent-card.json`; `SendMessage` → poll `GetTask`). No streaming / push / auth in v1.
+
+**Outbound — call a remote agent.** Each advertised skill becomes a tool named `<agent>_<skill>`
+(source `"a2a"`):
+
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options()
+    .WithAgents(new Agent { Card = "https://researcher.example.com/.well-known/agent-card.json" }));
+
+// or add one at runtime (an Agent, or a bare card URL):
+await tk.AddAgentAsync("https://writer.example.com/.well-known/agent-card.json");
+```
+
+`new Agent { Card, Headers?, Timeout?, PollEvery? }` — `Headers` support `${ENV}` expansion (never
+logged); `Timeout` / `PollEvery` are milliseconds (300000 / 1000 defaults). A config file can also
+carry an `agents` block (mirrors `mcpServers`). A failing agent is isolated — contributes no tools,
+never fatal.
+
+**Inbound — serve your toolkit as an agent.** The Agent Card is built from your **SKILL.md skills**
+(never raw tools):
+
+```csharp
+var agent = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai", Model = "openai/gpt-4o-mini",
+});
+
+var handle = await tk.ServeAsync("127.0.0.1:0", new Toolkit.ServeOptions
+{
+    Client = agent,
+    A2A = new A2AConfig
+    {
+        Name = "research-agent",
+        Description = "Answers research questions.",
+        // Skills = new List<string> { "hello-world" }, // subset of skills to advertise; null ⇒ all
+        Store = "memory",                                // "memory" (default) | "file:<dir>" | a custom ITaskStore
+    },
+});
+Console.WriteLine(handle.Url);   // GET /.well-known/agent-card.json ; POST / (SendMessage / GetTask)
+await handle.StopAsync();
+```
+
+`ServeAsync(addr, ServeOptions)` fulfils each inbound `SendMessage` task via `client.Run`. Task
+persistence is a pluggable `ITaskStore` — in-memory default, `"file:<dir>"`, or your own.
+
 ## API
 
 | Member | Description |

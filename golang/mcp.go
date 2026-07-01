@@ -110,8 +110,18 @@ func parseMcpBytes(data []byte) (McpConfig, error) {
 			return cfg, nil
 		}
 	}
+	// Bare map of servers — but strip the reserved sibling config keys
+	// (builtins §4A, agents §7A, a2a §7B) so they are not mistaken for MCP servers when
+	// no wrapper key is present.
+	delete(raw, "builtins")
+	delete(raw, "agents")
+	delete(raw, "a2a")
+	stripped, err := json.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse mcp config: %w", err)
+	}
 	var cfg McpConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	if err := json.Unmarshal(stripped, &cfg); err != nil {
 		return nil, fmt.Errorf("parse mcp config: %w", err)
 	}
 	return cfg, nil

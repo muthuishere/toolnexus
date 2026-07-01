@@ -60,7 +60,8 @@ A new language port is "correct" iff these hold. Run it against the shared
    </skill_files>
    </skill_content>
    ```
-   `skillsPrompt()` = `## Available Skills\n- **name**: description` (sorted, described only).
+   `skillsPrompt()` (when ≥1 described skill) = the instruction preamble (§3) + `\n\n` +
+   `## Available Skills\n- **name**: description` (sorted, described only); empty/"no skills" otherwise.
 7. **Adapters** (schema only): OpenAI `{type:"function",function:{name,description,parameters}}` ·
    Anthropic `{name,description,input_schema}` · Gemini `[{functionDeclarations:[{name,description,parameters}]}]`.
 8. **native** tool (`source:"native"`): fn→Tool; string return⇒output, throw/err⇒isError.
@@ -68,6 +69,12 @@ A new language port is "correct" iff these hold. Run it against the shared
    non-2xx⇒`HTTP <status>: <body>` isError, else body text.
 10. **Unified client**: `{baseUrl,style:"openai"|"anthropic",model,apiKey?}`; system = systemPrompt+`\n\n`+skillsPrompt();
     loop call→execute tool calls→feed back (provider's tool-result shape)→repeat to maxTurns(10).
+11. **Built-in tools** (`source:"builtin"`): the default toolset — `bash, read, write, edit, grep, glob,
+    webfetch, question, apply_patch, todowrite` — names + input schemas per §4A. **On by default**;
+    global toggle (`builtins:false` | `builtins.disabled:true` | `builtins.enabled:false` ⇒ whole source off, MCP
+    precedence). **Per-tool** override via `builtins.tools` (a name→bool map on the all-on baseline: `{bash:false}` drops
+    `bash`, `{...:true}` keeps it on). Global-off short-circuits the map. Surfaced via the tool-schema array only
+    (like MCP) — **not** the system prompt.
 
 That's it. The sections below just expand each point with wire-format detail.
 
@@ -141,6 +148,12 @@ Superset of the Claude-desktop / opencode format. The top-level key may be
 Type inference when `type` is omitted: presence of `url` ⇒ `remote`, presence of
 `command` ⇒ `local`.
 
+**Reserved sibling keys:** when no `mcpServers`/`servers`/`mcp` wrapper is present and the object is
+used as the raw server map, the parser MUST ignore the reserved top-level keys **`builtins`** (§4A),
+**`agents`** (§7A, outbound), and **`a2a`** (§7B, inbound card config) — they are sibling config
+sections, not MCP servers. (Without this, a config file that carries only a `builtins` toggle, an
+`agents` block, or an `a2a` card block would produce a bogus MCP server.)
+
 ### Behaviour (mirrors opencode `mcp/index.ts` + `mcp/catalog.ts`)
 
 - **local** → connect over **stdio** (spawn `command[0]` with `command[1:]`, merged
@@ -173,7 +186,11 @@ Type inference when `type` is omitted: presence of `url` ⇒ `remote`, presence 
 
 ### Discovery (mirrors opencode `skill/index.ts`)
 
-- Recursively glob `**/SKILL.md` under the given skills dir(s).
+- Recursively glob `**/SKILL.md` under the given skills dir(s). Discovery **follows symlinked
+  directories and symlinked `SKILL.md` files** (matching opencode's `symlink: true` glob), so a
+  skills root that symlinks to out-of-tree skills still discovers them. Symlink cycles are guarded by
+  tracking resolved real paths already visited. The sibling-file sampler (§ the `skill` tool) follows
+  symlinks the same way.
 - Parse YAML frontmatter; require `name` (string), optional `description`
   (string). Body after frontmatter = `content`.
 - Skill `Info { name, description, location (abs path to SKILL.md), content }`.
@@ -215,13 +232,21 @@ Note: file list is sampled.
 ### System-prompt helper
 
 `skillsPrompt()` returns the markdown catalog to inject into the system prompt so
-the model knows which skills exist (mirrors opencode `Skill.fmt`):
+the model knows which skills exist (mirrors opencode `Skill.fmt` + `SystemPrompt.skills`).
+When ≥1 described skill exists, it begins with a fixed **instruction preamble** (byte-identical
+across all four ports) telling the model to load a skill via the `skill` tool, then the list:
 
 ```
+Skills provide specialized instructions and workflows for specific tasks.
+Use the skill tool to load a skill when a task matches its description.
+
 ## Available Skills
 - **name**: description
 - ...
 ```
+
+When no described skill exists, the output is the existing empty/"No skills are currently
+available." result with **no** preamble.
 
 ### skill.txt (loader description, verbatim from opencode)
 
@@ -242,10 +267,12 @@ createToolkit({
   mcpConfig?:  string | object,   // path to config file OR parsed object
   skillsDir?:  string | string[], // one or more skill roots
   extraTools?: Tool[],            // your own custom tools
+  builtins?:   boolean | object,  // built-in tools (§4A); default ON. false|{disabled:true}|{enabled:false} ⇒ off;
+                                  //   {tools:{bash:false,...}} ⇒ per-tool disable on the all-on baseline
 }) -> Toolkit
 
 Toolkit {
-  tools()              -> Tool[]                 // mcp tools + skill tool + extras
+  tools()              -> Tool[]                 // mcp tools + skill tool + builtin tools + extras
   get(name)            -> Tool | undefined
   execute(name, args, ctx?) -> ToolResult        // routes to the right tool
   skillsPrompt()       -> string                 // system-prompt catalog
@@ -272,6 +299,59 @@ the toolkit alongside the dynamic MCP tools, so the same toolkit drives any LLM.
 The execution loop is identical for every provider: read the tool name + args the
 model returned → `toolkit.execute(name, args)` → feed `output` back as the tool
 result message.
+
+### Assembly order & builtin toggle
+
+`tools()` assembles deterministically: (1) drop any builtin whose name a host `extraTools` entry
+provides — so a host can shadow a builtin (e.g. a sandboxed `bash`); (2) concatenate the remaining
+sources in the order **MCP → skill → builtin → extraTools**; (3) dedupe by name, **first wins** (this
+governs the other pairs — MCP beats skill beats builtin). Net effect: MCP > skill > builtin for their
+own collisions, and `extraTools` > builtin for a shared name. The builtin
+source is **on by default**. The `builtins` option (or a top-level `builtins` key in a parsed config
+object) controls it at two levels:
+- **Whole source** — `builtins:false`, `{disabled:true}`, or `{enabled:false}` turns the entire source
+  off (MCP precedence: `disabled:true` wins, else `enabled:false` disables, else on).
+- **Per tool** — `builtins.tools` is a name→bool map applied on the all-on baseline: a tool mapped to
+  `false` is dropped, `true` (or absent) stays on. Unknown names are ignored. A whole-source-off
+  short-circuits and the map is not consulted.
+
+Builtin tools reach the model **only** through `toOpenAI()/toAnthropic()/toGemini()` (like MCP tools);
+nothing about them is added to the system prompt.
+
+---
+
+## 4A. Built-in tools (source: "builtin")
+
+The default toolset toolnexus ships so an agent can act with zero custom wiring — opencode's
+built-ins, ported with **identical tool names and input schemas** across all four ports. Every tool
+here has `source:"builtin"` and obeys the uniform `Tool`/`ToolResult` contract (§1): a failure is a
+`ToolResult{isError:true, output:<message>}`, never a thrown exception across the boundary. Paths are
+resolved relative to the process working directory unless absolute. Implementations are **native per
+runtime** (child-process / fs / HTTP of each language) — same behavior, idiomatic shape.
+
+The ten tools (`skill` is its own source, §3, and is not part of this set):
+
+| name | inputSchema (required unless `?`) | behavior |
+|------|-----------------------------------|----------|
+| `bash` | `command:string`, `workdir?:string`, `timeout?:number(ms,default 60000)`, `description?:string` | Run one shell command via the runtime's process API in `workdir` (default cwd). Output = combined stdout+stderr. Non-zero exit ⇒ `isError:true`, output includes the exit code. Timeout kills the child ⇒ `isError:true`. |
+| `read` | `path:string`, `offset?:number(1-based line)`, `limit?:number(lines)` | Read a UTF-8 text file. With `offset`/`limit`, return that line window. Missing file ⇒ `isError:true`. |
+| `write` | `path:string`, `content:string` | Write `content` to `path` (create/overwrite), creating parent dirs. Output = confirmation w/ byte count. |
+| `edit` | `path:string`, `oldString:string`, `newString:string`, `replaceAll?:boolean` | Exact-string replace in `path`. Default replaces the single occurrence; `oldString` absent OR (without `replaceAll`) non-unique ⇒ `isError:true`. `replaceAll:true` replaces all. |
+| `grep` | `pattern:string(regex)`, `path?:string(dir,default cwd)`, `include?:string(glob)`, `limit?:number` | Search file contents by regex under `path`, optionally filtered by `include` glob. Output = `file:line:text` matches, capped at `limit` (default 100). |
+| `glob` | `pattern:string`, `path?:string(dir,default cwd)`, `limit?:number` | List files matching the glob under `path`. Output = newline-joined relative paths, capped at `limit` (default 100). |
+| `webfetch` | `url:string`, `format?:"text"\|"markdown"\|"html"(default markdown)`, `timeout?:number(s,default 30)` | HTTP GET `url`; return body as text/markdown/html. Non-2xx ⇒ `isError:true` w/ `HTTP <status>`. |
+| `question` | `questions:array` (each `{ question:string, header?:string, options?:string[], multiple?:boolean }`) | Non-interactive in the headless loop: returns `ToolResult{isError:false, output:<JSON of questions>, metadata:{questions}}` for the host to answer. |
+| `apply_patch` | `patchText:string` | Apply one patch using opencode's grammar: `*** Begin Patch` / `*** Add File: p` / `*** Update File: p` / `*** Delete File: p` / `*** End Patch`, with `+`/`-`/context lines. Applies add/update/delete atomically; a hunk that doesn't match ⇒ `isError:true` and no partial write. |
+| `todowrite` | `todos:array` (each `{ id:string, text:string, completed:boolean }`) | Replace the session todo list with `todos`. Output = the rendered list. Stateless across processes in v1 (echoes back the list). |
+
+Enable/disable (§4 assembly): the whole source is gated by the `builtins` toggle (`false` /
+`{disabled:true}` / `{enabled:false}` ⇒ none of the ten appear anywhere). Individual tools are
+gated by `builtins.tools` — a name→bool map on the all-on baseline (`{tools:{bash:false,write:false}}`
+drops those two, the rest stay). Whole-source-off wins over the map.
+
+Safety: `bash`, `write`, `edit`, `apply_patch` execute commands / mutate the filesystem. Command
+output and `${ENV}`-expanded values are **never logged**; no secret value is written into any spec,
+test, or example fixture. The global toggle is the supported off-switch for locked-down hosts.
 
 ---
 
@@ -350,6 +430,90 @@ Behaviour:
 returns one `httpTool` per operation (operationId = tool name, parameters/requestBody →
 inputSchema). The single-endpoint `httpTool` is the required core; OpenAPI import may
 land as a follow-up.
+
+---
+
+## 7A. A2A agents — outbound (source: "a2a")
+
+Call remote **A2A agents** and expose their skills as tools. A genuine, minimal **subset of real A2A**
+(JSON-RPC 2.0; verified against the `a2a-python` SDK): the Agent Card lives at
+`/.well-known/agent-card.json`, the wire is JSON-RPC over one HTTP POST, and we use the
+**submit→poll** methods `SendMessage` + `GetTask`. No streaming / push / gRPC / auth in core.
+
+```
+agent({ card, headers?, timeout?, pollEvery? }) -> Agent   // card = Agent Card URL
+createToolkit({ agents: [a1, a2] })                        // array of Agent objects (like extraTools)
+toolkit.addAgent(agentOrCardUrl, opts?)                    // async, runtime add (register()s the tools)
+// config-file `agents` block (mirrors mcpServers): { "<id>": { card, headers?, timeout?, pollEvery?, enabled?/disabled? } }
+```
+Defaults: `timeout` 300000ms, `pollEvery` 1000ms. `headers` support `${ENV}` expansion, never logged.
+`enabled`/`disabled` use MCP `isEnabled` precedence. The config key is only an identifier — the tool
+prefix comes from the fetched card's `name`.
+
+**Resolve** = `GET <card>` → `AgentCard { name, description, version, protocolVersion,
+capabilities:{streaming,pushNotifications}, defaultInputModes, defaultOutputModes,
+skills:[{id,name,description,tags?,examples?}], url }`. For each skill emit a Tool: name =
+`sanitize(card.name) + "_" + sanitize(skill.id ?? skill.name)`, `source:"a2a"`, inputSchema
+`{type:"object", properties:{task:{type:"string"}}, required:["task"]}` (JSON-RPC endpoint = `card.url`,
+fallback = card URL origin). A failing agent is isolated (logged, no tools), never fatal — like MCP.
+
+**execute(args, ctx)** — one **`SendMessage`** then poll **`GetTask`**:
+```
+POST card.url  {"jsonrpc":"2.0","id":<uuid>,"method":"SendMessage",
+  "params":{"message":{"role":"user","messageId":<uuid>,"parts":[{"kind":"text","text":<task>}]},
+            "configuration":{"blocking":false}}}                     → result Task {id, status:{state}}
+POST card.url  {"jsonrpc":"2.0","id":<uuid>,"method":"GetTask","params":{"id":<taskId>}}  (every pollEvery)
+```
+Poll loop: check abort → check timeout → sleep(pollEvery) → check abort → `GetTask`, until a terminal
+state. **TaskState**: `submitted|working|completed|failed|canceled` (terminal = completed/failed/canceled).
+Map: `completed` ⇒ `ToolResult{isError:false, output:` all `kind:"text"` parts across `artifacts[].parts[]`
+joined by `"\n"` (fallback: last `role:"agent"` history message text) `}`; `failed`/`canceled` ⇒
+`isError:true, "A2A task <id> <state>[: <status.message text>]"`; timeout ⇒
+`isError:true, "A2A task <id> timed out after <ms>ms (state=<state>)"`; `ctx` abort ⇒ stop before the
+next `GetTask`, `"A2A task <id> canceled"`. `metadata` on every result = `{agent, taskId, state, polls, ms}`.
+Reuses httpTool's `${ENV}` header expansion + timeout + non-2xx mapping. Method names are the literal
+strings `SendMessage`/`GetTask`.
+
+---
+
+## 7B. A2A agents — inbound (`serve`)
+
+Expose a toolkit as an A2A agent so real A2A peers can call it. `serve` is generic (protocol-neutral);
+**A2A is an opt-in profile** via the `a2a` option (or a top-level `a2a` config block — a reserved key,
+§2). No streaming / push / auth in core.
+
+```
+toolkit.serve(addr, { client, a2a?, onTask? }) -> ServeHandle { url, stop() }   // close() aliases stop()
+A2AConfig = { name?, description?, version?, provider?:{organization,url}, skills?: string[], store? }
+```
+When `a2a` is absent, no A2A routes mount (every request 404s). When present, mount:
+
+- **`GET /.well-known/agent-card.json`** → an Agent Card:
+  ```json
+  { "name":"...", "description":"", "version":"0.1.0", "protocolVersion":"0.3.0",
+    "capabilities":{"streaming":false,"pushNotifications":false},
+    "defaultInputModes":["text"], "defaultOutputModes":["text"],
+    "skills":[{"id":"<skill>","name":"<skill>","description":"<SKILL.md desc>"}], "url":"<base>/" }
+  ```
+  `skills[]` come from the toolkit's SkillSource (`id=name=`SKILL.md name), filtered to `a2a.skills`
+  if given — **never raw tools**. `provider` included only when configured. Defaults when omitted:
+  `name:"toolnexus-agent"`, `description:""`, `version:"0.1.0"`, `protocolVersion:"0.3.0"`,
+  `capabilities.streaming:false`. `url` = base + `/` (the JSON-RPC POST endpoint).
+- **`POST /`** JSON-RPC 2.0 (`{jsonrpc:"2.0", id, method, params}`):
+  - **`SendMessage`** (`params.message.parts[].text` = the task) → create Task `{id:<uuid>,
+    status:{state:"submitted"}}`, `save` to the store, **return it immediately**, and run fulfilment
+    **async**: save `working` → `client.run(<task text>, {toolkit})` → on success save `completed` with
+    `artifacts:[{artifactId:<uuid>, parts:[{kind:"text", text: runResult.text}]}]`; on throw save
+    `failed` with `status.message={role:"agent", parts:[{kind:"text", text:<error>}]}`. A fulfilment
+    error never crashes the server.
+  - **`GetTask`** (`params.id`) → the current Task; unknown id → JSON-RPC `error {code:-32001}`.
+  - Unknown method → `-32601`; parse error → `-32700`.
+- **`onTask({ id, skill?, task, result?, state })`** fires on a terminal state with the `RunResult`
+  telemetry (tokens, tool count, turns).
+
+**TaskStore** (pluggable persistence): `get(id) -> Task|undefined`, `save(task)`. `resolveStore(store?)`:
+`undefined`|`"memory"` ⇒ in-memory (default); `"file:<dir>"` ⇒ file store (one `<id>.json` per task);
+an object ⇒ used as-is. All Task reads/writes go through the store.
 
 ---
 

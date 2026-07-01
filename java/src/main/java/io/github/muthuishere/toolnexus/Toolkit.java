@@ -1,9 +1,11 @@
 package io.github.muthuishere.toolnexus;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Toolkit — aggregates dynamic MCP tools + the skill tool + custom/native/http
@@ -13,6 +15,8 @@ import java.util.Map;
 public final class Toolkit implements AutoCloseable {
     private final McpSource mcp;       // may be null
     private final SkillSource skill;   // may be null
+    /** A2A profile read from a top-level {@code a2a} config block; {@link #serve} falls back to this. */
+    private final A2AServer.A2AConfig a2aConfig; // may be null
     private final Map<String, Tool> byName = new LinkedHashMap<>();
 
     public static final class Options {
@@ -20,6 +24,10 @@ public final class Toolkit implements AutoCloseable {
         public List<String> skillsDir;      // one or more skill roots
         public List<Tool> extraTools;       // custom/native/http tools
         public List<Object> annotatedObjects; // objects scanned via Tools.fromObject
+        /** Built-in tools (§4A). On by default. false | {disabled:true} | {enabled:false} => off. */
+        public Object builtins;
+        /** Remote A2A agents — each advertised skill becomes a tool (source:"a2a"). */
+        public List<A2A.Agent> agents;
 
         public Options mcpConfig(Object v) { this.mcpConfig = v; return this; }
         public Options skillsDir(String... v) { this.skillsDir = List.of(v); return this; }
@@ -27,15 +35,29 @@ public final class Toolkit implements AutoCloseable {
         public Options extraTools(List<Tool> v) { this.extraTools = v; return this; }
         public Options extraTools(Tool... v) { this.extraTools = List.of(v); return this; }
         public Options annotatedObjects(Object... v) { this.annotatedObjects = List.of(v); return this; }
+        public Options builtins(Object v) { this.builtins = v; return this; }
+        public Options agents(List<A2A.Agent> v) { this.agents = v; return this; }
+        public Options agents(A2A.Agent... v) { this.agents = List.of(v); return this; }
     }
 
-    private Toolkit(McpSource mcp, SkillSource skill, List<Tool> extraTools) {
+    private Toolkit(McpSource mcp, SkillSource skill, List<Tool> builtins, List<Tool> agents, List<Tool> extraTools,
+                   A2AServer.A2AConfig a2aConfig) {
         this.mcp = mcp;
         this.skill = skill;
+        this.a2aConfig = a2aConfig;
+        // Builtins are the lowest-precedence source: a host extraTools entry with
+        // the same name shadows a builtin (SPEC §4). Drop shadowed builtins up
+        // front, then apply the normal first-wins dedupe for MCP/skill/agents/extras.
+        Set<String> extraNames = new HashSet<>();
+        for (Tool t : extraTools) extraNames.add(t.name());
         List<Tool> all = new ArrayList<>();
         if (mcp != null) all.addAll(mcp.tools());
         if (skill != null) all.add(skill.tool());
-        if (extraTools != null) all.addAll(extraTools);
+        for (Tool b : builtins) {
+            if (!extraNames.contains(b.name())) all.add(b);
+        }
+        all.addAll(agents);
+        all.addAll(extraTools);
         for (Tool t : all) {
             if (byName.containsKey(t.name())) {
                 System.err.println("[toolnexus] duplicate tool name \"" + t.name() + "\" — keeping first");
@@ -56,7 +78,50 @@ public final class Toolkit implements AutoCloseable {
                 extras.addAll(Tools.fromObject(o));
             }
         }
-        return new Toolkit(mcp, skill, extras);
+
+        // The toggle comes from the `builtins` option, or a top-level `builtins`
+        // key on a parsed config Map — same precedence as MCP's isEnabled.
+        Object builtinsCfg = opts.builtins;
+        if (builtinsCfg == null && opts.mcpConfig instanceof Map
+                && ((Map<?, ?>) opts.mcpConfig).containsKey("builtins")) {
+            builtinsCfg = ((Map<?, ?>) opts.mcpConfig).get("builtins");
+        }
+        List<Tool> builtins = BuiltinTools.select(builtinsCfg);
+
+        // Remote A2A agents come from the `agents:[...]` option plus a top-level
+        // `agents` block on a parsed config Map (mirrors mcpServers). Each is
+        // resolved to its skill tools; a failing agent never breaks the toolkit.
+        List<A2A.Agent> descriptors = new ArrayList<>();
+        if (opts.agents != null) descriptors.addAll(opts.agents);
+        if (opts.mcpConfig instanceof Map && ((Map<?, ?>) opts.mcpConfig).containsKey("agents")) {
+            Object block = ((Map<?, ?>) opts.mcpConfig).get("agents");
+            @SuppressWarnings("unchecked")
+            Map<String, Object> agentsBlock = block instanceof Map ? (Map<String, Object>) block : null;
+            descriptors.addAll(A2A.parseAgentsConfig(agentsBlock));
+        }
+        List<Tool> agentTools = new ArrayList<>();
+        for (A2A.Agent ag : descriptors) {
+            try {
+                agentTools.addAll(A2A.agentTools(ag));
+            } catch (Exception e) {
+                System.err.println("[toolnexus] A2A agent \"" + ag.card() + "\" failed: "
+                        + (e.getMessage() == null ? String.valueOf(e) : e.getMessage()));
+            }
+        }
+
+        // A2A inbound profile: a top-level `a2a` block on a parsed config Map
+        // (mirrors builtins/agents). serve() prefers its inline `a2a` over this.
+        A2AServer.A2AConfig a2aConfig = null;
+        if (opts.mcpConfig instanceof Map && ((Map<?, ?>) opts.mcpConfig).containsKey("a2a")) {
+            Object block = ((Map<?, ?>) opts.mcpConfig).get("a2a");
+            if (block instanceof Map) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> a2aBlock = (Map<String, Object>) block;
+                a2aConfig = A2AServer.A2AConfig.fromMap(a2aBlock);
+            }
+        }
+
+        return new Toolkit(mcp, skill, builtins, agentTools, extras, a2aConfig);
     }
 
     public List<Tool> tools() {
@@ -77,6 +142,57 @@ public final class Toolkit implements AutoCloseable {
             byName.put(t.name(), t);
         }
         return this;
+    }
+
+    /**
+     * Fetch a remote A2A agent's card and register its skills as tools. First-name-wins
+     * dedupe. Mirrors the JS reference {@code toolkit.addAgent}.
+     */
+    public Toolkit addAgent(A2A.Agent ag) {
+        try {
+            return register(A2A.agentTools(ag).toArray(new Tool[0]));
+        } catch (Exception e) {
+            throw new RuntimeException("A2A addAgent failed: "
+                    + (e.getMessage() == null ? String.valueOf(e) : e.getMessage()), e);
+        }
+    }
+
+    /** Convenience: add an A2A agent from a bare Agent Card URL. */
+    public Toolkit addAgent(String cardUrl) {
+        return addAgent(A2A.agent(cardUrl));
+    }
+
+    /** Options for {@link #serve} — the client loop plus the opt-in A2A profile + callback. */
+    public static final class ServeOptions {
+        public LlmClient client;
+        public A2AServer.A2AConfig a2a;      // null ⇒ fall back to the toolkit's config block
+        public A2AServer.OnTask onTask;
+
+        public ServeOptions client(LlmClient v) { this.client = v; return this; }
+        public ServeOptions a2a(A2AServer.A2AConfig v) { this.a2a = v; return this; }
+        public ServeOptions onTask(A2AServer.OnTask v) { this.onTask = v; return this; }
+    }
+
+    /**
+     * Serve this toolkit as an agent over HTTP. When the {@code a2a} profile is present
+     * (inline, or a top-level {@code a2a} config block the toolkit was built from), it
+     * mounts the A2A Agent Card ({@code /.well-known/agent-card.json}, built from skills)
+     * and a JSON-RPC endpoint ({@code SendMessage} + {@code GetTask}) fulfilled by
+     * {@code client.run}. When {@code a2a} is absent, no A2A routes are mounted. Returns a
+     * stoppable handle. Mirrors the JS reference {@code toolkit.serve}.
+     */
+    public A2AServer.ServeHandle serve(String addr, ServeOptions opts) {
+        A2AServer.A2AConfig a2a = opts.a2a != null ? opts.a2a : this.a2aConfig;
+        List<SkillSource.SkillInfo> skills = skill != null
+                ? new ArrayList<>(skill.skills().values())
+                : new ArrayList<>();
+        LlmClient client = opts.client;
+        try {
+            return A2AServer.start(addr, a2a, skills,
+                    text -> client.run(text, this), opts.onTask);
+        } catch (java.io.IOException e) {
+            throw new RuntimeException("serve failed: " + e.getMessage(), e);
+        }
     }
 
     public ToolResult execute(String name, Map<String, Object> args, ToolContext ctx) {

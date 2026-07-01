@@ -96,8 +96,15 @@ public final class McpSource implements AutoCloseable {
         Object servers = raw.get("mcpServers");
         if (servers == null) servers = raw.get("servers");
         if (servers == null) servers = raw.get("mcp");
-        if (servers == null) servers = raw;
-        return (Map<String, Object>) servers;
+        if (servers != null) return (Map<String, Object>) servers;
+        // Bare map of servers — but strip sibling top-level config keys
+        // (builtins/agents/a2a) so they are not mistaken for MCP servers when no
+        // wrapper key is present. Copy so the caller's map is left untouched.
+        Map<String, Object> stripped = new LinkedHashMap<>(raw);
+        stripped.remove("builtins");
+        stripped.remove("agents");
+        stripped.remove("a2a");
+        return stripped;
     }
 
     /**

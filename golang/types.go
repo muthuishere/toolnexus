@@ -17,11 +17,13 @@ type JSONSchema = map[string]any
 type ToolSource string
 
 const (
-	SourceMCP    ToolSource = "mcp"
-	SourceSkill  ToolSource = "skill"
-	SourceNative ToolSource = "native"
-	SourceHTTP   ToolSource = "http"
-	SourceCustom ToolSource = "custom"
+	SourceMCP     ToolSource = "mcp"
+	SourceSkill   ToolSource = "skill"
+	SourceNative  ToolSource = "native"
+	SourceHTTP    ToolSource = "http"
+	SourceCustom  ToolSource = "custom"
+	SourceBuiltin ToolSource = "builtin"
+	SourceA2A     ToolSource = "a2a"
 )
 
 // ToolResult is the uniform result handed back to the model.

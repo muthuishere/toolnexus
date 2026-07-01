@@ -84,7 +84,7 @@ Don't want the host loop? Use the schema adapters and execute calls yourself:
 
 ```python
 tools  = tk.to_openai()        # or tk.to_anthropic() / tk.to_gemini()
-system = tk.skills_prompt()    # markdown skills catalog for your system prompt
+system = tk.skills_prompt()    # skills catalog for your system prompt (opens with a preamble telling the model to use the skill tool)
 # when the model returns a tool call { name, arguments }:
 res = await tk.execute(name, arguments)   # -> ToolResult(output, is_error, metadata)
 ```
@@ -99,6 +99,73 @@ res = await tk.execute(name, arguments)   # -> ToolResult(output, is_error, meta
 | **HTTP / REST** | `http_tool(...)` — an endpoint becomes a tool, `${ENV}` headers |
 
 All four appear as one uniform `Tool` in `tk.tools()`, with `source` in `"mcp" | "skill" | "custom"`.
+
+## Built-in tools
+
+A fifth source ships **10 built-in tools** — `bash`, `read`, `write`, `edit`, `grep`, `glob`,
+`webfetch`, `question`, `apply_patch`, `todowrite` (names + input schemas match
+opencode) — so an agent can act with zero wiring. They appear in the tool schema
+(`to_openai()`/`to_anthropic()`/`to_gemini()`), like MCP tools — not the system prompt.
+
+**On by default.** One global toggle turns the whole source off, or a per-tool `tools` map
+disables individual builtins on the all-on baseline:
+
+```python
+tk = await create_toolkit(mcp_config="./mcp.json", builtins=False)
+# also accepts {"disabled": True} or {"enabled": False}
+
+# per-tool: drop bash, keep the other nine (unknown names ignored; whole-source-off still wins)
+tk2 = await create_toolkit(mcp_config="./mcp.json", builtins={"tools": {"bash": False}})
+```
+
+`bash`/`write`/`edit`/`apply_patch` run commands and mutate the filesystem — the toggle is the
+off-switch for locked-down hosts.
+
+## A2A agents (agent-to-agent)
+
+Call **remote A2A agents** (each of their skills becomes a tool) and serve your own toolkit as an
+agent other A2A peers can call. A genuine, minimal subset of real A2A (JSON-RPC 2.0; Agent Card at
+`/.well-known/agent-card.json`; `SendMessage` → poll `GetTask`). No streaming / push / auth in v1.
+
+**Outbound — call a remote agent.** Each advertised skill becomes a tool named `<agent>_<skill>`
+(`source="a2a"`):
+
+```python
+from toolnexus import create_toolkit, agent
+
+tk = await create_toolkit(
+    agents=[agent("https://researcher.example.com/.well-known/agent-card.json")],
+)
+
+# or add one at runtime (an Agent or a bare card URL):
+await tk.add_agent("https://writer.example.com/.well-known/agent-card.json")
+```
+
+`agent(card, *, headers=None, timeout=None, poll_every=None)` — `headers` support `${ENV}`
+expansion (never logged); `timeout` / `poll_every` are milliseconds (300000 / 1000 defaults). A
+config file can also carry an `agents` block. A failing agent is isolated — contributes no tools,
+never fatal.
+
+**Inbound — serve your toolkit as an agent.** The Agent Card is built from your **SKILL.md skills**
+(never raw tools):
+
+```python
+from toolnexus import create_client
+
+agent_client = create_client(base_url="https://openrouter.ai/api/v1", style="openai", model="openai/gpt-4o-mini")
+
+handle = await tk.serve("127.0.0.1:0", client=agent_client, a2a={
+    "name": "research-agent",
+    "description": "Answers research questions.",
+    # "skills": ["hello-world"],   # subset of skills to advertise; omit ⇒ all
+    "store": "memory",             # "memory" (default) | "file:<dir>" | a custom TaskStore
+})
+print(handle.url)                  # GET /.well-known/agent-card.json ; POST / (SendMessage / GetTask)
+await handle.stop()
+```
+
+`serve(addr, *, client, a2a=None, on_task=None)` fulfils each inbound task via `client.run`. Task
+persistence is a pluggable `TaskStore` — in-memory default, `"file:<dir>"`, or your own.
 
 ## API
 

@@ -20,7 +20,14 @@ tk, err := toolnexus.CreateToolkit(ctx, toolnexus.Options{
 defer tk.Close()
 ```
 
-Your app now has every MCP server tool + a `skill` tool.
+Your app now has every MCP server tool, a `skill` tool, and the **10 built-in
+tools** (`bash`, `read`, `write`, `edit`, `grep`, `glob`, `webfetch`,
+`question`, `apply_patch`, `todowrite`) — on by default. Turn the whole built-in
+source off with `Builtins: false` in `Options`, or drop individual builtins with a
+per-tool map, e.g. `Builtins: toolnexus.BuiltinsConfig{Tools: map[string]bool{"bash": false}}`
+(all-on baseline; unknown names ignored; whole-source-off still wins). Reach for
+these on locked-down hosts, since `bash`/`write`/`edit`/`apply_patch` run commands
+and mutate the filesystem.
 
 ## 2. Your own tools
 
@@ -76,7 +83,31 @@ for _, t := range src.Tools() { fmt.Println(t.Name()) }
 ```sh
 go install github.com/muthuishere/toolnexus/golang/cmd/toolnexus@latest
 toolnexus run --config mcp.json --skills ./skills --base-url https://openrouter.ai/api/v1 --style openai --model openai/gpt-4o-mini
+toolnexus tools --config mcp.json --skills ./skills   # lists resolved tools, incl. the 10 builtins
 ```
+
+## 6. A2A agents (call remote agents / be one)
+
+Point at a remote agent's card and its skills become tools; serve your own toolkit so
+other A2A peers can call it. Minimal subset of real A2A — JSON-RPC 2.0, card at
+`/.well-known/agent-card.json`, `SendMessage` → poll `GetTask`; no streaming/auth in v1.
+
+```go
+// outbound: each remote skill → a tool named <agent>_<skill> (source "a2a")
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{
+    Agents: []toolnexus.Agent{{Card: "https://peer.example.com/.well-known/agent-card.json"}},
+})
+_, _ = tk.AddAgent(ctx, "https://other.example.com/.well-known/agent-card.json", nil) // or at runtime
+
+// inbound: serve this toolkit as an agent (card built from SKILL.md skills, never raw tools)
+handle, _ := tk.Serve("127.0.0.1:0", toolnexus.ServeOptions{
+    Client: client, // a *toolnexus.Client from CreateClient
+    A2A:    &toolnexus.A2AConfig{Name: "my-agent", Store: "memory"}, // "file:<dir>" / custom TaskStore too
+})
+defer handle.Stop()
+```
+
+See [README.md](README.md#a2a-agents-agent-to-agent) for the full option set.
 
 ## Notes
 
