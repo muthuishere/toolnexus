@@ -191,8 +191,14 @@ sections, not MCP servers. (Without this, a config file that carries only a `bui
   skills root that symlinks to out-of-tree skills still discovers them. Symlink cycles are guarded by
   tracking resolved real paths already visited. The sibling-file sampler (§ the `skill` tool) follows
   symlinks the same way.
-- Parse YAML frontmatter; require `name` (string), optional `description`
-  (string). Body after frontmatter = `content`.
+- Parse the `---`-fenced YAML frontmatter with a **standard YAML parser** (each port uses its
+  ecosystem lib: js `yaml`, python `PyYAML`, go `gopkg.in/yaml.v3`, java SnakeYAML, csharp YamlDotNet)
+  — NOT a hand-rolled `key: value` split — so folded (`>`), literal (`|`), chomping, quoting, and
+  multi-line values all resolve. Scalar values are coerced to string and **trimmed** (so block-scalar
+  trailing newlines, which chomp slightly differently per lib, don't leak and the ports stay
+  byte-identical). Malformed YAML fails gracefully (empty frontmatter, skill skipped for missing
+  `name`), never crashing discovery. Require `name` (string), optional `description` (string). Body
+  after frontmatter = `content`.
 - Skill `Info { name, description, location (abs path to SKILL.md), content }`.
 - Duplicate names: first wins, log a warning.
 

@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using YamlDotNet.Serialization;
 
 namespace Toolnexus;
 
@@ -163,7 +164,15 @@ public sealed partial class SkillSource
         }
     }
 
-    /// <summary>Minimal flat <c>key: value</c> frontmatter parser (mirrors the JS reference).</summary>
+    /// <summary>
+    /// Parse the <c>---</c>-fenced YAML frontmatter with a real YAML parser
+    /// (YamlDotNet), so folded (<c>&gt;</c>)/literal (<c>|</c>) block scalars,
+    /// chomping, quoting, and multi-line values all resolve correctly. Scalar
+    /// values (string/number/bool) are coerced to string and <c>.Trim()</c>'d,
+    /// keeping the five ports byte-identical. Malformed YAML fails gracefully to
+    /// an empty mapping, never crashing discovery. Mirrors js/src/skill.ts and
+    /// SPEC.md §3.
+    /// </summary>
     internal static (Dictionary<string, string> Data, string Content) ParseFrontmatter(string text)
     {
         var data = new Dictionary<string, string>();
@@ -171,16 +180,29 @@ public sealed partial class SkillSource
         if (!m.Success)
             return (data, text);
 
-        foreach (var line in Regex.Split(m.Groups[1].Value, "\r?\n"))
+        Dictionary<object, object> parsed;
+        try
         {
-            var idx = line.IndexOf(':');
-            if (idx == -1) continue;
-            var key = line[..idx].Trim();
-            var value = line[(idx + 1)..].Trim();
-            if ((value.StartsWith('"') && value.EndsWith('"') && value.Length >= 2)
-                || (value.StartsWith('\'') && value.EndsWith('\'') && value.Length >= 2))
-                value = value[1..^1];
-            if (key.Length > 0) data[key] = value;
+            var deserializer = new DeserializerBuilder().Build();
+            parsed = deserializer.Deserialize<Dictionary<object, object>>(m.Groups[1].Value)
+                     ?? new Dictionary<object, object>();
+        }
+        catch
+        {
+            // Malformed YAML — fall back to an empty mapping, never crash discovery.
+            parsed = new Dictionary<object, object>();
+        }
+
+        foreach (var (rawKey, rawValue) in parsed)
+        {
+            if (rawKey is null) continue;
+            var key = rawKey.ToString();
+            if (string.IsNullOrEmpty(key)) continue;
+            // Take only scalar values (YamlDotNet yields strings for scalars);
+            // skip nested mappings/sequences. Trim so block-scalar trailing
+            // newlines (chomping differs subtly per lib) don't leak.
+            if (rawValue is string or bool || (rawValue is not null && rawValue.GetType().IsPrimitive))
+                data[key] = rawValue!.ToString()!.Trim();
         }
         return (data, m.Groups[2].Value);
     }

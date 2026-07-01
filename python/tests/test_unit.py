@@ -634,3 +634,107 @@ def test_skill_discovery_follows_symlinked_dirs():
         src = load_skills(root)
         assert "direct-skill" in src.skills, "real skill discovered"
         assert "linked-skill" in src.skills, "symlinked skill directory discovered"
+
+
+# --------------------------------------------------------------------------- #
+# frontmatter YAML block scalars (folded `>`, literal `|`) — SPEC.md §3
+# --------------------------------------------------------------------------- #
+def _write_skill(root: str, name: str, body: str) -> None:
+    d = os.path.join(root, name)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
+        f.write(body)
+
+
+def test_frontmatter_single_line_description():
+    # No regression: plain single-line `description: text` still parses.
+    with tempfile.TemporaryDirectory() as root:
+        _write_skill(root, "s", "---\nname: s\ndescription: just a line\n---\nbody\n")
+        src = load_skills(root)
+        assert src.skills["s"].description == "just a line"
+
+
+def test_frontmatter_folded_description():
+    # Folded `>` block scalar: newlines fold to spaces, NOT captured as ">".
+    with tempfile.TemporaryDirectory() as root:
+        _write_skill(
+            root,
+            "s",
+            "---\n"
+            "name: s\n"
+            "description: >\n"
+            "  This is a folded\n"
+            "  description across lines.\n"
+            "---\n"
+            "body\n",
+        )
+        src = load_skills(root)
+        desc = src.skills["s"].description
+        assert desc != ">"
+        assert desc == "This is a folded description across lines."
+
+
+def test_frontmatter_literal_description():
+    # Literal `|` block scalar: newlines preserved (trailing trimmed).
+    with tempfile.TemporaryDirectory() as root:
+        _write_skill(
+            root,
+            "s",
+            "---\n"
+            "name: s\n"
+            "description: |\n"
+            "  line one\n"
+            "  line two\n"
+            "---\n"
+            "body\n",
+        )
+        src = load_skills(root)
+        desc = src.skills["s"].description
+        assert desc != "|"
+        assert desc == "line one\nline two"
+
+
+def test_frontmatter_empty_description():
+    # `description:` with no value → empty string or absent, never a crash.
+    with tempfile.TemporaryDirectory() as root:
+        _write_skill(root, "s", "---\nname: s\ndescription:\n---\nbody\n")
+        src = load_skills(root)
+        assert "s" in src.skills
+        assert (src.skills["s"].description or "") == ""
+
+
+def test_frontmatter_malformed_yaml_does_not_crash():
+    # Unterminated quote → malformed YAML. Discovery must not crash; the skill is
+    # skipped (no `name` survives) or has an empty description.
+    with tempfile.TemporaryDirectory() as root:
+        _write_skill(
+            root,
+            "s",
+            '---\nname: s\ndescription: "unterminated\n---\nbody\n',
+        )
+        src = load_skills(root)  # must not raise
+        assert "s" not in src.skills or (src.skills["s"].description or "") == ""
+
+
+def test_frontmatter_real_folded_example_huddle():
+    # A real-world folded example (mirrors huddle / reqsume-kernel SKILL.md).
+    with tempfile.TemporaryDirectory() as root:
+        _write_skill(
+            root,
+            "huddle",
+            "---\n"
+            "name: huddle\n"
+            "description: >\n"
+            "  Runs a repo-aware expert huddle for engineering decisions,\n"
+            "  planning, research, and verification.\n"
+            "---\n"
+            "# Huddle\n",
+        )
+        src = load_skills(root)
+        assert "huddle" in src.skills
+        desc = src.skills["huddle"].description
+        assert desc != ">"
+        assert desc == (
+            "Runs a repo-aware expert huddle for engineering decisions, "
+            "planning, research, and verification."
+        )

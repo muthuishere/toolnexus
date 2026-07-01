@@ -727,6 +727,32 @@ test("skill discovery follows symlinked skill directories (opencode parity)", ()
   assert.ok(src.skills["linked-skill"], "symlinked skill directory discovered")
 })
 
+test("frontmatter: YAML folded (>) and literal (|) block scalar descriptions", () => {
+  const root = tmp()
+  const folded = path.join(root, "folded")
+  fs.mkdirSync(folded, { recursive: true })
+  fs.writeFileSync(
+    path.join(folded, "SKILL.md"),
+    "---\nname: folded-skill\ndescription: >\n  Runs a repo-aware expert huddle. Trigger when the user says\n  \"start a huddle\" or \"war room\".\n---\nbody\n",
+  )
+  const literal = path.join(root, "literal")
+  fs.mkdirSync(literal, { recursive: true })
+  fs.writeFileSync(
+    path.join(literal, "SKILL.md"),
+    "---\nname: literal-skill\ndescription: |\n  line one\n  line two\n---\nbody\n",
+  )
+
+  const src = loadSkills(root)
+  // folded: newlines collapse to spaces — NOT the literal ">"
+  assert.equal(
+    src.skills["folded-skill"].description,
+    'Runs a repo-aware expert huddle. Trigger when the user says "start a huddle" or "war room".',
+  )
+  assert.notEqual(src.skills["folded-skill"].description, ">")
+  // literal: newlines preserved
+  assert.equal(src.skills["literal-skill"].description, "line one\nline two")
+})
+
 // ---------------------------------------------------------------------------
 // A2A (inbound) — serve a toolkit as an A2A agent; real localhost http.
 // ---------------------------------------------------------------------------

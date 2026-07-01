@@ -1,6 +1,6 @@
 {
   "name": "toolnexus",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Dynamic MCP servers + agent skills as uniform tools for any LLM (opencode-style).",
   "type": "module",
   "main": "./dist/index.js",
@@ -11,22 +11,40 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "src"],
+  "files": [
+    "dist",
+    "src"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --experimental-strip-types --test test/unit.test.ts",
     "example": "node --experimental-strip-types examples/basic.ts"
   },
-  "keywords": ["mcp", "llm", "agent", "skills", "tools", "openai", "anthropic", "gemini"],
+  "keywords": [
+    "mcp",
+    "llm",
+    "agent",
+    "skills",
+    "tools",
+    "openai",
+    "anthropic",
+    "gemini"
+  ],
   "license": "MIT",
-  "repository": { "type": "git", "url": "git+https://github.com/muthuishere/toolnexus.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/muthuishere/toolnexus.git"
+  },
   "homepage": "https://github.com/muthuishere/toolnexus#readme",
-  "bugs": { "url": "https://github.com/muthuishere/toolnexus/issues" },
+  "bugs": {
+    "url": "https://github.com/muthuishere/toolnexus/issues"
+  },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0"
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "typescript": "^5.6.0",
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
   }
 }

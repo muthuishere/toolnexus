@@ -41,20 +41,47 @@ type SkillInfo struct {
 var frontmatterRe = regexp.MustCompile(`(?s)^---\r?\n(.*?)\r?\n---\r?\n?(.*)$`)
 
 type frontmatter struct {
-	Name        string `yaml:"name"`
-	Description string `yaml:"description"`
+	Name        string
+	Description string
 }
 
+// parseFrontmatter parses the `---`-fenced YAML header with a real YAML parser
+// (gopkg.in/yaml.v3) so folded (`>`)/literal (`|`) block scalars, chomping,
+// quoting, and multi-line values all resolve — NOT a hand-rolled key:value
+// split. Scalar values are coerced to string and trimmed, so block-scalar
+// trailing newlines (which chomp slightly differently per lib) don't leak and
+// the ports stay byte-identical. Malformed YAML fails gracefully to an empty
+// map, never crashing discovery. Mirrors js/src/skill.ts parseFrontmatter.
+// See SPEC.md §3.
 func parseFrontmatter(text string) (data frontmatter, content string) {
 	m := frontmatterRe.FindStringSubmatch(text)
 	if m == nil {
 		return frontmatter{}, text
 	}
-	var fm frontmatter
-	if err := yaml.Unmarshal([]byte(m[1]), &fm); err != nil {
-		return frontmatter{}, text
+	var raw map[string]any
+	if err := yaml.Unmarshal([]byte(m[1]), &raw); err != nil {
+		raw = nil // malformed YAML → empty frontmatter, skill skipped for missing name
+	}
+	fm := frontmatter{}
+	if s, ok := scalarString(raw["name"]); ok {
+		fm.Name = s
+	}
+	if s, ok := scalarString(raw["description"]); ok {
+		fm.Description = s
 	}
 	return fm, m[2]
+}
+
+// scalarString returns a trimmed string for scalar YAML values (string, number,
+// bool) and ok=false for anything else (maps, sequences, null), mirroring the
+// JS port's `typeof value === "string" | "number" | "boolean"` guard.
+func scalarString(v any) (string, bool) {
+	switch v.(type) {
+	case string, int, int64, uint64, float64, float32, bool:
+		return strings.TrimSpace(fmt.Sprintf("%v", v)), true
+	default:
+		return "", false
+	}
 }
 
 // resolveEntry classifies a directory entry, following symlinks to their target

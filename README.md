@@ -23,7 +23,7 @@ npm i toolnexus                                   # JS / TypeScript
 pip install toolnexus                             # Python
 go get github.com/muthuishere/toolnexus/golang    # Go
 dotnet add package Toolnexus                       # C#
-# Java (Maven): io.github.muthuishere:toolnexus:0.2.0
+# Java (Maven): io.github.muthuishere:toolnexus:0.2.1
 ```
 
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server

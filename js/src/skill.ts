@@ -7,6 +7,7 @@
 import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
+import { parse as parseYaml } from "yaml"
 import type { Tool, ToolResult } from "./types.js"
 
 export const SKILL_TOOL_DESCRIPTION = `Load a specialized skill when the task at hand matches one of the skills listed in the system prompt.
@@ -30,23 +31,29 @@ export interface SkillInfo {
   content: string // body after frontmatter
 }
 
-/** Minimal YAML frontmatter parser — only flat `key: value` pairs are needed. */
+/**
+ * Parse YAML frontmatter (between the leading `---` fences) with a real YAML
+ * parser, so folded (`>`)/literal (`|`) block scalars, quoting, and multi-line
+ * values all resolve correctly. Scalar values are coerced to strings.
+ */
 function parseFrontmatter(text: string): { data: Record<string, string>; content: string } {
   const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text)
   if (!match) return { data: {}, content: text }
   const data: Record<string, string> = {}
-  for (const line of match[1].split(/\r?\n/)) {
-    const idx = line.indexOf(":")
-    if (idx === -1) continue
-    const key = line.slice(0, idx).trim()
-    let value = line.slice(idx + 1).trim()
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1)
+  let parsed: unknown
+  try {
+    parsed = parseYaml(match[1])
+  } catch {
+    parsed = null
+  }
+  if (parsed && typeof parsed === "object") {
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      // Trim so block-scalar trailing newlines (chomping differs subtly between
+      // YAML libs) don't leak — keeps the five ports byte-identical.
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        data[key] = String(value).trim()
+      }
     }
-    if (key) data[key] = value
   }
   return { data, content: match[2] }
 }

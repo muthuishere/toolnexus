@@ -17,6 +17,8 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import org.yaml.snakeyaml.Yaml;
+
 /**
  * Dynamic agent-skill source. Mirrors opencode's skill/index.ts + tool/skill.ts
  * and the JS reference ({@code js/src/skill.ts}): discover {@code **}/SKILL.md,
@@ -212,7 +214,13 @@ public final class SkillSource {
         }
     }
 
-    /** Minimal flat `key: value` frontmatter parser (mirrors the JS reference). */
+    /**
+     * Parse YAML frontmatter (between the leading {@code ---} fences) with a real
+     * YAML parser (SnakeYAML), so folded ({@code >})/literal ({@code |}) block
+     * scalars, quoting, and multi-line values all resolve correctly. Scalar values
+     * are coerced to strings and trimmed. Mirrors the JS reference
+     * ({@code js/src/skill.ts}). See SPEC.md §3.
+     */
     static Map<String, Object> parseFrontmatter(String text) {
         Matcher m = FRONTMATTER.matcher(text);
         Map<String, String> data = new LinkedHashMap<>();
@@ -220,16 +228,25 @@ public final class SkillSource {
         if (!m.find()) {
             content = text;
         } else {
-            for (String line : m.group(1).split("\\r?\\n")) {
-                int idx = line.indexOf(':');
-                if (idx == -1) continue;
-                String key = line.substring(0, idx).trim();
-                String value = line.substring(idx + 1).trim();
-                if ((value.startsWith("\"") && value.endsWith("\"") && value.length() >= 2)
-                        || (value.startsWith("'") && value.endsWith("'") && value.length() >= 2)) {
-                    value = value.substring(1, value.length() - 1);
+            Object parsed;
+            try {
+                parsed = new Yaml().load(m.group(1));
+            } catch (RuntimeException e) {
+                // Malformed YAML must never crash discovery — fall back to empty.
+                parsed = null;
+            }
+            if (parsed instanceof Map<?, ?> map) {
+                for (Map.Entry<?, ?> entry : map.entrySet()) {
+                    Object key = entry.getKey();
+                    Object value = entry.getValue();
+                    if (key == null) continue;
+                    // Only scalar values (String/Number/Boolean). Trim so block-scalar
+                    // trailing newlines (chomping differs subtly between YAML libs) don't
+                    // leak — keeps the five ports byte-identical.
+                    if (value instanceof String || value instanceof Number || value instanceof Boolean) {
+                        data.put(String.valueOf(key), String.valueOf(value).strip());
+                    }
                 }
-                if (!key.isEmpty()) data.put(key, value);
             }
             content = m.group(2);
         }

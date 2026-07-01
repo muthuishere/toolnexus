@@ -3,8 +3,9 @@ discover ``**/SKILL.md``, parse YAML frontmatter, and expose ONE ``skill`` tool
 that loads a skill's instructions + sampled resources on demand (progressive
 disclosure).
 
-Frontmatter parsing uses a minimal flat ``key: value`` parser (no heavy dep),
-matching the JS reference exactly.
+Frontmatter parsing uses a real YAML parser (PyYAML ``safe_load``) over the
+``---``-fenced header block, matching the JS reference exactly — so folded
+(``>``)/literal (``|``) block scalars, quoting, and multi-line values resolve.
 """
 from __future__ import annotations
 
@@ -14,6 +15,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
+
+import yaml
 
 from .types import Tool, ToolResult
 
@@ -43,23 +46,26 @@ _FRONTMATTER_RE = re.compile(r"^---\r?\n(.*?)\r?\n---\r?\n?(.*)$", re.DOTALL)
 
 
 def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
-    """Minimal YAML frontmatter parser — only flat `key: value` pairs are needed."""
+    """Parse the ``---``-fenced YAML frontmatter with a real YAML parser, so
+    folded (``>``)/literal (``|``) block scalars, quoting, and multi-line values
+    all resolve correctly. Scalar values are coerced to trimmed strings; malformed
+    YAML fails gracefully (empty frontmatter). Mirrors ``js/src/skill.ts``.
+    """
     match = _FRONTMATTER_RE.match(text)
     if not match:
         return {}, text
     data: dict[str, str] = {}
-    for line in re.split(r"\r?\n", match.group(1)):
-        idx = line.find(":")
-        if idx == -1:
-            continue
-        key = line[:idx].strip()
-        value = line[idx + 1 :].strip()
-        if (value.startswith('"') and value.endswith('"')) or (
-            value.startswith("'") and value.endswith("'")
-        ):
-            value = value[1:-1]
-        if key:
-            data[key] = value
+    try:
+        parsed = yaml.safe_load(match.group(1))
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict):
+        for key, value in parsed.items():
+            # Only scalars; coerce to string and trim so block-scalar trailing
+            # newlines (chomping differs subtly between YAML libs) don't leak —
+            # keeps the five ports byte-identical. See SPEC.md §3.
+            if isinstance(value, (str, int, float, bool)):
+                data[str(key)] = str(value).strip()
     return data, match.group(2)
 
 
