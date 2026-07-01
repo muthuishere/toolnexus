@@ -21,7 +21,36 @@ byte-identical, also in **JavaScript, Go, Java, and C#**. Built on the official 
 pip install toolnexus
 ```
 
-## An agent in 3 steps
+## Quick start — a working agent in 5 lines
+
+No `mcp.json`, no skills folder. The **10 built-in tools** (`bash`, `read`, `grep`, `webfetch`, …)
+are on by default, so the model can actually *do* things right away:
+
+```python
+import asyncio
+from toolnexus import create_toolkit, create_client
+
+async def main():
+    tk = await create_toolkit()                          # built-in tools, on by default
+    agent = create_client(
+        base_url="https://openrouter.ai/api/v1", style="openai",
+        model="deepseek/deepseek-chat",                  # any OpenRouter/OpenAI/Anthropic model
+    )
+    res = await agent.run("List the files here, then count them.", tk)
+    print(res.text)
+    await tk.close()
+
+asyncio.run(main())
+```
+
+```sh
+export OPENROUTER_API_KEY=...      # or OPENAI_API_KEY / ANTHROPIC_API_KEY
+```
+
+`create_client` reads the key from `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`
+(no `api_key=` needed).
+
+## With MCP servers + skills
 
 The MCP SDK is async, so the toolkit is async:
 
@@ -50,9 +79,44 @@ async def main():
 asyncio.run(main())
 ```
 
-`create_client` reads the key from `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`
-by default. The `Toolkit` is also an async context manager (`async with await create_toolkit(...)`)
+The `Toolkit` is also an async context manager (`async with await create_toolkit(...) as tk:`)
 if you'd rather not call `close()` yourself.
+
+## Conversations / memory
+
+`run()` is stateless — each call starts fresh. For a multi-turn thread that *remembers*, use
+`ask(prompt, tk, id=...)`. Give it an `id` and the client's **`ConversationStore`** does the work:
+load that thread's transcript → run → save the updated transcript. The next `ask` with the same
+`id` continues where it left off. Call `ask` **without** an `id` and it's a stateless one-shot —
+identical to `run`.
+
+```python
+agent = create_client(base_url="https://openrouter.ai/api/v1", style="openai",
+                      model="openai/gpt-4o-mini")
+
+await agent.ask("I trade NIFTY.", tk, id="trader-42")
+res = await agent.ask("What do I trade?", tk, id="trader-42")
+print(res.text)   # -> "NIFTY" — the second turn remembers the first
+```
+
+Every client has a store — by default an in-memory `InMemoryConversationStore` that lives as long
+as the client. To persist across processes (a file, a DB, Redis), pass your own to `create_client`:
+
+```python
+from toolnexus import create_client, ConversationStore
+
+class FileStore:                                  # implements ConversationStore
+    async def get(self, id):                      # -> list[messages] | None
+        ...
+    async def save(self, id, messages):           # persist the updated transcript
+        ...
+
+agent = create_client(base_url=..., style="openai", model=..., store=FileStore())
+```
+
+`ConversationStore` is just two async methods — `get(id)` and `save(id, messages)`. The A2A
+`serve` side uses the same store: an inbound peer's turns are keyed by their A2A `contextId`, so a
+served agent remembers a caller across tasks (see [A2A agents](#a2a-agents-agent-to-agent)).
 
 ## Add your own tools
 
@@ -77,28 +141,6 @@ tk.register(http_tool(
 
 URL `{placeholders}` are filled from args; the rest become the JSON body. Non-2xx →
 `ToolResult(output="HTTP <status>: <body>", is_error=True)`.
-
-## Bring your own loop
-
-Don't want the host loop? Use the schema adapters and execute calls yourself:
-
-```python
-tools  = tk.to_openai()        # or tk.to_anthropic() / tk.to_gemini()
-system = tk.skills_prompt()    # skills catalog for your system prompt (opens with a preamble telling the model to use the skill tool)
-# when the model returns a tool call { name, arguments }:
-res = await tk.execute(name, arguments)   # -> ToolResult(output, is_error, metadata)
-```
-
-## The four sources
-
-| Source | How |
-|--------|-----|
-| **MCP servers** | an `mcp.json` (`mcpServers`/`servers`/`mcp`); local stdio + remote streamable-HTTP, `headers` for auth |
-| **Agent skills** | a folder of `<name>/SKILL.md`; a `skill` tool loads each on demand + a system-prompt catalog |
-| **Native tools** | `define_tool(fn)` / the `@tool` decorator — a function becomes a tool |
-| **HTTP / REST** | `http_tool(...)` — an endpoint becomes a tool, `${ENV}` headers |
-
-All four appear as one uniform `Tool` in `tk.tools()`, with `source` in `"mcp" | "skill" | "custom"`.
 
 ## Built-in tools
 
@@ -164,21 +206,51 @@ print(handle.url)                  # GET /.well-known/agent-card.json ; POST / (
 await handle.stop()
 ```
 
-`serve(addr, *, client, a2a=None, on_task=None)` fulfils each inbound task via `client.run`. Task
-persistence is a pluggable `TaskStore` — in-memory default, `"file:<dir>"`, or your own.
+`serve(addr, *, client, a2a=None, on_task=None)` fulfils each inbound task through the client: a
+message carrying an A2A `contextId` goes through `client.ask(..., id=contextId)`, so a peer's turns
+are **remembered** across tasks via the client's `ConversationStore`; without a `contextId` it's a
+stateless `client.run`. Task persistence is a separate pluggable `TaskStore` (in-memory default,
+`"file:<dir>"`, or your own).
+
+## Bring your own loop
+
+Don't want the host loop? Use the schema adapters and execute calls yourself:
+
+```python
+tools  = tk.to_openai()        # or tk.to_anthropic() / tk.to_gemini()
+system = tk.skills_prompt()    # skills catalog for your system prompt (opens with a preamble telling the model to use the skill tool)
+# when the model returns a tool call { name, arguments }:
+res = await tk.execute(name, arguments)   # -> ToolResult(output, is_error, metadata)
+```
+
+## The four sources
+
+| Source | How |
+|--------|-----|
+| **MCP servers** | an `mcp.json` (`mcpServers`/`servers`/`mcp`); local stdio + remote streamable-HTTP, `headers` for auth |
+| **Agent skills** | a folder of `<name>/SKILL.md`; a `skill` tool loads each on demand + a system-prompt catalog |
+| **Native tools** | `define_tool(fn)` / the `@tool` decorator — a function becomes a tool |
+| **HTTP / REST** | `http_tool(...)` — an endpoint becomes a tool, `${ENV}` headers |
+
+All four appear as one uniform `Tool` in `tk.tools()`, with `source` in `"mcp" | "skill" | "custom"`.
 
 ## API
 
 | Python | Description |
 |--------|-------------|
 | `await create_toolkit(...)` | async factory → `Toolkit` |
-| `create_client(...)` | the unified host loop (`await agent.run(msg, tk)` / `agent.stream(...)`) |
+| `create_client(..., store=?)` | the unified host loop; `store` is the `ConversationStore` (default in-memory) |
+| `await agent.run(prompt, tk)` | one stateless agent loop → `RunResult(text, messages, tool_calls, usage, …)` |
+| `await agent.ask(prompt, tk, *, id=None)` | with `id`: remembers the thread via `store` (get → run → save); without: one-shot (= `run`) |
+| `agent.stream(prompt, tk)` | streaming variant — async-iterate text/tool/usage/done events |
+| `ConversationStore` / `InMemoryConversationStore` | `async get(id)` / `async save(id, messages)` — implement for file/db; in-memory default |
 | `tk.tools()` / `tk.get(name)` | the uniform tools |
 | `await tk.execute(name, args, ctx=None)` | run a tool → `ToolResult` |
 | `tk.skills_prompt()` | system-prompt skill catalog |
 | `tk.mcp_status()` | per-server connection status |
 | `tk.to_openai()` / `to_anthropic()` / `to_gemini()` | provider tool schemas |
 | `tk.register(*tools)` | add native/http/custom tools |
+| `await tk.serve(addr, client=…, a2a=…)` | serve the toolkit as an A2A agent |
 | `await tk.close()` | disconnect MCP servers |
 
 ## More

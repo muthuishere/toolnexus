@@ -10,50 +10,52 @@
 ### Your LLM, with MCP tools and agent skills built in — in 3 lines, in 5 languages.
 
 Point toolnexus at an `mcp.json` and a `skills/` folder and you get a **working agent**: the
-tool-calling loop, skills injection, and four unified tool sources — all included. Vendor-neutral,
-byte-identical across **JavaScript · Python · Go · Java · C#**.
+tool-calling loop, skills injection, five unified tool sources, and conversation memory — all
+included. Vendor-neutral, byte-identical across **JavaScript · Python · Go · Java · C#**.
 
 > **Right-sized.** Not a framework — no builders, advisors, runnables, or config to wade through.
 > Not a toy that falls over the moment you need streaming or a retry. Exactly what a real agent
-> needs — MCP, skills, native + HTTP tools, the loop, hooks, streaming, retries, memory — and
-> nothing it doesn't.
+> needs — MCP, skills, native + HTTP + built-in tools, remote A2A agents, the loop, hooks,
+> streaming, retries, memory — and nothing it doesn't.
 
 ```sh
 npm i toolnexus                                   # JS / TypeScript
 pip install toolnexus                             # Python
 go get github.com/muthuishere/toolnexus/golang    # Go
 dotnet add package Toolnexus                       # C#
-# Java (Maven): io.github.muthuishere:toolnexus:0.3.0
+# Java (Maven): io.github.muthuishere:toolnexus:0.3.1
 ```
 
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
-tools, agent skills, your own functions, and remote HTTP endpoints are all *the same thing*
-to an LLM — a named, described, schema'd callable. toolnexus unifies **four tool sources**
-behind one `Tool` interface and drives **any** model with them.
+tools, agent skills, your own functions, remote HTTP endpoints, and the built-in shell/file
+tools are all *the same thing* to an LLM — a named, described, schema'd callable. toolnexus
+unifies **every tool source** behind one `Tool` interface and drives **any** model with them.
 
 ```
-   SOURCES                         TOOLKIT                         ANY LLM
- ┌────────────────┐
- │ MCP servers    │──┐
- │  (mcp.json)    │  │      ┌─────────────────────────┐      ┌──────────────┐
- ├────────────────┤  │      │  uniform Tool[] registry │─────▶│ OpenAI-style │
- │ Agent skills   │  ├─────▶│  • tools() / execute()   │      ├──────────────┤
- │  (SKILL.md)    │  │      │  • skillsPrompt()        │─────▶│ Anthropic    │
- ├────────────────┤  │      │  • toOpenAI/Anthropic/   │      ├──────────────┤
- │ Native fns     │  │      │    Gemini()              │─────▶│ Gemini       │
- │  (@tool)       │  │      └────────────┬────────────┘      └──────────────┘
- ├────────────────┤  │                   ▼
- │ HTTP / OpenAPI │──┘      ┌─────────────────────────────────┐
- │  (url+headers) │         │ UNIFIED CLIENT (host loop):      │
- └────────────────┘         │ baseURL + style + model → run()  │
-                            │ inject skills → call → exec → … │
-                            └─────────────────────────────────┘
+   SOURCES                          TOOLKIT                          ANY LLM
+ ┌──────────────────┐
+ │ MCP servers      │──┐
+ │  (mcp.json)      │  │     ┌──────────────────────────┐      ┌──────────────┐
+ ├──────────────────┤  │     │  uniform Tool[] registry  │─────▶│ OpenAI-style │
+ │ Agent skills     │  │     │  • tools() / execute()    │      ├──────────────┤
+ │  (SKILL.md)      │  ├────▶│  • skillsPrompt()         │─────▶│ Anthropic    │
+ ├──────────────────┤  │     │  • toOpenAI/Anthropic/    │      ├──────────────┤
+ │ Native fns       │  │     │    Gemini()               │─────▶│ Gemini       │
+ │  (@tool)         │  │     └────────────┬─────────────┘      └──────────────┘
+ ├──────────────────┤  │                  ▼
+ │ HTTP / OpenAPI   │  │     ┌───────────────────────────────────┐
+ │  (url+headers)   │  ├────▶│ UNIFIED CLIENT (host loop):        │
+ ├──────────────────┤  │     │ baseURL + style + model → run()    │
+ │ Built-in tools   │──┘     │ inject skills → call → exec → …    │
+ │  (10, on by dflt)│        │ + memory: ask() / ConversationStore│
+ └──────────────────┘        └───────────────────────────────────┘
+        + remote A2A agents (each skill → a tool) · or serve your toolkit as an A2A agent
 ```
 
 ## From zero to agent in 3 steps
 
-No framework, no glue. Two files and one call — and your LLM now has **MCP tools and
-agent skills built in**, something no other library hands you as a drop-in.
+No framework, no glue. Two files and one call — and your LLM now has **MCP tools, agent skills,
+and 10 built-in shell/file tools built in**, something no other library hands you as a drop-in.
 
 **1. Add an MCP config file** — `mcp.json`:
 ```jsonc
@@ -74,25 +76,26 @@ description: Use when a customer asks for a refund. Walks the policy + steps.
 1. Verify the order …
 ```
 
-**3. Call any LLM — MCP + skills are already in it:**
+**3. Call any LLM — MCP + skills + built-ins are already in it:**
 ```ts
 const tk    = await createToolkit({ mcpConfig: "./mcp.json", skillsDir: "./skills" })
 const agent = createClient({ baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" })
 
 const { text } = await agent.run("Refund order 1234 for the customer.", { toolkit: tk })
-// the model already sees every MCP server tool + a `skill` tool, and the skills catalog
-// is injected into its system prompt — it loads `process-refund` and calls the fs/acme tools itself.
+// the model already sees every MCP server tool, a `skill` tool, and the built-in toolset — and the
+// skills catalog is injected into its system prompt. It loads `process-refund` and calls tools itself.
 ```
 
-That's the whole thing. Bring your own loop instead? Use `tk.toOpenAI()` /
+That's the whole thing. `createToolkit()` alone (no config) still gives you a working agent —
+the 10 built-in tools are on by default. Bring your own loop instead? Use `tk.toOpenAI()` /
 `toAnthropic()` / `toGemini()` for the schema and `tk.execute(name, args)` to run a call.
-Same three steps in Python, Go, Java, and C#.
+The same three steps work in Python, Go, Java, and C#.
 
 ## Why toolnexus
 
 The individual pieces — MCP, agent skills (`SKILL.md`), native tools, HTTP tools — each landed in
 the big frameworks during 2026: **Spring AI**, **LangChain** (Deep Agents) and **Google ADK** now
-do most of them. What none of them combine is **all four sources behind one interface,
+do most of them. What none of them combine is **every tool source behind one interface,
 byte-identical across five languages, vendor-neutral, in a small à-la-carte library:**
 
 - **Five languages, one behavior** — JS · Python · Go · Java · C#, pinned by a shared
@@ -101,9 +104,9 @@ byte-identical across five languages, vendor-neutral, in a small à-la-carte lib
 - **Vendor-neutral** — a plain base URL + `openai`/`anthropic` style; not tied to one provider
   (unlike Gemini-centric ADK).
 - **A library, not a platform** — à la carte: use just the MCP host, or add skills / native /
-  HTTP / the host loop as you like. No runtime, no orchestration server.
-- **All four sources unified** — MCP servers, agent skills, native functions, and HTTP/REST as
-  one `Tool` registry, for any model.
+  HTTP / built-ins / A2A / the host loop as you like. No runtime, no orchestration server.
+- **Everything unified** — MCP servers, agent skills, native functions, HTTP/REST, built-in
+  tools, and remote A2A agents as one `Tool` registry, for any model.
 
 Each language builds on the most popular MCP SDK for that ecosystem — nothing is reimplemented
 from scratch:
@@ -119,18 +122,22 @@ from scratch:
 The language-independent behavior is pinned in **[SPEC.md](SPEC.md)** so all five stay
 byte-compatible (especially the skill loader output).
 
-## Quick start (JS) — a full agent
+## Five tool sources, one interface
 
-```sh
-cd js && npm install && npm run build
-```
+Everything below surfaces as the same uniform `Tool` — one registry, any model.
+
+| # | Source | Declare with | What you get |
+|---|--------|--------------|--------------|
+| 1 | **MCP servers** | `mcp.json` | Claude-desktop superset (`mcpServers`/`servers`/`mcp`); local stdio + remote streamable-HTTP/SSE; `${ENV}` header auth; one bad server is isolated, never fatal. |
+| 2 | **Agent skills** | `skills/**/SKILL.md` | One `skill` tool loads each on demand (progressive disclosure) + a system-prompt catalog. Same format as Claude/opencode. |
+| 3 | **Native functions** | `defineTool` / `@tool` | A plain function → a tool; schema inferred from type hints / struct tags. |
+| 4 | **HTTP / REST** | `httpTool` | Declare an endpoint; `{ph}` URL substitution, `${ENV}` header expansion; OpenAPI import (best-effort). |
+| 5 | **Built-in tools** | on by default | 10 opencode shell/file tools so an agent can *act* with zero wiring (see below). |
+
+Registering your own native + HTTP tools is one call:
 
 ```ts
-import { createToolkit, defineTool, httpTool, createClient } from "toolnexus"
-
 const tk = await createToolkit({ mcpConfig: "./mcp.json", skillsDir: "./skills" })
-
-// add your own tools — a native function and a REST endpoint
 tk.register(
   defineTool({ name: "add", description: "Add two numbers",
     inputSchema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] },
@@ -139,61 +146,34 @@ tk.register(
     url: "https://jsonplaceholder.typicode.com/posts/{id}",
     inputSchema: { type: "object", properties: { id: { type: "number" } }, required: ["id"] } }),
 )
-
-// the host loop: plain URL + style → working agent
-const agent = createClient({ baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" })
-const { text } = await agent.run("What is 21+21? Then fetch post 1's title.", { toolkit: tk })
-console.log(text)
-await tk.close()
 ```
 
-Prefer to own the loop? Use the schema adapters and call `tk.execute(name, args)` yourself.
-
-## Go CLI — an instant agent from the terminal
-
-```sh
-cd golang && go build -o toolnexus ./cmd/toolnexus
-./toolnexus run --config ../examples/mcp.json --skills ../examples/skills \
-  --base-url https://openrouter.ai/api/v1 --style openai --model openai/gpt-4o-mini
-# > you: ...     (continuous REPL agent loop)
-./toolnexus tools --config ../examples/mcp.json --skills ../examples/skills   # list resolved tools
-```
-
-## The four sources
-
-1. **MCP servers** — an `mcp.json` (Claude-desktop superset; top-level `mcpServers`/`servers`/`mcp`).
-   Local stdio + remote streamable-HTTP/SSE, with `headers` for auth.
-2. **Agent skills** — a folder of `<name>/SKILL.md` (YAML frontmatter); a `skill` tool loads
-   each on demand (progressive disclosure) + a system-prompt catalog. Same format as Claude/opencode.
-3. **Native tools** — a plain function → a tool (`defineTool` / `@tool` decorator; schema inferred).
-4. **HTTP/REST tools** — declare an endpoint (`httpTool`); `${ENV}` header expansion; OpenAPI import (best-effort).
-
-All four show up as the same uniform `Tool`, in one registry, for any model.
-
-**À la carte.** Each source is usable on its own. Want *only* an MCP host — parse
-`mcp.json`, connect, get the tools, like the MCP-only libraries do? Use just
-`loadMcp` / `load_mcp` / `LoadMcp` (no skills, no loop). The skills, native/HTTP
-tools, and host loop are all opt-in on top.
+**À la carte.** Each source is usable on its own. Want *only* an MCP host — parse `mcp.json`,
+connect, get the tools, like the MCP-only libraries do? Use just `loadMcp` / `load_mcp` /
+`LoadMcp` (no skills, no loop). Everything else is opt-in on top.
 
 ### Built-in tools (on by default)
 
-On top of the four sources, toolnexus ships a fifth — a default toolset of **10 built-in tools**
-(`bash`, `read`, `write`, `edit`, `grep`, `glob`, `webfetch`, `question`, `apply_patch`,
-`todowrite`, names + input schemas matching opencode) so an agent can act with zero
-wiring. They surface in the tool schema (`toOpenAI`/`toAnthropic`/`toGemini`) like MCP tools —
-*not* injected into the system prompt. The whole source is **on by default** and gated by one
-global toggle — `createToolkit({ builtins: false })` / `create_toolkit(builtins=False)` /
-`Options{ Builtins: false }` / `.builtins(false)`. For finer control, a per-tool `tools`
-name→bool map drops individual builtins on the all-on baseline (e.g.
-`builtins: { tools: { bash: false } }`; other tools stay on, unknown names are ignored, and a
-whole-source-off still wins). Because `bash`/`write`/`edit`/`apply_patch` run commands and mutate
-the filesystem, these switches are the off-switch for locked-down hosts.
+toolnexus ships opencode's default toolset — **10 built-in tools** (`bash`, `read`, `write`,
+`edit`, `grep`, `glob`, `webfetch`, `question`, `apply_patch`, `todowrite`, with names + input
+schemas matching opencode) so an agent can act with zero wiring. They surface in the tool schema
+(`toOpenAI`/`toAnthropic`/`toGemini`) like MCP tools — *not* injected into the system prompt.
 
-### A2A agents (call remote agents, or be one)
+The source is **on by default** with two levels of control:
 
-A sixth source closes the loop: **agent-to-agent**. Point the toolkit at a remote **A2A agent**
-and each of its skills becomes a tool (named `<agent>_<skill>`, source `"a2a"`) — an agent is just
-another tool source. And the same toolkit can **serve itself** as an A2A agent, so other agents
+- **Global toggle** — `createToolkit({ builtins: false })` / `create_toolkit(builtins=False)` /
+  `Options{ Builtins: false }` / `.builtins(false)` turns the whole source off.
+- **Per-tool map** — `builtins: { tools: { bash: false } }` drops individual tools on the all-on
+  baseline (other tools stay on, unknown names ignored; a whole-source-off still wins).
+
+Because `bash`/`write`/`edit`/`apply_patch` run commands and mutate the filesystem, these switches
+are the off-switch for locked-down hosts.
+
+## A2A agents — call remote agents, or be one
+
+Beyond the five local sources: **agent-to-agent**. Point the toolkit at a remote **A2A agent** and
+each of its skills becomes a tool (named `<agent>_<skill>`, source `"a2a"`) — an agent is just
+another tool source. The same toolkit can **serve itself** as an A2A agent, so other agents
 (toolnexus or not) can call it. It's a genuine, minimal subset of real A2A (verified against
 `a2a-python`): JSON-RPC 2.0, the Agent Card at `/.well-known/agent-card.json`, `SendMessage` → poll
 `GetTask`. No streaming / push / auth in v1.
@@ -212,20 +192,56 @@ Both directions exist in all five ports (`agent(...)` / `Agent{...}`, an `agents
 `serve` / `ServeAsync`). Served tasks persist through a pluggable **TaskStore** (in-memory default,
 `"file:<dir>"`, or your own). See each port's README for the full option set.
 
+## Conversations & memory
+
+The host loop remembers a thread for you. `ask(prompt, { toolkit, id })` loads that id's transcript
+from a **ConversationStore**, runs the loop with it as history, and saves the updated transcript back
+— so the next `ask` with the same id continues the conversation. No id ⇒ a stateless one-shot
+(identical to `run`).
+
+```ts
+const agent = createClient({ baseUrl, style: "openai", model })   // in-memory store by default
+await agent.ask("Book me a flight to Berlin.", { toolkit: tk, id: "user-42" })
+await agent.ask("Actually, make it Munich.",   { toolkit: tk, id: "user-42" })  // same thread — remembered
+await agent.ask("What is 21 + 21?",            { toolkit: tk })                 // no id → one-shot
+```
+
+- **Pluggable store, two methods** — `get(id) → messages` and `save(id, messages)`. The default is
+  in-memory (per-client, process lifetime); pass `createClient({ ..., store })` with your own
+  file / db / redis implementation to persist across processes.
+- **Served A2A agents remember too** — inbound `serve` fulfils each `SendMessage` via
+  `ask(text, { id: contextId })`, so a peer's turns are remembered by A2A `contextId` through the
+  same store; a message with no `contextId` is a one-shot.
+- The low-level `run(prompt, { toolkit, history })` primitive and a stateful
+  `client.conversation({ toolkit })` wrapper are still there when you'd rather own the transcript.
+
+Available in all five ports (a `ConversationStore` interface + in-memory default + `ask`).
+
+## Go CLI — an instant agent from the terminal
+
+```sh
+cd golang && go build -o toolnexus ./cmd/toolnexus
+./toolnexus run --config ../examples/mcp.json --skills ../examples/skills \
+  --base-url https://openrouter.ai/api/v1 --style openai --model openai/gpt-4o-mini
+# > you: ...     (continuous REPL agent loop)
+./toolnexus tools --config ../examples/mcp.json --skills ../examples/skills   # list resolved tools
+```
+
 ## Per-language docs
 
 [`js/`](js/) · [`python/`](python/) · [`golang/`](golang/) · [`java/`](java/) · [`csharp/`](csharp/) — quickstarts and API.
 Embedding in a Go app? See [`golang/GUIDE.md`](golang/GUIDE.md).
 [`examples/`](examples/) holds the shared `mcp.json` + sample skill used by every
-implementation's examples and tests.
+implementation's examples and tests. The cross-language contract lives in [SPEC.md](SPEC.md).
 
 ## Status
 
 - ✅ MCP servers (stdio + streamable-HTTP / SSE)
 - ✅ Agent skills (SKILL.md discovery + progressive-disclosure `skill` tool)
 - ✅ Native/decorator tools + HTTP/REST tools
-- ✅ Built-in tools (11 opencode tools; on by default, whole-source toggle + per-tool map)
+- ✅ Built-in tools (10 opencode tools; on by default, whole-source toggle + per-tool map)
 - ✅ A2A agents — outbound (call remote agents) + inbound (`serve` your toolkit as an agent); all five ports
+- ✅ Conversation memory (`ask` + pluggable `ConversationStore`; A2A serve remembers by `contextId`)
 - ✅ Unified LLM client (OpenAI- and Anthropic-style endpoints) + Go CLI
 - ✅ OpenAI / Anthropic / Gemini schema adapters
 - ✅ Verified with live OpenRouter tool-calling round trips (every port)
@@ -236,15 +252,15 @@ implementation's examples and tests.
 
 Each port has a hermetic suite (no network, no LLM — local HTTP servers for the HTTP
 tool, the shared `examples/` fixtures for skills) covering config parsing, `${ENV}`
-header expansion, the byte-exact skill block, native + HTTP tools, the provider
-adapters, and toolkit routing.
+header expansion, the byte-exact skill block, native + HTTP + built-in tools, A2A, the
+provider adapters, and toolkit routing.
 
 ```sh
 cd js     && npm test                 # node:test
 cd python && uv run pytest -q         # pytest
 cd golang && go test ./...            # go test
 cd java   && ./gradlew test           # JUnit 5
-cd csharp && dotnet test              # xUnit — 24 tests
+cd csharp && dotnet test              # xUnit
 ```
 
 The end-to-end agent loop (MCP + skills + native + HTTP through the host loop) is

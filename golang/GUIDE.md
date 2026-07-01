@@ -61,6 +61,16 @@ out, _ := client.Run(ctx, "Refund order 1234.", tk)
 fmt.Println(out.Text)
 ```
 
+**Memory across turns** — `Run` is stateless; `Ask(ctx, prompt, tk, id)` remembers a conversation
+by `id` through a `ConversationStore` (in-memory by default). A non-empty `id` loads → runs →
+saves that id's transcript; an empty `id` is identical to `Run`. Implement `ConversationStore`
+(`Get(id) ([]any, error)` / `Save(id, messages) error`) and pass it as `ClientOptions.Store` to
+persist across processes.
+```go
+r1, _ := client.Ask(ctx, "My name is Muthu.", tk, "user-42")
+r2, _ := client.Ask(ctx, "What's my name?", tk, "user-42") // recalls turn 1 → "Muthu"
+```
+
 **B) Bring your own LLM client** — take just the schema + executor:
 ```go
 tools := tk.ToOpenAI()            // or ToAnthropic() / ToGemini()
@@ -106,6 +116,10 @@ handle, _ := tk.Serve("127.0.0.1:0", toolnexus.ServeOptions{
 })
 defer handle.Stop()
 ```
+
+A served message's A2A `contextId` keys the conversation via `Client.Ask`, so a peer's successive
+turns are remembered through the client's `ConversationStore` (no `contextId` ⇒ a stateless `Run`).
+The `Store` above is the separate, pluggable *TaskStore* for served-task persistence.
 
 See [README.md](README.md#a2a-agents-agent-to-agent) for the full option set.
 

@@ -3,13 +3,14 @@
 [![NuGet](https://img.shields.io/nuget/v/Toolnexus?logo=nuget&label=NuGet)](https://www.nuget.org/packages/Toolnexus)
 [![license](https://img.shields.io/badge/license-MIT-green)](https://github.com/muthuishere/toolnexus/blob/main/LICENSE)
 
-**Build an agent in a few lines.** Point at an `mcp.json` and a `skills/` folder, call `RunAsync()`,
-and you have a working agent — MCP servers, agent skills, your own functions, and HTTP endpoints
-unified as one tool set, driving any LLM.
+**Build an agent in a few lines.** Give a toolkit some tools — built-ins, an `mcp.json`, a
+`skills/` folder, your own C# methods, HTTP endpoints, other agents — point a client at any LLM,
+call `RunAsync()`, and the tool-calling loop runs to an answer. Every source is unified behind one
+`ITool` interface and emitted in **OpenAI / Anthropic / Gemini** schema.
 
-> **Right-sized.** Not a framework (no builders, no config to wade through), not a toy that falls
-> over the moment you need streaming or a retry. Everything a real agent needs — the loop, hooks,
-> streaming, retries, memory — and nothing it doesn't.
+> **Right-sized.** Not a framework (no builders to learn, no config to wade through), not a toy
+> that falls over the moment you need streaming or a retry. Everything a real agent needs — the
+> loop, hooks, streaming, retries, conversation memory — and nothing it doesn't.
 
 The C#/.NET port of [toolnexus](https://github.com/muthuishere/toolnexus) — the same library,
 byte-identical, also in **JavaScript, Python, Go, and Java**. Built on the official
@@ -21,39 +22,109 @@ byte-identical, also in **JavaScript, Python, Go, and Java**. Built on the offic
 dotnet add package Toolnexus
 ```
 
-## An agent in 3 steps
+## Quick start — an agent in 3 steps
 
 ```csharp
 using Toolnexus;
 
-// 1. tools from an mcp.json + a skills/ folder
-await using var tk = await Toolkit.CreateAsync(new Toolkit.Options()
-    .WithMcpConfig("./mcp.json")
-    .WithSkillsDir("./skills"));
+// 1. a toolkit — the 10 built-in tools (bash/read/write/edit/grep/glob/…) are on by default
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
 
-// 2. point at any OpenAI- or Anthropic-style endpoint
+// 2. a client — point at any OpenAI- or Anthropic-style endpoint
 var agent = LlmClient.Create(new LlmClient.Options
 {
     BaseUrl = "https://openrouter.ai/api/v1",
-    Style   = "openai",                 // or "anthropic"
-    Model   = "openai/gpt-4o-mini",
+    Style   = "openai",                       // or "anthropic"
+    Model   = "anthropic/claude-3.5-sonnet",
     ApiKey  = Environment.GetEnvironmentVariable("OPENROUTER_API_KEY"),
 });
 
-// 3. run — skills injected into the system prompt, tools called for you, looped to an answer
-var res = await agent.RunAsync("Refund order 1234 for the customer.", tk);
+// 3. run — tools called for you, looped to a final answer
+var res = await agent.RunAsync("List the files in the current folder, then summarise the README.", tk);
 Console.WriteLine(res.Text);
 ```
 
-The loop runs call → execute tools → feed back → repeat, with hooks, streaming, retries/backoff,
-and conversation memory available. `res` carries `Text`, `ToolCalls`, usage, turns, and model.
+The loop runs call → execute tools → feed results back → repeat, with hooks, streaming, and
+retries/backoff available. `res` is a `RunResult` carrying `Text`, `Messages`, `ToolCalls`
+(+ `ToolCallCount`), `Turns`, `Usage`, and `Model`.
+
+> **API key.** `ApiKey` is optional — when unset the client reads `OPENROUTER_API_KEY`, then
+> `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` from the environment. Keys are use-only; never bake one
+> into code.
+
+## With MCP servers + agent skills
+
+Point the toolkit at an `mcp.json` (local stdio **and** remote streamable-HTTP servers) and a
+folder of `<name>/SKILL.md` skills. Every MCP tool and the `skill` tool join the same tool set.
+
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options()
+    .WithMcpConfig("./mcp.json")     // path, raw JSON string, or a parsed config dict
+    .WithSkillsDir("./skills"));     // one or more skill roots
+
+var res = await agent.RunAsync("Refund order 1234 for the customer.", tk);
+```
+
+Skills are injected into the system prompt as a catalog; the `skill` tool loads a skill's full
+instructions + resources **on demand** (progressive disclosure). A failing MCP server is isolated —
+it contributes no tools and never breaks the toolkit.
+
+## Conversations / memory
+
+`RunAsync` is stateless — each call starts fresh. For a remembered, multi-turn conversation use
+**`AskAsync`** with a stable `id`: the client loads that id's transcript from its conversation
+store, runs, saves the updated transcript, and returns the answer — so the next `AskAsync` with the
+same id continues where it left off.
+
+```csharp
+var user = "user-42";
+
+var a = await agent.AskAsync("My name is Muthu and I love Go.", tk, user);
+var b = await agent.AskAsync("What's my name and favourite language?", tk, user);
+Console.WriteLine(b.Text);   // "Your name is Muthu and you love Go."
+
+// same overload, no id  →  stateless one-shot (identical to RunAsync)
+var once = await agent.AskAsync("Unrelated question.", tk);
+```
+
+```csharp
+public async Task<RunResult> AskAsync(
+    string prompt, Toolkit toolkit, string? id = null, CancellationToken cancellationToken = default);
+```
+
+- **Non-null `id`** — remembers via the store: `store.GetAsync(id)` → `RunAsync(prompt, toolkit, history)` → `store.SaveAsync(id, result.Messages)`.
+- **Null `id`** — stateless, exactly equivalent to `RunAsync`.
+
+### Where transcripts live
+
+The store comes from the `Store` option on `LlmClient.Options`, defaulting to
+`InMemoryConversationStore` (kept for the client's lifetime). Implement `IConversationStore` to
+persist across processes (file, database, Redis):
+
+```csharp
+public interface IConversationStore
+{
+    Task<List<object?>?> GetAsync(string id);        // stored transcript, or null
+    Task SaveAsync(string id, List<object?> messages); // persist the updated transcript
+}
+
+var agent = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = "https://openrouter.ai/api/v1",
+    Model   = "anthropic/claude-3.5-sonnet",
+    Store   = new MyFileConversationStore("./conversations"),  // your IConversationStore
+});
+```
+
+The same store powers **inbound A2A** (below): when a peer calls your served agent, its A2A
+`contextId` becomes the conversation id, so a peer's turns are remembered through this store.
 
 ## Add your own tools
 
 ```csharp
 using Toolnexus;
 
-// a method → a tool (attribute-based)
+// a C# method → a tool (attribute-based)
 public sealed class MathTools
 {
     [ToolMethod("add", "Add two numbers")]
@@ -61,6 +132,16 @@ public sealed class MathTools
 }
 
 tk.Register(Tools.FromObject(new MathTools()).ToArray());
+
+// a plain function → a tool (no class needed)
+tk.Register(NativeTool.Of("upper", "Uppercase a string",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["s"] = new Dictionary<string, object?> { ["type"] = "string" } },
+        ["required"] = new List<object?> { "s" },
+    },
+    args => (args.TryGetValue("s", out var s) ? s?.ToString() ?? "" : "").ToUpperInvariant()));
 
 // a REST endpoint → a tool
 tk.Register(HttpTool.Of(new HttpTool.Options
@@ -77,54 +158,48 @@ tk.Register(HttpTool.Of(new HttpTool.Options
 }));
 ```
 
-You can also pass `ExtraTools` / `AnnotatedObjects` straight into `Toolkit.Options`.
+`Register(params ITool[])` is chainable and first-name-wins (a duplicate name is warned and
+dropped). You can also pass `ExtraTools` / `AnnotatedObjects` straight into `Toolkit.Options`.
 
-## Bring your own loop
-
-```csharp
-var tools  = tk.ToOpenAI();      // or tk.ToAnthropic() / tk.ToGemini()
-var system = tk.SkillsPrompt();  // skills catalog for your system prompt
-// when the model returns a tool call (name, arguments):
-var res = await tk.ExecuteAsync(name, args);   // -> ToolResult(Output, IsError, Metadata)
-```
-
-## The four sources
+### The tool sources at a glance
 
 | Source | How |
 |--------|-----|
+| **Built-in** | 10 tools, on by default — see below |
 | **MCP servers** | an `mcp.json` (`mcpServers`/`servers`/`mcp`); local stdio + remote streamable-HTTP, `Headers` for auth |
 | **Agent skills** | a folder of `<name>/SKILL.md`; a `skill` tool loads each on demand + a system-prompt catalog |
 | **Native tools** | `[ToolMethod]`/`[Param]` on a class (`Tools.FromObject`), or `NativeTool.Of(...)` |
 | **HTTP / REST** | `HttpTool.Of(...)` — an endpoint becomes a tool, `${ENV}` headers |
+| **A2A agents** | remote agents whose skills become tools (below) |
 
-All four appear as one uniform `ITool` in `tk.Tools()`.
+All of them appear as one uniform `ITool` in `tk.Tools()`.
 
 ## Built-in tools
 
-A fifth source ships **10 built-in tools** — `bash`, `read`, `write`, `edit`, `grep`, `glob`,
+toolnexus ships **10 built-in tools** — `bash`, `read`, `write`, `edit`, `grep`, `glob`,
 `webfetch`, `question`, `apply_patch`, `todowrite` (names + input schemas match
-opencode) — so an agent can act with zero wiring. They appear in the tool schema
-(`ToOpenAI()`/`ToAnthropic()`/`ToGemini()`), like MCP tools — not the system prompt.
+[opencode](https://github.com/anomalyco/opencode)) — so an agent can act with zero wiring. They
+appear in the tool schema (`ToOpenAI()`/`ToAnthropic()`/`ToGemini()`), like MCP tools — not the
+system prompt.
 
-**On by default.** One global toggle turns the whole source off, or a per-tool `tools` map
-disables individual builtins on the all-on baseline:
+**On by default.** `WithBuiltins(false)` turns the whole source off; a per-tool map disables
+individual builtins on the all-on baseline:
 
 ```csharp
+// whole source off (for a locked-down host)
 await using var tk = await Toolkit.CreateAsync(new Toolkit.Options()
-    .WithMcpConfig("./mcp.json")
-    .WithBuiltins(false));   // also accepts a Dictionary with "disabled"/"enabled"
+    .WithBuiltins(false));   // also accepts { ["disabled"] = true } / { ["enabled"] = false }
 
 // per-tool: drop bash, keep the other nine (unknown names ignored; whole-source-off still wins)
 await using var tk2 = await Toolkit.CreateAsync(new Toolkit.Options()
-    .WithMcpConfig("./mcp.json")
     .WithBuiltins(new Dictionary<string, object?>
     {
         ["tools"] = new Dictionary<string, object?> { ["bash"] = false },
     }));
 ```
 
-`bash`/`write`/`edit`/`apply_patch` run commands and mutate the filesystem — these switches are
-the off-switch for locked-down hosts.
+`bash`/`write`/`edit`/`apply_patch` run commands and mutate the filesystem — these switches are the
+off-switch for locked-down hosts.
 
 ## A2A agents (agent-to-agent)
 
@@ -154,7 +229,7 @@ never fatal.
 ```csharp
 var agent = LlmClient.Create(new LlmClient.Options
 {
-    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai", Model = "openai/gpt-4o-mini",
+    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai", Model = "anthropic/claude-3.5-sonnet",
 });
 
 var handle = await tk.ServeAsync("127.0.0.1:0", new Toolkit.ServeOptions
@@ -165,27 +240,48 @@ var handle = await tk.ServeAsync("127.0.0.1:0", new Toolkit.ServeOptions
         Name = "research-agent",
         Description = "Answers research questions.",
         // Skills = new List<string> { "hello-world" }, // subset of skills to advertise; null ⇒ all
-        Store = "memory",                                // "memory" (default) | "file:<dir>" | a custom ITaskStore
+        Store = "memory",                                // task store: "memory" | "file:<dir>" | a custom ITaskStore
     },
 });
 Console.WriteLine(handle.Url);   // GET /.well-known/agent-card.json ; POST / (SendMessage / GetTask)
 await handle.StopAsync();
 ```
 
-`ServeAsync(addr, ServeOptions)` fulfils each inbound `SendMessage` task via `client.Run`. Task
-persistence is a pluggable `ITaskStore` — in-memory default, `"file:<dir>"`, or your own.
+Each inbound `SendMessage` is fulfilled by the client. A message's A2A `contextId` keys the
+conversation via `client.AskAsync`, so a peer's turns are **remembered** through the client's
+`IConversationStore` (a message with no `contextId` is a stateless run). Task lifecycle persistence
+is a separate, pluggable `ITaskStore` — in-memory default, `"file:<dir>"`, or your own.
+
+## Bring your own loop
+
+Don't want the built-in loop? Emit the schema for your provider, run your own calls, and let the
+toolkit execute the tool the model picks:
+
+```csharp
+var tools  = tk.ToOpenAI();      // or tk.ToAnthropic() / tk.ToGemini()
+var system = tk.SkillsPrompt();  // skills catalog for your system prompt
+
+// when the model returns a tool call (name, arguments):
+var res = await tk.ExecuteAsync(name, args);   // -> ToolResult(Output, IsError, Metadata)
+```
 
 ## API
 
 | Member | Description |
 |--------|-------------|
 | `Toolkit.CreateAsync(opts)` | async factory → `Toolkit` (`await using`) |
-| `LlmClient.Create(opts)` | the unified host loop (`RunAsync` / `StreamAsync`) |
-| `tk.Tools()` | the uniform tools |
+| `LlmClient.Create(opts)` | the unified host loop |
+| `agent.RunAsync(prompt, tk, history?, ct?)` | stateless run → `RunResult` |
+| `agent.AskAsync(prompt, tk, id?, ct?)` | remembered run when `id` is set (via `IConversationStore`); stateless when `id` is null |
+| `agent.StreamAsync(prompt, tk, onEvent, ct?)` | the loop with streaming events |
+| `tk.ServeAsync(addr, serveOpts)` | serve the toolkit as an A2A agent → `ServeHandle` |
+| `tk.Register(params ITool[])` | add native/http/custom tools (chainable) |
+| `tk.AddAgentAsync(agent \| cardUrl)` | register a remote A2A agent's skills at runtime |
+| `tk.Tools()` / `tk.Get(name)` | the uniform tools |
 | `tk.ExecuteAsync(name, args, ctx?)` | run a tool → `ToolResult` |
 | `tk.SkillsPrompt()` | system-prompt skill catalog |
 | `tk.ToOpenAI()` / `ToAnthropic()` / `ToGemini()` | provider tool schemas |
-| `tk.Register(params ITool[])` | add native/http/custom tools |
+| `IConversationStore` | `GetAsync(id)` / `SaveAsync(id, messages)` — implement for file/db memory |
 
 ## More
 
@@ -193,3 +289,5 @@ Full docs, the other four language ports, the shared behavior spec, and runnable
 **https://github.com/muthuishere/toolnexus**
 
 MIT licensed.
+</content>
+</invoke>
