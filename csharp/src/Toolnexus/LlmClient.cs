@@ -48,6 +48,9 @@ public sealed class LlmClient
     /// <summary>Conversation provider for <see cref="AskAsync"/> — from <c>opts.Store</c>, else in-memory.</summary>
     private readonly IConversationStore _store;
 
+    /// <summary>Cumulative Prometheus registry fed by the same events <c>OnMetric</c> sees.</summary>
+    private readonly MetricsRegistry _registry = new();
+
     private LlmClient(Options opts)
     {
         _opts = opts;
@@ -55,6 +58,40 @@ public sealed class LlmClient
     }
 
     public static LlmClient Create(Options opts) => new(opts);
+
+    /// <summary>Prometheus text exposition of cumulative metrics (SPEC §8). Always valid — before any
+    /// activity, only the <c># HELP</c>/<c># TYPE</c> lines render.</summary>
+    public string Metrics() => _registry.Render();
+
+    /// <summary>Feed a semantic metric event to the built-in registry and the optional <c>OnMetric</c> sink.</summary>
+    private void Emit(MetricEvent ev)
+    {
+        _registry.Record(ev);
+        _opts.OnMetric?.Invoke(ev);
+    }
+
+    /// <summary>Monotonic milliseconds for metric timing.</summary>
+    private static long NowMs() => Stopwatch.GetTimestamp() * 1000L / Stopwatch.Frequency;
+
+    /// <summary>Per-call token counts from one raw usage payload (not summed).</summary>
+    private static (long Prompt, long Completion) PerCall(IDictionary<string, object?>? raw, string style)
+    {
+        if (raw == null) return (0, 0);
+        return style == "anthropic"
+            ? (AsLong(raw.Get("input_tokens")), AsLong(raw.Get("output_tokens")))
+            : (AsLong(raw.Get("prompt_tokens")), AsLong(raw.Get("completion_tokens")));
+    }
+
+    /// <summary>Emit the terminal <c>run</c> metric event and build the <see cref="RunResult"/>.</summary>
+    private RunResult EndRun(long runStart, string text, List<object?> messages, List<ToolCall> toolCalls, int turns, Usage usage)
+    {
+        Emit(MetricEvent.Run(_opts.Model, turns, toolCalls.Count, usage.TotalTokens, NowMs() - runStart));
+        return new RunResult(text, messages, toolCalls, turns, usage, _opts.Model);
+    }
+
+    /// <summary>Emit a <c>run</c> error metric event (once, on a thrown run).</summary>
+    private void EmitRunError(long runStart, List<ToolCall> toolCalls, int turns, Usage usage, Exception e)
+        => Emit(MetricEvent.Run(_opts.Model, turns, toolCalls.Count, usage.TotalTokens, NowMs() - runStart, e.Message));
 
     // ---------------------------------------------------------------- options
 
@@ -76,6 +113,11 @@ public sealed class LlmClient
         /// lifetime). Supply a file/db store to persist conversations across processes.</summary>
         public IConversationStore? Store { get; set; }
 
+        /// <summary>Observability sink — receives semantic <see cref="MetricEvent"/>s as the loop runs
+        /// (SPEC §8). Forward to statsd/logs/OTel/anything. No cost when unset. The same events also
+        /// feed the built-in Prometheus registry behind <see cref="Metrics"/>.</summary>
+        public Action<MetricEvent>? OnMetric { get; set; }
+
         public Options WithBaseUrl(string v) { BaseUrl = v; return this; }
         public Options WithStyle(string v) { Style = v; return this; }
         public Options WithModel(string v) { Model = v; return this; }
@@ -88,6 +130,7 @@ public sealed class LlmClient
         public Options WithRetryBaseMs(int v) { RetryBaseMs = v; return this; }
         public Options WithTimeoutMs(long v) { TimeoutMs = v; return this; }
         public Options WithStore(IConversationStore v) { Store = v; return this; }
+        public Options WithOnMetric(Action<MetricEvent> v) { OnMetric = v; return this; }
     }
 
     /// <summary>Thrown when a run exceeds <see cref="Options.TimeoutMs"/> (or its in-flight request times out).</summary>
@@ -122,11 +165,18 @@ public sealed class LlmClient
         Toolkit toolkit, string name, IDictionary<string, object?> args, string? id, int turn)
     {
         var h = _opts.Hooks;
+        var source = toolkit.Get(name)?.Source ?? "custom";
+        var t0 = NowMs();
         var a = args;
         if (h?.BeforeTool != null)
         {
             var ov = h.BeforeTool(new BeforeToolEvent(name, a, id, turn));
-            if (ov?.Result != null) return (a, ov.Result);       // short-circuit
+            if (ov?.Result != null)
+            {
+                // short-circuit (deny/cache/dry-run) — still a tool call for metrics purposes
+                Emit(MetricEvent.ToolCall(name, source, ov.Result.IsError, NowMs() - t0));
+                return (a, ov.Result);
+            }
             if (ov?.Args != null) a = ov.Args;
         }
         var result = await toolkit.ExecuteAsync(name, a).ConfigureAwait(false);
@@ -135,6 +185,7 @@ public sealed class LlmClient
             var ov = h.AfterTool(new AfterToolEvent(name, a, result, id, turn));
             if (ov?.Result != null) result = ov.Result;
         }
+        Emit(MetricEvent.ToolCall(name, source, result.IsError, NowMs() - t0));
         return (a, result);
     }
 
@@ -206,8 +257,18 @@ public sealed class LlmClient
     /// transcript, and returns the answer — so the next <c>AskAsync</c> with the same id continues
     /// it. Without an id it is a stateless one-shot (identical to <see cref="RunAsync"/>).
     /// </summary>
-    public async Task<RunResult> AskAsync(string prompt, Toolkit toolkit, string? id = null, CancellationToken cancellationToken = default)
+    /// <param name="onText">Optional block-style streaming sink. When set, the streaming loop runs and
+    /// each text delta is forwarded here as it arrives — the final <see cref="RunResult"/> is still
+    /// returned. Memory (<paramref name="id"/> load/save) is handled by the streaming path, so there
+    /// is no duplication.</param>
+    public async Task<RunResult> AskAsync(string prompt, Toolkit toolkit, string? id = null,
+        Action<string>? onText = null, CancellationToken cancellationToken = default)
     {
+        if (onText != null)
+            return await StreamAsync(prompt, toolkit,
+                ev => { if (ev.Type == StreamKind.Text && ev.Delta != null) onText(ev.Delta); },
+                id, cancellationToken).ConfigureAwait(false);
+
         if (id == null)
             return await RunAsync(prompt, toolkit, null, cancellationToken).ConfigureAwait(false);
         var history = await _store.GetAsync(id).ConfigureAwait(false) ?? new List<object?>();
@@ -218,12 +279,23 @@ public sealed class LlmClient
 
     public Conversation NewConversation(Toolkit toolkit) => new(this, toolkit);
 
-    public Task<RunResult> StreamAsync(string prompt, Toolkit toolkit, Action<StreamEvent> onEvent, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Streaming variant: <paramref name="onEvent"/> receives live events (text deltas, tool
+    /// calls/results, usage, done) and the final <see cref="RunResult"/> is returned. With an
+    /// <paramref name="id"/> it is stateful (like <see cref="AskAsync"/>): the thread's transcript is
+    /// loaded as history before streaming, and saved back to the <see cref="IConversationStore"/> once
+    /// the run terminates. No <paramref name="id"/> ⇒ stateless.
+    /// </summary>
+    public async Task<RunResult> StreamAsync(string prompt, Toolkit toolkit, Action<StreamEvent> onEvent,
+        string? id = null, CancellationToken cancellationToken = default)
     {
         var deadline = new Deadline(_opts.TimeoutMs);
-        return _opts.Style == "anthropic"
-            ? StreamAnthropicAsync(prompt, toolkit, onEvent, deadline, cancellationToken)
-            : StreamOpenAIAsync(prompt, toolkit, onEvent, deadline, cancellationToken);
+        var history = id != null ? (await _store.GetAsync(id).ConfigureAwait(false) ?? new List<object?>()) : null;
+        var result = _opts.Style == "anthropic"
+            ? await StreamAnthropicAsync(prompt, toolkit, onEvent, history, deadline, cancellationToken).ConfigureAwait(false)
+            : await StreamOpenAIAsync(prompt, toolkit, onEvent, history, deadline, cancellationToken).ConfigureAwait(false);
+        if (id != null) await _store.SaveAsync(id, result.Messages).ConfigureAwait(false);
+        return result;
     }
 
     // ---------------------------------------------------------------- helpers
@@ -339,64 +411,73 @@ public sealed class LlmClient
         var toolCalls = new List<ToolCall>();
         var usage = new Usage();
         var turns = 0;
+        var runStart = NowMs();
 
-        for (var turn = 0; turn < MaxTurns(); turn++)
+        try
         {
-            turns++;
-            ApplyBeforeLLM(ref messages, ref tools, turn);
-
-            var body = new Dictionary<string, object?>
+            for (var turn = 0; turn < MaxTurns(); turn++)
             {
-                ["model"] = _opts.Model,
-                ["messages"] = messages,
-                ["tools"] = tools,
-                ["tool_choice"] = "auto",
-            };
-            var url = StripTrailingSlash(_opts.BaseUrl) + "/chat/completions";
-            var data = await PostJsonAsync(url, BaseHeaders(key, false), body, deadline, external).ConfigureAwait(false);
-            AddUsage(usage, data.Get("usage") as IDictionary<string, object?>, "openai");
-            _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(data, _opts.Model, turn));
+                turns++;
+                ApplyBeforeLLM(ref messages, ref tools, turn);
 
-            var choices = data.Get("choices") as List<object?> ?? new List<object?>();
-            var message = (IDictionary<string, object?>)((IDictionary<string, object?>)choices[0]!)["message"]!;
-            messages.Add(message);
-            var calls = message.Get("tool_calls") as List<object?>;
-            if (calls == null || calls.Count == 0)
-            {
-                var content = message.Get("content");
-                return new RunResult(content?.ToString() ?? "", messages, toolCalls, turns, usage, _opts.Model);
-            }
-
-            // Execute all tool calls in this turn concurrently.
-            var n = calls.Count;
-            var toolMsgs = new Dictionary<string, object?>[n];
-            var recorded = new ToolCall[n];
-            var tasks = new Task[n];
-            for (var i = 0; i < n; i++)
-            {
-                var idx = i;
-                var call = (IDictionary<string, object?>)calls[i]!;
-                var fn = (IDictionary<string, object?>)call["function"]!;
-                var fnName = fn.Get("name")?.ToString() ?? "";
-                var args = Json.ParseObjectLoose(fn.Get("arguments")?.ToString() ?? "{}");
-                var callId = call.Get("id")?.ToString();
-                tasks[idx] = Task.Run(async () =>
+                var body = new Dictionary<string, object?>
                 {
-                    var run = await RunToolAsync(toolkit, fnName, args, callId, turn).ConfigureAwait(false);
-                    recorded[idx] = new ToolCall(fnName, run.Args, run.Result.Output, run.Result.IsError, run.Result.Metadata);
-                    toolMsgs[idx] = new Dictionary<string, object?>
+                    ["model"] = _opts.Model,
+                    ["messages"] = messages,
+                    ["tools"] = tools,
+                    ["tool_choice"] = "auto",
+                };
+                var url = StripTrailingSlash(_opts.BaseUrl) + "/chat/completions";
+                var data = await LlmCallJsonAsync(url, BaseHeaders(key, false), body, deadline, external, "openai").ConfigureAwait(false);
+                AddUsage(usage, data.Get("usage") as IDictionary<string, object?>, "openai");
+                _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(data, _opts.Model, turn));
+
+                var choices = data.Get("choices") as List<object?> ?? new List<object?>();
+                var message = (IDictionary<string, object?>)((IDictionary<string, object?>)choices[0]!)["message"]!;
+                messages.Add(message);
+                var calls = message.Get("tool_calls") as List<object?>;
+                if (calls == null || calls.Count == 0)
+                {
+                    var content = message.Get("content");
+                    return EndRun(runStart, content?.ToString() ?? "", messages, toolCalls, turns, usage);
+                }
+
+                // Execute all tool calls in this turn concurrently.
+                var n = calls.Count;
+                var toolMsgs = new Dictionary<string, object?>[n];
+                var recorded = new ToolCall[n];
+                var tasks = new Task[n];
+                for (var i = 0; i < n; i++)
+                {
+                    var idx = i;
+                    var call = (IDictionary<string, object?>)calls[i]!;
+                    var fn = (IDictionary<string, object?>)call["function"]!;
+                    var fnName = fn.Get("name")?.ToString() ?? "";
+                    var args = Json.ParseObjectLoose(fn.Get("arguments")?.ToString() ?? "{}");
+                    var callId = call.Get("id")?.ToString();
+                    tasks[idx] = Task.Run(async () =>
                     {
-                        ["role"] = "tool",
-                        ["tool_call_id"] = callId,
-                        ["content"] = run.Result.Output,
-                    };
-                });
+                        var run = await RunToolAsync(toolkit, fnName, args, callId, turn).ConfigureAwait(false);
+                        recorded[idx] = new ToolCall(fnName, run.Args, run.Result.Output, run.Result.IsError, run.Result.Metadata);
+                        toolMsgs[idx] = new Dictionary<string, object?>
+                        {
+                            ["role"] = "tool",
+                            ["tool_call_id"] = callId,
+                            ["content"] = run.Result.Output,
+                        };
+                    });
+                }
+                await Task.WhenAll(tasks).ConfigureAwait(false);
+                toolCalls.AddRange(recorded);
+                messages.AddRange(toolMsgs);
             }
-            await Task.WhenAll(tasks).ConfigureAwait(false);
-            toolCalls.AddRange(recorded);
-            messages.AddRange(toolMsgs);
+            return EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage);
         }
-        return new RunResult(LastAssistantText(messages), messages, toolCalls, turns, usage, _opts.Model);
+        catch (Exception e)
+        {
+            EmitRunError(runStart, toolCalls, turns, usage, e);
+            throw;
+        }
     }
 
     // ---------------------------------------------------------------- Anthropic run
@@ -413,68 +494,77 @@ public sealed class LlmClient
         var toolCalls = new List<ToolCall>();
         var usage = new Usage();
         var turns = 0;
+        var runStart = NowMs();
 
-        for (var turn = 0; turn < MaxTurns(); turn++)
+        try
         {
-            turns++;
-            ApplyBeforeLLM(ref messages, ref tools, turn);
-
-            var body = new Dictionary<string, object?>
+            for (var turn = 0; turn < MaxTurns(); turn++)
             {
-                ["model"] = _opts.Model,
-                ["max_tokens"] = 4096,
-                ["messages"] = messages,
-                ["tools"] = tools,
-            };
-            if (system.Length > 0) body["system"] = system;
+                turns++;
+                ApplyBeforeLLM(ref messages, ref tools, turn);
 
-            var data = await PostJsonAsync(endpoint, BaseHeaders(key, true), body, deadline, external).ConfigureAwait(false);
-            AddUsage(usage, data.Get("usage") as IDictionary<string, object?>, "anthropic");
-            _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(data, _opts.Model, turn));
-
-            var content = data.Get("content") as List<object?> ?? new List<object?>();
-            messages.Add(new Dictionary<string, object?> { ["role"] = "assistant", ["content"] = content });
-
-            var uses = content.OfType<IDictionary<string, object?>>()
-                .Where(b => (b.Get("type") as string) == "tool_use").ToList();
-            if (uses.Count == 0)
-            {
-                var text = new StringBuilder();
-                foreach (var b in content.OfType<IDictionary<string, object?>>())
-                    if ((b.Get("type") as string) == "text")
-                        text.Append(b.Get("text"));
-                return new RunResult(text.ToString(), messages, toolCalls, turns, usage, _opts.Model);
-            }
-
-            var n = uses.Count;
-            var resultBlocks = new Dictionary<string, object?>[n];
-            var recorded = new ToolCall[n];
-            var tasks = new Task[n];
-            for (var i = 0; i < n; i++)
-            {
-                var idx = i;
-                var use = uses[i];
-                var input = use.Get("input") as IDictionary<string, object?> ?? new Dictionary<string, object?>();
-                var useName = use.Get("name")?.ToString() ?? "";
-                var useId = use.Get("id")?.ToString();
-                tasks[idx] = Task.Run(async () =>
+                var body = new Dictionary<string, object?>
                 {
-                    var run = await RunToolAsync(toolkit, useName, input, useId, turn).ConfigureAwait(false);
-                    recorded[idx] = new ToolCall(useName, run.Args, run.Result.Output, run.Result.IsError, run.Result.Metadata);
-                    resultBlocks[idx] = new Dictionary<string, object?>
+                    ["model"] = _opts.Model,
+                    ["max_tokens"] = 4096,
+                    ["messages"] = messages,
+                    ["tools"] = tools,
+                };
+                if (system.Length > 0) body["system"] = system;
+
+                var data = await LlmCallJsonAsync(endpoint, BaseHeaders(key, true), body, deadline, external, "anthropic").ConfigureAwait(false);
+                AddUsage(usage, data.Get("usage") as IDictionary<string, object?>, "anthropic");
+                _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(data, _opts.Model, turn));
+
+                var content = data.Get("content") as List<object?> ?? new List<object?>();
+                messages.Add(new Dictionary<string, object?> { ["role"] = "assistant", ["content"] = content });
+
+                var uses = content.OfType<IDictionary<string, object?>>()
+                    .Where(b => (b.Get("type") as string) == "tool_use").ToList();
+                if (uses.Count == 0)
+                {
+                    var text = new StringBuilder();
+                    foreach (var b in content.OfType<IDictionary<string, object?>>())
+                        if ((b.Get("type") as string) == "text")
+                            text.Append(b.Get("text"));
+                    return EndRun(runStart, text.ToString(), messages, toolCalls, turns, usage);
+                }
+
+                var n = uses.Count;
+                var resultBlocks = new Dictionary<string, object?>[n];
+                var recorded = new ToolCall[n];
+                var tasks = new Task[n];
+                for (var i = 0; i < n; i++)
+                {
+                    var idx = i;
+                    var use = uses[i];
+                    var input = use.Get("input") as IDictionary<string, object?> ?? new Dictionary<string, object?>();
+                    var useName = use.Get("name")?.ToString() ?? "";
+                    var useId = use.Get("id")?.ToString();
+                    tasks[idx] = Task.Run(async () =>
                     {
-                        ["type"] = "tool_result",
-                        ["tool_use_id"] = useId,
-                        ["content"] = run.Result.Output,
-                        ["is_error"] = run.Result.IsError,
-                    };
-                });
+                        var run = await RunToolAsync(toolkit, useName, input, useId, turn).ConfigureAwait(false);
+                        recorded[idx] = new ToolCall(useName, run.Args, run.Result.Output, run.Result.IsError, run.Result.Metadata);
+                        resultBlocks[idx] = new Dictionary<string, object?>
+                        {
+                            ["type"] = "tool_result",
+                            ["tool_use_id"] = useId,
+                            ["content"] = run.Result.Output,
+                            ["is_error"] = run.Result.IsError,
+                        };
+                    });
+                }
+                await Task.WhenAll(tasks).ConfigureAwait(false);
+                toolCalls.AddRange(recorded);
+                messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = resultBlocks.Cast<object?>().ToList() });
             }
-            await Task.WhenAll(tasks).ConfigureAwait(false);
-            toolCalls.AddRange(recorded);
-            messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = resultBlocks.Cast<object?>().ToList() });
+            return EndRun(runStart, "", messages, toolCalls, turns, usage);
         }
-        return new RunResult("", messages, toolCalls, turns, usage, _opts.Model);
+        catch (Exception e)
+        {
+            EmitRunError(runStart, toolCalls, turns, usage, e);
+            throw;
+        }
     }
 
     private string AnthropicEndpoint()
@@ -493,281 +583,332 @@ public sealed class LlmClient
 
     // ---------------------------------------------------------------- OpenAI stream
 
-    private async Task<RunResult> StreamOpenAIAsync(string prompt, Toolkit toolkit, Action<StreamEvent> onEvent, Deadline deadline, CancellationToken external)
+    private async Task<RunResult> StreamOpenAIAsync(string prompt, Toolkit toolkit, Action<StreamEvent> onEvent, List<object?>? history, Deadline deadline, CancellationToken external)
     {
         var key = ResolveKey();
         var messages = new List<object?>();
-        var system = System(toolkit);
-        if (system.Length > 0) messages.Add(Msg("system", system));
+        if (history is { Count: > 0 })
+        {
+            messages.AddRange(history);
+        }
+        else
+        {
+            var system = System(toolkit);
+            if (system.Length > 0) messages.Add(Msg("system", system));
+        }
         messages.Add(Msg("user", prompt));
         var tools = toolkit.ToOpenAI();
         var toolCalls = new List<ToolCall>();
         var usage = new Usage();
         var turns = 0;
+        var runStart = NowMs();
 
-        for (var turn = 0; turn < MaxTurns(); turn++)
+        try
         {
-            turns++;
-            ApplyBeforeLLM(ref messages, ref tools, turn);
-            var body = new Dictionary<string, object?>
+            for (var turn = 0; turn < MaxTurns(); turn++)
             {
-                ["model"] = _opts.Model,
-                ["messages"] = messages,
-                ["tools"] = tools,
-                ["tool_choice"] = "auto",
-                ["stream"] = true,
-                ["stream_options"] = new Dictionary<string, object?> { ["include_usage"] = true },
-            };
-            var url = StripTrailingSlash(_opts.BaseUrl) + "/chat/completions";
-
-            var content = new StringBuilder();
-            var acc = new Dictionary<int, string[]>(); // index -> [id, name, args]
-            var order = new List<int>();
-
-            await foreach (var line in SseLinesAsync(url, BaseHeaders(key, false), body, deadline, external).ConfigureAwait(false))
-            {
-                if (!line.StartsWith("data:")) continue;
-                var payload = line[5..].Trim();
-                if (payload == "[DONE]") break;
-                if (Json.ParseLoose(payload) is not IDictionary<string, object?> j) continue;
-                AddUsage(usage, j.Get("usage") as IDictionary<string, object?>, "openai");
-                if (j.Get("choices") is not List<object?> { Count: > 0 } choices) continue;
-                if (((IDictionary<string, object?>)choices[0]!).Get("delta") is not IDictionary<string, object?> delta) continue;
-                if (delta.Get("content") is string ds && ds.Length > 0)
+                turns++;
+                ApplyBeforeLLM(ref messages, ref tools, turn);
+                var body = new Dictionary<string, object?>
                 {
-                    content.Append(ds);
-                    onEvent(StreamEvent.Text(ds));
-                }
-                if (delta.Get("tool_calls") is List<object?> tcs)
+                    ["model"] = _opts.Model,
+                    ["messages"] = messages,
+                    ["tools"] = tools,
+                    ["tool_choice"] = "auto",
+                    ["stream"] = true,
+                    ["stream_options"] = new Dictionary<string, object?> { ["include_usage"] = true },
+                };
+                var url = StripTrailingSlash(_opts.BaseUrl) + "/chat/completions";
+
+                var content = new StringBuilder();
+                var acc = new Dictionary<int, string[]>(); // index -> [id, name, args]
+                var order = new List<int>();
+
+                var t0 = NowMs();
+                var beforeP = usage.PromptTokens;
+                var beforeC = usage.CompletionTokens;
+                try
                 {
-                    foreach (var o in tcs)
+                    await foreach (var line in SseLinesAsync(url, BaseHeaders(key, false), body, deadline, external).ConfigureAwait(false))
                     {
-                        var tc = (IDictionary<string, object?>)o!;
-                        var index = (int)AsLong(tc.Get("index"));
-                        if (!acc.TryGetValue(index, out var slot)) { slot = new[] { "", "", "" }; acc[index] = slot; order.Add(index); }
-                        if (tc.Get("id") != null) slot[0] = tc["id"]!.ToString()!;
-                        if (tc.Get("function") is IDictionary<string, object?> fn)
+                        if (!line.StartsWith("data:")) continue;
+                        var payload = line[5..].Trim();
+                        if (payload == "[DONE]") break;
+                        if (Json.ParseLoose(payload) is not IDictionary<string, object?> j) continue;
+                        AddUsage(usage, j.Get("usage") as IDictionary<string, object?>, "openai");
+                        if (j.Get("choices") is not List<object?> { Count: > 0 } choices) continue;
+                        if (((IDictionary<string, object?>)choices[0]!).Get("delta") is not IDictionary<string, object?> delta) continue;
+                        if (delta.Get("content") is string ds && ds.Length > 0)
                         {
-                            if (fn.Get("name") != null) slot[1] += fn["name"];
-                            if (fn.Get("arguments") != null) slot[2] += fn["arguments"];
+                            content.Append(ds);
+                            onEvent(StreamEvent.Text(ds));
+                        }
+                        if (delta.Get("tool_calls") is List<object?> tcs)
+                        {
+                            foreach (var o in tcs)
+                            {
+                                var tc = (IDictionary<string, object?>)o!;
+                                var index = (int)AsLong(tc.Get("index"));
+                                if (!acc.TryGetValue(index, out var slot)) { slot = new[] { "", "", "" }; acc[index] = slot; order.Add(index); }
+                                if (tc.Get("id") != null) slot[0] = tc["id"]!.ToString()!;
+                                if (tc.Get("function") is IDictionary<string, object?> fn)
+                                {
+                                    if (fn.Get("name") != null) slot[1] += fn["name"];
+                                    if (fn.Get("arguments") != null) slot[2] += fn["arguments"];
+                                }
+                            }
                         }
                     }
                 }
-            }
-            _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(new Dictionary<string, object?> { ["streamed"] = true }, _opts.Model, turn));
-
-            if (order.Count == 0)
-            {
-                messages.Add(Msg("assistant", content.ToString()));
-                onEvent(StreamEvent.UsageEvent(usage.Copy()));
-                var done0 = new RunResult(content.ToString(), messages, toolCalls, turns, usage, _opts.Model);
-                onEvent(StreamEvent.DoneEvent(done0));
-                return done0;
-            }
-
-            var assembledCalls = new List<object?>();
-            foreach (var index in order)
-            {
-                var slot = acc[index];
-                assembledCalls.Add(new Dictionary<string, object?>
+                catch (Exception)
                 {
-                    ["id"] = slot[0],
-                    ["type"] = "function",
-                    ["function"] = new Dictionary<string, object?> { ["name"] = slot[1], ["arguments"] = slot[2] },
-                });
-            }
-            messages.Add(new Dictionary<string, object?>
-            {
-                ["role"] = "assistant",
-                ["content"] = content.Length == 0 ? null : content.ToString(),
-                ["tool_calls"] = assembledCalls,
-            });
+                    Emit(MetricEvent.Llm(_opts.Model, "error", NowMs() - t0, 0, 0));
+                    throw;
+                }
+                Emit(MetricEvent.Llm(_opts.Model, "ok", NowMs() - t0, usage.PromptTokens - beforeP, usage.CompletionTokens - beforeC));
+                _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(new Dictionary<string, object?> { ["streamed"] = true }, _opts.Model, turn));
 
-            foreach (var index in order)
-            {
-                var slot = acc[index];
-                onEvent(StreamEvent.ToolCallEvent(slot[0], slot[1], Json.ParseObjectLoose(slot[2])));
+                if (order.Count == 0)
+                {
+                    messages.Add(Msg("assistant", content.ToString()));
+                    onEvent(StreamEvent.UsageEvent(usage.Copy()));
+                    var done0 = EndRun(runStart, content.ToString(), messages, toolCalls, turns, usage);
+                    onEvent(StreamEvent.DoneEvent(done0));
+                    return done0;
+                }
+
+                var assembledCalls = new List<object?>();
+                foreach (var index in order)
+                {
+                    var slot = acc[index];
+                    assembledCalls.Add(new Dictionary<string, object?>
+                    {
+                        ["id"] = slot[0],
+                        ["type"] = "function",
+                        ["function"] = new Dictionary<string, object?> { ["name"] = slot[1], ["arguments"] = slot[2] },
+                    });
+                }
+                messages.Add(new Dictionary<string, object?>
+                {
+                    ["role"] = "assistant",
+                    ["content"] = content.Length == 0 ? null : content.ToString(),
+                    ["tool_calls"] = assembledCalls,
+                });
+
+                foreach (var index in order)
+                {
+                    var slot = acc[index];
+                    onEvent(StreamEvent.ToolCallEvent(slot[0], slot[1], Json.ParseObjectLoose(slot[2])));
+                }
+                var n = order.Count;
+                var runs = new (IDictionary<string, object?> Args, ToolResult Result)[n];
+                var tasks = new Task[n];
+                for (var i = 0; i < n; i++)
+                {
+                    var idx = i;
+                    var slot = acc[order[i]];
+                    var args = Json.ParseObjectLoose(slot[2]);
+                    tasks[idx] = Task.Run(async () => runs[idx] = await RunToolAsync(toolkit, slot[1], args, slot[0], turn).ConfigureAwait(false));
+                }
+                await Task.WhenAll(tasks).ConfigureAwait(false);
+                for (var i = 0; i < n; i++)
+                {
+                    var slot = acc[order[i]];
+                    var r = runs[i];
+                    toolCalls.Add(new ToolCall(slot[1], r.Args, r.Result.Output, r.Result.IsError, r.Result.Metadata));
+                    messages.Add(new Dictionary<string, object?> { ["role"] = "tool", ["tool_call_id"] = slot[0], ["content"] = r.Result.Output });
+                    onEvent(StreamEvent.ToolResultEvent(slot[0], slot[1], r.Result.Output, r.Result.IsError));
+                }
             }
-            var n = order.Count;
-            var runs = new (IDictionary<string, object?> Args, ToolResult Result)[n];
-            var tasks = new Task[n];
-            for (var i = 0; i < n; i++)
-            {
-                var idx = i;
-                var slot = acc[order[i]];
-                var args = Json.ParseObjectLoose(slot[2]);
-                tasks[idx] = Task.Run(async () => runs[idx] = await RunToolAsync(toolkit, slot[1], args, slot[0], turn).ConfigureAwait(false));
-            }
-            await Task.WhenAll(tasks).ConfigureAwait(false);
-            for (var i = 0; i < n; i++)
-            {
-                var slot = acc[order[i]];
-                var r = runs[i];
-                toolCalls.Add(new ToolCall(slot[1], r.Args, r.Result.Output, r.Result.IsError, r.Result.Metadata));
-                messages.Add(new Dictionary<string, object?> { ["role"] = "tool", ["tool_call_id"] = slot[0], ["content"] = r.Result.Output });
-                onEvent(StreamEvent.ToolResultEvent(slot[0], slot[1], r.Result.Output, r.Result.IsError));
-            }
+            var done = EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage);
+            onEvent(StreamEvent.DoneEvent(done));
+            return done;
         }
-        var done = new RunResult(LastAssistantText(messages), messages, toolCalls, turns, usage, _opts.Model);
-        onEvent(StreamEvent.DoneEvent(done));
-        return done;
+        catch (Exception e)
+        {
+            EmitRunError(runStart, toolCalls, turns, usage, e);
+            throw;
+        }
     }
 
     // ---------------------------------------------------------------- Anthropic stream
 
-    private async Task<RunResult> StreamAnthropicAsync(string prompt, Toolkit toolkit, Action<StreamEvent> onEvent, Deadline deadline, CancellationToken external)
+    private async Task<RunResult> StreamAnthropicAsync(string prompt, Toolkit toolkit, Action<StreamEvent> onEvent, List<object?>? history, Deadline deadline, CancellationToken external)
     {
         var key = ResolveKey();
         var endpoint = AnthropicEndpoint();
         var system = System(toolkit);
-        var messages = new List<object?> { Msg("user", prompt) };
+        var messages = new List<object?>();
+        if (history is { Count: > 0 }) messages.AddRange(history);
+        messages.Add(Msg("user", prompt));
         var tools = toolkit.ToAnthropic();
         var toolCalls = new List<ToolCall>();
         var usage = new Usage();
         var turns = 0;
+        var runStart = NowMs();
 
-        for (var turn = 0; turn < MaxTurns(); turn++)
+        try
         {
-            turns++;
-            ApplyBeforeLLM(ref messages, ref tools, turn);
-            var body = new Dictionary<string, object?>
+            for (var turn = 0; turn < MaxTurns(); turn++)
             {
-                ["model"] = _opts.Model,
-                ["max_tokens"] = 4096,
-                ["messages"] = messages,
-                ["tools"] = tools,
-                ["stream"] = true,
-            };
-            if (system.Length > 0) body["system"] = system;
+                turns++;
+                ApplyBeforeLLM(ref messages, ref tools, turn);
+                var body = new Dictionary<string, object?>
+                {
+                    ["model"] = _opts.Model,
+                    ["max_tokens"] = 4096,
+                    ["messages"] = messages,
+                    ["tools"] = tools,
+                    ["stream"] = true,
+                };
+                if (system.Length > 0) body["system"] = system;
 
-            var blocks = new Dictionary<int, Dictionary<string, object?>>();
-            var order = new List<int>();
-            var stopReason = "";
+                var blocks = new Dictionary<int, Dictionary<string, object?>>();
+                var order = new List<int>();
+                var stopReason = "";
 
-            await foreach (var line in SseLinesAsync(endpoint, BaseHeaders(key, true), body, deadline, external).ConfigureAwait(false))
-            {
-                if (!line.StartsWith("data:")) continue;
-                if (Json.ParseLoose(line[5..].Trim()) is not IDictionary<string, object?> j) continue;
-                var type = j.Get("type") as string;
-                if (type == "message_start")
+                var t0 = NowMs();
+                var beforeP = usage.PromptTokens;
+                var beforeC = usage.CompletionTokens;
+                try
                 {
-                    if (j.Get("message") is IDictionary<string, object?> m)
-                        AddUsage(usage, m.Get("usage") as IDictionary<string, object?>, "anthropic");
-                }
-                else if (type == "content_block_start")
-                {
-                    var index = (int)AsLong(j.Get("index"));
-                    var cb = (IDictionary<string, object?>)j["content_block"]!;
-                    blocks[index] = new Dictionary<string, object?>
+                    await foreach (var line in SseLinesAsync(endpoint, BaseHeaders(key, true), body, deadline, external).ConfigureAwait(false))
                     {
-                        ["type"] = cb.Get("type"),
-                        ["id"] = cb.Get("id"),
-                        ["name"] = cb.Get("name"),
-                        ["text"] = new StringBuilder(),
-                        ["json"] = new StringBuilder(),
-                    };
-                    order.Add(index);
-                }
-                else if (type == "content_block_delta")
-                {
-                    var index = (int)AsLong(j.Get("index"));
-                    if (!blocks.TryGetValue(index, out var b)) continue;
-                    var delta = (IDictionary<string, object?>)j["delta"]!;
-                    var dtype = delta.Get("type") as string;
-                    if (dtype == "text_delta")
-                    {
-                        var t = delta.Get("text")?.ToString() ?? "";
-                        ((StringBuilder)b["text"]!).Append(t);
-                        onEvent(StreamEvent.Text(t));
+                        if (!line.StartsWith("data:")) continue;
+                        if (Json.ParseLoose(line[5..].Trim()) is not IDictionary<string, object?> j) continue;
+                        var type = j.Get("type") as string;
+                        if (type == "message_start")
+                        {
+                            if (j.Get("message") is IDictionary<string, object?> m)
+                                AddUsage(usage, m.Get("usage") as IDictionary<string, object?>, "anthropic");
+                        }
+                        else if (type == "content_block_start")
+                        {
+                            var index = (int)AsLong(j.Get("index"));
+                            var cb = (IDictionary<string, object?>)j["content_block"]!;
+                            blocks[index] = new Dictionary<string, object?>
+                            {
+                                ["type"] = cb.Get("type"),
+                                ["id"] = cb.Get("id"),
+                                ["name"] = cb.Get("name"),
+                                ["text"] = new StringBuilder(),
+                                ["json"] = new StringBuilder(),
+                            };
+                            order.Add(index);
+                        }
+                        else if (type == "content_block_delta")
+                        {
+                            var index = (int)AsLong(j.Get("index"));
+                            if (!blocks.TryGetValue(index, out var b)) continue;
+                            var delta = (IDictionary<string, object?>)j["delta"]!;
+                            var dtype = delta.Get("type") as string;
+                            if (dtype == "text_delta")
+                            {
+                                var t = delta.Get("text")?.ToString() ?? "";
+                                ((StringBuilder)b["text"]!).Append(t);
+                                onEvent(StreamEvent.Text(t));
+                            }
+                            else if (dtype == "input_json_delta")
+                            {
+                                ((StringBuilder)b["json"]!).Append(delta.Get("partial_json"));
+                            }
+                        }
+                        else if (type == "message_delta")
+                        {
+                            if (j.Get("delta") is IDictionary<string, object?> delta && delta.Get("stop_reason") != null)
+                                stopReason = delta["stop_reason"]!.ToString()!;
+                            AddUsage(usage, j.Get("usage") as IDictionary<string, object?>, "anthropic");
+                        }
                     }
-                    else if (dtype == "input_json_delta")
+                }
+                catch (Exception)
+                {
+                    Emit(MetricEvent.Llm(_opts.Model, "error", NowMs() - t0, 0, 0));
+                    throw;
+                }
+                Emit(MetricEvent.Llm(_opts.Model, "ok", NowMs() - t0, usage.PromptTokens - beforeP, usage.CompletionTokens - beforeC));
+                _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(new Dictionary<string, object?> { ["streamed"] = true }, _opts.Model, turn));
+
+                var contentBlocks = new List<object?>();
+                var uses = new List<Dictionary<string, object?>>();
+                foreach (var index in order)
+                {
+                    var b = blocks[index];
+                    if ((b["type"] as string) == "tool_use")
                     {
-                        ((StringBuilder)b["json"]!).Append(delta.Get("partial_json"));
+                        var json = b["json"]!.ToString()!;
+                        var tu = new Dictionary<string, object?>
+                        {
+                            ["type"] = "tool_use",
+                            ["id"] = b["id"],
+                            ["name"] = b["name"],
+                            ["input"] = Json.ParseObjectLoose(json.Length == 0 ? "{}" : json),
+                        };
+                        contentBlocks.Add(tu);
+                        uses.Add(tu);
+                    }
+                    else
+                    {
+                        contentBlocks.Add(new Dictionary<string, object?> { ["type"] = "text", ["text"] = b["text"]!.ToString() });
                     }
                 }
-                else if (type == "message_delta")
-                {
-                    if (j.Get("delta") is IDictionary<string, object?> delta && delta.Get("stop_reason") != null)
-                        stopReason = delta["stop_reason"]!.ToString()!;
-                    AddUsage(usage, j.Get("usage") as IDictionary<string, object?>, "anthropic");
-                }
-            }
-            _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(new Dictionary<string, object?> { ["streamed"] = true }, _opts.Model, turn));
+                messages.Add(new Dictionary<string, object?> { ["role"] = "assistant", ["content"] = contentBlocks });
 
-            var contentBlocks = new List<object?>();
-            var uses = new List<Dictionary<string, object?>>();
-            foreach (var index in order)
-            {
-                var b = blocks[index];
-                if ((b["type"] as string) == "tool_use")
+                if (stopReason != "tool_use" || uses.Count == 0)
                 {
-                    var json = b["json"]!.ToString()!;
-                    var tu = new Dictionary<string, object?>
+                    var text = new StringBuilder();
+                    foreach (var b in contentBlocks.OfType<IDictionary<string, object?>>())
+                        if ((b.Get("type") as string) == "text")
+                            text.Append(b.Get("text"));
+                    onEvent(StreamEvent.UsageEvent(usage.Copy()));
+                    var done0 = EndRun(runStart, text.ToString(), messages, toolCalls, turns, usage);
+                    onEvent(StreamEvent.DoneEvent(done0));
+                    return done0;
+                }
+
+                var n = uses.Count;
+                foreach (var u in uses)
+                    onEvent(StreamEvent.ToolCallEvent(u["id"]?.ToString(), u["name"]?.ToString() ?? "", (IDictionary<string, object?>)u["input"]!));
+                var runs = new (IDictionary<string, object?> Args, ToolResult Result)[n];
+                var tasks = new Task[n];
+                for (var i = 0; i < n; i++)
+                {
+                    var idx = i;
+                    var u = uses[i];
+                    var input = u.Get("input") as IDictionary<string, object?> ?? new Dictionary<string, object?>();
+                    var name = u.Get("name")?.ToString() ?? "";
+                    var id = u.Get("id")?.ToString();
+                    tasks[idx] = Task.Run(async () => runs[idx] = await RunToolAsync(toolkit, name, input, id, turn).ConfigureAwait(false));
+                }
+                await Task.WhenAll(tasks).ConfigureAwait(false);
+                var results = new List<object?>(n);
+                for (var i = 0; i < n; i++)
+                {
+                    var u = uses[i];
+                    var r = runs[i];
+                    var name = u.Get("name")?.ToString() ?? "";
+                    var id = u.Get("id")?.ToString();
+                    toolCalls.Add(new ToolCall(name, r.Args, r.Result.Output, r.Result.IsError, r.Result.Metadata));
+                    results.Add(new Dictionary<string, object?>
                     {
-                        ["type"] = "tool_use",
-                        ["id"] = b["id"],
-                        ["name"] = b["name"],
-                        ["input"] = Json.ParseObjectLoose(json.Length == 0 ? "{}" : json),
-                    };
-                    contentBlocks.Add(tu);
-                    uses.Add(tu);
+                        ["type"] = "tool_result",
+                        ["tool_use_id"] = id,
+                        ["content"] = r.Result.Output,
+                        ["is_error"] = r.Result.IsError,
+                    });
+                    onEvent(StreamEvent.ToolResultEvent(id, name, r.Result.Output, r.Result.IsError));
                 }
-                else
-                {
-                    contentBlocks.Add(new Dictionary<string, object?> { ["type"] = "text", ["text"] = b["text"]!.ToString() });
-                }
+                messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = results });
             }
-            messages.Add(new Dictionary<string, object?> { ["role"] = "assistant", ["content"] = contentBlocks });
-
-            if (stopReason != "tool_use" || uses.Count == 0)
-            {
-                var text = new StringBuilder();
-                foreach (var b in contentBlocks.OfType<IDictionary<string, object?>>())
-                    if ((b.Get("type") as string) == "text")
-                        text.Append(b.Get("text"));
-                onEvent(StreamEvent.UsageEvent(usage.Copy()));
-                var done0 = new RunResult(text.ToString(), messages, toolCalls, turns, usage, _opts.Model);
-                onEvent(StreamEvent.DoneEvent(done0));
-                return done0;
-            }
-
-            var n = uses.Count;
-            foreach (var u in uses)
-                onEvent(StreamEvent.ToolCallEvent(u["id"]?.ToString(), u["name"]?.ToString() ?? "", (IDictionary<string, object?>)u["input"]!));
-            var runs = new (IDictionary<string, object?> Args, ToolResult Result)[n];
-            var tasks = new Task[n];
-            for (var i = 0; i < n; i++)
-            {
-                var idx = i;
-                var u = uses[i];
-                var input = u.Get("input") as IDictionary<string, object?> ?? new Dictionary<string, object?>();
-                var name = u.Get("name")?.ToString() ?? "";
-                var id = u.Get("id")?.ToString();
-                tasks[idx] = Task.Run(async () => runs[idx] = await RunToolAsync(toolkit, name, input, id, turn).ConfigureAwait(false));
-            }
-            await Task.WhenAll(tasks).ConfigureAwait(false);
-            var results = new List<object?>(n);
-            for (var i = 0; i < n; i++)
-            {
-                var u = uses[i];
-                var r = runs[i];
-                var name = u.Get("name")?.ToString() ?? "";
-                var id = u.Get("id")?.ToString();
-                toolCalls.Add(new ToolCall(name, r.Args, r.Result.Output, r.Result.IsError, r.Result.Metadata));
-                results.Add(new Dictionary<string, object?>
-                {
-                    ["type"] = "tool_result",
-                    ["tool_use_id"] = id,
-                    ["content"] = r.Result.Output,
-                    ["is_error"] = r.Result.IsError,
-                });
-                onEvent(StreamEvent.ToolResultEvent(id, name, r.Result.Output, r.Result.IsError));
-            }
-            messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = results });
+            var done = EndRun(runStart, "", messages, toolCalls, turns, usage);
+            onEvent(StreamEvent.DoneEvent(done));
+            return done;
         }
-        var done = new RunResult("", messages, toolCalls, turns, usage, _opts.Model);
-        onEvent(StreamEvent.DoneEvent(done));
-        return done;
+        catch (Exception e)
+        {
+            EmitRunError(runStart, toolCalls, turns, usage, e);
+            throw;
+        }
     }
 
     // ---------------------------------------------------------------- resilience / HTTP
@@ -874,6 +1015,25 @@ public sealed class LlmClient
         var capped = deadline.Bounded ? Math.Min(ms, Math.Max(0, deadline.RemainingMs)) : ms;
         await Task.Delay((int)Math.Max(0, capped), external).ConfigureAwait(false);
         deadline.Check();
+    }
+
+    /// <summary>One non-streaming LLM call, with an <c>llm</c> metric event (ok/error + per-call tokens + ms).</summary>
+    private async Task<Dictionary<string, object?>> LlmCallJsonAsync(string url, Dictionary<string, string> headers,
+        Dictionary<string, object?> body, Deadline deadline, CancellationToken external, string style)
+    {
+        var t0 = NowMs();
+        try
+        {
+            var data = await PostJsonAsync(url, headers, body, deadline, external).ConfigureAwait(false);
+            var tok = PerCall(data.Get("usage") as IDictionary<string, object?>, style);
+            Emit(MetricEvent.Llm(_opts.Model, "ok", NowMs() - t0, tok.Prompt, tok.Completion));
+            return data;
+        }
+        catch (Exception)
+        {
+            Emit(MetricEvent.Llm(_opts.Model, "error", NowMs() - t0, 0, 0));
+            throw;
+        }
     }
 
     private async Task<Dictionary<string, object?>> PostJsonAsync(string url, Dictionary<string, string> headers,

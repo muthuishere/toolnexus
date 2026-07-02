@@ -29,7 +29,7 @@ official **MCP Java SDK** (`io.modelcontextprotocol.sdk:mcp`).
 
 ## Install
 
-Maven Central coordinate: **`io.github.muthuishere:toolnexus:0.3.1`**. Requires **Java 21+**.
+Maven Central coordinate: **`io.github.muthuishere:toolnexus:0.4.0`**. Requires **Java 21+**.
 
 **Gradle** (`build.gradle`):
 
@@ -37,7 +37,7 @@ Maven Central coordinate: **`io.github.muthuishere:toolnexus:0.3.1`**. Requires 
 repositories { mavenCentral() }
 
 dependencies {
-    implementation 'io.github.muthuishere:toolnexus:0.3.1'
+    implementation 'io.github.muthuishere:toolnexus:0.4.0'
 }
 ```
 
@@ -191,6 +191,69 @@ Wire it to files, Redis, Postgres — anything keyed by a string id.
 
 *(For an ephemeral in-process thread without a store, `agent.conversation(tk)`
 returns a `Conversation` whose `send(prompt)` retains history automatically.)*
+
+### Streaming with memory
+
+The `id` also works while streaming. `ask` has an overload that takes an
+`onText` callback — it runs the streaming loop, forwards each assistant text
+delta to `onText`, and **still returns the final `RunResult`** (memory keyed by
+`id` exactly as the non-streaming `ask`). `stream` gains an `id` overload: the
+thread is loaded before streaming and saved once the terminal `done` fires.
+
+```java
+// block-style: stream deltas to stdout, still get the RunResult — remembered under "user-42"
+LlmClient.RunResult r = agent.ask("Draft a reply.", tk, "user-42", System.out::print);
+
+// event stream with memory: id ⇒ load before, save on DONE
+agent.stream("And summarise it.", tk, ev -> {
+    if (ev.type() == LlmClient.StreamEvent.Kind.TEXT) System.out.print(ev.delta());
+    else if (ev.type() == LlmClient.StreamEvent.Kind.DONE) System.out.println("\n" + ev.result().usage);
+}, "user-42");
+```
+
+---
+
+## Observability & metrics
+
+Zero-dependency, two outputs from one internal instrumentation — both opt-in, no
+cost when unused.
+
+**`onMetric` — a semantic event feed.** `Options.onMetric(Consumer<MetricEvent>)`
+receives a readable `MetricEvent` (a sealed interface) at each significant point:
+`MetricEvent.Llm(model, status, ms, promptTokens, completionTokens)` per model
+call, `MetricEvent.Tool(tool, source, isError, ms)` per tool call, and a terminal
+`MetricEvent.Run(model, turns, toolCalls, totalTokens, ms, error)` per `run`/`ask`
+(`event()` yields the `"llm"`/`"tool"`/`"run"` string). Forward it anywhere —
+statsd, logs, OpenTelemetry.
+
+```java
+LlmClient agent = LlmClient.create(new LlmClient.Options()
+        .baseUrl(baseUrl).style("openai").model(model)
+        .onMetric(ev -> System.out.println("[metric] " + ev.event() + " " + ev)));
+```
+
+**`agent.metrics()` — built-in Prometheus text.** The same events feed a tiny
+in-memory registry that renders the Prometheus text exposition format (no
+third-party dep). Mount it at `GET /metrics`:
+
+```java
+HttpServer server = HttpServer.create(new InetSocketAddress(9090), 0);
+server.createContext("/metrics", exchange -> {
+    byte[] body = agent.metrics().getBytes(StandardCharsets.UTF_8);
+    exchange.getResponseHeaders().set("Content-Type", "text/plain; version=0.0.4");
+    exchange.sendResponseHeaders(200, body.length);
+    try (var os = exchange.getResponseBody()) { os.write(body); }
+});
+server.start();
+```
+
+Series: `toolnexus_llm_requests_total{model,status}`,
+`toolnexus_llm_tokens_total{type}`,
+`toolnexus_tool_calls_total{tool,source,is_error}`,
+`toolnexus_run_errors_total{model}`, plus the
+`toolnexus_llm_request_duration_seconds` and `toolnexus_tool_duration_seconds`
+histograms. The rendered text is byte-identical across all five ports; OTLP push
+is a planned future companion.
 
 ---
 
@@ -356,10 +419,12 @@ toolkit are useful even with zero of the client loop.
 | `tk.mcpStatus()` / `skillsPrompt()` | Per-server MCP status; the skills catalog for the system prompt. |
 | `tk.serve(addr, ServeOptions)` | Serve the toolkit as an A2A agent; returns a stoppable `ServeHandle`. |
 | `tk.close()` | Shut down MCP subprocesses (`AutoCloseable`). |
-| `LlmClient.create(Options)` | Build the host loop (baseUrl, style, model, systemPrompt, store, hooks, retries…). |
+| `LlmClient.create(Options)` | Build the host loop (baseUrl, style, model, systemPrompt, store, hooks, retries, onMetric…). |
 | `agent.run(prompt, tk)` | Stateless one-shot; returns `RunResult` (text, toolCalls, usage, messages, turns). |
 | `agent.ask(prompt, tk, id)` | Stateful: remembers the thread via the `ConversationStore` (empty/null id ⇒ `run`). |
-| `agent.stream(prompt, tk, onEvent)` | Same loop, incremental events (text deltas, tool calls/results, usage, done). |
+| `agent.ask(prompt, tk, id, onText)` | `ask` + a text-delta callback; still returns the final `RunResult`. |
+| `agent.stream(prompt, tk, onEvent[, id])` | Same loop, incremental events; `id` overload loads before / saves on `done`. |
+| `agent.metrics()` | Prometheus text exposition of cumulative metrics — mount at `GET /metrics`. |
 | `LlmClient.ConversationStore` | `get(id)` / `save(id, messages)` — implement for file/db/redis memory. |
 
 ---

@@ -23,7 +23,7 @@ npm i toolnexus                                   # JS / TypeScript
 pip install toolnexus                             # Python
 go get github.com/muthuishere/toolnexus/golang    # Go
 dotnet add package Toolnexus                       # C#
-# Java (Maven): io.github.muthuishere:toolnexus:0.3.1
+# Java (Maven): io.github.muthuishere:toolnexus:0.4.0
 ```
 
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
@@ -214,8 +214,26 @@ await agent.ask("What is 21 + 21?",            { toolkit: tk })                 
   same store; a message with no `contextId` is a one-shot.
 - The low-level `run(prompt, { toolkit, history })` primitive and a stateful
   `client.conversation({ toolkit })` wrapper are still there when you'd rather own the transcript.
+- **Streaming with memory** — the same `id` works on the streaming paths. Pass `on_text` to `ask`
+  to stream assistant text deltas while `ask` still returns the final result, or use
+  `stream(prompt, { toolkit, id })` to iterate events (`text` / `tool_call` / `tool_result` /
+  `usage` / `done`); with an `id` the thread is loaded before and saved on the `done` event.
 
 Available in all five ports (a `ConversationStore` interface + in-memory default + `ask`).
+
+## Observability — metric events + built-in Prometheus
+
+Zero-dependency, two outputs from one internal instrumentation — both opt-in, no cost when unused.
+
+- **`on_metric` event feed** — `createClient({ ..., on_metric })` (idiomatic name per port) receives a
+  readable semantic record at each significant point: one `{ event: "llm" }` per model call, one
+  `{ event: "tool" }` per tool call, one terminal `{ event: "run" }` per `run`/`ask` (with tokens,
+  turns, timings, error). Forward it to statsd, logs, or OpenTelemetry — the library holds no opinion.
+- **`client.metrics()` → Prometheus text** — the same events feed a tiny in-memory registry that
+  renders the Prometheus text exposition format (no third-party dep). Mount it at `GET /metrics`:
+  `toolnexus_llm_requests_total`, `toolnexus_llm_tokens_total`, `toolnexus_tool_calls_total`, plus
+  the `toolnexus_llm_request_duration_seconds` / `toolnexus_tool_duration_seconds` histograms. The
+  rendered text is byte-identical across all five ports; OTLP push is a planned future companion.
 
 ## Go CLI — an instant agent from the terminal
 
@@ -242,6 +260,8 @@ implementation's examples and tests. The cross-language contract lives in [SPEC.
 - ✅ Built-in tools (10 opencode tools; on by default, whole-source toggle + per-tool map)
 - ✅ A2A agents — outbound (call remote agents) + inbound (`serve` your toolkit as an agent); all five ports
 - ✅ Conversation memory (`ask` + pluggable `ConversationStore`; A2A serve remembers by `contextId`)
+- ✅ Streaming with memory (`stream`/`ask` take an `id`; `ask` gains an `on_text` delta callback)
+- ✅ Observability — `on_metric` event feed + zero-dep `client.metrics()` Prometheus text
 - ✅ Unified LLM client (OpenAI- and Anthropic-style endpoints) + Go CLI
 - ✅ OpenAI / Anthropic / Gemini schema adapters
 - ✅ Verified with live OpenRouter tool-calling round trips (every port)

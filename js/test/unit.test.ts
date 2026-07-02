@@ -331,6 +331,173 @@ test("client: run-level timeout aborts", async () => {
   server.close()
 })
 
+test("client: stream({ id }) remembers the transcript across streams", async () => {
+  // mock streaming LLM whose text = number of messages it received → proves history is loaded
+  const server = http.createServer((req, res) => {
+    let body = ""
+    req.on("data", (c) => (body += c))
+    req.on("end", () => {
+      const msg = JSON.parse(body)
+      const n = String(msg.messages.length)
+      res.writeHead(200, { "content-type": "text/event-stream" })
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: n } }] })}\n\n`)
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: {} }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\n`)
+      res.write("data: [DONE]\n\n")
+      res.end()
+    })
+  })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({ builtins: false }) // no skills ⇒ no system message; count = turns
+  const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "x", apiKey: "k" })
+
+  const consume = async (prompt: string, id?: string) => {
+    let text = ""
+    let done: any
+    for await (const ev of client.stream(prompt, { toolkit: tk, id })) {
+      if (ev.type === "text") text += ev.delta
+      if (ev.type === "done") done = ev.result
+    }
+    return { text, done }
+  }
+
+  const solo = await consume("x")
+  assert.equal(solo.text, "1", "no id ⇒ stateless (just the user turn)")
+
+  const first = await consume("first", "s1")
+  assert.equal(first.text, "1", "first stream: 1 message")
+  const second = await consume("second", "s1")
+  assert.equal(second.text, "3", "same id remembers: user+assistant+user = 3")
+  assert.equal(second.done.messages.length, 4, "transcript saved on done (now 4 messages)")
+
+  const other = await consume("other", "s2")
+  assert.equal(other.text, "1", "a different id is independent")
+
+  await tk.close()
+  server.close()
+})
+
+test("client: ask({ on_text }) streams deltas AND returns the full RunResult", async () => {
+  // one server: SSE when stream:true, plain JSON otherwise
+  const server = http.createServer((req, res) => {
+    let body = ""
+    req.on("data", (c) => (body += c))
+    req.on("end", () => {
+      const msg = JSON.parse(body)
+      if (msg.stream) {
+        res.writeHead(200, { "content-type": "text/event-stream" })
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "Hel" } }] })}\n\n`)
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "lo" } }] })}\n\n`)
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: {} }], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } })}\n\n`)
+        res.write("data: [DONE]\n\n")
+        res.end()
+      } else {
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ choices: [{ message: { content: "Hello" } }], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } }))
+      }
+    })
+  })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({ builtins: false })
+  const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "x", apiKey: "k" })
+
+  const deltas: string[] = []
+  const streamed = await client.ask("hi", { toolkit: tk, on_text: (d) => deltas.push(d) })
+  assert.deepEqual(deltas, ["Hel", "lo"], "on_text receives each text delta")
+  assert.equal(streamed.text, "Hello", "ask still returns the full RunResult")
+  assert.equal(streamed.usage.totalTokens, 5)
+
+  const plain = await client.ask("hi", { toolkit: tk })
+  assert.equal(plain.text, "Hello", "without on_text: non-streaming path still works")
+
+  await tk.close()
+  server.close()
+})
+
+test("client: onMetric fires llm, tool, and a final aggregated run event", async () => {
+  // first request (no tool result yet) → a tool call; second → final text
+  const server = http.createServer((req, res) => {
+    let body = ""
+    req.on("data", (c) => (body += c))
+    req.on("end", () => {
+      const msg = JSON.parse(body)
+      const hasToolResult = msg.messages.some((m: any) => m.role === "tool")
+      res.writeHead(200, { "content-type": "application/json" })
+      if (!hasToolResult) {
+        res.end(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "add", arguments: JSON.stringify({ a: 2, b: 3 }) } }] } }], usage: { prompt_tokens: 5, completion_tokens: 4, total_tokens: 9 } }))
+      } else {
+        res.end(JSON.stringify({ choices: [{ message: { content: "5" } }], usage: { prompt_tokens: 6, completion_tokens: 1, total_tokens: 7 } }))
+      }
+    })
+  })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({ builtins: false })
+  tk.register(defineTool({ name: "add", description: "add", inputSchema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] }, run: ({ a, b }) => `${(a as number) + (b as number)}` }))
+  const events: any[] = []
+  const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "gpt-x", apiKey: "k", onMetric: (ev) => events.push(ev) })
+  await client.run("add them", { toolkit: tk })
+
+  const llm = events.find((e) => e.event === "llm")
+  assert.ok(llm, "an llm event fired")
+  assert.equal(llm.model, "gpt-x")
+  assert.equal(llm.status, "ok")
+  assert.equal(typeof llm.ms, "number")
+
+  const tool = events.find((e) => e.event === "tool")
+  assert.ok(tool, "a tool event fired")
+  assert.equal(tool.tool, "add")
+  assert.equal(tool.source, "native")
+  assert.equal(tool.isError, false)
+
+  const run = events[events.length - 1]
+  assert.equal(run.event, "run", "run event is last")
+  assert.equal(run.model, "gpt-x")
+  assert.equal(run.toolCalls, 1, "one tool call aggregated")
+  assert.equal(run.turns, 2, "two LLM round trips")
+  assert.equal(run.totalTokens, 16, "9 + 7 summed")
+  assert.equal(events.filter((e) => e.event === "llm").length, 2, "one llm event per call")
+
+  await tk.close()
+  server.close()
+})
+
+test("client: metrics() renders well-formed Prometheus text after a run", async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" })
+    res.end(JSON.stringify({ choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } }))
+  })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({ builtins: false })
+  const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "gpt-x", apiKey: "k" })
+
+  const before = client.metrics()
+  assert.match(before, /# TYPE toolnexus_llm_requests_total counter/, "empty-but-valid before activity")
+
+  await client.run("hi", { toolkit: tk })
+  const text = client.metrics()
+
+  // counters present with labels
+  assert.match(text, /toolnexus_llm_requests_total\{model="gpt-x",status="ok"\} 1/)
+  assert.match(text, /toolnexus_llm_tokens_total\{type="prompt"\} 3/)
+  assert.match(text, /toolnexus_llm_tokens_total\{type="completion"\} 2/)
+  // histogram: HELP/TYPE + _bucket / _sum / _count
+  assert.match(text, /# TYPE toolnexus_llm_request_duration_seconds histogram/)
+  assert.match(text, /toolnexus_llm_request_duration_seconds_bucket\{model="gpt-x",le="0.05"\} \d+/)
+  assert.match(text, /toolnexus_llm_request_duration_seconds_bucket\{model="gpt-x",le="\+Inf"\} \d+/)
+  assert.match(text, /toolnexus_llm_request_duration_seconds_sum\{model="gpt-x"\} /)
+  assert.match(text, /toolnexus_llm_request_duration_seconds_count\{model="gpt-x"\} 1/)
+  // every line is either a comment or a metric sample
+  for (const line of text.split("\n").filter(Boolean)) {
+    assert.ok(/^#/.test(line) || /^[a-zA-Z_][a-zA-Z0-9_]*(\{[^}]*\})? -?[0-9.eE+]+$/.test(line), `well-formed line: ${line}`)
+  }
+
+  await tk.close()
+  server.close()
+})
+
 // ---------------------------------------------------------------------------
 // builtin tools
 // ---------------------------------------------------------------------------

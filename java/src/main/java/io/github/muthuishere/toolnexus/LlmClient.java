@@ -51,6 +51,10 @@ public final class LlmClient {
         /** Conversation provider for {@link LlmClient#ask}. Default: in-memory (process lifetime).
          * Supply a file/db store to persist conversations across processes. */
         public ConversationStore store; // optional; null = in-memory default
+        /** Observability sink — receives semantic {@link MetricEvent}s as the loop runs (§8
+         * Observability). Forward to statsd/logs/OTel/anything. No cost when unset. The same
+         * events also feed the built-in Prometheus registry ({@link LlmClient#metrics()}). */
+        public Consumer<MetricEvent> onMetric; // optional; null = no sink
 
         public Options baseUrl(String v) { this.baseUrl = v; return this; }
         public Options style(String v) { this.style = v; return this; }
@@ -64,6 +68,43 @@ public final class LlmClient {
         public Options retryBaseMs(int v) { this.retryBaseMs = v; return this; }
         public Options timeoutMs(long v) { this.timeoutMs = v; return this; }
         public Options store(ConversationStore v) { this.store = v; return this; }
+        public Options onMetric(Consumer<MetricEvent> v) { this.onMetric = v; return this; }
+    }
+
+    // ------------------------------------------------------------------
+    // Observability (§8) — semantic metric events + a zero-dependency
+    // Prometheus registry fed by the same events. Mirrors the JS `MetricEvent`
+    // union / `MetricsRegistry` (js/src/client.ts). Field names use idiomatic
+    // Java camelCase (promptTokens/isError/toolCalls) — NOT byte-identical to
+    // the JS event object; only the `metrics()` Prometheus TEXT is byte-identical.
+    // ------------------------------------------------------------------
+
+    /**
+     * Semantic observability events (§8). NOT counter/histogram primitives — readable records the
+     * host can forward anywhere. The same events also feed the built-in Prometheus registry
+     * ({@link #metrics()}). Modeled as a sealed interface (the type is the discriminator; the
+     * {@link #event()} string mirrors the JS {@code event} field for convenience).
+     */
+    public sealed interface MetricEvent permits MetricEvent.Llm, MetricEvent.Tool, MetricEvent.Run {
+        /** The event kind: {@code "llm"}, {@code "tool"}, or {@code "run"}. */
+        String event();
+
+        /** One LLM round trip. */
+        record Llm(String model, String status, long ms, long promptTokens, long completionTokens)
+                implements MetricEvent {
+            @Override public String event() { return "llm"; }
+        }
+
+        /** One tool call. */
+        record Tool(String tool, String source, boolean isError, long ms) implements MetricEvent {
+            @Override public String event() { return "tool"; }
+        }
+
+        /** One completed {@code run}/{@code ask}. {@code error} is null on success. */
+        record Run(String model, int turns, int toolCalls, long totalTokens, long ms, String error)
+                implements MetricEvent {
+            @Override public String event() { return "run"; }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -169,10 +210,16 @@ public final class LlmClient {
      */
     private ToolRun runTool(Toolkit toolkit, String name, Map<String, Object> args, String id, int turn) {
         Hooks h = opts.hooks;
+        Tool tool = toolkit.get(name);
+        String source = tool != null ? tool.source() : "custom";
+        long t0 = System.currentTimeMillis();
         Map<String, Object> a = args;
         if (h != null && h.beforeTool != null) {
             ToolOverride ov = h.beforeTool.apply(new BeforeToolEvent(name, a, id, turn));
-            if (ov != null && ov.result() != null) return new ToolRun(a, ov.result()); // short-circuit
+            if (ov != null && ov.result() != null) { // short-circuit (deny/cache) — still a tool call for metrics
+                emit(new MetricEvent.Tool(name, source, ov.result().isError(), System.currentTimeMillis() - t0));
+                return new ToolRun(a, ov.result());
+            }
             if (ov != null && ov.args() != null) a = ov.args();
         }
         ToolResult result = toolkit.execute(name, a);
@@ -180,6 +227,7 @@ public final class LlmClient {
             ToolOverride ov = h.afterTool.apply(new AfterToolEvent(name, a, result, id, turn));
             if (ov != null && ov.result() != null) result = ov.result();
         }
+        emit(new MetricEvent.Tool(name, source, result.isError(), System.currentTimeMillis() - t0));
         return new ToolRun(a, result);
     }
 
@@ -307,6 +355,8 @@ public final class LlmClient {
     private final Options opts;
     /** Conversation provider for {@link #ask} — from {@code opts.store}, else in-memory. */
     private final ConversationStore store;
+    /** Cumulative Prometheus registry fed by the same events {@code onMetric} sees. */
+    private final MetricsRegistry registry = new MetricsRegistry();
 
     private LlmClient(Options opts) {
         this.opts = opts;
@@ -315,6 +365,30 @@ public final class LlmClient {
 
     public static LlmClient create(Options opts) {
         return new LlmClient(opts);
+    }
+
+    /**
+     * Prometheus text exposition of cumulative metrics (§8). Always valid, empty-but-valid
+     * before any activity (only {@code # HELP}/{@code # TYPE} lines). The rendered text is
+     * byte-identical across all ports.
+     */
+    public String metrics() {
+        return registry.render();
+    }
+
+    /** Feed a semantic metric event to the built-in registry and the optional {@code onMetric} sink. */
+    private void emit(MetricEvent ev) {
+        registry.record(ev);
+        if (opts.onMetric != null) opts.onMetric.accept(ev);
+    }
+
+    /** Per-call token counts from one raw usage payload (not summed). Mirrors JS {@code perCall}. */
+    private static long[] perCall(Map<String, Object> raw, String style) {
+        if (raw == null) return new long[]{0, 0};
+        if ("anthropic".equals(style)) {
+            return new long[]{asLong(raw.get("input_tokens")), asLong(raw.get("output_tokens"))};
+        }
+        return new long[]{asLong(raw.get("prompt_tokens")), asLong(raw.get("completion_tokens"))};
     }
 
     public RunResult run(String prompt, Toolkit toolkit) {
@@ -329,6 +403,22 @@ public final class LlmClient {
      * Mirrors the JS {@code ask(prompt, { toolkit, id })}.
      */
     public RunResult ask(String prompt, Toolkit toolkit, String id) {
+        return ask(prompt, toolkit, id, null);
+    }
+
+    /**
+     * {@code ask} with a block-style streaming callback. When {@code onText} is non-null, the
+     * streaming loop runs, each assistant text delta is forwarded to {@code onText}, and the final
+     * {@link RunResult} is STILL returned (the return type never changes). Memory (id load/save) is
+     * handled by {@link #stream} itself, so there's no duplication. Omit {@code onText} (null) ⇒ the
+     * non-streaming path. Mirrors the JS {@code ask(prompt, { id, on_text })}.
+     */
+    public RunResult ask(String prompt, Toolkit toolkit, String id, Consumer<String> onText) {
+        if (onText != null) {
+            return stream(prompt, toolkit, ev -> {
+                if (ev.type() == StreamEvent.Kind.TEXT) onText.accept(ev.delta());
+            }, id);
+        }
         if (id == null || id.isEmpty()) return run(prompt, toolkit);
         List<Object> history = store.get(id);
         if (history == null) history = new ArrayList<>();
@@ -362,10 +452,29 @@ public final class LlmClient {
      * Returns the same {@link RunResult} for convenience. This is the required Java stream API.
      */
     public RunResult stream(String prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent) {
+        return stream(prompt, toolkit, onEvent, null);
+    }
+
+    /**
+     * Streaming with conversation memory. Like {@link #ask}, a non-null/non-empty {@code id} makes
+     * the stream stateful: the thread's transcript is loaded from the {@link ConversationStore} as
+     * history before streaming, and the updated transcript is saved back under {@code id} once the
+     * terminal {@code done} event has fired. A null/empty {@code id} ⇒ stateless. Mirrors the JS
+     * {@code stream(prompt, { id })}.
+     */
+    public RunResult stream(String prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent, String id) {
         Deadline deadline = newDeadline();
-        return "anthropic".equals(opts.style)
-                ? streamAnthropic(prompt, toolkit, onEvent, deadline)
-                : streamOpenAI(prompt, toolkit, onEvent, deadline);
+        boolean stateful = id != null && !id.isEmpty();
+        List<Object> history = null;
+        if (stateful) {
+            history = store.get(id);
+            if (history == null) history = new ArrayList<>();
+        }
+        RunResult result = "anthropic".equals(opts.style)
+                ? streamAnthropic(prompt, toolkit, onEvent, deadline, history)
+                : streamOpenAI(prompt, toolkit, onEvent, deadline, history);
+        if (stateful) store.save(id, result.messages);
+        return result;
     }
 
     /**
@@ -417,6 +526,20 @@ public final class LlmClient {
         return s.endsWith("/") ? s.substring(0, s.length() - 1) : s;
     }
 
+    /** Emit the terminal {@code run} metric event and build the {@link RunResult}. */
+    private RunResult endRun(long runStart, String text, List<Object> messages,
+                             List<ToolCall> toolCalls, int turns, Usage usage) {
+        emit(new MetricEvent.Run(opts.model, turns, toolCalls.size(), usage.totalTokens,
+                System.currentTimeMillis() - runStart, null));
+        return new RunResult(text, messages, toolCalls, turns, usage, opts.model);
+    }
+
+    /** Emit a {@code run} error metric event (once, on a thrown run). */
+    private void emitRunError(long runStart, List<ToolCall> toolCalls, int turns, Usage usage, RuntimeException e) {
+        emit(new MetricEvent.Run(opts.model, turns, toolCalls.size(), usage.totalTokens,
+                System.currentTimeMillis() - runStart, e.getMessage() != null ? e.getMessage() : e.toString()));
+    }
+
     // ---- OpenAI-style: POST {baseUrl}/chat/completions ----
     @SuppressWarnings("unchecked")
     private RunResult runOpenAI(String prompt, Toolkit toolkit, List<Object> history, Deadline deadline) {
@@ -434,6 +557,7 @@ public final class LlmClient {
         List<ToolCall> toolCalls = new ArrayList<>();
         Usage usage = new Usage();
         int turns = 0;
+        long runStart = System.currentTimeMillis();
 
         // One virtual-thread executor for the whole run; tool calls in a turn run on it.
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
@@ -458,7 +582,7 @@ public final class LlmClient {
                 headers.put("Content-Type", "application/json");
                 if (opts.headers != null) headers.putAll(opts.headers);
 
-                Map<String, Object> data = postJson(url, headers, body, deadline);
+                Map<String, Object> data = llmCallJson(url, headers, body, deadline, "openai");
                 addUsage(usage, (Map<String, Object>) data.get("usage"), "openai");
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
                     opts.hooks.afterLLM.accept(new AfterLLMEvent(data, opts.model, turn));
@@ -470,8 +594,8 @@ public final class LlmClient {
                 List<Object> calls = (List<Object>) message.get("tool_calls");
                 if (calls == null || calls.isEmpty()) {
                     Object content = message.get("content");
-                    return new RunResult(content == null ? "" : String.valueOf(content),
-                            messages, toolCalls, turns, usage, opts.model);
+                    return endRun(runStart, content == null ? "" : String.valueOf(content),
+                            messages, toolCalls, turns, usage);
                 }
 
                 // Execute all tool calls in this turn concurrently (true parallel tool calling).
@@ -507,7 +631,10 @@ public final class LlmClient {
                 for (int i = 0; i < n; i++) toolCalls.add(recorded[i]);
                 for (int i = 0; i < n; i++) messages.add(toolMsgs[i]);
             }
-            return new RunResult(lastAssistantText(messages), messages, toolCalls, turns, usage, opts.model);
+            return endRun(runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
+        } catch (RuntimeException e) {
+            emitRunError(runStart, toolCalls, turns, usage, e);
+            throw e;
         } finally {
             executor.shutdown();
         }
@@ -529,6 +656,7 @@ public final class LlmClient {
         List<ToolCall> toolCalls = new ArrayList<>();
         Usage usage = new Usage();
         int turns = 0;
+        long runStart = System.currentTimeMillis();
 
         // One virtual-thread executor for the whole run; tool calls in a turn run on it.
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
@@ -554,7 +682,7 @@ public final class LlmClient {
                 headers.put("Content-Type", "application/json");
                 if (opts.headers != null) headers.putAll(opts.headers);
 
-                Map<String, Object> data = postJson(endpoint, headers, body, deadline);
+                Map<String, Object> data = llmCallJson(endpoint, headers, body, deadline, "anthropic");
                 addUsage(usage, (Map<String, Object>) data.get("usage"), "anthropic");
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
                     opts.hooks.afterLLM.accept(new AfterLLMEvent(data, opts.model, turn));
@@ -577,7 +705,7 @@ public final class LlmClient {
                         Map<String, Object> block = (Map<String, Object>) b;
                         if ("text".equals(block.get("type"))) text.append(String.valueOf(block.get("text")));
                     }
-                    return new RunResult(text.toString(), messages, toolCalls, turns, usage, opts.model);
+                    return endRun(runStart, text.toString(), messages, toolCalls, turns, usage);
                 }
 
                 // Execute all tool_use blocks in this turn concurrently (true parallel tool calling).
@@ -620,7 +748,10 @@ public final class LlmClient {
                 userMsg.put("content", results);
                 messages.add(userMsg);
             }
-            return new RunResult("", messages, toolCalls, turns, usage, opts.model);
+            return endRun(runStart, "", messages, toolCalls, turns, usage);
+        } catch (RuntimeException e) {
+            emitRunError(runStart, toolCalls, turns, usage, e);
+            throw e;
         } finally {
             executor.shutdown();
         }
@@ -628,16 +759,22 @@ public final class LlmClient {
 
     // ---- Streaming: OpenAI-style (SSE, line-by-line) ----
     @SuppressWarnings("unchecked")
-    private RunResult streamOpenAI(String prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent, Deadline deadline) {
+    private RunResult streamOpenAI(String prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent,
+                                   Deadline deadline, List<Object> history) {
         String key = resolveKey();
         List<Object> messages = new ArrayList<>();
-        String system = system(toolkit);
-        if (!system.isEmpty()) messages.add(msg("system", system));
+        if (history != null && !history.isEmpty()) {
+            messages.addAll(history);
+        } else {
+            String system = system(toolkit);
+            if (!system.isEmpty()) messages.add(msg("system", system));
+        }
         messages.add(msg("user", prompt));
         List<Map<String, Object>> tools = toolkit.toOpenAI();
         List<ToolCall> toolCalls = new ArrayList<>();
         Usage usage = new Usage();
         int turns = 0;
+        long runStart = System.currentTimeMillis();
 
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         try {
@@ -664,52 +801,60 @@ public final class LlmClient {
                 headers.put("Content-Type", "application/json");
                 if (opts.headers != null) headers.putAll(opts.headers);
 
-                // The JDK HttpClient streams the SSE response as lines — ideal for SSE.
-                HttpResponse<Stream<String>> res =
-                        llmSend(url, headers, body, deadline, HttpResponse.BodyHandlers.ofLines());
-                if (res.statusCode() < 200 || res.statusCode() >= 300) {
-                    String b = res.body() == null ? "" : res.body().collect(Collectors.joining("\n"));
-                    throw new RuntimeException("LLM " + res.statusCode() + ": " + b);
-                }
-
+                long t0 = System.currentTimeMillis();
+                long beforeP = usage.promptTokens, beforeC = usage.completionTokens;
                 StringBuilder content = new StringBuilder();
                 // index -> accumulated tool call (id/name/args assembled across deltas).
                 Map<Integer, String[]> acc = new LinkedHashMap<>(); // [id, name, args]
                 List<Integer> order = new ArrayList<>();
-                try (Stream<String> lines = res.body()) {
-                    for (String line : (Iterable<String>) lines::iterator) {
-                        if (!line.startsWith("data:")) continue;
-                        String payload = line.substring(5).trim();
-                        if ("[DONE]".equals(payload)) break;
-                        Map<String, Object> j = parseObjOrNull(payload);
-                        if (j == null) continue;
-                        addUsage(usage, (Map<String, Object>) j.get("usage"), "openai");
-                        List<Object> choices = (List<Object>) j.get("choices");
-                        if (choices == null || choices.isEmpty()) continue;
-                        Map<String, Object> delta = (Map<String, Object>) ((Map<String, Object>) choices.get(0)).get("delta");
-                        if (delta == null) continue;
-                        Object dc = delta.get("content");
-                        if (dc instanceof String s && !s.isEmpty()) {
-                            content.append(s);
-                            onEvent.accept(StreamEvent.text(s));
-                        }
-                        List<Object> tcs = (List<Object>) delta.get("tool_calls");
-                        if (tcs != null) {
-                            for (Object o : tcs) {
-                                Map<String, Object> tc = (Map<String, Object>) o;
-                                int index = tc.get("index") instanceof Number n ? n.intValue() : 0;
-                                String[] slot = acc.get(index);
-                                if (slot == null) { slot = new String[]{"", "", ""}; acc.put(index, slot); order.add(index); }
-                                if (tc.get("id") != null) slot[0] = String.valueOf(tc.get("id"));
-                                Map<String, Object> fn = (Map<String, Object>) tc.get("function");
-                                if (fn != null) {
-                                    if (fn.get("name") != null) slot[1] += String.valueOf(fn.get("name"));
-                                    if (fn.get("arguments") != null) slot[2] += String.valueOf(fn.get("arguments"));
+                try {
+                    // The JDK HttpClient streams the SSE response as lines — ideal for SSE.
+                    HttpResponse<Stream<String>> res =
+                            llmSend(url, headers, body, deadline, HttpResponse.BodyHandlers.ofLines());
+                    if (res.statusCode() < 200 || res.statusCode() >= 300) {
+                        String b = res.body() == null ? "" : res.body().collect(Collectors.joining("\n"));
+                        throw new RuntimeException("LLM " + res.statusCode() + ": " + b);
+                    }
+                    try (Stream<String> lines = res.body()) {
+                        for (String line : (Iterable<String>) lines::iterator) {
+                            if (!line.startsWith("data:")) continue;
+                            String payload = line.substring(5).trim();
+                            if ("[DONE]".equals(payload)) break;
+                            Map<String, Object> j = parseObjOrNull(payload);
+                            if (j == null) continue;
+                            addUsage(usage, (Map<String, Object>) j.get("usage"), "openai");
+                            List<Object> choices = (List<Object>) j.get("choices");
+                            if (choices == null || choices.isEmpty()) continue;
+                            Map<String, Object> delta = (Map<String, Object>) ((Map<String, Object>) choices.get(0)).get("delta");
+                            if (delta == null) continue;
+                            Object dc = delta.get("content");
+                            if (dc instanceof String s && !s.isEmpty()) {
+                                content.append(s);
+                                onEvent.accept(StreamEvent.text(s));
+                            }
+                            List<Object> tcs = (List<Object>) delta.get("tool_calls");
+                            if (tcs != null) {
+                                for (Object o : tcs) {
+                                    Map<String, Object> tc = (Map<String, Object>) o;
+                                    int index = tc.get("index") instanceof Number n ? n.intValue() : 0;
+                                    String[] slot = acc.get(index);
+                                    if (slot == null) { slot = new String[]{"", "", ""}; acc.put(index, slot); order.add(index); }
+                                    if (tc.get("id") != null) slot[0] = String.valueOf(tc.get("id"));
+                                    Map<String, Object> fn = (Map<String, Object>) tc.get("function");
+                                    if (fn != null) {
+                                        if (fn.get("name") != null) slot[1] += String.valueOf(fn.get("name"));
+                                        if (fn.get("arguments") != null) slot[2] += String.valueOf(fn.get("arguments"));
+                                    }
                                 }
                             }
                         }
                     }
+                } catch (RuntimeException e) {
+                    emit(new MetricEvent.Llm(opts.model, "error", System.currentTimeMillis() - t0, 0, 0));
+                    throw e;
                 }
+                emit(new MetricEvent.Llm(opts.model, "ok", System.currentTimeMillis() - t0,
+                        usage.promptTokens - beforeP, usage.completionTokens - beforeC));
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
                     Map<String, Object> resp = new LinkedHashMap<>();
                     resp.put("streamed", true);
@@ -720,7 +865,7 @@ public final class LlmClient {
                 if (order.isEmpty()) {
                     messages.add(msg("assistant", content.toString()));
                     onEvent.accept(StreamEvent.usage(copyUsage(usage)));
-                    RunResult done = new RunResult(content.toString(), messages, toolCalls, turns, usage, opts.model);
+                    RunResult done = endRun(runStart, content.toString(), messages, toolCalls, turns, usage);
                     onEvent.accept(StreamEvent.done(done));
                     return done;
                 }
@@ -773,9 +918,12 @@ public final class LlmClient {
                     onEvent.accept(StreamEvent.toolResult(slot[0], slot[1], r.result().output(), r.result().isError()));
                 }
             }
-            RunResult done = new RunResult(lastAssistantText(messages), messages, toolCalls, turns, usage, opts.model);
+            RunResult done = endRun(runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
             onEvent.accept(StreamEvent.done(done));
             return done;
+        } catch (RuntimeException e) {
+            emitRunError(runStart, toolCalls, turns, usage, e);
+            throw e;
         } finally {
             executor.shutdown();
         }
@@ -783,17 +931,20 @@ public final class LlmClient {
 
     // ---- Streaming: Anthropic-style (SSE content_block_* / message_delta) ----
     @SuppressWarnings("unchecked")
-    private RunResult streamAnthropic(String prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent, Deadline deadline) {
+    private RunResult streamAnthropic(String prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent,
+                                      Deadline deadline, List<Object> history) {
         String key = resolveKey();
         String base = stripTrailingSlash(opts.baseUrl);
         String endpoint = base.endsWith("/v1") ? base + "/messages" : base + "/v1/messages";
         String system = system(toolkit);
         List<Object> messages = new ArrayList<>();
+        if (history != null && !history.isEmpty()) messages.addAll(history);
         messages.add(msg("user", prompt));
         List<Map<String, Object>> tools = toolkit.toAnthropic();
         List<ToolCall> toolCalls = new ArrayList<>();
         Usage usage = new Usage();
         int turns = 0;
+        long runStart = System.currentTimeMillis();
 
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         try {
@@ -818,59 +969,67 @@ public final class LlmClient {
                 headers.put("Content-Type", "application/json");
                 if (opts.headers != null) headers.putAll(opts.headers);
 
-                HttpResponse<Stream<String>> res =
-                        llmSend(endpoint, headers, body, deadline, HttpResponse.BodyHandlers.ofLines());
-                if (res.statusCode() < 200 || res.statusCode() >= 300) {
-                    String b = res.body() == null ? "" : res.body().collect(Collectors.joining("\n"));
-                    throw new RuntimeException("LLM " + res.statusCode() + ": " + b);
-                }
-
+                long t0 = System.currentTimeMillis();
+                long beforeP = usage.promptTokens, beforeC = usage.completionTokens;
                 // index -> block being assembled: {type, text, id, name, json}
                 Map<Integer, Map<String, Object>> blocks = new LinkedHashMap<>();
                 List<Integer> order = new ArrayList<>();
                 String[] stopReason = {""};
-                try (Stream<String> lines = res.body()) {
-                    for (String line : (Iterable<String>) lines::iterator) {
-                        if (!line.startsWith("data:")) continue;
-                        Map<String, Object> j = parseObjOrNull(line.substring(5).trim());
-                        if (j == null) continue;
-                        String type = String.valueOf(j.get("type"));
-                        if ("message_start".equals(type)) {
-                            Map<String, Object> m = (Map<String, Object>) j.get("message");
-                            if (m != null) addUsage(usage, (Map<String, Object>) m.get("usage"), "anthropic");
-                        } else if ("content_block_start".equals(type)) {
-                            int index = j.get("index") instanceof Number n ? n.intValue() : 0;
-                            Map<String, Object> cb = (Map<String, Object>) j.get("content_block");
-                            Map<String, Object> b = new LinkedHashMap<>();
-                            b.put("type", cb.get("type"));
-                            b.put("id", cb.get("id"));
-                            b.put("name", cb.get("name"));
-                            b.put("text", new StringBuilder());
-                            b.put("json", new StringBuilder());
-                            blocks.put(index, b);
-                            order.add(index);
-                        } else if ("content_block_delta".equals(type)) {
-                            int index = j.get("index") instanceof Number n ? n.intValue() : 0;
-                            Map<String, Object> b = blocks.get(index);
-                            if (b == null) continue;
-                            Map<String, Object> delta = (Map<String, Object>) j.get("delta");
-                            String dtype = String.valueOf(delta.get("type"));
-                            if ("text_delta".equals(dtype)) {
-                                String t = String.valueOf(delta.get("text"));
-                                ((StringBuilder) b.get("text")).append(t);
-                                onEvent.accept(StreamEvent.text(t));
-                            } else if ("input_json_delta".equals(dtype)) {
-                                ((StringBuilder) b.get("json")).append(String.valueOf(delta.get("partial_json")));
+                try {
+                    HttpResponse<Stream<String>> res =
+                            llmSend(endpoint, headers, body, deadline, HttpResponse.BodyHandlers.ofLines());
+                    if (res.statusCode() < 200 || res.statusCode() >= 300) {
+                        String b = res.body() == null ? "" : res.body().collect(Collectors.joining("\n"));
+                        throw new RuntimeException("LLM " + res.statusCode() + ": " + b);
+                    }
+                    try (Stream<String> lines = res.body()) {
+                        for (String line : (Iterable<String>) lines::iterator) {
+                            if (!line.startsWith("data:")) continue;
+                            Map<String, Object> j = parseObjOrNull(line.substring(5).trim());
+                            if (j == null) continue;
+                            String type = String.valueOf(j.get("type"));
+                            if ("message_start".equals(type)) {
+                                Map<String, Object> m = (Map<String, Object>) j.get("message");
+                                if (m != null) addUsage(usage, (Map<String, Object>) m.get("usage"), "anthropic");
+                            } else if ("content_block_start".equals(type)) {
+                                int index = j.get("index") instanceof Number n ? n.intValue() : 0;
+                                Map<String, Object> cb = (Map<String, Object>) j.get("content_block");
+                                Map<String, Object> b = new LinkedHashMap<>();
+                                b.put("type", cb.get("type"));
+                                b.put("id", cb.get("id"));
+                                b.put("name", cb.get("name"));
+                                b.put("text", new StringBuilder());
+                                b.put("json", new StringBuilder());
+                                blocks.put(index, b);
+                                order.add(index);
+                            } else if ("content_block_delta".equals(type)) {
+                                int index = j.get("index") instanceof Number n ? n.intValue() : 0;
+                                Map<String, Object> b = blocks.get(index);
+                                if (b == null) continue;
+                                Map<String, Object> delta = (Map<String, Object>) j.get("delta");
+                                String dtype = String.valueOf(delta.get("type"));
+                                if ("text_delta".equals(dtype)) {
+                                    String t = String.valueOf(delta.get("text"));
+                                    ((StringBuilder) b.get("text")).append(t);
+                                    onEvent.accept(StreamEvent.text(t));
+                                } else if ("input_json_delta".equals(dtype)) {
+                                    ((StringBuilder) b.get("json")).append(String.valueOf(delta.get("partial_json")));
+                                }
+                            } else if ("message_delta".equals(type)) {
+                                Map<String, Object> delta = (Map<String, Object>) j.get("delta");
+                                if (delta != null && delta.get("stop_reason") != null) {
+                                    stopReason[0] = String.valueOf(delta.get("stop_reason"));
+                                }
+                                addUsage(usage, (Map<String, Object>) j.get("usage"), "anthropic");
                             }
-                        } else if ("message_delta".equals(type)) {
-                            Map<String, Object> delta = (Map<String, Object>) j.get("delta");
-                            if (delta != null && delta.get("stop_reason") != null) {
-                                stopReason[0] = String.valueOf(delta.get("stop_reason"));
-                            }
-                            addUsage(usage, (Map<String, Object>) j.get("usage"), "anthropic");
                         }
                     }
+                } catch (RuntimeException e) {
+                    emit(new MetricEvent.Llm(opts.model, "error", System.currentTimeMillis() - t0, 0, 0));
+                    throw e;
                 }
+                emit(new MetricEvent.Llm(opts.model, "ok", System.currentTimeMillis() - t0,
+                        usage.promptTokens - beforeP, usage.completionTokens - beforeC));
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
                     Map<String, Object> resp = new LinkedHashMap<>();
                     resp.put("streamed", true);
@@ -910,7 +1069,7 @@ public final class LlmClient {
                         if ("text".equals(blk.get("type"))) text.append(String.valueOf(blk.get("text")));
                     }
                     onEvent.accept(StreamEvent.usage(copyUsage(usage)));
-                    RunResult done = new RunResult(text.toString(), messages, toolCalls, turns, usage, opts.model);
+                    RunResult done = endRun(runStart, text.toString(), messages, toolCalls, turns, usage);
                     onEvent.accept(StreamEvent.done(done));
                     return done;
                 }
@@ -956,12 +1115,136 @@ public final class LlmClient {
                 userMsg.put("content", results);
                 messages.add(userMsg);
             }
-            RunResult done = new RunResult("", messages, toolCalls, turns, usage, opts.model);
+            RunResult done = endRun(runStart, "", messages, toolCalls, turns, usage);
             onEvent.accept(StreamEvent.done(done));
             return done;
+        } catch (RuntimeException e) {
+            emitRunError(runStart, toolCalls, turns, usage, e);
+            throw e;
         } finally {
             executor.shutdown();
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Prometheus registry (zero-dependency; §8 Observability). In-memory,
+    // cumulative, thread-safe. Turns the same MetricEvents `onMetric` sees into
+    // counters/histograms and renders the text exposition format by hand. The
+    // rendered text is BYTE-IDENTICAL across all ports — see js/src/client.ts.
+    // ------------------------------------------------------------------
+
+    /** FIXED across all ports for byte-parity of {@code ..._duration_seconds} histograms. Seconds. */
+    private static final double[] DURATION_BUCKETS = {0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60};
+    /** {@code le} label strings, pinned to JS {@code String(bucket)} formatting (no trailing {@code .0}). */
+    private static final String[] BUCKET_LE = {"0.05", "0.1", "0.25", "0.5", "1", "2.5", "5", "10", "30", "60"};
+
+    private static final class Hist {
+        final long[] counts = new long[DURATION_BUCKETS.length];
+        double sum;
+        long count;
+    }
+
+    private static final class MetricsRegistry {
+        private final Map<String, Long> llmRequests = new LinkedHashMap<>();   // labels: model,status
+        private final Map<String, Long> llmTokens = new LinkedHashMap<>();     // labels: type
+        private final Map<String, Hist> llmDuration = new LinkedHashMap<>();   // labels: model
+        private final Map<String, Long> toolCalls = new LinkedHashMap<>();     // labels: tool,source,is_error
+        private final Map<String, Hist> toolDuration = new LinkedHashMap<>();  // labels: tool
+        private final Map<String, Long> runErrors = new LinkedHashMap<>();     // labels: model
+
+        synchronized void record(MetricEvent ev) {
+            if (ev instanceof MetricEvent.Llm e) {
+                inc(llmRequests, labelStr(pair("model", e.model()), pair("status", e.status())), 1);
+                if ("ok".equals(e.status())) {
+                    inc(llmTokens, labelStr(pair("type", "prompt")), e.promptTokens());
+                    inc(llmTokens, labelStr(pair("type", "completion")), e.completionTokens());
+                }
+                observe(llmDuration, labelStr(pair("model", e.model())), e.ms() / 1000.0);
+            } else if (ev instanceof MetricEvent.Tool e) {
+                inc(toolCalls, labelStr(pair("tool", e.tool()), pair("source", e.source()),
+                        pair("is_error", String.valueOf(e.isError()))), 1);
+                observe(toolDuration, labelStr(pair("tool", e.tool())), e.ms() / 1000.0);
+            } else if (ev instanceof MetricEvent.Run e) {
+                if (e.error() != null) inc(runErrors, labelStr(pair("model", e.model())), 1);
+            }
+        }
+
+        synchronized String render() {
+            List<String> out = new ArrayList<>();
+            renderCounter(out, "toolnexus_llm_requests_total", "Total LLM requests.", llmRequests);
+            renderCounter(out, "toolnexus_llm_tokens_total", "Total tokens, by type.", llmTokens);
+            renderHistogram(out, "toolnexus_llm_request_duration_seconds", "LLM request duration in seconds.", llmDuration);
+            renderCounter(out, "toolnexus_tool_calls_total", "Total tool calls.", toolCalls);
+            renderHistogram(out, "toolnexus_tool_duration_seconds", "Tool execution duration in seconds.", toolDuration);
+            renderCounter(out, "toolnexus_run_errors_total", "Total run errors.", runErrors);
+            return String.join("\n", out) + "\n";
+        }
+
+        private static void renderCounter(List<String> out, String name, String help, Map<String, Long> m) {
+            out.add("# HELP " + name + " " + help);
+            out.add("# TYPE " + name + " counter");
+            List<String> keys = new ArrayList<>(m.keySet());
+            keys.sort(null);
+            for (String key : keys) {
+                out.add(key.isEmpty() ? name + " " + m.get(key) : name + "{" + key + "} " + m.get(key));
+            }
+        }
+
+        private static void renderHistogram(List<String> out, String name, String help, Map<String, Hist> m) {
+            out.add("# HELP " + name + " " + help);
+            out.add("# TYPE " + name + " histogram");
+            List<String> keys = new ArrayList<>(m.keySet());
+            keys.sort(null);
+            for (String key : keys) {
+                Hist h = m.get(key);
+                for (int i = 0; i < DURATION_BUCKETS.length; i++) {
+                    out.add(name + "_bucket{" + withLe(key, BUCKET_LE[i]) + "} " + h.counts[i]);
+                }
+                out.add(name + "_bucket{" + withLe(key, "+Inf") + "} " + h.count);
+                out.add(key.isEmpty() ? name + "_sum " + num(h.sum) : name + "_sum{" + key + "} " + num(h.sum));
+                out.add(key.isEmpty() ? name + "_count " + h.count : name + "_count{" + key + "} " + h.count);
+            }
+        }
+    }
+
+    private static void inc(Map<String, Long> m, String key, long by) {
+        m.merge(key, by, Long::sum);
+    }
+
+    private static void observe(Map<String, Hist> m, String key, double seconds) {
+        Hist h = m.computeIfAbsent(key, k -> new Hist());
+        h.sum += seconds;
+        h.count++;
+        for (int i = 0; i < DURATION_BUCKETS.length; i++) if (seconds <= DURATION_BUCKETS[i]) h.counts[i]++;
+    }
+
+    private record LabelPair(String key, String value) {}
+
+    private static LabelPair pair(String k, String v) { return new LabelPair(k, v); }
+
+    /** Render an ordered list of label pairs to {@code k="v",k="v"} (order is load-bearing for parity). */
+    private static String labelStr(LabelPair... pairs) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < pairs.length; i++) {
+            if (i > 0) sb.append(",");
+            sb.append(pairs[i].key()).append("=\"").append(escapeLabel(pairs[i].value())).append("\"");
+        }
+        return sb.toString();
+    }
+
+    /** Escape a Prometheus label value: backslash, double-quote, newline. */
+    private static String escapeLabel(String v) {
+        return v.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+    }
+
+    private static String withLe(String base, String le) {
+        return base.isEmpty() ? "le=\"" + le + "\"" : base + ",le=\"" + le + "\"";
+    }
+
+    /** Render a metric value: whole numbers as integers (matches JS {@code String(n)}; no {@code .0}). */
+    private static String num(double v) {
+        if (v == Math.rint(v) && !Double.isInfinite(v)) return Long.toString((long) v);
+        return Double.toString(v);
     }
 
     private static Usage copyUsage(Usage u) {
@@ -1088,6 +1371,25 @@ public final class LlmClient {
             throw new RuntimeException("interrupted during backoff", e);
         }
         deadline.check();
+    }
+
+    /**
+     * One non-streaming LLM call with an {@code llm} metric event (ok/error + per-call tokens + ms).
+     * Mirrors JS {@code llmCallJson}: emits an error event and rethrows on failure.
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> llmCallJson(String url, Map<String, String> headers,
+                                            Map<String, Object> body, Deadline deadline, String style) {
+        long t0 = System.currentTimeMillis();
+        try {
+            Map<String, Object> data = postJson(url, headers, body, deadline);
+            long[] tok = perCall((Map<String, Object>) data.get("usage"), style);
+            emit(new MetricEvent.Llm(opts.model, "ok", System.currentTimeMillis() - t0, tok[0], tok[1]));
+            return data;
+        } catch (RuntimeException e) {
+            emit(new MetricEvent.Llm(opts.model, "error", System.currentTimeMillis() - t0, 0, 0));
+            throw e;
+        }
     }
 
     /** Send and parse a JSON object response, retrying transient failures + enforcing the deadline. */

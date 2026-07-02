@@ -89,11 +89,13 @@ var once = await agent.AskAsync("Unrelated question.", tk);
 
 ```csharp
 public async Task<RunResult> AskAsync(
-    string prompt, Toolkit toolkit, string? id = null, CancellationToken cancellationToken = default);
+    string prompt, Toolkit toolkit, string? id = null,
+    Action<string>? onText = null, CancellationToken cancellationToken = default);
 ```
 
 - **Non-null `id`** — remembers via the store: `store.GetAsync(id)` → `RunAsync(prompt, toolkit, history)` → `store.SaveAsync(id, result.Messages)`.
 - **Null `id`** — stateless, exactly equivalent to `RunAsync`.
+- **`onText`** — a block-style streaming sink: when set, the streaming loop runs and each assistant text delta is forwarded as it arrives; `AskAsync` still returns the final `RunResult`.
 
 ### Where transcripts live
 
@@ -118,6 +120,58 @@ var agent = LlmClient.Create(new LlmClient.Options
 
 The same store powers **inbound A2A** (below): when a peer calls your served agent, its A2A
 `contextId` becomes the conversation id, so a peer's turns are remembered through this store.
+
+### Streaming with memory
+
+The `id` also works while streaming. Pass `onText` to `AskAsync` to stream text deltas as they
+arrive — `AskAsync` still returns the final `RunResult` — or use `StreamAsync(prompt, tk, onEvent,
+id)` for the full event stream. With an `id`, the thread is loaded before the stream and saved once
+the run terminates.
+
+```csharp
+// block-style: stream deltas to the console, still get the RunResult — remembered under "user-42"
+var r = await agent.AskAsync("Draft a reply.", tk, "user-42",
+    onText: delta => Console.Write(delta));
+
+// event stream with memory: id ⇒ load before, save at the end
+await agent.StreamAsync("And summarise it.", tk, ev =>
+{
+    if (ev.Type == LlmClient.StreamKind.Text) Console.Write(ev.Delta);
+    else if (ev.Type == LlmClient.StreamKind.Done) Console.WriteLine($"\n{ev.Result!.Usage}");
+}, "user-42");
+```
+
+## Observability / metrics
+
+Zero-dependency, two outputs from one internal instrumentation — both opt-in, no cost when unused.
+
+**`OnMetric` — a semantic event feed.** Set `OnMetric` on `LlmClient.Options` and it receives a
+readable `MetricEvent` (a record) at each significant point: `Event == "llm"` (`Model`, `Status`,
+`Ms`, `PromptTokens`, `CompletionTokens`) per model call, `Event == "tool"` (`Tool`, `Source`,
+`IsError`, `Ms`) per tool call, and a terminal `Event == "run"` (`Model`, `Turns`, `ToolCalls`,
+`TotalTokens`, `Ms`, `Error`) per run/ask. Forward it anywhere (statsd, logs, OpenTelemetry).
+
+```csharp
+var agent = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = baseUrl, Style = "openai", Model = model,
+    OnMetric = ev => Console.WriteLine($"[metric] {ev.Event} {ev}"),
+});
+```
+
+**`agent.Metrics()` — built-in Prometheus text.** The same events feed a tiny in-memory registry
+that renders the Prometheus text exposition format (no third-party dep). Mount it at `GET /metrics`:
+
+```csharp
+// ASP.NET Core minimal API
+app.MapGet("/metrics", () =>
+    Results.Text(agent.Metrics(), "text/plain; version=0.0.4"));
+```
+
+Series: `toolnexus_llm_requests_total{model,status}`, `toolnexus_llm_tokens_total{type}`,
+`toolnexus_tool_calls_total{tool,source,is_error}`, `toolnexus_run_errors_total{model}`, plus the
+`toolnexus_llm_request_duration_seconds` and `toolnexus_tool_duration_seconds` histograms. The
+rendered text is byte-identical across all five ports; OTLP push is a planned future companion.
 
 ## Add your own tools
 
@@ -272,8 +326,9 @@ var res = await tk.ExecuteAsync(name, args);   // -> ToolResult(Output, IsError,
 | `Toolkit.CreateAsync(opts)` | async factory → `Toolkit` (`await using`) |
 | `LlmClient.Create(opts)` | the unified host loop |
 | `agent.RunAsync(prompt, tk, history?, ct?)` | stateless run → `RunResult` |
-| `agent.AskAsync(prompt, tk, id?, ct?)` | remembered run when `id` is set (via `IConversationStore`); stateless when `id` is null |
-| `agent.StreamAsync(prompt, tk, onEvent, ct?)` | the loop with streaming events |
+| `agent.AskAsync(prompt, tk, id?, onText?, ct?)` | remembered run when `id` is set (via `IConversationStore`); stateless when `id` is null; `onText` streams text deltas |
+| `agent.StreamAsync(prompt, tk, onEvent, id?, ct?)` | the loop with streaming events; `id` ⇒ stateful (load before, save at end) |
+| `agent.Metrics()` | Prometheus text exposition of cumulative metrics — mount at `GET /metrics` |
 | `tk.ServeAsync(addr, serveOpts)` | serve the toolkit as an A2A agent → `ServeHandle` |
 | `tk.Register(params ITool[])` | add native/http/custom tools (chainable) |
 | `tk.AddAgentAsync(agent \| cardUrl)` | register a remote A2A agent's skills at runtime |

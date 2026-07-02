@@ -595,8 +595,10 @@ caching, arg rewriting, and observability (cost/latency in `afterLLM`).
 
 ### Streaming
 
-`client.stream(prompt, { toolkit })` returns an async iterator of events (same loop, hooks,
-tools, telemetry as `run()` — just incremental):
+`client.stream(prompt, { toolkit, id? })` returns an async iterator of events (same loop, hooks,
+tools, telemetry as `run()` — just incremental). Like `ask`, an optional **`id`** makes it stateful:
+the thread's transcript is loaded as history before the stream, and saved back to the
+`ConversationStore` when the `done` event fires (§ Conversation memory). No `id` ⇒ stateless.
 
 - `{ type: "text", delta }` — assistant text token deltas
 - `{ type: "tool_call", id, name, args }` — a tool about to run
@@ -629,11 +631,14 @@ construction — `createClient({ ..., store })`, defaulting to an **in-memory st
 process lifetime). A `ConversationStore` is two methods: `get(id) -> messages | undefined` and
 `save(id, messages)` — implement it for a file/db/redis provider to persist across processes.
 
-`client.ask(prompt, { toolkit, id? })`:
+`client.ask(prompt, { toolkit, id?, on_text? })`:
 - **with `id`** — loads that id's transcript from the store, `run`s the loop with it as `history`,
   `save`s the updated `RunResult.messages` back under `id`, and returns the `RunResult`. So the next
   `ask` with the same `id` continues the conversation. Works identically for `openai` and `anthropic`.
 - **without `id`** — a stateless one-shot, identical to `run` (the store is untouched).
+- **with `on_text`** — a callback invoked with each assistant text delta as it streams; `ask` still
+  returns the final `RunResult` (the return type never changes). Omit it ⇒ non-streaming. This is the
+  block-style streaming path; `stream()` remains the idiomatic iterator for consuming tool events too.
 
 **A2A serve uses the same store.** The inbound `serve` (§7B) fulfils each `SendMessage` via
 `ask(text, { toolkit, id: <message.contextId> })` when the message carries an A2A `contextId`, so a
@@ -641,6 +646,42 @@ peer's turns are remembered through the client's `ConversationStore`; no `contex
 
 Each language exposes the idiomatic equivalent (a `ConversationStore` interface + an in-memory default
 + `ask`).
+
+### Observability (metrics)
+
+Zero-dependency, two outputs from one internal instrumentation. Both are opt-in and add no cost when
+unused.
+
+**`on_metric` — semantic events (forward anywhere).** The `on_metric` client option (idiomatic name
+per port, e.g. `onMetric` in JS/Java, `on_metric` in Python) receives a readable record at each
+significant point — NOT counter/histogram primitives. Field **names follow each port's idiomatic
+casing** (exactly like `RunResult` — `toolCalls`/`tool_calls`), so these are NOT byte-identical across
+ports; only the Prometheus text below is:
+- `event: "llm"` + `model`, `status` (`ok`/`error`), `ms`, prompt-tokens, completion-tokens — one per LLM call
+- `event: "tool"` + `tool`, `source`, is-error, `ms` — one per tool call
+- `event: "run"` + `model`, `turns`, tool-calls, total-tokens, `ms`, `error?` — one per `run`/`ask`
+Forward these to statsd, logs, OTel, your own exporter — the library holds no opinion.
+
+**`client.metrics()` — built-in Prometheus text (scrape).** The client accumulates those same events
+into a tiny in-memory registry and renders the **Prometheus text exposition format** (no third-party
+dependency — the format is plain text). The host mounts it at `GET /metrics`. Metrics + labels
+(bounded cardinality — no `id`):
+- `toolnexus_llm_requests_total{model,status}` · `toolnexus_llm_tokens_total{type}` ·
+  `toolnexus_llm_request_duration_seconds{model}` (histogram) ·
+  `toolnexus_tool_calls_total{tool,source,is_error}` · `toolnexus_tool_duration_seconds{tool}`
+  (histogram) · `toolnexus_run_errors_total{model}`
+
+The `metrics()` **text is byte-identical across all five ports** — pin: metrics in the fixed order
+above; each with `# HELP`/`# TYPE` lines; series within a metric sorted lexicographically by their
+rendered label string; histogram buckets (seconds) fixed at
+`[0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60]` + `+Inf` (cumulative `_bucket{le=…}` + `_sum` +
+`_count`, observing `ms/1000`, `le` rendered `0.05`/`0.1`/…/`60`/`+Inf`); label values escaped
+`\`→`\\`, `"`→`\"`, newline→`\n`; output ends with a trailing newline; before any activity, only the
+`# HELP`/`# TYPE` lines render. Label names stay snake_case (`is_error`, `type`) per Prometheus
+convention in every port.
+
+OTLP/OpenTelemetry push is intentionally a **future opt-in companion** (heavy SDK per language), not
+core. Each port exposes the idiomatic `on_metric` callback + a `metrics()` returning the Prometheus text.
 
 ---
 

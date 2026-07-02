@@ -105,6 +105,64 @@ automatically (`.messages`, `.reset()`).
 The same `store` powers inbound A2A: `toolkit.serve` keys each peer's turns by the A2A
 `contextId` through `client.ask`, so a remote agent's conversation is remembered too (see below).
 
+**Streaming with memory.** The `id` also works while streaming. Pass `on_text` to `ask` to stream
+text deltas as they arrive — `ask` still returns the final `RunResult` — or iterate `stream()`
+directly. With an `id`, the thread is loaded before the stream and saved on the `done` event.
+
+```ts
+// block-style: stream deltas to stdout, still get the RunResult back — remembered under `id`
+const res = await agent.ask("Draft a reply.", {
+  toolkit: tk,
+  id: "user-42",
+  on_text: (delta) => process.stdout.write(delta),
+})
+
+// iterator: consume text + tool events; `id` makes it stateful (load before, save on `done`)
+for await (const ev of agent.stream("And summarise it.", { toolkit: tk, id: "user-42" })) {
+  if (ev.type === "text") process.stdout.write(ev.delta)
+  else if (ev.type === "done") console.log("\n", ev.result.usage)
+}
+```
+
+## Observability / metrics
+
+Zero-dependency, two outputs from one internal instrumentation — both opt-in, no cost when unused.
+
+**`onMetric` — a semantic event feed.** Pass it to `createClient` and it receives a readable
+`MetricEvent` at each significant point: `{ event: "llm", model, status, ms, promptTokens,
+completionTokens }` per model call, `{ event: "tool", tool, source, isError, ms }` per tool call,
+and a terminal `{ event: "run", model, turns, toolCalls, totalTokens, ms, error? }` per `run`/`ask`.
+Forward it anywhere (statsd, logs, OpenTelemetry) — the library holds no opinion.
+
+```ts
+const agent = createClient({
+  baseUrl, style: "openai", model,
+  onMetric: (ev) => console.log("[metric]", ev.event, JSON.stringify(ev)),
+})
+```
+
+**`client.metrics()` — built-in Prometheus text.** The same events feed a tiny in-memory registry
+that renders the Prometheus text exposition format (no third-party dep). Mount it at `GET /metrics`:
+
+```ts
+import { createServer } from "node:http"
+
+createServer((req, res) => {
+  if (req.url === "/metrics") {
+    res.setHeader("Content-Type", "text/plain; version=0.0.4")
+    res.end(agent.metrics())
+  } else {
+    res.statusCode = 404
+    res.end()
+  }
+}).listen(9090)
+```
+
+Series: `toolnexus_llm_requests_total{model,status}`, `toolnexus_llm_tokens_total{type}`,
+`toolnexus_tool_calls_total{tool,source,is_error}`, `toolnexus_run_errors_total{model}`, plus the
+`toolnexus_llm_request_duration_seconds` and `toolnexus_tool_duration_seconds` histograms. The
+rendered text is byte-identical across all five ports; OTLP push is a planned future companion.
+
 ## Add your own tools
 
 ```ts
@@ -238,11 +296,12 @@ a sixth.
 | Member | Description |
 |--------|-------------|
 | `createToolkit(opts)` | async factory → `Toolkit` (`mcpConfig`, `skillsDir`, `builtins`, `agents`, `extraTools`) |
-| `createClient(opts)` | the unified host loop (`baseUrl`, `style`, `model`, `store?`, `hooks?`, `maxTurns?`, `retries?`, `timeoutMs?`) |
+| `createClient(opts)` | the unified host loop (`baseUrl`, `style`, `model`, `store?`, `hooks?`, `maxTurns?`, `retries?`, `timeoutMs?`, `onMetric?`) |
 | `client.run(prompt, { toolkit, signal?, history? })` | stateless run → `RunResult` |
-| `client.ask(prompt, { toolkit, id?, signal? })` | stateful with `id` (loads → runs → saves via `store`); one-shot without `id` |
+| `client.ask(prompt, { toolkit, id?, on_text?, signal? })` | stateful with `id` (loads → runs → saves via `store`); one-shot without `id`; `on_text` streams text deltas |
 | `client.conversation({ toolkit })` | in-process multi-turn object — `.send(prompt)`, `.messages`, `.reset()` |
-| `client.stream(prompt, { toolkit })` | async-iterate `StreamEvent`s (text deltas, tool calls/results, usage, done) |
+| `client.stream(prompt, { toolkit, id? })` | async-iterate `StreamEvent`s (text deltas, tool calls/results, usage, done); `id` ⇒ stateful |
+| `client.metrics()` | Prometheus text exposition of cumulative metrics — mount at `GET /metrics` |
 | `ConversationStore` | `get(id)` / `save(id, messages)` — implement for file/db; default `InMemoryConversationStore` |
 | `tk.tools()` / `tk.get(name)` | the uniform tools |
 | `tk.register(...tools)` | add native/http/custom tools at runtime |
