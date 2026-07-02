@@ -118,6 +118,67 @@ agent = create_client(base_url=..., style="openai", model=..., store=FileStore()
 `serve` side uses the same store: an inbound peer's turns are keyed by their A2A `contextId`, so a
 served agent remembers a caller across tasks (see [A2A agents](#a2a-agents-agent-to-agent)).
 
+**Streaming with memory.** The `id` also works while streaming. Pass `on_text` (a sync- or
+async-callable) to `ask` to stream text deltas as they arrive — `ask` still returns the final
+`RunResult` — or iterate `stream()` directly. With an `id`, the thread is loaded before the stream
+and saved on the terminal `done` event.
+
+```python
+# block-style: stream deltas, still get the RunResult back — remembered under `id`
+res = await agent.ask("Draft a reply.", tk, id="trader-42",
+                      on_text=lambda delta: print(delta, end="", flush=True))
+
+# async iterator: consume text + tool events; `id` makes it stateful (load before, save on done)
+async for ev in agent.stream("And summarise it.", tk, id="trader-42"):
+    if ev["type"] == "text":
+        print(ev["delta"], end="", flush=True)
+    elif ev["type"] == "done":
+        print("\n", ev["result"].usage)
+```
+
+## Observability / metrics
+
+Zero-dependency, two outputs from one internal instrumentation — both opt-in, no cost when unused.
+
+**`on_metric` — a semantic event feed.** Pass it to `create_client` and it receives a readable,
+snake_case dict at each significant point: `{"event": "llm", "model", "status", "ms",
+"prompt_tokens", "completion_tokens"}` per model call, `{"event": "tool", "tool", "source",
+"is_error", "ms"}` per tool call, and a terminal `{"event": "run", "model", "turns", "tool_calls",
+"total_tokens", "ms", "error"?}` per `run`/`ask`. Forward it anywhere (statsd, logs, OpenTelemetry).
+
+```python
+agent = create_client(
+    base_url=..., style="openai", model=...,
+    on_metric=lambda ev: print("[metric]", ev["event"], ev),
+)
+```
+
+**`agent.metrics()` — built-in Prometheus text.** The same events feed a tiny in-memory registry
+that renders the Prometheus text exposition format (no third-party dep). Mount it at `GET /metrics`:
+
+```python
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/metrics":
+            body = agent.metrics().encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4")
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+HTTPServer(("", 9090), Handler).serve_forever()
+```
+
+Series: `toolnexus_llm_requests_total{model,status}`, `toolnexus_llm_tokens_total{type}`,
+`toolnexus_tool_calls_total{tool,source,is_error}`, `toolnexus_run_errors_total{model}`, plus the
+`toolnexus_llm_request_duration_seconds` and `toolnexus_tool_duration_seconds` histograms. The
+rendered text is byte-identical across all five ports; OTLP push is a planned future companion.
+
 ## Add your own tools
 
 ```python
@@ -239,10 +300,11 @@ All four appear as one uniform `Tool` in `tk.tools()`, with `source` in `"mcp" |
 | Python | Description |
 |--------|-------------|
 | `await create_toolkit(...)` | async factory → `Toolkit` |
-| `create_client(..., store=?)` | the unified host loop; `store` is the `ConversationStore` (default in-memory) |
+| `create_client(..., store=?, on_metric=?)` | the unified host loop; `store` is the `ConversationStore` (default in-memory); `on_metric` is the metric-event sink |
 | `await agent.run(prompt, tk)` | one stateless agent loop → `RunResult(text, messages, tool_calls, usage, …)` |
-| `await agent.ask(prompt, tk, *, id=None)` | with `id`: remembers the thread via `store` (get → run → save); without: one-shot (= `run`) |
-| `agent.stream(prompt, tk)` | streaming variant — async-iterate text/tool/usage/done events |
+| `await agent.ask(prompt, tk, *, id=None, on_text=None)` | with `id`: remembers the thread via `store` (get → run → save); without: one-shot (= `run`); `on_text` streams text deltas |
+| `agent.stream(prompt, tk, *, id=None)` | streaming variant — async-iterate text/tool/usage/done events; `id` ⇒ stateful |
+| `agent.metrics()` | Prometheus text exposition of cumulative metrics — mount at `GET /metrics` |
 | `ConversationStore` / `InMemoryConversationStore` | `async get(id)` / `async save(id, messages)` — implement for file/db; in-memory default |
 | `tk.tools()` / `tk.get(name)` | the uniform tools |
 | `await tk.execute(name, args, ctx=None)` | run a tool → `ToolResult` |

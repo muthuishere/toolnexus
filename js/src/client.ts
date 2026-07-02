@@ -26,7 +26,20 @@ export interface ClientOptions {
   /** Conversation provider for `ask(prompt, { id })`. Default: in-memory (process lifetime).
    * Supply a file/db store to persist conversations across processes. */
   store?: ConversationStore
+  /** Observability sink — receives semantic metric events ({event:"llm"|"tool"|"run"…}) as the
+   * loop runs (§8 Observability). Forward to statsd/logs/OTel/anything. No cost when unset. */
+  onMetric?: (ev: MetricEvent) => void
 }
+
+/**
+ * Semantic observability events (§8). NOT counter/histogram primitives — readable records the
+ * host can forward anywhere. The same events also feed the built-in Prometheus registry
+ * (`client.metrics()`).
+ */
+export type MetricEvent =
+  | { event: "llm"; model: string; status: "ok" | "error"; ms: number; promptTokens: number; completionTokens: number }
+  | { event: "tool"; tool: string; source: string; isError: boolean; ms: number }
+  | { event: "run"; model: string; turns: number; toolCalls: number; totalTokens: number; ms: number; error?: string }
 
 /**
  * Where `ask()` conversations are remembered — two methods. Ship the in-memory
@@ -127,6 +140,13 @@ function addUsage(acc: Usage, raw: any, style: ClientStyle): void {
   }
 }
 
+/** Per-call token counts from one raw usage payload (not summed). */
+function perCall(raw: any, style: ClientStyle): { prompt: number; completion: number } {
+  if (!raw) return { prompt: 0, completion: 0 }
+  if (style === "anthropic") return { prompt: raw.input_tokens ?? 0, completion: raw.output_tokens ?? 0 }
+  return { prompt: raw.prompt_tokens ?? 0, completion: raw.completion_tokens ?? 0 }
+}
+
 function resolveKey(opts: ClientOptions): string {
   if (opts.apiKey) return opts.apiKey
   const env = process.env
@@ -139,11 +159,137 @@ function resolveKey(opts: ClientOptions): string {
   return key
 }
 
+// ---- Prometheus metrics registry (zero-dependency; §8 Observability) ----
+
+/** FIXED across all ports for byte-parity of `..._duration_seconds` histograms. Seconds. */
+const DURATION_BUCKETS = [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60]
+
+interface Hist {
+  counts: number[]
+  sum: number
+  count: number
+}
+
+/** Escape a Prometheus label value: backslash, double-quote, newline. */
+function escapeLabel(v: string): string {
+  return v.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")
+}
+
+/** Render an ordered list of label pairs to `k="v",k="v"` (order is load-bearing for parity). */
+function labelStr(pairs: [string, string][]): string {
+  return pairs.map(([k, v]) => `${k}="${escapeLabel(v)}"`).join(",")
+}
+
+function inc(m: Map<string, number>, key: string, by = 1): void {
+  m.set(key, (m.get(key) ?? 0) + by)
+}
+
+function observe(m: Map<string, Hist>, key: string, seconds: number): void {
+  let h = m.get(key)
+  if (!h) {
+    h = { counts: new Array(DURATION_BUCKETS.length).fill(0), sum: 0, count: 0 }
+    m.set(key, h)
+  }
+  h.sum += seconds
+  h.count++
+  for (let i = 0; i < DURATION_BUCKETS.length; i++) if (seconds <= DURATION_BUCKETS[i]) h.counts[i]++
+}
+
+/**
+ * In-memory cumulative registry that turns the same semantic events `onMetric` sees into the
+ * Prometheus counters/histograms of §8, and renders the text exposition format by hand (no dep).
+ */
+class MetricsRegistry {
+  private readonly llmRequests = new Map<string, number>() // labels: model,status
+  private readonly llmTokens = new Map<string, number>() // labels: type
+  private readonly llmDuration = new Map<string, Hist>() // labels: model
+  private readonly toolCalls = new Map<string, number>() // labels: tool,source,is_error
+  private readonly toolDuration = new Map<string, Hist>() // labels: tool
+  private readonly runErrors = new Map<string, number>() // labels: model
+
+  record(ev: MetricEvent): void {
+    if (ev.event === "llm") {
+      inc(this.llmRequests, labelStr([["model", ev.model], ["status", ev.status]]))
+      if (ev.status === "ok") {
+        inc(this.llmTokens, labelStr([["type", "prompt"]]), ev.promptTokens)
+        inc(this.llmTokens, labelStr([["type", "completion"]]), ev.completionTokens)
+      }
+      observe(this.llmDuration, labelStr([["model", ev.model]]), ev.ms / 1000)
+    } else if (ev.event === "tool") {
+      inc(this.toolCalls, labelStr([["tool", ev.tool], ["source", ev.source], ["is_error", String(ev.isError)]]))
+      observe(this.toolDuration, labelStr([["tool", ev.tool]]), ev.ms / 1000)
+    } else if (ev.event === "run") {
+      if (ev.error) inc(this.runErrors, labelStr([["model", ev.model]]))
+    }
+  }
+
+  render(): string {
+    const out: string[] = []
+    this.renderCounter(out, "toolnexus_llm_requests_total", "Total LLM requests.", this.llmRequests)
+    this.renderCounter(out, "toolnexus_llm_tokens_total", "Total tokens, by type.", this.llmTokens)
+    this.renderHistogram(out, "toolnexus_llm_request_duration_seconds", "LLM request duration in seconds.", this.llmDuration)
+    this.renderCounter(out, "toolnexus_tool_calls_total", "Total tool calls.", this.toolCalls)
+    this.renderHistogram(out, "toolnexus_tool_duration_seconds", "Tool execution duration in seconds.", this.toolDuration)
+    this.renderCounter(out, "toolnexus_run_errors_total", "Total run errors.", this.runErrors)
+    return out.join("\n") + "\n"
+  }
+
+  private renderCounter(out: string[], name: string, help: string, m: Map<string, number>): void {
+    out.push(`# HELP ${name} ${help}`)
+    out.push(`# TYPE ${name} counter`)
+    for (const key of [...m.keys()].sort()) {
+      out.push(key ? `${name}{${key}} ${m.get(key)}` : `${name} ${m.get(key)}`)
+    }
+  }
+
+  private renderHistogram(out: string[], name: string, help: string, m: Map<string, Hist>): void {
+    out.push(`# HELP ${name} ${help}`)
+    out.push(`# TYPE ${name} histogram`)
+    for (const key of [...m.keys()].sort()) {
+      const h = m.get(key)!
+      for (let i = 0; i < DURATION_BUCKETS.length; i++) {
+        out.push(`${name}_bucket{${withLe(key, String(DURATION_BUCKETS[i]))}} ${h.counts[i]}`)
+      }
+      out.push(`${name}_bucket{${withLe(key, "+Inf")}} ${h.count}`)
+      out.push(key ? `${name}_sum{${key}} ${h.sum}` : `${name}_sum ${h.sum}`)
+      out.push(key ? `${name}_count{${key}} ${h.count}` : `${name}_count ${h.count}`)
+    }
+  }
+}
+
+function withLe(base: string, le: string): string {
+  return base ? `${base},le="${le}"` : `le="${le}"`
+}
+
 export class Client {
   /** Conversation provider for `ask()` — from opts.store, else in-memory. */
   private readonly store: ConversationStore
+  /** Cumulative Prometheus registry fed by the same events `onMetric` sees. */
+  private readonly registry = new MetricsRegistry()
   constructor(private readonly opts: ClientOptions) {
     this.store = opts.store ?? new InMemoryConversationStore()
+  }
+
+  /** Prometheus text exposition of cumulative metrics (§8). Always valid, empty-but-valid before activity. */
+  metrics(): string {
+    return this.registry.render()
+  }
+
+  /** Feed a semantic metric event to the built-in registry and the optional onMetric sink. */
+  private emit(ev: MetricEvent): void {
+    this.registry.record(ev)
+    this.opts.onMetric?.(ev)
+  }
+
+  /** Emit the terminal `run` metric event and build the RunResult. */
+  private endRun(runStart: number, text: string, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage): RunResult {
+    this.emit({ event: "run", model: this.opts.model, turns, toolCalls: toolCalls.length, totalTokens: usage.totalTokens, ms: Date.now() - runStart })
+    return this.result(text, messages, toolCalls, turns, usage)
+  }
+
+  /** Emit a `run` error metric event (once, on a thrown run). */
+  private emitRunError(runStart: number, toolCalls: ToolCallRecord[], turns: number, usage: Usage, e: unknown): void {
+    this.emit({ event: "run", model: this.opts.model, turns, toolCalls: toolCalls.length, totalTokens: usage.totalTokens, ms: Date.now() - runStart, error: e instanceof Error ? e.message : String(e) })
   }
 
   async run(prompt: string, ctx: { toolkit: Toolkit; signal?: AbortSignal; history?: any[] }): Promise<RunResult> {
@@ -158,7 +304,17 @@ export class Client {
    * the answer — so the next `ask` with the same `id` continues it. Without an
    * `id` it is a stateless one-shot (identical to `run`).
    */
-  async ask(prompt: string, ctx: { toolkit: Toolkit; id?: string; signal?: AbortSignal }): Promise<RunResult> {
+  async ask(prompt: string, ctx: { toolkit: Toolkit; id?: string; on_text?: (delta: string) => void; signal?: AbortSignal }): Promise<RunResult> {
+    // Block-style streaming: run the streaming loop, forward text deltas, still return the
+    // final RunResult. Memory (id load/save) is handled by stream() itself, so no duplication.
+    if (ctx.on_text) {
+      let result: RunResult | undefined
+      for await (const ev of this.stream(prompt, { toolkit: ctx.toolkit, id: ctx.id, signal: ctx.signal })) {
+        if (ev.type === "text") ctx.on_text(ev.delta)
+        else if (ev.type === "done") result = ev.result
+      }
+      return result!
+    }
     if (!ctx.id) return this.run(prompt, { toolkit: ctx.toolkit, signal: ctx.signal })
     const history = (await this.store.get(ctx.id)) ?? []
     const result = await this.run(prompt, { toolkit: ctx.toolkit, signal: ctx.signal, history })
@@ -171,11 +327,20 @@ export class Client {
     return new Conversation(this, ctx.toolkit, ctx.signal)
   }
 
-  /** Streaming variant: async-iterate live events (text deltas, tool calls/results, usage, done). */
-  stream(prompt: string, ctx: { toolkit: Toolkit; signal?: AbortSignal }): AsyncGenerator<StreamEvent, void, unknown> {
-    return this.opts.style === "anthropic"
-      ? this.streamAnthropic(prompt, ctx.toolkit, ctx.signal)
-      : this.streamOpenAI(prompt, ctx.toolkit, ctx.signal)
+  /**
+   * Streaming variant: async-iterate live events (text deltas, tool calls/results, usage, done).
+   * With an `id`, it is stateful (like `ask`): the thread's transcript is loaded as history before
+   * streaming, and saved back to the ConversationStore on the terminal `done` event. No `id` ⇒ stateless.
+   */
+  async *stream(prompt: string, ctx: { toolkit: Toolkit; id?: string; signal?: AbortSignal }): AsyncGenerator<StreamEvent, void, unknown> {
+    const history = ctx.id ? (await this.store.get(ctx.id)) ?? [] : undefined
+    const gen = this.opts.style === "anthropic"
+      ? this.streamAnthropic(prompt, ctx.toolkit, ctx.signal, history)
+      : this.streamOpenAI(prompt, ctx.toolkit, ctx.signal, history)
+    for await (const ev of gen) {
+      if (ev.type === "done" && ctx.id) await this.store.save(ctx.id, ev.result.messages)
+      yield ev
+    }
   }
 
   private system(toolkit: Toolkit): string {
@@ -220,10 +385,16 @@ export class Client {
   /** Run one tool through beforeTool/afterTool hooks (mutate args, short-circuit, transform result). */
   private async runTool(toolkit: Toolkit, name: string, args: Record<string, unknown>, id: string | undefined, turn: number) {
     const h = this.opts.hooks
+    const source = toolkit.get(name)?.source ?? "custom"
+    const t0 = Date.now()
     let a = args
     if (h?.beforeTool) {
       const ov = await h.beforeTool({ name, args: a, id, turn })
-      if (ov?.result) return { args: a, result: ov.result } // short-circuit (deny/cache/dry-run)
+      if (ov?.result) {
+        // short-circuit (deny/cache/dry-run) — still a tool call for metrics purposes
+        this.emit({ event: "tool", tool: name, source, isError: ov.result.isError, ms: Date.now() - t0 })
+        return { args: a, result: ov.result }
+      }
       if (ov?.args) a = ov.args
     }
     let result = await toolkit.execute(name, a)
@@ -231,13 +402,31 @@ export class Client {
       const ov = await h.afterTool({ name, args: a, result, id, turn })
       if (ov?.result) result = ov.result
     }
+    this.emit({ event: "tool", tool: name, source, isError: result.isError, ms: Date.now() - t0 })
     return { args: a, result }
+  }
+
+  /** One non-streaming LLM call, with an `llm` metric event (ok/error + per-call tokens + ms). */
+  private async llmCallJson(url: string, init: RequestInit, signal: AbortSignal, style: ClientStyle): Promise<any> {
+    const t0 = Date.now()
+    try {
+      const res = await this.llmFetch(url, init, signal)
+      if (!res.ok) throw new Error(`LLM ${res.status}: ${await res.text()}`)
+      const data: any = await res.json()
+      const tok = perCall(data.usage, style)
+      this.emit({ event: "llm", model: this.opts.model, status: "ok", ms: Date.now() - t0, promptTokens: tok.prompt, completionTokens: tok.completion })
+      return data
+    } catch (e) {
+      this.emit({ event: "llm", model: this.opts.model, status: "error", ms: Date.now() - t0, promptTokens: 0, completionTokens: 0 })
+      throw e
+    }
   }
 
   // ---- OpenAI-style: POST {baseUrl}/chat/completions ----
   private async runOpenAI(prompt: string, toolkit: Toolkit, external?: AbortSignal, history?: any[]): Promise<RunResult> {
     const key = resolveKey(this.opts)
     const signal = this.makeSignal(external)
+    const runStart = Date.now()
     let messages: any[] = history && history.length ? [...history] : []
     if (!messages.length) {
       const system = this.system(toolkit)
@@ -249,37 +438,40 @@ export class Client {
     const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
     let turns = 0
 
-    for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
-      turns++
-      if (this.opts.hooks?.beforeLLM) {
-        const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn })
-        if (ov?.messages) messages = ov.messages
-        if (ov?.tools) tools = ov.tools
+    try {
+      for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
+        turns++
+        if (this.opts.hooks?.beforeLLM) {
+          const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn })
+          if (ov?.messages) messages = ov.messages
+          if (ov?.tools) tools = ov.tools
+        }
+        const data: any = await this.llmCallJson(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
+          body: JSON.stringify({ model: this.opts.model, messages, tools, tool_choice: "auto" }),
+        }, signal, "openai")
+        addUsage(usage, data.usage, "openai")
+        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: this.opts.model, turn })
+        const msg = data.choices[0].message
+        messages.push(msg)
+        const calls = msg.tool_calls ?? []
+        if (calls.length === 0) return this.endRun(runStart, msg.content ?? "", messages, toolCalls, turns, usage)
+        // execute all tool calls in this turn concurrently (true parallel tool calling)
+        const results = await Promise.all(
+          calls.map(async (call: any) => {
+            const { args, result } = await this.runTool(toolkit, call.function.name, safeJson(call.function.arguments), call.id, turn)
+            toolCalls.push({ name: call.function.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
+            return { role: "tool", tool_call_id: call.id, content: result.output }
+          }),
+        )
+        messages.push(...results)
       }
-      const res = await this.llmFetch(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
-        body: JSON.stringify({ model: this.opts.model, messages, tools, tool_choice: "auto" }),
-      }, signal)
-      if (!res.ok) throw new Error(`LLM ${res.status}: ${await res.text()}`)
-      const data: any = await res.json()
-      addUsage(usage, data.usage, "openai")
-      if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: this.opts.model, turn })
-      const msg = data.choices[0].message
-      messages.push(msg)
-      const calls = msg.tool_calls ?? []
-      if (calls.length === 0) return this.result(msg.content ?? "", messages, toolCalls, turns, usage)
-      // execute all tool calls in this turn concurrently (true parallel tool calling)
-      const results = await Promise.all(
-        calls.map(async (call: any) => {
-          const { args, result } = await this.runTool(toolkit, call.function.name, safeJson(call.function.arguments), call.id, turn)
-          toolCalls.push({ name: call.function.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
-          return { role: "tool", tool_call_id: call.id, content: result.output }
-        }),
-      )
-      messages.push(...results)
+      return this.endRun(runStart, lastText(messages), messages, toolCalls, turns, usage)
+    } catch (e) {
+      this.emitRunError(runStart, toolCalls, turns, usage, e)
+      throw e
     }
-    return this.result(lastText(messages), messages, toolCalls, turns, usage)
   }
 
   private result(text: string, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage): RunResult {
@@ -293,184 +485,216 @@ export class Client {
     const base = this.opts.baseUrl.replace(/\/$/, "")
     const endpoint = base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`
     const system = this.system(toolkit)
+    const runStart = Date.now()
     let messages: any[] = history && history.length ? [...history, { role: "user", content: prompt }] : [{ role: "user", content: prompt }]
     let tools = toolkit.toAnthropic()
     const toolCalls: ToolCallRecord[] = []
     const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
     let turns = 0
 
-    for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
-      turns++
-      if (this.opts.hooks?.beforeLLM) {
-        const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn })
-        if (ov?.messages) messages = ov.messages
-        if (ov?.tools) tools = ov.tools
+    try {
+      for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
+        turns++
+        if (this.opts.hooks?.beforeLLM) {
+          const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn })
+          if (ov?.messages) messages = ov.messages
+          if (ov?.tools) tools = ov.tools
+        }
+        const data: any = await this.llmCallJson(endpoint, {
+          method: "POST",
+          headers: {
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+            ...this.opts.headers,
+          },
+          body: JSON.stringify({ model: this.opts.model, max_tokens: 4096, system, messages, tools }),
+        }, signal, "anthropic")
+        addUsage(usage, data.usage, "anthropic")
+        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: this.opts.model, turn })
+        messages.push({ role: "assistant", content: data.content })
+        const uses = (data.content ?? []).filter((b: any) => b.type === "tool_use")
+        if (uses.length === 0) {
+          const text = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
+          return this.endRun(runStart, text, messages, toolCalls, turns, usage)
+        }
+        // execute all tool_use blocks in this turn concurrently (true parallel tool calling)
+        const results = await Promise.all(
+          uses.map(async (use: any) => {
+            const { args, result } = await this.runTool(toolkit, use.name, use.input ?? {}, use.id, turn)
+            toolCalls.push({ name: use.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
+            return { type: "tool_result", tool_use_id: use.id, content: result.output, is_error: result.isError }
+          }),
+        )
+        messages.push({ role: "user", content: results })
       }
-      const res = await this.llmFetch(endpoint, {
-        method: "POST",
-        headers: {
-          "x-api-key": key,
-          "anthropic-version": "2023-06-01",
-          "Content-Type": "application/json",
-          ...this.opts.headers,
-        },
-        body: JSON.stringify({ model: this.opts.model, max_tokens: 4096, system, messages, tools }),
-      }, signal)
-      if (!res.ok) throw new Error(`LLM ${res.status}: ${await res.text()}`)
-      const data: any = await res.json()
-      addUsage(usage, data.usage, "anthropic")
-      if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: this.opts.model, turn })
-      messages.push({ role: "assistant", content: data.content })
-      const uses = (data.content ?? []).filter((b: any) => b.type === "tool_use")
-      if (uses.length === 0) {
-        const text = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
-        return this.result(text, messages, toolCalls, turns, usage)
-      }
-      // execute all tool_use blocks in this turn concurrently (true parallel tool calling)
-      const results = await Promise.all(
-        uses.map(async (use: any) => {
-          const { args, result } = await this.runTool(toolkit, use.name, use.input ?? {}, use.id, turn)
-          toolCalls.push({ name: use.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
-          return { type: "tool_result", tool_use_id: use.id, content: result.output, is_error: result.isError }
-        }),
-      )
-      messages.push({ role: "user", content: results })
+      return this.endRun(runStart, "", messages, toolCalls, turns, usage)
+    } catch (e) {
+      this.emitRunError(runStart, toolCalls, turns, usage, e)
+      throw e
     }
-    return this.result("", messages, toolCalls, turns, usage)
   }
 
   // ---- Streaming: OpenAI-style ----
-  private async *streamOpenAI(prompt: string, toolkit: Toolkit, external?: AbortSignal): AsyncGenerator<StreamEvent, void, unknown> {
+  private async *streamOpenAI(prompt: string, toolkit: Toolkit, external?: AbortSignal, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
     const key = resolveKey(this.opts)
     const signal = this.makeSignal(external)
-    let messages: any[] = []
-    const system = this.system(toolkit)
-    if (system) messages.push({ role: "system", content: system })
+    const runStart = Date.now()
+    let messages: any[] = history && history.length ? [...history] : []
+    if (!messages.length) {
+      const system = this.system(toolkit)
+      if (system) messages.push({ role: "system", content: system })
+    }
     messages.push({ role: "user", content: prompt })
     let tools = toolkit.toOpenAI()
     const toolCalls: ToolCallRecord[] = []
     const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
     let turns = 0
 
-    for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
-      turns++
-      if (this.opts.hooks?.beforeLLM) {
-        const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn })
-        if (ov?.messages) messages = ov.messages
-        if (ov?.tools) tools = ov.tools
-      }
-      const res = await this.llmFetch(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
-        body: JSON.stringify({ model: this.opts.model, messages, tools, tool_choice: "auto", stream: true, stream_options: { include_usage: true } }),
-      }, signal)
-      if (!res.ok || !res.body) throw new Error(`LLM ${res.status}: ${await res.text()}`)
+    try {
+      for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
+        turns++
+        if (this.opts.hooks?.beforeLLM) {
+          const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn })
+          if (ov?.messages) messages = ov.messages
+          if (ov?.tools) tools = ov.tools
+        }
+        const t0 = Date.now()
+        const beforeP = usage.promptTokens, beforeC = usage.completionTokens
+        let content = ""
+        const acc = new Map<number, { id: string; name: string; args: string }>()
+        try {
+          const res = await this.llmFetch(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
+            body: JSON.stringify({ model: this.opts.model, messages, tools, tool_choice: "auto", stream: true, stream_options: { include_usage: true } }),
+          }, signal)
+          if (!res.ok || !res.body) throw new Error(`LLM ${res.status}: ${await res.text()}`)
+          for await (const line of sseLines(res.body)) {
+            if (!line.startsWith("data:")) continue
+            const payload = line.slice(5).trim()
+            if (payload === "[DONE]") break
+            const j = safeParse(payload)
+            if (j?.usage) addUsage(usage, j.usage, "openai")
+            const choice = j?.choices?.[0]
+            const d = choice?.delta
+            if (d?.content) { content += d.content; yield { type: "text", delta: d.content } }
+            for (const tc of d?.tool_calls ?? []) {
+              const slot = acc.get(tc.index) ?? { id: "", name: "", args: "" }
+              if (tc.id) slot.id = tc.id
+              if (tc.function?.name) slot.name += tc.function.name
+              if (tc.function?.arguments) slot.args += tc.function.arguments
+              acc.set(tc.index, slot)
+            }
+          }
+        } catch (e) {
+          this.emit({ event: "llm", model: this.opts.model, status: "error", ms: Date.now() - t0, promptTokens: 0, completionTokens: 0 })
+          throw e
+        }
+        this.emit({ event: "llm", model: this.opts.model, status: "ok", ms: Date.now() - t0, promptTokens: usage.promptTokens - beforeP, completionTokens: usage.completionTokens - beforeC })
+        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: { streamed: true, usage }, model: this.opts.model, turn })
 
-      let content = ""
-      const acc = new Map<number, { id: string; name: string; args: string }>()
-      for await (const line of sseLines(res.body)) {
-        if (!line.startsWith("data:")) continue
-        const payload = line.slice(5).trim()
-        if (payload === "[DONE]") break
-        const j = safeParse(payload)
-        if (j?.usage) addUsage(usage, j.usage, "openai")
-        const choice = j?.choices?.[0]
-        const d = choice?.delta
-        if (d?.content) { content += d.content; yield { type: "text", delta: d.content } }
-        for (const tc of d?.tool_calls ?? []) {
-          const slot = acc.get(tc.index) ?? { id: "", name: "", args: "" }
-          if (tc.id) slot.id = tc.id
-          if (tc.function?.name) slot.name += tc.function.name
-          if (tc.function?.arguments) slot.args += tc.function.arguments
-          acc.set(tc.index, slot)
+        const calls = [...acc.values()]
+        if (calls.length === 0) {
+          messages.push({ role: "assistant", content })
+          yield { type: "usage", usage }
+          yield { type: "done", result: this.endRun(runStart, content, messages, toolCalls, turns, usage) }
+          return
+        }
+        messages.push({ role: "assistant", content: content || null, tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.args } })) })
+        for (const c of calls) yield { type: "tool_call", id: c.id, name: c.name, args: safeJson(c.args) }
+        const settled = await Promise.all(calls.map((c) => this.runTool(toolkit, c.name, safeJson(c.args), c.id, turn)))
+        for (let i = 0; i < calls.length; i++) {
+          const c = calls[i], { args, result } = settled[i]
+          toolCalls.push({ name: c.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
+          messages.push({ role: "tool", tool_call_id: c.id, content: result.output })
+          yield { type: "tool_result", id: c.id, name: c.name, output: result.output, isError: result.isError }
         }
       }
-      if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: { streamed: true, usage }, model: this.opts.model, turn })
-
-      const calls = [...acc.values()]
-      if (calls.length === 0) {
-        messages.push({ role: "assistant", content })
-        yield { type: "usage", usage }
-        yield { type: "done", result: this.result(content, messages, toolCalls, turns, usage) }
-        return
-      }
-      messages.push({ role: "assistant", content: content || null, tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.args } })) })
-      for (const c of calls) yield { type: "tool_call", id: c.id, name: c.name, args: safeJson(c.args) }
-      const settled = await Promise.all(calls.map((c) => this.runTool(toolkit, c.name, safeJson(c.args), c.id, turn)))
-      for (let i = 0; i < calls.length; i++) {
-        const c = calls[i], { args, result } = settled[i]
-        toolCalls.push({ name: c.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
-        messages.push({ role: "tool", tool_call_id: c.id, content: result.output })
-        yield { type: "tool_result", id: c.id, name: c.name, output: result.output, isError: result.isError }
-      }
+      yield { type: "done", result: this.endRun(runStart, lastText(messages), messages, toolCalls, turns, usage) }
+    } catch (e) {
+      this.emitRunError(runStart, toolCalls, turns, usage, e)
+      throw e
     }
-    yield { type: "done", result: this.result(lastText(messages), messages, toolCalls, turns, usage) }
   }
 
   // ---- Streaming: Anthropic-style ----
-  private async *streamAnthropic(prompt: string, toolkit: Toolkit, external?: AbortSignal): AsyncGenerator<StreamEvent, void, unknown> {
+  private async *streamAnthropic(prompt: string, toolkit: Toolkit, external?: AbortSignal, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
     const key = resolveKey(this.opts)
     const signal = this.makeSignal(external)
+    const runStart = Date.now()
     const base = this.opts.baseUrl.replace(/\/$/, "")
     const endpoint = base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`
     const system = this.system(toolkit)
-    let messages: any[] = [{ role: "user", content: prompt }]
+    let messages: any[] = history && history.length ? [...history, { role: "user", content: prompt }] : [{ role: "user", content: prompt }]
     let tools = toolkit.toAnthropic()
     const toolCalls: ToolCallRecord[] = []
     const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
     let turns = 0
 
-    for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
-      turns++
-      if (this.opts.hooks?.beforeLLM) {
-        const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn })
-        if (ov?.messages) messages = ov.messages
-        if (ov?.tools) tools = ov.tools
-      }
-      const res = await this.llmFetch(endpoint, {
-        method: "POST",
-        headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json", ...this.opts.headers },
-        body: JSON.stringify({ model: this.opts.model, max_tokens: 4096, system, messages, tools, stream: true }),
-      }, signal)
-      if (!res.ok || !res.body) throw new Error(`LLM ${res.status}: ${await res.text()}`)
+    try {
+      for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
+        turns++
+        if (this.opts.hooks?.beforeLLM) {
+          const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn })
+          if (ov?.messages) messages = ov.messages
+          if (ov?.tools) tools = ov.tools
+        }
+        const t0 = Date.now()
+        const beforeP = usage.promptTokens, beforeC = usage.completionTokens
+        const blocks = new Map<number, { type: string; text?: string; id?: string; name?: string; json?: string }>()
+        let stopReason = ""
+        try {
+          const res = await this.llmFetch(endpoint, {
+            method: "POST",
+            headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json", ...this.opts.headers },
+            body: JSON.stringify({ model: this.opts.model, max_tokens: 4096, system, messages, tools, stream: true }),
+          }, signal)
+          if (!res.ok || !res.body) throw new Error(`LLM ${res.status}: ${await res.text()}`)
+          for await (const line of sseLines(res.body)) {
+            if (!line.startsWith("data:")) continue
+            const j = safeParse(line.slice(5).trim())
+            if (!j) continue
+            if (j.type === "message_start") addUsage(usage, j.message?.usage, "anthropic")
+            else if (j.type === "content_block_start") blocks.set(j.index, { type: j.content_block.type, id: j.content_block.id, name: j.content_block.name, text: "", json: "" })
+            else if (j.type === "content_block_delta") {
+              const b = blocks.get(j.index)!
+              if (j.delta.type === "text_delta") { b.text += j.delta.text; yield { type: "text", delta: j.delta.text } }
+              else if (j.delta.type === "input_json_delta") b.json += j.delta.partial_json
+            } else if (j.type === "message_delta") { stopReason = j.delta?.stop_reason ?? stopReason; addUsage(usage, j.usage, "anthropic") }
+          }
+        } catch (e) {
+          this.emit({ event: "llm", model: this.opts.model, status: "error", ms: Date.now() - t0, promptTokens: 0, completionTokens: 0 })
+          throw e
+        }
+        this.emit({ event: "llm", model: this.opts.model, status: "ok", ms: Date.now() - t0, promptTokens: usage.promptTokens - beforeP, completionTokens: usage.completionTokens - beforeC })
+        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: { streamed: true, usage }, model: this.opts.model, turn })
 
-      const blocks = new Map<number, { type: string; text?: string; id?: string; name?: string; json?: string }>()
-      let stopReason = ""
-      for await (const line of sseLines(res.body)) {
-        if (!line.startsWith("data:")) continue
-        const j = safeParse(line.slice(5).trim())
-        if (!j) continue
-        if (j.type === "message_start") addUsage(usage, j.message?.usage, "anthropic")
-        else if (j.type === "content_block_start") blocks.set(j.index, { type: j.content_block.type, id: j.content_block.id, name: j.content_block.name, text: "", json: "" })
-        else if (j.type === "content_block_delta") {
-          const b = blocks.get(j.index)!
-          if (j.delta.type === "text_delta") { b.text += j.delta.text; yield { type: "text", delta: j.delta.text } }
-          else if (j.delta.type === "input_json_delta") b.json += j.delta.partial_json
-        } else if (j.type === "message_delta") { stopReason = j.delta?.stop_reason ?? stopReason; addUsage(usage, j.usage, "anthropic") }
+        const content = [...blocks.values()].map((b) => b.type === "tool_use" ? { type: "tool_use", id: b.id, name: b.name, input: safeJson(b.json || "{}") } : { type: "text", text: b.text })
+        messages.push({ role: "assistant", content })
+        const uses = content.filter((b: any) => b.type === "tool_use")
+        if (stopReason !== "tool_use" || uses.length === 0) {
+          const text = content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
+          yield { type: "usage", usage }
+          yield { type: "done", result: this.endRun(runStart, text, messages, toolCalls, turns, usage) }
+          return
+        }
+        for (const u of uses as any[]) yield { type: "tool_call", id: u.id, name: u.name, args: u.input }
+        const settled = await Promise.all((uses as any[]).map((u) => this.runTool(toolkit, u.name, u.input ?? {}, u.id, turn)))
+        const results: any[] = []
+        for (let i = 0; i < uses.length; i++) {
+          const u = uses[i] as any, { args, result } = settled[i]
+          toolCalls.push({ name: u.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
+          results.push({ type: "tool_result", tool_use_id: u.id, content: result.output, is_error: result.isError })
+          yield { type: "tool_result", id: u.id, name: u.name, output: result.output, isError: result.isError }
+        }
+        messages.push({ role: "user", content: results })
       }
-      if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: { streamed: true, usage }, model: this.opts.model, turn })
-
-      const content = [...blocks.values()].map((b) => b.type === "tool_use" ? { type: "tool_use", id: b.id, name: b.name, input: safeJson(b.json || "{}") } : { type: "text", text: b.text })
-      messages.push({ role: "assistant", content })
-      const uses = content.filter((b: any) => b.type === "tool_use")
-      if (stopReason !== "tool_use" || uses.length === 0) {
-        const text = content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
-        yield { type: "usage", usage }
-        yield { type: "done", result: this.result(text, messages, toolCalls, turns, usage) }
-        return
-      }
-      for (const u of uses as any[]) yield { type: "tool_call", id: u.id, name: u.name, args: u.input }
-      const settled = await Promise.all((uses as any[]).map((u) => this.runTool(toolkit, u.name, u.input ?? {}, u.id, turn)))
-      const results: any[] = []
-      for (let i = 0; i < uses.length; i++) {
-        const u = uses[i] as any, { args, result } = settled[i]
-        toolCalls.push({ name: u.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
-        results.push({ type: "tool_result", tool_use_id: u.id, content: result.output, is_error: result.isError })
-        yield { type: "tool_result", id: u.id, name: u.name, output: result.output, isError: result.isError }
-      }
-      messages.push({ role: "user", content: results })
+      yield { type: "done", result: this.endRun(runStart, "", messages, toolCalls, turns, usage) }
+    } catch (e) {
+      this.emitRunError(runStart, toolCalls, turns, usage, e)
+      throw e
     }
-    yield { type: "done", result: this.result("", messages, toolCalls, turns, usage) }
   }
 }
 

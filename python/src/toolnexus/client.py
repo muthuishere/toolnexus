@@ -30,7 +30,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Literal, Mapping, Optional, Protocol
+from typing import Any, AsyncGenerator, Callable, Literal, Mapping, Optional, Protocol
 
 from .toolkit import Toolkit
 from .types import ToolResult
@@ -184,6 +184,157 @@ def _last_text(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
+# --------------------------------------------------------------------------- #
+# Observability — semantic metric events (§8) + zero-dependency Prometheus text
+# --------------------------------------------------------------------------- #
+#
+# ``on_metric`` receives readable, snake_case dict events (idiomatic Python — the
+# field CASING is NOT byte-identical to the JS reference, exactly like RunResult's
+# ``tool_calls``; only ``metrics()`` text below is byte-identical across ports):
+#   {"event": "llm", "model", "status": "ok"|"error", "ms",
+#    "prompt_tokens", "completion_tokens"}                    — one per LLM call
+#   {"event": "tool", "tool", "source", "is_error", "ms"}     — one per tool call
+#   {"event": "run", "model", "turns", "tool_calls",
+#    "total_tokens", "ms", "error"?}                          — one per run/ask
+# The same events also feed the built-in Prometheus registry (``client.metrics()``).
+MetricEvent = dict[str, Any]
+OnMetric = Callable[[MetricEvent], None]
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+def _ms_since(start: float) -> float:
+    """Elapsed milliseconds since ``start`` (a ``time.monotonic()`` reading)."""
+    return (time.monotonic() - start) * 1000.0
+
+
+def _per_call(raw: Any, style: ClientStyle) -> tuple[int, int]:
+    """Per-call (prompt, completion) tokens from one raw usage payload (not summed)."""
+    if not raw:
+        return (0, 0)
+    if style == "anthropic":
+        return (raw.get("input_tokens") or 0, raw.get("output_tokens") or 0)
+    return (raw.get("prompt_tokens") or 0, raw.get("completion_tokens") or 0)
+
+
+# FIXED across all ports for byte-parity of *_duration_seconds histograms. Seconds.
+_DURATION_BUCKETS = [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60]
+# ``le`` label values rendered exactly like JS ``String(bucket)`` (1 not 1.0).
+_DURATION_BUCKET_LES = ["0.05", "0.1", "0.25", "0.5", "1", "2.5", "5", "10", "30", "60"]
+
+
+def _fmt_num(x: float) -> str:
+    """Render a number like JS ``String()``: integral values without a decimal point."""
+    f = float(x)
+    if f.is_integer():
+        return str(int(f))
+    return repr(f)
+
+
+def _escape_label(v: str) -> str:
+    """Escape a Prometheus label value: backslash, double-quote, newline."""
+    return v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _label_str(pairs: list[tuple[str, str]]) -> str:
+    """Render ordered label pairs to ``k="v",k="v"`` (order is load-bearing for parity)."""
+    return ",".join(f'{k}="{_escape_label(v)}"' for k, v in pairs)
+
+
+def _with_le(base: str, le: str) -> str:
+    return f'{base},le="{le}"' if base else f'le="{le}"'
+
+
+class _Hist:
+    __slots__ = ("counts", "sum", "count")
+
+    def __init__(self) -> None:
+        self.counts = [0] * len(_DURATION_BUCKETS)
+        self.sum = 0.0
+        self.count = 0
+
+
+class MetricsRegistry:
+    """In-memory cumulative registry that turns the same semantic events ``on_metric``
+    sees into the Prometheus counters/histograms of §8, and renders the text exposition
+    format by hand (no dependency). The rendered text is byte-identical across all ports.
+    """
+
+    def __init__(self) -> None:
+        self._llm_requests: dict[str, float] = {}   # labels: model,status
+        self._llm_tokens: dict[str, float] = {}     # labels: type
+        self._llm_duration: dict[str, _Hist] = {}   # labels: model
+        self._tool_calls: dict[str, float] = {}     # labels: tool,source,is_error
+        self._tool_duration: dict[str, _Hist] = {}  # labels: tool
+        self._run_errors: dict[str, float] = {}     # labels: model
+
+    def record(self, ev: MetricEvent) -> None:
+        et = ev.get("event")
+        if et == "llm":
+            self._inc(self._llm_requests, _label_str([("model", ev["model"]), ("status", ev["status"])]))
+            if ev["status"] == "ok":
+                self._inc(self._llm_tokens, _label_str([("type", "prompt")]), ev["prompt_tokens"])
+                self._inc(self._llm_tokens, _label_str([("type", "completion")]), ev["completion_tokens"])
+            self._observe(self._llm_duration, _label_str([("model", ev["model"])]), ev["ms"] / 1000)
+        elif et == "tool":
+            self._inc(
+                self._tool_calls,
+                _label_str([("tool", ev["tool"]), ("source", ev["source"]), ("is_error", "true" if ev["is_error"] else "false")]),
+            )
+            self._observe(self._tool_duration, _label_str([("tool", ev["tool"])]), ev["ms"] / 1000)
+        elif et == "run":
+            if ev.get("error"):
+                self._inc(self._run_errors, _label_str([("model", ev["model"])]))
+
+    @staticmethod
+    def _inc(m: dict[str, float], key: str, by: float = 1) -> None:
+        m[key] = m.get(key, 0) + by
+
+    @staticmethod
+    def _observe(m: dict[str, _Hist], key: str, seconds: float) -> None:
+        h = m.get(key)
+        if h is None:
+            h = _Hist()
+            m[key] = h
+        h.sum += seconds
+        h.count += 1
+        for i, bucket in enumerate(_DURATION_BUCKETS):
+            if seconds <= bucket:
+                h.counts[i] += 1
+
+    def render(self) -> str:
+        out: list[str] = []
+        self._render_counter(out, "toolnexus_llm_requests_total", "Total LLM requests.", self._llm_requests)
+        self._render_counter(out, "toolnexus_llm_tokens_total", "Total tokens, by type.", self._llm_tokens)
+        self._render_histogram(out, "toolnexus_llm_request_duration_seconds", "LLM request duration in seconds.", self._llm_duration)
+        self._render_counter(out, "toolnexus_tool_calls_total", "Total tool calls.", self._tool_calls)
+        self._render_histogram(out, "toolnexus_tool_duration_seconds", "Tool execution duration in seconds.", self._tool_duration)
+        self._render_counter(out, "toolnexus_run_errors_total", "Total run errors.", self._run_errors)
+        return "\n".join(out) + "\n"
+
+    @staticmethod
+    def _render_counter(out: list[str], name: str, help_text: str, m: dict[str, float]) -> None:
+        out.append(f"# HELP {name} {help_text}")
+        out.append(f"# TYPE {name} counter")
+        for key in sorted(m.keys()):
+            v = _fmt_num(m[key])
+            out.append(f"{name}{{{key}}} {v}" if key else f"{name} {v}")
+
+    @staticmethod
+    def _render_histogram(out: list[str], name: str, help_text: str, m: dict[str, _Hist]) -> None:
+        out.append(f"# HELP {name} {help_text}")
+        out.append(f"# TYPE {name} histogram")
+        for key in sorted(m.keys()):
+            h = m[key]
+            for i, le in enumerate(_DURATION_BUCKET_LES):
+                out.append(f"{name}_bucket{{{_with_le(key, le)}}} {_fmt_num(h.counts[i])}")
+            out.append(f"{name}_bucket{{{_with_le(key, '+Inf')}}} {_fmt_num(h.count)}")
+            out.append(f"{name}_sum{{{key}}} {_fmt_num(h.sum)}" if key else f"{name}_sum {_fmt_num(h.sum)}")
+            out.append(f"{name}_count{{{key}}} {_fmt_num(h.count)}" if key else f"{name}_count {_fmt_num(h.count)}")
+
+
 class ConversationStore(Protocol):
     """Where ``ask()`` conversations are remembered — two async methods. Ship the
     in-memory default; implement this for a file/db/redis provider to persist
@@ -232,6 +383,7 @@ class Client:
         retry_base_ms: int = 500,
         timeout_ms: Optional[int] = None,
         store: Optional[ConversationStore] = None,
+        on_metric: Optional[OnMetric] = None,
     ) -> None:
         self.base_url = base_url
         self.style = style
@@ -246,6 +398,64 @@ class Client:
         self.timeout_ms = timeout_ms
         # Conversation provider for ask() — from the `store` arg, else in-memory.
         self.store: ConversationStore = store if store is not None else InMemoryConversationStore()
+        # Observability sink — receives semantic metric events as the loop runs (§8).
+        self.on_metric = on_metric
+        # Cumulative Prometheus registry fed by the same events on_metric sees.
+        self._registry = MetricsRegistry()
+
+    def metrics(self) -> str:
+        """Prometheus text exposition of cumulative metrics (§8). Always valid, and
+        empty-but-valid (HELP/TYPE only) before any activity."""
+        return self._registry.render()
+
+    def _emit(self, ev: MetricEvent) -> None:
+        """Feed a semantic metric event to the built-in registry + the optional sink."""
+        self._registry.record(ev)
+        if self.on_metric is not None:
+            self.on_metric(ev)
+
+    def _end_run(
+        self,
+        run_start: float,
+        text: str,
+        messages: list[dict[str, Any]],
+        tool_calls: list[dict[str, Any]],
+        turns: int,
+        usage: dict[str, int],
+    ) -> RunResult:
+        """Emit the terminal ``run`` metric event and build the RunResult."""
+        self._emit(
+            {
+                "event": "run",
+                "model": self.model,
+                "turns": turns,
+                "tool_calls": len(tool_calls),
+                "total_tokens": usage["total_tokens"],
+                "ms": _ms_since(run_start),
+            }
+        )
+        return self._result(text, messages, tool_calls, turns, usage)
+
+    def _emit_run_error(
+        self,
+        run_start: float,
+        tool_calls: list[dict[str, Any]],
+        turns: int,
+        usage: dict[str, int],
+        e: BaseException,
+    ) -> None:
+        """Emit a ``run`` error metric event (once, on a thrown run)."""
+        self._emit(
+            {
+                "event": "run",
+                "model": self.model,
+                "turns": turns,
+                "tool_calls": len(tool_calls),
+                "total_tokens": usage["total_tokens"],
+                "ms": _ms_since(run_start),
+                "error": str(e),
+            }
+        )
 
     def _system(self, toolkit: Toolkit) -> str:
         parts = [self.system_prompt or "", toolkit.skills_prompt()]
@@ -366,12 +576,17 @@ class Client:
         """Run one tool through before_tool/after_tool hooks: rewrite args,
         short-circuit, or transform the result. Mirrors JS ``runTool``."""
         a = args
+        found = toolkit.get(name)
+        source = found.source if found is not None else "custom"
+        t0 = _now()
         before = _get_hook(self.hooks, "before_tool")
         if before is not None:
             ov = await _call_hook(before, {"name": name, "args": a, "id": call_id, "turn": turn})
             if ov:
                 if ov.get("result") is not None:
-                    # short-circuit (deny / cache hit / dry-run) — real tool never runs
+                    # short-circuit (deny / cache hit / dry-run) — real tool never runs,
+                    # but it still counts as a tool call for metrics purposes.
+                    self._emit({"event": "tool", "tool": name, "source": source, "is_error": ov["result"].is_error, "ms": _ms_since(t0)})
                     return a, ov["result"]
                 if ov.get("args") is not None:
                     a = ov["args"]
@@ -383,7 +598,29 @@ class Client:
             )
             if ov and ov.get("result") is not None:
                 result = ov["result"]
+        self._emit({"event": "tool", "tool": name, "source": source, "is_error": result.is_error, "ms": _ms_since(t0)})
         return a, result
+
+    async def _llm_call_json(
+        self,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        deadline: Optional[float],
+        cancel: Optional[asyncio.Event],
+        style: ClientStyle,
+    ) -> dict[str, Any]:
+        """One non-streaming LLM call, with an ``llm`` metric event (ok/error + per-call
+        tokens + ms). Mirrors JS ``llmCallJson``."""
+        t0 = _now()
+        try:
+            data = await self._llm_fetch(_post, url, headers, payload, deadline, cancel)
+            prompt, completion = _per_call(data.get("usage"), style)
+            self._emit({"event": "llm", "model": self.model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": prompt, "completion_tokens": completion})
+            return data
+        except Exception:
+            self._emit({"event": "llm", "model": self.model, "status": "error", "ms": _ms_since(t0), "prompt_tokens": 0, "completion_tokens": 0})
+            raise
 
     async def run(
         self,
@@ -404,6 +641,7 @@ class Client:
         toolkit: Toolkit,
         *,
         id: Optional[str] = None,  # noqa: A002 — mirrors JS `ask(prompt, { id })`
+        on_text: Optional[Callable[[str], Any]] = None,
         cancel: Optional[asyncio.Event] = None,
     ) -> RunResult:
         """Stateful ask. With an ``id``, the client's ``store`` remembers the
@@ -411,7 +649,23 @@ class Client:
         transcript, and returns the answer — so the next ``ask`` with the same
         ``id`` continues it. Without an ``id`` it is a stateless one-shot
         (identical to :meth:`run`). Mirrors the JS ``ask``.
+
+        With ``on_text`` (a sync- or async-callable ``(delta: str) -> None``), the
+        streaming loop runs and each assistant text delta is forwarded to it; ``ask``
+        still returns the final :class:`RunResult`. Memory (id load/save) is handled by
+        :meth:`stream`, so there is no duplication. Omit it ⇒ the non-streaming path.
         """
+        if on_text is not None:
+            result: Optional[RunResult] = None
+            async for ev in self.stream(prompt, toolkit, id=id, cancel=cancel):
+                if ev["type"] == "text":
+                    r = on_text(ev["delta"])
+                    if inspect.isawaitable(r):
+                        await r
+                elif ev["type"] == "done":
+                    result = ev["result"]
+            assert result is not None
+            return result
         if not id:
             return await self.run(prompt, toolkit, cancel=cancel)
         history = await self.store.get(id) or []
@@ -423,17 +677,29 @@ class Client:
         """A stateful multi-turn conversation that retains history across sends."""
         return Conversation(self, toolkit, cancel)
 
-    def stream(
+    async def stream(
         self,
         prompt: str,
         toolkit: Toolkit,
+        *,
+        id: Optional[str] = None,  # noqa: A002 — mirrors JS `stream(prompt, { id })`
         cancel: Optional[asyncio.Event] = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Streaming variant: async-iterate live event dicts (text deltas,
-        tool_call/tool_result, usage, done)."""
+        tool_call/tool_result, usage, done). With an ``id`` it is stateful (like
+        :meth:`ask`): the thread's transcript is loaded as history before streaming,
+        and saved back to the ConversationStore on the terminal ``done`` event.
+        No ``id`` ⇒ stateless. Mirrors the JS ``stream``.
+        """
+        history = (await self.store.get(id) or []) if id else None
         if self.style == "anthropic":
-            return self._stream_anthropic(prompt, toolkit, cancel)
-        return self._stream_openai(prompt, toolkit, cancel)
+            gen = self._stream_anthropic(prompt, toolkit, cancel, history)
+        else:
+            gen = self._stream_openai(prompt, toolkit, cancel, history)
+        async for ev in gen:
+            if ev["type"] == "done" and id:
+                await self.store.save(id, ev["result"].messages)
+            yield ev
 
     # ----------------------------------------------------------------------- #
     # OpenAI-style: POST {base_url}/chat/completions
@@ -463,70 +729,75 @@ class Client:
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
         turns = 0
+        run_start = _now()
 
-        for turn in range(self.max_turns):
-            turns += 1
-            before = _get_hook(self.hooks, "before_llm")
-            if before is not None:
-                ov = await _call_hook(
-                    before,
-                    {"messages": messages, "tools": tools, "model": self.model, "turn": turn},
-                )
-                if ov:
-                    if ov.get("messages") is not None:
-                        messages = ov["messages"]
-                    if ov.get("tools") is not None:
-                        tools = ov["tools"]
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "tools": tools,
-                "tool_choice": "auto",
-            }
-            data = await self._llm_fetch(_post, url, req_headers, payload, deadline, cancel)
-            _add_usage(usage, data.get("usage"), "openai")
-            after = _get_hook(self.hooks, "after_llm")
-            if after is not None:
-                await _call_hook(after, {"response": data, "model": self.model, "turn": turn})
-            msg = data["choices"][0]["message"]
-            messages.append(msg)
-            calls = msg.get("tool_calls") or []
-            if not calls:
-                return self._result(
-                    msg.get("content") or "", messages, tool_calls, turns, usage
-                )
+        try:
+            for turn in range(self.max_turns):
+                turns += 1
+                before = _get_hook(self.hooks, "before_llm")
+                if before is not None:
+                    ov = await _call_hook(
+                        before,
+                        {"messages": messages, "tools": tools, "model": self.model, "turn": turn},
+                    )
+                    if ov:
+                        if ov.get("messages") is not None:
+                            messages = ov["messages"]
+                        if ov.get("tools") is not None:
+                            tools = ov["tools"]
+                payload = {
+                    "model": self.model,
+                    "messages": messages,
+                    "tools": tools,
+                    "tool_choice": "auto",
+                }
+                data = await self._llm_call_json(url, req_headers, payload, deadline, cancel, "openai")
+                _add_usage(usage, data.get("usage"), "openai")
+                after = _get_hook(self.hooks, "after_llm")
+                if after is not None:
+                    await _call_hook(after, {"response": data, "model": self.model, "turn": turn})
+                msg = data["choices"][0]["message"]
+                messages.append(msg)
+                calls = msg.get("tool_calls") or []
+                if not calls:
+                    return self._end_run(
+                        run_start, msg.get("content") or "", messages, tool_calls, turns, usage
+                    )
 
-            # Parse the tool calls in order, then execute them concurrently (true
-            # parallel tool calling). Each result is mapped back to its originating
-            # call by index so tool_call_id ↔ output stays correct. We record the
-            # tool_calls entry AFTER execute so it carries output/is_error/metadata.
-            parsed = []
-            for call in calls:
-                fn = call["function"]
-                args = _safe_json(fn.get("arguments"))
-                parsed.append((call["id"], fn["name"], args))
+                # Parse the tool calls in order, then execute them concurrently (true
+                # parallel tool calling). Each result is mapped back to its originating
+                # call by index so tool_call_id ↔ output stays correct. We record the
+                # tool_calls entry AFTER execute so it carries output/is_error/metadata.
+                parsed = []
+                for call in calls:
+                    fn = call["function"]
+                    args = _safe_json(fn.get("arguments"))
+                    parsed.append((call["id"], fn["name"], args))
 
-            results = await asyncio.gather(
-                *(
-                    self._run_tool(toolkit, name, args, call_id, turn)
-                    for (call_id, name, args) in parsed
+                results = await asyncio.gather(
+                    *(
+                        self._run_tool(toolkit, name, args, call_id, turn)
+                        for (call_id, name, args) in parsed
+                    )
                 )
-            )
-            for (call_id, name, _orig_args), (args, result) in zip(parsed, results):
-                tool_calls.append(
-                    {
-                        "name": name,
-                        "args": args,
-                        "output": result.output,
-                        "is_error": result.is_error,
-                        "metadata": result.metadata,
-                    }
-                )
-                messages.append(
-                    {"role": "tool", "tool_call_id": call_id, "content": result.output}
-                )
+                for (call_id, name, _orig_args), (args, result) in zip(parsed, results):
+                    tool_calls.append(
+                        {
+                            "name": name,
+                            "args": args,
+                            "output": result.output,
+                            "is_error": result.is_error,
+                            "metadata": result.metadata,
+                        }
+                    )
+                    messages.append(
+                        {"role": "tool", "tool_call_id": call_id, "content": result.output}
+                    )
 
-        return self._result(_last_text(messages), messages, tool_calls, turns, usage)
+            return self._end_run(run_start, _last_text(messages), messages, tool_calls, turns, usage)
+        except Exception as e:
+            self._emit_run_error(run_start, tool_calls, turns, usage, e)
+            raise
 
     # ----------------------------------------------------------------------- #
     # Anthropic-style: POST {base_url}/messages
@@ -557,73 +828,78 @@ class Client:
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
         turns = 0
+        run_start = _now()
 
-        for turn in range(self.max_turns):
-            turns += 1
-            before = _get_hook(self.hooks, "before_llm")
-            if before is not None:
-                ov = await _call_hook(
-                    before,
-                    {"messages": messages, "tools": tools, "model": self.model, "turn": turn},
-                )
-                if ov:
-                    if ov.get("messages") is not None:
-                        messages = ov["messages"]
-                    if ov.get("tools") is not None:
-                        tools = ov["tools"]
-            payload = {
-                "model": self.model,
-                "max_tokens": 4096,
-                "system": system,
-                "messages": messages,
-                "tools": tools,
-            }
-            data = await self._llm_fetch(_post, endpoint, req_headers, payload, deadline, cancel)
-            _add_usage(usage, data.get("usage"), "anthropic")
-            after = _get_hook(self.hooks, "after_llm")
-            if after is not None:
-                await _call_hook(after, {"response": data, "model": self.model, "turn": turn})
-            content = data.get("content") or []
-            messages.append({"role": "assistant", "content": content})
-            uses = [b for b in content if b.get("type") == "tool_use"]
-            if not uses:
-                text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
-                return self._result(text, messages, tool_calls, turns, usage)
-
-            # Execute the tool_use blocks concurrently (true parallel tool calling).
-            # Each result is mapped back to its originating block by index so
-            # tool_use_id ↔ output stays correct. We record the tool_calls entry
-            # AFTER execute so it carries output/is_error/metadata.
-            outputs = await asyncio.gather(
-                *(
-                    self._run_tool(
-                        toolkit, use["name"], use.get("input") or {}, use.get("id"), turn
+        try:
+            for turn in range(self.max_turns):
+                turns += 1
+                before = _get_hook(self.hooks, "before_llm")
+                if before is not None:
+                    ov = await _call_hook(
+                        before,
+                        {"messages": messages, "tools": tools, "model": self.model, "turn": turn},
                     )
-                    for use in uses
-                )
-            )
-            results: list[dict[str, Any]] = []
-            for use, (args, result) in zip(uses, outputs):
-                tool_calls.append(
-                    {
-                        "name": use["name"],
-                        "args": args,
-                        "output": result.output,
-                        "is_error": result.is_error,
-                        "metadata": result.metadata,
-                    }
-                )
-                results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": use["id"],
-                        "content": result.output,
-                        "is_error": result.is_error,
-                    }
-                )
-            messages.append({"role": "user", "content": results})
+                    if ov:
+                        if ov.get("messages") is not None:
+                            messages = ov["messages"]
+                        if ov.get("tools") is not None:
+                            tools = ov["tools"]
+                payload = {
+                    "model": self.model,
+                    "max_tokens": 4096,
+                    "system": system,
+                    "messages": messages,
+                    "tools": tools,
+                }
+                data = await self._llm_call_json(endpoint, req_headers, payload, deadline, cancel, "anthropic")
+                _add_usage(usage, data.get("usage"), "anthropic")
+                after = _get_hook(self.hooks, "after_llm")
+                if after is not None:
+                    await _call_hook(after, {"response": data, "model": self.model, "turn": turn})
+                content = data.get("content") or []
+                messages.append({"role": "assistant", "content": content})
+                uses = [b for b in content if b.get("type") == "tool_use"]
+                if not uses:
+                    text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+                    return self._end_run(run_start, text, messages, tool_calls, turns, usage)
 
-        return self._result("", messages, tool_calls, turns, usage)
+                # Execute the tool_use blocks concurrently (true parallel tool calling).
+                # Each result is mapped back to its originating block by index so
+                # tool_use_id ↔ output stays correct. We record the tool_calls entry
+                # AFTER execute so it carries output/is_error/metadata.
+                outputs = await asyncio.gather(
+                    *(
+                        self._run_tool(
+                            toolkit, use["name"], use.get("input") or {}, use.get("id"), turn
+                        )
+                        for use in uses
+                    )
+                )
+                results: list[dict[str, Any]] = []
+                for use, (args, result) in zip(uses, outputs):
+                    tool_calls.append(
+                        {
+                            "name": use["name"],
+                            "args": args,
+                            "output": result.output,
+                            "is_error": result.is_error,
+                            "metadata": result.metadata,
+                        }
+                    )
+                    results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": use["id"],
+                            "content": result.output,
+                            "is_error": result.is_error,
+                        }
+                    )
+                messages.append({"role": "user", "content": results})
+
+            return self._end_run(run_start, "", messages, tool_calls, turns, usage)
+        except Exception as e:
+            self._emit_run_error(run_start, tool_calls, turns, usage, e)
+            raise
 
     # ----------------------------------------------------------------------- #
     # Streaming: OpenAI-style
@@ -633,6 +909,7 @@ class Client:
         prompt: str,
         toolkit: Toolkit,
         cancel: Optional[asyncio.Event],
+        history: Optional[list[dict[str, Any]]] = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         key = _resolve_key(self.api_key, self.style)
         url = self.base_url.rstrip("/") + "/chat/completions"
@@ -642,121 +919,134 @@ class Client:
             **self.headers,
         }
         deadline = self._deadline()
-        messages: list[dict[str, Any]] = []
-        system = self._system(toolkit)
-        if system:
-            messages.append({"role": "system", "content": system})
+        messages: list[dict[str, Any]] = list(history) if history else []
+        if not messages:
+            system = self._system(toolkit)
+            if system:
+                messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
         tools = toolkit.to_openai()
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
         turns = 0
+        run_start = _now()
 
-        for turn in range(self.max_turns):
-            turns += 1
-            before = _get_hook(self.hooks, "before_llm")
-            if before is not None:
-                ov = await _call_hook(
-                    before,
-                    {"messages": messages, "tools": tools, "model": self.model, "turn": turn},
-                )
-                if ov:
-                    if ov.get("messages") is not None:
-                        messages = ov["messages"]
-                    if ov.get("tools") is not None:
-                        tools = ov["tools"]
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "tools": tools,
-                "tool_choice": "auto",
-                "stream": True,
-                "stream_options": {"include_usage": True},
-            }
-
-            content = ""
-            acc: dict[int, dict[str, str]] = {}
-            async for line in self._sse_lines(url, req_headers, payload, deadline, cancel):
-                if not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    break
-                j = _safe_parse(data_str)
-                if not j:
-                    continue
-                if j.get("usage"):
-                    _add_usage(usage, j["usage"], "openai")
-                choices = j.get("choices") or []
-                if not choices:
-                    continue
-                d = choices[0].get("delta") or {}
-                if d.get("content"):
-                    content += d["content"]
-                    yield {"type": "text", "delta": d["content"]}
-                for tc in d.get("tool_calls") or []:
-                    idx = tc.get("index", 0)
-                    slot = acc.setdefault(idx, {"id": "", "name": "", "args": ""})
-                    if tc.get("id"):
-                        slot["id"] = tc["id"]
-                    fn = tc.get("function") or {}
-                    if fn.get("name"):
-                        slot["name"] += fn["name"]
-                    if fn.get("arguments"):
-                        slot["args"] += fn["arguments"]
-
-            after = _get_hook(self.hooks, "after_llm")
-            if after is not None:
-                await _call_hook(
-                    after, {"response": {"streamed": True, "usage": usage}, "model": self.model, "turn": turn}
-                )
-
-            calls = [acc[i] for i in sorted(acc)]
-            if not calls:
-                messages.append({"role": "assistant", "content": content})
-                yield {"type": "usage", "usage": usage}
-                yield {"type": "done", "result": self._result(content, messages, tool_calls, turns, usage)}
-                return
-
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": content or None,
-                    "tool_calls": [
-                        {
-                            "id": c["id"],
-                            "type": "function",
-                            "function": {"name": c["name"], "arguments": c["args"]},
-                        }
-                        for c in calls
-                    ],
+        try:
+            for turn in range(self.max_turns):
+                turns += 1
+                before = _get_hook(self.hooks, "before_llm")
+                if before is not None:
+                    ov = await _call_hook(
+                        before,
+                        {"messages": messages, "tools": tools, "model": self.model, "turn": turn},
+                    )
+                    if ov:
+                        if ov.get("messages") is not None:
+                            messages = ov["messages"]
+                        if ov.get("tools") is not None:
+                            tools = ov["tools"]
+                payload = {
+                    "model": self.model,
+                    "messages": messages,
+                    "tools": tools,
+                    "tool_choice": "auto",
+                    "stream": True,
+                    "stream_options": {"include_usage": True},
                 }
-            )
-            for c in calls:
-                yield {"type": "tool_call", "id": c["id"], "name": c["name"], "args": _safe_json(c["args"])}
-            settled = await asyncio.gather(
-                *(self._run_tool(toolkit, c["name"], _safe_json(c["args"]), c["id"], turn) for c in calls)
-            )
-            for c, (args, result) in zip(calls, settled):
-                tool_calls.append(
+
+                t0 = _now()
+                before_p, before_c = usage["prompt_tokens"], usage["completion_tokens"]
+                content = ""
+                acc: dict[int, dict[str, str]] = {}
+                try:
+                    async for line in self._sse_lines(url, req_headers, payload, deadline, cancel):
+                        if not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        j = _safe_parse(data_str)
+                        if not j:
+                            continue
+                        if j.get("usage"):
+                            _add_usage(usage, j["usage"], "openai")
+                        choices = j.get("choices") or []
+                        if not choices:
+                            continue
+                        d = choices[0].get("delta") or {}
+                        if d.get("content"):
+                            content += d["content"]
+                            yield {"type": "text", "delta": d["content"]}
+                        for tc in d.get("tool_calls") or []:
+                            idx = tc.get("index", 0)
+                            slot = acc.setdefault(idx, {"id": "", "name": "", "args": ""})
+                            if tc.get("id"):
+                                slot["id"] = tc["id"]
+                            fn = tc.get("function") or {}
+                            if fn.get("name"):
+                                slot["name"] += fn["name"]
+                            if fn.get("arguments"):
+                                slot["args"] += fn["arguments"]
+                except Exception:
+                    self._emit({"event": "llm", "model": self.model, "status": "error", "ms": _ms_since(t0), "prompt_tokens": 0, "completion_tokens": 0})
+                    raise
+                self._emit({"event": "llm", "model": self.model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": usage["prompt_tokens"] - before_p, "completion_tokens": usage["completion_tokens"] - before_c})
+
+                after = _get_hook(self.hooks, "after_llm")
+                if after is not None:
+                    await _call_hook(
+                        after, {"response": {"streamed": True, "usage": usage}, "model": self.model, "turn": turn}
+                    )
+
+                calls = [acc[i] for i in sorted(acc)]
+                if not calls:
+                    messages.append({"role": "assistant", "content": content})
+                    yield {"type": "usage", "usage": usage}
+                    yield {"type": "done", "result": self._end_run(run_start, content, messages, tool_calls, turns, usage)}
+                    return
+
+                messages.append(
                     {
-                        "name": c["name"],
-                        "args": args,
-                        "output": result.output,
-                        "is_error": result.is_error,
-                        "metadata": result.metadata,
+                        "role": "assistant",
+                        "content": content or None,
+                        "tool_calls": [
+                            {
+                                "id": c["id"],
+                                "type": "function",
+                                "function": {"name": c["name"], "arguments": c["args"]},
+                            }
+                            for c in calls
+                        ],
                     }
                 )
-                messages.append({"role": "tool", "tool_call_id": c["id"], "content": result.output})
-                yield {
-                    "type": "tool_result",
-                    "id": c["id"],
-                    "name": c["name"],
-                    "output": result.output,
-                    "is_error": result.is_error,
-                }
+                for c in calls:
+                    yield {"type": "tool_call", "id": c["id"], "name": c["name"], "args": _safe_json(c["args"])}
+                settled = await asyncio.gather(
+                    *(self._run_tool(toolkit, c["name"], _safe_json(c["args"]), c["id"], turn) for c in calls)
+                )
+                for c, (args, result) in zip(calls, settled):
+                    tool_calls.append(
+                        {
+                            "name": c["name"],
+                            "args": args,
+                            "output": result.output,
+                            "is_error": result.is_error,
+                            "metadata": result.metadata,
+                        }
+                    )
+                    messages.append({"role": "tool", "tool_call_id": c["id"], "content": result.output})
+                    yield {
+                        "type": "tool_result",
+                        "id": c["id"],
+                        "name": c["name"],
+                        "output": result.output,
+                        "is_error": result.is_error,
+                    }
 
-        yield {"type": "done", "result": self._result(_last_text(messages), messages, tool_calls, turns, usage)}
+            yield {"type": "done", "result": self._end_run(run_start, _last_text(messages), messages, tool_calls, turns, usage)}
+        except Exception as e:
+            self._emit_run_error(run_start, tool_calls, turns, usage, e)
+            raise
 
     # ----------------------------------------------------------------------- #
     # Streaming: Anthropic-style
@@ -766,6 +1056,7 @@ class Client:
         prompt: str,
         toolkit: Toolkit,
         cancel: Optional[asyncio.Event],
+        history: Optional[list[dict[str, Any]]] = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         key = _resolve_key(self.api_key, self.style)
         base = self.base_url.rstrip("/")
@@ -778,122 +1069,137 @@ class Client:
         }
         deadline = self._deadline()
         system = self._system(toolkit)
-        messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
+        if history:
+            messages: list[dict[str, Any]] = list(history) + [{"role": "user", "content": prompt}]
+        else:
+            messages = [{"role": "user", "content": prompt}]
         tools = toolkit.to_anthropic()
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
         turns = 0
+        run_start = _now()
 
-        for turn in range(self.max_turns):
-            turns += 1
-            before = _get_hook(self.hooks, "before_llm")
-            if before is not None:
-                ov = await _call_hook(
-                    before,
-                    {"messages": messages, "tools": tools, "model": self.model, "turn": turn},
+        try:
+            for turn in range(self.max_turns):
+                turns += 1
+                before = _get_hook(self.hooks, "before_llm")
+                if before is not None:
+                    ov = await _call_hook(
+                        before,
+                        {"messages": messages, "tools": tools, "model": self.model, "turn": turn},
+                    )
+                    if ov:
+                        if ov.get("messages") is not None:
+                            messages = ov["messages"]
+                        if ov.get("tools") is not None:
+                            tools = ov["tools"]
+                payload = {
+                    "model": self.model,
+                    "max_tokens": 4096,
+                    "system": system,
+                    "messages": messages,
+                    "tools": tools,
+                    "stream": True,
+                }
+
+                t0 = _now()
+                before_p, before_c = usage["prompt_tokens"], usage["completion_tokens"]
+                blocks: dict[int, dict[str, Any]] = {}
+                stop_reason = ""
+                try:
+                    async for line in self._sse_lines(endpoint, req_headers, payload, deadline, cancel):
+                        if not line.startswith("data:"):
+                            continue
+                        j = _safe_parse(line[5:].strip())
+                        if not j:
+                            continue
+                        t = j.get("type")
+                        if t == "message_start":
+                            _add_usage(usage, (j.get("message") or {}).get("usage"), "anthropic")
+                        elif t == "content_block_start":
+                            cb = j.get("content_block") or {}
+                            blocks[j["index"]] = {
+                                "type": cb.get("type"),
+                                "id": cb.get("id"),
+                                "name": cb.get("name"),
+                                "text": "",
+                                "json": "",
+                            }
+                        elif t == "content_block_delta":
+                            b = blocks.get(j["index"])
+                            if b is None:
+                                continue
+                            delta = j.get("delta") or {}
+                            if delta.get("type") == "text_delta":
+                                b["text"] += delta.get("text", "")
+                                yield {"type": "text", "delta": delta.get("text", "")}
+                            elif delta.get("type") == "input_json_delta":
+                                b["json"] += delta.get("partial_json", "")
+                        elif t == "message_delta":
+                            stop_reason = (j.get("delta") or {}).get("stop_reason") or stop_reason
+                            _add_usage(usage, j.get("usage"), "anthropic")
+                except Exception:
+                    self._emit({"event": "llm", "model": self.model, "status": "error", "ms": _ms_since(t0), "prompt_tokens": 0, "completion_tokens": 0})
+                    raise
+                self._emit({"event": "llm", "model": self.model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": usage["prompt_tokens"] - before_p, "completion_tokens": usage["completion_tokens"] - before_c})
+
+                after = _get_hook(self.hooks, "after_llm")
+                if after is not None:
+                    await _call_hook(
+                        after, {"response": {"streamed": True, "usage": usage}, "model": self.model, "turn": turn}
+                    )
+
+                content = [
+                    {"type": "tool_use", "id": b["id"], "name": b["name"], "input": _safe_json(b["json"] or "{}")}
+                    if b["type"] == "tool_use"
+                    else {"type": "text", "text": b["text"]}
+                    for b in (blocks[i] for i in sorted(blocks))
+                ]
+                messages.append({"role": "assistant", "content": content})
+                uses = [b for b in content if b["type"] == "tool_use"]
+                if stop_reason != "tool_use" or not uses:
+                    text = "".join(b["text"] for b in content if b["type"] == "text")
+                    yield {"type": "usage", "usage": usage}
+                    yield {"type": "done", "result": self._end_run(run_start, text, messages, tool_calls, turns, usage)}
+                    return
+
+                for u in uses:
+                    yield {"type": "tool_call", "id": u["id"], "name": u["name"], "args": u["input"]}
+                settled = await asyncio.gather(
+                    *(self._run_tool(toolkit, u["name"], u.get("input") or {}, u["id"], turn) for u in uses)
                 )
-                if ov:
-                    if ov.get("messages") is not None:
-                        messages = ov["messages"]
-                    if ov.get("tools") is not None:
-                        tools = ov["tools"]
-            payload = {
-                "model": self.model,
-                "max_tokens": 4096,
-                "system": system,
-                "messages": messages,
-                "tools": tools,
-                "stream": True,
-            }
-
-            blocks: dict[int, dict[str, Any]] = {}
-            stop_reason = ""
-            async for line in self._sse_lines(endpoint, req_headers, payload, deadline, cancel):
-                if not line.startswith("data:"):
-                    continue
-                j = _safe_parse(line[5:].strip())
-                if not j:
-                    continue
-                t = j.get("type")
-                if t == "message_start":
-                    _add_usage(usage, (j.get("message") or {}).get("usage"), "anthropic")
-                elif t == "content_block_start":
-                    cb = j.get("content_block") or {}
-                    blocks[j["index"]] = {
-                        "type": cb.get("type"),
-                        "id": cb.get("id"),
-                        "name": cb.get("name"),
-                        "text": "",
-                        "json": "",
-                    }
-                elif t == "content_block_delta":
-                    b = blocks.get(j["index"])
-                    if b is None:
-                        continue
-                    delta = j.get("delta") or {}
-                    if delta.get("type") == "text_delta":
-                        b["text"] += delta.get("text", "")
-                        yield {"type": "text", "delta": delta.get("text", "")}
-                    elif delta.get("type") == "input_json_delta":
-                        b["json"] += delta.get("partial_json", "")
-                elif t == "message_delta":
-                    stop_reason = (j.get("delta") or {}).get("stop_reason") or stop_reason
-                    _add_usage(usage, j.get("usage"), "anthropic")
-
-            after = _get_hook(self.hooks, "after_llm")
-            if after is not None:
-                await _call_hook(
-                    after, {"response": {"streamed": True, "usage": usage}, "model": self.model, "turn": turn}
-                )
-
-            content = [
-                {"type": "tool_use", "id": b["id"], "name": b["name"], "input": _safe_json(b["json"] or "{}")}
-                if b["type"] == "tool_use"
-                else {"type": "text", "text": b["text"]}
-                for b in (blocks[i] for i in sorted(blocks))
-            ]
-            messages.append({"role": "assistant", "content": content})
-            uses = [b for b in content if b["type"] == "tool_use"]
-            if stop_reason != "tool_use" or not uses:
-                text = "".join(b["text"] for b in content if b["type"] == "text")
-                yield {"type": "usage", "usage": usage}
-                yield {"type": "done", "result": self._result(text, messages, tool_calls, turns, usage)}
-                return
-
-            for u in uses:
-                yield {"type": "tool_call", "id": u["id"], "name": u["name"], "args": u["input"]}
-            settled = await asyncio.gather(
-                *(self._run_tool(toolkit, u["name"], u.get("input") or {}, u["id"], turn) for u in uses)
-            )
-            results: list[dict[str, Any]] = []
-            for u, (args, result) in zip(uses, settled):
-                tool_calls.append(
-                    {
+                results: list[dict[str, Any]] = []
+                for u, (args, result) in zip(uses, settled):
+                    tool_calls.append(
+                        {
+                            "name": u["name"],
+                            "args": args,
+                            "output": result.output,
+                            "is_error": result.is_error,
+                            "metadata": result.metadata,
+                        }
+                    )
+                    results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": u["id"],
+                            "content": result.output,
+                            "is_error": result.is_error,
+                        }
+                    )
+                    yield {
+                        "type": "tool_result",
+                        "id": u["id"],
                         "name": u["name"],
-                        "args": args,
                         "output": result.output,
                         "is_error": result.is_error,
-                        "metadata": result.metadata,
                     }
-                )
-                results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": u["id"],
-                        "content": result.output,
-                        "is_error": result.is_error,
-                    }
-                )
-                yield {
-                    "type": "tool_result",
-                    "id": u["id"],
-                    "name": u["name"],
-                    "output": result.output,
-                    "is_error": result.is_error,
-                }
-            messages.append({"role": "user", "content": results})
+                messages.append({"role": "user", "content": results})
 
-        yield {"type": "done", "result": self._result("", messages, tool_calls, turns, usage)}
+            yield {"type": "done", "result": self._end_run(run_start, "", messages, tool_calls, turns, usage)}
+        except Exception as e:
+            self._emit_run_error(run_start, tool_calls, turns, usage, e)
+            raise
 
     # ----------------------------------------------------------------------- #
     # SSE plumbing: blocking urllib read in a worker thread -> asyncio.Queue
@@ -1018,6 +1324,7 @@ def create_client(
     retry_base_ms: int = 500,
     timeout_ms: Optional[int] = None,
     store: Optional[ConversationStore] = None,
+    on_metric: Optional[OnMetric] = None,
 ) -> Client:
     return Client(
         base_url=base_url,
@@ -1032,4 +1339,5 @@ def create_client(
         retry_base_ms=retry_base_ms,
         timeout_ms=timeout_ms,
         store=store,
+        on_metric=on_metric,
     )

@@ -188,6 +188,65 @@ the conversation via `Ask`, so a remote peer's successive turns are remembered �
 > Prefer an explicit object? `agent.Conversation(tk)` returns a stateful `*Conversation`; each
 > `conv.Send(ctx, prompt)` continues the same in-memory transcript, and `conv.Reset()` clears it.
 
+**Streaming with memory.** The `id` also works while streaming. `AskStream` is `Ask` plus an
+`onText func(delta string)` callback — it runs the streaming path, forwards each assistant text
+delta to `onText`, and still returns the final `RunResult` (memory keyed by `id` exactly as `Ask`).
+`StreamWithID` is `Stream` with an `id`: the thread is loaded before streaming and saved on the
+`done` event.
+
+```go
+// block-style: stream deltas to stdout, still get the RunResult — remembered under "user-42"
+r, _ := agent.AskStream(ctx, "Draft a reply.", tk, "user-42", func(delta string) {
+	fmt.Print(delta)
+})
+
+// channel: consume text + tool events; the id makes it stateful (load before, save on done)
+ch, _ := agent.StreamWithID(ctx, "And summarise it.", tk, "user-42")
+for ev := range ch {
+	switch ev.Type {
+	case "text":
+		fmt.Print(ev.Delta)
+	case "done":
+		fmt.Println("\n", ev.Result.Usage)
+	}
+}
+```
+
+## Observability & metrics
+
+Zero-dependency, two outputs from one internal instrumentation — both opt-in, no cost when unused.
+
+**`OnMetric` — a semantic event feed.** Set `ClientOptions.OnMetric func(MetricEvent)` and it fires
+a readable `MetricEvent` at each significant point: `Event == "llm"` (`Model`, `Status`, `Ms`,
+`PromptTokens`, `CompletionTokens`) per model call, `Event == "tool"` (`Tool`, `Source`, `IsError`,
+`Ms`) per tool call, and a terminal `Event == "run"` (`Model`, `Turns`, `ToolCalls`, `TotalTokens`,
+`Ms`, `Error`) per `Run`/`Ask`. Forward it anywhere (statsd, logs, OpenTelemetry).
+
+```go
+agent := toolnexus.CreateClient(toolnexus.ClientOptions{
+	BaseURL: baseURL, Style: "openai", Model: model,
+	OnMetric: func(ev toolnexus.MetricEvent) {
+		log.Printf("[metric] %s %+v", ev.Event, ev)
+	},
+})
+```
+
+**`client.Metrics()` — built-in Prometheus text.** The same events feed a tiny in-memory registry
+that renders the Prometheus text exposition format (no third-party dep). Mount it at `GET /metrics`:
+
+```go
+http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	fmt.Fprint(w, agent.Metrics())
+})
+log.Fatal(http.ListenAndServe(":9090", nil))
+```
+
+Series: `toolnexus_llm_requests_total{model,status}`, `toolnexus_llm_tokens_total{type}`,
+`toolnexus_tool_calls_total{tool,source,is_error}`, `toolnexus_run_errors_total{model}`, plus the
+`toolnexus_llm_request_duration_seconds` and `toolnexus_tool_duration_seconds` histograms. The
+rendered text is byte-identical across all five ports; OTLP push is a planned future companion.
+
 ## Add your own tools
 
 Any Go function or HTTP endpoint becomes a first-class tool alongside MCP and skills.
@@ -346,10 +405,13 @@ and a terminal `done` or `error` event.
 | Call | What it does |
 |------|--------------|
 | `CreateToolkit(ctx, Options{McpConfig, SkillsDir, ExtraTools, Builtins, Agents}) (*Toolkit, error)` | Aggregate MCP + skills + built-ins + A2A + your tools into one toolkit |
-| `CreateClient(ClientOptions{BaseURL, Style, Model, APIKey, ..., Store}) *Client` | Build the unified LLM client (OpenAI- / Anthropic-style) |
+| `CreateClient(ClientOptions{BaseURL, Style, Model, APIKey, ..., Store, OnMetric}) *Client` | Build the unified LLM client (OpenAI- / Anthropic-style) |
 | `client.Run(ctx, prompt, tk) (RunResult, error)` | Stateless one-shot agent loop |
 | `client.Ask(ctx, prompt, tk, id) (RunResult, error)` | Stateful: non-empty `id` remembers via the store; empty `id` = `Run` |
+| `client.AskStream(ctx, prompt, tk, id, onText) (RunResult, error)` | `Ask` + a text-delta callback (still returns the final `RunResult`) |
 | `client.Stream(ctx, prompt, tk) (<-chan StreamEvent, error)` | Same loop, streamed as events |
+| `client.StreamWithID(ctx, prompt, tk, id) (<-chan StreamEvent, error)` | `Stream` with memory: load before, save on `done` |
+| `client.Metrics() string` | Prometheus text exposition of cumulative metrics — mount at `GET /metrics` |
 | `client.Conversation(tk) *Conversation` | Explicit stateful transcript (`.Send`, `.Reset`) |
 | `tk.Register(tools ...Tool) *Toolkit` | Add native / HTTP / custom tools (first-name-wins) |
 | `tk.AddAgent(ctx, cardURLorAgent, *Agent) (*Toolkit, error)` | Register a remote A2A agent's skills as tools |

@@ -55,6 +55,53 @@ type ClientOptions struct {
 	// (per-client, process lifetime). Supply a file/db store to persist
 	// conversations across processes. Mirrors js ClientOptions.store.
 	Store ConversationStore
+	// OnMetric is an observability sink — it receives a semantic MetricEvent at
+	// each significant point (one "llm" per LLM call, one "tool" per tool call,
+	// one terminal "run" per run/ask) as the loop runs (§8 Observability).
+	// Forward to statsd / logs / OTel / anything. No cost when nil. The same
+	// events also feed the built-in Prometheus registry (Client.Metrics()).
+	// Mirrors js ClientOptions.onMetric.
+	OnMetric func(MetricEvent)
+}
+
+// MetricEvent is a semantic observability record fired as the loop runs (§8).
+// It is NOT a counter/histogram primitive — it is a readable event the host can
+// forward anywhere. Event discriminates which fields are meaningful:
+//
+//	"llm"  → Model, Status ("ok"|"error"), Ms, PromptTokens, CompletionTokens
+//	"tool" → Tool, Source, IsError, Ms
+//	"run"  → Model, Turns, ToolCalls, TotalTokens, Ms, Error (set only on failure)
+//
+// Field names follow Go's idiomatic PascalCase casing (like RunResult), so this
+// struct is NOT byte-identical to the js MetricEvent union — only the Prometheus
+// text from Client.Metrics() is byte-identical across ports. Mirrors js
+// MetricEvent and SPEC.md §8.
+type MetricEvent struct {
+	// Event discriminates the record: "llm" | "tool" | "run".
+	Event string
+	// Model is the model used ("llm", "run").
+	Model string
+	// Status is "ok" | "error" ("llm").
+	Status string
+	// Ms is the elapsed wall-clock time in milliseconds (all events).
+	Ms int64
+	// PromptTokens / CompletionTokens are the per-call token counts ("llm").
+	PromptTokens     int
+	CompletionTokens int
+	// Tool is the tool name ("tool").
+	Tool string
+	// Source is where the tool came from ("mcp"/"skill"/"native"/… else "custom") ("tool").
+	Source string
+	// IsError flags a tool error ("tool").
+	IsError bool
+	// Turns is the number of LLM round trips ("run").
+	Turns int
+	// ToolCalls is the total number of tool calls ("run").
+	ToolCalls int
+	// TotalTokens is the aggregated token usage across the run ("run").
+	TotalTokens int
+	// Error is the failure message, set only on a failed run ("run").
+	Error string
 }
 
 // retryableStatus is the set of HTTP statuses worth retrying. Mirrors js RETRYABLE.
@@ -225,6 +272,9 @@ type Client struct {
 	// store is the conversation provider for Ask — from opts.Store, else a fresh
 	// in-memory store.
 	store ConversationStore
+	// registry is the cumulative Prometheus registry fed by the same events the
+	// OnMetric sink sees; rendered by Metrics().
+	registry *metricsRegistry
 }
 
 // CreateClient builds a Client.
@@ -233,7 +283,68 @@ func CreateClient(opts ClientOptions) *Client {
 	if store == nil {
 		store = NewInMemoryConversationStore()
 	}
-	return &Client{opts: opts, http: http.DefaultClient, store: store}
+	return &Client{opts: opts, http: http.DefaultClient, store: store, registry: newMetricsRegistry()}
+}
+
+// Metrics renders the cumulative metrics as Prometheus text exposition format
+// (§8). Always valid — empty-but-valid (only # HELP/# TYPE lines) before any
+// activity. Byte-identical across ports. Mirrors js Client.metrics().
+func (c *Client) Metrics() string {
+	return c.registry.render()
+}
+
+// emit feeds a semantic metric event to the built-in registry and the optional
+// OnMetric sink. Mirrors js Client.emit.
+func (c *Client) emit(ev MetricEvent) {
+	c.registry.record(ev)
+	if c.opts.OnMetric != nil {
+		c.opts.OnMetric(ev)
+	}
+}
+
+// emitLLM emits an "llm" metric event for one model call.
+func (c *Client) emitLLM(status string, start time.Time, prompt, completion int) {
+	c.emit(MetricEvent{Event: "llm", Model: c.opts.Model, Status: status, Ms: msSince(start), PromptTokens: prompt, CompletionTokens: completion})
+}
+
+// endRun emits the terminal (success) "run" metric event and builds the
+// RunResult. Mirrors js Client.endRun.
+func (c *Client) endRun(start time.Time, text string, messages []any, toolCalls []ToolCall, turns int, usage Usage) RunResult {
+	c.emit(MetricEvent{Event: "run", Model: c.opts.Model, Turns: turns, ToolCalls: len(toolCalls), TotalTokens: usage.TotalTokens, Ms: msSince(start)})
+	return c.result(text, messages, toolCalls, turns, usage)
+}
+
+// emitRunError emits the terminal "run" metric event for a failed run (once).
+// Mirrors js Client.emitRunError.
+func (c *Client) emitRunError(start time.Time, toolCalls []ToolCall, turns int, usage Usage, err error) {
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	c.emit(MetricEvent{Event: "run", Model: c.opts.Model, Turns: turns, ToolCalls: len(toolCalls), TotalTokens: usage.TotalTokens, Ms: msSince(start), Error: msg})
+}
+
+// msSince returns milliseconds elapsed since start (integer, like js Date.now()).
+func msSince(start time.Time) int64 {
+	return time.Since(start).Milliseconds()
+}
+
+// perCall extracts the per-call prompt/completion token counts from one raw
+// usage payload (not summed). Mirrors js perCall.
+func perCall(raw map[string]any, style string) (prompt, completion int) {
+	if raw == nil {
+		return 0, 0
+	}
+	num := func(k string) int {
+		if v, ok := raw[k].(float64); ok {
+			return int(v)
+		}
+		return 0
+	}
+	if style == string(StyleAnthropic) {
+		return num("input_tokens"), num("output_tokens")
+	}
+	return num("prompt_tokens"), num("completion_tokens")
 }
 
 func (c *Client) maxTurns() int {
@@ -305,6 +416,11 @@ func (c *Client) system(tk *Toolkit) string {
 // result. Mirrors js Client.runTool. Hook errors abort the run.
 func (c *Client) runTool(ctx context.Context, tk *Toolkit, name string, args map[string]any, id string, turn int) (map[string]any, ToolResult, error) {
 	h := c.opts.Hooks
+	source := "custom"
+	if t, ok := tk.Get(name); ok {
+		source = string(t.Source)
+	}
+	start := time.Now()
 	a := args
 	if h != nil && h.BeforeTool != nil {
 		ov, err := h.BeforeTool(ctx, BeforeToolEvent{Name: name, Args: a, ID: id, Turn: turn})
@@ -313,7 +429,9 @@ func (c *Client) runTool(ctx context.Context, tk *Toolkit, name string, args map
 		}
 		if ov != nil {
 			if ov.Result != nil {
-				return a, *ov.Result, nil // short-circuit (deny / cache / dry-run)
+				// short-circuit (deny / cache / dry-run) — still a tool call for metrics.
+				c.emit(MetricEvent{Event: "tool", Tool: name, Source: source, IsError: ov.Result.IsError, Ms: msSince(start)})
+				return a, *ov.Result, nil
 			}
 			if ov.Args != nil {
 				a = ov.Args
@@ -333,6 +451,7 @@ func (c *Client) runTool(ctx context.Context, tk *Toolkit, name string, args map
 			result = *ov.Result
 		}
 	}
+	c.emit(MetricEvent{Event: "tool", Tool: name, Source: source, IsError: result.IsError, Ms: msSince(start)})
 	return a, result, nil
 }
 
@@ -368,6 +487,40 @@ func (c *Client) RunWithHistory(ctx context.Context, prompt string, tk *Toolkit,
 // the store untouched). Works identically for openai and anthropic. Mirrors js
 // Client.ask and SPEC.md §8.
 func (c *Client) Ask(ctx context.Context, prompt string, tk *Toolkit, id string) (RunResult, error) {
+	return c.AskStream(ctx, prompt, tk, id, nil)
+}
+
+// AskStream is Ask with an optional block-style text callback. When onText is
+// non-nil it runs the streaming path, invokes onText for each assistant text
+// delta as it arrives, and STILL returns the final RunResult (the return type
+// never changes) — memory (id load/save) is handled by the streaming path just
+// as for Ask. When onText is nil it is exactly Ask (non-streaming). Mirrors js
+// Client.ask({ on_text }) and SPEC.md §8.
+func (c *Client) AskStream(ctx context.Context, prompt string, tk *Toolkit, id string, onText func(delta string)) (RunResult, error) {
+	if onText != nil {
+		ch, err := c.StreamWithID(ctx, prompt, tk, id)
+		if err != nil {
+			return RunResult{}, err
+		}
+		var result RunResult
+		var streamErr error
+		for ev := range ch {
+			switch ev.Type {
+			case "text":
+				onText(ev.Delta)
+			case "done":
+				if ev.Result != nil {
+					result = *ev.Result
+				}
+			case "error":
+				streamErr = ev.Err
+			}
+		}
+		if streamErr != nil {
+			return RunResult{}, streamErr
+		}
+		return result, nil
+	}
 	if id == "" {
 		return c.Run(ctx, prompt, tk)
 	}
@@ -477,7 +630,7 @@ func (c *Client) postJSON(ctx context.Context, endpoint string, headers map[stri
 
 // ---- OpenAI-style: POST {baseURL}/chat/completions ----
 
-func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, history []any) (RunResult, error) {
+func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, history []any) (res RunResult, err error) {
 	key, err := c.resolveKey()
 	if err != nil {
 		return RunResult{}, err
@@ -496,6 +649,14 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 	var toolCalls []ToolCall
 	var usage Usage
 	turns := 0
+	runStart := time.Now()
+	// Any error path emits the terminal "run" error event exactly once; success
+	// paths emit via endRun (so err is nil here and this is a no-op).
+	defer func() {
+		if err != nil {
+			c.emitRunError(runStart, toolCalls, turns, usage, err)
+		}
+	}()
 
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
@@ -519,8 +680,10 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 			"tools":       tools,
 			"tool_choice": "auto",
 		}
+		t0 := time.Now()
 		raw, err := c.postJSON(ctx, endpoint, map[string]string{"Authorization": "Bearer " + key}, body)
 		if err != nil {
+			c.emitLLM("error", t0, 0, 0)
 			return RunResult{}, err
 		}
 		var data struct {
@@ -541,8 +704,11 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 			Usage map[string]any `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &data); err != nil {
+			c.emitLLM("error", t0, 0, 0)
 			return RunResult{}, err
 		}
+		p, cp := perCall(data.Usage, string(StyleOpenAI))
+		c.emitLLM("ok", t0, p, cp)
 		addUsage(&usage, data.Usage, string(StyleOpenAI))
 		if c.opts.Hooks != nil && c.opts.Hooks.AfterLLM != nil {
 			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: decodeResponse(raw), Model: c.opts.Model, Turn: turn}); err != nil {
@@ -550,7 +716,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 			}
 		}
 		if len(data.Choices) == 0 {
-			return c.result("", messages, toolCalls, turns, usage), nil
+			return c.endRun(runStart, "", messages, toolCalls, turns, usage), nil
 		}
 		msg := data.Choices[0].Message
 
@@ -573,7 +739,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 		messages = append(messages, asst)
 
 		if len(msg.ToolCalls) == 0 {
-			return c.result(msg.Content, messages, toolCalls, turns, usage), nil
+			return c.endRun(runStart, msg.Content, messages, toolCalls, turns, usage), nil
 		}
 
 		// Execute all tool calls in this turn concurrently (true parallel tool
@@ -626,7 +792,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 		}
 		messages = append(messages, results...)
 	}
-	return c.result("", messages, toolCalls, turns, usage), nil
+	return c.endRun(runStart, "", messages, toolCalls, turns, usage), nil
 }
 
 // result assembles a RunResult, filling in the derived telemetry fields.
@@ -644,7 +810,7 @@ func (c *Client) result(text string, messages []any, toolCalls []ToolCall, turns
 
 // ---- Anthropic-style: POST {baseURL}/messages ----
 
-func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, history []any) (RunResult, error) {
+func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, history []any) (res RunResult, err error) {
 	key, err := c.resolveKey()
 	if err != nil {
 		return RunResult{}, err
@@ -664,6 +830,12 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 	var toolCalls []ToolCall
 	var usage Usage
 	turns := 0
+	runStart := time.Now()
+	defer func() {
+		if err != nil {
+			c.emitRunError(runStart, toolCalls, turns, usage, err)
+		}
+	}()
 
 	headers := map[string]string{
 		"x-api-key":         key,
@@ -695,8 +867,10 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 		if system != "" {
 			body["system"] = system
 		}
+		t0 := time.Now()
 		raw, err := c.postJSON(ctx, endpoint, headers, body)
 		if err != nil {
+			c.emitLLM("error", t0, 0, 0)
 			return RunResult{}, err
 		}
 		var data struct {
@@ -710,8 +884,11 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 			Usage map[string]any `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &data); err != nil {
+			c.emitLLM("error", t0, 0, 0)
 			return RunResult{}, err
 		}
+		p, cp := perCall(data.Usage, string(StyleAnthropic))
+		c.emitLLM("ok", t0, p, cp)
 		addUsage(&usage, data.Usage, string(StyleAnthropic))
 		if c.opts.Hooks != nil && c.opts.Hooks.AfterLLM != nil {
 			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: decodeResponse(raw), Model: c.opts.Model, Turn: turn}); err != nil {
@@ -749,7 +926,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 		messages = append(messages, map[string]any{"role": "assistant", "content": content})
 
 		if len(uses) == 0 {
-			return c.result(strings.Join(textParts, ""), messages, toolCalls, turns, usage), nil
+			return c.endRun(runStart, strings.Join(textParts, ""), messages, toolCalls, turns, usage), nil
 		}
 
 		// Execute all tool_use blocks in this turn concurrently. results[i] keeps
@@ -802,7 +979,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 		}
 		messages = append(messages, map[string]any{"role": "user", "content": results})
 	}
-	return c.result("", messages, toolCalls, turns, usage), nil
+	return c.endRun(runStart, "", messages, toolCalls, turns, usage), nil
 }
 
 // decodeResponse decodes a raw provider response body into a map for AfterLLM.
@@ -839,22 +1016,62 @@ func safeJSONArgs(s string) map[string]any {
 // cancellation both abort the in-flight request and end the stream with an
 // "error" event carrying ctx.Err(). Mirrors js Client.stream.
 func (c *Client) Stream(ctx context.Context, prompt string, tk *Toolkit) (<-chan StreamEvent, error) {
+	return c.StreamWithID(ctx, prompt, tk, "")
+}
+
+// StreamWithID is the stateful counterpart to Stream. With a non-empty id it is
+// stateful (like Ask): the thread's transcript is loaded as history before
+// streaming, and the updated RunResult.Messages is saved back to the
+// ConversationStore on the terminal "done" event — so the next call with the
+// same id continues the conversation. An empty id ⇒ stateless (identical to
+// Stream, the store untouched). Mirrors js Client.stream(prompt, { id }).
+func (c *Client) StreamWithID(ctx context.Context, prompt string, tk *Toolkit, id string) (<-chan StreamEvent, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	var history []any
+	if id != "" {
+		h, err := c.store.Get(id)
+		if err != nil {
+			return nil, err
+		}
+		history = h
+	}
 	ch := make(chan StreamEvent, 16)
+	stream := func(dctx context.Context, out chan<- StreamEvent) error {
+		if c.opts.Style == StyleAnthropic {
+			return c.streamAnthropic(dctx, prompt, tk, history, out)
+		}
+		return c.streamOpenAI(dctx, prompt, tk, history, out)
+	}
 	go func() {
-		ctx, cancel := c.withDeadline(ctx)
+		dctx, cancel := c.withDeadline(ctx)
 		defer cancel()
 		defer close(ch)
-		var err error
-		if c.opts.Style == StyleAnthropic {
-			err = c.streamAnthropic(ctx, prompt, tk, ch)
-		} else {
-			err = c.streamOpenAI(ctx, prompt, tk, ch)
+		// Stateless: stream straight through.
+		if id == "" {
+			if err := stream(dctx, ch); err != nil {
+				ch <- StreamEvent{Type: "error", Err: err}
+			}
+			return
 		}
-		if err != nil {
-			ch <- StreamEvent{Type: "error", Err: err}
+		// Stateful: intercept the terminal "done" event to persist the transcript
+		// (mirrors js stream() saving on done when an id is set).
+		inner := make(chan StreamEvent, 16)
+		go func() {
+			defer close(inner)
+			if err := stream(dctx, inner); err != nil {
+				inner <- StreamEvent{Type: "error", Err: err}
+			}
+		}()
+		for ev := range inner {
+			if ev.Type == "done" && ev.Result != nil {
+				if err := c.store.Save(id, ev.Result.Messages); err != nil {
+					ch <- StreamEvent{Type: "error", Err: err}
+					return
+				}
+			}
+			ch <- ev
 		}
 	}()
 	return ch, nil
@@ -862,7 +1079,7 @@ func (c *Client) Stream(ctx context.Context, prompt string, tk *Toolkit) (<-chan
 
 // ---- Streaming: OpenAI-style ----
 
-func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, ch chan<- StreamEvent) error {
+func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, history []any, ch chan<- StreamEvent) (err error) {
 	key, err := c.resolveKey()
 	if err != nil {
 		return err
@@ -870,7 +1087,10 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, c
 	endpoint := strings.TrimRight(c.opts.BaseURL, "/") + "/chat/completions"
 
 	var messages []any
-	if sys := c.system(tk); sys != "" {
+	if len(history) > 0 {
+		// Continue an existing transcript; the system prompt is already in it.
+		messages = append(messages, history...)
+	} else if sys := c.system(tk); sys != "" {
 		messages = append(messages, map[string]any{"role": "system", "content": sys})
 	}
 	messages = append(messages, map[string]any{"role": "user", "content": prompt})
@@ -878,6 +1098,12 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, c
 	var toolCalls []ToolCall
 	var usage Usage
 	turns := 0
+	runStart := time.Now()
+	defer func() {
+		if err != nil {
+			c.emitRunError(runStart, toolCalls, turns, usage, err)
+		}
+	}()
 
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
@@ -906,13 +1132,17 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, c
 		if err != nil {
 			return err
 		}
+		t0 := time.Now()
+		beforeP, beforeC := usage.PromptTokens, usage.CompletionTokens
 		resp, err := c.llmFetch(ctx, endpoint, map[string]string{"Authorization": "Bearer " + key}, body)
 		if err != nil {
+			c.emitLLM("error", t0, 0, 0)
 			return err
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			out, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			c.emitLLM("error", t0, 0, 0)
 			return fmt.Errorf("LLM %d: %s", resp.StatusCode, string(out))
 		}
 
@@ -976,8 +1206,10 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, c
 		})
 		resp.Body.Close()
 		if sErr != nil {
+			c.emitLLM("error", t0, 0, 0)
 			return sErr
 		}
+		c.emitLLM("ok", t0, usage.PromptTokens-beforeP, usage.CompletionTokens-beforeC)
 		if c.opts.Hooks != nil && c.opts.Hooks.AfterLLM != nil {
 			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: map[string]any{"streamed": true}, Model: c.opts.Model, Turn: turn}); err != nil {
 				return err
@@ -993,7 +1225,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, c
 			messages = append(messages, map[string]any{"role": "assistant", "content": text})
 			u := usage
 			ch <- StreamEvent{Type: "usage", Usage: &u}
-			res := c.result(text, messages, toolCalls, turns, usage)
+			res := c.endRun(runStart, text, messages, toolCalls, turns, usage)
 			ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 			return nil
 		}
@@ -1053,7 +1285,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, c
 			ch <- events[i]
 		}
 	}
-	res := c.result(lastText(messages), messages, toolCalls, turns, usage)
+	res := c.endRun(runStart, lastText(messages), messages, toolCalls, turns, usage)
 	u := usage
 	ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 	return nil
@@ -1061,7 +1293,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, c
 
 // ---- Streaming: Anthropic-style ----
 
-func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit, ch chan<- StreamEvent) error {
+func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit, history []any, ch chan<- StreamEvent) (err error) {
 	key, err := c.resolveKey()
 	if err != nil {
 		return err
@@ -1072,11 +1304,21 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 		endpoint = base + "/messages"
 	}
 	system := c.system(tk)
-	messages := []any{map[string]any{"role": "user", "content": prompt}}
+	var messages []any
+	if len(history) > 0 {
+		messages = append(messages, history...)
+	}
+	messages = append(messages, map[string]any{"role": "user", "content": prompt})
 	tools := tk.ToAnthropic()
 	var toolCalls []ToolCall
 	var usage Usage
 	turns := 0
+	runStart := time.Now()
+	defer func() {
+		if err != nil {
+			c.emitRunError(runStart, toolCalls, turns, usage, err)
+		}
+	}()
 
 	headers := map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"}
 
@@ -1110,13 +1352,17 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 		if err != nil {
 			return err
 		}
+		t0 := time.Now()
+		beforeP, beforeC := usage.PromptTokens, usage.CompletionTokens
 		resp, err := c.llmFetch(ctx, endpoint, headers, body)
 		if err != nil {
+			c.emitLLM("error", t0, 0, 0)
 			return err
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			out, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			c.emitLLM("error", t0, 0, 0)
 			return fmt.Errorf("LLM %d: %s", resp.StatusCode, string(out))
 		}
 
@@ -1181,8 +1427,10 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 		})
 		resp.Body.Close()
 		if sErr != nil {
+			c.emitLLM("error", t0, 0, 0)
 			return sErr
 		}
+		c.emitLLM("ok", t0, usage.PromptTokens-beforeP, usage.CompletionTokens-beforeC)
 		if c.opts.Hooks != nil && c.opts.Hooks.AfterLLM != nil {
 			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: map[string]any{"streamed": true}, Model: c.opts.Model, Turn: turn}); err != nil {
 				return err
@@ -1213,7 +1461,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 			text := strings.Join(textParts, "")
 			u := usage
 			ch <- StreamEvent{Type: "usage", Usage: &u}
-			res := c.result(text, messages, toolCalls, turns, usage)
+			res := c.endRun(runStart, text, messages, toolCalls, turns, usage)
 			ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 			return nil
 		}
@@ -1259,7 +1507,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 		}
 		messages = append(messages, map[string]any{"role": "user", "content": results})
 	}
-	res := c.result("", messages, toolCalls, turns, usage)
+	res := c.endRun(runStart, "", messages, toolCalls, turns, usage)
 	u := usage
 	ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 	return nil

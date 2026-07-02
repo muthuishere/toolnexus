@@ -71,6 +71,15 @@ r1, _ := client.Ask(ctx, "My name is Muthu.", tk, "user-42")
 r2, _ := client.Ask(ctx, "What's my name?", tk, "user-42") // recalls turn 1 → "Muthu"
 ```
 
+**Streaming + memory** — `AskStream(ctx, prompt, tk, id, onText)` is `Ask` plus a `func(delta
+string)` text callback (still returns the final `RunResult`); `StreamWithID(ctx, prompt, tk, id)`
+is `Stream` with memory (load before, save on the `done` event). Empty `id` ⇒ stateless.
+
+**Observability** — set `ClientOptions.OnMetric func(MetricEvent)` to receive semantic
+`"llm"`/`"tool"`/`"run"` events, and mount `client.Metrics()` (Prometheus text, zero-dep) at
+`GET /metrics`. Series: `toolnexus_llm_requests_total`, `toolnexus_llm_tokens_total`,
+`toolnexus_tool_calls_total`, + the `*_duration_seconds` histograms. OTLP is a future companion.
+
 **B) Bring your own LLM client** — take just the schema + executor:
 ```go
 tools := tk.ToOpenAI()            // or ToAnthropic() / ToGemini()
