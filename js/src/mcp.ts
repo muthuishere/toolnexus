@@ -55,9 +55,9 @@ export function parseMcpConfig(input: string | object): McpConfig {
   const wrapped = raw.mcpServers ?? raw.servers ?? raw.mcp
   if (wrapped !== undefined) return wrapped as McpConfig
   // Bare map of servers — but strip sibling top-level config keys (builtins/
-  // agents/a2a) so they are not mistaken for MCP servers when no wrapper key
-  // is present.
-  const { builtins: _builtins, agents: _agents, a2a: _a2a, ...servers } = raw
+  // agents/a2a/mcpServer) so they are not mistaken for MCP servers when no
+  // wrapper key is present.
+  const { builtins: _builtins, agents: _agents, a2a: _a2a, mcpServer: _mcpServer, ...servers } = raw
   return servers as McpConfig
 }
 

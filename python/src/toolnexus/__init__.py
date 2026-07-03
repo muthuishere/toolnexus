@@ -48,6 +48,12 @@ from .mcp_source import (
     load_mcp,
     parse_mcp_config,
 )
+from .mcp_serve import (
+    MCPServeConfig,
+    OnCall,
+    build_mcp_server,
+    exposed_mcp_tools,
+)
 from .serve import (
     A2AConfig,
     FileTaskStore,
@@ -137,6 +143,11 @@ __all__ = [
     "start_a2a_server",
     "ServeHandle",
     "OnTask",
+    # mcp serve (inbound)
+    "MCPServeConfig",
+    "OnCall",
+    "build_mcp_server",
+    "exposed_mcp_tools",
     # unified client
     "Client",
     "ClientStyle",

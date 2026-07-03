@@ -32,8 +32,15 @@ from abc import ABC, abstractmethod
 from typing import Any, Awaitable, Callable, Optional, Union
 
 from .a2a import A2ATask
+from .mcp_serve import (
+    MCPServeConfig,
+    OnCall,
+    build_mcp_server,
+    exposed_mcp_tools,
+    serve_mcp_http_request,
+)
 from .skill import SkillInfo
-from .types import sanitize
+from .types import Tool, sanitize
 
 # ---------------------------------------------------------------------------
 # TaskStore adapter — pluggable persistence for served Tasks.
@@ -242,9 +249,49 @@ class _A2AHandler(http.server.BaseHTTPRequestHandler):
     def _schedule(self, coro: Awaitable[Any]) -> None:
         asyncio.run_coroutine_threadsafe(coro, self.server._loop)  # type: ignore[attr-defined]
 
+    # --- MCP streamable-HTTP -----------------------------------------------
+    def _is_mcp_path(self) -> bool:
+        return self.path == "/mcp" or self.path.startswith("/mcp?")
+
+    def _handle_mcp(self) -> None:
+        """Serve one streamable-HTTP MCP request at ``/mcp`` (independent of A2A).
+
+        A fresh server+transport per request (stateless), mirroring the JS serve.ts
+        ``/mcp`` path. Checked before the A2A handlers so ``/mcp`` is never shadowed.
+        """
+        srv = self.server
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(length) if length else b""
+        headers = [
+            (k.lower().encode("latin-1"), v.encode("latin-1"))
+            for k, v in self.headers.items()
+        ]
+        server = build_mcp_server(
+            srv._mcp_tools,  # type: ignore[attr-defined]
+            srv._mcp,  # type: ignore[attr-defined]
+            srv._on_call,  # type: ignore[attr-defined]
+        )
+        try:
+            status, resp_headers, resp_body = self._await(
+                serve_mcp_http_request(server, self.command, self.path, headers, body)
+            )
+        except Exception:  # noqa: BLE001 — a transport error never crashes the server
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(b"mcp error")
+            return
+        self.send_response(status)
+        for hk, hv in resp_headers:
+            self.send_header(hk.decode("latin-1"), hv.decode("latin-1"))
+        self.end_headers()
+        if resp_body:
+            self.wfile.write(resp_body)
+
     # --- routes ------------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802
         srv = self.server
+        if srv._mcp is not None and self._is_mcp_path():  # type: ignore[attr-defined]
+            return self._handle_mcp()
         # No A2A profile ⇒ no routes.
         if srv._a2a is None or srv._store is None:  # type: ignore[attr-defined]
             return self._not_found()
@@ -256,6 +303,8 @@ class _A2AHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         srv = self.server
+        if srv._mcp is not None and self._is_mcp_path():  # type: ignore[attr-defined]
+            return self._handle_mcp()
         if srv._a2a is None or srv._store is None:  # type: ignore[attr-defined]
             return self._not_found()
         length = int(self.headers.get("Content-Length", 0) or 0)
@@ -301,9 +350,14 @@ async def start_a2a_server(
     run_task: RunTask,
     on_task: Optional[OnTask] = None,
     loop: Optional[asyncio.AbstractEventLoop] = None,
+    mcp: Optional[MCPServeConfig] = None,
+    mcp_tools: Optional[list[Tool]] = None,
+    on_call: Optional[OnCall] = None,
 ) -> ServeHandle:
     """Start the HTTP server. Delegated to by :meth:`Toolkit.serve`. When ``a2a`` is
-    absent, the server answers 404 to everything (a minimal base for now).
+    absent, the server answers 404 to everything (except ``/mcp`` when the ``mcp``
+    profile is present). When ``mcp`` is present, a streamable-HTTP MCP server is
+    co-mounted at ``POST /mcp``.
     """
     host, port = _split_addr(addr)
     store = resolve_store(a2a.get("store")) if a2a else None
@@ -314,6 +368,11 @@ async def start_a2a_server(
     httpd._skills = skills  # type: ignore[attr-defined]
     httpd._run_task = run_task  # type: ignore[attr-defined]
     httpd._on_task = on_task  # type: ignore[attr-defined]
+    # MCP inbound profile (independent of A2A): the exposed tool subset is computed
+    # once; a fresh MCP server is built per request from it.
+    httpd._mcp = mcp  # type: ignore[attr-defined]
+    httpd._mcp_tools = exposed_mcp_tools(mcp_tools or [], mcp) if mcp else []  # type: ignore[attr-defined]
+    httpd._on_call = on_call  # type: ignore[attr-defined]
     httpd._loop = loop or asyncio.get_running_loop()  # type: ignore[attr-defined]
     httpd._base_url = _base_url(host, httpd)  # type: ignore[attr-defined]
 

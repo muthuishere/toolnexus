@@ -380,6 +380,27 @@ successive turns are remembered through the client's `ConversationStore` (no `co
 stateless `Run`). Served-task persistence is a separate pluggable `TaskStore` — in-memory default,
 `"file:<dir>"`, or your own.
 
+## Serve as an MCP server (be a gateway)
+
+The inbound mirror of A2A: expose your **whole toolkit as an MCP server** so any MCP client — an IDE,
+another agent, a remote host — can call its tools. Point toolnexus at N MCP servers + skills + your
+own functions, then re-expose the union as **one** MCP server. Unlike A2A, the MCP client *is* the LLM
+host, so each `tools/call` dispatches straight to the tool's `Execute` — no client, no tasks, no store.
+
+```go
+// streamable-HTTP — an embeddable remote server, mounted at POST /mcp beside any A2A routes:
+srv, _ := tk.Serve("127.0.0.1:0", toolnexus.ServeOptions{
+	MCP:    &toolnexus.MCPServeConfig{Name: "my-gateway"}, // optional Tools: []string{"echo"} subset; nil ⇒ all
+	OnCall: func(ev toolnexus.OnCallEvent) { log.Println(ev.Name, ev.Ms, ev.IsError) },
+})
+fmt.Println(srv.URL + "/mcp") // connect any MCP client here
+defer srv.Stop()
+```
+
+`tools/list` advertises every toolkit tool (name **verbatim**, `inputSchema` = the tool's parameters);
+`MCP.Tools` narrows the surface. The profile can also live in the config file as a top-level
+**`mcpServer`** block (singular — distinct from the client-side `mcpServers`).
+
 ## Bring your own loop
 
 Don't want the client loop? Take just the schema adapters and the executor. Emit tool schema in

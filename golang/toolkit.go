@@ -37,6 +37,10 @@ type Toolkit struct {
 	// a2aConfig is the A2A inbound profile from a top-level `a2a` config block;
 	// Serve() falls back to it when no inline A2A option is given.
 	a2aConfig *A2AConfig
+	// mcpServerConfig is the MCP inbound serve profile from a top-level
+	// `mcpServer` (singular) config block — distinct from the client-side plural
+	// `mcpServers`. Serve() falls back to it when no inline MCP option is given.
+	mcpServerConfig *MCPServeConfig
 }
 
 // CreateToolkit builds a Toolkit from the given options.
@@ -103,6 +107,19 @@ func CreateToolkit(ctx context.Context, opts Options) (*Toolkit, error) {
 				_ = json.Unmarshal(b, &cfg)
 			}
 			tk.a2aConfig = &cfg
+		}
+	}
+
+	// MCP inbound serve profile: a top-level `mcpServer` (singular) block on a
+	// parsed McpConfig map — distinct from the client-side `mcpServers`.
+	// Serve() prefers an inline MCP option over this.
+	if m, ok := opts.McpConfig.(map[string]any); ok {
+		if v, exists := m["mcpServer"]; exists {
+			var cfg MCPServeConfig
+			if b, err := json.Marshal(v); err == nil {
+				_ = json.Unmarshal(b, &cfg)
+			}
+			tk.mcpServerConfig = &cfg
 		}
 	}
 
@@ -195,11 +212,19 @@ func (tk *Toolkit) Serve(addr string, opts ServeOptions) (*ServeHandle, error) {
 	if a2a == nil {
 		a2a = tk.a2aConfig
 	}
+	mcp := opts.MCP
+	if mcp == nil {
+		mcp = tk.mcpServerConfig
+	}
 	var skills []SkillInfo
 	if tk.skill != nil {
 		for _, s := range tk.skill.Skills {
 			skills = append(skills, s)
 		}
+	}
+	var mcpTools []Tool
+	if mcp != nil {
+		mcpTools = tk.Tools()
 	}
 	client := opts.Client
 	return startA2AServer(startServerOptions{
@@ -215,7 +240,10 @@ func (tk *Toolkit) Serve(addr string, opts ServeOptions) (*ServeHandle, error) {
 			}
 			return client.Run(context.Background(), text, tk)
 		},
-		onTask: opts.OnTask,
+		onTask:   opts.OnTask,
+		mcp:      mcp,
+		mcpTools: mcpTools,
+		onCall:   opts.OnCall,
 	})
 }
 

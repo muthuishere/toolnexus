@@ -4,22 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What we're trying to build
 
-**toolnexus** — a small, **vendor-neutral** library that gives *any* LLM the two dynamic
+**toolnexus** — a small, **vendor-neutral** library that gives *any* LLM the dynamic
 capabilities [opencode](https://github.com/anomalyco/opencode) has, ported **byte-identically
-across four languages** (`js/`, `python/`, `golang/`, `java/`):
+across five languages** (`js/`, `python/`, `golang/`, `java/`, `csharp/`):
 
 1. **Dynamic MCP servers** — read an `mcp.json`, connect to every server (local stdio +
    remote streamable-HTTP), expose each server tool as a uniform `Tool`.
 2. **Dynamic agent skills** — glob a `skills/` folder (`**/SKILL.md`) and expose one `skill`
    tool that loads a skill's instructions + resources on demand (progressive disclosure).
 
-The insight: MCP tools, agent skills, your own functions (`@tool`), and remote HTTP endpoints
-are *the same thing* to an LLM — a named, described, schema'd callable. toolnexus unifies all
-**four tool sources** behind one `Tool` interface, emits the schema in **OpenAI / Anthropic /
-Gemini** formats, and ships a **unified client** with a built-in tool-calling loop (system
-prompt, skills injection, parallel + chained tool calls, hooks, streaming, retries, memory).
+The insight: MCP tools, agent skills, your own functions (`@tool`), remote HTTP endpoints, the
+built-in shell/file tools, and remote **A2A agents** are *the same thing* to an LLM — a named,
+described, schema'd callable. toolnexus unifies all these tool sources behind one `Tool`
+interface, emits the schema in **OpenAI / Anthropic / Gemini** formats, and ships a **unified
+client** with a built-in tool-calling loop (system prompt, skills injection, parallel + chained
+tool calls, hooks, streaming, retries, conversation memory, observability metrics).
 
-The whole point of four ports is **parity**: the same `examples/` fixtures must produce the
+It is also an **inbound** endpoint: `toolkit.serve(addr, …)` exposes the toolkit to the outside
+world — today as a remote **A2A agent** (Agent Card + JSON-RPC over the client loop; `SPEC.md §7B`).
+
+The whole point of the ports is **parity**: the same `examples/` fixtures must produce the
 same behavior in every language. That is the product. Protecting it is the prime directive
 below.
 
@@ -32,23 +36,24 @@ below.
 | `python/` | Python port — `toolnexus` (PyPI), Python ≥ 3.11. MCP SDK: `mcp`. |
 | `golang/` | Go port — `github.com/muthuishere/toolnexus/golang`, Go 1.23. MCP SDK: `mark3labs/mcp-go`. Also ships the `toolnexus` CLI under `cmd/`. |
 | `java/` | Java port — `io.github.muthuishere:toolnexus`, Java 21. MCP SDK: official `io.modelcontextprotocol.sdk:mcp`. |
+| `csharp/` | C# port — `Toolnexus` (NuGet), .NET. MCP SDK: `ModelContextProtocol`. |
 | `examples/` | **Shared cross-language fixtures** — `mcp.json` + `skills/hello-world/`. Every port runs against these; outputs must match. |
 | `openspec/` | **Spec-driven change workflow (OpenSpec).** `changes/` = active proposals (`proposal.md` + spec deltas + `tasks.md`), `specs/` = canonical capability specs, `changes/archive/` = shipped changes. Run the `openspec` CLI from the repo root. |
-| `.github/workflows/ci.yml` | Runs all four suites (JS/Python/Go/Java), hermetically (no network, no live LLM). |
+| `.github/workflows/ci.yml` | Runs all five suites (JS/Python/Go/Java/C#), hermetically (no network, no live LLM). |
 
-## The prime directive: spec-driven, four-language parity
+## The prime directive: spec-driven, five-language parity
 
-`SPEC.md` is the contract; the four ports are implementations of it. Two rules govern every change:
+`SPEC.md` is the contract; the five ports are implementations of it. Two rules govern every change:
 
 1. **Behavior is defined in the spec before it is written in code.** `SPEC.md §0` is the
    conformance contract — if a change alters observable behavior (tool naming, config parsing,
    the `skill` tool's byte-exact output, adapter mapping, the client loop), it changes `SPEC.md`
    *first*, then the code. Any change of real substance goes through an **OpenSpec change** first
    (below) — the proposal's spec deltas are where intended behavior is pinned before code.
-2. **A behavior change lands in all four ports, or it is not done.** Do not ship a capability
-   in `js/` and leave `python/`/`golang/`/`java/` behind without explicitly saying so and
-   tracking it in an in-progress spec. The ports are meant to be substitutable; silent drift is
-   the one bug this repo exists to prevent.
+2. **A behavior change lands in all five ports, or it is not done.** Do not ship a capability
+   in `js/` and leave `python/`/`golang/`/`java/`/`csharp/` behind without explicitly saying so
+   and tracking it in an in-progress spec. The ports are meant to be substitutable; silent drift
+   is the one bug this repo exists to prevent.
 
 > "Correct" is defined by §0: run a port against the shared `examples/` (same `mcp.json` + skill)
 > and its outputs must match the others. When in doubt, make the spec authoritative and bring
@@ -68,8 +73,8 @@ it is installed globally.
 2. **Validate** — `openspec validate <name>` (catches malformed deltas / missing scenarios).
 3. **Apply across the ports** — `/opsx:apply`. Implement the tasks in **every affected language**
    and tick them off. Each behavior change carries a **per-language parity checklist** (js /
-   python / golang / java) in `tasks.md`; if a pass covers only a subset, the rest stay as
-   unchecked tasks — never let parity drift silently.
+   python / golang / java / csharp) in `tasks.md`; if a pass covers only a subset, the rest stay
+   as unchecked tasks — never let parity drift silently.
 4. **Verify** — run the narrowest useful suite per touched port (see Commands) and check parity
    against the shared `examples/`. Call out anything unverified.
 5. **Open the PR** with the change folder + code in one diff, so reviewers see intent and
@@ -113,16 +118,17 @@ Each port is self-contained and hermetic — `cd` into its directory first. CI r
 | `python/` | `pip install -e ".[test]"` | `python -m pytest -q` |
 | `golang/` | `go build ./...` && `go vet ./...` | `go test -race ./...` |
 | `java/` | `./gradlew build --no-daemon` | `./gradlew test --no-daemon` |
+| `csharp/` | `dotnet build` | `dotnet test` |
 
-All four are currently at version `0.1.0`. Publishing (npm / PyPI / Maven Central / Go module
-tag) is done **manually** — key-based auto-deploy is intentionally not wired (see in-progress
-specs). Never bake registry tokens into code, config, or CI; they are use-only env vars.
+All five ports are currently at version `0.4.0`. Publishing (npm / PyPI / NuGet / Maven Central /
+Go module tag) is done **manually** — key-based auto-deploy is intentionally not wired (see
+in-progress specs). Never bake registry tokens into code, config, or CI; they are use-only env vars.
 
 ## Coding conventions
 
 - **Match the local style of each port.** Idiomatic TS, idiomatic Python, idiomatic Go,
-  idiomatic Java — not a transliteration of one language into another. Same *behavior*, native
-  *shape*.
+  idiomatic Java, idiomatic C# — not a transliteration of one language into another. Same
+  *behavior*, native *shape*.
 - **The `examples/` fixtures are shared and authoritative** — don't fork per-language copies;
   if a fixture must change, change it once and re-verify every port.
 - **Secrets are use-only.** Remote MCP `headers` values expand `${ENV_VAR}` from the environment
@@ -139,7 +145,7 @@ specs). Never bake registry tokens into code, config, or CI; they are use-only e
 | `CLAUDE.md` | Project guidance for Claude Code (this file) |
 | `SPEC.md` | The shared cross-language contract — start here for any behavior question |
 | `README.md` | End-user pitch + "zero to agent in 3 steps" |
-| `js/README.md`, `python/README.md`, `golang/README.md` + `golang/GUIDE.md`, `java/README.md` | Per-language end-user docs |
+| `js/README.md`, `python/README.md`, `golang/README.md` + `golang/GUIDE.md`, `java/README.md`, `csharp/README.md` | Per-language end-user docs |
 | `openspec/changes/` | Active OpenSpec change proposals — feature/change work starts here (`/opsx:propose`) |
 | `openspec/specs/` | Canonical capability specs (accrue from archived changes) |
 | `PUBLISHING.md` | How each port is published |

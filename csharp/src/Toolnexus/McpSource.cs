@@ -63,12 +63,13 @@ public sealed partial class McpSource : IAsyncDisposable
                       ?? raw.Get("mcp");
         if (servers is IDictionary<string, object?> sd)
             return new Dictionary<string, object?>(sd);
-        // Bare map of servers — but strip sibling top-level config keys (builtins/agents/a2a)
-        // so they are not mistaken for MCP servers when no wrapper key is present (SPEC §2).
+        // Bare map of servers — but strip sibling top-level config keys (builtins/agents/a2a/
+        // mcpServer) so they are not mistaken for MCP servers when no wrapper key is present (SPEC §2).
         var stripped = new Dictionary<string, object?>(raw);
         stripped.Remove("builtins");
         stripped.Remove("agents");
         stripped.Remove("a2a");
+        stripped.Remove("mcpServer");
         return stripped;
     }
 

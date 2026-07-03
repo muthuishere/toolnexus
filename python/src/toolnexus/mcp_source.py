@@ -96,8 +96,14 @@ def parse_mcp_config(input: str | dict[str, Any]) -> McpConfig:
     if "mcp" in raw:
         return raw["mcp"]  # type: ignore[return-value]
     # Bare map of servers — but strip sibling top-level config keys (builtins/agents/
-    # a2a) so they are not mistaken for MCP servers when no wrapper key is present.
-    return {k: v for k, v in raw.items() if k not in ("builtins", "agents", "a2a")}
+    # a2a/mcpServer) so they are not mistaken for MCP servers when no wrapper key is
+    # present. `mcpServer` (singular) is the inbound MCP-serve profile (§7C), distinct
+    # from the `mcpServers` (plural) client wrapper stripped above.
+    return {
+        k: v
+        for k, v in raw.items()
+        if k not in ("builtins", "agents", "a2a", "mcpServer")
+    }
 
 
 def _is_text_content(item: Any) -> bool:

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mark3labs/mcp-go/server"
 )
 
 const (
@@ -185,6 +186,12 @@ type ServeOptions struct {
 	Client *Client
 	A2A    *A2AConfig
 	OnTask OnTask
+	// MCP, when present (or a top-level `mcpServer` config block), mounts a
+	// streamable-HTTP MCP server at POST /mcp exposing the toolkit's unified
+	// tools. Independent of A2A.
+	MCP *MCPServeConfig
+	// OnCall fires per inbound MCP tools/call.
+	OnCall OnCall
 }
 
 // ServeHandle is returned by Serve — the base URL plus a stop/close method.
@@ -315,6 +322,12 @@ type startServerOptions struct {
 	// store; an empty contextId is a stateless run.
 	runTask func(text, contextID string) (RunResult, error)
 	onTask  OnTask
+	// mcp, when present, mounts a streamable-HTTP MCP server at POST /mcp
+	// (independent of A2A). mcpTools are the toolkit's unified tools it exposes;
+	// onCall fires per inbound tools/call.
+	mcp      *MCPServeConfig
+	mcpTools []Tool
+	onCall   OnCall
 }
 
 // rpcError is the JSON-RPC 2.0 error object.
@@ -382,6 +395,14 @@ func startA2AServer(opts startServerOptions) (*ServeHandle, error) {
 		store = s
 	}
 
+	// MCP streamable-HTTP profile (independent of A2A): a single stateless MCP
+	// server, mounted at /mcp. Absent mcp ⇒ no /mcp surface.
+	var mcpHandler http.Handler
+	if opts.mcp != nil {
+		mcpSrv := buildMcpServer(ExposedMcpTools(opts.mcpTools, opts.mcp), opts.mcp, opts.onCall)
+		mcpHandler = server.NewStreamableHTTPServer(mcpSrv, server.WithStateLess(true))
+	}
+
 	ln, err := net.Listen("tcp", net.JoinHostPort(host, port))
 	if err != nil {
 		return nil, err
@@ -402,7 +423,21 @@ func startA2AServer(opts startServerOptions) (*ServeHandle, error) {
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// No A2A profile ⇒ no routes.
+		// No profile at all ⇒ no routes.
+		if (opts.a2a == nil || store == nil) && mcpHandler == nil {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("not found"))
+			return
+		}
+
+		// MCP streamable-HTTP profile, checked first so /mcp is never shadowed by
+		// the A2A POST handler (which would otherwise treat it as JSON-RPC).
+		if mcpHandler != nil && r.URL.Path == "/mcp" {
+			mcpHandler.ServeHTTP(w, r)
+			return
+		}
+
+		// No A2A profile ⇒ no A2A routes (an MCP-only server 404s everything else).
 		if opts.a2a == nil || store == nil {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte("not found"))

@@ -31,7 +31,12 @@ import {
   FileTaskStore,
   resolveStore,
   buildAgentCard,
+  buildMcpServer,
+  exposedMcpTools,
 } from "../dist/index.js"
+import { Client as MCPClient } from "@modelcontextprotocol/sdk/client/index.js"
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 
 const SKILLS_DIR = path.resolve(fileURLToPath(import.meta.url), "../../../examples/skills")
 
@@ -1247,5 +1252,163 @@ test("a2a inbound: top-level a2a config block is picked up by serve", async () =
     await srv.stop()
     await tk.close()
     llm.close()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// MCP inbound (§7C) — serve a toolkit as an MCP server.
+// ---------------------------------------------------------------------------
+
+const echoTool = defineTool({
+  name: "echo",
+  description: "echo back text",
+  inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false },
+  run: (args: any) => String(args.text ?? ""),
+})
+const boomTool = defineTool({
+  name: "boom",
+  description: "always throws",
+  run: () => {
+    throw new Error("kaboom")
+  },
+})
+
+/** Connect an in-process MCP client to a built server via a linked transport pair. */
+async function connectInProc(server: any): Promise<any> {
+  const [clientT, serverT] = InMemoryTransport.createLinkedPair()
+  await server.connect(serverT)
+  const client = new MCPClient({ name: "test-client", version: "1.0.0" })
+  await client.connect(clientT)
+  return client
+}
+
+test("mcp inbound: exposedMcpTools filters by name, omit ⇒ all", () => {
+  const tools = [echoTool, boomTool]
+  assert.deepEqual(exposedMcpTools(tools).map((t) => t.name), ["echo", "boom"])
+  assert.deepEqual(exposedMcpTools(tools, { tools: ["echo"] }).map((t) => t.name), ["echo"])
+  // unknown names in the filter are ignored, not an error
+  assert.deepEqual(exposedMcpTools(tools, { tools: ["echo", "nope"] }).map((t) => t.name), ["echo"])
+})
+
+test("mcp inbound: initialize reports serverInfo from the profile", async () => {
+  const server = buildMcpServer([echoTool], { name: "gateway", version: "2.0.0" })
+  const client = await connectInProc(server)
+  try {
+    const info = client.getServerVersion()
+    assert.equal(info?.name, "gateway")
+    assert.equal(info?.version, "2.0.0")
+  } finally {
+    await client.close()
+  }
+})
+
+test("mcp inbound: tools/list advertises unified tools with inputSchema=parameters", async () => {
+  const server = buildMcpServer([echoTool, boomTool])
+  const client = await connectInProc(server)
+  try {
+    const { tools } = await client.listTools()
+    assert.deepEqual(tools.map((t: any) => t.name).sort(), ["boom", "echo"])
+    const echo = tools.find((t: any) => t.name === "echo")
+    assert.deepEqual(echo.inputSchema, echoTool.inputSchema)
+  } finally {
+    await client.close()
+  }
+})
+
+test("mcp inbound: mcp.tools narrows the advertised surface", async () => {
+  const server = buildMcpServer(exposedMcpTools([echoTool, boomTool], { tools: ["echo"] }), { tools: ["echo"] })
+  const client = await connectInProc(server)
+  try {
+    const { tools } = await client.listTools()
+    assert.deepEqual(tools.map((t: any) => t.name), ["echo"])
+  } finally {
+    await client.close()
+  }
+})
+
+test("mcp inbound: tools/call dispatches to execute → text content, isError false", async () => {
+  const calls: any[] = []
+  const server = buildMcpServer([echoTool], undefined, (ev) => calls.push(ev))
+  const client = await connectInProc(server)
+  try {
+    const res: any = await client.callTool({ name: "echo", arguments: { text: "hi" } })
+    assert.equal(res.isError, false)
+    assert.equal(res.content[0].type, "text")
+    assert.equal(res.content[0].text, "hi")
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].name, "echo")
+    assert.equal(calls[0].source, "native")
+    assert.equal(calls[0].isError, false)
+  } finally {
+    await client.close()
+  }
+})
+
+test("mcp inbound: erroring tool → isError result, server survives", async () => {
+  const server = buildMcpServer([echoTool, boomTool])
+  const client = await connectInProc(server)
+  try {
+    const bad: any = await client.callTool({ name: "boom", arguments: {} })
+    assert.equal(bad.isError, true)
+    assert.match(bad.content[0].text, /kaboom/)
+    // server keeps serving
+    const ok: any = await client.callTool({ name: "echo", arguments: { text: "still up" } })
+    assert.equal(ok.isError, false)
+    assert.equal(ok.content[0].text, "still up")
+  } finally {
+    await client.close()
+  }
+})
+
+test("mcp inbound: streamable-HTTP /mcp round-trip via serve()", async () => {
+  const tk = await createToolkit({ builtins: false, extraTools: [echoTool] })
+  const srv = await tk.serve("127.0.0.1:0", { mcp: { name: "http-gw" } })
+  const client = new MCPClient({ name: "http-test", version: "1.0.0" })
+  try {
+    await client.connect(new StreamableHTTPClientTransport(new URL(srv.url + "/mcp")))
+    const info = client.getServerVersion()
+    assert.equal(info?.name, "http-gw")
+    const { tools } = await client.listTools()
+    assert.ok(tools.some((t: any) => t.name === "echo"))
+    const res: any = await client.callTool({ name: "echo", arguments: { text: "over http" } })
+    assert.equal(res.content[0].text, "over http")
+  } finally {
+    await client.close()
+    await srv.stop()
+    await tk.close()
+  }
+})
+
+test("mcp inbound: absent profile ⇒ no /mcp surface", async () => {
+  const tk = await createToolkit({ builtins: false, extraTools: [echoTool] })
+  const srv = await tk.serve("127.0.0.1:0", { mcp: undefined, a2a: { name: "only-a2a" } })
+  try {
+    const res = await fetch(srv.url + "/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    })
+    // A2A POST handler treats it as an unknown JSON-RPC method (not an MCP endpoint).
+    const body: any = await res.json()
+    assert.ok(body.error, "expected a JSON-RPC error, not an MCP tools/list result")
+    assert.equal(body.result, undefined)
+  } finally {
+    await srv.stop()
+    await tk.close()
+  }
+})
+
+test("mcp inbound: top-level mcpServer config block is picked up by serve", async () => {
+  const tk = await createToolkit({ mcpConfig: { mcpServer: { name: "from-config" } }, builtins: false, extraTools: [echoTool] })
+  // serve() with no inline mcp falls back to the config block
+  const srv = await tk.serve("127.0.0.1:0", {})
+  const client = new MCPClient({ name: "cfg-test", version: "1.0.0" })
+  try {
+    await client.connect(new StreamableHTTPClientTransport(new URL(srv.url + "/mcp")))
+    assert.equal(client.getServerVersion()?.name, "from-config")
+  } finally {
+    await client.close()
+    await srv.stop()
+    await tk.close()
   }
 })

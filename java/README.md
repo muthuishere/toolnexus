@@ -29,7 +29,7 @@ official **MCP Java SDK** (`io.modelcontextprotocol.sdk:mcp`).
 
 ## Install
 
-Maven Central coordinate: **`io.github.muthuishere:toolnexus:0.4.0`**. Requires **Java 21+**.
+Maven Central coordinate: **`io.github.muthuishere:toolnexus:0.5.0`**. Requires **Java 21+**.
 
 **Gradle** (`build.gradle`):
 
@@ -37,7 +37,7 @@ Maven Central coordinate: **`io.github.muthuishere:toolnexus:0.4.0`**. Requires 
 repositories { mavenCentral() }
 
 dependencies {
-    implementation 'io.github.muthuishere:toolnexus:0.4.0'
+    implementation 'io.github.muthuishere:toolnexus:0.5.0'
 }
 ```
 
@@ -47,7 +47,7 @@ dependencies {
 <dependency>
   <groupId>io.github.muthuishere</groupId>
   <artifactId>toolnexus</artifactId>
-  <version>0.3.0</version>
+  <version>0.5.0</version>
 </dependency>
 ```
 
@@ -385,6 +385,29 @@ handle.stop();
 
 Task persistence is a pluggable `A2AServer.TaskStore` — in-memory default,
 `"file:<dir>"`, or your own.
+
+---
+
+## Serve as an MCP server (be a gateway)
+
+The inbound mirror of A2A: expose your **whole toolkit as an MCP server** so any MCP
+client — an IDE, another agent, a remote host — can call its tools. Point toolnexus at
+N MCP servers + skills + your own functions, then re-expose the union as **one** MCP
+server. Unlike A2A, the MCP client *is* the LLM host, so each `tools/call` dispatches
+straight to the tool's `execute` — no client, no tasks, no store.
+
+```java
+// streamable-HTTP — an embeddable remote server, mounted at POST /mcp beside any A2A routes:
+A2AServer.ServeHandle srv = tk.serve("127.0.0.1:0", new Toolkit.ServeOptions()
+        .mcp(new McpServe.MCPServeConfig().name("my-gateway"))   // .tools(List.of("echo")) subset; omit ⇒ all
+        .onCall(ev -> System.err.println(ev.name() + " " + ev.ms() + " " + ev.isError())));
+System.out.println(srv.url() + "/mcp");   // connect any MCP client here
+srv.stop();
+```
+
+`tools/list` advertises every toolkit tool (name **verbatim**, `inputSchema` = the tool's
+parameters); `mcp.tools` narrows the surface. The profile can also live in the config file
+as a top-level **`mcpServer`** block (singular — distinct from the client-side `mcpServers`).
 
 ---
 

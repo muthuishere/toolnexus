@@ -116,6 +116,7 @@ func parseMcpBytes(data []byte) (McpConfig, error) {
 	delete(raw, "builtins")
 	delete(raw, "agents")
 	delete(raw, "a2a")
+	delete(raw, "mcpServer")
 	stripped, err := json.Marshal(raw)
 	if err != nil {
 		return nil, fmt.Errorf("parse mcp config: %w", err)

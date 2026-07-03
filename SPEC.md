@@ -150,9 +150,11 @@ Type inference when `type` is omitted: presence of `url` ⇒ `remote`, presence 
 
 **Reserved sibling keys:** when no `mcpServers`/`servers`/`mcp` wrapper is present and the object is
 used as the raw server map, the parser MUST ignore the reserved top-level keys **`builtins`** (§4A),
-**`agents`** (§7A, outbound), and **`a2a`** (§7B, inbound card config) — they are sibling config
-sections, not MCP servers. (Without this, a config file that carries only a `builtins` toggle, an
-`agents` block, or an `a2a` card block would produce a bogus MCP server.)
+**`agents`** (§7A, outbound), **`a2a`** (§7B, inbound card config), and **`mcpServer`** (§7C, inbound
+MCP serve profile — singular, distinct from the client-side plural `mcpServers` wrapper) — they are
+sibling config sections, not MCP servers. (Without this, a config file that carries only a `builtins`
+toggle, an `agents` block, an `a2a` card block, or an `mcpServer` profile would produce a bogus MCP
+server.)
 
 ### Behaviour (mirrors opencode `mcp/index.ts` + `mcp/catalog.ts`)
 
@@ -520,6 +522,51 @@ When `a2a` is absent, no A2A routes mount (every request 404s). When present, mo
 **TaskStore** (pluggable persistence): `get(id) -> Task|undefined`, `save(task)`. `resolveStore(store?)`:
 `undefined`|`"memory"` ⇒ in-memory (default); `"file:<dir>"` ⇒ file store (one `<id>.json` per task);
 an object ⇒ used as-is. All Task reads/writes go through the store.
+
+---
+
+## 7C. MCP server — inbound (`serve` MCP profile)
+
+Expose a toolkit **as an MCP server** so any MCP client (Claude Desktop, an IDE, another agent) can
+call its tools — the inbound mirror of §7B. Where A2A advertises **skills** and fulfils a Task through
+the whole client loop, MCP advertises the toolkit's **unified tools** (every source — mcp · skill ·
+native · http · builtin · a2a) and dispatches each `tools/call` straight to `Tool.execute`. The calling
+MCP client *is* the LLM host, so there is **no `client`, no Task, and no TaskStore**. This turns
+toolnexus into a **universal MCP gateway**: aggregate N servers + skills + your own tools behind one
+toolkit, then re-expose the union as one MCP server. **Opt-in** via the `mcp` profile (or a top-level
+`mcpServer` config block — a reserved key, §2, singular, distinct from the client-side `mcpServers`).
+Built on each port's existing MCP SDK **in server mode** (no new dependency). Transport is
+**streamable-HTTP** (a networked MCP server); stdio is intentionally out of scope.
+
+```
+MCPServeConfig = { name?, version?, tools?: string[] }        // name default "toolnexus", version "0.1.0"
+OnCall = ({ name, source, ms, isError }) => void              // fires per inbound tools/call
+
+// streamable-HTTP — co-mounted at POST /mcp on the serve() server, beside the A2A routes:
+toolkit.serve(addr, { mcp?, onCall?, ...a2a })  -> ServeHandle { url, stop() }
+```
+
+- **`initialize`** advertises `serverInfo:{name, version}` from the profile (defaults `name:"toolnexus"`,
+  `version:"0.1.0"`) and `capabilities.tools`.
+- **`tools/list`** → one entry per exposed tool: `{ name, description, inputSchema }`, where `name` is
+  the toolkit `Tool.name` used **verbatim** (already sanitized at registration, §0.2 — *not*
+  re-sanitized, unlike §7A/§7B skill ids) and `inputSchema` is the tool's `parameters` (JSON Schema).
+  When `mcp.tools` is set, the list is filtered to exactly those names; **unknown names are ignored**
+  (never an error). Omit `mcp.tools` ⇒ all toolkit tools.
+- **`tools/call`** (`{ name, arguments }`) → `Tool.execute(arguments, ctx)`; map the `ToolResult` to a
+  `CallToolResult`: `output` → a single `{type:"text", text}` content part, `isError` propagates. An
+  `execute` throw becomes `isError:true` with the error text — **never crashes the server**. An unknown
+  tool name → the SDK's standard error (`InvalidParams`/`-32602`). `metadata` is not on the MCP wire
+  (surfaced via `onCall` only). `ctx` carries the request's cancellation signal.
+- **`mcp` absent** ⇒ no MCP surface (`serve` mounts no `/mcp`; an MCP-only `serve` 404s all other paths).
+- **Transport**: streamable-HTTP via the `/mcp` endpoint on `serve(addr, …)` (stateless — a fresh
+  server+transport per request). Hermetic tests connect the port's own MCP **client** to the served
+  toolkit (in-memory/linked transport where the SDK offers one, else an ephemeral HTTP port) and assert
+  `tools/list`/`tools/call` round-trips.
+
+Deferred (forward-compatible): a **stdio** transport (for local clients like Claude Desktop), MCP
+resources / prompts / sampling / completion (skills already reach clients via the `skill` tool), auth
+in core, and the Go CLI `serve --mcp` subcommand.
 
 ---
 
