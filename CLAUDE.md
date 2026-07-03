@@ -120,9 +120,13 @@ Each port is self-contained and hermetic — `cd` into its directory first. CI r
 | `java/` | `./gradlew build --no-daemon` | `./gradlew test --no-daemon` |
 | `csharp/` | `dotnet build` | `dotnet test` |
 
-All five ports are currently at version `0.4.0`. Publishing (npm / PyPI / NuGet / Maven Central /
-Go module tag) is done **manually** — key-based auto-deploy is intentionally not wired (see
-in-progress specs). Never bake registry tokens into code, config, or CI; they are use-only env vars.
+All five ports are currently at version `0.5.0`. Publishing runs through the **`release.yml`**
+GitHub Actions workflow: cut a GitHub Release `vX.Y.Z` (or `workflow_dispatch`) and each port
+publishes if its repo variable `ENABLE_*` is `true`. npm / PyPI / NuGet use **OIDC Trusted
+Publishing** (no stored tokens); Go is a tag push (`golang/vX.Y.Z`); Maven Central (Java) uses the
+`prod` environment secrets (`CENTRAL_USERNAME` / `CENTRAL_PASSWORD` / `GPG_*`). A `preflight` job
+fails the run unless all four manifests (js/python/csharp/java) match the release version — so bump
+them together. Never bake registry tokens into code, config, or CI; they are use-only env vars.
 
 ## Coding conventions
 
