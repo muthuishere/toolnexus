@@ -1,91 +1,65 @@
 # Publishing toolnexus
 
-Names (all verified free at setup): npm **`toolnexus`**, PyPI **`toolnexus`**,
-Go module **`github.com/muthuishere/toolnexus/golang`**, repo **`muthuishere/toolnexus`**.
+All five ports publish from **one** GitHub Actions workflow — `.github/workflows/release.yml`.
+You cut a GitHub Release and the workflow publishes every enabled port at the release's version.
+No tokens are stored for npm / PyPI / NuGet (OIDC Trusted Publishing); Go is a tag push; only Maven
+Central uses stored secrets.
 
-> npm + PyPI are published **manually** by Muthu (no token-based CI). Commands below are
-> copy-paste. Go needs no registry — a GitHub tag is the release.
+Package names (all live): npm **`toolnexus`**, PyPI **`toolnexus`**, NuGet **`Toolnexus`**,
+Maven **`io.github.muthuishere:toolnexus`**, Go module **`github.com/muthuishere/toolnexus/golang`**.
 
-## 0. One-time: GitHub repo
+## Release in one step
 
-```sh
-cd /Users/muthuishere/muthu/gitworkspace/agentskillsmcp
-gh repo create muthuishere/toolnexus --public --source . --remote origin --description "Build an agent in a few lines: MCP + agent skills + native + HTTP tools, one interface, any LLM. JS/Python/Go."
-git push -u origin main
-```
+1. **Bump every manifest to the same version** (a pre-flight job fails the run otherwise):
+   `js/package.json`, `python/pyproject.toml`, `csharp/src/Toolnexus/Toolnexus.csproj` (`<Version>`),
+   `java/build.gradle` (`version`). Go has no manifest — it releases as a tag.
+2. Merge to `main`.
+3. **Cut a GitHub Release named `vX.Y.Z`** targeting `main`:
+   ```sh
+   gh release create v0.5.0 --target main --title "v0.5.0 — <headline>" --notes "..."
+   ```
+   That triggers `release.yml` (`on: release.published`). Each port publishes **iff** its repo
+   variable is `true` (Settings → Secrets and variables → Actions → Variables):
+   `ENABLE_NPM`, `ENABLE_PYPI`, `ENABLE_GO`, `ENABLE_NUGET`, `ENABLE_JAVA` — all currently on.
+4. Watch it: `gh run watch <run-id> --exit-status`.
 
-## 1. npm (JS)  →  `npm i toolnexus`
+Dry run / manual: `release.yml` also has a `workflow_dispatch` with a `version` input. (Note: npm and
+PyPI reject re-publishing an existing version, so only dispatch a version you have not released.)
 
-```sh
-cd js
-npm login                 # interactive, once
-npm run build             # produces dist/
-npm publish --access public
-```
+## How each port authenticates
 
-To bump: edit `version` in `js/package.json`, rebuild, `npm publish`.
+| Port | Mechanism | Secret / config |
+|------|-----------|-----------------|
+| **npm** | OIDC Trusted Publishing (provenance) | none — the npm Trusted Publisher is scoped to the `prod` GitHub environment. Needs npm ≥ 11.5.1 (the job upgrades it). |
+| **PyPI** | OIDC Trusted Publishing (`pypa/gh-action-pypi-publish`) | none — a PyPI Trusted Publisher scoped to `prod`. |
+| **NuGet** | OIDC (`NuGet/login@v1` mints a short-lived key) | none — a NuGet Trusted Publishing policy scoped to `prod`. |
+| **Go** | tag push `golang/vX.Y.Z` | none — `contents: write` in the workflow. Idempotent (skips if the tag exists). |
+| **Maven Central** | Gradle `publishAndReleaseToMavenCentral` | `prod` environment secrets: `CENTRAL_USERNAME`, `CENTRAL_PASSWORD` (Sonatype Central Portal token), `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE`. No OIDC available for Central. |
 
-## 2. PyPI (Python)  →  `pip install toolnexus`
+**Version parity is enforced.** The `preflight` job reads all four manifests and fails the run unless
+each equals the release tag — so partial version bumps never publish a mismatched set.
 
-```sh
-cd python
-python -m pip install --upgrade build twine
-python -m build           # creates dist/*.whl + *.tar.gz
-python -m twine upload dist/*     # prompts for PyPI token/credentials
-```
-
-To bump: edit `version` in `python/pyproject.toml`, rebuild, re-upload.
-
-## 3. Go  →  `go get github.com/muthuishere/toolnexus/golang`
-
-No registry. Tag a release once the repo is pushed:
-
-```sh
-cd /Users/muthuishere/muthu/gitworkspace/agentskillsmcp
-git tag golang/v0.1.0     # module is in the golang/ subdir, so tag is path-prefixed
-git push origin golang/v0.1.0
-```
-
-Then consumers: `go get github.com/muthuishere/toolnexus/golang@v0.1.0`.
-
-CLI install: `go install github.com/muthuishere/toolnexus/golang/cmd/toolnexus@latest`.
-
-## 4. Java  →  `io.github.muthuishere:toolnexus`
-
-Gradle `maven-publish` is configured. Publish manually to Maven Central (via the
-Central Portal / OSSRH) or GitHub Packages — both need credentials in
-`~/.gradle/gradle.properties` (never commit them):
+## Consumers install
 
 ```sh
-cd java
-./gradlew build
-./gradlew publish          # uses the configured repository + your gradle.properties creds
+npm i toolnexus                                   # JS / TypeScript
+pip install toolnexus                             # Python
+dotnet add package Toolnexus                       # C#
+go get github.com/muthuishere/toolnexus/golang    # Go
+# Java (Maven): io.github.muthuishere:toolnexus:<version>
 ```
 
-Consumers: `implementation 'io.github.muthuishere:toolnexus:0.1.0'`.
-To bump: edit `version` in `java/build.gradle`, rebuild, republish.
+## Secrets discipline
 
-## 5. .NET / NuGet  →  `dotnet add package Toolnexus`
-
-Package id **`Toolnexus`** (metadata lives in `csharp/src/Toolnexus/Toolnexus.csproj`).
-Pack and push manually to nuget.org with an API key in the environment (never commit it):
-
-```sh
-cd csharp
-dotnet build -c Release
-dotnet pack src/Toolnexus/Toolnexus.csproj -c Release      # -> src/Toolnexus/bin/Release/Toolnexus.0.1.0.nupkg
-dotnet nuget push src/Toolnexus/bin/Release/Toolnexus.0.1.0.nupkg \
-  --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
-```
-
-Consumers: `dotnet add package Toolnexus --version 0.1.0`.
-To bump: edit `<Version>` in `csharp/src/Toolnexus/Toolnexus.csproj`, rebuild, repack, repush.
+Registry credentials live **only** as GitHub Actions secrets in the `prod` environment, referenced
+as `${{ secrets.* }}` and masked in logs — never committed, printed, or passed through an agent. To
+rotate the Maven Central token: regenerate a user token at central.sonatype.com, then update
+`CENTRAL_USERNAME` / `CENTRAL_PASSWORD` in the `prod` environment and re-run the failed job
+(`gh run rerun <run-id> --failed`).
 
 ## Pre-publish checklist
 
-- [ ] `js`: `npm run build` clean; `node --experimental-strip-types examples/basic.ts` works
-- [ ] `python`: `python -m build` clean; `python examples/basic.py` works
-- [ ] `golang`: `go build ./...` + `go vet ./...` clean; `go run ./examples/basic` works
-- [ ] `csharp`: `dotnet build` + `dotnet test` clean; `dotnet run -- basic` works
-- [ ] README + SPEC version numbers bumped together
-- [ ] live OpenRouter agent example passes in at least one language
+- [ ] All four manifests bumped to the same `X.Y.Z`
+- [ ] `js`: `npm run build` clean · `python`: `python -m build` clean · `golang`: `go build ./... && go vet ./...` clean · `csharp`: `dotnet build && dotnet test` clean · `java`: `./gradlew build`
+- [ ] README + SPEC version references bumped together
+- [ ] CI green on `main` before cutting the Release
