@@ -14,6 +14,10 @@ from typing import TYPE_CHECKING, Any, Optional
 from .a2a import Agent, agent_tools, parse_agents_config
 from .adapters import to_anthropic, to_gemini, to_openai
 from .builtin import BuiltinsConfig, select_builtins
+from .mcp_serve import (
+    MCPServeConfig,
+    OnCall,
+)
 from .mcp_source import McpSource, load_mcp
 from .serve import A2AConfig, OnTask, ServeHandle, start_a2a_server
 from .skill import SkillSource, load_skills
@@ -32,11 +36,16 @@ class Toolkit:
         agents: list[Tool],
         extra_tools: list[Tool],
         a2a_config: Optional[A2AConfig] = None,
+        mcp_server_config: Optional[MCPServeConfig] = None,
     ) -> None:
         self._mcp = mcp
         self._skill = skill
         # A2A profile read from a top-level `a2a` config block (serve() falls back to this).
         self._a2a_config = a2a_config
+        # MCP serve profile read from a top-level `mcpServer` (singular) config block
+        # — distinct from the client-side `mcpServers`. serve() prefers its inline
+        # `mcp` over this.
+        self._mcp_server_config = mcp_server_config
         self._by_name: dict[str, Tool] = {}
         # Builtins are the lowest-precedence source: a host extra_tools entry with
         # the same name shadows a builtin (SPEC §4). Drop shadowed builtins up
@@ -108,7 +117,22 @@ class Toolkit:
         if isinstance(mcp_config, dict) and "a2a" in mcp_config:
             a2a_config = mcp_config["a2a"]
 
-        return cls(mcp, skill, builtin_tools, agent_tools_flat, extra_tools or [], a2a_config)
+        # MCP inbound profile: a top-level `mcpServer` (singular) block — distinct
+        # from the client-side `mcpServers` block. serve() prefers its inline `mcp`
+        # over this.
+        mcp_server_config: Optional[MCPServeConfig] = None
+        if isinstance(mcp_config, dict) and "mcpServer" in mcp_config:
+            mcp_server_config = mcp_config["mcpServer"]
+
+        return cls(
+            mcp,
+            skill,
+            builtin_tools,
+            agent_tools_flat,
+            extra_tools or [],
+            a2a_config,
+            mcp_server_config,
+        )
 
     def register(self, *tools: Tool) -> "Toolkit":
         """Add native/http/custom tools at runtime. First-name-wins; warn on dup.
@@ -153,9 +177,11 @@ class Toolkit:
         self,
         addr: str,
         *,
-        client: "Client",
+        client: Optional["Client"] = None,
         a2a: Optional[A2AConfig] = None,
         on_task: Optional[OnTask] = None,
+        mcp: Optional[MCPServeConfig] = None,
+        on_call: Optional[OnCall] = None,
     ) -> ServeHandle:
         """Serve this toolkit as an agent over HTTP. When the ``a2a`` profile is
         present (inline, or a top-level ``a2a`` config block the toolkit was built
@@ -163,18 +189,21 @@ class Toolkit:
         from skills) and a JSON-RPC endpoint (``SendMessage`` + ``GetTask``) fulfilled
         by the client. A message's A2A ``contextId`` keys the conversation via
         ``client.ask``, so a peer's turns are remembered through the client's
-        ConversationStore. When ``a2a`` is absent, no A2A routes are mounted. Returns a
-        stoppable handle.
+        ConversationStore. When the ``mcp`` profile is present (inline, or a top-level
+        ``mcpServer`` config block), a streamable-HTTP MCP server exposing the
+        toolkit's unified tools is co-mounted at ``POST /mcp``. When both are absent,
+        no routes are mounted. Returns a stoppable handle.
         """
         cfg = a2a if a2a is not None else self._a2a_config
+        mcp_cfg = mcp if mcp is not None else self._mcp_server_config
         skills = list(self._skill.skills.values()) if self._skill is not None else []
 
         async def run_task(text: str, context_id: Optional[str] = None) -> Any:
             # contextId keys the conversation via client.ask so a peer's turns are
             # remembered through the client's ConversationStore; absent ⇒ stateless run.
             if context_id:
-                return await client.ask(text, self, id=context_id)
-            return await client.run(text, self)
+                return await client.ask(text, self, id=context_id)  # type: ignore[union-attr]
+            return await client.run(text, self)  # type: ignore[union-attr]
 
         return await start_a2a_server(
             addr=addr,
@@ -183,6 +212,9 @@ class Toolkit:
             run_task=run_task,
             on_task=on_task,
             loop=asyncio.get_running_loop(),
+            mcp=mcp_cfg,
+            mcp_tools=self.tools() if mcp_cfg else None,
+            on_call=on_call,
         )
 
     def tools(self) -> list[Tool]:

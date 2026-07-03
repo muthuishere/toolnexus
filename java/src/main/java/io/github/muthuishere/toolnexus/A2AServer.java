@@ -258,10 +258,36 @@ public final class A2AServer {
      */
     public static ServeHandle start(String addr, A2AConfig a2a, List<SkillSource.SkillInfo> skills,
                                     RunTask runTask, OnTask onTask) throws IOException {
+        return start(addr, a2a, skills, runTask, onTask, null, null, null);
+    }
+
+    /**
+     * Start the HTTP server with both the A2A profile (inbound §7B) and the MCP
+     * serve profile (inbound §7C). When {@code mcp} is present, a stateless MCP
+     * server is co-mounted at {@code POST /mcp}, independent of A2A; when both
+     * profiles are absent, the server answers 404 to everything.
+     */
+    public static ServeHandle start(String addr, A2AConfig a2a, List<SkillSource.SkillInfo> skills,
+                                    RunTask runTask, OnTask onTask,
+                                    McpServe.MCPServeConfig mcp, List<Tool> mcpTools, McpServe.OnCall onCall)
+            throws IOException {
         String[] hp = splitAddr(addr);
         String host = hp[0];
         int port = Integer.parseInt(hp[1].trim());
         TaskStore store = a2a != null ? resolveStore(a2a.store) : null;
+
+        // MCP serve profile (§7C): a stateless SDK MCP server bridged onto this
+        // JDK HttpServer at POST /mcp, built once and reused (stateless — no session).
+        final McpServe.JdkStatelessHttpTransport mcpTransport;
+        final io.modelcontextprotocol.server.McpStatelessSyncServer mcpServer;
+        if (mcp != null) {
+            mcpTransport = new McpServe.JdkStatelessHttpTransport();
+            mcpServer = McpServe.buildStatelessServer(mcpTransport,
+                    McpServe.exposedMcpTools(mcpTools == null ? List.of() : mcpTools, mcp), mcp, onCall);
+        } else {
+            mcpTransport = null;
+            mcpServer = null;
+        }
 
         // A single virtual-thread executor drives background fulfilment off the
         // request threads; a fulfilment error never propagates to the server.
@@ -273,7 +299,14 @@ public final class A2AServer {
                 String method = exchange.getRequestMethod();
                 String path = exchange.getRequestURI().getPath();
 
-                // No A2A profile ⇒ no routes.
+                // MCP streamable-HTTP profile (independent of A2A): checked first so
+                // /mcp is never shadowed by the A2A POST handler. Absent ⇒ no /mcp.
+                if (mcpTransport != null && "/mcp".equals(path)) {
+                    mcpTransport.handle(exchange);
+                    return;
+                }
+
+                // No A2A profile ⇒ no A2A routes (an MCP-only server 404s everything else).
                 if (a2a == null || store == null) {
                     sendText(exchange, 404, "not found");
                     return;
@@ -353,6 +386,13 @@ public final class A2AServer {
 
             @Override
             public void stop() {
+                if (mcpServer != null) {
+                    try {
+                        mcpServer.closeGracefully();
+                    } catch (Exception ignored) {
+                        // best-effort teardown
+                    }
+                }
                 server.stop(0);
                 executor.shutdownNow();
             }

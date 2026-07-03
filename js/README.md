@@ -268,6 +268,29 @@ Task persistence is a pluggable `TaskStore` — in-memory default, `"file:<dir>"
 it **remembers**: a message's A2A `contextId` keys the conversation through `client.ask`, so a
 peer's turns in the same context carry history via the client's `ConversationStore`.
 
+## Serve as an MCP server (be a gateway)
+
+The inbound mirror of A2A: expose your **whole toolkit as an MCP server** so any MCP client — an IDE,
+another agent, a remote host — can call its tools. Point toolnexus at N MCP servers + skills + your
+own functions, then re-expose the union as **one** MCP server. Unlike A2A (which advertises skills and
+runs the client loop), the MCP client *is* the LLM host, so each `tools/call` dispatches straight to
+`Tool.execute` — no `client`, no tasks, no store.
+
+```ts
+// streamable-HTTP — an embeddable MCP server mounted at POST /mcp, beside any A2A routes:
+const srv = await tk.serve("127.0.0.1:0", {
+  mcp: { name: "my-gateway" /*, tools: ["echo"]  // subset; omit ⇒ every toolkit tool */ },
+  onCall: (ev) => console.error(ev.name, ev.ms, ev.isError),
+})
+console.log(srv.url + "/mcp")   // connect any MCP client here
+await srv.stop()
+```
+
+`tools/list` advertises every toolkit tool (name **verbatim**, `inputSchema` = the tool's parameters);
+`mcp.tools` narrows the surface. The `mcp` profile can also live in the config file as a top-level
+**`mcpServer`** block (singular — distinct from the client-side `mcpServers`). (Transport is
+streamable-HTTP; a stdio transport for local clients like Claude Desktop is a planned follow-up.)
+
 ## Bring your own loop
 
 Don't want the host loop? Use the schema adapters and execute calls yourself:
@@ -309,7 +332,7 @@ a sixth.
 | `tk.skillsPrompt()` | system-prompt skill catalog |
 | `tk.mcpStatus()` | per-server connection status |
 | `tk.toOpenAI()` / `toAnthropic()` / `toGemini()` | provider tool schemas |
-| `tk.serve(addr, { client, a2a?, onTask? })` | serve the toolkit as an A2A agent → `ServeHandle` |
+| `tk.serve(addr, { client?, a2a?, onTask?, mcp?, onCall? })` | serve the toolkit over HTTP — A2A agent and/or streamable-HTTP MCP server (`/mcp`) → `ServeHandle` |
 | `tk.addAgent(cardUrl \| Agent)` | fetch a remote agent's card and register its skills as tools |
 | `tk.close()` | disconnect MCP servers |
 | `defineTool` / `httpTool` / `agent` | build native / HTTP / A2A tools |

@@ -5,6 +5,10 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Extensions.Logging.Abstractions;
+using ModelContextProtocol;
+using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
 
 namespace Toolnexus;
 
@@ -249,11 +253,19 @@ public static class A2AServer
         A2AConfig? a2a,
         IReadOnlyList<SkillSource.SkillInfo> skills,
         Func<string, string?, Task<LlmClient.RunResult>> runTask,
-        OnTask? onTask)
+        OnTask? onTask,
+        MCPServeConfig? mcp = null,
+        IReadOnlyList<ITool>? mcpTools = null,
+        OnCall? onCall = null)
     {
         var (host, port) = SplitAddr(addr);
         if (port == 0) port = FreePort();
         var store = a2a != null ? ResolveStore(a2a.Store) : null;
+        // The MCP inbound profile (independent of A2A): the toolkit's unified tools filtered to
+        // the profile's `tools` list, re-exposed as one MCP server at POST /mcp.
+        var exposedMcpTools = mcp != null
+            ? McpServe.ExposedMcpTools(mcpTools ?? Array.Empty<ITool>(), mcp)
+            : (IReadOnlyList<ITool>)Array.Empty<ITool>();
 
         var bindHost = host is "0.0.0.0" or "::" ? "+" : host;
         var reportHost = host is "0.0.0.0" or "::" ? "127.0.0.1" : host;
@@ -275,7 +287,7 @@ public static class A2AServer
                 // fulfilment / handler error never crashes the server.
                 _ = Task.Run(async () =>
                 {
-                    try { await HandleAsync(ctx, a2a, store, skills, runTask, onTask, baseUrl).ConfigureAwait(false); }
+                    try { await HandleAsync(ctx, a2a, store, skills, runTask, onTask, baseUrl, mcp, exposedMcpTools, onCall).ConfigureAwait(false); }
                     catch { /* isolated — the server keeps serving */ }
                 });
             }
@@ -298,11 +310,29 @@ public static class A2AServer
         IReadOnlyList<SkillSource.SkillInfo> skills,
         Func<string, string?, Task<LlmClient.RunResult>> runTask,
         OnTask? onTask,
-        string baseUrl)
+        string baseUrl,
+        MCPServeConfig? mcp,
+        IReadOnlyList<ITool> mcpTools,
+        OnCall? onCall)
     {
         var req = ctx.Request;
 
-        // No A2A profile ⇒ no routes.
+        // No profile at all ⇒ no routes.
+        if (store == null && mcp == null)
+        {
+            Respond(ctx, 404, "not found", "text/plain");
+            return;
+        }
+
+        // MCP streamable-HTTP profile (independent of A2A): a fresh server+transport per request
+        // (stateless). Checked first so /mcp is never shadowed by the A2A POST handler.
+        if (mcp != null && req.Url!.AbsolutePath == "/mcp")
+        {
+            await HandleMcpAsync(ctx, mcpTools, mcp, onCall).ConfigureAwait(false);
+            return;
+        }
+
+        // No A2A profile ⇒ no A2A routes (an MCP-only server 404s everything else).
         if (a2a == null || store == null)
         {
             Respond(ctx, 404, "not found", "text/plain");
@@ -360,6 +390,61 @@ public static class A2AServer
         }
 
         Respond(ctx, 404, "not found", "text/plain");
+    }
+
+    /// <summary>
+    /// Handle one streamable-HTTP MCP POST: a fresh, stateless MCP server + transport per request
+    /// (no session), matching the JS reference's <c>sessionIdGenerator: undefined</c>. The SDK
+    /// server processes the message and writes the response over the SSE response body.
+    /// </summary>
+    private static async Task HandleMcpAsync(
+        HttpListenerContext ctx, IReadOnlyList<ITool> tools, MCPServeConfig mcp, OnCall? onCall)
+    {
+        if (ctx.Request.HttpMethod != "POST")
+        {
+            Respond(ctx, 405, "method not allowed", "text/plain");
+            return;
+        }
+
+        string body;
+        using (var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8))
+            body = await reader.ReadToEndAsync().ConfigureAwait(false);
+
+        JsonRpcMessage? message;
+        try
+        {
+            message = JsonSerializer.Deserialize<JsonRpcMessage>(body, McpJsonUtilities.DefaultOptions);
+        }
+        catch
+        {
+            message = null;
+        }
+        if (message == null)
+        {
+            Respond(ctx, 400, "invalid JSON-RPC message", "text/plain");
+            return;
+        }
+
+        var transport = new StreamableHttpServerTransport(NullLoggerFactory.Instance) { Stateless = true };
+        var server = McpServe.BuildMcpServer(transport, tools, mcp, onCall);
+        var runTask = server.RunAsync(CancellationToken.None);
+        try
+        {
+            ctx.Response.ContentType = "text/event-stream";
+            ctx.Response.Headers["Cache-Control"] = "no-cache,no-store";
+            ctx.Response.SendChunked = true;
+            var wrote = await transport
+                .HandlePostRequestAsync(message, ctx.Response.OutputStream, CancellationToken.None)
+                .ConfigureAwait(false);
+            if (!wrote) ctx.Response.StatusCode = 202; // notification/response — nothing to write back
+        }
+        finally
+        {
+            try { ctx.Response.OutputStream.Close(); } catch { }
+            try { await transport.DisposeAsync().ConfigureAwait(false); } catch { }
+            try { await server.DisposeAsync().ConfigureAwait(false); } catch { }
+            try { await runTask.ConfigureAwait(false); } catch { }
+        }
     }
 
     /// <summary>

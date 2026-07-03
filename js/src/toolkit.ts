@@ -8,6 +8,7 @@ import { loadSkills, type SkillSource } from "./skill.js"
 import { selectBuiltins, type BuiltinsConfig } from "./builtin.js"
 import { agentTools, parseAgentsConfig, type Agent } from "./a2a.js"
 import { startA2AServer, type A2AConfig, type OnTask, type ServeHandle } from "./serve.js"
+import { type MCPServeConfig, type OnCall } from "./mcpserve.js"
 import { toAnthropic, toGemini, toOpenAI } from "./adapters.js"
 import type { Client } from "./client.js"
 
@@ -31,6 +32,8 @@ export class Toolkit {
     extraTools: Tool[],
     /** A2A profile read from a top-level `a2a` config block (serve() falls back to this). */
     private readonly a2aConfig: A2AConfig | undefined,
+    /** MCP serve profile read from a top-level `mcpServer` config block. */
+    private readonly mcpServerConfig: MCPServeConfig | undefined,
   ) {
     // Builtins are the lowest-precedence source: a host extraTools entry with
     // the same name shadows a builtin (SPEC §4). Drop shadowed builtins up
@@ -87,7 +90,15 @@ export class Toolkit {
       a2aConfig = (opts.mcpConfig as { a2a?: A2AConfig }).a2a
     }
 
-    return new Toolkit(mcp, skill, builtins, agentToolsFlat, opts.extraTools ?? [], a2aConfig)
+    // MCP inbound profile: a top-level `mcpServer` (singular) block — distinct
+    // from the client-side `mcpServers` block. serve()/serveStdio() prefer their
+    // inline `mcp` over this.
+    let mcpServerConfig: MCPServeConfig | undefined
+    if (opts.mcpConfig && typeof opts.mcpConfig === "object" && "mcpServer" in opts.mcpConfig) {
+      mcpServerConfig = (opts.mcpConfig as { mcpServer?: MCPServeConfig }).mcpServer
+    }
+
+    return new Toolkit(mcp, skill, builtins, agentToolsFlat, opts.extraTools ?? [], a2aConfig, mcpServerConfig)
   }
 
   tools(): Tool[] {
@@ -129,8 +140,12 @@ export class Toolkit {
    * peer's turns are remembered through the client's ConversationStore.
    * When `a2a` is absent, no A2A routes are mounted. Returns a stoppable handle.
    */
-  serve(addr: string, opts: { client: Client; a2a?: A2AConfig; onTask?: OnTask }): Promise<ServeHandle> {
+  serve(
+    addr: string,
+    opts: { client?: Client; a2a?: A2AConfig; onTask?: OnTask; mcp?: MCPServeConfig; onCall?: OnCall },
+  ): Promise<ServeHandle> {
     const a2a = opts.a2a ?? this.a2aConfig
+    const mcp = opts.mcp ?? this.mcpServerConfig
     const skills = this.skill ? Object.values(this.skill.skills) : []
     return startA2AServer({
       addr,
@@ -138,9 +153,12 @@ export class Toolkit {
       skills,
       runTask: (text, contextId) =>
         contextId
-          ? opts.client.ask(text, { toolkit: this, id: contextId })
-          : opts.client.run(text, { toolkit: this }),
+          ? opts.client!.ask(text, { toolkit: this, id: contextId })
+          : opts.client!.run(text, { toolkit: this }),
       onTask: opts.onTask,
+      mcp,
+      mcpTools: mcp ? this.tools() : undefined,
+      onCall: opts.onCall,
     })
   }
 

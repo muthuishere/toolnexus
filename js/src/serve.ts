@@ -18,10 +18,12 @@ import http from "node:http"
 import fs from "node:fs"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
-import { sanitize } from "./types.js"
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
+import { sanitize, type Tool } from "./types.js"
 import type { SkillInfo } from "./skill.js"
 import type { RunResult } from "./client.js"
 import type { A2AArtifact, A2ATask, A2ATaskState, AgentCard } from "./a2a.js"
+import { buildMcpServer, exposedMcpTools, type MCPServeConfig, type OnCall } from "./mcpserve.js"
 
 // ---------------------------------------------------------------------------
 // TaskStore adapter — pluggable persistence for served Tasks.
@@ -162,6 +164,12 @@ export interface StartServerOptions {
    * message) keys the conversation so served turns are remembered via the store. */
   runTask: (text: string, contextId?: string) => Promise<RunResult>
   onTask?: OnTask
+  /** When present, mounts a streamable-HTTP MCP server at `/mcp`; absent ⇒ no MCP route. */
+  mcp?: MCPServeConfig
+  /** The toolkit's unified tools, exposed by the MCP profile. */
+  mcpTools?: Tool[]
+  /** Surfaced on each inbound MCP `tools/call`. */
+  onCall?: OnCall
 }
 
 /** Extract the concatenated text of a JSON-RPC `SendMessage` message's parts. */
@@ -182,14 +190,23 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   })
 }
 
+function safeJson(body: string): unknown {
+  try {
+    return JSON.parse(body)
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * Start the HTTP server. Delegated to by `Toolkit.serve`. When `a2a` is absent,
  * the server answers 404 to everything (a minimal base for now).
  */
 export async function startA2AServer(opts: StartServerOptions): Promise<ServeHandle> {
-  const { a2a, skills, runTask, onTask } = opts
+  const { a2a, skills, runTask, onTask, mcp, mcpTools, onCall } = opts
   const [host, portStr] = splitAddr(opts.addr)
   const store = a2a ? resolveStore(a2a.store) : undefined
+  const exposedTools = mcp ? exposedMcpTools(mcpTools ?? [], mcp) : []
 
   const server = http.createServer((req, res) => {
     const rpcRes = (id: unknown, payload: object) => {
@@ -199,7 +216,38 @@ export async function startA2AServer(opts: StartServerOptions): Promise<ServeHan
     const rpcOk = (id: unknown, result: unknown) => rpcRes(id, { result })
     const rpcErr = (id: unknown, code: number, message: string) => rpcRes(id, { error: { code, message } })
 
-    // No A2A profile ⇒ no routes.
+    // No profile at all ⇒ no routes.
+    if (!store && !mcp) {
+      res.writeHead(404)
+      res.end("not found")
+      return
+    }
+
+    // MCP streamable-HTTP profile (independent of A2A): a fresh server+transport
+    // per request (stateless — sessionIdGenerator undefined). Checked first so
+    // `/mcp` is never shadowed by the A2A POST handler.
+    if (mcp && req.url && (req.url === "/mcp" || req.url.startsWith("/mcp?"))) {
+      void (async () => {
+        const body = req.method === "POST" ? await readBody(req) : ""
+        const parsed = body ? safeJson(body) : undefined
+        const mcpServer = buildMcpServer(exposedTools, mcp, onCall)
+        const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
+        res.on("close", () => {
+          void transport.close()
+          void mcpServer.close()
+        })
+        await mcpServer.connect(transport)
+        await transport.handleRequest(req, res, parsed)
+      })().catch(() => {
+        if (!res.headersSent) {
+          res.writeHead(500)
+          res.end("mcp error")
+        }
+      })
+      return
+    }
+
+    // No A2A profile ⇒ no A2A routes (an MCP-only server 404s everything else).
     if (!a2a || !store) {
       res.writeHead(404)
       res.end("not found")

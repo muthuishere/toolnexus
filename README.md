@@ -23,7 +23,7 @@ npm i toolnexus                                   # JS / TypeScript
 pip install toolnexus                             # Python
 go get github.com/muthuishere/toolnexus/golang    # Go
 dotnet add package Toolnexus                       # C#
-# Java (Maven): io.github.muthuishere:toolnexus:0.4.0
+# Java (Maven): io.github.muthuishere:toolnexus:0.5.0
 ```
 
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
@@ -192,6 +192,24 @@ Both directions exist in all five ports (`agent(...)` / `Agent{...}`, an `agents
 `serve` / `ServeAsync`). Served tasks persist through a pluggable **TaskStore** (in-memory default,
 `"file:<dir>"`, or your own). See each port's README for the full option set.
 
+## Serve as an MCP server — be a gateway
+
+The other inbound edge: expose your **whole toolkit as an MCP server**, so any MCP client (Claude
+Desktop, an IDE, another agent) can call its tools. Aggregate N MCP servers + skills + your own
+functions behind one toolkit, then re-expose the **union** as one MCP server — a universal MCP
+gateway. Unlike A2A (which advertises skills and runs the client loop), the MCP client *is* the LLM
+host, so each `tools/call` dispatches straight to `Tool.execute` — no client, no tasks, no store.
+
+```ts
+// streamable-HTTP — an embeddable MCP server at POST /mcp, beside any A2A routes:
+const srv = await tk.serve("127.0.0.1:0", { mcp: { name: "my-gateway" } })   // connect at srv.url + "/mcp"
+```
+
+All five ports ship the streamable-HTTP MCP server (the `/mcp` endpoint on `serve`), built on each
+port's existing MCP SDK in server mode. `tools/list` advertises every tool (name verbatim,
+`inputSchema` = the tool's parameters). A stdio transport (for local clients like Claude Desktop) is a
+planned follow-up. See `SPEC.md §7C`.
+
 ## Conversations & memory
 
 The host loop remembers a thread for you. `ask(prompt, { toolkit, id })` loads that id's transcript
@@ -259,6 +277,7 @@ implementation's examples and tests. The cross-language contract lives in [SPEC.
 - ✅ Native/decorator tools + HTTP/REST tools
 - ✅ Built-in tools (10 opencode tools; on by default, whole-source toggle + per-tool map)
 - ✅ A2A agents — outbound (call remote agents) + inbound (`serve` your toolkit as an agent); all five ports
+- ✅ MCP server (inbound) — expose the toolkit as a streamable-HTTP MCP server (`/mcp` on `serve`); all five ports
 - ✅ Conversation memory (`ask` + pluggable `ConversationStore`; A2A serve remembers by `contextId`)
 - ✅ Streaming with memory (`stream`/`ask` take an `id`; `ask` gains an `on_text` delta callback)
 - ✅ Observability — `on_metric` event feed + zero-dep `client.metrics()` Prometheus text

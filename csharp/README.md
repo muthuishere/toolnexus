@@ -306,6 +306,29 @@ conversation via `client.AskAsync`, so a peer's turns are **remembered** through
 `IConversationStore` (a message with no `contextId` is a stateless run). Task lifecycle persistence
 is a separate, pluggable `ITaskStore` — in-memory default, `"file:<dir>"`, or your own.
 
+## Serve as an MCP server (be a gateway)
+
+The inbound mirror of A2A: expose your **whole toolkit as an MCP server** so any MCP client — an IDE,
+another agent, a remote host — can call its tools. Point toolnexus at N MCP servers + skills + your
+own functions, then re-expose the union as **one** MCP server. Unlike A2A, the MCP client *is* the LLM
+host, so each `tools/call` dispatches straight to the tool's `ExecuteAsync` — no client, no tasks, no store.
+
+```csharp
+// streamable-HTTP — an embeddable MCP server mounted at POST /mcp, beside any A2A routes:
+var srv = await tk.ServeAsync("127.0.0.1:0", new Toolkit.ServeOptions
+{
+    Mcp = new MCPServeConfig { Name = "my-gateway" },   // optional Tools = ["echo"] subset; null ⇒ all
+    OnCall = ev => { Console.Error.WriteLine($"{ev.Name} {ev.Ms} {ev.IsError}"); return Task.CompletedTask; },
+});
+Console.WriteLine(srv.Url + "/mcp");   // connect any MCP client here
+await srv.StopAsync();
+```
+
+`tools/list` advertises every toolkit tool (name **verbatim**, `inputSchema` = the tool's parameters);
+`Mcp.Tools` narrows the surface. The profile can also live in the config file as a top-level
+**`mcpServer`** block (singular — distinct from the client-side `mcpServers`). (Transport is
+streamable-HTTP; a stdio transport for local clients like Claude Desktop is a planned follow-up.)
+
 ## Bring your own loop
 
 Don't want the built-in loop? Emit the schema for your provider, run your own calls, and let the

@@ -14,6 +14,9 @@ public sealed class Toolkit : IAsyncDisposable
     /// <summary>A2A profile read from a top-level <c>a2a</c> config block (ServeAsync falls back to this).</summary>
     private readonly A2AConfig? _a2aConfig;
 
+    /// <summary>MCP serve profile read from a top-level <c>mcpServer</c> config block (ServeAsync falls back to this).</summary>
+    private readonly MCPServeConfig? _mcpServerConfig;
+
     public sealed class Options
     {
         /// <summary>Path string, raw JSON string, or parsed config dictionary.</summary>
@@ -48,11 +51,12 @@ public sealed class Toolkit : IAsyncDisposable
         public Options WithAgents(params Agent[] v) { Agents = v.ToList(); return this; }
     }
 
-    private Toolkit(McpSource? mcp, SkillSource? skill, List<ITool> builtins, List<ITool> agents, List<ITool> extraTools, A2AConfig? a2aConfig)
+    private Toolkit(McpSource? mcp, SkillSource? skill, List<ITool> builtins, List<ITool> agents, List<ITool> extraTools, A2AConfig? a2aConfig, MCPServeConfig? mcpServerConfig)
     {
         _mcp = mcp;
         _skill = skill;
         _a2aConfig = a2aConfig;
+        _mcpServerConfig = mcpServerConfig;
         // Builtins are the lowest-precedence source: a host extraTools entry with the same name
         // shadows a builtin (SPEC §4). Drop shadowed builtins up front, then apply the normal
         // first-wins dedupe for MCP/skill/agents/extras. Order: MCP → skill → builtin → agents → extraTools.
@@ -110,7 +114,28 @@ public sealed class Toolkit : IAsyncDisposable
         if (opts.McpConfig is IDictionary<string, object?> a2amc && a2amc.ContainsKey("a2a"))
             a2aConfig = ParseA2AConfig(a2amc.Get("a2a"));
 
-        return new Toolkit(mcp, skill, builtins, agentTools, extras, a2aConfig);
+        // MCP inbound profile: a top-level `mcpServer` (singular) block — distinct from the
+        // client-side `mcpServers` block. ServeAsync prefers its inline `mcp` over this.
+        MCPServeConfig? mcpServerConfig = null;
+        if (opts.McpConfig is IDictionary<string, object?> mcpmc && mcpmc.ContainsKey("mcpServer"))
+            mcpServerConfig = ParseMcpServeConfig(mcpmc.Get("mcpServer"));
+
+        return new Toolkit(mcp, skill, builtins, agentTools, extras, a2aConfig, mcpServerConfig);
+    }
+
+    /// <summary>Coerce a top-level <c>mcpServer</c> config value (an <see cref="MCPServeConfig"/> or a parsed dict) into an <see cref="MCPServeConfig"/>.</summary>
+    private static MCPServeConfig? ParseMcpServeConfig(object? value)
+    {
+        if (value is MCPServeConfig cfg) return cfg;
+        if (value is not IDictionary<string, object?> map) return null;
+        var result = new MCPServeConfig
+        {
+            Name = map.Get("name") as string,
+            Version = map.Get("version") as string,
+        };
+        if (map.Get("tools") is IEnumerable<object?> tools)
+            result.Tools = tools.Select(t => t?.ToString() ?? "").ToList();
+        return result;
     }
 
     /// <summary>Coerce a top-level <c>a2a</c> config value (an <see cref="A2AConfig"/> or a parsed dict) into an <see cref="A2AConfig"/>.</summary>
@@ -187,6 +212,12 @@ public sealed class Toolkit : IAsyncDisposable
 
         /// <summary>Fires on each served Task's terminal state with the <see cref="LlmClient.RunResult"/> telemetry.</summary>
         public OnTask? OnTask { get; set; }
+
+        /// <summary>Opt-in MCP inbound profile; mounts a streamable-HTTP MCP server at <c>POST /mcp</c>. Falls back to a top-level <c>mcpServer</c> config block when null.</summary>
+        public MCPServeConfig? Mcp { get; set; }
+
+        /// <summary>Fires on each inbound MCP <c>tools/call</c>.</summary>
+        public OnCall? OnCall { get; set; }
     }
 
     /// <summary>
@@ -201,6 +232,7 @@ public sealed class Toolkit : IAsyncDisposable
     public Task<ServeHandle> ServeAsync(string addr, ServeOptions opts)
     {
         var a2a = opts.A2A ?? _a2aConfig;
+        var mcp = opts.Mcp ?? _mcpServerConfig;
         var skills = _skill != null ? _skill.Skills.Values.ToList() : new List<SkillSource.SkillInfo>();
         return A2AServer.StartAsync(
             addr,
@@ -211,7 +243,10 @@ public sealed class Toolkit : IAsyncDisposable
             (text, contextId) => contextId != null
                 ? opts.Client.AskAsync(text, this, contextId)
                 : opts.Client.RunAsync(text, this),
-            opts.OnTask);
+            opts.OnTask,
+            mcp,
+            mcp != null ? Tools() : null,
+            opts.OnCall);
     }
 
     public async Task<ToolResult> ExecuteAsync(string name, IDictionary<string, object?>? args, ToolContext? ctx = null)

@@ -17,6 +17,8 @@ public final class Toolkit implements AutoCloseable {
     private final SkillSource skill;   // may be null
     /** A2A profile read from a top-level {@code a2a} config block; {@link #serve} falls back to this. */
     private final A2AServer.A2AConfig a2aConfig; // may be null
+    /** MCP serve profile read from a top-level {@code mcpServer} (singular) config block. */
+    private final McpServe.MCPServeConfig mcpServerConfig; // may be null
     private final Map<String, Tool> byName = new LinkedHashMap<>();
 
     public static final class Options {
@@ -41,10 +43,11 @@ public final class Toolkit implements AutoCloseable {
     }
 
     private Toolkit(McpSource mcp, SkillSource skill, List<Tool> builtins, List<Tool> agents, List<Tool> extraTools,
-                   A2AServer.A2AConfig a2aConfig) {
+                   A2AServer.A2AConfig a2aConfig, McpServe.MCPServeConfig mcpServerConfig) {
         this.mcp = mcp;
         this.skill = skill;
         this.a2aConfig = a2aConfig;
+        this.mcpServerConfig = mcpServerConfig;
         // Builtins are the lowest-precedence source: a host extraTools entry with
         // the same name shadows a builtin (SPEC §4). Drop shadowed builtins up
         // front, then apply the normal first-wins dedupe for MCP/skill/agents/extras.
@@ -121,7 +124,20 @@ public final class Toolkit implements AutoCloseable {
             }
         }
 
-        return new Toolkit(mcp, skill, builtins, agentTools, extras, a2aConfig);
+        // MCP inbound profile: a top-level `mcpServer` (singular) block on a parsed
+        // config Map — distinct from the client-side `mcpServers` block. serve()
+        // prefers its inline `mcp` over this.
+        McpServe.MCPServeConfig mcpServerConfig = null;
+        if (opts.mcpConfig instanceof Map && ((Map<?, ?>) opts.mcpConfig).containsKey("mcpServer")) {
+            Object block = ((Map<?, ?>) opts.mcpConfig).get("mcpServer");
+            if (block instanceof Map) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> mcpBlock = (Map<String, Object>) block;
+                mcpServerConfig = McpServe.MCPServeConfig.fromMap(mcpBlock);
+            }
+        }
+
+        return new Toolkit(mcp, skill, builtins, agentTools, extras, a2aConfig, mcpServerConfig);
     }
 
     public List<Tool> tools() {
@@ -162,15 +178,19 @@ public final class Toolkit implements AutoCloseable {
         return addAgent(A2A.agent(cardUrl));
     }
 
-    /** Options for {@link #serve} — the client loop plus the opt-in A2A profile + callback. */
+    /** Options for {@link #serve} — the client loop plus the opt-in A2A/MCP profiles + callbacks. */
     public static final class ServeOptions {
         public LlmClient client;
         public A2AServer.A2AConfig a2a;      // null ⇒ fall back to the toolkit's config block
         public A2AServer.OnTask onTask;
+        public McpServe.MCPServeConfig mcp;  // null ⇒ fall back to the toolkit's `mcpServer` block
+        public McpServe.OnCall onCall;
 
         public ServeOptions client(LlmClient v) { this.client = v; return this; }
         public ServeOptions a2a(A2AServer.A2AConfig v) { this.a2a = v; return this; }
         public ServeOptions onTask(A2AServer.OnTask v) { this.onTask = v; return this; }
+        public ServeOptions mcp(McpServe.MCPServeConfig v) { this.mcp = v; return this; }
+        public ServeOptions onCall(McpServe.OnCall v) { this.onCall = v; return this; }
     }
 
     /**
@@ -185,6 +205,7 @@ public final class Toolkit implements AutoCloseable {
      */
     public A2AServer.ServeHandle serve(String addr, ServeOptions opts) {
         A2AServer.A2AConfig a2a = opts.a2a != null ? opts.a2a : this.a2aConfig;
+        McpServe.MCPServeConfig mcp = opts.mcp != null ? opts.mcp : this.mcpServerConfig;
         List<SkillSource.SkillInfo> skills = skill != null
                 ? new ArrayList<>(skill.skills().values())
                 : new ArrayList<>();
@@ -196,7 +217,8 @@ public final class Toolkit implements AutoCloseable {
                     (text, contextId) -> (contextId != null && !contextId.isEmpty())
                             ? client.ask(text, this, contextId)
                             : client.run(text, this),
-                    opts.onTask);
+                    opts.onTask,
+                    mcp, mcp != null ? tools() : null, opts.onCall);
         } catch (java.io.IOException e) {
             throw new RuntimeException("serve failed: " + e.getMessage(), e);
         }
