@@ -18,6 +18,7 @@ from .client import (
     Client,
     ClientStyle,
     Conversation,
+    WaitFor,
     ConversationStore,
     Hooks,
     InMemoryConversationStore,
@@ -74,12 +75,17 @@ from .skill import (
 )
 from .toolkit import Toolkit, create_toolkit
 from .types import (
+    Answer,
     JSONSchema,
     McpStatus,
+    Request,
     Tool,
     ToolContext,
     ToolResult,
     ToolSource,
+    auth_required,
+    pending,
+    pending_of,
     sanitize,
 )
 
@@ -92,6 +98,12 @@ __all__ = [
     "ToolResult",
     "ToolSource",
     "sanitize",
+    # suspension (§10)
+    "Request",
+    "Answer",
+    "pending",
+    "auth_required",
+    "pending_of",
     # mcp
     "DEFAULT_TIMEOUT",
     "McpConfig",
@@ -160,5 +172,6 @@ __all__ = [
     "RunCancelled",
     "RunResult",
     "RunTimeout",
+    "WaitFor",
     "create_client",
 ]

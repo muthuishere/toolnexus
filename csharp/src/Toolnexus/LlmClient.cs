@@ -118,6 +118,18 @@ public sealed class LlmClient
         /// feed the built-in Prometheus registry behind <see cref="Metrics"/>.</summary>
         public Action<MetricEvent>? OnMetric { get; set; }
 
+        /// <summary>
+        /// §10 Suspension resolver — the ONE host slot. When a tool returns a suspension
+        /// (<c>Metadata["pending"]</c> = <see cref="Request"/>), the client calls this, then retries the
+        /// tool once with <c>ToolContext.Answer</c> = the resolution. Its interior is unconstrained (open
+        /// a browser + poll; text a link to a channel; forward over A2A). Named <c>WaitFor</c>, never
+        /// <c>await</c> (reserved in C#). When null, <c>run</c> does NOT hang — it returns
+        /// <c>{ Status = "pending", Pending = request }</c> to resume later.
+        /// </summary>
+        public Func<Request, Task<Answer>>? WaitFor { get; set; }
+
+        public Options WithWaitFor(Func<Request, Task<Answer>> v) { WaitFor = v; return this; }
+
         public Options WithBaseUrl(string v) { BaseUrl = v; return this; }
         public Options WithStyle(string v) { Style = v; return this; }
         public Options WithModel(string v) { Model = v; return this; }
@@ -189,6 +201,42 @@ public sealed class LlmClient
         return (a, result);
     }
 
+    /// <summary>
+    /// §10: resolve a suspended tool result. Calls <c>WaitFor(request)</c>, and on <c>ok</c> re-executes
+    /// the tool ONCE with <c>ToolContext.Answer = answer</c>. Returns the resolved result, or a non-null
+    /// <c>Halted</c> when no <c>WaitFor</c> is configured (the run should stop and surface the request).
+    /// </summary>
+    private async Task<(ToolResult Result, Request? Halted)> ResolvePendingAsync(
+        Toolkit toolkit, string name, IDictionary<string, object?> args, Request request, string? id, int turn)
+    {
+        if (_opts.WaitFor == null)
+            return (ToolResult.Error(request.Prompt), request); // halt: durable host resumes later
+
+        var answer = await _opts.WaitFor(request).ConfigureAwait(false);
+        if (answer == null || !answer.Ok)
+            return (ToolResult.Error($"declined/expired: {request.Prompt}"), null);
+
+        var source = toolkit.Get(name)?.Source ?? "custom";
+        var t0 = NowMs();
+        var result = await toolkit.ExecuteAsync(name, args, new ToolContext(answer: answer)).ConfigureAwait(false);
+        if (_opts.Hooks?.AfterTool != null)
+        {
+            var ov = _opts.Hooks.AfterTool(new AfterToolEvent(name, args, result, id, turn));
+            if (ov?.Result != null) result = ov.Result;
+        }
+        Emit(MetricEvent.ToolCall(name, source, result.IsError, NowMs() - t0));
+        if (ToolResult.PendingOf(result) != null)
+            result = ToolResult.Error($"unresolved: {request.Prompt}"); // never loop forever on the same request
+        return (result, null);
+    }
+
+    /// <summary>§10: build the terminal <see cref="RunResult"/> for a run halted by an unresolved suspension.</summary>
+    private RunResult PendingRun(long runStart, Request request, List<object?> messages, List<ToolCall> toolCalls, int turns, Usage usage)
+    {
+        Emit(MetricEvent.Run(_opts.Model, turns, toolCalls.Count, usage.TotalTokens, NowMs() - runStart));
+        return new RunResult(request.Prompt, messages, toolCalls, turns, usage, _opts.Model, "pending", request);
+    }
+
     // ---------------------------------------------------------------- results
 
     public sealed record ToolCall(string Name, IDictionary<string, object?> Args, string Output, bool IsError, IDictionary<string, object?>? Metadata);
@@ -212,7 +260,14 @@ public sealed class LlmClient
         public Usage Usage { get; }
         public string Model { get; }
 
-        public RunResult(string text, List<object?> messages, List<ToolCall> toolCalls, int turns, Usage usage, string model)
+        /// <summary>§10: "done" normally; "pending" iff a tool suspended and no <c>WaitFor</c> was configured.</summary>
+        public string Status { get; }
+
+        /// <summary>§10: the unresolved suspension — present iff <see cref="Status"/> == "pending".</summary>
+        public Request? Pending { get; }
+
+        public RunResult(string text, List<object?> messages, List<ToolCall> toolCalls, int turns, Usage usage,
+            string model, string status = "done", Request? pending = null)
         {
             Text = text;
             Messages = messages;
@@ -220,18 +275,22 @@ public sealed class LlmClient
             Turns = turns;
             Usage = usage;
             Model = model;
+            Status = status;
+            Pending = pending;
         }
     }
 
     // ---------------------------------------------------------------- streaming events
 
-    public enum StreamKind { Text, ToolCall, ToolResult, Usage, Done }
+    public enum StreamKind { Text, ToolCall, ToolResult, Usage, Pending, Done }
 
     public sealed record StreamEvent(
         StreamKind Type, string? Delta = null, string? Id = null, string? Name = null,
         IDictionary<string, object?>? Args = null, string? Output = null, bool IsError = false,
-        Usage? Usage = null, RunResult? Result = null)
+        Usage? Usage = null, RunResult? Result = null, Request? Request = null)
     {
+        /// <summary>§10: a tool is waiting on an out-of-band resolution (emitted before <c>WaitFor</c> runs).</summary>
+        internal static StreamEvent PendingEvent(Request request) => new(StreamKind.Pending, Request: request);
         internal static StreamEvent Text(string delta) => new(StreamKind.Text, Delta: delta);
         internal static StreamEvent ToolCallEvent(string? id, string name, IDictionary<string, object?> args)
             => new(StreamKind.ToolCall, Id: id, Name: name, Args: args);
@@ -444,32 +503,42 @@ public sealed class LlmClient
 
                 // Execute all tool calls in this turn concurrently.
                 var n = calls.Count;
-                var toolMsgs = new Dictionary<string, object?>[n];
-                var recorded = new ToolCall[n];
+                var names = new string[n];
+                var callIds = new string?[n];
+                var runs = new (IDictionary<string, object?> Args, ToolResult Result)[n];
                 var tasks = new Task[n];
                 for (var i = 0; i < n; i++)
                 {
                     var idx = i;
                     var call = (IDictionary<string, object?>)calls[i]!;
                     var fn = (IDictionary<string, object?>)call["function"]!;
-                    var fnName = fn.Get("name")?.ToString() ?? "";
+                    names[idx] = fn.Get("name")?.ToString() ?? "";
+                    callIds[idx] = call.Get("id")?.ToString();
                     var args = Json.ParseObjectLoose(fn.Get("arguments")?.ToString() ?? "{}");
-                    var callId = call.Get("id")?.ToString();
-                    tasks[idx] = Task.Run(async () =>
-                    {
-                        var run = await RunToolAsync(toolkit, fnName, args, callId, turn).ConfigureAwait(false);
-                        recorded[idx] = new ToolCall(fnName, run.Args, run.Result.Output, run.Result.IsError, run.Result.Metadata);
-                        toolMsgs[idx] = new Dictionary<string, object?>
-                        {
-                            ["role"] = "tool",
-                            ["tool_call_id"] = callId,
-                            ["content"] = run.Result.Output,
-                        };
-                    });
+                    tasks[idx] = Task.Run(async () => runs[idx] = await RunToolAsync(toolkit, names[idx], args, callIds[idx], turn).ConfigureAwait(false));
                 }
                 await Task.WhenAll(tasks).ConfigureAwait(false);
-                toolCalls.AddRange(recorded);
-                messages.AddRange(toolMsgs);
+
+                // §10: resolve any suspensions (serially — WaitFor is a human-in-the-loop slot).
+                Request? halted = null;
+                for (var i = 0; i < n; i++)
+                {
+                    var req = ToolResult.PendingOf(runs[i].Result);
+                    if (req != null)
+                    {
+                        var r = await ResolvePendingAsync(toolkit, names[i], runs[i].Args, req, callIds[i], turn).ConfigureAwait(false);
+                        runs[i] = (runs[i].Args, r.Result);
+                        if (r.Halted != null) halted = r.Halted;
+                    }
+                    toolCalls.Add(new ToolCall(names[i], runs[i].Args, runs[i].Result.Output, runs[i].Result.IsError, runs[i].Result.Metadata));
+                    messages.Add(new Dictionary<string, object?>
+                    {
+                        ["role"] = "tool",
+                        ["tool_call_id"] = callIds[i],
+                        ["content"] = runs[i].Result.Output,
+                    });
+                }
+                if (halted != null) return PendingRun(runStart, halted, messages, toolCalls, turns, usage);
             }
             return EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage);
         }
@@ -531,32 +600,44 @@ public sealed class LlmClient
                 }
 
                 var n = uses.Count;
-                var resultBlocks = new Dictionary<string, object?>[n];
-                var recorded = new ToolCall[n];
+                var names = new string[n];
+                var useIds = new string?[n];
+                var runs = new (IDictionary<string, object?> Args, ToolResult Result)[n];
                 var tasks = new Task[n];
                 for (var i = 0; i < n; i++)
                 {
                     var idx = i;
                     var use = uses[i];
                     var input = use.Get("input") as IDictionary<string, object?> ?? new Dictionary<string, object?>();
-                    var useName = use.Get("name")?.ToString() ?? "";
-                    var useId = use.Get("id")?.ToString();
-                    tasks[idx] = Task.Run(async () =>
-                    {
-                        var run = await RunToolAsync(toolkit, useName, input, useId, turn).ConfigureAwait(false);
-                        recorded[idx] = new ToolCall(useName, run.Args, run.Result.Output, run.Result.IsError, run.Result.Metadata);
-                        resultBlocks[idx] = new Dictionary<string, object?>
-                        {
-                            ["type"] = "tool_result",
-                            ["tool_use_id"] = useId,
-                            ["content"] = run.Result.Output,
-                            ["is_error"] = run.Result.IsError,
-                        };
-                    });
+                    names[idx] = use.Get("name")?.ToString() ?? "";
+                    useIds[idx] = use.Get("id")?.ToString();
+                    tasks[idx] = Task.Run(async () => runs[idx] = await RunToolAsync(toolkit, names[idx], input, useIds[idx], turn).ConfigureAwait(false));
                 }
                 await Task.WhenAll(tasks).ConfigureAwait(false);
-                toolCalls.AddRange(recorded);
-                messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = resultBlocks.Cast<object?>().ToList() });
+
+                // §10: resolve any suspensions serially.
+                Request? halted = null;
+                var resultBlocks = new List<object?>(n);
+                for (var i = 0; i < n; i++)
+                {
+                    var req = ToolResult.PendingOf(runs[i].Result);
+                    if (req != null)
+                    {
+                        var r = await ResolvePendingAsync(toolkit, names[i], runs[i].Args, req, useIds[i], turn).ConfigureAwait(false);
+                        runs[i] = (runs[i].Args, r.Result);
+                        if (r.Halted != null) halted = r.Halted;
+                    }
+                    toolCalls.Add(new ToolCall(names[i], runs[i].Args, runs[i].Result.Output, runs[i].Result.IsError, runs[i].Result.Metadata));
+                    resultBlocks.Add(new Dictionary<string, object?>
+                    {
+                        ["type"] = "tool_result",
+                        ["tool_use_id"] = useIds[i],
+                        ["content"] = runs[i].Result.Output,
+                        ["is_error"] = runs[i].Result.IsError,
+                    });
+                }
+                messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = resultBlocks });
+                if (halted != null) return PendingRun(runStart, halted, messages, toolCalls, turns, usage);
             }
             return EndRun(runStart, "", messages, toolCalls, turns, usage);
         }
@@ -711,13 +792,28 @@ public sealed class LlmClient
                     tasks[idx] = Task.Run(async () => runs[idx] = await RunToolAsync(toolkit, slot[1], args, slot[0], turn).ConfigureAwait(false));
                 }
                 await Task.WhenAll(tasks).ConfigureAwait(false);
+                Request? halted = null;
                 for (var i = 0; i < n; i++)
                 {
                     var slot = acc[order[i]];
-                    var r = runs[i];
-                    toolCalls.Add(new ToolCall(slot[1], r.Args, r.Result.Output, r.Result.IsError, r.Result.Metadata));
-                    messages.Add(new Dictionary<string, object?> { ["role"] = "tool", ["tool_call_id"] = slot[0], ["content"] = r.Result.Output });
-                    onEvent(StreamEvent.ToolResultEvent(slot[0], slot[1], r.Result.Output, r.Result.IsError));
+                    var req = ToolResult.PendingOf(runs[i].Result);
+                    if (req != null)
+                    {
+                        onEvent(StreamEvent.PendingEvent(req)); // surface BEFORE WaitFor so a channel can push the link
+                        var r = await ResolvePendingAsync(toolkit, slot[1], runs[i].Args, req, slot[0], turn).ConfigureAwait(false);
+                        runs[i] = (runs[i].Args, r.Result);
+                        if (r.Halted != null) halted = r.Halted;
+                    }
+                    var rr = runs[i];
+                    toolCalls.Add(new ToolCall(slot[1], rr.Args, rr.Result.Output, rr.Result.IsError, rr.Result.Metadata));
+                    messages.Add(new Dictionary<string, object?> { ["role"] = "tool", ["tool_call_id"] = slot[0], ["content"] = rr.Result.Output });
+                    onEvent(StreamEvent.ToolResultEvent(slot[0], slot[1], rr.Result.Output, rr.Result.IsError));
+                }
+                if (halted != null)
+                {
+                    var p = PendingRun(runStart, halted, messages, toolCalls, turns, usage);
+                    onEvent(StreamEvent.DoneEvent(p));
+                    return p;
                 }
             }
             var done = EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage);
@@ -881,13 +977,22 @@ public sealed class LlmClient
                     tasks[idx] = Task.Run(async () => runs[idx] = await RunToolAsync(toolkit, name, input, id, turn).ConfigureAwait(false));
                 }
                 await Task.WhenAll(tasks).ConfigureAwait(false);
+                Request? halted = null;
                 var results = new List<object?>(n);
                 for (var i = 0; i < n; i++)
                 {
                     var u = uses[i];
-                    var r = runs[i];
                     var name = u.Get("name")?.ToString() ?? "";
                     var id = u.Get("id")?.ToString();
+                    var req = ToolResult.PendingOf(runs[i].Result);
+                    if (req != null)
+                    {
+                        onEvent(StreamEvent.PendingEvent(req)); // surface BEFORE WaitFor
+                        var rp = await ResolvePendingAsync(toolkit, name, runs[i].Args, req, id, turn).ConfigureAwait(false);
+                        runs[i] = (runs[i].Args, rp.Result);
+                        if (rp.Halted != null) halted = rp.Halted;
+                    }
+                    var r = runs[i];
                     toolCalls.Add(new ToolCall(name, r.Args, r.Result.Output, r.Result.IsError, r.Result.Metadata));
                     results.Add(new Dictionary<string, object?>
                     {
@@ -899,6 +1004,12 @@ public sealed class LlmClient
                     onEvent(StreamEvent.ToolResultEvent(id, name, r.Result.Output, r.Result.IsError));
                 }
                 messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = results });
+                if (halted != null)
+                {
+                    var p = PendingRun(runStart, halted, messages, toolCalls, turns, usage);
+                    onEvent(StreamEvent.DoneEvent(p));
+                    return p;
+                }
             }
             var done = EndRun(runStart, "", messages, toolCalls, turns, usage);
             onEvent(StreamEvent.DoneEvent(done));

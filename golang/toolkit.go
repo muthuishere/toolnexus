@@ -278,6 +278,20 @@ func (tk *Toolkit) Execute(ctx context.Context, name string, args map[string]any
 	return tool.Execute(args, tctx)
 }
 
+// executeWithAnswer is Execute with a §10 resolution attached to the context
+// (ToolContext.Answer). Used by the client loop to re-run a suspended tool once
+// after WaitFor resolves.
+func (tk *Toolkit) executeWithAnswer(ctx context.Context, name string, args map[string]any, answer *Answer) (ToolResult, error) {
+	tool, ok := tk.byName[name]
+	if !ok {
+		return ToolResult{Output: fmt.Sprintf("Unknown tool: %s", name), IsError: true}, nil
+	}
+	if args == nil {
+		args = map[string]any{}
+	}
+	return tool.Execute(args, &ToolContext{Ctx: ctx, Answer: answer})
+}
+
 // SkillsPrompt returns the markdown skill catalog for the system prompt.
 func (tk *Toolkit) SkillsPrompt() string {
 	if tk.skill == nil {

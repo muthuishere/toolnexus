@@ -11,10 +11,19 @@ public sealed class ToolContext
 
     public CancellationToken CancellationToken { get; }
 
-    public ToolContext(long? timeoutMs = null, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// §10 Suspension. Present ONLY on a post-<c>WaitFor</c> retry: the resolution of a prior
+    /// suspension. A tool uses <c>ctx.Answer.Data</c> when the resolution <em>is</em> the payload
+    /// (<c>kind:"input"</c>) and ignores it when the world changed out-of-band
+    /// (<c>kind:"authorization"</c> — the session is now valid).
+    /// </summary>
+    public Answer? Answer { get; }
+
+    public ToolContext(long? timeoutMs = null, CancellationToken cancellationToken = default, Answer? answer = null)
     {
         TimeoutMs = timeoutMs;
         CancellationToken = cancellationToken;
+        Answer = answer;
     }
 
     public bool IsCancelled => CancellationToken.IsCancellationRequested;

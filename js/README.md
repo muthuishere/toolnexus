@@ -61,6 +61,41 @@ console.log(text)
 await tk.close()               // disconnect MCP servers
 ```
 
+## Suspension — login / approval / input (`Pending` / `waitFor`)
+
+Some tools can't finish in one shot: they need an **out-of-band, async resolution** — a human
+logs in, approves a trade, types a value. That's one idea, not one feature: *login* is just the
+`kind:"authorization"` case. A tool returns **`Pending(request)`**; the client calls your
+**`waitFor(request) → answer`**, then **retries the tool** with `ctx.answer`, and the model gets
+the real answer. Everything crossing a boundary is plain data, so it works the same across
+processes, agents, and restarts — and identically in all five language ports.
+
+```ts
+import { authRequired } from "toolnexus"
+
+// a tool that needs login the first time:
+defineTool({
+  name: "get_balance", description: "…", inputSchema: { type: "object", properties: {} },
+  run: (_args, ctx) =>
+    authed ? `balance: ₹67,417` : authRequired("https://example.com/login", "Log in to continue"),
+})
+
+// the host supplies ONE function — how the link reaches the human is your call:
+const agent = createClient({
+  baseUrl, style: "openai", model,
+  waitFor: async (request) => {          // interactive: open a browser + poll
+    open(request.url); await pollUntilLoggedIn(); return { id: request.id, ok: true }
+  },
+  // headless desk: waitFor = send request.url to your channel + poll
+  // another agent: waitFor = forward the request over A2A, await its answer
+})
+```
+
+Omit `waitFor` for a **durable** host: `run()` doesn't hang — it returns
+`{ status: "pending", pending: request }`, so you can deliver the link out-of-band (file, HTTP,
+channel) and resume later, even in another process. `stream()` emits a `{ type: "pending", request }`
+event so a channel can push the link in real time. Runnable demo: `examples/pending.ts`.
+
 ## Conversations / memory
 
 `run()` is stateless — each call starts fresh. To keep a thread's history, use `ask()` with an

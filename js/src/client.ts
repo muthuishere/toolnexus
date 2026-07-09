@@ -4,7 +4,8 @@
  * Toolkit. See ../../SPEC.md §8.
  */
 import type { Toolkit } from "./toolkit.js"
-import type { ToolResult } from "./types.js"
+import type { ToolResult, Request, Answer } from "./types.js"
+import { pendingOf } from "./types.js"
 
 export type ClientStyle = "openai" | "anthropic"
 
@@ -29,6 +30,11 @@ export interface ClientOptions {
   /** Observability sink — receives semantic metric events ({event:"llm"|"tool"|"run"…}) as the
    * loop runs (§8 Observability). Forward to statsd/logs/OTel/anything. No cost when unset. */
   onMetric?: (ev: MetricEvent) => void
+  /** §10 Suspension resolver. When a tool returns Pending (metadata.pending), the client calls
+   * this, then retries the tool with Context.answer = the resolution. Its interior is unconstrained
+   * (open a browser, message a channel, watch a file, forward to another agent). Omit for a durable
+   * host: run() does not hang — it returns { status:"pending", pending:request } to resume later. */
+  waitFor?: (request: Request) => Promise<Answer>
 }
 
 /**
@@ -117,6 +123,10 @@ export interface RunResult {
   usage: Usage
   /** The model used. */
   model: string
+  /** "done" normally; "pending" iff a tool suspended and no waitFor was configured (§10). */
+  status: "done" | "pending"
+  /** The unresolved suspension — present iff status === "pending" (§10). */
+  pending?: Request
 }
 
 /** Events yielded by client.stream(). */
@@ -125,6 +135,7 @@ export type StreamEvent =
   | { type: "tool_call"; id: string; name: string; args: Record<string, unknown> }
   | { type: "tool_result"; id: string; name: string; output: string; isError: boolean }
   | { type: "usage"; usage: Usage }
+  | { type: "pending"; request: Request }
   | { type: "done"; result: RunResult }
 
 function addUsage(acc: Usage, raw: any, style: ClientStyle): void {
@@ -458,14 +469,22 @@ export class Client {
         const calls = msg.tool_calls ?? []
         if (calls.length === 0) return this.endRun(runStart, msg.content ?? "", messages, toolCalls, turns, usage)
         // execute all tool calls in this turn concurrently (true parallel tool calling)
+        let halted: Request | undefined
         const results = await Promise.all(
           calls.map(async (call: any) => {
-            const { args, result } = await this.runTool(toolkit, call.function.name, safeJson(call.function.arguments), call.id, turn)
+            let { args, result } = await this.runTool(toolkit, call.function.name, safeJson(call.function.arguments), call.id, turn)
+            const req = pendingOf(result)
+            if (req) {
+              const r = await this.resolvePending(toolkit, call.function.name, args, req, call.id, turn)
+              result = r.result
+              if (r.halted) halted = r.halted
+            }
             toolCalls.push({ name: call.function.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
             return { role: "tool", tool_call_id: call.id, content: result.output }
           }),
         )
         messages.push(...results)
+        if (halted) return this.pendingRun(runStart, halted, messages, toolCalls, turns, usage)
       }
       return this.endRun(runStart, lastText(messages), messages, toolCalls, turns, usage)
     } catch (e) {
@@ -475,7 +494,35 @@ export class Client {
   }
 
   private result(text: string, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage): RunResult {
-    return { text, messages, toolCalls, toolCallCount: toolCalls.length, turns, usage, model: this.opts.model }
+    return { text, messages, toolCalls, toolCallCount: toolCalls.length, turns, usage, model: this.opts.model, status: "done" }
+  }
+
+  /** §10: a run halted because a tool suspended and no `waitFor` was configured. */
+  private pendingRun(runStart: number, request: Request, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage): RunResult {
+    this.emit({ event: "run", model: this.opts.model, turns, toolCalls: toolCalls.length, totalTokens: usage.totalTokens, ms: Date.now() - runStart })
+    return { text: request.prompt, messages, toolCalls, toolCallCount: toolCalls.length, turns, usage, model: this.opts.model, status: "pending", pending: request }
+  }
+
+  /**
+   * §10: resolve a suspended tool result. Calls `waitFor(request)`, and on `ok` re-executes the
+   * tool once with `Context.answer = answer`. Returns the resolved result, or `{ halted }` when
+   * no `waitFor` is configured (the run should stop and surface the request).
+   */
+  private async resolvePending(
+    toolkit: Toolkit, name: string, args: Record<string, unknown>, request: Request, id: string | undefined, turn: number,
+  ): Promise<{ result: ToolResult; halted?: Request }> {
+    if (!this.opts.waitFor) return { result: { output: request.prompt, isError: true }, halted: request }
+    const answer = await this.opts.waitFor(request)
+    if (!answer?.ok) return { result: { output: `declined/expired: ${request.prompt}`, isError: true } }
+    const t0 = Date.now()
+    let result = await toolkit.execute(name, args, { answer })
+    if (this.opts.hooks?.afterTool) {
+      const ov = await this.opts.hooks.afterTool({ name, args, result, id, turn })
+      if (ov?.result) result = ov.result
+    }
+    this.emit({ event: "tool", tool: name, source: toolkit.get(name)?.source ?? "custom", isError: result.isError, ms: Date.now() - t0 })
+    if (pendingOf(result)) result = { output: `unresolved: ${request.prompt}`, isError: true } // never loop forever
+    return { result }
   }
 
   // ---- Anthropic-style: POST {baseUrl}/messages ----
@@ -519,14 +566,22 @@ export class Client {
           return this.endRun(runStart, text, messages, toolCalls, turns, usage)
         }
         // execute all tool_use blocks in this turn concurrently (true parallel tool calling)
+        let halted: Request | undefined
         const results = await Promise.all(
           uses.map(async (use: any) => {
-            const { args, result } = await this.runTool(toolkit, use.name, use.input ?? {}, use.id, turn)
+            let { args, result } = await this.runTool(toolkit, use.name, use.input ?? {}, use.id, turn)
+            const req = pendingOf(result)
+            if (req) {
+              const r = await this.resolvePending(toolkit, use.name, args, req, use.id, turn)
+              result = r.result
+              if (r.halted) halted = r.halted
+            }
             toolCalls.push({ name: use.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
             return { type: "tool_result", tool_use_id: use.id, content: result.output, is_error: result.isError }
           }),
         )
         messages.push({ role: "user", content: results })
+        if (halted) return this.pendingRun(runStart, halted, messages, toolCalls, turns, usage)
       }
       return this.endRun(runStart, "", messages, toolCalls, turns, usage)
     } catch (e) {
@@ -605,7 +660,20 @@ export class Client {
         for (const c of calls) yield { type: "tool_call", id: c.id, name: c.name, args: safeJson(c.args) }
         const settled = await Promise.all(calls.map((c) => this.runTool(toolkit, c.name, safeJson(c.args), c.id, turn)))
         for (let i = 0; i < calls.length; i++) {
-          const c = calls[i], { args, result } = settled[i]
+          const c = calls[i]
+          let { args, result } = settled[i]
+          const req = pendingOf(result)
+          if (req) {
+            yield { type: "pending", request: req } // surface BEFORE waitFor so a channel can push the link
+            const r = await this.resolvePending(toolkit, c.name, args, req, c.id, turn)
+            result = r.result
+            if (r.halted) {
+              toolCalls.push({ name: c.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
+              messages.push({ role: "tool", tool_call_id: c.id, content: result.output })
+              yield { type: "done", result: this.pendingRun(runStart, r.halted, messages, toolCalls, turns, usage) }
+              return
+            }
+          }
           toolCalls.push({ name: c.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
           messages.push({ role: "tool", tool_call_id: c.id, content: result.output })
           yield { type: "tool_result", id: c.id, name: c.name, output: result.output, isError: result.isError }
@@ -683,7 +751,21 @@ export class Client {
         const settled = await Promise.all((uses as any[]).map((u) => this.runTool(toolkit, u.name, u.input ?? {}, u.id, turn)))
         const results: any[] = []
         for (let i = 0; i < uses.length; i++) {
-          const u = uses[i] as any, { args, result } = settled[i]
+          const u = uses[i] as any
+          let { args, result } = settled[i]
+          const req = pendingOf(result)
+          if (req) {
+            yield { type: "pending", request: req }
+            const r = await this.resolvePending(toolkit, u.name, args, req, u.id, turn)
+            result = r.result
+            if (r.halted) {
+              toolCalls.push({ name: u.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
+              results.push({ type: "tool_result", tool_use_id: u.id, content: result.output, is_error: result.isError })
+              messages.push({ role: "user", content: results })
+              yield { type: "done", result: this.pendingRun(runStart, r.halted, messages, toolCalls, turns, usage) }
+              return
+            }
+          }
           toolCalls.push({ name: u.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
           results.push({ type: "tool_result", tool_use_id: u.id, content: result.output, is_error: result.isError })
           yield { type: "tool_result", id: u.id, name: u.name, output: result.output, isError: result.isError }
