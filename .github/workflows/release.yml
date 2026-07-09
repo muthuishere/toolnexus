@@ -64,9 +64,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"               # bundles npm >= 11.5.1 (OIDC trusted publishing);
           registry-url: "https://registry.npmjs.org"
-      - run: npm install -g npm@latest    # OIDC trusted publishing needs npm >= 11.5.1
+      # No global `npm install -g npm@latest`: self-upgrading the bundled npm corrupts it
+      # (drops bundled deps like `sigstore`, breaking `--provenance`). Node 24 already ships
+      # a new-enough npm, so use it directly.
       - run: npm ci
       - run: npm run build
       - run: npm publish --provenance --access public
