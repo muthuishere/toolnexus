@@ -75,6 +75,13 @@ A new language port is "correct" iff these hold. Run it against the shared
     precedence). **Per-tool** override via `builtins.tools` (a name→bool map on the all-on baseline: `{bash:false}` drops
     `bash`, `{...:true}` keeps it on). Global-off short-circuits the map. Surfaced via the tool-schema array only
     (like MCP) — **not** the system prompt.
+12. **Suspension** (§10): a `ToolResult` whose `metadata.pending` is a `Request` is a suspension.
+    With a `waitFor` host slot: call `answer = waitFor(request)`; on `ok` re-execute the tool once
+    with `Context.answer = answer` and feed that back; on `!ok` (or a second suspension) feed back an
+    error result. Without `waitFor`:
+    `run` does not hang — it returns `{status:"pending", pending:request}`. `Request` =
+    `{id,kind,prompt,url?,data?,expiresAt?}`, `Answer` = `{id,ok,data?}`, keys byte-identical across ports.
+    Streaming emits `{type:"pending",request}`. Never name the slot `await` (reserved in JS/Python/C#).
 
 That's it. The sections below just expand each point with wire-format detail.
 
@@ -112,7 +119,20 @@ ToolResult {
 Context {
   signal?:  AbortSignal/cancellation token
   timeout?: number (ms)
+  answer?:  Answer             // present ONLY on a post-waitFor retry (§10); carries the resolution
 }
+```
+
+### Pending (suspension — full contract in §10)
+
+A tool that needs an out-of-band, async resolution (login, approval, input) returns a
+normal `ToolResult` carrying `metadata.pending = Request`. The client calls the host's
+`waitFor(request) -> Answer` and retries the tool. `execute`'s signature is unchanged —
+suspension is **data on the existing result**, not a new return type.
+
+```
+Request { id, kind, prompt, url?, data?, expiresAt? }   // byte-identical wire data
+Answer  { id, ok, data? }
 ```
 
 ---
@@ -754,3 +774,136 @@ toolnexus run \
 - `toolnexus tools --config ... --skills ...` lists the resolved tools and exits.
   `toolnexus --help` documents flags.
 - Ctrl-D / `exit` quits; the toolkit is closed (MCP servers torn down) on exit.
+
+---
+
+## 10. Suspension — `Pending` / `waitFor`
+
+Some tools can't finish in one shot: they need an **out-of-band, asynchronous
+resolution** — a human logs in, approves a trade, uploads a file, replies "YES".
+This is one idea, not one feature: *login* is just the `kind:"authorization"` case.
+There is **no auth subsystem** — there is a suspend/resume primitive, and auth is
+data on top of it.
+
+The whole thing in one sentence:
+
+> A tool may return **`Pending(request)`** instead of an answer. The client calls the
+> host's **`waitFor(request) → answer`**, then **retries the tool** and resumes.
+
+Everything crossing a boundary is **data** (`request`, `answer`) — so this works
+identically across the five ports, across processes, across agents (A2A), and across
+restarts. Only the host's `waitFor` is behavior, and it is not the engine's business:
+it may open a browser, message a channel, watch a file, or forward to another agent.
+
+### `Pending` (rides on `ToolResult` — no signature change)
+
+`execute` still returns a `ToolResult`. A result is a **suspension** iff its
+`metadata.pending` is present and is a `Request`:
+
+```
+ToolResult {
+  output:   string             // human-readable fallback ("Login required: <url>")
+  isError:  true               // it did not produce a usable answer
+  metadata: { pending: Request }
+}
+```
+
+Keeping it on `metadata` (not a new return type) is deliberate: the uniform
+`execute(args,ctx) -> ToolResult` contract (§0.1) is untouched, so no port changes a
+signature. A convenience producer helper MAY exist —
+`authRequired(url, prompt?)` → a `ToolResult` with `metadata.pending =
+{ kind:"authorization", url, prompt }` and a generated `id` — but it is sugar, not
+required.
+
+### `Request` — byte-identical wire data
+
+```
+Request {
+  id:         string           // unique per suspension; the correlation key
+  kind:       string           // "authorization" | "approval" | "input" | ...  (open vocabulary)
+  prompt:     string           // what is being asked, in human words
+  url:        string?          // present when the action happens at a link
+  data:       object?          // kind-specific extra (e.g. choices to pick from)
+  expiresAt:  string?          // RFC3339; the request is stale after this
+}
+```
+
+### `Answer` — byte-identical wire data
+
+```
+Answer {
+  id:    string                // echoes Request.id
+  ok:    boolean               // satisfied, vs declined / aborted / expired
+  data:  object?               // kind-specific payload (e.g. the value entered)
+}
+```
+
+`Request`/`Answer` keys are **fixed across all ports** (they serialize over the wire
+and cross agent boundaries) — pinned exactly as above, *not* idiomatic-cased like
+`RunResult`.
+
+**The `authorization` kind = OAuth2 / OIDC.** By convention `kind:"authorization"` follows
+OAuth2 / OpenID-Connect authorization-code semantics: `url` is the authorize endpoint; the
+host's `waitFor` performs the redirect → consent → callback (and any token exchange) **out-of-band**;
+`answer.ok` marks success and `answer.data` MAY carry the resulting token/claims. **The kernel stays
+OIDC-agnostic** — no OIDC library, no token logic in core; OIDC lives entirely inside the host's
+`waitFor` at the edge. This is the canonical instance the mechanism exists for (login), but it is
+*just data* — the same `Pending`/`waitFor` serves `approval`, `input`, and any other `kind`.
+
+### `waitFor` — the one host slot
+
+A client option (`waitFor` in JS/Python, `WaitFor` in Go/Java/C#):
+
+```
+waitFor(request: Request) -> Answer      // idiomatic async per port
+```
+
+- Signature is **data → data**. Its interior is unconstrained (open browser + poll;
+  send link to a channel + poll; write a file + watch; forward over A2A).
+- Async flavor is idiomatic per port (JS `Promise`, Go blocking + `ctx`, Python
+  coroutine, Java `CompletableFuture`, C# `Task`) — same rule as streaming (§8).
+- Named `waitFor`, **never `await`** — `await` is a reserved word in JS/Python/C#.
+
+### Loop rule (the one behavioral pin)
+
+When a tool call returns a suspension (`metadata.pending` = `request`):
+
+1. **`waitFor` configured** → call `answer = waitFor(request)`.
+   - `answer.ok == true` → **re-execute the same tool with the same args once**, passing
+     the `answer` in `Context.answer`; feed that result back to the model. A tool uses
+     `ctx.answer.data` when the resolution *is* the payload (`kind:"input"`) and ignores
+     it when the world changed out-of-band (`kind:"authorization"` — the session is now
+     valid). If the retry still suspends, feed back an error `ToolResult`
+     (`"unresolved: <prompt>"`) — never loop forever on the same request.
+   - `answer.ok == false` → feed back an error `ToolResult`
+     (`"declined/expired: <prompt>"`). The loop continues; the model decides what to do.
+2. **`waitFor` not configured** → the run does **not** hang. It halts and returns a
+   `RunResult` with `status:"pending"` and the `request`, so a durable host can deliver
+   it out-of-band and resume by calling `run` again later (possibly in another process).
+
+`RunResult` therefore gains:
+
+```
+RunResult {
+  ...                          // as §8
+  status:   "done" | "pending" // "pending" ⇒ a tool suspended and no waitFor was set
+  pending:  Request?           // present iff status == "pending"
+}
+```
+
+### Streaming event
+
+`stream()` (§8) emits one more event when a tool suspends, before `waitFor` runs — so a
+channel handler can push the link in real time:
+
+- `{ type: "pending", request }` — a tool is waiting on an out-of-band resolution
+
+### Why in-process *and* durable both fall out of one contract
+
+- **In-process** host: provide `waitFor` (block, poll, retry). Simplest; state lives on
+  the live process. Rule 1.
+- **Durable** host: omit `waitFor`; take the `status:"pending"` `RunResult`, persist the
+  `request`, deliver it however (file, HTTP, channel, another agent), and later call
+  `run` again once the world has changed. Rule 2. Because `request`/`answer` are plain
+  serializable data, this survives restarts and lets a *different* process/agent resolve
+  it. No extra core machinery.

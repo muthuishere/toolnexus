@@ -55,6 +55,14 @@ public final class LlmClient {
          * Observability). Forward to statsd/logs/OTel/anything. No cost when unset. The same
          * events also feed the built-in Prometheus registry ({@link LlmClient#metrics()}). */
         public Consumer<MetricEvent> onMetric; // optional; null = no sink
+        /** §10 Suspension resolver. When a tool returns Pending ({@code metadata.pending}), the
+         * client calls {@code waitFor(request)} to obtain an {@link Answer}, then re-executes the
+         * SAME tool once with {@code Context.answer} set. Signature is data -> data; its interior is
+         * unconstrained (open a browser + poll, message a channel + poll, forward over A2A). Runs
+         * synchronously on the calling thread (same rule as hooks). Without it, a suspended run does
+         * NOT hang: {@link #run} returns {@code status="pending"} + the {@code pending} request so a
+         * durable host can resolve it out-of-band and resume by calling {@code run} again later. */
+        public Function<Request, Answer> waitFor; // optional; null = durable/halt posture
 
         public Options baseUrl(String v) { this.baseUrl = v; return this; }
         public Options style(String v) { this.style = v; return this; }
@@ -69,6 +77,7 @@ public final class LlmClient {
         public Options timeoutMs(long v) { this.timeoutMs = v; return this; }
         public Options store(ConversationStore v) { this.store = v; return this; }
         public Options onMetric(Consumer<MetricEvent> v) { this.onMetric = v; return this; }
+        public Options waitFor(Function<Request, Answer> v) { this.waitFor = v; return this; }
     }
 
     // ------------------------------------------------------------------
@@ -231,6 +240,58 @@ public final class LlmClient {
         return new ToolRun(a, result);
     }
 
+    /** Outcome of resolving one tool call: the (possibly still-suspended) result, plus the
+     * {@code halted} request set when no {@code waitFor} is configured (§10). */
+    private record Resolved(ToolResult result, Request halted) {}
+
+    /**
+     * §10: run one tool AND resolve any suspension it returns. Mirrors JS {@code runTool} +
+     * {@code resolvePending}: execute through the hooks; if the result is a suspension
+     * ({@code metadata.pending}), call {@code waitFor} and, on {@code ok}, re-execute the SAME
+     * tool once with {@code Context.answer} set. Returns the resolved {@link ToolRun}; when no
+     * {@code waitFor} is configured the run should halt — the halted request is reported via
+     * {@code haltSink} (an {@link AtomicReference}, since tool calls run concurrently).
+     */
+    private ToolRun runToolResolved(Toolkit toolkit, String name, Map<String, Object> args,
+                                    String id, int turn, java.util.concurrent.atomic.AtomicReference<Request> haltSink) {
+        ToolRun run = runTool(toolkit, name, args, id, turn);
+        Request req = ToolResult.pendingOf(run.result());
+        if (req == null) return run;
+        Resolved r = resolvePending(toolkit, name, run.args(), req, id, turn);
+        if (r.halted() != null) haltSink.set(r.halted());
+        return new ToolRun(run.args(), r.result());
+    }
+
+    /**
+     * §10: resolve a suspended tool result. Calls {@code waitFor(request)}, and on {@code ok}
+     * re-executes the tool once with {@code Context.answer = answer}. Returns the resolved result,
+     * or {@code {halted}} when no {@code waitFor} is configured (the run should stop and surface
+     * the request). A second suspension on retry is never looped — it becomes an error result.
+     */
+    private Resolved resolvePending(Toolkit toolkit, String name, Map<String, Object> args,
+                                    Request request, String id, int turn) {
+        if (opts.waitFor == null) {
+            return new Resolved(ToolResult.error(request.prompt()), request);
+        }
+        Answer answer = opts.waitFor.apply(request);
+        if (answer == null || !answer.ok()) {
+            return new Resolved(ToolResult.error("declined/expired: " + request.prompt()), null);
+        }
+        Tool tool = toolkit.get(name);
+        String source = tool != null ? tool.source() : "custom";
+        long t0 = System.currentTimeMillis();
+        ToolResult result = toolkit.execute(name, args, new ToolContext(null, null, answer));
+        if (opts.hooks != null && opts.hooks.afterTool != null) {
+            ToolOverride ov = opts.hooks.afterTool.apply(new AfterToolEvent(name, args, result, id, turn));
+            if (ov != null && ov.result() != null) result = ov.result();
+        }
+        emit(new MetricEvent.Tool(name, source, result.isError(), System.currentTimeMillis() - t0));
+        if (ToolResult.pendingOf(result) != null) {
+            result = ToolResult.error("unresolved: " + request.prompt()); // never loop forever
+        }
+        return new Resolved(result, null);
+    }
+
     /** A tool call the model made, plus its result + metadata. */
     public static final class ToolCall {
         public final String name;
@@ -269,9 +330,19 @@ public final class LlmClient {
         public final Usage usage;
         /** The model used. */
         public final String model;
+        /** §10: {@code "done"} normally; {@code "pending"} iff a tool suspended and no
+         * {@code waitFor} was configured. */
+        public final String status;
+        /** §10: the unresolved suspension — present (non-null) iff {@code status == "pending"}. */
+        public final Request pending;
 
         RunResult(String text, List<Object> messages, List<ToolCall> toolCalls,
                   int turns, Usage usage, String model) {
+            this(text, messages, toolCalls, turns, usage, model, "done", null);
+        }
+
+        RunResult(String text, List<Object> messages, List<ToolCall> toolCalls,
+                  int turns, Usage usage, String model, String status, Request pending) {
             this.text = text;
             this.messages = messages;
             this.toolCalls = toolCalls;
@@ -279,6 +350,8 @@ public final class LlmClient {
             this.turns = turns;
             this.usage = usage;
             this.model = model;
+            this.status = status;
+            this.pending = pending;
         }
     }
 
@@ -298,23 +371,28 @@ public final class LlmClient {
      */
     public record StreamEvent(Kind type, String delta, String id, String name,
                               Map<String, Object> args, String output, boolean isError,
-                              Usage usage, RunResult result) {
-        public enum Kind { TEXT, TOOL_CALL, TOOL_RESULT, USAGE, DONE }
+                              Usage usage, RunResult result, Request request) {
+        public enum Kind { TEXT, TOOL_CALL, TOOL_RESULT, USAGE, PENDING, DONE }
 
         static StreamEvent text(String delta) {
-            return new StreamEvent(Kind.TEXT, delta, null, null, null, null, false, null, null);
+            return new StreamEvent(Kind.TEXT, delta, null, null, null, null, false, null, null, null);
         }
         static StreamEvent toolCall(String id, String name, Map<String, Object> args) {
-            return new StreamEvent(Kind.TOOL_CALL, null, id, name, args, null, false, null, null);
+            return new StreamEvent(Kind.TOOL_CALL, null, id, name, args, null, false, null, null, null);
         }
         static StreamEvent toolResult(String id, String name, String output, boolean isError) {
-            return new StreamEvent(Kind.TOOL_RESULT, null, id, name, null, output, isError, null, null);
+            return new StreamEvent(Kind.TOOL_RESULT, null, id, name, null, output, isError, null, null, null);
         }
         static StreamEvent usage(Usage usage) {
-            return new StreamEvent(Kind.USAGE, null, null, null, null, null, false, usage, null);
+            return new StreamEvent(Kind.USAGE, null, null, null, null, null, false, usage, null, null);
+        }
+        /** §10: a tool is waiting on an out-of-band resolution — emitted BEFORE {@code waitFor}
+         * runs so a channel handler can push the link in real time. */
+        static StreamEvent pending(Request request) {
+            return new StreamEvent(Kind.PENDING, null, null, null, null, null, false, null, null, request);
         }
         static StreamEvent done(RunResult result) {
-            return new StreamEvent(Kind.DONE, null, null, null, null, null, false, null, result);
+            return new StreamEvent(Kind.DONE, null, null, null, null, null, false, null, result, null);
         }
     }
 
@@ -534,6 +612,16 @@ public final class LlmClient {
         return new RunResult(text, messages, toolCalls, turns, usage, opts.model);
     }
 
+    /** §10: a run halted because a tool suspended and no {@code waitFor} was configured. Returns a
+     * {@link RunResult} with {@code status="pending"} and the {@code request} to resume later. */
+    private RunResult pendingRun(long runStart, Request request, List<Object> messages,
+                                 List<ToolCall> toolCalls, int turns, Usage usage) {
+        emit(new MetricEvent.Run(opts.model, turns, toolCalls.size(), usage.totalTokens,
+                System.currentTimeMillis() - runStart, null));
+        return new RunResult(request.prompt(), messages, toolCalls, turns, usage, opts.model,
+                "pending", request);
+    }
+
     /** Emit a {@code run} error metric event (once, on a thrown run). */
     private void emitRunError(long runStart, List<ToolCall> toolCalls, int turns, Usage usage, RuntimeException e) {
         emit(new MetricEvent.Run(opts.model, turns, toolCalls.size(), usage.totalTokens,
@@ -602,6 +690,7 @@ public final class LlmClient {
                 int n = calls.size();
                 Map<String, Object>[] toolMsgs = new Map[n];
                 ToolCall[] recorded = new ToolCall[n];
+                java.util.concurrent.atomic.AtomicReference<Request> halted = new java.util.concurrent.atomic.AtomicReference<>();
                 CompletableFuture<Void>[] futures = new CompletableFuture[n];
                 for (int i = 0; i < n; i++) {
                     final int idx = i;
@@ -613,8 +702,8 @@ public final class LlmClient {
                     Object callId = call.get("id");
                     final int t = turn;
                     futures[idx] = CompletableFuture.supplyAsync(
-                            () -> runTool(toolkit, fnName,
-                                    args, callId == null ? null : String.valueOf(callId), t),
+                            () -> runToolResolved(toolkit, fnName,
+                                    args, callId == null ? null : String.valueOf(callId), t, halted),
                             executor).thenAccept(run -> {
                         recorded[idx] = new ToolCall(fnName, run.args(),
                                 run.result().output(), run.result().isError(), run.result().metadata());
@@ -630,6 +719,9 @@ public final class LlmClient {
                 // Append in original order; record toolCalls in original order (after join → thread-safe).
                 for (int i = 0; i < n; i++) toolCalls.add(recorded[i]);
                 for (int i = 0; i < n; i++) messages.add(toolMsgs[i]);
+                if (halted.get() != null) {
+                    return pendingRun(runStart, halted.get(), messages, toolCalls, turns, usage);
+                }
             }
             return endRun(runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
         } catch (RuntimeException e) {
@@ -712,6 +804,7 @@ public final class LlmClient {
                 int n = uses.size();
                 Map<String, Object>[] resultBlocks = new Map[n];
                 ToolCall[] recorded = new ToolCall[n];
+                java.util.concurrent.atomic.AtomicReference<Request> halted = new java.util.concurrent.atomic.AtomicReference<>();
                 CompletableFuture<Void>[] futures = new CompletableFuture[n];
                 for (int i = 0; i < n; i++) {
                     final int idx = i;
@@ -723,8 +816,8 @@ public final class LlmClient {
                     Object useId = use.get("id");
                     final int t = turn;
                     futures[idx] = CompletableFuture.supplyAsync(
-                            () -> runTool(toolkit, useName, useInput,
-                                    useId == null ? null : String.valueOf(useId), t),
+                            () -> runToolResolved(toolkit, useName, useInput,
+                                    useId == null ? null : String.valueOf(useId), t, halted),
                             executor).thenAccept(run -> {
                         recorded[idx] = new ToolCall(useName, run.args(),
                                 run.result().output(), run.result().isError(), run.result().metadata());
@@ -747,6 +840,9 @@ public final class LlmClient {
                 userMsg.put("role", "user");
                 userMsg.put("content", results);
                 messages.add(userMsg);
+                if (halted.get() != null) {
+                    return pendingRun(runStart, halted.get(), messages, toolCalls, turns, usage);
+                }
             }
             return endRun(runStart, "", messages, toolCalls, turns, usage);
         } catch (RuntimeException e) {
@@ -906,9 +1002,18 @@ public final class LlmClient {
                             .thenAccept(r -> runs[idx] = r);
                 }
                 CompletableFuture.allOf(futures).join();
+                Request halted = null;
                 for (int i = 0; i < n; i++) {
                     String[] slot = acc.get(order.get(i));
                     ToolRun r = runs[i];
+                    // §10: resolve suspensions sequentially so the pending event ordering is stable.
+                    Request req = ToolResult.pendingOf(r.result());
+                    if (req != null) {
+                        onEvent.accept(StreamEvent.pending(req)); // surface BEFORE waitFor so a channel can push the link
+                        Resolved res = resolvePending(toolkit, slot[1], r.args(), req, slot[0], turn);
+                        if (res.halted() != null) halted = res.halted();
+                        r = new ToolRun(r.args(), res.result());
+                    }
                     toolCalls.add(new ToolCall(slot[1], r.args(), r.result().output(), r.result().isError(), r.result().metadata()));
                     Map<String, Object> toolMsg = new LinkedHashMap<>();
                     toolMsg.put("role", "tool");
@@ -916,6 +1021,11 @@ public final class LlmClient {
                     toolMsg.put("content", r.result().output());
                     messages.add(toolMsg);
                     onEvent.accept(StreamEvent.toolResult(slot[0], slot[1], r.result().output(), r.result().isError()));
+                }
+                if (halted != null) {
+                    RunResult done = pendingRun(runStart, halted, messages, toolCalls, turns, usage);
+                    onEvent.accept(StreamEvent.done(done));
+                    return done;
                 }
             }
             RunResult done = endRun(runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
@@ -1096,11 +1206,20 @@ public final class LlmClient {
                 }
                 CompletableFuture.allOf(futures).join();
                 List<Object> results = new ArrayList<>(n);
+                Request halted = null;
                 for (int i = 0; i < n; i++) {
                     Map<String, Object> u = uses.get(i);
                     ToolRun r = runs[i];
                     String name = String.valueOf(u.get("name"));
                     String id = String.valueOf(u.get("id"));
+                    // §10: resolve suspensions sequentially so the pending event ordering is stable.
+                    Request req = ToolResult.pendingOf(r.result());
+                    if (req != null) {
+                        onEvent.accept(StreamEvent.pending(req)); // surface BEFORE waitFor so a channel can push the link
+                        Resolved res = resolvePending(toolkit, name, r.args(), req, id, turn);
+                        if (res.halted() != null) halted = res.halted();
+                        r = new ToolRun(r.args(), res.result());
+                    }
                     toolCalls.add(new ToolCall(name, r.args(), r.result().output(), r.result().isError(), r.result().metadata()));
                     Map<String, Object> tr = new LinkedHashMap<>();
                     tr.put("type", "tool_result");
@@ -1114,6 +1233,11 @@ public final class LlmClient {
                 userMsg.put("role", "user");
                 userMsg.put("content", results);
                 messages.add(userMsg);
+                if (halted != null) {
+                    RunResult done = pendingRun(runStart, halted, messages, toolCalls, turns, usage);
+                    onEvent.accept(StreamEvent.done(done));
+                    return done;
+                }
             }
             RunResult done = endRun(runStart, "", messages, toolCalls, turns, usage);
             onEvent.accept(StreamEvent.done(done));

@@ -62,6 +62,16 @@ type ClientOptions struct {
 	// events also feed the built-in Prometheus registry (Client.Metrics()).
 	// Mirrors js ClientOptions.onMetric.
 	OnMetric func(MetricEvent)
+	// WaitFor is the §10 suspension resolver. When a tool returns a suspension
+	// (metadata.pending = Request), the client calls WaitFor(request), and on a
+	// successful (Ok) Answer re-executes the same tool once with
+	// ToolContext.Answer set, then feeds that result back to the model. Its
+	// interior is unconstrained (open a browser, message a channel, watch a file,
+	// forward over A2A). When nil, a suspension does NOT hang the run — Run halts
+	// and returns a RunResult with Status "pending" and Pending set, so a durable
+	// host can deliver it out-of-band and resume later. Named WaitFor, never
+	// "await" (a reserved word). Mirrors js ClientOptions.waitFor.
+	WaitFor func(Request) (Answer, error)
 }
 
 // MetricEvent is a semantic observability record fired as the loop runs (§8).
@@ -203,6 +213,11 @@ type RunResult struct {
 	Usage Usage `json:"usage"`
 	// Model is the model used.
 	Model string `json:"model"`
+	// Status is "done" normally; "pending" iff a tool suspended and no WaitFor
+	// was configured (§10).
+	Status string `json:"status"`
+	// Pending is the unresolved suspension — present iff Status == "pending" (§10).
+	Pending *Request `json:"pending,omitempty"`
 }
 
 // StreamEvent is one event emitted on the channel returned by Client.Stream.
@@ -230,6 +245,9 @@ type StreamEvent struct {
 	Usage *Usage
 	// Result is the final RunResult (Type == "done").
 	Result *RunResult
+	// Request is the suspension (Type == "pending"); emitted before WaitFor runs
+	// so a channel handler can push the link in real time (§10).
+	Request *Request
 	// Err is the terminal error (Type == "error"); the channel closes right after.
 	Err error
 }
@@ -751,6 +769,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 		var wg sync.WaitGroup
 		var mu sync.Mutex
 		var hookErr error
+		var halted *Request
 		for i, tc := range msg.ToolCalls {
 			wg.Add(1)
 			go func(i int, tc struct {
@@ -763,6 +782,17 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 			}) {
 				defer wg.Done()
 				args, result, err := c.runTool(ctx, tk, tc.Function.Name, safeJSONArgs(tc.Function.Arguments), tc.ID, turn)
+				if err == nil {
+					if req := PendingOf(result); req != nil {
+						r, h, rerr := c.resolvePending(ctx, tk, tc.Function.Name, args, *req, tc.ID, turn)
+						err, result = rerr, r
+						if h != nil {
+							mu.Lock()
+							halted = h
+							mu.Unlock()
+						}
+					}
+				}
 				mu.Lock()
 				if err != nil {
 					if hookErr == nil {
@@ -791,6 +821,9 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 			return RunResult{}, hookErr
 		}
 		messages = append(messages, results...)
+		if halted != nil {
+			return c.pendingRun(runStart, *halted, messages, toolCalls, turns, usage), nil
+		}
 	}
 	return c.endRun(runStart, "", messages, toolCalls, turns, usage), nil
 }
@@ -805,7 +838,69 @@ func (c *Client) result(text string, messages []any, toolCalls []ToolCall, turns
 		Turns:         turns,
 		Usage:         usage,
 		Model:         c.opts.Model,
+		Status:        "done",
 	}
+}
+
+// pendingRun builds the terminal RunResult for a run that halted because a tool
+// suspended and no WaitFor was configured (§10). Mirrors js Client.pendingRun.
+func (c *Client) pendingRun(runStart time.Time, request Request, messages []any, toolCalls []ToolCall, turns int, usage Usage) RunResult {
+	c.emit(MetricEvent{Event: "run", Model: c.opts.Model, Turns: turns, ToolCalls: len(toolCalls), TotalTokens: usage.TotalTokens, Ms: msSince(runStart)})
+	req := request
+	return RunResult{
+		Text:          request.Prompt,
+		Messages:      messages,
+		ToolCalls:     toolCalls,
+		ToolCallCount: len(toolCalls),
+		Turns:         turns,
+		Usage:         usage,
+		Model:         c.opts.Model,
+		Status:        "pending",
+		Pending:       &req,
+	}
+}
+
+// resolvePending resolves a suspended tool result (§10). It calls WaitFor(request),
+// and on an Ok Answer re-executes the same tool once with ToolContext.Answer set,
+// feeding that result back. When WaitFor is not configured it returns halted set to
+// the request so the run stops and surfaces it. On !Ok (declined/expired) or a
+// second suspension (unresolved) it returns an error ToolResult — never looping
+// forever on the same request. Mirrors js Client.resolvePending.
+func (c *Client) resolvePending(ctx context.Context, tk *Toolkit, name string, args map[string]any, request Request, id string, turn int) (result ToolResult, halted *Request, err error) {
+	if c.opts.WaitFor == nil {
+		req := request
+		return ToolResult{Output: request.Prompt, IsError: true}, &req, nil
+	}
+	answer, err := c.opts.WaitFor(request)
+	if err != nil {
+		return ToolResult{}, nil, err
+	}
+	if !answer.Ok {
+		return ToolResult{Output: "declined/expired: " + request.Prompt, IsError: true}, nil, nil
+	}
+	start := time.Now()
+	result, err = tk.executeWithAnswer(ctx, name, args, &answer)
+	if err != nil {
+		return ToolResult{}, nil, err
+	}
+	if c.opts.Hooks != nil && c.opts.Hooks.AfterTool != nil {
+		ov, herr := c.opts.Hooks.AfterTool(ctx, AfterToolEvent{Name: name, Args: args, Result: result, ID: id, Turn: turn})
+		if herr != nil {
+			return ToolResult{}, nil, herr
+		}
+		if ov != nil && ov.Result != nil {
+			result = *ov.Result
+		}
+	}
+	source := "custom"
+	if t, ok := tk.Get(name); ok {
+		source = string(t.Source)
+	}
+	c.emit(MetricEvent{Event: "tool", Tool: name, Source: source, IsError: result.IsError, Ms: msSince(start)})
+	if PendingOf(result) != nil {
+		result = ToolResult{Output: "unresolved: " + request.Prompt, IsError: true} // never loop forever
+	}
+	return result, nil, nil
 }
 
 // ---- Anthropic-style: POST {baseURL}/messages ----
@@ -936,6 +1031,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 		var wg sync.WaitGroup
 		var mu sync.Mutex
 		var hookErr error
+		var halted *Request
 		for i, u := range uses {
 			wg.Add(1)
 			go func(i int, u struct {
@@ -949,6 +1045,17 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 					in = map[string]any{}
 				}
 				args, result, err := c.runTool(ctx, tk, u.Name, in, u.ID, turn)
+				if err == nil {
+					if req := PendingOf(result); req != nil {
+						r, h, rerr := c.resolvePending(ctx, tk, u.Name, args, *req, u.ID, turn)
+						err, result = rerr, r
+						if h != nil {
+							mu.Lock()
+							halted = h
+							mu.Unlock()
+						}
+					}
+				}
 				mu.Lock()
 				if err != nil {
 					if hookErr == nil {
@@ -978,6 +1085,9 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 			return RunResult{}, hookErr
 		}
 		messages = append(messages, map[string]any{"role": "user", "content": results})
+		if halted != nil {
+			return c.pendingRun(runStart, *halted, messages, toolCalls, turns, usage), nil
+		}
 	}
 	return c.endRun(runStart, "", messages, toolCalls, turns, usage), nil
 }
@@ -1257,11 +1367,24 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, h
 		var wg sync.WaitGroup
 		var hookErr error
 		var mu sync.Mutex
+		var halted *Request
 		for i, cc := range calls {
 			wg.Add(1)
 			go func(i int, cc *streamCall) {
 				defer wg.Done()
 				args, result, err := c.runTool(ctx, tk, cc.name, safeJSONArgs(cc.args), cc.id, turn)
+				if err == nil {
+					if req := PendingOf(result); req != nil {
+						ch <- StreamEvent{Type: "pending", Request: req} // surface BEFORE WaitFor so a channel can push the link
+						r, h, rerr := c.resolvePending(ctx, tk, cc.name, args, *req, cc.id, turn)
+						err, result = rerr, r
+						if h != nil {
+							mu.Lock()
+							halted = h
+							mu.Unlock()
+						}
+					}
+				}
 				if err != nil {
 					mu.Lock()
 					if hookErr == nil {
@@ -1283,6 +1406,12 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, h
 			toolCalls = append(toolCalls, records[i])
 			messages = append(messages, results[i])
 			ch <- events[i]
+		}
+		if halted != nil {
+			res := c.pendingRun(runStart, *halted, messages, toolCalls, turns, usage)
+			u := usage
+			ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
+			return nil
 		}
 	}
 	res := c.endRun(runStart, lastText(messages), messages, toolCalls, turns, usage)
@@ -1475,6 +1604,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 		var wg sync.WaitGroup
 		var hookErr error
 		var mu sync.Mutex
+		var halted *Request
 		for i, u := range uses {
 			wg.Add(1)
 			go func(i int, u useBlock) {
@@ -1484,6 +1614,18 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 					in = map[string]any{}
 				}
 				args, result, err := c.runTool(ctx, tk, u.name, in, u.id, turn)
+				if err == nil {
+					if req := PendingOf(result); req != nil {
+						ch <- StreamEvent{Type: "pending", Request: req} // surface BEFORE WaitFor so a channel can push the link
+						r, h, rerr := c.resolvePending(ctx, tk, u.name, args, *req, u.id, turn)
+						err, result = rerr, r
+						if h != nil {
+							mu.Lock()
+							halted = h
+							mu.Unlock()
+						}
+					}
+				}
 				if err != nil {
 					mu.Lock()
 					if hookErr == nil {
@@ -1506,6 +1648,12 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 			ch <- events[i]
 		}
 		messages = append(messages, map[string]any{"role": "user", "content": results})
+		if halted != nil {
+			res := c.pendingRun(runStart, *halted, messages, toolCalls, turns, usage)
+			u := usage
+			ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
+			return nil
+		}
 	}
 	res := c.endRun(runStart, "", messages, toolCalls, turns, usage)
 	u := usage

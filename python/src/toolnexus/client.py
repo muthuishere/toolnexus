@@ -33,7 +33,11 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Callable, Literal, Mapping, Optional, Protocol
 
 from .toolkit import Toolkit
-from .types import ToolResult
+from .types import Answer, Request, ToolContext, ToolResult, pending_of
+
+# §10 Suspension resolver: (request) -> answer, idiomatic async per port. May be a
+# plain sync callable or an async coroutine; its interior is unconstrained.
+WaitFor = Callable[[Request], Any]
 
 ClientStyle = Literal["openai", "anthropic"]
 
@@ -97,6 +101,10 @@ class RunResult:
     usage: dict[str, int] = field(default_factory=_empty_usage)
     # The model used.
     model: str = ""
+    # "done" normally; "pending" iff a tool suspended and no wait_for was set (§10).
+    status: Literal["done", "pending"] = "done"
+    # The unresolved suspension — present iff status == "pending" (§10).
+    pending: Optional[Request] = None
 
 
 def _add_usage(acc: dict[str, int], raw: Any, style: ClientStyle) -> None:
@@ -384,6 +392,7 @@ class Client:
         timeout_ms: Optional[int] = None,
         store: Optional[ConversationStore] = None,
         on_metric: Optional[OnMetric] = None,
+        wait_for: Optional[WaitFor] = None,
     ) -> None:
         self.base_url = base_url
         self.style = style
@@ -398,6 +407,9 @@ class Client:
         self.timeout_ms = timeout_ms
         # Conversation provider for ask() — from the `store` arg, else in-memory.
         self.store: ConversationStore = store if store is not None else InMemoryConversationStore()
+        # §10 Suspension resolver — when a tool returns Pending, the client calls
+        # this then retries the tool with ctx.answer set. None ⇒ durable halt.
+        self.wait_for = wait_for
         # Observability sink — receives semantic metric events as the loop runs (§8).
         self.on_metric = on_metric
         # Cumulative Prometheus registry fed by the same events on_metric sees.
@@ -478,6 +490,81 @@ class Client:
             usage=usage,
             model=self.model,
         )
+
+    # ----------------------------------------------------------------------- #
+    # §10 Suspension — Pending / wait_for
+    # ----------------------------------------------------------------------- #
+    def _pending_run(
+        self,
+        run_start: float,
+        request: Request,
+        messages: list[dict[str, Any]],
+        tool_calls: list[dict[str, Any]],
+        turns: int,
+        usage: dict[str, int],
+    ) -> RunResult:
+        """A run halted because a tool suspended and no ``wait_for`` was configured.
+        Emits the terminal ``run`` event and returns status="pending". Mirrors JS
+        ``pendingRun``."""
+        self._emit(
+            {
+                "event": "run",
+                "model": self.model,
+                "turns": turns,
+                "tool_calls": len(tool_calls),
+                "total_tokens": usage["total_tokens"],
+                "ms": _ms_since(run_start),
+            }
+        )
+        return RunResult(
+            text=request.prompt,
+            messages=messages,
+            tool_calls=tool_calls,
+            tool_call_count=len(tool_calls),
+            turns=turns,
+            usage=usage,
+            model=self.model,
+            status="pending",
+            pending=request,
+        )
+
+    async def _resolve_pending(
+        self,
+        toolkit: Toolkit,
+        name: str,
+        args: dict[str, Any],
+        request: Request,
+        call_id: Optional[str],
+        turn: int,
+    ) -> tuple[ToolResult, Optional[Request]]:
+        """Resolve a suspended tool result (§10). Calls ``wait_for(request)``, and on
+        ``ok`` re-executes the SAME tool once with ``ctx.answer`` set. Returns
+        ``(result, halted)`` — ``halted`` is the request when no ``wait_for`` is
+        configured (the run should stop and surface it). Mirrors JS ``resolvePending``.
+        """
+        if self.wait_for is None:
+            return ToolResult(output=request.prompt, is_error=True), request
+        r = self.wait_for(request)
+        if inspect.isawaitable(r):
+            r = await r
+        answer: Optional[Answer] = r
+        if answer is None or not answer.ok:
+            return ToolResult(output=f"declined/expired: {request.prompt}", is_error=True), None
+        t0 = _now()
+        result = await toolkit.execute(name, args, ToolContext(answer=answer))
+        after = _get_hook(self.hooks, "after_tool")
+        if after is not None:
+            ov = await _call_hook(
+                after, {"name": name, "args": args, "result": result, "id": call_id, "turn": turn}
+            )
+            if ov and ov.get("result") is not None:
+                result = ov["result"]
+        source = toolkit.get(name).source if toolkit.get(name) is not None else "custom"
+        self._emit({"event": "tool", "tool": name, "source": source, "is_error": result.is_error, "ms": _ms_since(t0)})
+        if pending_of(result) is not None:
+            # never loop forever on the same request
+            result = ToolResult(output=f"unresolved: {request.prompt}", is_error=True)
+        return result, None
 
     # ----------------------------------------------------------------------- #
     # Resilience helpers
@@ -780,7 +867,13 @@ class Client:
                         for (call_id, name, args) in parsed
                     )
                 )
+                halted: Optional[Request] = None
                 for (call_id, name, _orig_args), (args, result) in zip(parsed, results):
+                    req = pending_of(result)
+                    if req is not None:
+                        result, h = await self._resolve_pending(toolkit, name, args, req, call_id, turn)
+                        if h is not None:
+                            halted = h
                     tool_calls.append(
                         {
                             "name": name,
@@ -793,6 +886,8 @@ class Client:
                     messages.append(
                         {"role": "tool", "tool_call_id": call_id, "content": result.output}
                     )
+                if halted is not None:
+                    return self._pending_run(run_start, halted, messages, tool_calls, turns, usage)
 
             return self._end_run(run_start, _last_text(messages), messages, tool_calls, turns, usage)
         except Exception as e:
@@ -876,7 +971,13 @@ class Client:
                     )
                 )
                 results: list[dict[str, Any]] = []
+                halted: Optional[Request] = None
                 for use, (args, result) in zip(uses, outputs):
+                    req = pending_of(result)
+                    if req is not None:
+                        result, h = await self._resolve_pending(toolkit, use["name"], args, req, use.get("id"), turn)
+                        if h is not None:
+                            halted = h
                     tool_calls.append(
                         {
                             "name": use["name"],
@@ -895,6 +996,8 @@ class Client:
                         }
                     )
                 messages.append({"role": "user", "content": results})
+                if halted is not None:
+                    return self._pending_run(run_start, halted, messages, tool_calls, turns, usage)
 
             return self._end_run(run_start, "", messages, tool_calls, turns, usage)
         except Exception as e:
@@ -1025,6 +1128,23 @@ class Client:
                     *(self._run_tool(toolkit, c["name"], _safe_json(c["args"]), c["id"], turn) for c in calls)
                 )
                 for c, (args, result) in zip(calls, settled):
+                    req = pending_of(result)
+                    if req is not None:
+                        yield {"type": "pending", "request": req}  # surface BEFORE wait_for so a channel can push the link
+                        result, halted = await self._resolve_pending(toolkit, c["name"], args, req, c["id"], turn)
+                        if halted is not None:
+                            tool_calls.append(
+                                {
+                                    "name": c["name"],
+                                    "args": args,
+                                    "output": result.output,
+                                    "is_error": result.is_error,
+                                    "metadata": result.metadata,
+                                }
+                            )
+                            messages.append({"role": "tool", "tool_call_id": c["id"], "content": result.output})
+                            yield {"type": "done", "result": self._pending_run(run_start, halted, messages, tool_calls, turns, usage)}
+                            return
                     tool_calls.append(
                         {
                             "name": c["name"],
@@ -1169,7 +1289,12 @@ class Client:
                     *(self._run_tool(toolkit, u["name"], u.get("input") or {}, u["id"], turn) for u in uses)
                 )
                 results: list[dict[str, Any]] = []
+                halted: Optional[Request] = None
                 for u, (args, result) in zip(uses, settled):
+                    req = pending_of(result)
+                    if req is not None:
+                        yield {"type": "pending", "request": req}  # surface BEFORE wait_for
+                        result, halted = await self._resolve_pending(toolkit, u["name"], args, req, u["id"], turn)
                     tool_calls.append(
                         {
                             "name": u["name"],
@@ -1194,6 +1319,10 @@ class Client:
                         "output": result.output,
                         "is_error": result.is_error,
                     }
+                    if halted is not None:
+                        messages.append({"role": "user", "content": results})
+                        yield {"type": "done", "result": self._pending_run(run_start, halted, messages, tool_calls, turns, usage)}
+                        return
                 messages.append({"role": "user", "content": results})
 
             yield {"type": "done", "result": self._end_run(run_start, "", messages, tool_calls, turns, usage)}
@@ -1325,6 +1454,7 @@ def create_client(
     timeout_ms: Optional[int] = None,
     store: Optional[ConversationStore] = None,
     on_metric: Optional[OnMetric] = None,
+    wait_for: Optional[WaitFor] = None,
 ) -> Client:
     return Client(
         base_url=base_url,
@@ -1340,4 +1470,5 @@ def create_client(
         timeout_ms=timeout_ms,
         store=store,
         on_metric=on_metric,
+        wait_for=wait_for,
     )

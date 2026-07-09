@@ -795,10 +795,11 @@ wheels = [
 
 [[package]]
 name = "toolnexus"
-version = "0.1.1"
+version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
+    { name = "pyyaml" },
 ]
 
 [package.optional-dependencies]
@@ -806,18 +807,15 @@ test = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
-yaml = [
-    { name = "pyyaml" },
-]
 
 [package.metadata]
 requires-dist = [
     { name = "mcp", specifier = ">=1.0.0" },
     { name = "pytest", marker = "extra == 'test'" },
     { name = "pytest-asyncio", marker = "extra == 'test'" },
-    { name = "pyyaml", marker = "extra == 'yaml'", specifier = ">=6.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
-provides-extras = ["yaml", "test"]
+provides-extras = ["test"]
 
 [[package]]
 name = "typing-extensions"
