@@ -26,3 +26,6 @@ golang/agent
 golang/openrouter
 golang/toolnexus
 golang/cmd/toolnexus/toolnexus
+
+# local working notes (not tracked)
+inprogress.md
