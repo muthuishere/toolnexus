@@ -45,6 +45,10 @@ class Answer:
     id: str
     ok: bool
     data: Optional[dict[str, Any]] = None
+    # When ``ok`` is False, why (advisory — the loop rule branches only on ``ok``).
+    # Distinguishes an explicit refusal from a dismissal/timeout; the MCP elicitation
+    # bridge maps ``declined``→``decline`` and everything else→``cancel``. (R1)
+    reason: Optional[Literal["declined", "cancelled", "expired"]] = None
 
 
 @dataclass

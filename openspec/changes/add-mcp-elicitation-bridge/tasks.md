@@ -1,35 +1,48 @@
 # Tasks — MCP elicitation bridge (design-stage until the seam is reviewed)
 
-## 0. Resolve open questions (design.md) — BEFORE code
-- [ ] 0.1 `schema` location: `Request.data.schema` (leaning) vs first-class `Request.schema`.
-- [ ] 0.2 `ok=false` default MCP action when `reason` absent: `cancel` (leaning) vs `decline`.
-- [ ] 0.3 `content` validation ownership: bridge validates vs trusts host (leaning bridge-validates).
-- [ ] 0.4 Python URL-mode scope: form-only now + follow-up, or bump the Python SDK.
+## 0. Resolved open questions (2026-07-11)
+- [x] 0.1 `schema` location → **`Request.data.schema`** (no `Request`-shape change; consistent with `data.questions`).
+- [x] 0.2 `ok=false` default → **`cancel`** (safe/retry-later); `decline` only when `reason=="declined"`; `expired`→`cancel`.
+- [x] 0.3 content validation → **bridge does NOT validate in v1** (host owns it; server rejects malformed per spec). Avoids a 5-port validator; delta says "MAY". Documented future enhancement.
+- [x] 0.4 URL mode → **form mode (`kind:"input"`) all ports in v1; URL mode fast-follow** (Python SDK 1.28.0 is form-only). Pure mapping still handles url for parity.
 
 ## 1. Contract (spec-first, all ports)
-- [ ] 1.1 `SPEC.md §10`: add optional `Answer.reason` (R1) + `Request.data.schema` (R2), loop rule
-      unchanged (branch on `ok`). `SPEC.md §2`: MCP outbound gains the elicitation bridge + `waitFor`
-      wiring; capability advertised iff `waitFor` present.
-- [ ] 1.2 Add `reason?` to `Answer` and (if 0.1 picks first-class) `schema?` to `Request`, in all five
-      ports. Non-breaking (optional).
+- [x] 1.1 `SPEC.md §10`: added optional `Answer.reason` (R1) + `Request.data.schema` (R2), loop rule
+      unchanged. `SPEC.md §2`: MCP outbound elicitation-bridge subsection (map form→input/URL→auth;
+      capability advertised iff `waitFor` present; inline resolution).
+- [x] 1.2 JS: `Answer.reason` added; `data.schema` is a convention (no `Request`-shape change). Ports
+      add `reason` to their `Answer` (fan-out).
 
-## 2. The bridge (per port — shared logic, per-SDK registration)
-Register the elicitation handler + advertise the capability iff `waitFor` present; map
-`create → Request → waitFor → Answer → ElicitResult` inline; handle URL-mode re-entrancy.
-- [ ] 2.1 JS — `client.setRequestHandler(ElicitRequestSchema, fn)`; plumb `waitFor` into `loadMcp` (`js/src/mcp.ts:171`).
-- [ ] 2.2 Python — `ClientSession(elicitation_callback=…)` (`mcp_source.py:236`). (Form mode; URL per 0.4.)
-- [ ] 2.3 Go — `client.WithElicitationHandler(h)` (`golang/mcp.go:298` + HTTP/SSE builders).
-- [ ] 2.4 Java — `.capabilities(...elicitation(true,true)).elicitation(h).urlElicitation(h)`.
-- [ ] 2.5 C# — `McpClientOptions.Handlers.ElicitationHandler`.
+## 2. The bridge (per port — shared PURE mapping helpers, per-SDK registration)
+Pure helpers `elicitationToRequest` / `answerToElicitResult` (byte-parity tested) + register the
+handler & advertise the capability iff `waitFor` present; map `create → Request → waitFor → Answer →
+ElicitResult` inline.
+- [x] 2.1 JS (reference, commit 12b1e24) — `client.setRequestHandler(ElicitRequestSchema, fn)`;
+      `loadMcp(input,{waitFor})`; `createToolkit({waitFor})`; mapping unit test. 64 tests green.
+- [x] 2.2 Python — `ClientSession(elicitation_callback=…)`; capability gated on wait_for (SDK default-callback check). 85 tests.
+- [x] 2.3 Go — swapped convenience constructors for `transport + mcpclient.NewClient(WithElicitationHandler)` at all 3 sites (stdio/HTTP/SSE). green -race.
+- [x] 2.4 Java — `ClientCapabilities.builder().elicitation(true,true)` + `.elicitation(h)` + `.urlElicitation(h)` (SDK 2.0.0 has both). green.
+- [x] 2.5 C# — `McpClientOptions.Handlers.ElicitationHandler` + `Capabilities.Elicitation{Form,Url}`. 105 tests.
 
-## 3. Tests (per port, hermetic — stub MCP server that elicits during a tool call)
-- [ ] 3.x form-mode elicit → `waitFor` called with `kind:"input"` + schema, `accept` returns answer,
-      tool completes; `ok=false` → decline/cancel per 0.2, tool degrades; URL mode → `kind:"authorization"`
-      + url, `accept` no content; no-`waitFor` → capability not advertised.
+## 3. Tests (per port — the mapping is the parity lock)
+- [x] 3.x Unit-tested the pure mapping identically in all five: form→input+`data.schema` (no url),
+      url→authorization+url (no schema), accept+data / accept-empty→empty map / declined→decline /
+      bare-false→cancel / expired→cancel. (A full stub-server round-trip was descoped — loadMcp uses
+      real transports, not injectable ones; the pure mapping is the byte-parity-critical unit. Full
+      round-trip integration test = future enhancement.)
 
 ## 4. Parity + validate
-- [ ] 4.1 The Request/Answer additions + bridge behavior identical across ports (form mode at least).
-- [ ] 4.2 `openspec validate add-mcp-elicitation-bridge --strict`.
+- [x] 4.1 Request/Answer additions (`reason`, `data.schema`) + mapping behavior identical across ports;
+      capability gated on `waitFor` in every port (clean degrade). Suites: JS 64, Python 85, Go ok,
+      C# 105, Java green — all verified in-tree.
+- [x] 4.2 `openspec validate add-mcp-elicitation-bridge --strict`.
+
+## Known limitations (v1)
+- Form mode everywhere; URL mode wired where the SDK supports it (JS/Go/Java/C#), Python is form-only
+  (SDK 1.28.x) — URL mode is the one fast-follow.
+- Bridge does not validate `answer.data` against `data.schema` (0.3) — host/server responsibility.
+- No durable (no-`waitFor`) elicitation — MCP has no cross-process suspend of an open JSON-RPC call.
+- Parity locked at the mapping level; a full stub-server-elicits round-trip test is a future add.
 
 ## Dependencies / notes
 - Lands AFTER `harden-suspension-layer` (needs the `suspension` capability + pending-not-error).

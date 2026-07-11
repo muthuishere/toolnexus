@@ -10,8 +10,10 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	mcpclient "github.com/mark3labs/mcp-go/client"
@@ -22,6 +24,80 @@ import (
 const (
 	defaultTimeout = 30 * time.Second
 )
+
+// ---------------------------------------------------------------------------
+// MCP elicitation bridge (§10). A server can ask US for input mid-`tools/call`
+// (a reverse-request). We map it onto the one WaitFor: form mode → kind:"input",
+// URL mode → kind:"authorization". The two mappings are pure + byte-parity-tested.
+// ---------------------------------------------------------------------------
+
+var elcSeq atomic.Uint64
+
+// ElicitationToRequest maps an MCP `elicitation/create` request onto a §10 Request.
+func ElicitationToRequest(params mcp.ElicitationParams) Request {
+	isURL := params.Mode == "url"
+	req := Request{
+		ID:     "elc-" + strconv.FormatInt(time.Now().UnixMilli(), 36) + "-" + strconv.FormatUint(elcSeq.Add(1), 10),
+		Prompt: params.Message,
+	}
+	if isURL {
+		req.Kind = "authorization"
+		if params.URL != "" {
+			req.URL = params.URL
+		}
+	} else {
+		req.Kind = "input"
+		if params.RequestedSchema != nil {
+			req.Data = map[string]any{"schema": params.RequestedSchema}
+		}
+	}
+	return req
+}
+
+// AnswerToElicitResult maps a resolved §10 Answer back onto an MCP ElicitationResult.
+// Ok→accept; Reason=="declined"→decline; everything else→cancel.
+func AnswerToElicitResult(answer Answer) *mcp.ElicitationResult {
+	res := &mcp.ElicitationResult{}
+	if answer.Ok {
+		res.Action = mcp.ElicitationResponseActionAccept
+		if answer.Data != nil {
+			res.Content = answer.Data
+		} else {
+			res.Content = map[string]any{}
+		}
+		return res
+	}
+	if answer.Reason == "declined" {
+		res.Action = mcp.ElicitationResponseActionDecline
+	} else {
+		res.Action = mcp.ElicitationResponseActionCancel
+	}
+	return res
+}
+
+// elicitationBridge adapts a host WaitFor onto the SDK's ElicitationHandler: it
+// maps ElicitationRequest→Request→WaitFor→Answer→ElicitationResult.
+type elicitationBridge struct {
+	waitFor func(Request) (Answer, error)
+}
+
+func (b elicitationBridge) Elicit(ctx context.Context, request mcp.ElicitationRequest) (*mcp.ElicitationResult, error) {
+	answer, err := b.waitFor(ElicitationToRequest(request.Params))
+	if err != nil {
+		return nil, err
+	}
+	return AnswerToElicitResult(answer), nil
+}
+
+// elicitationOptions returns the client options that advertise the elicitation
+// capability + register the bridge — ONLY when a waitFor exists to satisfy it. A
+// waitFor-less host degrades cleanly (the server won't elicit). (§10 elicitation bridge)
+func elicitationOptions(waitFor func(Request) (Answer, error)) []mcpclient.ClientOption {
+	if waitFor == nil {
+		return nil
+	}
+	return []mcpclient.ClientOption{mcpclient.WithElicitationHandler(elicitationBridge{waitFor})}
+}
 
 // ServerConfig is a single MCP server entry. The same struct holds both local
 // (stdio) and remote (HTTP/SSE) fields; the active transport is inferred.
@@ -260,11 +336,11 @@ func (m *McpSource) Close() {
 	}
 }
 
-func connectServer(name string, cfg ServerConfig) (*mcpclient.Client, error) {
+func connectServer(name string, cfg ServerConfig, waitFor func(Request) (Answer, error)) (*mcpclient.Client, error) {
 	timeout := cfg.timeout()
 
 	if cfg.isRemote() {
-		client, err := newRemoteClient(cfg)
+		client, err := newRemoteClient(cfg, waitFor)
 		if err != nil {
 			return nil, err
 		}
@@ -295,11 +371,13 @@ func connectServer(name string, cfg ServerConfig) (*mcpclient.Client, error) {
 			return cmd, nil
 		}))
 	}
-	client, err := mcpclient.NewStdioMCPClientWithOptions(cfg.Command[0], env, cfg.Command[1:], opts...)
-	if err != nil {
-		return nil, err
+	// Build the transport + client directly (instead of the NewStdioMCPClientWithOptions
+	// convenience) so the elicitation handler can be attached when a waitFor is present.
+	stdioTransport := transport.NewStdioWithOptions(cfg.Command[0], env, cfg.Command[1:], opts...)
+	if err := stdioTransport.Start(context.Background()); err != nil {
+		return nil, fmt.Errorf("failed to start stdio transport: %w", err)
 	}
-	// NewStdioMCPClientWithOptions auto-starts the transport.
+	client := mcpclient.NewClient(stdioTransport, elicitationOptions(waitFor)...)
 	if err := initClient(client, timeout); err != nil {
 		client.Close()
 		return nil, err
@@ -307,18 +385,25 @@ func connectServer(name string, cfg ServerConfig) (*mcpclient.Client, error) {
 	return client, nil
 }
 
-func newRemoteClient(cfg ServerConfig) (*mcpclient.Client, error) {
+func newRemoteClient(cfg ServerConfig, waitFor func(Request) (Answer, error)) (*mcpclient.Client, error) {
 	// Expand ${ENV_VAR} in header values so tokens live in the environment, not
 	// the committed config. Values are never logged.
 	headers := ExpandEnvHeaders(cfg.Headers)
 
-	// Prefer streamable HTTP, fall back to SSE.
+	// Prefer streamable HTTP, fall back to SSE. Build transport + client directly
+	// (instead of the NewStreamableHttpClient / NewSSEMCPClient convenience) so the
+	// elicitation handler can be attached when a waitFor is present.
 	var httpOpts []transport.StreamableHTTPCOption
 	if len(headers) > 0 {
 		httpOpts = append(httpOpts, transport.WithHTTPHeaders(headers))
 	}
-	httpClient, err := mcpclient.NewStreamableHttpClient(cfg.URL, httpOpts...)
+	httpTransport, err := transport.NewStreamableHTTP(cfg.URL, httpOpts...)
 	if err == nil {
+		clientOpts := elicitationOptions(waitFor)
+		if httpTransport.GetSessionId() != "" {
+			clientOpts = append(clientOpts, mcpclient.WithSession())
+		}
+		httpClient := mcpclient.NewClient(httpTransport, clientOpts...)
 		if startErr := httpClient.Start(context.Background()); startErr == nil {
 			return httpClient, nil
 		} else {
@@ -331,10 +416,11 @@ func newRemoteClient(cfg ServerConfig) (*mcpclient.Client, error) {
 	if len(headers) > 0 {
 		sseOpts = append(sseOpts, mcpclient.WithHeaders(headers))
 	}
-	sseClient, sseErr := mcpclient.NewSSEMCPClient(cfg.URL, sseOpts...)
+	sseTransport, sseErr := transport.NewSSE(cfg.URL, sseOpts...)
 	if sseErr != nil {
 		return nil, fmt.Errorf("streamable-http failed (%v) and sse setup failed: %w", err, sseErr)
 	}
+	sseClient := mcpclient.NewClient(sseTransport, elicitationOptions(waitFor)...)
 	if startErr := sseClient.Start(context.Background()); startErr != nil {
 		sseClient.Close()
 		return nil, fmt.Errorf("streamable-http failed (%v) and sse start failed: %w", err, startErr)
@@ -364,11 +450,17 @@ func listTools(client *mcpclient.Client, timeout time.Duration) ([]mcp.Tool, err
 }
 
 // LoadMcp connects to every enabled server, lists + converts tools. Failures
-// are isolated — one bad server logs a warning and is marked failed.
-func LoadMcp(input any) (*McpSource, error) {
+// are isolated — one bad server logs a warning and is marked failed. When a
+// waitFor is given, connected clients advertise the elicitation capability and
+// bridge server elicitation mid-`tools/call` onto it (§10); omit ⇒ not advertised.
+func LoadMcp(input any, waitFor ...func(Request) (Answer, error)) (*McpSource, error) {
 	config, err := ParseMcpConfig(input)
 	if err != nil {
 		return nil, err
+	}
+	var wf func(Request) (Answer, error)
+	if len(waitFor) > 0 {
+		wf = waitFor[0]
 	}
 
 	var (
@@ -388,7 +480,7 @@ func LoadMcp(input any) (*McpSource, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			client, cErr := connectServer(name, cfg)
+			client, cErr := connectServer(name, cfg, wf)
 			if cErr != nil {
 				mu.Lock()
 				status[name] = StatusFailed

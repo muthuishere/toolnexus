@@ -202,6 +202,26 @@ server.)
 `connected | disabled | failed`  (v1 drops opencode's `needs_auth` /
 `needs_client_registration` since OAuth is deferred.)
 
+### Elicitation bridge (server→client input, mapped onto §10)
+
+An MCP server may **elicit** input from the user *during* a `tools/call` it is servicing —
+`elicitation/create`, a reverse-request on the same session (the mirror of sampling/roots). toolnexus
+bridges it onto the one §10 `waitFor` rather than inventing a second input path:
+
+- When the MCP source is constructed **with** a `waitFor` (from `createToolkit({ waitFor })`, typically
+  the same function given to the client), the MCP client advertises the `elicitation` capability and
+  registers a handler. **Without** a `waitFor`, the capability is not advertised — a compliant server
+  will not elicit, so the host degrades cleanly.
+- The handler maps the request onto a `Request` and back: **form mode** → `kind:"input"` with the
+  `requestedSchema` carried in `data.schema`; **URL mode** → `kind:"authorization"` with `url`. It calls
+  `waitFor(request)` and maps the `Answer` to the MCP result: `ok` → `accept` (with `answer.data` as the
+  content); `ok==false` → `decline` if `answer.reason=="declined"`, else `cancel`. It satisfies the
+  reverse-request **inline** — it does not re-execute the tool; the in-flight `tools/call` resumes when
+  the handler returns.
+- Credentials are never collected via form/`input` (the §10 trust boundary): a server needing a secret
+  uses URL mode → `kind:"authorization"`, entered out-of-band. v1 ships form mode across all ports; URL
+  mode where the port's MCP SDK supports it.
+
 ---
 
 ## 3. Skill source
@@ -823,20 +843,31 @@ Request {
   kind:       string           // "authorization" | "approval" | "input" | ...  (open vocabulary)
   prompt:     string           // what is being asked, in human words
   url:        string?          // present when the action happens at a link
-  data:       object?          // kind-specific extra (e.g. choices to pick from)
+  data:       object?          // kind-specific extra (e.g. choices, or data.schema — see below)
   expiresAt:  string?          // RFC3339; the request is stale after this
 }
 ```
+
+`data.schema` (optional, **R2**) MAY carry a restricted JSON-Schema (flat primitive properties only —
+string/number/boolean/enum, the MCP `requestedSchema` shape) describing the expected `answer.data`, so
+a generic host/renderer can render and validate input without bespoke glue. Its absence is fully
+backward-compatible; carrying the schema under `data` keeps the `Request` shape unchanged.
 
 ### `Answer` — byte-identical wire data
 
 ```
 Answer {
-  id:    string                // echoes Request.id
-  ok:    boolean               // satisfied, vs declined / aborted / expired
-  data:  object?               // kind-specific payload (e.g. the value entered)
+  id:      string              // echoes Request.id
+  ok:      boolean             // satisfied, vs declined / aborted / expired
+  data:    object?             // kind-specific payload (e.g. the value entered)
+  reason:  string?             // when ok==false: "declined" | "cancelled" | "expired"  (R1, advisory)
 }
 ```
+
+`reason` (optional, **R1**) is populated only when `ok == false`, distinguishing an explicit refusal
+from a dismissal/timeout. **The loop rule branches only on `ok`** — `reason` is advisory. The MCP
+elicitation bridge (§2) uses it to map `ok==false` onto MCP's `decline` (when `reason=="declined"`)
+vs `cancel` (otherwise).
 
 `Request`/`Answer` keys are **fixed across all ports** (they serialize over the wire
 and cross agent boundaries) — pinned exactly as above, *not* idiomatic-cased like

@@ -26,6 +26,11 @@ type Options struct {
 	// (source:"a2a"). A top-level `agents` block on a parsed McpConfig map is
 	// merged in as well.
 	Agents []Agent
+	// WaitFor is a host resolver for out-of-band input (§10). When set, connected
+	// MCP servers may elicit input from the human mid-`tools/call` and it is bridged
+	// onto this WaitFor (form→kind:"input", URL→kind:"authorization"). Typically the
+	// same function passed to the client. Omit ⇒ MCP elicitation is not advertised.
+	WaitFor func(Request) (Answer, error)
 }
 
 // Toolkit aggregates all tools and routes execution.
@@ -51,7 +56,7 @@ func CreateToolkit(ctx context.Context, opts Options) (*Toolkit, error) {
 	)
 
 	if opts.McpConfig != nil {
-		m, err := LoadMcp(opts.McpConfig)
+		m, err := LoadMcp(opts.McpConfig, opts.WaitFor)
 		if err != nil {
 			return nil, err
 		}

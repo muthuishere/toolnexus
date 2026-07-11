@@ -43,6 +43,8 @@ from .mcp_source import (
     McpConfig,
     McpSource,
     ServerConfig,
+    answer_to_elicit_result,
+    elicitation_to_request,
     expand_env_headers,
     is_enabled,
     is_remote,
@@ -114,6 +116,8 @@ __all__ = [
     "is_remote",
     "load_mcp",
     "parse_mcp_config",
+    "elicitation_to_request",
+    "answer_to_elicit_result",
     # skill
     "SKILL_TOOL_DESCRIPTION",
     "SKILLS_PROMPT_PREAMBLE",

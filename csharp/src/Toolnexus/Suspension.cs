@@ -51,4 +51,14 @@ public sealed record Answer
     [JsonPropertyName("data")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IDictionary<string, object?>? Data { get; init; }
+
+    /// <summary>
+    /// When <see cref="Ok"/> is false, why (advisory — the loop rule branches only on <see cref="Ok"/>).
+    /// Distinguishes an explicit refusal from a dismissal/timeout; the MCP elicitation bridge maps
+    /// <c>declined</c>→<c>decline</c> and everything else→<c>cancel</c>. (R1) One of
+    /// <c>declined</c> | <c>cancelled</c> | <c>expired</c>.
+    /// </summary>
+    [JsonPropertyName("reason")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Reason { get; init; }
 }

@@ -68,6 +68,10 @@ type Answer struct {
 	ID   string         `json:"id"`             // echoes Request.ID
 	Ok   bool           `json:"ok"`             // satisfied, vs declined / aborted / expired
 	Data map[string]any `json:"data,omitempty"` // kind-specific payload (e.g. the value entered)
+	// Reason: when Ok is false, why (advisory — the loop rule branches only on Ok).
+	// Distinguishes an explicit refusal from a dismissal/timeout; the MCP elicitation
+	// bridge maps "declined"→decline and everything else→cancel. "declined"|"cancelled"|"expired". (R1)
+	Reason string `json:"reason,omitempty"`
 }
 
 var pendingSeq atomic.Uint64

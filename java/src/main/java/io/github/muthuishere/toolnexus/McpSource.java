@@ -24,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -45,6 +46,45 @@ public final class McpSource implements AutoCloseable {
     private final List<Tool> tools;
     private final Map<String, String> status; // server -> "connected" | "disabled" | "failed"
     private final List<McpSyncClient> clients;
+
+    // -----------------------------------------------------------------------
+    // MCP elicitation bridge (§10). A server can ask US for input mid-`tools/call`
+    // (a reverse-request). We map it onto the one `waitFor`: form mode → kind:"input",
+    // URL mode → kind:"authorization". The two mappings are pure + byte-parity-tested.
+    // -----------------------------------------------------------------------
+
+    private static final AtomicInteger ELC_SEQ = new AtomicInteger(0);
+
+    /** Map an MCP {@code elicitation/create} request onto a §10 {@link Request}. */
+    static Request elicitationToRequest(McpSchema.ElicitRequest params) {
+        boolean isUrl = "url".equals(params.mode());
+        String message = params.message() == null ? "" : params.message();
+        String id = "elc-" + Long.toString(System.currentTimeMillis(), 36) + "-" + ELC_SEQ.incrementAndGet();
+        String url = null;
+        Map<String, Object> data = null;
+        if (isUrl && params instanceof McpSchema.ElicitUrlRequest u && u.url() != null) {
+            url = u.url();
+        }
+        if (!isUrl && params instanceof McpSchema.ElicitFormRequest f && f.requestedSchema() != null) {
+            data = Map.of("schema", f.requestedSchema());
+        }
+        return new Request(id, isUrl ? "authorization" : "input", message, url, data, null);
+    }
+
+    /**
+     * Map a resolved §10 {@link Answer} back onto an MCP {@link McpSchema.ElicitResult}.
+     * ok→accept (content = answer.data, or empty map); declined→decline; else→cancel.
+     */
+    static McpSchema.ElicitResult answerToElicitResult(Answer answer) {
+        if (answer.ok()) {
+            Map<String, Object> content = answer.data() != null ? answer.data() : Map.of();
+            return new McpSchema.ElicitResult(McpSchema.ElicitResult.Action.ACCEPT, content);
+        }
+        McpSchema.ElicitResult.Action action = "declined".equals(answer.reason())
+                ? McpSchema.ElicitResult.Action.DECLINE
+                : McpSchema.ElicitResult.Action.CANCEL;
+        return new McpSchema.ElicitResult(action, null);
+    }
 
     private McpSource(List<Tool> tools, Map<String, String> status, List<McpSyncClient> clients) {
         this.tools = tools;
@@ -165,8 +205,19 @@ public final class McpSource implements AutoCloseable {
     }
 
     /** Connect to every enabled server, list + convert tools. Failures are isolated. */
-    @SuppressWarnings("unchecked")
     public static McpSource load(Object input) {
+        return load(input, null);
+    }
+
+    /**
+     * Connect to every enabled server, list + convert tools. Failures are isolated.
+     * When {@code waitFor} is present, each MCP client advertises the elicitation
+     * capability and registers a handler that bridges a server {@code elicitation/create}
+     * onto the one §10 {@code waitFor} (form→kind:"input", URL→kind:"authorization").
+     * A {@code null} {@code waitFor} degrades cleanly — the capability is not advertised.
+     */
+    @SuppressWarnings("unchecked")
+    public static McpSource load(Object input, Function<Request, Answer> waitFor) {
         Map<String, Object> config = parseConfig(input);
         List<Tool> tools = new ArrayList<>();
         Map<String, String> status = new LinkedHashMap<>();
@@ -194,11 +245,19 @@ public final class McpSource implements AutoCloseable {
                     McpClientTransport transport = isRemote(cfg)
                             ? buildRemoteTransport(cfg)
                             : buildLocalTransport(cfg);
-                    client = McpClient.sync(transport)
+                    McpClient.SyncSpec spec = McpClient.sync(transport)
                             .requestTimeout(Duration.ofMillis(timeout))
                             .initializationTimeout(Duration.ofMillis(timeout))
-                            .clientInfo(new McpSchema.Implementation("toolnexus", "0.1.0"))
-                            .build();
+                            .clientInfo(new McpSchema.Implementation("toolnexus", "0.1.0"));
+                    // Advertise elicitation + register the bridge ONLY when a waitFor exists to
+                    // satisfy it — a waitFor-less host degrades cleanly (the server won't elicit).
+                    // (§10 elicitation bridge) form mode → kind:"input"; URL mode → kind:"authorization".
+                    if (waitFor != null) {
+                        spec.capabilities(McpSchema.ClientCapabilities.builder().elicitation(true, true).build())
+                                .elicitation(req -> answerToElicitResult(waitFor.apply(elicitationToRequest(req))))
+                                .urlElicitation(req -> answerToElicitResult(waitFor.apply(elicitationToRequest(req))));
+                    }
+                    client = spec.build();
                     client.initialize();
                     List<McpSchema.Tool> defs = paginateTools(client);
                     List<Tool> converted = new ArrayList<>();

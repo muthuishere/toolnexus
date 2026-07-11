@@ -21,10 +21,12 @@ import pytest
 
 from toolnexus import (
     SKILLS_PROMPT_PREAMBLE,
+    answer_to_elicit_result,
     builtins_enabled,
     create_builtin_tools,
     create_toolkit,
     define_tool,
+    elicitation_to_request,
     expand_env_headers,
     http_tool,
     load_skills,
@@ -758,3 +760,45 @@ def test_frontmatter_real_folded_example_huddle():
             "Runs a repo-aware expert huddle for engineering decisions, "
             "planning, research, and verification."
         )
+
+
+# --------------------------------------------------------------------------- #
+# MCP elicitation bridge (§10) — pure mapping parity with js/test/unit.test.ts
+# --------------------------------------------------------------------------- #
+def test_mcp_elicitation_maps_to_section10_request_and_answer():
+    from types import SimpleNamespace
+
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+    }
+    # form mode → kind:"input" carrying the schema in data["schema"] (no url)
+    req = elicitation_to_request(
+        SimpleNamespace(message="Your name?", requestedSchema=schema)
+    )
+    assert req.kind == "input"
+    assert req.prompt == "Your name?"
+    assert req.data == {"schema": schema}
+    assert req.url is None
+    # URL mode → kind:"authorization" carrying the url, no schema
+    ureq = elicitation_to_request(
+        SimpleNamespace(mode="url", message="Log in", url="https://x/auth")
+    )
+    assert ureq.kind == "authorization"
+    assert ureq.url == "https://x/auth"
+    assert ureq.data is None
+    # Answer → ElicitResult (do NOT assert the request id above)
+    accept = answer_to_elicit_result(Answer(id="1", ok=True, data={"name": "Ada"}))
+    assert accept.action == "accept"
+    assert accept.content == {"name": "Ada"}
+    accept_empty = answer_to_elicit_result(Answer(id="1", ok=True))
+    assert accept_empty.action == "accept"
+    assert accept_empty.content == {}
+    assert answer_to_elicit_result(
+        Answer(id="1", ok=False, reason="declined")
+    ).action == "decline"
+    assert answer_to_elicit_result(Answer(id="1", ok=False)).action == "cancel"
+    assert answer_to_elicit_result(
+        Answer(id="1", ok=False, reason="expired")
+    ).action == "cancel"

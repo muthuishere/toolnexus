@@ -43,12 +43,21 @@ public sealed class Toolkit : IAsyncDisposable
         /// <summary>Remote A2A agents — each advertised skill becomes a tool (source <c>"a2a"</c>).</summary>
         public List<Agent>? Agents { get; set; }
 
+        /// <summary>
+        /// Host resolver for out-of-band input (§10). When set, connected MCP servers may elicit
+        /// input from the human mid-<c>tools/call</c> and it is bridged onto this <c>WaitFor</c>
+        /// (form→kind:"input", URL→kind:"authorization"). Typically the same function passed to the
+        /// client. Omit ⇒ MCP elicitation is not advertised.
+        /// </summary>
+        public Func<Request, Task<Answer>>? WaitFor { get; set; }
+
         public Options WithMcpConfig(object? v) { McpConfig = v; return this; }
         public Options WithSkillsDir(params string[] v) { SkillsDir = v.ToList(); return this; }
         public Options WithExtraTools(params ITool[] v) { ExtraTools = v.ToList(); return this; }
         public Options WithAnnotatedObjects(params object[] v) { AnnotatedObjects = v.ToList(); return this; }
         public Options WithBuiltins(object? v) { Builtins = v; return this; }
         public Options WithAgents(params Agent[] v) { Agents = v.ToList(); return this; }
+        public Options WithWaitFor(Func<Request, Task<Answer>> v) { WaitFor = v; return this; }
     }
 
     private Toolkit(McpSource? mcp, SkillSource? skill, List<ITool> builtins, List<ITool> agents, List<ITool> extraTools, A2AConfig? a2aConfig, MCPServeConfig? mcpServerConfig)
@@ -73,7 +82,7 @@ public sealed class Toolkit : IAsyncDisposable
 
     public static async Task<Toolkit> CreateAsync(Options opts)
     {
-        var mcp = opts.McpConfig != null ? await McpSource.LoadAsync(opts.McpConfig).ConfigureAwait(false) : null;
+        var mcp = opts.McpConfig != null ? await McpSource.LoadAsync(opts.McpConfig, opts.WaitFor).ConfigureAwait(false) : null;
         var skill = opts.SkillsDir != null ? SkillSource.Load(opts.SkillsDir) : null;
 
         var extras = new List<ITool>();

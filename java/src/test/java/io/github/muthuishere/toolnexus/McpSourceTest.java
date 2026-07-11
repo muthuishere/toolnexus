@@ -2,6 +2,8 @@ package io.github.muthuishere.toolnexus;
 
 import org.junit.jupiter.api.Test;
 
+import io.modelcontextprotocol.spec.McpSchema;
+
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -85,5 +87,54 @@ class McpSourceTest {
         headers.put("X-Path", "p=${PATH}");
         Map<String, String> out = McpSource.expandEnvHeaders(headers);
         assertEquals("p=" + path, out.get("X-Path"));
+    }
+
+    /**
+     * MCP elicitation ⇄ §10 mapping (form→input, url→authorization, accept/decline/cancel).
+     * Mirrors the JS reference unit test. The generated {@code elc-} id is not asserted.
+     */
+    @Test
+    void elicitationBridgeMapsFormAndUrlAndAcceptDeclineCancel() {
+        Map<String, Object> schema = new LinkedHashMap<>();
+        schema.put("type", "object");
+        Map<String, Object> props = new LinkedHashMap<>();
+        Map<String, Object> nameProp = new LinkedHashMap<>();
+        nameProp.put("type", "string");
+        props.put("name", nameProp);
+        schema.put("properties", props);
+        schema.put("required", java.util.List.of("name"));
+
+        // form mode → kind:"input" carrying the schema in data.schema
+        McpSchema.ElicitFormRequest form = new McpSchema.ElicitFormRequest("Your name?", schema, null);
+        Request req = McpSource.elicitationToRequest(form);
+        assertEquals("input", req.kind());
+        assertEquals("Your name?", req.prompt());
+        assertEquals(schema, req.data().get("schema"));
+        assertNull(req.url());
+
+        // URL mode → kind:"authorization" carrying the url, no schema
+        McpSchema.ElicitUrlRequest url = new McpSchema.ElicitUrlRequest("Log in", "https://x/auth", "eid-1", null);
+        Request ureq = McpSource.elicitationToRequest(url);
+        assertEquals("authorization", ureq.kind());
+        assertEquals("https://x/auth", ureq.url());
+        assertNull(ureq.data());
+
+        // Answer → ElicitResult
+        McpSchema.ElicitResult acceptData = McpSource.answerToElicitResult(new Answer("1", true, Map.of("name", "Ada")));
+        assertEquals(McpSchema.ElicitResult.Action.ACCEPT, acceptData.action());
+        assertEquals(Map.of("name", "Ada"), acceptData.content());
+
+        McpSchema.ElicitResult acceptEmpty = McpSource.answerToElicitResult(new Answer("1", true));
+        assertEquals(McpSchema.ElicitResult.Action.ACCEPT, acceptEmpty.action());
+        assertEquals(Map.of(), acceptEmpty.content());
+
+        McpSchema.ElicitResult declined = McpSource.answerToElicitResult(new Answer("1", false, null, "declined"));
+        assertEquals(McpSchema.ElicitResult.Action.DECLINE, declined.action());
+
+        McpSchema.ElicitResult cancel = McpSource.answerToElicitResult(new Answer("1", false));
+        assertEquals(McpSchema.ElicitResult.Action.CANCEL, cancel.action());
+
+        McpSchema.ElicitResult expired = McpSource.answerToElicitResult(new Answer("1", false, null, "expired"));
+        assertEquals(McpSchema.ElicitResult.Action.CANCEL, expired.action());
     }
 }

@@ -30,6 +30,13 @@ public final class Toolkit implements AutoCloseable {
         public Object builtins;
         /** Remote A2A agents — each advertised skill becomes a tool (source:"a2a"). */
         public List<A2A.Agent> agents;
+        /**
+         * Host resolver for out-of-band input (§10). When set, connected MCP servers may elicit
+         * input from the human mid-{@code tools/call} and it is bridged onto this {@code waitFor}
+         * (form→kind:"input", URL→kind:"authorization"). Typically the same function passed to the
+         * client. Omit ⇒ MCP elicitation is not advertised.
+         */
+        public java.util.function.Function<Request, Answer> waitFor;
 
         public Options mcpConfig(Object v) { this.mcpConfig = v; return this; }
         public Options skillsDir(String... v) { this.skillsDir = List.of(v); return this; }
@@ -40,6 +47,7 @@ public final class Toolkit implements AutoCloseable {
         public Options builtins(Object v) { this.builtins = v; return this; }
         public Options agents(List<A2A.Agent> v) { this.agents = v; return this; }
         public Options agents(A2A.Agent... v) { this.agents = List.of(v); return this; }
+        public Options waitFor(java.util.function.Function<Request, Answer> v) { this.waitFor = v; return this; }
     }
 
     private Toolkit(McpSource mcp, SkillSource skill, List<Tool> builtins, List<Tool> agents, List<Tool> extraTools,
@@ -71,7 +79,7 @@ public final class Toolkit implements AutoCloseable {
     }
 
     public static Toolkit create(Options opts) {
-        McpSource mcp = opts.mcpConfig != null ? McpSource.load(opts.mcpConfig) : null;
+        McpSource mcp = opts.mcpConfig != null ? McpSource.load(opts.mcpConfig, opts.waitFor) : null;
         SkillSource skill = opts.skillsDir != null ? SkillSource.load(opts.skillsDir) : null;
 
         List<Tool> extras = new ArrayList<>();

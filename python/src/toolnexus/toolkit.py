@@ -77,8 +77,17 @@ class Toolkit:
         extra_tools: Optional[list[Tool]] = None,
         builtins: Optional[BuiltinsConfig] = None,
         agents: Optional[list[Agent]] = None,
+        wait_for: Optional[Any] = None,
     ) -> "Toolkit":
-        mcp = await load_mcp(mcp_config) if mcp_config is not None else None
+        # ``wait_for`` (§10): when set, connected MCP servers may elicit input from the
+        # human mid-``tools/call``, bridged onto this resolver (form→kind:"input",
+        # URL→kind:"authorization"). Typically the same function passed to the client.
+        # Omit ⇒ MCP elicitation is not advertised.
+        mcp = (
+            await load_mcp(mcp_config, wait_for=wait_for)
+            if mcp_config is not None
+            else None
+        )
         skill = load_skills(skills_dir) if skills_dir is not None else None
         # The toggle comes from the `builtins` option, or a top-level `builtins`
         # key on a parsed config dict — same precedence as MCP's is_enabled.
@@ -267,6 +276,7 @@ async def create_toolkit(
     extra_tools: Optional[list[Tool]] = None,
     builtins: Optional[BuiltinsConfig] = None,
     agents: Optional[list[Agent]] = None,
+    wait_for: Optional[Any] = None,
 ) -> Toolkit:
     """Async factory. The returned Toolkit is also an async context manager.
 
@@ -281,4 +291,5 @@ async def create_toolkit(
         extra_tools=extra_tools,
         builtins=builtins,
         agents=agents,
+        wait_for=wait_for,
     )

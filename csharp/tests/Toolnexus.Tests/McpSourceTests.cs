@@ -1,3 +1,6 @@
+using System.Text.Json;
+using ModelContextProtocol.Protocol;
+
 namespace Toolnexus.Tests;
 
 public class McpSourceTests
@@ -65,5 +68,47 @@ public class McpSourceTests
         var headers = new Dictionary<string, string> { ["X-Path"] = "p=${PATH}" };
         var output = McpSource.ExpandEnvHeaders(headers)!;
         Assert.Equal("p=" + path, output["X-Path"]);
+    }
+
+    // §10 MCP elicitation bridge: form→input (carries data.schema), url→authorization (carries url);
+    // Answer→ElicitResult (ok→accept, declined→decline, else→cancel). Byte-parity with the JS mapping.
+    // The generated `elc-...` Id is deliberately NOT asserted.
+    [Fact]
+    public void ElicitationBridgeMapsFormAndUrlAndAcceptDeclineCancel()
+    {
+        var schema = new ElicitRequestParams.RequestSchema
+        {
+            Properties = new Dictionary<string, ElicitRequestParams.PrimitiveSchemaDefinition>
+            {
+                ["name"] = new ElicitRequestParams.StringSchema(),
+            },
+            Required = new List<string> { "name" },
+        };
+
+        // form mode → kind:"input" carrying the schema in data.schema
+        var req = McpSource.ElicitationToRequest(new ElicitRequestParams { Message = "Your name?", RequestedSchema = schema });
+        Assert.Equal("input", req.Kind);
+        Assert.Equal("Your name?", req.Prompt);
+        Assert.Same(schema, req.Data!["schema"]);
+        Assert.Null(req.Url);
+
+        // URL mode → kind:"authorization" carrying the url, no schema
+        var ureq = McpSource.ElicitationToRequest(new ElicitRequestParams { Mode = "url", Message = "Log in", Url = "https://x/auth" });
+        Assert.Equal("authorization", ureq.Kind);
+        Assert.Equal("https://x/auth", ureq.Url);
+        Assert.Null(ureq.Data);
+
+        // Answer → ElicitResult
+        var accept = McpSource.AnswerToElicitResult(new Answer { Id = "1", Ok = true, Data = new Dictionary<string, object?> { ["name"] = "Ada" } });
+        Assert.Equal("accept", accept.Action);
+        Assert.Equal("Ada", accept.Content!["name"].GetString());
+
+        var acceptEmpty = McpSource.AnswerToElicitResult(new Answer { Id = "1", Ok = true });
+        Assert.Equal("accept", acceptEmpty.Action);
+        Assert.Empty(acceptEmpty.Content!);
+
+        Assert.Equal("decline", McpSource.AnswerToElicitResult(new Answer { Id = "1", Ok = false, Reason = "declined" }).Action);
+        Assert.Equal("cancel", McpSource.AnswerToElicitResult(new Answer { Id = "1", Ok = false }).Action);
+        Assert.Equal("cancel", McpSource.AnswerToElicitResult(new Answer { Id = "1", Ok = false, Reason = "expired" }).Action);
     }
 }

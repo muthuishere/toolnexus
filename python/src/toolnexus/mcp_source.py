@@ -8,10 +8,13 @@ the lifetime of the source (released by :meth:`McpSource.close`).
 """
 from __future__ import annotations
 
+import inspect
+import itertools
 import json
 import os
 import re
 import sys
+import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -21,11 +24,14 @@ from mcp import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamablehttp_client
+from mcp.types import ElicitResult
 from mcp.types import Tool as McpToolDef
 
 from .types import (
+    Answer,
     JSONSchema,
     McpStatus,
+    Request,
     Tool,
     ToolContext,
     ToolResult,
@@ -34,6 +40,49 @@ from .types import (
 
 DEFAULT_TIMEOUT = 30.0  # seconds (JS uses 30_000 ms)
 MAX_LIST_PAGES = 1_000
+
+
+# ---------------------------------------------------------------------------
+# MCP elicitation bridge (§10). A server can ask US for input mid-``tools/call``
+# (a reverse-request). We map it onto the one ``wait_for``: form mode → kind:"input",
+# URL mode → kind:"authorization". The two mappings are pure + byte-parity-tested.
+# ---------------------------------------------------------------------------
+
+_elc_seq = itertools.count(1)
+
+
+def elicitation_to_request(params: Any) -> Request:
+    """Map an MCP ``elicitation/create`` request onto a §10 :class:`Request`.
+
+    Mirrors the JS ``elicitationToRequest`` byte-for-byte: URL mode →
+    ``kind="authorization"`` carrying the ``url``; otherwise ``kind="input"``
+    carrying the ``requestedSchema`` in ``data["schema"]``.
+    """
+    is_url = getattr(params, "mode", None) == "url"
+    message = getattr(params, "message", None)
+    req = Request(
+        id=f"elc-{int(time.time() * 1000):x}-{next(_elc_seq)}",
+        kind="authorization" if is_url else "input",
+        prompt=str(message) if message is not None else "",
+    )
+    url = getattr(params, "url", None)
+    if is_url and url:
+        req.url = url
+    schema = getattr(params, "requestedSchema", None)
+    if not is_url and schema:
+        req.data = {"schema": schema}
+    return req
+
+
+def answer_to_elicit_result(answer: Answer) -> ElicitResult:
+    """Map a resolved §10 :class:`Answer` back onto an MCP ``ElicitResult``.
+
+    Mirrors the JS ``answerToElicitResult``: ``ok`` → ``accept`` (with ``data`` or
+    ``{}``); ``reason == "declined"`` → ``decline``; everything else → ``cancel``.
+    """
+    if answer.ok:
+        return ElicitResult(action="accept", content=answer.data or {})
+    return ElicitResult(action="decline" if answer.reason == "declined" else "cancel")
 
 _ENV_RE = re.compile(r"\$\{([A-Za-z0-9_]+)\}")
 
@@ -202,8 +251,22 @@ class McpSource:
         await self._stack.aclose()
 
 
+def _make_elicitation_callback(wait_for: Any) -> Any:
+    """Build the SDK ``elicitation_callback`` that bridges a server elicitation onto
+    ``wait_for`` (§10). Passing it advertises the elicitation capability; the SDK
+    gates that capability on a non-default callback (see ``mcp.client.session``)."""
+
+    async def _callback(context: Any, params: Any) -> ElicitResult:
+        r = wait_for(elicitation_to_request(params))
+        if inspect.isawaitable(r):
+            r = await r
+        return answer_to_elicit_result(r)
+
+    return _callback
+
+
 async def _connect_session(
-    stack: AsyncExitStack, name: str, cfg: ServerConfig
+    stack: AsyncExitStack, name: str, cfg: ServerConfig, wait_for: Any = None
 ) -> ClientSession:
     """Open the right transport and an initialized ClientSession on `stack`."""
     timeout = _to_seconds(cfg.get("timeout", DEFAULT_TIMEOUT * 1000))
@@ -232,14 +295,25 @@ async def _connect_session(
         )
         read, write = await stack.enter_async_context(stdio_client(params))
 
+    # Advertise elicitation + register the bridge ONLY when a wait_for exists to
+    # satisfy it — a wait_for-less host degrades cleanly (the server won't elicit).
+    # (§10 elicitation bridge). The SDK gates the advertised capability on a
+    # non-default callback, so passing it only-when-present is enough.
     session = await stack.enter_async_context(
-        ClientSession(read, write, read_timeout_seconds=timedelta(seconds=timeout))
+        ClientSession(
+            read,
+            write,
+            read_timeout_seconds=timedelta(seconds=timeout),
+            elicitation_callback=(
+                _make_elicitation_callback(wait_for) if wait_for else None
+            ),
+        )
     )
     await session.initialize()
     return session
 
 
-async def load_mcp(input: str | dict[str, Any]) -> McpSource:
+async def load_mcp(input: str | dict[str, Any], wait_for: Any = None) -> McpSource:
     """Connect to every enabled server, list + convert tools. Failures are isolated:
     one bad server records status ``"failed"`` and never breaks the toolkit."""
     config = parse_mcp_config(input)
@@ -256,7 +330,7 @@ async def load_mcp(input: str | dict[str, Any]) -> McpSource:
         # back cleanly without tearing down already-connected servers.
         server_stack = AsyncExitStack()
         try:
-            session = await _connect_session(server_stack, name, cfg)
+            session = await _connect_session(server_stack, name, cfg, wait_for)
             defs = await _paginate_tools(session)
             for defn in defs:
                 tools.append(_convert_tool(name, defn, session, timeout))

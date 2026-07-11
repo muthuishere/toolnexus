@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 
@@ -17,6 +18,48 @@ public sealed partial class McpSource : IAsyncDisposable
 
     [GeneratedRegex(@"\$\{([A-Za-z0-9_]+)\}")]
     private static partial Regex EnvVar();
+
+    // -----------------------------------------------------------------------
+    // MCP elicitation bridge (§10). A server can ask US for input mid-`tools/call`
+    // (a reverse-request). We map it onto the one `waitFor`: form mode → kind:"input",
+    // URL mode → kind:"authorization". The two mappings are pure + byte-parity-tested.
+    // -----------------------------------------------------------------------
+
+    private static long _elcSeq;
+
+    /// <summary>Map an MCP <c>elicitation/create</c> request onto a §10 <see cref="Request"/>.</summary>
+    public static Request ElicitationToRequest(ElicitRequestParams p)
+    {
+        var isUrl = p.Mode == "url";
+        var req = new Request
+        {
+            Id = $"elc-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds():x}-{Interlocked.Increment(ref _elcSeq)}",
+            Kind = isUrl ? "authorization" : "input",
+            Prompt = p.Message ?? "",
+            Url = isUrl && p.Url != null ? p.Url : null,
+            Data = !isUrl && p.RequestedSchema != null
+                ? new Dictionary<string, object?> { ["schema"] = p.RequestedSchema }
+                : null,
+        };
+        return req;
+    }
+
+    /// <summary>
+    /// Map a resolved §10 <see cref="Answer"/> back onto an MCP <see cref="ElicitResult"/>.
+    /// <c>ok</c>→accept; <c>reason:"declined"</c>→decline; else→cancel.
+    /// </summary>
+    public static ElicitResult AnswerToElicitResult(Answer answer)
+    {
+        if (answer.Ok)
+        {
+            var content = new Dictionary<string, JsonElement>();
+            if (answer.Data != null)
+                foreach (var (k, v) in answer.Data)
+                    content[k] = JsonSerializer.SerializeToElement(v);
+            return new ElicitResult { Action = "accept", Content = content };
+        }
+        return new ElicitResult { Action = answer.Reason == "declined" ? "decline" : "cancel" };
+    }
 
     private readonly List<ITool> _tools;
     private readonly Dictionary<string, string> _status;
@@ -125,7 +168,13 @@ public sealed partial class McpSource : IAsyncDisposable
         };
 
     /// <summary>Connect to every enabled server, list + convert tools. Failures are isolated.</summary>
-    public static async Task<McpSource> LoadAsync(object input)
+    /// <param name="input">Path string, raw JSON string, or parsed config dictionary.</param>
+    /// <param name="waitFor">
+    /// Host resolver for out-of-band input (§10). When set, connected MCP servers may elicit input
+    /// from the human mid-<c>tools/call</c> and it is bridged onto this <c>waitFor</c> (form→kind:"input",
+    /// URL→kind:"authorization"). Omit ⇒ the elicitation capability is not advertised (clean degrade).
+    /// </param>
+    public static async Task<McpSource> LoadAsync(object input, Func<Request, Task<Answer>>? waitFor = null)
     {
         var config = ParseConfig(input);
         var tools = new List<ITool>();
@@ -151,7 +200,7 @@ public sealed partial class McpSource : IAsyncDisposable
                 {
                     using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(timeout));
                     IClientTransport transport = IsRemote(cfg) ? BuildRemoteTransport(cfg) : BuildLocalTransport(cfg);
-                    client = await McpClient.CreateAsync(transport, cancellationToken: cts.Token).ConfigureAwait(false);
+                    client = await McpClient.CreateAsync(transport, BuildClientOptions(waitFor), cancellationToken: cts.Token).ConfigureAwait(false);
                     var defs = await client.ListToolsAsync(cancellationToken: cts.Token).ConfigureAwait(false);
 
                     var converted = new List<ITool>();
@@ -179,6 +228,28 @@ public sealed partial class McpSource : IAsyncDisposable
 
         await Task.WhenAll(tasks).ConfigureAwait(false);
         return new McpSource(tools, status, clients);
+    }
+
+    /// <summary>
+    /// Advertise elicitation + register the bridge ONLY when a <c>waitFor</c> exists to satisfy it —
+    /// a waitFor-less host degrades cleanly (the server won't elicit). (§10 elicitation bridge)
+    /// </summary>
+    private static McpClientOptions? BuildClientOptions(Func<Request, Task<Answer>>? waitFor)
+    {
+        if (waitFor == null) return null;
+        return new McpClientOptions
+        {
+            ClientInfo = new Implementation { Name = "toolnexus", Version = "0.1.0" },
+            Capabilities = new ClientCapabilities
+            {
+                Elicitation = new ElicitationCapability { Form = new(), Url = new() },
+            },
+            Handlers = new McpClientHandlers
+            {
+                ElicitationHandler = async (p, ct) =>
+                    AnswerToElicitResult(await waitFor(ElicitationToRequest(p!)).ConfigureAwait(false)),
+            },
+        };
     }
 
     private static IClientTransport BuildLocalTransport(IDictionary<string, object?> cfg)
