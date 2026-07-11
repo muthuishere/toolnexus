@@ -44,7 +44,7 @@ export interface ClientOptions {
  */
 export type MetricEvent =
   | { event: "llm"; model: string; status: "ok" | "error"; ms: number; promptTokens: number; completionTokens: number }
-  | { event: "tool"; tool: string; source: string; isError: boolean; ms: number }
+  | { event: "tool"; tool: string; source: string; isError: boolean; ms: number; pending?: boolean }
   | { event: "run"; model: string; turns: number; toolCalls: number; totalTokens: number; ms: number; error?: string }
 
 /**
@@ -227,7 +227,7 @@ class MetricsRegistry {
       }
       observe(this.llmDuration, labelStr([["model", ev.model]]), ev.ms / 1000)
     } else if (ev.event === "tool") {
-      inc(this.toolCalls, labelStr([["tool", ev.tool], ["source", ev.source], ["is_error", String(ev.isError)]]))
+      inc(this.toolCalls, labelStr([["tool", ev.tool], ["source", ev.source], ["is_error", String(ev.isError)], ["pending", String(ev.pending ?? false)]]))
       observe(this.toolDuration, labelStr([["tool", ev.tool]]), ev.ms / 1000)
     } else if (ev.event === "run") {
       if (ev.error) inc(this.runErrors, labelStr([["model", ev.model]]))
@@ -402,19 +402,29 @@ export class Client {
     if (h?.beforeTool) {
       const ov = await h.beforeTool({ name, args: a, id, turn })
       if (ov?.result) {
-        // short-circuit (deny/cache/dry-run) — still a tool call for metrics purposes
-        this.emit({ event: "tool", tool: name, source, isError: ov.result.isError, ms: Date.now() - t0 })
+        // short-circuit (deny/cache/dry-run, or a guard-raised suspension — path B); still a tool
+        // call for metrics, but a suspension is classified pending, never an error.
+        this.emitTool(name, source, ov.result, t0)
         return { args: a, result: ov.result }
       }
       if (ov?.args) a = ov.args
     }
     let result = await toolkit.execute(name, a)
-    if (h?.afterTool) {
+    // A suspension (§10) is not a real result: skip afterTool's failure path on it — the resolved
+    // result (post-waitFor) still flows through afterTool in resolvePending — and never count it as
+    // a tool error.
+    if (h?.afterTool && !pendingOf(result)) {
       const ov = await h.afterTool({ name, args: a, result, id, turn })
       if (ov?.result) result = ov.result
     }
-    this.emit({ event: "tool", tool: name, source, isError: result.isError, ms: Date.now() - t0 })
+    this.emitTool(name, source, result, t0)
     return { args: a, result }
+  }
+
+  /** Emit the `tool` metric, classifying a §10 suspension as `pending` (isError:false), not a failure. */
+  private emitTool(name: string, source: string, result: ToolResult, t0: number) {
+    const req = pendingOf(result)
+    this.emit({ event: "tool", tool: name, source, isError: req ? false : result.isError, ms: Date.now() - t0, ...(req ? { pending: true } : {}) })
   }
 
   /** One non-streaming LLM call, with an `llm` metric event (ok/error + per-call tokens + ms). */
@@ -469,22 +479,27 @@ export class Client {
         const calls = msg.tool_calls ?? []
         if (calls.length === 0) return this.endRun(runStart, msg.content ?? "", messages, toolCalls, turns, usage)
         // execute all tool calls in this turn concurrently (true parallel tool calling)
-        let halted: Request | undefined
-        const results = await Promise.all(
+        const settled = await Promise.all(
           calls.map(async (call: any) => {
             let { args, result } = await this.runTool(toolkit, call.function.name, safeJson(call.function.arguments), call.id, turn)
+            let halted: Request | undefined
             const req = pendingOf(result)
             if (req) {
               const r = await this.resolvePending(toolkit, call.function.name, args, req, call.id, turn)
               result = r.result
-              if (r.halted) halted = r.halted
+              halted = r.halted
             }
-            toolCalls.push({ name: call.function.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
-            return { role: "tool", tool_call_id: call.id, content: result.output }
+            return { call, args, result, halted }
           }),
         )
-        messages.push(...results)
-        if (halted) return this.pendingRun(runStart, halted, messages, toolCalls, turns, usage)
+        // Record in tool-call order; on the FIRST durable halt, surface it and stop — deterministic,
+        // and the later suspensions' placeholder results never enter the transcript (they re-suspend
+        // on resume). Mirrors the streaming path.
+        for (const s of settled) {
+          toolCalls.push({ name: s.call.function.name, args: s.args, output: s.result.output, isError: s.result.isError, metadata: s.result.metadata })
+          messages.push({ role: "tool", tool_call_id: s.call.id, content: s.result.output })
+          if (s.halted) return this.pendingRun(runStart, s.halted, messages, toolCalls, turns, usage)
+        }
       }
       return this.endRun(runStart, lastText(messages), messages, toolCalls, turns, usage)
     } catch (e) {
@@ -520,7 +535,7 @@ export class Client {
       const ov = await this.opts.hooks.afterTool({ name, args, result, id, turn })
       if (ov?.result) result = ov.result
     }
-    this.emit({ event: "tool", tool: name, source: toolkit.get(name)?.source ?? "custom", isError: result.isError, ms: Date.now() - t0 })
+    this.emitTool(name, toolkit.get(name)?.source ?? "custom", result, t0)
     if (pendingOf(result)) result = { output: `unresolved: ${request.prompt}`, isError: true } // never loop forever
     return { result }
   }

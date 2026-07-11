@@ -21,6 +21,7 @@ import {
   toGemini,
   createToolkit,
   createClient,
+  pending,
   type ConversationStore,
   createBuiltinTools,
   builtinsEnabled,
@@ -789,6 +790,107 @@ test("client: a question suspension with no waitFor halts the run (status pendin
     assert.equal(res.status, "pending", "no waitFor ⇒ the run halts pending, does not loop forever")
     assert.equal(res.pending?.kind, "question")
     assert.equal(res.pending?.prompt, "Pick a color? (options: red, green)")
+  } finally {
+    await tk.close()
+    server.close()
+  }
+})
+
+test("client: a suspension is pending, not a tool error; afterTool sees only the resolved result (G2)", async () => {
+  const server = http.createServer((req, res) => {
+    let body = ""
+    req.on("data", (c) => (body += c))
+    req.on("end", () => {
+      const msg = JSON.parse(body)
+      const hasTool = msg.messages.some((m: any) => m.role === "tool")
+      res.writeHead(200, { "content-type": "application/json" })
+      if (!hasTool) res.end(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "question", arguments: JSON.stringify({ questions: [{ question: "Pick?", options: ["a", "b"] }] }) } }] } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+      else res.end(JSON.stringify({ choices: [{ message: { content: "done" } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+    })
+  })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({})
+  const events: any[] = []
+  const afterToolSaw: any[] = []
+  const client = createClient({
+    baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "x", apiKey: "k",
+    waitFor: async (r) => ({ id: r.id, ok: true, data: { answers: ["a"] } }),
+    hooks: { afterTool: ({ result }) => { afterToolSaw.push(result) } },
+    onMetric: (ev) => events.push(ev),
+  })
+  try {
+    const res = await client.run("ask", { toolkit: tk })
+    assert.equal(res.status, "done", "waitFor resolved the suspension and the run finished")
+    const toolEvents = events.filter((e) => e.event === "tool" && e.tool === "question")
+    const suspend = toolEvents.find((e) => e.pending)
+    assert.ok(suspend, "the suspension emitted a tool event tagged pending")
+    assert.equal(suspend.isError, false, "a suspension is not a tool error")
+    assert.equal(afterToolSaw.length, 1, "afterTool ran exactly once — not on the suspension")
+    assert.ok(!(afterToolSaw[0].metadata as any)?.pending, "afterTool saw the resolved result, never the suspension")
+  } finally {
+    await tk.close()
+    server.close()
+  }
+})
+
+test("client: a beforeTool guard-raised pending is honored, counted pending not error (path B)", async () => {
+  const server = http.createServer((req, res) => {
+    let body = ""
+    req.on("data", (c) => (body += c))
+    req.on("end", () => {
+      const msg = JSON.parse(body)
+      const hasTool = msg.messages.some((m: any) => m.role === "tool")
+      res.writeHead(200, { "content-type": "application/json" })
+      if (!hasTool) res.end(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "add", arguments: JSON.stringify({ a: 1, b: 2 }) } }] } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+      else res.end(JSON.stringify({ choices: [{ message: { content: "3" } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+    })
+  })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({ builtins: false })
+  tk.register(defineTool({ name: "add", description: "add", inputSchema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] }, run: ({ a, b }) => `${(a as number) + (b as number)}` }))
+  const events: any[] = []
+  let asked = false
+  const client = createClient({
+    baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "x", apiKey: "k",
+    // guard raises a suspension with NO tool code running (path B)
+    hooks: { beforeTool: ({ name }) => (name === "add" && !asked ? { result: pending({ kind: "approval", prompt: "approve add?" }) } : undefined) },
+    waitFor: async (r) => { asked = true; return { id: r.id, ok: true } },
+    onMetric: (ev) => events.push(ev),
+  })
+  try {
+    const res = await client.run("add them", { toolkit: tk })
+    assert.equal(res.status, "done", "on approval the real tool ran and the run finished")
+    const toolEvents = events.filter((e) => e.event === "tool" && e.tool === "add")
+    const suspend = toolEvents.find((e) => e.pending)
+    assert.ok(suspend, "the guard-raised pending emitted a tool event tagged pending")
+    assert.equal(suspend.isError, false, "a guard-raised suspension is not a tool error")
+    assert.ok(res.toolCalls.some((t) => t.name === "add" && t.output === "3"), "the real tool ran after approval")
+  } finally {
+    await tk.close()
+    server.close()
+  }
+})
+
+test("client: two concurrent suspensions with no waitFor surface the first, not the last (G3)", async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" })
+    res.end(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [
+      { id: "c1", type: "function", function: { name: "question", arguments: JSON.stringify({ questions: [{ question: "First?" }] }) } },
+      { id: "c2", type: "function", function: { name: "question", arguments: JSON.stringify({ questions: [{ question: "Second?" }] }) } },
+    ] } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+  })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({}) // no waitFor
+  const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "x", apiKey: "k" })
+  try {
+    const res = await client.run("ask two", { toolkit: tk })
+    assert.equal(res.status, "pending")
+    assert.equal(res.pending?.prompt, "First?", "the FIRST suspension in call order is surfaced, deterministically")
+    const c2msg = res.messages.find((m: any) => m.tool_call_id === "c2")
+    assert.ok(!c2msg, "the second concurrent suspension does not pollute the transcript")
   } finally {
     await tk.close()
     server.close()
