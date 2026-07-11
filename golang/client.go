@@ -79,7 +79,7 @@ type ClientOptions struct {
 // forward anywhere. Event discriminates which fields are meaningful:
 //
 //	"llm"  → Model, Status ("ok"|"error"), Ms, PromptTokens, CompletionTokens
-//	"tool" → Tool, Source, IsError, Ms
+//	"tool" → Tool, Source, IsError, Ms, Pending
 //	"run"  → Model, Turns, ToolCalls, TotalTokens, Ms, Error (set only on failure)
 //
 // Field names follow Go's idiomatic PascalCase casing (like RunResult), so this
@@ -104,6 +104,10 @@ type MetricEvent struct {
 	Source string
 	// IsError flags a tool error ("tool").
 	IsError bool
+	// Pending marks a §10 suspension ("tool"): the tool returned a Request awaiting
+	// out-of-band resolution rather than a real result. A suspension is classified
+	// Pending (IsError:false), never a tool error. Mirrors js MetricEvent.pending.
+	Pending bool
 	// Turns is the number of LLM round trips ("run").
 	Turns int
 	// ToolCalls is the total number of tool calls ("run").
@@ -447,8 +451,10 @@ func (c *Client) runTool(ctx context.Context, tk *Toolkit, name string, args map
 		}
 		if ov != nil {
 			if ov.Result != nil {
-				// short-circuit (deny / cache / dry-run) — still a tool call for metrics.
-				c.emit(MetricEvent{Event: "tool", Tool: name, Source: source, IsError: ov.Result.IsError, Ms: msSince(start)})
+				// short-circuit (deny / cache / dry-run, or a guard-raised suspension —
+				// path B) — still a tool call for metrics, but a suspension is classified
+				// pending, never an error.
+				c.emitTool(name, source, *ov.Result, start)
 				return a, *ov.Result, nil
 			}
 			if ov.Args != nil {
@@ -460,7 +466,10 @@ func (c *Client) runTool(ctx context.Context, tk *Toolkit, name string, args map
 	if err != nil {
 		return a, result, err
 	}
-	if h != nil && h.AfterTool != nil {
+	// A suspension (§10) is not a real result: skip AfterTool on it — the resolved
+	// result (post-WaitFor) flows through AfterTool in resolvePending — and never
+	// count it as a tool error.
+	if h != nil && h.AfterTool != nil && PendingOf(result) == nil {
 		ov, err := h.AfterTool(ctx, AfterToolEvent{Name: name, Args: a, Result: result, ID: id, Turn: turn})
 		if err != nil {
 			return a, result, err
@@ -469,8 +478,18 @@ func (c *Client) runTool(ctx context.Context, tk *Toolkit, name string, args map
 			result = *ov.Result
 		}
 	}
-	c.emit(MetricEvent{Event: "tool", Tool: name, Source: source, IsError: result.IsError, Ms: msSince(start)})
+	c.emitTool(name, source, result, start)
 	return a, result, nil
+}
+
+// emitTool emits the `tool` metric, classifying a §10 suspension as Pending
+// (IsError:false), not a failure. Mirrors js Client.emitTool.
+func (c *Client) emitTool(name, source string, result ToolResult, start time.Time) {
+	if PendingOf(result) != nil {
+		c.emit(MetricEvent{Event: "tool", Tool: name, Source: source, IsError: false, Pending: true, Ms: msSince(start)})
+		return
+	}
+	c.emit(MetricEvent{Event: "tool", Tool: name, Source: source, IsError: result.IsError, Ms: msSince(start)})
 }
 
 // Run executes the agent loop for one prompt against the toolkit. It is
@@ -761,15 +780,15 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 		}
 
 		// Execute all tool calls in this turn concurrently (true parallel tool
-		// calling). Each result is written to its own slot in results[], so the
-		// appended tool messages keep the same order the model emitted them
-		// (deterministic output, independent of completion order). toolCalls is
-		// appended under a mutex to avoid a data race.
+		// calling). Each call writes its outcome to its own slot, so the transcript
+		// is assembled in the order the model emitted the calls (deterministic,
+		// independent of completion order).
 		results := make([]any, len(msg.ToolCalls))
+		records := make([]ToolCall, len(msg.ToolCalls))
+		haltedAt := make([]*Request, len(msg.ToolCalls))
 		var wg sync.WaitGroup
 		var mu sync.Mutex
 		var hookErr error
-		var halted *Request
 		for i, tc := range msg.ToolCalls {
 			wg.Add(1)
 			go func(i int, tc struct {
@@ -786,29 +805,24 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 					if req := PendingOf(result); req != nil {
 						r, h, rerr := c.resolvePending(ctx, tk, tc.Function.Name, args, *req, tc.ID, turn)
 						err, result = rerr, r
-						if h != nil {
-							mu.Lock()
-							halted = h
-							mu.Unlock()
-						}
+						haltedAt[i] = h
 					}
 				}
-				mu.Lock()
 				if err != nil {
+					mu.Lock()
 					if hookErr == nil {
 						hookErr = err
 					}
 					mu.Unlock()
 					return
 				}
-				toolCalls = append(toolCalls, ToolCall{
+				records[i] = ToolCall{
 					Name:     tc.Function.Name,
 					Args:     args,
 					Output:   result.Output,
 					IsError:  result.IsError,
 					Metadata: result.Metadata,
-				})
-				mu.Unlock()
+				}
 				results[i] = map[string]any{
 					"role":         "tool",
 					"tool_call_id": tc.ID,
@@ -820,9 +834,15 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 		if hookErr != nil {
 			return RunResult{}, hookErr
 		}
-		messages = append(messages, results...)
-		if halted != nil {
-			return c.pendingRun(runStart, *halted, messages, toolCalls, turns, usage), nil
+		// Record in tool-call order; on the FIRST durable halt, surface it and stop —
+		// deterministic, and the later suspensions' placeholder results never enter the
+		// transcript (they re-suspend on resume). Mirrors the streaming path (G3).
+		for i := range msg.ToolCalls {
+			toolCalls = append(toolCalls, records[i])
+			messages = append(messages, results[i])
+			if haltedAt[i] != nil {
+				return c.pendingRun(runStart, *haltedAt[i], messages, toolCalls, turns, usage), nil
+			}
 		}
 	}
 	return c.endRun(runStart, "", messages, toolCalls, turns, usage), nil
@@ -896,7 +916,7 @@ func (c *Client) resolvePending(ctx context.Context, tk *Toolkit, name string, a
 	if t, ok := tk.Get(name); ok {
 		source = string(t.Source)
 	}
-	c.emit(MetricEvent{Event: "tool", Tool: name, Source: source, IsError: result.IsError, Ms: msSince(start)})
+	c.emitTool(name, source, result, start)
 	if PendingOf(result) != nil {
 		result = ToolResult{Output: "unresolved: " + request.Prompt, IsError: true} // never loop forever
 	}
@@ -1024,14 +1044,15 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 			return c.endRun(runStart, strings.Join(textParts, ""), messages, toolCalls, turns, usage), nil
 		}
 
-		// Execute all tool_use blocks in this turn concurrently. results[i] keeps
-		// the original block order so tool_result blocks map deterministically to
-		// their tool_use ids; toolCalls is appended under a mutex.
+		// Execute all tool_use blocks in this turn concurrently. Each block writes its
+		// outcome to its own slot so the tool_result blocks map deterministically to
+		// their tool_use ids (independent of completion order).
 		results := make([]any, len(uses))
+		records := make([]ToolCall, len(uses))
+		haltedAt := make([]*Request, len(uses))
 		var wg sync.WaitGroup
 		var mu sync.Mutex
 		var hookErr error
-		var halted *Request
 		for i, u := range uses {
 			wg.Add(1)
 			go func(i int, u struct {
@@ -1049,29 +1070,24 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 					if req := PendingOf(result); req != nil {
 						r, h, rerr := c.resolvePending(ctx, tk, u.Name, args, *req, u.ID, turn)
 						err, result = rerr, r
-						if h != nil {
-							mu.Lock()
-							halted = h
-							mu.Unlock()
-						}
+						haltedAt[i] = h
 					}
 				}
-				mu.Lock()
 				if err != nil {
+					mu.Lock()
 					if hookErr == nil {
 						hookErr = err
 					}
 					mu.Unlock()
 					return
 				}
-				toolCalls = append(toolCalls, ToolCall{
+				records[i] = ToolCall{
 					Name:     u.Name,
 					Args:     args,
 					Output:   result.Output,
 					IsError:  result.IsError,
 					Metadata: result.Metadata,
-				})
-				mu.Unlock()
+				}
 				results[i] = map[string]any{
 					"type":        "tool_result",
 					"tool_use_id": u.ID,
@@ -1084,9 +1100,23 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 		if hookErr != nil {
 			return RunResult{}, hookErr
 		}
-		messages = append(messages, map[string]any{"role": "user", "content": results})
-		if halted != nil {
-			return c.pendingRun(runStart, *halted, messages, toolCalls, turns, usage), nil
+		// Assemble the tool_result blocks in call order; on the FIRST durable halt,
+		// include up to and including that block, surface it and stop — the later
+		// suspensions' placeholder results never enter the transcript (they re-suspend
+		// on resume). Mirrors the streaming path (G3).
+		blocks := make([]any, 0, len(uses))
+		var haltReq *Request
+		for i := range uses {
+			toolCalls = append(toolCalls, records[i])
+			blocks = append(blocks, results[i])
+			if haltedAt[i] != nil {
+				haltReq = haltedAt[i]
+				break
+			}
+		}
+		messages = append(messages, map[string]any{"role": "user", "content": blocks})
+		if haltReq != nil {
+			return c.pendingRun(runStart, *haltReq, messages, toolCalls, turns, usage), nil
 		}
 	}
 	return c.endRun(runStart, "", messages, toolCalls, turns, usage), nil

@@ -11,7 +11,7 @@ namespace Toolnexus;
 /// only the Prometheus text from <see cref="LlmClient.Metrics"/> is. <see cref="Event"/> discriminates:
 /// <list type="bullet">
 ///   <item><c>"llm"</c> — <see cref="Model"/>, <see cref="Status"/>, <see cref="Ms"/>, <see cref="PromptTokens"/>, <see cref="CompletionTokens"/></item>
-///   <item><c>"tool"</c> — <see cref="Tool"/>, <see cref="Source"/>, <see cref="IsError"/>, <see cref="Ms"/></item>
+///   <item><c>"tool"</c> — <see cref="Tool"/>, <see cref="Source"/>, <see cref="IsError"/>, <see cref="Pending"/>, <see cref="Ms"/></item>
 ///   <item><c>"run"</c> — <see cref="Model"/>, <see cref="Turns"/>, <see cref="ToolCalls"/>, <see cref="TotalTokens"/>, <see cref="Ms"/>, <see cref="Error"/></item>
 /// </list>
 /// </summary>
@@ -30,6 +30,10 @@ public sealed record MetricEvent
     public string? Tool { get; init; }
     public string? Source { get; init; }
     public bool IsError { get; init; }
+    /// <summary>§10: true iff this tool call suspended (a Request awaiting out-of-band resolution).
+    /// A suspension is classified <c>pending</c>, never <see cref="IsError"/> — see the <c>pending</c>
+    /// label on <c>toolnexus_tool_calls_total</c>.</summary>
+    public bool Pending { get; init; }
     // run
     public int Turns { get; init; }
     public int ToolCalls { get; init; }
@@ -41,8 +45,8 @@ public sealed record MetricEvent
     internal static MetricEvent Llm(string model, string status, long ms, long promptTokens, long completionTokens)
         => new() { Event = "llm", Model = model, Status = status, Ms = ms, PromptTokens = promptTokens, CompletionTokens = completionTokens };
 
-    internal static MetricEvent ToolCall(string tool, string source, bool isError, long ms)
-        => new() { Event = "tool", Tool = tool, Source = source, IsError = isError, Ms = ms };
+    internal static MetricEvent ToolCall(string tool, string source, bool isError, long ms, bool pending = false)
+        => new() { Event = "tool", Tool = tool, Source = source, IsError = isError, Ms = ms, Pending = pending };
 
     internal static MetricEvent Run(string model, int turns, int toolCalls, long totalTokens, long ms, string? error = null)
         => new() { Event = "run", Model = model, Turns = turns, ToolCalls = toolCalls, TotalTokens = totalTokens, Ms = ms, Error = error };
@@ -73,7 +77,7 @@ internal sealed class MetricsRegistry
     private readonly Dictionary<string, long> _llmRequests = new(); // labels: model,status
     private readonly Dictionary<string, long> _llmTokens = new();   // labels: type
     private readonly Dictionary<string, Hist> _llmDuration = new(); // labels: model
-    private readonly Dictionary<string, long> _toolCalls = new();   // labels: tool,source,is_error
+    private readonly Dictionary<string, long> _toolCalls = new();   // labels: tool,source,is_error,pending
     private readonly Dictionary<string, Hist> _toolDuration = new();// labels: tool
     private readonly Dictionary<string, long> _runErrors = new();   // labels: model
 
@@ -93,7 +97,7 @@ internal sealed class MetricsRegistry
                     Observe(_llmDuration, LabelStr(("model", ev.Model ?? "")), ev.Ms / 1000.0);
                     break;
                 case "tool":
-                    Inc(_toolCalls, LabelStr(("tool", ev.Tool ?? ""), ("source", ev.Source ?? ""), ("is_error", ev.IsError ? "true" : "false")));
+                    Inc(_toolCalls, LabelStr(("tool", ev.Tool ?? ""), ("source", ev.Source ?? ""), ("is_error", ev.IsError ? "true" : "false"), ("pending", ev.Pending ? "true" : "false")));
                     Observe(_toolDuration, LabelStr(("tool", ev.Tool ?? "")), ev.Ms / 1000.0);
                     break;
                 case "run":

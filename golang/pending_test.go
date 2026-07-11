@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -201,6 +202,285 @@ func TestQuestionNoWaitForHalts(t *testing.T) {
 	}
 	if want := "Pick a color? (options: red, green)"; res.Pending.Prompt != want {
 		t.Fatalf("pending.prompt = %q, want %q", res.Pending.Prompt, want)
+	}
+}
+
+// answerableQuestionLLM stands in for an OpenAI endpoint: turn 1 calls the `question`
+// builtin; turn 2 (once it sees a tool result in the transcript) returns a final answer.
+func answerableQuestionLLM(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []map[string]any `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		sawToolResult := false
+		for _, m := range body.Messages {
+			if m["role"] == "tool" {
+				sawToolResult = true
+			}
+		}
+		var message map[string]any
+		if sawToolResult {
+			message = map[string]any{"role": "assistant", "content": "done"}
+		} else {
+			args := `{"questions":[{"question":"Pick?","options":["a","b"]}]}`
+			message = map[string]any{
+				"role":    "assistant",
+				"content": nil,
+				"tool_calls": []any{map[string]any{
+					"id":       "c1",
+					"type":     "function",
+					"function": map[string]any{"name": "question", "arguments": args},
+				}},
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": message}},
+			"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+	}))
+}
+
+// TestSuspensionIsNotToolError (G2): a suspension emits a `tool` metric tagged
+// Pending (IsError:false), never a tool error; AfterTool runs exactly once — on the
+// resolved result, not on the suspension. Mirrors the JS "a suspension is pending,
+// not a tool error" test.
+func TestSuspensionIsNotToolError(t *testing.T) {
+	srv := answerableQuestionLLM(t)
+	defer srv.Close()
+
+	tk, err := CreateToolkit(context.Background(), Options{}) // builtins on → `question` exists
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tk.Close()
+
+	var mu sync.Mutex
+	var events []MetricEvent
+	var afterToolSaw []ToolResult
+	c := CreateClient(ClientOptions{
+		BaseURL: srv.URL, Style: StyleOpenAI, Model: "stub", APIKey: "k",
+		WaitFor: func(req Request) (Answer, error) {
+			return Answer{ID: req.ID, Ok: true, Data: map[string]any{"answers": []any{"a"}}}, nil
+		},
+		Hooks: &Hooks{
+			AfterTool: func(_ context.Context, ev AfterToolEvent) (*ToolOverride, error) {
+				mu.Lock()
+				afterToolSaw = append(afterToolSaw, ev.Result)
+				mu.Unlock()
+				return nil, nil
+			},
+		},
+		OnMetric: func(ev MetricEvent) {
+			mu.Lock()
+			events = append(events, ev)
+			mu.Unlock()
+		},
+	})
+
+	res, err := c.Run(context.Background(), "ask", tk)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Status != "done" {
+		t.Fatalf("status = %q, want done (waitFor resolved the suspension)", res.Status)
+	}
+	var suspend *MetricEvent
+	for i := range events {
+		if events[i].Event == "tool" && events[i].Tool == "question" && events[i].Pending {
+			suspend = &events[i]
+			break
+		}
+	}
+	if suspend == nil {
+		t.Fatal("no tool metric tagged Pending for the suspension")
+	}
+	if suspend.IsError {
+		t.Fatal("a suspension is not a tool error (IsError must be false)")
+	}
+	if len(afterToolSaw) != 1 {
+		t.Fatalf("AfterTool ran %d times, want exactly 1 (only on the resolved result)", len(afterToolSaw))
+	}
+	if PendingOf(afterToolSaw[0]) != nil {
+		t.Fatal("AfterTool saw a suspension; it must see only the resolved result")
+	}
+}
+
+// addToolkit builds a toolkit with a single `add` tool that returns a+b as a string.
+func addToolkit(t *testing.T) *Toolkit {
+	t.Helper()
+	add := Tool{
+		Name:        "add",
+		Description: "add",
+		InputSchema: JSONSchema{"type": "object", "properties": map[string]any{"a": map[string]any{"type": "number"}, "b": map[string]any{"type": "number"}}, "required": []string{"a", "b"}},
+		Source:      SourceCustom,
+		Execute: func(args map[string]any, _ *ToolContext) (ToolResult, error) {
+			a, _ := args["a"].(float64)
+			b, _ := args["b"].(float64)
+			return ToolResult{Output: strconv.Itoa(int(a + b))}, nil
+		},
+	}
+	tk, err := CreateToolkit(context.Background(), Options{Builtins: false, ExtraTools: []Tool{add}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tk
+}
+
+// addLLM stands in for an OpenAI endpoint: turn 1 calls `add`; turn 2 (once it sees a
+// tool result) returns a final answer.
+func addLLM(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []map[string]any `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		sawToolResult := false
+		for _, m := range body.Messages {
+			if m["role"] == "tool" {
+				sawToolResult = true
+			}
+		}
+		var message map[string]any
+		if sawToolResult {
+			message = map[string]any{"role": "assistant", "content": "3"}
+		} else {
+			message = map[string]any{
+				"role":    "assistant",
+				"content": nil,
+				"tool_calls": []any{map[string]any{
+					"id":       "c1",
+					"type":     "function",
+					"function": map[string]any{"name": "add", "arguments": `{"a":1,"b":2}`},
+				}},
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": message}},
+			"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+	}))
+}
+
+// TestBeforeToolPendingIsPathB (path B): a BeforeTool guard raises a suspension with
+// no tool code running; with a WaitFor that approves, the real tool then runs, and the
+// guard-raised suspension is counted Pending (not a tool error). Mirrors the JS
+// "a beforeTool guard-raised pending is honored" test.
+func TestBeforeToolPendingIsPathB(t *testing.T) {
+	srv := addLLM(t)
+	defer srv.Close()
+
+	var mu sync.Mutex
+	var events []MetricEvent
+	asked := false
+	c := CreateClient(ClientOptions{
+		BaseURL: srv.URL, Style: StyleOpenAI, Model: "stub", APIKey: "k",
+		Hooks: &Hooks{
+			// guard raises a suspension with NO tool code running (path B)
+			BeforeTool: func(_ context.Context, ev BeforeToolEvent) (*ToolOverride, error) {
+				if ev.Name == "add" && !asked {
+					r := Pending(Request{Kind: "approval", Prompt: "approve add?"})
+					return &ToolOverride{Result: &r}, nil
+				}
+				return nil, nil
+			},
+		},
+		WaitFor: func(req Request) (Answer, error) {
+			asked = true
+			return Answer{ID: req.ID, Ok: true}, nil
+		},
+		OnMetric: func(ev MetricEvent) {
+			mu.Lock()
+			events = append(events, ev)
+			mu.Unlock()
+		},
+	})
+
+	res, err := c.Run(context.Background(), "add them", addToolkit(t))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Status != "done" {
+		t.Fatalf("status = %q, want done (on approval the real tool ran)", res.Status)
+	}
+	var suspend *MetricEvent
+	for i := range events {
+		if events[i].Event == "tool" && events[i].Tool == "add" && events[i].Pending {
+			suspend = &events[i]
+			break
+		}
+	}
+	if suspend == nil {
+		t.Fatal("no tool metric tagged Pending for the guard-raised suspension")
+	}
+	if suspend.IsError {
+		t.Fatal("a guard-raised suspension is not a tool error (IsError must be false)")
+	}
+	ran := false
+	for _, tcl := range res.ToolCalls {
+		if tcl.Name == "add" && tcl.Output == "3" {
+			ran = true
+		}
+	}
+	if !ran {
+		t.Fatalf("the real tool did not run after approval; toolCalls = %+v", res.ToolCalls)
+	}
+}
+
+// twoQuestionsLLM stands in for an OpenAI endpoint that emits TWO `question` tool_calls
+// in one turn — used to drive concurrent suspensions (§10, G3).
+func twoQuestionsLLM(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		message := map[string]any{
+			"role":    "assistant",
+			"content": nil,
+			"tool_calls": []any{
+				map[string]any{"id": "c1", "type": "function", "function": map[string]any{"name": "question", "arguments": `{"questions":[{"question":"First?"}]}`}},
+				map[string]any{"id": "c2", "type": "function", "function": map[string]any{"name": "question", "arguments": `{"questions":[{"question":"Second?"}]}`}},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": message}},
+			"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+	}))
+}
+
+// TestConcurrentSuspensionsSurfaceFirst (G3): two concurrent suspensions with no
+// WaitFor surface the FIRST in call order, deterministically; the second's placeholder
+// result never enters the transcript. Mirrors the JS "two concurrent suspensions
+// surface the first, not the last" test.
+func TestConcurrentSuspensionsSurfaceFirst(t *testing.T) {
+	srv := twoQuestionsLLM(t)
+	defer srv.Close()
+
+	tk, err := CreateToolkit(context.Background(), Options{}) // builtins on, no WaitFor
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tk.Close()
+
+	c := CreateClient(ClientOptions{BaseURL: srv.URL, Style: StyleOpenAI, Model: "stub", APIKey: "k"})
+	res, err := c.Run(context.Background(), "ask two", tk)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Status != "pending" {
+		t.Fatalf("status = %q, want pending", res.Status)
+	}
+	if res.Pending == nil {
+		t.Fatal("pending request is nil")
+	}
+	if want := "First?"; res.Pending.Prompt != want {
+		t.Fatalf("pending.prompt = %q, want %q (the FIRST suspension in call order)", res.Pending.Prompt, want)
+	}
+	for _, m := range res.Messages {
+		if mm, ok := m.(map[string]any); ok && mm["tool_call_id"] == "c2" {
+			t.Fatal("the second concurrent suspension polluted the transcript (c2 present)")
+		}
 	}
 }
 

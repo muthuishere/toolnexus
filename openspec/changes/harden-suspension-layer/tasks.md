@@ -1,10 +1,10 @@
 # Tasks — harden the §10 suspension layer (G2 + G3)
 
 ## 0. Contract
-- [ ] 0.1 `SPEC.md` §10: a suspension is never a tool error (emitted `pending`, not `isError`);
+- [x] 0.1 `SPEC.md` §10: a suspension is never a tool error (emitted `pending`, not `isError`);
       concurrent durable suspensions surface the **first** in tool-call order deterministically.
-- [ ] 0.2 Decide the Prometheus shape (design Open Q): `pending` label on the existing tool counter,
-      `is_error=false` for suspensions. Pin so all five emit identically.
+- [x] 0.2 Prometheus shape LOCKED: `pending` label on the existing tool counter (order
+      `tool,source,is_error,pending`), `is_error=false` for suspensions. Identical in all five.
 
 ## 1. JS (`js/`) — reference port
 - [ ] 1.1 G2: in `runTool` (`src/client.ts:397`), compute `pendingOf(result)` before the metric +
@@ -35,9 +35,24 @@
 - [ ] 6.1 The `tool` event `pending` marker + counter behave identically across ports.
 - [ ] 6.2 `openspec validate harden-suspension-layer --strict`.
 
+## Status (2026-07-11)
+- G2 + G3 implemented in **both** non-streaming loops (OpenAI + Anthropic) in JS (ref, commits
+  6f19705 + e3df17f), Go, Java, C# — each independently green. Python: OpenAI loop done + G2/tests
+  green; Anthropic loop (`_run_anthropic`) fix in progress (the initial JS ref only had OpenAI; the
+  port agents surfaced the gap and it was back-ported to JS).
+
 ## Notes
-- Streaming loop already halts on first suspension (no G3 change there) — verify per port.
 - With a `waitFor`, concurrent suspensions already resolve inline (no G3 loss) — the fix targets the
   no-`waitFor` durable halt only.
 - R1 (`Answer.reason`) and R2 (`Request.schema`) are intentionally NOT here — they land with
   `add-mcp-elicitation-bridge`, which needs them.
+
+## Follow-up (pre-existing, OUT OF SCOPE here) — streaming-suspension parity
+Independently flagged by the Go and C# port agents: **the streaming loops do NOT all halt on the
+first suspension.** JS streaming (`streamOpenAI`/`streamAnthropic`) returns inside the loop on the
+first halt, but the Go and C# streaming loops accumulate a last-write-wins `halted` and push every
+suspension's placeholder — the same G3 bug this change fixes for the non-streaming paths, still
+present in some ports' streaming paths, and divergent from JS. This is a pre-existing cross-port
+parity gap (not introduced here; this change deliberately scoped to non-streaming). → file
+`harden-suspension-layer-streaming` (or fold into a streaming-parity pass): bring every port's
+streaming loop to JS's halt-on-first behavior, with an Anthropic + OpenAI streaming G3 test each.

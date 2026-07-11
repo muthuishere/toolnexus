@@ -104,8 +104,12 @@ public final class LlmClient {
             @Override public String event() { return "llm"; }
         }
 
-        /** One tool call. */
-        record Tool(String tool, String source, boolean isError, long ms) implements MetricEvent {
+        /** One tool call. {@code pending} marks a §10 suspension (never counted as an error). */
+        record Tool(String tool, String source, boolean isError, long ms, boolean pending) implements MetricEvent {
+            /** Convenience: a non-pending tool event. */
+            Tool(String tool, String source, boolean isError, long ms) {
+                this(tool, source, isError, ms, false);
+            }
             @Override public String event() { return "tool"; }
         }
 
@@ -225,41 +229,57 @@ public final class LlmClient {
         Map<String, Object> a = args;
         if (h != null && h.beforeTool != null) {
             ToolOverride ov = h.beforeTool.apply(new BeforeToolEvent(name, a, id, turn));
-            if (ov != null && ov.result() != null) { // short-circuit (deny/cache) — still a tool call for metrics
-                emit(new MetricEvent.Tool(name, source, ov.result().isError(), System.currentTimeMillis() - t0));
+            if (ov != null && ov.result() != null) {
+                // short-circuit (deny/cache/dry-run, or a guard-raised suspension — path B); still a
+                // tool call for metrics, but a suspension is classified pending, never an error.
+                emitTool(name, source, ov.result(), t0);
                 return new ToolRun(a, ov.result());
             }
             if (ov != null && ov.args() != null) a = ov.args();
         }
         ToolResult result = toolkit.execute(name, a);
-        if (h != null && h.afterTool != null) {
+        // A suspension (§10) is not a real result: skip afterTool on it — the resolved result
+        // (post-waitFor) still flows through afterTool in resolvePending — and never count it as
+        // a tool error.
+        if (h != null && h.afterTool != null && ToolResult.pendingOf(result) == null) {
             ToolOverride ov = h.afterTool.apply(new AfterToolEvent(name, a, result, id, turn));
             if (ov != null && ov.result() != null) result = ov.result();
         }
-        emit(new MetricEvent.Tool(name, source, result.isError(), System.currentTimeMillis() - t0));
+        emitTool(name, source, result, t0);
         return new ToolRun(a, result);
+    }
+
+    /** Emit the {@code tool} metric, classifying a §10 suspension as {@code pending} (isError:false), not a failure. */
+    private void emitTool(String name, String source, ToolResult result, long t0) {
+        Request req = ToolResult.pendingOf(result);
+        emit(new MetricEvent.Tool(name, source, req != null ? false : result.isError(),
+                System.currentTimeMillis() - t0, req != null));
     }
 
     /** Outcome of resolving one tool call: the (possibly still-suspended) result, plus the
      * {@code halted} request set when no {@code waitFor} is configured (§10). */
     private record Resolved(ToolResult result, Request halted) {}
 
+    /** Outcome of {@link #runToolResolved}: the resolved run, plus this call's own {@code halted}
+     * request (set when THIS tool suspended and no {@code waitFor} was configured, §10). Per-call —
+     * so the loop can surface the FIRST suspension in call order deterministically (G3). */
+    private record ToolOutcome(ToolRun run, Request halted) {}
+
     /**
      * §10: run one tool AND resolve any suspension it returns. Mirrors JS {@code runTool} +
      * {@code resolvePending}: execute through the hooks; if the result is a suspension
      * ({@code metadata.pending}), call {@code waitFor} and, on {@code ok}, re-execute the SAME
-     * tool once with {@code Context.answer} set. Returns the resolved {@link ToolRun}; when no
-     * {@code waitFor} is configured the run should halt — the halted request is reported via
-     * {@code haltSink} (an {@link AtomicReference}, since tool calls run concurrently).
+     * tool once with {@code Context.answer} set. Returns the resolved run and this call's own
+     * {@code halted} request (non-null iff it suspended with no {@code waitFor}); the caller
+     * surfaces the first halt in call order.
      */
-    private ToolRun runToolResolved(Toolkit toolkit, String name, Map<String, Object> args,
-                                    String id, int turn, java.util.concurrent.atomic.AtomicReference<Request> haltSink) {
+    private ToolOutcome runToolResolved(Toolkit toolkit, String name, Map<String, Object> args,
+                                        String id, int turn) {
         ToolRun run = runTool(toolkit, name, args, id, turn);
         Request req = ToolResult.pendingOf(run.result());
-        if (req == null) return run;
+        if (req == null) return new ToolOutcome(run, null);
         Resolved r = resolvePending(toolkit, name, run.args(), req, id, turn);
-        if (r.halted() != null) haltSink.set(r.halted());
-        return new ToolRun(run.args(), r.result());
+        return new ToolOutcome(new ToolRun(run.args(), r.result()), r.halted());
     }
 
     /**
@@ -285,7 +305,7 @@ public final class LlmClient {
             ToolOverride ov = opts.hooks.afterTool.apply(new AfterToolEvent(name, args, result, id, turn));
             if (ov != null && ov.result() != null) result = ov.result();
         }
-        emit(new MetricEvent.Tool(name, source, result.isError(), System.currentTimeMillis() - t0));
+        emitTool(name, source, result, t0);
         if (ToolResult.pendingOf(result) != null) {
             result = ToolResult.error("unresolved: " + request.prompt()); // never loop forever
         }
@@ -690,7 +710,7 @@ public final class LlmClient {
                 int n = calls.size();
                 Map<String, Object>[] toolMsgs = new Map[n];
                 ToolCall[] recorded = new ToolCall[n];
-                java.util.concurrent.atomic.AtomicReference<Request> halted = new java.util.concurrent.atomic.AtomicReference<>();
+                Request[] haltedAt = new Request[n];
                 CompletableFuture<Void>[] futures = new CompletableFuture[n];
                 for (int i = 0; i < n; i++) {
                     final int idx = i;
@@ -703,8 +723,10 @@ public final class LlmClient {
                     final int t = turn;
                     futures[idx] = CompletableFuture.supplyAsync(
                             () -> runToolResolved(toolkit, fnName,
-                                    args, callId == null ? null : String.valueOf(callId), t, halted),
-                            executor).thenAccept(run -> {
+                                    args, callId == null ? null : String.valueOf(callId), t),
+                            executor).thenAccept(outcome -> {
+                        ToolRun run = outcome.run();
+                        haltedAt[idx] = outcome.halted();
                         recorded[idx] = new ToolCall(fnName, run.args(),
                                 run.result().output(), run.result().isError(), run.result().metadata());
                         Map<String, Object> toolMsg = new LinkedHashMap<>();
@@ -716,11 +738,15 @@ public final class LlmClient {
                 }
                 CompletableFuture.allOf(futures).join();
 
-                // Append in original order; record toolCalls in original order (after join → thread-safe).
-                for (int i = 0; i < n; i++) toolCalls.add(recorded[i]);
-                for (int i = 0; i < n; i++) messages.add(toolMsgs[i]);
-                if (halted.get() != null) {
-                    return pendingRun(runStart, halted.get(), messages, toolCalls, turns, usage);
+                // Record in tool-call order; on the FIRST durable halt, surface it and stop —
+                // deterministic, and the later suspensions' placeholder results never enter the
+                // transcript (they re-suspend on resume). Mirrors the streaming path.
+                for (int i = 0; i < n; i++) {
+                    toolCalls.add(recorded[i]);
+                    messages.add(toolMsgs[i]);
+                    if (haltedAt[i] != null) {
+                        return pendingRun(runStart, haltedAt[i], messages, toolCalls, turns, usage);
+                    }
                 }
             }
             return endRun(runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
@@ -804,7 +830,7 @@ public final class LlmClient {
                 int n = uses.size();
                 Map<String, Object>[] resultBlocks = new Map[n];
                 ToolCall[] recorded = new ToolCall[n];
-                java.util.concurrent.atomic.AtomicReference<Request> halted = new java.util.concurrent.atomic.AtomicReference<>();
+                Request[] haltedAt = new Request[n];
                 CompletableFuture<Void>[] futures = new CompletableFuture[n];
                 for (int i = 0; i < n; i++) {
                     final int idx = i;
@@ -817,8 +843,10 @@ public final class LlmClient {
                     final int t = turn;
                     futures[idx] = CompletableFuture.supplyAsync(
                             () -> runToolResolved(toolkit, useName, useInput,
-                                    useId == null ? null : String.valueOf(useId), t, halted),
-                            executor).thenAccept(run -> {
+                                    useId == null ? null : String.valueOf(useId), t),
+                            executor).thenAccept(outcome -> {
+                        ToolRun run = outcome.run();
+                        haltedAt[idx] = outcome.halted();
                         recorded[idx] = new ToolCall(useName, run.args(),
                                 run.result().output(), run.result().isError(), run.result().metadata());
                         Map<String, Object> tr = new LinkedHashMap<>();
@@ -831,17 +859,23 @@ public final class LlmClient {
                 }
                 CompletableFuture.allOf(futures).join();
 
-                // Record toolCalls and build the result list in original order (after join → thread-safe).
-                for (int i = 0; i < n; i++) toolCalls.add(recorded[i]);
-                List<Object> results = new ArrayList<>(n);
-                for (int i = 0; i < n; i++) results.add(resultBlocks[i]);
+                // Record in tool-call order; on the FIRST durable halt, surface it and stop — the
+                // later suspensions' placeholder results never enter the transcript (they re-suspend
+                // on resume). Mirrors the streaming path.
+                List<Object> results = new ArrayList<>();
+                Request halted = null;
+                for (int i = 0; i < n; i++) {
+                    toolCalls.add(recorded[i]);
+                    results.add(resultBlocks[i]);
+                    if (haltedAt[i] != null) { halted = haltedAt[i]; break; }
+                }
 
                 Map<String, Object> userMsg = new LinkedHashMap<>();
                 userMsg.put("role", "user");
                 userMsg.put("content", results);
                 messages.add(userMsg);
-                if (halted.get() != null) {
-                    return pendingRun(runStart, halted.get(), messages, toolCalls, turns, usage);
+                if (halted != null) {
+                    return pendingRun(runStart, halted, messages, toolCalls, turns, usage);
                 }
             }
             return endRun(runStart, "", messages, toolCalls, turns, usage);
@@ -1272,7 +1306,7 @@ public final class LlmClient {
         private final Map<String, Long> llmRequests = new LinkedHashMap<>();   // labels: model,status
         private final Map<String, Long> llmTokens = new LinkedHashMap<>();     // labels: type
         private final Map<String, Hist> llmDuration = new LinkedHashMap<>();   // labels: model
-        private final Map<String, Long> toolCalls = new LinkedHashMap<>();     // labels: tool,source,is_error
+        private final Map<String, Long> toolCalls = new LinkedHashMap<>();     // labels: tool,source,is_error,pending
         private final Map<String, Hist> toolDuration = new LinkedHashMap<>();  // labels: tool
         private final Map<String, Long> runErrors = new LinkedHashMap<>();     // labels: model
 
@@ -1286,7 +1320,7 @@ public final class LlmClient {
                 observe(llmDuration, labelStr(pair("model", e.model())), e.ms() / 1000.0);
             } else if (ev instanceof MetricEvent.Tool e) {
                 inc(toolCalls, labelStr(pair("tool", e.tool()), pair("source", e.source()),
-                        pair("is_error", String.valueOf(e.isError()))), 1);
+                        pair("is_error", String.valueOf(e.isError())), pair("pending", String.valueOf(e.pending()))), 1);
                 observe(toolDuration, labelStr(pair("tool", e.tool())), e.ms() / 1000.0);
             } else if (ev instanceof MetricEvent.Run e) {
                 if (e.error() != null) inc(runErrors, labelStr(pair("model", e.model())), 1);

@@ -185,20 +185,32 @@ public sealed class LlmClient
             var ov = h.BeforeTool(new BeforeToolEvent(name, a, id, turn));
             if (ov?.Result != null)
             {
-                // short-circuit (deny/cache/dry-run) — still a tool call for metrics purposes
-                Emit(MetricEvent.ToolCall(name, source, ov.Result.IsError, NowMs() - t0));
+                // short-circuit (deny/cache/dry-run, or a guard-raised suspension — path B); still a
+                // tool call for metrics, but a suspension is classified pending, never an error.
+                EmitTool(name, source, ov.Result, t0);
                 return (a, ov.Result);
             }
             if (ov?.Args != null) a = ov.Args;
         }
         var result = await toolkit.ExecuteAsync(name, a).ConfigureAwait(false);
-        if (h?.AfterTool != null)
+        // A suspension (§10) is not a real result: skip afterTool's failure path on it — the resolved
+        // result (post-WaitFor) still flows through afterTool in ResolvePendingAsync — and never count
+        // it as a tool error.
+        if (h?.AfterTool != null && ToolResult.PendingOf(result) == null)
         {
             var ov = h.AfterTool(new AfterToolEvent(name, a, result, id, turn));
             if (ov?.Result != null) result = ov.Result;
         }
-        Emit(MetricEvent.ToolCall(name, source, result.IsError, NowMs() - t0));
+        EmitTool(name, source, result, t0);
         return (a, result);
+    }
+
+    /// <summary>Emit the <c>tool</c> metric, classifying a §10 suspension as <c>pending</c>
+    /// (<c>IsError = false</c>), never a failure.</summary>
+    private void EmitTool(string name, string source, ToolResult result, long t0)
+    {
+        var req = ToolResult.PendingOf(result);
+        Emit(MetricEvent.ToolCall(name, source, req != null ? false : result.IsError, NowMs() - t0, req != null));
     }
 
     /// <summary>
@@ -224,7 +236,7 @@ public sealed class LlmClient
             var ov = _opts.Hooks.AfterTool(new AfterToolEvent(name, args, result, id, turn));
             if (ov?.Result != null) result = ov.Result;
         }
-        Emit(MetricEvent.ToolCall(name, source, result.IsError, NowMs() - t0));
+        EmitTool(name, source, result, t0);
         if (ToolResult.PendingOf(result) != null)
             result = ToolResult.Error($"unresolved: {request.Prompt}"); // never loop forever on the same request
         return (result, null);
@@ -519,16 +531,19 @@ public sealed class LlmClient
                 }
                 await Task.WhenAll(tasks).ConfigureAwait(false);
 
-                // §10: resolve any suspensions (serially — WaitFor is a human-in-the-loop slot).
-                Request? halted = null;
+                // §10: resolve any suspensions (serially — WaitFor is a human-in-the-loop slot). Record
+                // in tool-call order; on the FIRST durable halt, surface it and stop — deterministic, and
+                // the later concurrent suspensions' placeholder results never enter the transcript (they
+                // re-suspend on resume). Mirrors the streaming path.
                 for (var i = 0; i < n; i++)
                 {
                     var req = ToolResult.PendingOf(runs[i].Result);
+                    Request? halted = null;
                     if (req != null)
                     {
                         var r = await ResolvePendingAsync(toolkit, names[i], runs[i].Args, req, callIds[i], turn).ConfigureAwait(false);
                         runs[i] = (runs[i].Args, r.Result);
-                        if (r.Halted != null) halted = r.Halted;
+                        halted = r.Halted;
                     }
                     toolCalls.Add(new ToolCall(names[i], runs[i].Args, runs[i].Result.Output, runs[i].Result.IsError, runs[i].Result.Metadata));
                     messages.Add(new Dictionary<string, object?>
@@ -537,8 +552,8 @@ public sealed class LlmClient
                         ["tool_call_id"] = callIds[i],
                         ["content"] = runs[i].Result.Output,
                     });
+                    if (halted != null) return PendingRun(runStart, halted, messages, toolCalls, turns, usage);
                 }
-                if (halted != null) return PendingRun(runStart, halted, messages, toolCalls, turns, usage);
             }
             return EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage);
         }
@@ -615,17 +630,19 @@ public sealed class LlmClient
                 }
                 await Task.WhenAll(tasks).ConfigureAwait(false);
 
-                // §10: resolve any suspensions serially.
-                Request? halted = null;
+                // §10: resolve any suspensions serially. Record in tool-call order; on the FIRST durable
+                // halt, push the results so far (incl. the halted one) and surface it — later concurrent
+                // suspensions' placeholder results never enter the transcript (they re-suspend on resume).
                 var resultBlocks = new List<object?>(n);
                 for (var i = 0; i < n; i++)
                 {
                     var req = ToolResult.PendingOf(runs[i].Result);
+                    Request? halted = null;
                     if (req != null)
                     {
                         var r = await ResolvePendingAsync(toolkit, names[i], runs[i].Args, req, useIds[i], turn).ConfigureAwait(false);
                         runs[i] = (runs[i].Args, r.Result);
-                        if (r.Halted != null) halted = r.Halted;
+                        halted = r.Halted;
                     }
                     toolCalls.Add(new ToolCall(names[i], runs[i].Args, runs[i].Result.Output, runs[i].Result.IsError, runs[i].Result.Metadata));
                     resultBlocks.Add(new Dictionary<string, object?>
@@ -635,9 +652,13 @@ public sealed class LlmClient
                         ["content"] = runs[i].Result.Output,
                         ["is_error"] = runs[i].Result.IsError,
                     });
+                    if (halted != null)
+                    {
+                        messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = resultBlocks });
+                        return PendingRun(runStart, halted, messages, toolCalls, turns, usage);
+                    }
                 }
                 messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = resultBlocks });
-                if (halted != null) return PendingRun(runStart, halted, messages, toolCalls, turns, usage);
             }
             return EndRun(runStart, "", messages, toolCalls, turns, usage);
         }

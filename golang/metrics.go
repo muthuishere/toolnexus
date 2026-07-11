@@ -37,7 +37,7 @@ type metricsRegistry struct {
 	llmRequests  map[string]int64 // labels: model,status
 	llmTokens    map[string]int64 // labels: type
 	llmDuration  map[string]*hist // labels: model
-	toolCalls    map[string]int64 // labels: tool,source,is_error
+	toolCalls    map[string]int64 // labels: tool,source,is_error,pending
 	toolDuration map[string]*hist // labels: tool
 	runErrors    map[string]int64 // labels: model
 }
@@ -68,7 +68,7 @@ func (r *metricsRegistry) record(ev MetricEvent) {
 		}
 		observe(r.llmDuration, labelStr([2]string{"model", ev.Model}), float64(ev.Ms)/1000)
 	case "tool":
-		r.toolCalls[labelStr([2]string{"tool", ev.Tool}, [2]string{"source", ev.Source}, [2]string{"is_error", strconv.FormatBool(ev.IsError)})]++
+		r.toolCalls[labelStr([2]string{"tool", ev.Tool}, [2]string{"source", ev.Source}, [2]string{"is_error", strconv.FormatBool(ev.IsError)}, [2]string{"pending", strconv.FormatBool(ev.Pending)})]++
 		observe(r.toolDuration, labelStr([2]string{"tool", ev.Tool}), float64(ev.Ms)/1000)
 	case "run":
 		if ev.Error != "" {

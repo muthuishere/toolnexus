@@ -201,7 +201,9 @@ def _last_text(messages: list[dict[str, Any]]) -> str:
 # ``tool_calls``; only ``metrics()`` text below is byte-identical across ports):
 #   {"event": "llm", "model", "status": "ok"|"error", "ms",
 #    "prompt_tokens", "completion_tokens"}                    — one per LLM call
-#   {"event": "tool", "tool", "source", "is_error", "ms"}     — one per tool call
+#   {"event": "tool", "tool", "source", "is_error", "ms",
+#    "pending"?}                                              — one per tool call
+#    (``pending`` is True when the result is a §10 suspension: never a tool error)
 #   {"event": "run", "model", "turns", "tool_calls",
 #    "total_tokens", "ms", "error"?}                          — one per run/ask
 # The same events also feed the built-in Prometheus registry (``client.metrics()``).
@@ -274,7 +276,7 @@ class MetricsRegistry:
         self._llm_requests: dict[str, float] = {}   # labels: model,status
         self._llm_tokens: dict[str, float] = {}     # labels: type
         self._llm_duration: dict[str, _Hist] = {}   # labels: model
-        self._tool_calls: dict[str, float] = {}     # labels: tool,source,is_error
+        self._tool_calls: dict[str, float] = {}     # labels: tool,source,is_error,pending
         self._tool_duration: dict[str, _Hist] = {}  # labels: tool
         self._run_errors: dict[str, float] = {}     # labels: model
 
@@ -289,7 +291,7 @@ class MetricsRegistry:
         elif et == "tool":
             self._inc(
                 self._tool_calls,
-                _label_str([("tool", ev["tool"]), ("source", ev["source"]), ("is_error", "true" if ev["is_error"] else "false")]),
+                _label_str([("tool", ev["tool"]), ("source", ev["source"]), ("is_error", "true" if ev["is_error"] else "false"), ("pending", "true" if ev.get("pending") else "false")]),
             )
             self._observe(self._tool_duration, _label_str([("tool", ev["tool"])]), ev["ms"] / 1000)
         elif et == "run":
@@ -560,7 +562,7 @@ class Client:
             if ov and ov.get("result") is not None:
                 result = ov["result"]
         source = toolkit.get(name).source if toolkit.get(name) is not None else "custom"
-        self._emit({"event": "tool", "tool": name, "source": source, "is_error": result.is_error, "ms": _ms_since(t0)})
+        self._emit_tool(name, source, result, t0)
         if pending_of(result) is not None:
             # never loop forever on the same request
             result = ToolResult(output=f"unresolved: {request.prompt}", is_error=True)
@@ -671,22 +673,41 @@ class Client:
             ov = await _call_hook(before, {"name": name, "args": a, "id": call_id, "turn": turn})
             if ov:
                 if ov.get("result") is not None:
-                    # short-circuit (deny / cache hit / dry-run) — real tool never runs,
-                    # but it still counts as a tool call for metrics purposes.
-                    self._emit({"event": "tool", "tool": name, "source": source, "is_error": ov["result"].is_error, "ms": _ms_since(t0)})
+                    # short-circuit (deny / cache hit / dry-run, or a guard-raised suspension —
+                    # path B) — real tool never runs, but it still counts as a tool call for
+                    # metrics; a suspension is classified pending, never an error.
+                    self._emit_tool(name, source, ov["result"], t0)
                     return a, ov["result"]
                 if ov.get("args") is not None:
                     a = ov["args"]
         result = await toolkit.execute(name, a)
+        # A suspension (§10) is not a real result: skip after_tool's failure path on it — the
+        # resolved result (post-wait_for) still flows through after_tool in _resolve_pending — and
+        # never count it as a tool error.
         after = _get_hook(self.hooks, "after_tool")
-        if after is not None:
+        if after is not None and pending_of(result) is None:
             ov = await _call_hook(
                 after, {"name": name, "args": a, "result": result, "id": call_id, "turn": turn}
             )
             if ov and ov.get("result") is not None:
                 result = ov["result"]
-        self._emit({"event": "tool", "tool": name, "source": source, "is_error": result.is_error, "ms": _ms_since(t0)})
+        self._emit_tool(name, source, result, t0)
         return a, result
+
+    def _emit_tool(self, name: str, source: str, result: ToolResult, t0: float) -> None:
+        """Emit the ``tool`` metric, classifying a §10 suspension as ``pending``
+        (``is_error`` False), never a failure. Mirrors JS ``emitTool``."""
+        req = pending_of(result)
+        ev: dict[str, Any] = {
+            "event": "tool",
+            "tool": name,
+            "source": source,
+            "is_error": False if req is not None else result.is_error,
+            "ms": _ms_since(t0),
+        }
+        if req is not None:
+            ev["pending"] = True
+        self._emit(ev)
 
     async def _llm_call_json(
         self,
@@ -867,13 +888,14 @@ class Client:
                         for (call_id, name, args) in parsed
                     )
                 )
-                halted: Optional[Request] = None
+                # Record in tool-call order; on the FIRST durable halt, surface it and stop —
+                # deterministic, and the later suspensions' placeholder results never enter the
+                # transcript (they re-suspend on resume). Mirrors the streaming path.
                 for (call_id, name, _orig_args), (args, result) in zip(parsed, results):
+                    halted: Optional[Request] = None
                     req = pending_of(result)
                     if req is not None:
-                        result, h = await self._resolve_pending(toolkit, name, args, req, call_id, turn)
-                        if h is not None:
-                            halted = h
+                        result, halted = await self._resolve_pending(toolkit, name, args, req, call_id, turn)
                     tool_calls.append(
                         {
                             "name": name,
@@ -886,8 +908,8 @@ class Client:
                     messages.append(
                         {"role": "tool", "tool_call_id": call_id, "content": result.output}
                     )
-                if halted is not None:
-                    return self._pending_run(run_start, halted, messages, tool_calls, turns, usage)
+                    if halted is not None:
+                        return self._pending_run(run_start, halted, messages, tool_calls, turns, usage)
 
             return self._end_run(run_start, _last_text(messages), messages, tool_calls, turns, usage)
         except Exception as e:
@@ -970,14 +992,15 @@ class Client:
                         for use in uses
                     )
                 )
+                # Record in tool-call order; on the FIRST durable halt, include that tool_result
+                # block, stop building the content, and surface it — deterministic (G3), later
+                # suspensions re-suspend on resume. Mirrors the OpenAI path and the streaming loops.
                 results: list[dict[str, Any]] = []
                 halted: Optional[Request] = None
                 for use, (args, result) in zip(uses, outputs):
                     req = pending_of(result)
                     if req is not None:
-                        result, h = await self._resolve_pending(toolkit, use["name"], args, req, use.get("id"), turn)
-                        if h is not None:
-                            halted = h
+                        result, halted = await self._resolve_pending(toolkit, use["name"], args, req, use.get("id"), turn)
                     tool_calls.append(
                         {
                             "name": use["name"],
@@ -995,6 +1018,8 @@ class Client:
                             "is_error": result.is_error,
                         }
                     )
+                    if halted is not None:
+                        break
                 messages.append({"role": "user", "content": results})
                 if halted is not None:
                     return self._pending_run(run_start, halted, messages, tool_calls, turns, usage)

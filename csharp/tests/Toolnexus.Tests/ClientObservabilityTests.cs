@@ -72,7 +72,7 @@ public class ClientObservabilityTests
         toolnexus_llm_request_duration_seconds_count{model="gpt"} 1
         # HELP toolnexus_tool_calls_total Total tool calls.
         # TYPE toolnexus_tool_calls_total counter
-        toolnexus_tool_calls_total{tool="echo",source="mcp",is_error="false"} 1
+        toolnexus_tool_calls_total{tool="echo",source="mcp",is_error="false",pending="false"} 1
         # HELP toolnexus_tool_duration_seconds Tool execution duration in seconds.
         # TYPE toolnexus_tool_duration_seconds histogram
         toolnexus_tool_duration_seconds_bucket{tool="echo",le="0.05"} 0
@@ -170,7 +170,7 @@ public class ClientObservabilityTests
         // The built-in registry saw the same events.
         var text = client.Metrics();
         Assert.Contains("toolnexus_llm_requests_total{model=\"gpt\",status=\"ok\"} 2", text);
-        Assert.Contains("toolnexus_tool_calls_total{tool=\"echo\",source=\"native\",is_error=\"false\"} 1", text);
+        Assert.Contains("toolnexus_tool_calls_total{tool=\"echo\",source=\"native\",is_error=\"false\",pending=\"false\"} 1", text);
     }
 
     // ---- helpers ----

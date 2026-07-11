@@ -907,6 +907,19 @@ RunResult {
 }
 ```
 
+**A suspension is never a tool error.** A `Pending` result is a distinct state, not a failure: the
+`tool` observability event for a suspended call carries `isError:false` and a `pending:true` marker
+(so error-rate metrics and circuit-breakers do not count it), and the `afterTool` hook's failure
+path does not run on the suspension — only on the resolved result. This holds whether the suspension
+comes from the tool's own execution or from a `beforeTool` hook short-circuit (a guard-raised
+pending).
+
+**Concurrent suspensions surface deterministically.** When more than one tool call in a turn
+suspends and no `waitFor` is set, the run halts on the **first** suspension in tool-call order (not a
+scheduling-dependent one) and does not record the other suspensions' placeholder results in the
+transcript — those calls re-suspend on resume. With a `waitFor`, each concurrent suspension resolves
+independently inline and none is lost.
+
 ### Streaming event
 
 `stream()` (§8) emits one more event when a tool suspends, before `waitFor` runs — so a

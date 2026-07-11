@@ -277,7 +277,7 @@ def test_metrics_registry_exact_bytes():
         'toolnexus_llm_request_duration_seconds_count{model="gpt-x"} 1\n'
         "# HELP toolnexus_tool_calls_total Total tool calls.\n"
         "# TYPE toolnexus_tool_calls_total counter\n"
-        'toolnexus_tool_calls_total{tool="add",source="native",is_error="false"} 1\n'
+        'toolnexus_tool_calls_total{tool="add",source="native",is_error="false",pending="false"} 1\n'
         "# HELP toolnexus_tool_duration_seconds Tool execution duration in seconds.\n"
         "# TYPE toolnexus_tool_duration_seconds histogram\n"
         'toolnexus_tool_duration_seconds_bucket{tool="add",le="0.05"} 0\n'
