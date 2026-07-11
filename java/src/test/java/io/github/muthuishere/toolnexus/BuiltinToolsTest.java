@@ -321,19 +321,40 @@ class BuiltinToolsTest {
     // ---- question / todowrite --------------------------------------------
 
     @Test
-    void questionAndTodowriteStructuredRoundTrip() {
+    void questionSuspendsViaKindQuestionRequestResolvesToTheAnswer() {
         Map<String, Object> q1 = new LinkedHashMap<>();
-        q1.put("question", "Pick one?");
+        q1.put("question", "Pick a color?");
         q1.put("header", "Choice");
-        q1.put("options", List.of("a", "b"));
+        q1.put("options", List.of("red", "green"));
         q1.put("multiple", false);
-        List<Map<String, Object>> questions = List.of(q1);
+        Map<String, Object> q2 = new LinkedHashMap<>();
+        q2.put("question", "Confirm?");
+        List<Map<String, Object>> questions = List.of(q1, q2);
 
+        // A — first call suspends (§10), it does NOT answer immediately.
         ToolResult q = run("question", Map.of("questions", questions));
-        assertFalse(q.isError());
-        assertEquals(Json.stringify(questions), q.output());
-        assertEquals(questions, q.metadata().get("questions"));
+        Request req = ToolResult.pendingOf(q);
+        assertNotNull(req, "returns a suspension carrying metadata.pending");
+        assertTrue(q.isError(), "a suspension is not a usable answer");
+        assertEquals("question", req.kind());
+        assertEquals("Pick a color? (options: red, green)\nConfirm?", req.prompt(), "byte-exact rendered prompt");
+        assertEquals(questions, req.data().get("questions"), "structured questions ride in data.questions");
 
+        // B — re-executed after waitFor resolved: the answer is forwarded verbatim.
+        Answer answer = new Answer(req.id(), true, Map.of("answers", List.of("red")));
+        ToolContext ctx = new ToolContext(null, null, answer);
+        ToolResult answered = tool("question").execute(Map.of("questions", questions), ctx);
+        assertFalse(answered.isError());
+        assertEquals("{\"answers\":[\"red\"]}", answered.output());
+
+        // ok-but-empty resolution → "{}" (agnostic passthrough).
+        ToolContext emptyCtx = new ToolContext(null, null, new Answer(req.id(), true));
+        ToolResult empty = tool("question").execute(Map.of("questions", questions), emptyCtx);
+        assertEquals("{}", empty.output());
+    }
+
+    @Test
+    void todowriteStructuredRoundTrip() {
         Map<String, Object> t1 = new LinkedHashMap<>();
         t1.put("id", "1");
         t1.put("text", "write code");

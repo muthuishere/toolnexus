@@ -528,6 +528,20 @@ func fulfil(
 			},
 		}
 		state = "failed"
+	} else if rr.Status == "pending" && rr.Pending != nil {
+		// §10 suspension over A2A: the run halted waiting on out-of-band input.
+		// Surface the protocol's `input-required` state carrying the request
+		// prompt — never a false `completed`.
+		result = &rr
+		prompt := rr.Pending.Prompt
+		task = A2ATask{
+			ID: id,
+			Status: A2ATaskStatus{
+				State:   "input-required",
+				Message: &A2AMessage{Role: "agent", Parts: []A2APart{{Kind: "text", Text: &prompt}}},
+			},
+		}
+		state = "input-required"
 	} else {
 		result = &rr
 		artifactText := rr.Text

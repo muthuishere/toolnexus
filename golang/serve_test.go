@@ -313,6 +313,97 @@ func TestServeFulfilmentErrorFailsTaskAndSurvives(t *testing.T) {
 	}
 }
 
+// TestServeSuspendedRunInputRequired is G1: the model calls `question`; with no WaitFor the
+// run halts pending — serve must surface A2A "input-required" carrying the prompt, NOT a false
+// "completed" with an artifact. Mirrors the JS "a suspended run surfaces input-required" test.
+func TestServeSuspendedRunInputRequired(t *testing.T) {
+	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		args := `{"questions":[{"question":"Pick a color?","options":["red","green"]}]}`
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{
+				"role":    "assistant",
+				"content": nil,
+				"tool_calls": []any{map[string]any{
+					"id":       "c1",
+					"type":     "function",
+					"function": map[string]any{"name": "question", "arguments": args},
+				}},
+			}}},
+			"usage": map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+	}))
+	defer llm.Close()
+
+	tk, err := CreateToolkit(context.Background(), Options{}) // builtins on → `question` exists
+	if err != nil {
+		t.Fatalf("CreateToolkit: %v", err)
+	}
+	defer tk.Close()
+
+	client := CreateClient(ClientOptions{BaseURL: llm.URL, Style: StyleOpenAI, Model: "x", APIKey: "k"}) // no WaitFor
+	var events []OnTaskEvent
+	var mu sync.Mutex
+	handle, err := tk.Serve("127.0.0.1:0", ServeOptions{
+		Client: client, A2A: &A2AConfig{Name: "ask-desk"},
+		OnTask: func(ev OnTaskEvent) { mu.Lock(); events = append(events, ev); mu.Unlock() },
+	})
+	if err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	defer handle.Stop()
+	endpoint := handle.URL + "/"
+
+	sent := rpcPost(t, endpoint, "SendMessage", map[string]any{
+		"message": map[string]any{"parts": []any{map[string]any{"kind": "text", "text": "go"}}},
+	})
+	result, _ := sent["result"].(map[string]any)
+	if result == nil {
+		t.Fatalf("SendMessage result missing: %v", sent)
+	}
+	id, _ := result["id"].(string)
+
+	var task map[string]any
+	for i := 0; i < 200; i++ {
+		got := rpcPost(t, endpoint, "GetTask", map[string]any{"id": id})
+		res, _ := got["result"].(map[string]any)
+		if res == nil {
+			t.Fatalf("GetTask error: %v", got)
+		}
+		st, _ := res["status"].(map[string]any)
+		state, _ := st["state"].(string)
+		if state != "" && state != "submitted" && state != "working" {
+			task = res
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if task == nil {
+		t.Fatal("task never reached a terminal state")
+	}
+	st, _ := task["status"].(map[string]any)
+	if st["state"] != "input-required" {
+		t.Fatalf("state = %v, want input-required (suspended run must never report completed)", st["state"])
+	}
+	msg, _ := st["message"].(map[string]any)
+	parts, _ := msg["parts"].([]any)
+	if len(parts) == 0 {
+		t.Fatalf("status message has no parts: %v", st)
+	}
+	p0, _ := parts[0].(map[string]any)
+	if text, _ := p0["text"].(string); text != "Pick a color? (options: red, green)" {
+		t.Fatalf("status message text = %q, want the rendered prompt", text)
+	}
+	if arts, ok := task["artifacts"].([]any); ok && len(arts) > 0 {
+		t.Fatalf("suspended run should carry no artifact, got %v", arts)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) == 0 || events[len(events)-1].State != "input-required" {
+		t.Fatalf("onTask last event state = %v, want input-required", events)
+	}
+}
+
 // TestServeErrorCodes covers the JSON-RPC error mapping.
 func TestServeErrorCodes(t *testing.T) {
 	llm := mockOpenAI("ok")

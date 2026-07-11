@@ -34,7 +34,7 @@ from toolnexus import (
     to_gemini,
     to_openai,
 )
-from toolnexus.types import ToolResult
+from toolnexus.types import Answer, ToolContext, ToolResult
 
 # examples/skills lives at <repo>/examples/skills; this file is at
 # <repo>/python/tests/test_unit.py
@@ -574,13 +574,33 @@ async def test_builtin_apply_patch_roundtrip_and_atomic_abort():
             assert f.read() == "line one\nline TWO changed\nline three\n", "update untouched"
 
 
-async def test_builtin_question_and_todowrite_roundtrip():
-    questions = [{"question": "Pick one?", "header": "Choice", "options": ["a", "b"], "multiple": False}]
+async def test_builtin_question_suspends_and_resolves():
+    questions = [
+        {"question": "Pick a color?", "header": "Choice", "options": ["red", "green"], "multiple": False},
+        {"question": "Confirm?"},
+    ]
+    # A — first call suspends (§10), it does NOT answer immediately.
     q = await _builtin("question").execute({"questions": questions})
-    assert q.is_error is False
-    assert json.loads(q.output) == questions
-    assert q.metadata["questions"] == questions
+    req = q.metadata["pending"]
+    assert req is not None, "returns a suspension carrying metadata['pending']"
+    assert q.is_error is True, "a suspension is not a usable answer"
+    assert req.kind == "question"
+    assert req.prompt == "Pick a color? (options: red, green)\nConfirm?", "byte-exact rendered prompt"
+    assert req.data["questions"] == questions, "structured questions ride in data.questions"
 
+    # B — re-executed after wait_for resolved: the answer is forwarded verbatim.
+    ctx = ToolContext(answer=Answer(id=req.id, ok=True, data={"answers": ["red"]}))
+    answered = await _builtin("question").execute({"questions": questions}, ctx)
+    assert answered.is_error is False
+    assert json.loads(answered.output) == {"answers": ["red"]}
+    # ok-but-empty resolution → "{}" (agnostic passthrough).
+    empty_ctx = ToolContext(answer=Answer(id=req.id, ok=True))
+    empty = await _builtin("question").execute({"questions": questions}, empty_ctx)
+    assert empty.output == "{}"
+    assert json.loads(empty.output) == {}
+
+
+async def test_builtin_todowrite_roundtrip():
     todos = [
         {"id": "1", "text": "write code", "completed": True},
         {"id": "2", "text": "ship it", "completed": False},

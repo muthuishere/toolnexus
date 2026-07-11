@@ -304,6 +304,64 @@ public class A2AServeTests
         }
     }
 
+    // ---- G1: a suspended run surfaces input-required, not a false completed ----
+
+    [Fact]
+    public async Task SuspendedRun_SurfacesInputRequired_NotFalseCompleted()
+    {
+        // Model calls `question`; with no WaitFor the run halts pending — serve must NOT report completed.
+        using var llm = new StubServer(ctx =>
+        {
+            const string args = "{\\\"questions\\\":[{\\\"question\\\":\\\"Pick a color?\\\",\\\"options\\\":[\\\"red\\\",\\\"green\\\"]}]}";
+            StubServer.Respond(ctx, 200,
+                "{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":[" +
+                "{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"question\",\"arguments\":\"" + args + "\"}}]}}]," +
+                "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}");
+        });
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = true }); // `question` exists
+
+        var events = new List<OnTaskEvent>();
+        var handle = await tk.ServeAsync("127.0.0.1:0", new Toolkit.ServeOptions
+        {
+            Client = ClientFor(llm),
+            A2A = new A2AConfig { Name = "ask-desk" },
+            OnTask = ev => { events.Add(ev); return Task.CompletedTask; },
+        });
+        try
+        {
+            var taskId = await SendMessage(handle.Url, "go");
+            var task = await PollUntilInputRequired(handle.Url, taskId);
+            var status = (IDictionary<string, object?>)task["status"]!;
+            Assert.Equal("input-required", status["state"]); // suspended run → input-required, never completed
+
+            var message = (IDictionary<string, object?>)status["message"]!;
+            var parts = (IEnumerable<object?>)message["parts"]!;
+            var text = ((IDictionary<string, object?>)parts.First()!)["text"]?.ToString();
+            Assert.Equal("Pick a color? (options: red, green)", text); // prompt carried in the status message
+
+            Assert.False(task.TryGetValue("artifacts", out var arts) && arts is IEnumerable<object?> a && a.Any(),
+                "no artifact passing the prompt off as a real answer");
+            Assert.Equal("input-required", events[^1].State); // onTask surfaced input-required
+        }
+        finally
+        {
+            await handle.StopAsync();
+        }
+    }
+
+    private static async Task<IDictionary<string, object?>> PollUntilInputRequired(string baseUrl, string taskId)
+    {
+        for (var i = 0; i < 100; i++)
+        {
+            var rpc = await Rpc(baseUrl, "GetTask", "{\"id\":\"" + taskId + "\"}");
+            var result = (IDictionary<string, object?>)rpc["result"]!;
+            var state = ((IDictionary<string, object?>)result["status"]!)["state"]?.ToString();
+            if (state is not ("submitted" or "working")) return result;
+            await Task.Delay(20);
+        }
+        throw new Exception("task did not leave the working state");
+    }
+
     // ---- helpers ----
 
     private static async Task<IDictionary<string, object?>> Rpc(string baseUrl, string method, string paramsJson)

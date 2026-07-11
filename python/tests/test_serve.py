@@ -338,3 +338,70 @@ async def test_serve_top_level_a2a_config_block_picked_up():
         await srv.stop()
         await tk.close()
         llm.shutdown()
+
+
+def _question_toolcall(h):
+    """Mock LLM completion: model calls the `question` builtin (suspends, no answer)."""
+    body = json.dumps(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "c1",
+                                "type": "function",
+                                "function": {
+                                    "name": "question",
+                                    "arguments": '{"questions": [{"question": "Pick a color?", "options": ["red", "green"]}]}',
+                                },
+                            }
+                        ],
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    ).encode("utf-8")
+    h.send_response(200)
+    h.send_header("Content-Type", "application/json")
+    h.send_header("Content-Length", str(len(body)))
+    h.end_headers()
+    h.wfile.write(body)
+
+
+async def _poll_until_state(endpoint: str, id: str, wanted: str) -> dict:
+    for _ in range(100):
+        env = await _rpc(endpoint, "GetTask", {"id": id})
+        state = (env.get("result") or {}).get("status", {}).get("state")
+        if state == wanted:
+            return env["result"]
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"task never reached state {wanted!r}")
+
+
+async def test_serve_suspended_run_surfaces_input_required_not_completed_g1():
+    # Model calls `question`; with no wait_for the run halts pending — serve must NOT report completed.
+    llm, base_url = _start_mock_llm(_question_toolcall)
+    client = create_client(base_url=base_url, style="openai", model="x", api_key="k")  # no wait_for
+    tk = await create_toolkit()  # builtins on → `question` exists
+    events: list[dict] = []
+    srv = await tk.serve(
+        "127.0.0.1:0", client=client, a2a={"name": "ask-desk"}, on_task=lambda ev: events.append(ev)
+    )
+    endpoint = srv.url + "/"
+    try:
+        sent = await _rpc(endpoint, "SendMessage", _text_message("go"))
+        tid = sent["result"]["id"]
+        task = await _poll_until_state(endpoint, tid, "input-required")
+        assert task["status"]["state"] == "input-required", "suspended run → input-required, never completed"
+        assert "Pick a color? (options: red, green)" in task["status"]["message"]["parts"][0]["text"], (
+            "prompt carried in the status message"
+        )
+        assert not task.get("artifacts"), "no artifact passing the prompt off as a real answer"
+        assert events[-1]["state"] == "input-required"  # onTask surfaced input-required
+    finally:
+        await srv.stop()
+        await tk.close()
+        llm.shutdown()

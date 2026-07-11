@@ -469,18 +469,40 @@ public static class A2AServer
             // contextId groups a peer's turns into one conversation — thread it so the client's
             // IConversationStore remembers across tasks in the same context.
             result = await runTask(text, contextId).ConfigureAwait(false);
-            var artifact = new A2AArtifact
+            if (result.Status == "pending" && result.Pending is not null)
             {
-                ArtifactId = Guid.NewGuid().ToString(),
-                Parts = new List<A2APart> { new() { Kind = "text", Text = result.Text } },
-            };
-            task = new A2ATask
+                // §10 suspension over A2A: the run halted waiting on out-of-band input. Surface the
+                // protocol's `input-required` state carrying the request prompt — never a false `completed`.
+                task = new A2ATask
+                {
+                    Id = id,
+                    Status = new A2ATaskStatus
+                    {
+                        State = "input-required",
+                        Message = new A2AMessage
+                        {
+                            Role = "agent",
+                            Parts = new List<A2APart> { new() { Kind = "text", Text = result.Pending.Prompt } },
+                        },
+                    },
+                };
+                state = "input-required";
+            }
+            else
             {
-                Id = id,
-                Status = new A2ATaskStatus { State = "completed" },
-                Artifacts = new List<A2AArtifact> { artifact },
-            };
-            state = "completed";
+                var artifact = new A2AArtifact
+                {
+                    ArtifactId = Guid.NewGuid().ToString(),
+                    Parts = new List<A2APart> { new() { Kind = "text", Text = result.Text } },
+                };
+                task = new A2ATask
+                {
+                    Id = id,
+                    Status = new A2ATaskStatus { State = "completed" },
+                    Artifacts = new List<A2AArtifact> { artifact },
+                };
+                state = "completed";
+            }
         }
         catch (Exception e)
         {

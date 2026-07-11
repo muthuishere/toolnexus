@@ -92,7 +92,40 @@ public class PendingTests
         Assert.Contains("example.com/login", b.Pending.Url!);
     }
 
+    // ---- B') no WaitFor → a `question` builtin suspension halts the run the same way ----
+
+    [Fact]
+    public async Task NoWaitFor_QuestionBuiltin_Halts_WithQuestionRequest()
+    {
+        using var llm = StubQuestionLlm();
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = true }); // `question` exists
+
+        var client = LlmClient.Create(new LlmClient.Options
+        {
+            BaseUrl = llm.BaseUrl, Style = "openai", Model = "stub", ApiKey = "k", // no WaitFor
+        });
+
+        var res = await client.RunAsync("ask me", tk);
+
+        Assert.Equal("pending", res.Status);          // no WaitFor ⇒ halts pending, does not loop forever
+        Assert.NotNull(res.Pending);
+        Assert.Equal("question", res.Pending!.Kind);
+        Assert.Equal("Pick a color? (options: red, green)", res.Pending.Prompt); // byte-exact
+    }
+
     // ---- helpers ----
+
+    /// <summary>A fake LLM whose first turn calls the `question` builtin (never reached again — the run halts).</summary>
+    private static StubServer StubQuestionLlm()
+        => new(ctx =>
+        {
+            ReadBody(ctx); // drain
+            const string args = "{\\\"questions\\\":[{\\\"question\\\":\\\"Pick a color?\\\",\\\"options\\\":[\\\"red\\\",\\\"green\\\"]}]}";
+            var json = "{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":[" +
+                       "{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"question\",\"arguments\":\"" + args + "\"}}]}}]," +
+                       "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}";
+            StubServer.Respond(ctx, 200, json);
+        });
 
     /// <summary>A tool that needs authorization the first time, then returns the balance.</summary>
     private static NativeTool BalanceTool(Func<bool> authed)

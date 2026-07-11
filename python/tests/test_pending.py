@@ -103,3 +103,43 @@ async def test_no_wait_for_halts_pending(monkeypatch):
     assert result.pending is not None
     assert result.pending.kind == "authorization"
     assert "example.com/login" in result.pending.url
+
+
+@pytest.mark.asyncio
+async def test_question_suspension_halts_run(monkeypatch):
+    """A `question` builtin suspension with no wait_for halts the run (status pending)."""
+
+    def fake_post(url, headers, payload, timeout):
+        # Model calls the `question` builtin; with no wait_for the loop halts (§10).
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "c1",
+                                "type": "function",
+                                "function": {
+                                    "name": "question",
+                                    "arguments": '{"questions": [{"question": "Pick a color?", "options": ["red", "green"]}]}',
+                                },
+                            }
+                        ],
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    monkeypatch.setattr(client_mod, "_post", fake_post)
+    tk = await create_toolkit()  # builtins on → `question` exists
+
+    client = create_client(base_url="http://stub", style="openai", model="stub", api_key="x")  # no wait_for
+    result = await client.run("ask me", tk)
+
+    assert result.status == "pending", "no wait_for ⇒ the run halts pending, does not loop forever"
+    assert result.pending is not None
+    assert result.pending.kind == "question"
+    assert result.pending.prompt == "Pick a color? (options: red, green)"

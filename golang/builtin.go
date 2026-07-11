@@ -678,10 +678,50 @@ func webfetchTool() Tool {
 	)
 }
 
+// renderQuestionPrompt renders the questions into a human-readable Request.prompt
+// (§10). Byte-identical across ports: each question's text in order, " (options:
+// a, b, c)" appended when it has non-empty options, joined by "\n" (no trailing
+// newline). header is NOT rendered — it survives in data.questions. Mirrors the
+// JS renderQuestionPrompt.
+func renderQuestionPrompt(questions []any) string {
+	lines := make([]string, 0, len(questions))
+	for _, q := range questions {
+		item, _ := q.(map[string]any)
+		line := ""
+		if s, ok := item["question"].(string); ok {
+			line = s
+		}
+		opts := questionOptions(item["options"])
+		if len(opts) > 0 {
+			line += " (options: " + strings.Join(opts, ", ") + ")"
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// questionOptions coerces the schema-string[] options into a []string, matching
+// the JS `options.join(", ")`. Non-slice / empty ⇒ nil.
+func questionOptions(v any) []string {
+	arr, ok := v.([]any)
+	if !ok || len(arr) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, e := range arr {
+		if s, ok := e.(string); ok {
+			out = append(out, s)
+		} else {
+			out = append(out, fmt.Sprintf("%v", e))
+		}
+	}
+	return out
+}
+
 func questionTool() Tool {
 	return builtin(
 		"question",
-		"Ask the host one or more questions. Returns the questions as structured output for the host to answer.",
+		"Ask the host one or more questions. Suspends via a kind:\"question\" Request (§10); the host's waitFor resolves it and the answer is returned to the model.",
 		JSONSchema{
 			"type": "object",
 			"properties": map[string]any{
@@ -703,13 +743,29 @@ func questionTool() Tool {
 			"required":             []string{"questions"},
 			"additionalProperties": false,
 		},
-		func(args map[string]any, _ *ToolContext) (ToolResult, error) {
+		func(args map[string]any, ctx *ToolContext) (ToolResult, error) {
 			questions := asArray(args["questions"])
-			b, err := json.Marshal(questions)
-			if err != nil {
-				return bErr(fmt.Sprintf("question: %v", err), nil)
+			// Re-executed after the host's waitFor resolved (§10 loop rule): the
+			// resolution IS the answer, as with kind:"input" — forward it verbatim
+			// to the model.
+			if ctx != nil && ctx.Answer != nil {
+				data := ctx.Answer.Data
+				if data == nil {
+					data = map[string]any{}
+				}
+				b, err := json.Marshal(data)
+				if err != nil {
+					return bErr(fmt.Sprintf("question: %v", err), nil)
+				}
+				return bOk(string(b), nil)
 			}
-			return bOk(string(b), map[string]any{"questions": questions})
+			// First call: suspend. A question is just a §10 Request with kind:"question".
+			qs, _ := questions.([]any)
+			return Pending(Request{
+				Kind:   "question",
+				Prompt: renderQuestionPrompt(qs),
+				Data:   map[string]any{"questions": questions},
+			}), nil
 		},
 	)
 }

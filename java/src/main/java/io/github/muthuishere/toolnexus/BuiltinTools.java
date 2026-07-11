@@ -533,13 +533,47 @@ public final class BuiltinTools {
         props.put("questions", questionsProp);
         return builtin(
                 "question",
-                "Ask the host one or more questions. Returns the questions as structured output for the host to answer.",
+                "Ask the host one or more questions. Suspends via a kind:\"question\" Request (§10); the host's waitFor resolves it and the answer is returned to the model.",
                 schema(props, List.of("questions")),
                 (args, ctx) -> {
                     Object q = args.get("questions");
                     List<?> questions = q instanceof List ? (List<?>) q : List.of();
-                    return ok(Json.stringify(questions), meta("questions", questions));
+                    // Re-executed after the host's waitFor resolved (§10 loop rule): the resolution
+                    // IS the answer, as with kind:"input" — forward it verbatim to the model.
+                    if (ctx != null && ctx.answer() != null) {
+                        Map<String, Object> data = ctx.answer().data();
+                        return ok(Json.stringify(data != null ? data : Map.of()));
+                    }
+                    // First call: suspend. A question is just a §10 Request with kind:"question".
+                    Map<String, Object> reqData = new LinkedHashMap<>();
+                    reqData.put("questions", questions);
+                    return ToolResult.pending(
+                            new Request(null, "question", renderQuestionPrompt(questions), null, reqData, null));
                 });
+    }
+
+    /**
+     * Render the questions into a human-readable {@code Request.prompt} (§10). Byte-identical
+     * across ports: each question's text in order, {@code " (options: a, b, c)"} appended when it
+     * has non-empty options, joined by {@code "\n"} (no trailing newline). {@code header} is not
+     * rendered — it survives in {@code data.questions}.
+     */
+    private static String renderQuestionPrompt(List<?> questions) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < questions.size(); i++) {
+            if (i > 0) sb.append("\n");
+            Object item = questions.get(i);
+            Map<?, ?> q = item instanceof Map ? (Map<?, ?>) item : Map.of();
+            Object qv = q.get("question");
+            sb.append(qv instanceof String s ? s : "");
+            Object ov = q.get("options");
+            if (ov instanceof List<?> opts && !opts.isEmpty()) {
+                List<String> parts = new java.util.ArrayList<>();
+                for (Object o : opts) parts.add(String.valueOf(o));
+                sb.append(" (options: ").append(String.join(", ", parts)).append(")");
+            }
+        }
+        return sb.toString();
     }
 
     // -----------------------------------------------------------------------

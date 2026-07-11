@@ -139,4 +139,49 @@ class PendingSuspensionTest {
             server.stop(0);
         }
     }
+
+    // A fake OpenAI endpoint that always calls the `question` builtin. With no waitFor the loop
+    // halts durably (§10) — the question suspension surfaces as status:"pending".
+    private static HttpServer questionLLM() throws IOException {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            Map<String, Object> message = new java.util.LinkedHashMap<>();
+            message.put("role", "assistant");
+            message.put("content", null);
+            String argsJson = Json.stringify(Map.of("questions",
+                    List.of(Map.of("question", "Pick a color?", "options", List.of("red", "green")))));
+            message.put("tool_calls", List.of(Map.of(
+                    "id", "c1", "type", "function",
+                    "function", Map.of("name", "question", "arguments", argsJson))));
+            String json = Json.stringify(Map.of(
+                    "choices", List.of(Map.of("message", message)),
+                    "usage", Map.of("prompt_tokens", 1, "completion_tokens", 1, "total_tokens", 2)));
+            byte[] out = json.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, out.length);
+            try (OutputStream os = exchange.getResponseBody()) { os.write(out); }
+        });
+        server.start();
+        return server;
+    }
+
+    // ── a question suspension with no waitFor halts the run (status pending) ────────
+    @Test
+    void questionSuspensionNoWaitForHaltsPending() throws IOException {
+        HttpServer server = questionLLM();
+        String base = "http://127.0.0.1:" + server.getAddress().getPort();
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) { // builtins on → `question` exists
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl(base).style("openai").model("stub").apiKey("k")); // no waitFor
+            LlmClient.RunResult res = client.run("ask me", tk);
+
+            assertEquals("pending", res.status, "no waitFor ⇒ the run halts pending, does not loop forever");
+            assertNotNull(res.pending);
+            assertEquals("question", res.pending.kind());
+            assertEquals("Pick a color? (options: red, green)", res.pending.prompt(), "byte-exact rendered prompt");
+        } finally {
+            server.stop(0);
+        }
+    }
 }

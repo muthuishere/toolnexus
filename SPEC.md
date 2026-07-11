@@ -368,7 +368,7 @@ The ten tools (`skill` is its own source, §3, and is not part of this set):
 | `grep` | `pattern:string(regex)`, `path?:string(dir,default cwd)`, `include?:string(glob)`, `limit?:number` | Search file contents by regex under `path`, optionally filtered by `include` glob. Output = `file:line:text` matches, capped at `limit` (default 100). |
 | `glob` | `pattern:string`, `path?:string(dir,default cwd)`, `limit?:number` | List files matching the glob under `path`. Output = newline-joined relative paths, capped at `limit` (default 100). |
 | `webfetch` | `url:string`, `format?:"text"\|"markdown"\|"html"(default markdown)`, `timeout?:number(s,default 30)` | HTTP GET `url`; return body as text/markdown/html. Non-2xx ⇒ `isError:true` w/ `HTTP <status>`. |
-| `question` | `questions:array` (each `{ question:string, header?:string, options?:string[], multiple?:boolean }`) | Non-interactive in the headless loop: returns `ToolResult{isError:false, output:<JSON of questions>, metadata:{questions}}` for the host to answer. |
+| `question` | `questions:array` (each `{ question:string, header?:string, options?:string[], multiple?:boolean }`) | **Suspends** (§10) — asking the human is a `Request`, not a special case. First call returns `pending({ kind:"question", prompt:<rendered>, data:{questions} })`; the host's `waitFor` resolves it, the loop re-executes the tool with `ctx.answer`, and the tool returns `ok(<JSON of answer.data>)` (the resolution *is* the answer, as with `kind:"input"`). With no `waitFor`, the run halts durably (`RunResult.status:"pending"`). `<rendered>` = each question's text in order, `" (options: a, b, c)"` appended when it has non-empty `options`, joined by `"\n"` (no trailing newline; `header` is not rendered, it stays in `data.questions`) — **byte-identical across ports**. |
 | `apply_patch` | `patchText:string` | Apply one patch using opencode's grammar: `*** Begin Patch` / `*** Add File: p` / `*** Update File: p` / `*** Delete File: p` / `*** End Patch`, with `+`/`-`/context lines. Applies add/update/delete atomically; a hunk that doesn't match ⇒ `isError:true` and no partial write. |
 | `todowrite` | `todos:array` (each `{ id:string, text:string, completed:boolean }`) | Replace the session todo list with `todos`. Output = the rendered list. Stateless across processes in v1 (echoes back the list). |
 
@@ -849,6 +849,22 @@ host's `waitFor` performs the redirect → consent → callback (and any token e
 OIDC-agnostic** — no OIDC library, no token logic in core; OIDC lives entirely inside the host's
 `waitFor` at the edge. This is the canonical instance the mechanism exists for (login), but it is
 *just data* — the same `Pending`/`waitFor` serves `approval`, `input`, and any other `kind`.
+
+**The `question` kind = ask the human.** The built-in `question` tool (§4A) is the canonical
+`kind:"question"` producer: it suspends with `data.questions` (the structured questions) and a
+rendered `prompt`, and on resolution returns `answer.data` verbatim — the resolution *is* the
+answer, exactly as with `kind:"input"`. A host `waitFor` MAY populate `answer.data` however it
+likes; a **recommended, non-normative** shape is `{ answers: [ ... ] }` (one entry per question, in
+order), but the tool forwards whatever it receives without interpreting it. **Trust boundary
+(normative):** `kind:"question"` and `kind:"input"` MUST NOT be used to collect credentials —
+passwords, API keys, tokens, or payment secrets. Those go through `kind:"authorization"` with a
+`url`, so the secret is entered out-of-band and never transits the tool's `data`/`answer` channel
+or the model's context. (This mirrors MCP elicitation's form-vs-URL security split.)
+
+**When suspension crosses A2A (`serve()`, §7B).** A run that halts with `status:"pending"` and is
+being fulfilled as an inbound A2A task MUST surface the protocol's `input-required` state (carrying
+`pending.prompt` in the task's status message) — never a `completed` task. Reporting `completed`
+would pass the unanswered prompt off as the result and strand the suspension.
 
 ### `waitFor` — the one host slot
 

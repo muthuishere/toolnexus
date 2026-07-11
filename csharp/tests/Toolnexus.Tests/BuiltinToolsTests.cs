@@ -377,16 +377,37 @@ public class BuiltinMiscToolsTests
     }
 
     [Fact]
-    public async Task QuestionRoundTrip()
+    public async Task QuestionSuspendsAndResolvesToTheAnswer()
     {
         var questions = new List<object?>
         {
-            new Dictionary<string, object?> { ["question"] = "Proceed?" },
+            new Dictionary<string, object?>
+            {
+                ["question"] = "Pick a color?", ["header"] = "Choice",
+                ["options"] = new List<object?> { "red", "green" }, ["multiple"] = false,
+            },
+            new Dictionary<string, object?> { ["question"] = "Confirm?" },
         };
-        var r = await Tool("question").ExecuteAsync(Args(("questions", questions)));
-        Assert.False(r.IsError);
-        Assert.Contains("Proceed?", r.Output);
-        Assert.NotNull(r.Metadata!["questions"]);
+
+        // A — first call suspends (§10), it does NOT answer immediately.
+        var q = await Tool("question").ExecuteAsync(Args(("questions", questions)));
+        var req = ToolResult.PendingOf(q);
+        Assert.NotNull(req);                                   // returns a suspension carrying metadata.pending
+        Assert.True(q.IsError);                                // a suspension is not a usable answer
+        Assert.Equal("question", req!.Kind);
+        Assert.Equal("Pick a color? (options: red, green)\nConfirm?", req.Prompt); // byte-exact rendered prompt
+        Assert.Equal(questions, req.Data!["questions"]);       // structured questions ride in data.questions
+
+        // B — re-executed after WaitFor resolved: the answer is forwarded verbatim.
+        var answer = new Answer { Id = req.Id, Ok = true, Data = new Dictionary<string, object?> { ["answers"] = new[] { "red" } } };
+        var answered = await Tool("question").ExecuteAsync(Args(("questions", questions)), new ToolContext(answer: answer));
+        Assert.False(answered.IsError);
+        Assert.Equal("{\"answers\":[\"red\"]}", answered.Output);
+
+        // ok-but-empty resolution → "{}" (agnostic passthrough).
+        var empty = await Tool("question").ExecuteAsync(
+            Args(("questions", questions)), new ToolContext(answer: new Answer { Id = req.Id, Ok = true }));
+        Assert.Equal("{}", empty.Output);
     }
 
     [Fact]

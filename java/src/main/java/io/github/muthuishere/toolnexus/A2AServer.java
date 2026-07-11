@@ -412,14 +412,30 @@ public final class A2AServer {
             store.save(task(id, "working"));
             // Thread contextId so the client's ConversationStore remembers across tasks in the same context.
             result = runTask.run(text, contextId);
-            Map<String, Object> artifact = new LinkedHashMap<>();
-            artifact.put("artifactId", UUID.randomUUID().toString());
-            artifact.put("parts", List.of(textPart(result.text)));
-            task = new LinkedHashMap<>();
-            task.put("id", id);
-            task.put("status", statusState("completed"));
-            task.put("artifacts", List.of(artifact));
-            state = "completed";
+            if ("pending".equals(result.status) && result.pending != null) {
+                // §10 suspension over A2A (G1): the run halted waiting on out-of-band input.
+                // Surface the protocol's `input-required` state carrying the request prompt —
+                // never a false `completed`.
+                Map<String, Object> message = new LinkedHashMap<>();
+                message.put("role", "agent");
+                message.put("parts", List.of(textPart(result.pending.prompt())));
+                Map<String, Object> status = new LinkedHashMap<>();
+                status.put("state", "input-required");
+                status.put("message", message);
+                task = new LinkedHashMap<>();
+                task.put("id", id);
+                task.put("status", status);
+                state = "input-required";
+            } else {
+                Map<String, Object> artifact = new LinkedHashMap<>();
+                artifact.put("artifactId", UUID.randomUUID().toString());
+                artifact.put("parts", List.of(textPart(result.text)));
+                task = new LinkedHashMap<>();
+                task.put("id", id);
+                task.put("status", statusState("completed"));
+                task.put("artifacts", List.of(artifact));
+                state = "completed";
+            }
         } catch (Throwable e) {
             String detail = e.getMessage() == null ? String.valueOf(e) : e.getMessage();
             Map<String, Object> message = new LinkedHashMap<>();

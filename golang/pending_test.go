@@ -150,6 +150,60 @@ func TestPendingNoWaitForHalts(t *testing.T) {
 	}
 }
 
+// questionLLM stands in for an OpenAI endpoint that always calls the `question` builtin
+// with a fixed set of questions — used to drive the §10 suspension through the client loop.
+func questionLLM(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		args := `{"questions":[{"question":"Pick a color?","options":["red","green"]}]}`
+		message := map[string]any{
+			"role":    "assistant",
+			"content": nil,
+			"tool_calls": []any{map[string]any{
+				"id":       "c1",
+				"type":     "function",
+				"function": map[string]any{"name": "question", "arguments": args},
+			}},
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": message}},
+			"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+	}))
+}
+
+// TestQuestionNoWaitForHalts: the model calls the `question` builtin; with no WaitFor the loop
+// halts durably (§10) with Status:"pending" carrying the kind:"question" Request. Mirrors the
+// JS "a question suspension with no waitFor halts the run" test.
+func TestQuestionNoWaitForHalts(t *testing.T) {
+	srv := questionLLM(t)
+	defer srv.Close()
+
+	tk, err := CreateToolkit(context.Background(), Options{}) // builtins on → `question` exists
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tk.Close()
+
+	c := CreateClient(ClientOptions{BaseURL: srv.URL, Style: StyleOpenAI, Model: "stub", APIKey: "k"}) // no WaitFor
+	res, err := c.Run(context.Background(), "ask me", tk)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Status != "pending" {
+		t.Fatalf("status = %q, want pending (no WaitFor ⇒ the run halts, does not loop forever)", res.Status)
+	}
+	if res.Pending == nil {
+		t.Fatal("pending request is nil")
+	}
+	if res.Pending.Kind != "question" {
+		t.Fatalf("pending.kind = %q, want question", res.Pending.Kind)
+	}
+	if want := "Pick a color? (options: red, green)"; res.Pending.Prompt != want {
+		t.Fatalf("pending.prompt = %q, want %q", res.Pending.Prompt, want)
+	}
+}
+
 // TestPendingWireKeys pins the byte-identical JSON keys for Request/Answer across ports.
 func TestPendingWireKeys(t *testing.T) {
 	reqJSON, _ := json.Marshal(Request{ID: "r1", Kind: "input", Prompt: "p", URL: "u", Data: map[string]any{"k": "v"}, ExpiresAt: "2026-01-01T00:00:00Z"})

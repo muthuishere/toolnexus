@@ -397,9 +397,21 @@ async def _fulfil(
         # contextId groups a peer's turns into one conversation — thread it so the
         # client's ConversationStore remembers across tasks in the same context.
         result = await run_task(text, context_id)
-        artifact = {"artifactId": str(uuid.uuid4()), "parts": [{"kind": "text", "text": result.text}]}
-        task: A2ATask = {"id": id, "status": {"state": "completed"}, "artifacts": [artifact]}
-        state = "completed"
+        if result.status == "pending" and result.pending is not None:
+            # §10 suspension over A2A: the run halted waiting on out-of-band input. Surface the
+            # protocol's `input-required` state carrying the request prompt — never a false `completed`.
+            task: A2ATask = {
+                "id": id,
+                "status": {
+                    "state": "input-required",
+                    "message": {"role": "agent", "parts": [{"kind": "text", "text": result.pending.prompt}]},
+                },
+            }
+            state = "input-required"
+        else:
+            artifact = {"artifactId": str(uuid.uuid4()), "parts": [{"kind": "text", "text": result.text}]}
+            task = {"id": id, "status": {"state": "completed"}, "artifacts": [artifact]}
+            state = "completed"
     except Exception as e:  # noqa: BLE001 — a fulfilment error becomes a failed Task
         detail = str(e)
         task = {

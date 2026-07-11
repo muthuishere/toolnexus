@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -412,22 +413,47 @@ func TestBuiltinApplyPatch(t *testing.T) {
 }
 
 func TestBuiltinQuestionAndTodowrite(t *testing.T) {
+	// A — first call suspends (§10), it does NOT answer immediately.
 	questions := []any{
-		map[string]any{"question": "Pick one?", "header": "Choice", "options": []any{"a", "b"}, "multiple": false},
+		map[string]any{"question": "Pick a color?", "header": "Choice", "options": []any{"red", "green"}, "multiple": false},
+		map[string]any{"question": "Confirm?"},
 	}
 	q, _ := builtinTool(t, "question").Execute(map[string]any{"questions": questions}, nil)
-	if q.IsError {
-		t.Fatalf("question error: %s", q.Output)
+	req := PendingOf(q)
+	if req == nil {
+		t.Fatalf("question: expected a suspension carrying metadata.pending, got %+v", q)
 	}
-	var parsed []any
-	if err := json.Unmarshal([]byte(q.Output), &parsed); err != nil {
-		t.Fatalf("question output not JSON: %v", err)
+	if !q.IsError {
+		t.Fatalf("question: a suspension is not a usable answer (IsError should be true)")
 	}
-	if len(parsed) != 1 {
-		t.Fatalf("question parsed len = %d, want 1", len(parsed))
+	if req.Kind != "question" {
+		t.Fatalf("question: pending.Kind = %q, want %q", req.Kind, "question")
 	}
-	if q.Metadata["questions"] == nil {
-		t.Fatalf("question metadata.questions missing")
+	if want := "Pick a color? (options: red, green)\nConfirm?"; req.Prompt != want {
+		t.Fatalf("question: pending.Prompt = %q, want %q", req.Prompt, want)
+	}
+	if !reflect.DeepEqual(req.Data["questions"], any(questions)) {
+		t.Fatalf("question: pending.Data[questions] = %#v, want %#v", req.Data["questions"], questions)
+	}
+
+	// B — re-executed after waitFor resolved: the answer is forwarded verbatim.
+	answered, _ := builtinTool(t, "question").Execute(
+		map[string]any{"questions": questions},
+		&ToolContext{Answer: &Answer{ID: req.ID, Ok: true, Data: map[string]any{"answers": []any{"red"}}}},
+	)
+	if answered.IsError {
+		t.Fatalf("question answered: unexpected error: %s", answered.Output)
+	}
+	if answered.Output != `{"answers":["red"]}` {
+		t.Fatalf("question answered output = %q, want %q", answered.Output, `{"answers":["red"]}`)
+	}
+	// ok-but-empty resolution (Data nil) → "{}" (agnostic passthrough).
+	empty, _ := builtinTool(t, "question").Execute(
+		map[string]any{"questions": questions},
+		&ToolContext{Answer: &Answer{ID: req.ID, Ok: true}},
+	)
+	if empty.Output != "{}" {
+		t.Fatalf("question empty answer output = %q, want %q", empty.Output, "{}")
 	}
 
 	todos := []any{

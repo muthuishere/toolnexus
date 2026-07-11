@@ -236,6 +236,80 @@ class A2AServerTest {
     }
 
     // ---------------------------------------------------------------------
+    // G1: a suspended run surfaces input-required, not a false completed.
+    // ---------------------------------------------------------------------
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void suspendedRunSurfacesInputRequiredNotCompleted() throws Exception {
+        // A mock LLM that calls the `question` builtin; with no waitFor the run halts pending —
+        // serve must NOT report completed.
+        HttpServer qllm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        qllm.createContext("/", exchange -> {
+            try {
+                exchange.getRequestBody().readAllBytes();
+                Map<String, Object> message = new LinkedHashMap<>();
+                message.put("role", "assistant");
+                message.put("content", null);
+                String argsJson = Json.stringify(Map.of("questions",
+                        List.of(Map.of("question", "Pick a color?", "options", List.of("red", "green")))));
+                message.put("tool_calls", List.of(Map.of(
+                        "id", "c1", "type", "function",
+                        "function", Map.of("name", "question", "arguments", argsJson))));
+                Map<String, Object> data = new LinkedHashMap<>();
+                data.put("choices", List.of(Map.of("message", message)));
+                data.put("usage", Map.of("prompt_tokens", 1, "completion_tokens", 1, "total_tokens", 2));
+                respond(exchange, 200, Json.stringify(data));
+            } catch (Exception e) {
+                try { respond(exchange, 500, "err"); } catch (Exception ignored) { }
+            }
+        });
+        qllm.start();
+        String qbase = "http://127.0.0.1:" + qllm.getAddress().getPort();
+        LlmClient qclient = LlmClient.create(new LlmClient.Options()
+                .baseUrl(qbase).style("openai").model("test-model").apiKey("test-key")); // no waitFor
+        List<A2AServer.OnTaskEvent> events = new ArrayList<>();
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) { // builtins on → `question` exists
+            A2AServer.A2AConfig a2a = new A2AServer.A2AConfig().name("ask-desk");
+            A2AServer.ServeHandle handle = tk.serve("127.0.0.1:0",
+                    new Toolkit.ServeOptions().client(qclient).a2a(a2a)
+                            .onTask(ev -> { synchronized (events) { events.add(ev); } }));
+            try {
+                Map<String, Object> submitted = rpc(handle.url() + "/", "SendMessage", sendParams("go"));
+                String id = String.valueOf(submitted.get("id"));
+
+                // Poll until a terminal-or-input-required state.
+                Map<String, Object> task = null;
+                long deadline = System.currentTimeMillis() + 5_000;
+                while (System.currentTimeMillis() < deadline) {
+                    task = rpc(handle.url() + "/", "GetTask", Map.of("id", id));
+                    String st = state(task);
+                    if (st != null && !"submitted".equals(st) && !"working".equals(st)) break;
+                    Thread.sleep(25);
+                }
+
+                assertEquals("input-required", state(task), "suspended run → input-required, never completed");
+                Map<String, Object> status = (Map<String, Object>) task.get("status");
+                Map<String, Object> msg = (Map<String, Object>) status.get("message");
+                assertEquals("agent", msg.get("role"));
+                List<Object> parts = (List<Object>) msg.get("parts");
+                String text = String.valueOf(((Map<String, Object>) parts.get(0)).get("text"));
+                assertTrue(text.contains("Pick a color? (options: red, green)"), "prompt carried in the status message: " + text);
+                assertTrue(task.get("artifacts") == null || ((List<Object>) task.get("artifacts")).isEmpty(),
+                        "no artifact passing the prompt off as a real answer");
+                synchronized (events) {
+                    assertFalse(events.isEmpty(), "onTask fired");
+                    assertEquals("input-required", events.get(events.size() - 1).state());
+                }
+            } finally {
+                handle.close();
+            }
+        } finally {
+            qllm.stop(0);
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // Custom TaskStore is used as-is.
     // ---------------------------------------------------------------------
 

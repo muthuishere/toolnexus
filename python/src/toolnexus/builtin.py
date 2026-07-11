@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Awaitable, Callable, Optional, Union
 
-from .types import JSONSchema, Tool, ToolContext, ToolResult
+from .types import JSONSchema, Tool, ToolContext, ToolResult, pending
 
 # A single global builtin toggle (mirrors MCP is_enabled precedence). The dict
 # form also allows a ``tools`` name→bool map for per-tool enable/disable.
@@ -472,15 +472,43 @@ def _webfetch_tool() -> Tool:
     )
 
 
+def _render_question_prompt(questions: list[Any]) -> str:
+    """Render the questions into a human-readable ``Request.prompt`` (§10). Byte-identical
+    across ports: each question's text in order, ``" (options: a, b, c)"`` appended when it
+    has non-empty options, joined by "\n" (no trailing newline). ``header`` is not rendered —
+    it survives in ``data.questions``. Mirrors the JS ``renderQuestionPrompt``."""
+    lines: list[str] = []
+    for q in questions:
+        item = q if isinstance(q, dict) else {}
+        text = item.get("question")
+        line = text if isinstance(text, str) else ""
+        opts = item.get("options")
+        opts = opts if isinstance(opts, list) else []
+        if opts:
+            line += f" (options: {', '.join(opts)})"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _question_tool() -> Tool:
     async def run(args: dict[str, Any], ctx: Optional[ToolContext]) -> ToolResult:
         questions = args.get("questions")
         questions = questions if isinstance(questions, list) else []
-        return _ok(json.dumps(questions), {"questions": questions})
+        # Re-executed after the host's waitFor resolved (§10 loop rule): the resolution IS the
+        # answer, as with kind="input" — forward it verbatim to the model.
+        if ctx is not None and ctx.answer is not None:
+            return _ok(json.dumps(ctx.answer.data if ctx.answer.data is not None else {}))
+        # First call: suspend. A question is just a §10 Request with kind="question".
+        return pending(
+            kind="question",
+            prompt=_render_question_prompt(questions),
+            data={"questions": questions},
+        )
 
     return _builtin(
         "question",
-        "Ask the host one or more questions. Returns the questions as structured output for the host to answer.",
+        'Ask the host one or more questions. Suspends via a kind:"question" Request (§10); '
+        "the host's waitFor resolves it and the answer is returned to the model.",
         {
             "type": "object",
             "properties": {

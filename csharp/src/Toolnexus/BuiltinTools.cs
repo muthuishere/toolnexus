@@ -544,9 +544,25 @@ public static partial class BuiltinTools
             }
         });
 
+    /// <summary>
+    /// Render the questions into a human-readable <c>Request.Prompt</c> (§10). Byte-identical across
+    /// ports: each question's text in order, <c>" (options: a, b, c)"</c> appended when it has non-empty
+    /// options, joined by "\n" (no trailing newline). <c>header</c> is not rendered — it survives in
+    /// <c>data.questions</c>.
+    /// </summary>
+    private static string RenderQuestionPrompt(IEnumerable<object?> questions)
+        => string.Join("\n", questions.Select(q =>
+        {
+            var item = q as IDictionary<string, object?>;
+            var line = item?.Get("question") is string s ? s : "";
+            var opts = (item?.Get("options") as IEnumerable<object?>)?.ToList() ?? new List<object?>();
+            if (opts.Count > 0) line += $" (options: {string.Join(", ", opts)})";
+            return line;
+        }));
+
     private static ITool QuestionTool() => Builtin(
         "question",
-        "Ask the host one or more questions. Returns the questions as structured output for the host to answer.",
+        "Ask the host one or more questions. Suspends via a kind:\"question\" Request (§10); the host's WaitFor resolves it and the answer is returned to the model.",
         Schema(new()
         {
             ["questions"] = new Dictionary<string, object?>
@@ -571,12 +587,21 @@ public static partial class BuiltinTools
                 },
             },
         }, "questions"),
-        (args, _) =>
+        (args, ctx) =>
         {
             var questions = args.Get("questions") as IEnumerable<object?> ?? new List<object?>();
             var list = questions.ToList();
-            var meta = new Dictionary<string, object?> { ["questions"] = list };
-            return Task.FromResult(ToolResult.Ok(Json.Stringify(list), meta));
+            // Re-executed after the host's WaitFor resolved (§10 loop rule): the resolution IS the
+            // answer, as with kind:"input" — forward it verbatim to the model.
+            if (ctx?.Answer is not null)
+                return Task.FromResult(ToolResult.Ok(Json.Stringify(ctx.Answer.Data ?? new Dictionary<string, object?>())));
+            // First call: suspend. A question is just a §10 Request with kind:"question".
+            return Task.FromResult(ToolResult.Pending(new Request
+            {
+                Kind = "question",
+                Prompt = RenderQuestionPrompt(list),
+                Data = new Dictionary<string, object?> { ["questions"] = list },
+            }));
         });
 
     private static ITool TodowriteTool() => Builtin(
