@@ -581,21 +581,30 @@ export class Client {
           return this.endRun(runStart, text, messages, toolCalls, turns, usage)
         }
         // execute all tool_use blocks in this turn concurrently (true parallel tool calling)
-        let halted: Request | undefined
-        const results = await Promise.all(
+        const settled = await Promise.all(
           uses.map(async (use: any) => {
             let { args, result } = await this.runTool(toolkit, use.name, use.input ?? {}, use.id, turn)
+            let halted: Request | undefined
             const req = pendingOf(result)
             if (req) {
               const r = await this.resolvePending(toolkit, use.name, args, req, use.id, turn)
               result = r.result
-              if (r.halted) halted = r.halted
+              halted = r.halted
             }
-            toolCalls.push({ name: use.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
-            return { type: "tool_result", tool_use_id: use.id, content: result.output, is_error: result.isError }
+            return { use, args, result, halted }
           }),
         )
-        messages.push({ role: "user", content: results })
+        // Record in tool-call order; on the FIRST durable halt, include that tool_result block, stop
+        // building the content, and surface it — deterministic (G3), later suspensions re-suspend on
+        // resume. Mirrors the OpenAI path and the streaming loops.
+        const content: any[] = []
+        let halted: Request | undefined
+        for (const s of settled) {
+          toolCalls.push({ name: s.use.name, args: s.args, output: s.result.output, isError: s.result.isError, metadata: s.result.metadata })
+          content.push({ type: "tool_result", tool_use_id: s.use.id, content: s.result.output, is_error: s.result.isError })
+          if (s.halted) { halted = s.halted; break }
+        }
+        messages.push({ role: "user", content })
         if (halted) return this.pendingRun(runStart, halted, messages, toolCalls, turns, usage)
       }
       return this.endRun(runStart, "", messages, toolCalls, turns, usage)

@@ -897,6 +897,31 @@ test("client: two concurrent suspensions with no waitFor surface the first, not 
   }
 })
 
+test("client: G3 also holds on the anthropic non-streaming path (first suspension, no leak)", async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" })
+    res.end(JSON.stringify({ content: [
+      { type: "tool_use", id: "t1", name: "question", input: { questions: [{ question: "First?" }] } },
+      { type: "tool_use", id: "t2", name: "question", input: { questions: [{ question: "Second?" }] } },
+    ], stop_reason: "tool_use", usage: { input_tokens: 10, output_tokens: 5 } }))
+  })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({}) // no waitFor
+  const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "anthropic", model: "claude-x", apiKey: "k" })
+  try {
+    const res = await client.run("ask two", { toolkit: tk })
+    assert.equal(res.status, "pending")
+    assert.equal(res.pending?.prompt, "First?", "first tool_use in order is surfaced")
+    const userMsg = res.messages.filter((m: any) => m.role === "user" && Array.isArray(m.content)).at(-1)
+    const ids = (userMsg?.content ?? []).map((b: any) => b.tool_use_id)
+    assert.ok(ids.includes("t1") && !ids.includes("t2"), "only the first tool_result is recorded, no second-suspension leak")
+  } finally {
+    await tk.close()
+    server.close()
+  }
+})
+
 test("skillsPrompt preamble present with skills, absent without", async () => {
   const withSkills = loadSkills(SKILLS_DIR)
   const p = withSkills.prompt()
