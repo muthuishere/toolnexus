@@ -739,13 +739,30 @@ test("builtin apply_patch: add + update + delete round-trip; non-match aborts at
   }
 })
 
-test("builtin question + todowrite: structured round-trip", async () => {
-  const questions = [{ question: "Pick one?", header: "Choice", options: ["a", "b"], multiple: false }]
+test("builtin question: suspends via a kind:\"question\" Request, resolves to the answer", async () => {
+  const questions = [
+    { question: "Pick a color?", header: "Choice", options: ["red", "green"], multiple: false },
+    { question: "Confirm?" },
+  ]
+  // A — first call suspends (§10), it does NOT answer immediately.
   const q = await tool("question").execute({ questions })
-  assert.equal(q.isError, false)
-  assert.deepEqual(JSON.parse(q.output), questions)
-  assert.deepEqual((q.metadata as any).questions, questions)
+  const req = (q.metadata as any)?.pending
+  assert.ok(req, "returns a suspension carrying metadata.pending")
+  assert.equal(q.isError, true, "a suspension is not a usable answer")
+  assert.equal(req.kind, "question")
+  assert.equal(req.prompt, "Pick a color? (options: red, green)\nConfirm?", "byte-exact rendered prompt")
+  assert.deepEqual(req.data.questions, questions, "structured questions ride in data.questions")
 
+  // B — re-executed after waitFor resolved: the answer is forwarded verbatim.
+  const answered = await tool("question").execute({ questions }, { answer: { id: req.id, ok: true, data: { answers: ["red"] } } })
+  assert.equal(answered.isError, false)
+  assert.deepEqual(JSON.parse(answered.output), { answers: ["red"] })
+  // ok-but-empty resolution → "{}" (agnostic passthrough).
+  const empty = await tool("question").execute({ questions }, { answer: { id: req.id, ok: true } })
+  assert.equal(JSON.parse(empty.output) && Object.keys(JSON.parse(empty.output)).length, 0)
+})
+
+test("builtin todowrite: structured round-trip", async () => {
   const todos = [
     { id: "1", text: "write code", completed: true },
     { id: "2", text: "ship it", completed: false },
@@ -755,6 +772,27 @@ test("builtin question + todowrite: structured round-trip", async () => {
   assert.deepEqual((t.metadata as any).todos, todos)
   assert.match(t.output, /\[x\] write code/)
   assert.match(t.output, /\[ \] ship it/)
+})
+
+test("client: a question suspension with no waitFor halts the run (status pending)", async () => {
+  // Model calls the `question` builtin; with no waitFor configured the loop halts durably (§10).
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" })
+    res.end(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "question", arguments: JSON.stringify({ questions: [{ question: "Pick a color?", options: ["red", "green"] }] }) } }] } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+  })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({}) // builtins on → `question` exists
+  const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "x", apiKey: "k" }) // no waitFor
+  try {
+    const res = await client.run("ask me", { toolkit: tk })
+    assert.equal(res.status, "pending", "no waitFor ⇒ the run halts pending, does not loop forever")
+    assert.equal(res.pending?.kind, "question")
+    assert.equal(res.pending?.prompt, "Pick a color? (options: red, green)")
+  } finally {
+    await tk.close()
+    server.close()
+  }
 })
 
 test("skillsPrompt preamble present with skills, absent without", async () => {
@@ -1163,6 +1201,38 @@ test("a2a inbound: fulfilment error ⇒ failed task; server keeps serving", asyn
     assert.equal(card.status, 200)
 
     assert.equal(events.at(-1).state, "failed", "onTask surfaced the failed outcome")
+  } finally {
+    await srv.stop()
+    await tk.close()
+    llm.close()
+  }
+})
+
+test("a2a inbound: a suspended run surfaces input-required, not a false completed (G1)", async () => {
+  // Model calls `question`; with no waitFor the run halts pending — serve must NOT report completed.
+  const { server: llm, baseUrl } = await startMockLLM((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" })
+    res.end(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "question", arguments: JSON.stringify({ questions: [{ question: "Pick a color?", options: ["red", "green"] }] }) } }] } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+  })
+  const client = createClient({ baseUrl, style: "openai", model: "x", apiKey: "k" }) // no waitFor
+  const tk = await createToolkit({}) // builtins on → `question` exists
+  const events: any[] = []
+  const srv = await tk.serve("127.0.0.1:0", { client, a2a: { name: "ask-desk" }, onTask: (ev) => events.push(ev) })
+  const endpoint = srv.url + "/"
+  try {
+    const sent = await rpc(endpoint, "SendMessage", textMessage("go"))
+    const id = sent.result.id
+    let task: any
+    for (let i = 0; i < 100; i++) {
+      const env = await rpc(endpoint, "GetTask", { id })
+      const state = env.result?.status?.state
+      if (state && state !== "submitted" && state !== "working") { task = env.result; break }
+      await new Promise((r) => setTimeout(r, 10))
+    }
+    assert.equal(task.status.state, "input-required", "suspended run → input-required, never completed")
+    assert.match(task.status.message.parts[0].text, /Pick a color\? \(options: red, green\)/, "prompt carried in the status message")
+    assert.ok(!task.artifacts || task.artifacts.length === 0, "no artifact passing the prompt off as a real answer")
+    assert.equal(events.at(-1)?.state, "input-required", "onTask surfaced input-required")
   } finally {
     await srv.stop()
     await tk.close()

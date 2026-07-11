@@ -331,12 +331,22 @@ async function fulfil(
     // contextId groups a peer's turns into one conversation — thread it so the
     // client's ConversationStore remembers across tasks in the same context.
     result = await runTask(text, contextId)
-    const artifact: A2AArtifact = {
-      artifactId: randomUUID(),
-      parts: [{ kind: "text", text: result.text }],
+    if (result.status === "pending" && result.pending) {
+      // §10 suspension over A2A: the run halted waiting on out-of-band input. Surface the
+      // protocol's `input-required` state carrying the request prompt — never a false `completed`.
+      task = {
+        id,
+        status: { state: "input-required", message: { role: "agent", parts: [{ kind: "text", text: result.pending.prompt }] } },
+      }
+      state = "input-required"
+    } else {
+      const artifact: A2AArtifact = {
+        artifactId: randomUUID(),
+        parts: [{ kind: "text", text: result.text }],
+      }
+      task = { id, status: { state: "completed" }, artifacts: [artifact] }
+      state = "completed"
     }
-    task = { id, status: { state: "completed" }, artifacts: [artifact] }
-    state = "completed"
   } catch (e) {
     const detail = e instanceof Error ? e.message : String(e)
     task = { id, status: { state: "failed", message: { role: "agent", parts: [{ kind: "text", text: detail }] } } }

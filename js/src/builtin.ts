@@ -12,6 +12,7 @@ import fs from "node:fs/promises"
 import { existsSync, readdirSync } from "node:fs"
 import path from "node:path"
 import type { JSONSchema, Tool, ToolContext, ToolResult } from "./types.js"
+import { pending } from "./types.js"
 
 /** Config for the single global builtin toggle (mirrors MCP isEnabled precedence). */
 export type BuiltinsConfig =
@@ -412,10 +413,27 @@ function webfetchTool(): Tool {
   )
 }
 
+/**
+ * Render the questions into a human-readable `Request.prompt` (§10). Byte-identical across ports:
+ * each question's text in order, `" (options: a, b, c)"` appended when it has non-empty options,
+ * joined by "\n" (no trailing newline). `header` is not rendered — it survives in `data.questions`.
+ */
+function renderQuestionPrompt(questions: unknown[]): string {
+  return questions
+    .map((q) => {
+      const item = q as { question?: unknown; options?: unknown }
+      let line = typeof item?.question === "string" ? item.question : ""
+      const opts = Array.isArray(item?.options) ? item.options : []
+      if (opts.length > 0) line += ` (options: ${opts.join(", ")})`
+      return line
+    })
+    .join("\n")
+}
+
 function questionTool(): Tool {
   return builtin(
     "question",
-    "Ask the host one or more questions. Returns the questions as structured output for the host to answer.",
+    "Ask the host one or more questions. Suspends via a kind:\"question\" Request (§10); the host's waitFor resolves it and the answer is returned to the model.",
     {
       type: "object",
       properties: {
@@ -437,9 +455,13 @@ function questionTool(): Tool {
       required: ["questions"],
       additionalProperties: false,
     },
-    async (args) => {
+    async (args, ctx) => {
       const questions = Array.isArray(args.questions) ? args.questions : []
-      return ok(JSON.stringify(questions), { questions })
+      // Re-executed after the host's waitFor resolved (§10 loop rule): the resolution IS the
+      // answer, as with kind:"input" — forward it verbatim to the model.
+      if (ctx?.answer) return ok(JSON.stringify(ctx.answer.data ?? {}))
+      // First call: suspend. A question is just a §10 Request with kind:"question".
+      return pending({ kind: "question", prompt: renderQuestionPrompt(questions), data: { questions } })
     },
   )
 }
