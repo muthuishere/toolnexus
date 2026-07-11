@@ -8,8 +8,36 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js"
-import type { Tool as McpToolDef } from "@modelcontextprotocol/sdk/types.js"
-import { type JSONSchema, type Tool, type ToolContext, type ToolResult, type McpStatus, sanitize } from "./types.js"
+import type { Tool as McpToolDef, ElicitRequest, ElicitResult } from "@modelcontextprotocol/sdk/types.js"
+import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js"
+import { type JSONSchema, type Tool, type ToolContext, type ToolResult, type McpStatus, type Request, type Answer, sanitize } from "./types.js"
+
+// ---------------------------------------------------------------------------
+// MCP elicitation bridge (§10). A server can ask US for input mid-`tools/call`
+// (a reverse-request). We map it onto the one `waitFor`: form mode → kind:"input",
+// URL mode → kind:"authorization". The two mappings are pure + byte-parity-tested.
+// ---------------------------------------------------------------------------
+
+let _elcSeq = 0
+/** Map an MCP `elicitation/create` request onto a §10 `Request`. */
+export function elicitationToRequest(params: ElicitRequest["params"]): Request {
+  const p = params as { message?: string; requestedSchema?: unknown; mode?: string; url?: string }
+  const isUrl = p.mode === "url"
+  const req: Request = {
+    id: `elc-${Date.now().toString(36)}-${++_elcSeq}`,
+    kind: isUrl ? "authorization" : "input",
+    prompt: String(p.message ?? ""),
+  }
+  if (isUrl && p.url) req.url = p.url
+  if (!isUrl && p.requestedSchema) req.data = { schema: p.requestedSchema }
+  return req
+}
+
+/** Map a resolved §10 `Answer` back onto an MCP `ElicitResult`. ok→accept; declined→decline; else→cancel. */
+export function answerToElicitResult(answer: Answer): ElicitResult {
+  if (answer.ok) return { action: "accept", content: (answer.data ?? {}) as ElicitResult["content"] }
+  return { action: answer.reason === "declined" ? "decline" : "cancel" }
+}
 
 const DEFAULT_TIMEOUT = 30_000
 const MAX_LIST_PAGES = 1_000
@@ -155,11 +183,12 @@ export interface McpSource {
 }
 
 /** Connect to every enabled server, list + convert tools. Failures are isolated. */
-export async function loadMcp(input: string | object): Promise<McpSource> {
+export async function loadMcp(input: string | object, opts?: { waitFor?: (request: Request) => Promise<Answer> }): Promise<McpSource> {
   const config = parseMcpConfig(input)
   const tools: Tool[] = []
   const status: Record<string, McpStatus> = {}
   const clients: Client[] = []
+  const waitFor = opts?.waitFor
 
   await Promise.all(
     Object.entries(config).map(async ([name, cfg]) => {
@@ -168,7 +197,14 @@ export async function loadMcp(input: string | object): Promise<McpSource> {
         return
       }
       const timeout = cfg.timeout ?? DEFAULT_TIMEOUT
-      const client = new Client({ name: "toolnexus", version: "0.1.0" }, { capabilities: {} })
+      // Advertise elicitation + register the bridge ONLY when a waitFor exists to satisfy it —
+      // a waitFor-less host degrades cleanly (the server won't elicit). (§10 elicitation bridge)
+      const client = new Client({ name: "toolnexus", version: "0.1.0" }, { capabilities: waitFor ? { elicitation: {} } : {} })
+      if (waitFor) {
+        client.setRequestHandler(ElicitRequestSchema, async (request) =>
+          answerToElicitResult(await waitFor(elicitationToRequest(request.params))),
+        )
+      }
       try {
         if (isRemote(cfg)) {
           const url = new URL(cfg.url)

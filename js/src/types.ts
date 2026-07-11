@@ -43,6 +43,12 @@ export interface Answer {
   id: string
   ok: boolean
   data?: Record<string, unknown>
+  /**
+   * When `ok` is false, why (advisory — the loop rule branches only on `ok`). Distinguishes an
+   * explicit refusal from a dismissal/timeout; the MCP elicitation bridge maps `declined`→`decline`
+   * and everything else→`cancel`. (R1)
+   */
+  reason?: "declined" | "cancelled" | "expired"
 }
 
 let _pendingSeq = 0

@@ -20,6 +20,13 @@ export interface ToolkitOptions {
   builtins?: BuiltinsConfig
   /** Remote A2A agents — each advertised skill becomes a tool (source:"a2a"). */
   agents?: Agent[]
+  /**
+   * Host resolver for out-of-band input (§10). When set, connected MCP servers may elicit input
+   * from the human mid-`tools/call` and it is bridged onto this `waitFor` (form→kind:"input",
+   * URL→kind:"authorization"). Typically the same function passed to the client. Omit ⇒ MCP
+   * elicitation is not advertised.
+   */
+  waitFor?: (request: import("./types.js").Request) => Promise<import("./types.js").Answer>
 }
 
 export class Toolkit {
@@ -51,7 +58,7 @@ export class Toolkit {
   }
 
   static async create(opts: ToolkitOptions): Promise<Toolkit> {
-    const mcp = opts.mcpConfig !== undefined ? await loadMcp(opts.mcpConfig) : undefined
+    const mcp = opts.mcpConfig !== undefined ? await loadMcp(opts.mcpConfig, { waitFor: opts.waitFor }) : undefined
     const skill = opts.skillsDir !== undefined ? loadSkills(opts.skillsDir) : undefined
     // The toggle comes from the `builtins` option, or a top-level `builtins`
     // key on a parsed config object — same precedence as MCP's isEnabled.

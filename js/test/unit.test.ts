@@ -22,6 +22,8 @@ import {
   createToolkit,
   createClient,
   pending,
+  elicitationToRequest,
+  answerToElicitResult,
   type ConversationStore,
   createBuiltinTools,
   builtinsEnabled,
@@ -920,6 +922,27 @@ test("client: G3 also holds on the anthropic non-streaming path (first suspensio
     await tk.close()
     server.close()
   }
+})
+
+test("mcp elicitation ⇄ §10 mapping (form→input, url→authorization, accept/decline/cancel)", () => {
+  const schema = { type: "object", properties: { name: { type: "string" } }, required: ["name"] }
+  // form mode → kind:"input" carrying the schema in data.schema
+  const req = elicitationToRequest({ message: "Your name?", requestedSchema: schema } as any)
+  assert.equal(req.kind, "input")
+  assert.equal(req.prompt, "Your name?")
+  assert.deepEqual(req.data?.schema, schema)
+  assert.equal(req.url, undefined)
+  // URL mode → kind:"authorization" carrying the url, no schema
+  const ureq = elicitationToRequest({ mode: "url", message: "Log in", url: "https://x/auth" } as any)
+  assert.equal(ureq.kind, "authorization")
+  assert.equal(ureq.url, "https://x/auth")
+  assert.equal(ureq.data, undefined)
+  // Answer → ElicitResult
+  assert.deepEqual(answerToElicitResult({ id: "1", ok: true, data: { name: "Ada" } }), { action: "accept", content: { name: "Ada" } })
+  assert.deepEqual(answerToElicitResult({ id: "1", ok: true }), { action: "accept", content: {} })
+  assert.deepEqual(answerToElicitResult({ id: "1", ok: false, reason: "declined" }), { action: "decline" })
+  assert.deepEqual(answerToElicitResult({ id: "1", ok: false }), { action: "cancel" })
+  assert.deepEqual(answerToElicitResult({ id: "1", ok: false, reason: "expired" }), { action: "cancel" })
 })
 
 test("skillsPrompt preamble present with skills, absent without", async () => {
