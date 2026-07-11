@@ -456,6 +456,13 @@ public static class A2A
                     $"A2A task {taskId} {state}" + (detail.Length > 0 ? $": {detail}" : ""),
                     true, Meta());
             }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                // Cancellation raced an in-flight SendMessage/GetTask call — the request's
+                // own linked CancellationTokenSource threw before our explicit checks ran.
+                state = "canceled";
+                return new ToolResult($"A2A task {taskId} canceled", true, Meta());
+            }
             catch (Exception e)
             {
                 return new ToolResult(e.Message ?? e.ToString(), true, Meta());
