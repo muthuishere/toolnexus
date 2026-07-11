@@ -1394,10 +1394,10 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, h
 		results := make([]any, len(calls))
 		records := make([]ToolCall, len(calls))
 		events := make([]StreamEvent, len(calls))
+		haltedAt := make([]*Request, len(calls))
 		var wg sync.WaitGroup
 		var hookErr error
 		var mu sync.Mutex
-		var halted *Request
 		for i, cc := range calls {
 			wg.Add(1)
 			go func(i int, cc *streamCall) {
@@ -1408,11 +1408,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, h
 						ch <- StreamEvent{Type: "pending", Request: req} // surface BEFORE WaitFor so a channel can push the link
 						r, h, rerr := c.resolvePending(ctx, tk, cc.name, args, *req, cc.id, turn)
 						err, result = rerr, r
-						if h != nil {
-							mu.Lock()
-							halted = h
-							mu.Unlock()
-						}
+						haltedAt[i] = h
 					}
 				}
 				if err != nil {
@@ -1432,16 +1428,19 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, h
 		if hookErr != nil {
 			return hookErr
 		}
+		// Record in tool-call order; on the FIRST durable halt, append that one tool
+		// result, surface it and stop — later suspensions' placeholder results never
+		// enter the transcript (they re-suspend on resume). Mirrors js streamOpenAI (G3).
 		for i := range calls {
 			toolCalls = append(toolCalls, records[i])
 			messages = append(messages, results[i])
+			if haltedAt[i] != nil {
+				res := c.pendingRun(runStart, *haltedAt[i], messages, toolCalls, turns, usage)
+				u := usage
+				ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
+				return nil
+			}
 			ch <- events[i]
-		}
-		if halted != nil {
-			res := c.pendingRun(runStart, *halted, messages, toolCalls, turns, usage)
-			u := usage
-			ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
-			return nil
 		}
 	}
 	res := c.endRun(runStart, lastText(messages), messages, toolCalls, turns, usage)
@@ -1631,10 +1630,10 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 		results := make([]any, len(uses))
 		records := make([]ToolCall, len(uses))
 		events := make([]StreamEvent, len(uses))
+		haltedAt := make([]*Request, len(uses))
 		var wg sync.WaitGroup
 		var hookErr error
 		var mu sync.Mutex
-		var halted *Request
 		for i, u := range uses {
 			wg.Add(1)
 			go func(i int, u useBlock) {
@@ -1649,11 +1648,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 						ch <- StreamEvent{Type: "pending", Request: req} // surface BEFORE WaitFor so a channel can push the link
 						r, h, rerr := c.resolvePending(ctx, tk, u.name, args, *req, u.id, turn)
 						err, result = rerr, r
-						if h != nil {
-							mu.Lock()
-							halted = h
-							mu.Unlock()
-						}
+						haltedAt[i] = h
 					}
 				}
 				if err != nil {
@@ -1673,17 +1668,24 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 		if hookErr != nil {
 			return hookErr
 		}
+		// Assemble tool_result blocks in call order; on the FIRST durable halt, include
+		// up to and including that block, push the user message, surface it and stop —
+		// later suspensions' placeholder results never enter the transcript (they
+		// re-suspend on resume). Mirrors js streamAnthropic (G3).
+		resultBlocks := make([]any, 0, len(uses))
 		for i := range uses {
 			toolCalls = append(toolCalls, records[i])
+			resultBlocks = append(resultBlocks, results[i])
+			if haltedAt[i] != nil {
+				messages = append(messages, map[string]any{"role": "user", "content": resultBlocks})
+				res := c.pendingRun(runStart, *haltedAt[i], messages, toolCalls, turns, usage)
+				u := usage
+				ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
+				return nil
+			}
 			ch <- events[i]
 		}
-		messages = append(messages, map[string]any{"role": "user", "content": results})
-		if halted != nil {
-			res := c.pendingRun(runStart, *halted, messages, toolCalls, turns, usage)
-			u := usage
-			ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
-			return nil
-		}
+		messages = append(messages, map[string]any{"role": "user", "content": resultBlocks})
 	}
 	res := c.endRun(runStart, "", messages, toolCalls, turns, usage)
 	u := usage

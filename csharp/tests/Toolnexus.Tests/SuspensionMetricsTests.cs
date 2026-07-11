@@ -112,6 +112,37 @@ public class SuspensionMetricsTests
         Assert.False(c2);
     }
 
+    // ---- G3 (streaming): the streaming loop halts on the FIRST suspension in call order too ----
+
+    [Fact]
+    public async Task Streaming_TwoConcurrentSuspensions_NoWaitFor_SurfaceFirst_NotLast()
+    {
+        using var llm = TwoQuestionsStreamingLlm();
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = true }); // no WaitFor
+        var client = LlmClient.Create(new LlmClient.Options
+        {
+            BaseUrl = llm.BaseUrl, Style = "openai", Model = "x", ApiKey = "k",
+        });
+
+        var events = new List<LlmClient.StreamEvent>();
+        var res = await client.StreamAsync("ask two", tk, events.Add);
+
+        Assert.Equal("pending", res.Status);
+        Assert.NotNull(res.Pending);
+        Assert.Equal("First?", res.Pending!.Prompt); // FIRST suspension in call order, deterministically
+
+        // the terminal done event carries the same pending run
+        var done = Assert.Single(events, e => e.Type == LlmClient.StreamKind.Done);
+        Assert.Equal("pending", done.Result!.Status);
+        Assert.Equal("First?", done.Result.Pending!.Prompt);
+
+        // the second concurrent suspension's placeholder never entered the transcript
+        var c2 = res.Messages.OfType<IDictionary<string, object?>>().Any(m => (m.Get("tool_call_id") as string) == "c2");
+        Assert.False(c2);
+        // and no tool_result event was emitted for either (the first halted before its result event)
+        Assert.DoesNotContain(events, e => e.Type == LlmClient.StreamKind.ToolResult);
+    }
+
     // ---- helpers ----
 
     private static long AsLong(object? v) => v switch
@@ -172,4 +203,30 @@ public class SuspensionMetricsTests
                        "]}}]," + Usage + "}";
             StubServer.Respond(ctx, 200, json);
         });
+
+    /// <summary>A single STREAMING turn that emits TWO `question` tool_calls (First?, Second?) as SSE deltas.</summary>
+    private static StubServer TwoQuestionsStreamingLlm()
+        => new(ctx =>
+        {
+            ReadBody(ctx); // drain
+            StubServer.Respond(ctx, 200, Sse(
+                StreamQuestionCall(0, "c1", "First?"),
+                StreamQuestionCall(1, "c2", "Second?"),
+                "{\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}"));
+        });
+
+    /// <summary>One `question` tool_call as an OpenAI streaming delta frame (whole args in one frame).</summary>
+    private static string StreamQuestionCall(int index, string id, string text)
+        => "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":" + index + ",\"id\":\"" + id +
+           "\",\"function\":{\"name\":\"question\",\"arguments\":\"" +
+           "{\\\"questions\\\":[{\\\"question\\\":\\\"" + text + "\\\"}]}" + "\"}}]}}]}";
+
+    /// <summary>Assemble SSE frames into a <c>data:</c>-prefixed stream ending in <c>[DONE]</c>.</summary>
+    private static string Sse(params string[] frames)
+    {
+        var sb = new StringBuilder();
+        foreach (var f in frames) sb.Append("data: ").Append(f).Append("\n\n");
+        sb.Append("data: [DONE]\n\n");
+        return sb.ToString();
+    }
 }

@@ -484,6 +484,82 @@ func TestConcurrentSuspensionsSurfaceFirst(t *testing.T) {
 	}
 }
 
+// twoQuestionsStreamLLM is the streaming (SSE) counterpart of twoQuestionsLLM: it
+// streams a single assistant turn with two `question` tool_calls (c1 "First?", c2
+// "Second?") over text/event-stream, then a terminal usage delta and [DONE].
+func twoQuestionsStreamLLM(t *testing.T) *httptest.Server {
+	t.Helper()
+	write := func(w http.ResponseWriter, v any) {
+		b, _ := json.Marshal(v)
+		_, _ = w.Write([]byte("data: " + string(b) + "\n\n"))
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		write(w, map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"tool_calls": []any{
+			map[string]any{"index": 0, "id": "c1", "type": "function", "function": map[string]any{"name": "question", "arguments": `{"questions":[{"question":"First?"}]}`}},
+			map[string]any{"index": 1, "id": "c2", "type": "function", "function": map[string]any{"name": "question", "arguments": `{"questions":[{"question":"Second?"}]}`}},
+		}}}}})
+		write(w, map[string]any{"choices": []any{map[string]any{"delta": map[string]any{}}}, "usage": map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+}
+
+// TestConcurrentSuspensionsSurfaceFirstStreaming (G3, streaming): two concurrent
+// suspensions with no WaitFor surface the FIRST in call order over Stream(...), and the
+// second's placeholder result never enters the transcript. The streaming counterpart of
+// TestConcurrentSuspensionsSurfaceFirst; mirrors js streamOpenAI's halt-on-first.
+func TestConcurrentSuspensionsSurfaceFirstStreaming(t *testing.T) {
+	srv := twoQuestionsStreamLLM(t)
+	defer srv.Close()
+
+	tk, err := CreateToolkit(context.Background(), Options{}) // builtins on, no WaitFor
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tk.Close()
+
+	c := CreateClient(ClientOptions{BaseURL: srv.URL, Style: StyleOpenAI, Model: "stub", APIKey: "k"})
+	ch, err := c.Stream(context.Background(), "ask two", tk)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+
+	var res RunResult
+	sawSecondResult := false
+	for ev := range ch {
+		switch ev.Type {
+		case "done":
+			if ev.Result != nil {
+				res = *ev.Result
+			}
+		case "tool_result":
+			if ev.ID == "c2" {
+				sawSecondResult = true
+			}
+		case "error":
+			t.Fatalf("stream error: %v", ev.Err)
+		}
+	}
+
+	if res.Status != "pending" {
+		t.Fatalf("status = %q, want pending", res.Status)
+	}
+	if res.Pending == nil {
+		t.Fatal("pending request is nil")
+	}
+	if want := "First?"; res.Pending.Prompt != want {
+		t.Fatalf("pending.prompt = %q, want %q (the FIRST suspension in call order)", res.Pending.Prompt, want)
+	}
+	if sawSecondResult {
+		t.Fatal("the second concurrent suspension emitted a tool_result event (c2) — later suspensions must not surface")
+	}
+	for _, m := range res.Messages {
+		if mm, ok := m.(map[string]any); ok && mm["tool_call_id"] == "c2" {
+			t.Fatal("the second concurrent suspension polluted the transcript (c2 present)")
+		}
+	}
+}
+
 // TestPendingWireKeys pins the byte-identical JSON keys for Request/Answer across ports.
 func TestPendingWireKeys(t *testing.T) {
 	reqJSON, _ := json.Marshal(Request{ID: "r1", Kind: "input", Prompt: "p", URL: "u", Data: map[string]any{"k": "v"}, ExpiresAt: "2026-01-01T00:00:00Z"})
