@@ -1,0 +1,47 @@
+---
+title: Install — all five languages
+description: Install toolnexus in JavaScript, Python, Go, Java or C#. Same behavior, native shape.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+All five ports are published from the same release and carry the same version.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```sh
+npm install toolnexus
+```
+[npm · toolnexus](https://www.npmjs.com/package/toolnexus) · MCP SDK: `@modelcontextprotocol/sdk`
+</TabItem>
+<TabItem label="Python">
+```sh
+pip install toolnexus
+```
+Python ≥ 3.11 · [PyPI · toolnexus](https://pypi.org/project/toolnexus/) · MCP SDK: `mcp`
+</TabItem>
+<TabItem label="Go">
+```sh
+go get github.com/muthuishere/toolnexus/golang
+```
+Go 1.23 · also ships the `toolnexus` CLI · MCP SDK: `mark3labs/mcp-go`
+</TabItem>
+<TabItem label="Java">
+```xml
+<dependency>
+  <groupId>io.github.muthuishere</groupId>
+  <artifactId>toolnexus</artifactId>
+  <version>0.6.0</version>
+</dependency>
+```
+Java 21 · [Maven Central](https://central.sonatype.com/artifact/io.github.muthuishere/toolnexus) · MCP SDK: `io.modelcontextprotocol.sdk:mcp`
+</TabItem>
+<TabItem label="C#">
+```sh
+dotnet add package Toolnexus
+```
+[NuGet · Toolnexus](https://www.nuget.org/packages/Toolnexus) · MCP SDK: `ModelContextProtocol`
+</TabItem>
+</Tabs>
+
+Once installed, head to the [Quickstart](/toolnexus/quickstart/).

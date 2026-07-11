@@ -1,0 +1,35 @@
+---
+title: Ecosystem & references
+description: The standards and projects toolnexus builds on — MCP, Agent Skills, A2A — and where to learn each.
+---
+
+toolnexus doesn't invent new standards; it unifies existing ones behind a single `Tool`
+interface. Here's what it builds on and where to go deeper.
+
+## The standards
+
+- **[Model Context Protocol (MCP)](https://modelcontextprotocol.io)** — the open standard for
+  connecting models to tools, resources, and prompts over JSON-RPC (local stdio + remote HTTP).
+  toolnexus reads an `mcp.json` and exposes every server. See [MCP servers](/toolnexus/mcp/).
+- **[Agent Skills](https://www.anthropic.com/news/skills)** — the `SKILL.md` folder format with
+  progressive disclosure. toolnexus globs a `skills/` folder and exposes one `skill` tool. See
+  [Agent skills](/toolnexus/skills/).
+- **[Agent2Agent (A2A)](https://a2aproject.github.io/A2A/)** — the protocol for agents to call
+  each other: an Agent Card advertises skills, JSON-RPC drives the exchange. toolnexus can both
+  **consume** a remote A2A agent as a tool and **serve** your toolkit as one.
+- **Model tool-call formats** — the same uniform tools are emitted in **OpenAI**, **Anthropic**,
+  and **Gemini** shapes, so you can drive any of them.
+
+## Inspiration
+
+- **[opencode](https://github.com/anomalyco/opencode)** — the project whose insight toolnexus
+  ports: MCP tools, agent skills, your own functions, HTTP endpoints, and remote agents are *the
+  same thing* to an LLM. toolnexus makes that idea vendor-neutral and byte-identical across five
+  languages.
+
+## The contract
+
+Everything above is pinned in `SPEC.md` in the repository — the one-page cross-language
+conformance contract that guarantees the five ports behave identically. The same `examples/`
+fixtures (one `mcp.json`, one skill) produce the same output in JavaScript, Python, Go, Java and
+C#. That parity is the product.
