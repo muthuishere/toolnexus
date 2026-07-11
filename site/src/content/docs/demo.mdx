@@ -1,0 +1,75 @@
+---
+title: One demo, five sources
+description: A single run that exercises every tool source — a plain function, an MCP server, an agent skill, a remote A2A agent — and then pauses to ask you a question before finishing.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+To an LLM, a tool is a tool is a tool: a named, described, schema'd callable. This one run proves
+it — a plain function, an MCP server, an agent skill, and a remote A2A agent all sit in the same
+registry, and then the agent stops to ask **you** a question before it finishes.
+
+<div class="tn-video-placeholder">
+	<span class="tn-video-badge">Featured demo · coming soon</span>
+	<span class="tn-video-play">▶</span>
+	<span class="tn-video-title">Five sources, one loop, one human decision</span>
+	<span class="tn-video-note">The narrated walkthrough — typed live, then run end-to-end — lands here.</span>
+</div>
+
+## The six beats
+
+1. **A plain function** — register `add(a, b)` with `defineTool`. Your code is a tool.
+2. **An MCP server** — loaded from `mcp.json`; its tools appear with `source: "mcp"`.
+3. **An agent skill** — a `SKILL.md` under `skills/`, loaded on demand via the `skill` tool.
+4. **A remote A2A agent** — another agent, served over A2A, called like a function.
+5. **A question** — the agent hits a fork and *suspends*, asking you to decide.
+6. **Resume** — your answer flows back in; the loop finishes.
+
+## Assembling every source
+
+```ts
+import { createToolkit, defineTool, createClient, agent } from "toolnexus"
+
+const tk = await createToolkit({
+  mcpConfig: "./mcp.json",                                   // 2 — MCP server tools
+  skillsDir: "./skills",                                     // 3 — the `skill` tool
+  agents: [agent({ card: reviewerUrl + "/.well-known/agent-card.json" })], // 4 — A2A agent-as-tool
+  // built-ins on by default → 5 — the `question` tool is present
+})
+
+tk.register(defineTool({                                     // 1 — a plain function tool
+  name: "add",
+  description: "Add two numbers.",
+  inputSchema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] },
+  run: ({ a, b }) => `${a + b}`,
+}))
+```
+
+## The human in the loop
+
+Give the client a `waitFor` host. When any tool suspends — here, the built-in `question` tool —
+the loop calls `waitFor`, feeds your answer back in, and resumes:
+
+```ts
+const client = createClient({
+  baseUrl, style: "openai", model,
+  waitFor: async (req) => {
+    // req.kind === "question", req.prompt renders the choices
+    return { id: req.id, ok: true, data: { answers: ["yes"] } }
+  },
+})
+
+const res = await client.run("Do the whole demo.", { toolkit: tk })
+// res.toolCalls → ["add", "everything_echo", "skill", "reviewer_hello-world", "question"]
+// res.status   → "done"
+```
+
+Without a `waitFor`, the same run returns `status: "pending"` and hands you the `Request` to
+answer later — a durable, resumable halt. That is the suspension layer; read it in full on
+the [suspension page](/toolnexus/suspension/).
+
+<Aside type="note">
+The runnable version of this script (`examples/combined.ts`) uses a **deterministic scripted
+model** so it behaves identically every run — no live LLM needed. It's the same file the demo
+video is recorded from.
+</Aside>

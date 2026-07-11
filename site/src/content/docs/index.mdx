@@ -1,0 +1,172 @@
+---
+title: toolnexus
+description: Your LLM, with MCP tools and agent skills built in — in 3 lines, in 5 languages. Vendor-neutral, byte-identical across JavaScript, Python, Go, Java and C#.
+template: splash
+hero:
+  tagline: Your LLM, with MCP tools and agent skills built in — in 3 lines, in 5 languages.
+  actions:
+    - text: Quickstart
+      link: /toolnexus/quickstart/
+      icon: right-arrow
+    - text: One demo, five sources
+      link: /toolnexus/demo/
+      icon: right-arrow
+      variant: minimal
+    - text: GitHub
+      link: https://github.com/muthuishere/toolnexus
+      icon: external
+      variant: minimal
+---
+
+import { Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+<div class="tn-video-placeholder">
+	<span class="tn-video-badge">Demo · coming soon</span>
+	<span class="tn-video-play">▶</span>
+	<span class="tn-video-title">Zero to agent — five tool sources, one loop</span>
+	<span class="tn-video-note">A walkthrough video lands here: a plain function, an MCP server, an agent skill, a remote A2A agent, and a human-in-the-loop question — all in one run.</span>
+</div>
+
+## Point it at your tools. Get a working agent.
+
+Point toolnexus at an `mcp.json` and a `skills/` folder and you get the tool-calling loop,
+skills injection, five unified tool sources, and conversation memory — all included.
+The same three lines, in every language:
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createToolkit, createClient } from "toolnexus"
+
+const tk = await createToolkit({
+  mcpConfig: "./mcp.json",                           // every MCP server's tools
+  skillsDir: "./skills",                             // every SKILL.md, loaded on demand
+})
+const agent = createClient({
+  baseUrl: "https://openrouter.ai/api/v1",          // any OpenAI- or Anthropic-style endpoint
+  style: "openai",
+  model: "openai/gpt-4o-mini",
+})
+
+const { text } = await agent.run("Use my tools to answer this.", { toolkit: tk })
+console.log(text)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+import asyncio
+from toolnexus import create_toolkit, create_client
+
+async def main():
+    tk = await create_toolkit(
+        mcp_config="./mcp.json",                     # every MCP server's tools
+        skills_dir="./skills",                       # every SKILL.md, loaded on demand
+    )
+    agent = create_client(
+        base_url="https://openrouter.ai/api/v1", style="openai",
+        model="deepseek/deepseek-chat",
+    )
+    res = await agent.run("Use my tools to answer this.", tk)
+    print(res.text)
+    await tk.close()
+
+asyncio.run(main())
+```
+</TabItem>
+<TabItem label="Go">
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	ctx := context.Background()
+	tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{
+		MCPConfig: "./mcp.json", // every MCP server's tools
+		SkillsDir: "./skills",   // every SKILL.md, loaded on demand
+	})
+	defer tk.Close()
+
+	agent := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: "https://openrouter.ai/api/v1",
+		Style:   "openai",
+		Model:   "openai/gpt-4o-mini",
+	})
+
+	res, _ := agent.Run(ctx, "Use my tools to answer this.", tk)
+	fmt.Println(res.Text)
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Toolkit tk = Toolkit.create(new Toolkit.Options()
+        .mcpConfig("./mcp.json")     // every MCP server's tools
+        .skillsDir("./skills"));     // every SKILL.md, loaded on demand
+LlmClient agent = LlmClient.create(new LlmClient.Options()
+        .baseUrl("https://openrouter.ai/api/v1").style("openai").model("openai/gpt-4o-mini"));
+System.out.println(agent.run("Use my tools to answer this.", tk).text);
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+using Toolnexus;
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    McpConfig = "./mcp.json",   // every MCP server's tools
+    SkillsDir = "./skills",     // every SKILL.md, loaded on demand
+});
+var agent = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = "https://openrouter.ai/api/v1",
+    Style   = "openai",
+    Model   = "anthropic/claude-3.5-sonnet",
+    ApiKey  = Environment.GetEnvironmentVariable("OPENROUTER_API_KEY"),
+});
+
+var res = await agent.RunAsync("Use my tools to answer this.", tk);
+Console.WriteLine(res.Text);
+```
+</TabItem>
+</Tabs>
+
+## One interface for every tool
+
+<CardGrid>
+	<Card title="MCP servers" icon="puzzle">
+		Read an `mcp.json`, connect to every server (local stdio + remote streamable-HTTP),
+		expose each server tool as a uniform `Tool`.
+	</Card>
+	<Card title="Agent skills" icon="open-book">
+		Glob a `skills/` folder of `SKILL.md` files; one `skill` tool loads instructions and
+		resources on demand — progressive disclosure.
+	</Card>
+	<Card title="Your own functions" icon="setting">
+		Register a plain function as a tool. Native, HTTP endpoints, and the built-in shell/file
+		tools all share the same shape.
+	</Card>
+	<Card title="Remote A2A agents" icon="rocket">
+		Another agent, called like a function. `toolkit.serve(...)` also exposes *your* toolkit
+		to the world as an A2A agent.
+	</Card>
+	<Card title="The loop, included" icon="approve-check">
+		System prompt, skills injection, parallel + chained tool calls, hooks, streaming, retries,
+		conversation memory, observability metrics.
+	</Card>
+	<Card title="Human in the loop" icon="comment">
+		The suspension layer: an agent can pause, ask *you* a question, and resume — plus an
+		MCP elicitation bridge. Nobody else ships this across five ports.
+	</Card>
+</CardGrid>
+
+## Byte-identical across five languages
+
+The whole point is **parity**: the same `examples/` fixtures produce the same behavior in every
+language. Install for yours on the [install page](/toolnexus/install/), or walk the
+[one-demo-five-sources](/toolnexus/demo/) tour.

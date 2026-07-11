@@ -1,0 +1,60 @@
+---
+title: Suspension & the human loop
+description: An agent can pause mid-loop, ask you a question or for authorization, and resume — a durable, resumable halt. Plus an MCP elicitation bridge that maps server requests to the same primitive.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Real agents sometimes need a human. The suspension layer lets any tool **pause the loop**, surface
+a `Request`, and resume once it's answered — the same way in all five ports.
+
+## The primitive
+
+A tool suspends by returning a `pending(Request)`:
+
+```ts
+pending({ kind: "question", prompt: "Ship it?", data: { questions: [...] } })
+```
+
+What happens next depends on whether the client has a `waitFor` host:
+
+- **With `waitFor`** — the loop calls `waitFor(request)`, gets back an `Answer`, feeds it to the
+  tool, and continues to `status: "done"`. The pause is invisible to the caller.
+- **Without `waitFor`** — `run()` returns `status: "pending"` and hands you the `Request`. You can
+  persist it, answer out of band, and resume later. A durable halt.
+
+```ts
+// Request  → { id, kind, prompt, url?, data?, expiresAt? }
+// Answer   → { id, ok, data?, reason? }
+```
+
+`ok: false` declines; the optional `reason` (`"declined"` | `"cancelled"` | `"expired"`) is
+advisory — the loop always branches on `ok`.
+
+## Question and authorization
+
+The built-in `question` tool suspends to ask the user structured questions and resumes with their
+answers. The same primitive covers **authorization** — an agent that needs the user to approve an
+action or visit a URL suspends with `kind: "authorization"` and a `url`.
+
+## MCP elicitation bridge
+
+MCP servers can send a reverse request — `elicitation/create` — mid tool-call, asking the client
+to collect input. toolnexus **bridges that to the same primitive**: a form request maps to `kind: "input"` (with
+the server's schema in `data.schema`), a URL request maps to `kind: "authorization"`. Your single
+`waitFor` host answers both your own agent's questions and any MCP server's elicitations — one
+human-in-the-loop surface for everything. The capability is advertised to servers only when a
+`waitFor` is present.
+
+## Guarantees
+
+- A suspension is **never** counted as a tool error — the loop emits `pending`, not `isError`.
+- If several tools suspend at once with no `waitFor`, the **first in tool-call order** is
+  surfaced — deterministically, with no transcript leak — in both the non-streaming and streaming
+  loops.
+
+<Aside type="note">
+This layer shipped byte-identical across JavaScript, Python, Go, Java and C#. The `A2A`
+fulfilment path maps a suspended run to the A2A `input-required` state, so a served toolnexus
+agent can ask its caller a question too.
+</Aside>

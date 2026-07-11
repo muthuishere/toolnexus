@@ -1,0 +1,47 @@
+---
+title: A tool is a tool is a tool
+description: Every tool source — MCP servers, agent skills, your own functions, HTTP endpoints, remote A2A agents, the built-ins — collapses to one uniform Tool interface.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The insight toolnexus is built on: **MCP server tools, agent skills, your own functions, remote
+HTTP endpoints, the built-in shell/file tools, and remote A2A agents are the same thing to an
+LLM** — a named, described, schema'd callable. toolnexus unifies every source behind one `Tool`
+interface, emits the schema in OpenAI / Anthropic / Gemini formats, and drives any model with them.
+
+## The sources
+
+| Source | What it is | Appears as |
+|--------|------------|-----------|
+| **[MCP](https://modelcontextprotocol.io)** | Servers from `mcp.json` — local stdio + remote streamable-HTTP | `source: "mcp"` |
+| **[Agent skills](https://www.anthropic.com/news/skills)** | A `skills/` folder of `SKILL.md` files, loaded on demand | one `skill` tool |
+| **Native** | Your own function, registered natively (`defineTool` / `NativeTool`) | `source: "native"` |
+| **HTTP** | A remote HTTP endpoint wrapped as a tool | `source: "http"` |
+| **Built-ins** | bash, read, write, edit, grep, glob, and more — on by default | `source: "builtin"` |
+| **A2A** | A remote agent's skills, fetched from its Agent Card | `source: "a2a"` |
+
+Every one produces a `Tool` with a name, a description, an input schema, and an `execute`. The
+adapters render that uniform shape into whatever your model expects.
+
+**Deep dives:** [MCP servers](/toolnexus/mcp/) · [Agent skills](/toolnexus/skills/)
+
+## The client loop
+
+The unified client ships a built-in tool-calling loop: system prompt, skills injection into the
+prompt, parallel **and** chained tool calls, hooks (before/after tool), streaming, retries,
+conversation memory, and observability metrics. You bring a model endpoint; toolnexus runs the
+conversation.
+
+## Inbound, too
+
+toolnexus is not only a consumer of tools — `toolkit.serve(addr, …)` exposes *your* toolkit to
+the outside world as a remote **A2A agent**: an Agent Card plus JSON-RPC over the same client
+loop. Your toolkit becomes something another toolnexus (in any of the five languages) can call as
+a tool.
+
+<Aside type="tip">
+The five ports are meant to be substitutable. The same `examples/` fixtures — one `mcp.json`, one
+skill — produce the same behavior in JavaScript, Python, Go, Java and C#. That parity is the
+product; `SPEC.md` in the repo is the byte-level contract that guarantees it.
+</Aside>

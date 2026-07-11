@@ -1,0 +1,103 @@
+---
+title: Agent skills
+description: What an agent skill is, how toolnexus loads a skills/ folder with progressive disclosure, and what toolnexus adds on top — across five languages.
+---
+
+import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
+
+## What is an agent skill?
+
+An **[agent skill](https://www.anthropic.com/news/skills)** is a folder with a `SKILL.md` file at
+its root. The frontmatter carries a `name` and a `description`; the body holds instructions — and
+the folder can ship **resources** (scripts, templates, data) alongside it.
+
+The key idea is **progressive disclosure**: the model doesn't get every skill's full instructions
+up front. It first sees only the short `name` + `description` of each available skill. When a task
+matches, it *loads* that one skill — and only then are the full instructions (and a view of the
+skill's files) pulled into the conversation. Skills scale to hundreds without flooding the context.
+
+## How toolnexus uses skills
+
+toolnexus globs a `skills/` folder for every `**/SKILL.md`, and exposes **one** `skill` tool. The
+model calls it with a skill name; toolnexus injects that skill's body plus a sampled list of its
+files, resolved against the skill's base directory.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const tk = await createToolkit({ skillsDir: "./skills" })
+```
+</TabItem>
+<TabItem label="Python">
+```python
+tk = await create_toolkit(skills_dir="./skills")
+```
+</TabItem>
+<TabItem label="Go">
+```go
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{ SkillsDir: "./skills" })
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Toolkit tk = Toolkit.create(new Toolkit.Options().skillsDir("./skills"));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { SkillsDir = "./skills" });
+```
+</TabItem>
+</Tabs>
+
+## The `SKILL.md` format
+
+A skill is frontmatter + instructions. Resources live next to it and are referenced by relative
+path. This is the shared fixture toolnexus tests every port against:
+
+```markdown
+---
+name: hello-world
+description: A tiny example skill. Use when you want to see how skill loading (progressive disclosure) works end to end.
+---
+
+# Hello World Skill
+
+When the model calls the `skill` tool with `{ "name": "hello-world" }`, everything below the
+frontmatter is injected — along with a sampled list of files in this directory.
+
+## Steps
+1. Read `scripts/greet.sh` in this skill's base directory.
+2. Run it with the user's name.
+3. Report the greeting back.
+```
+
+```
+skills/
+└── hello-world/
+    ├── SKILL.md            # frontmatter (name, description) + instructions
+    └── scripts/greet.sh    # a resource, loaded on demand
+```
+
+<Aside type="tip">
+Relative paths in the body (like `scripts/greet.sh`) resolve against the base directory that
+toolnexus prints in the `skill` tool's output — so the model always knows where "here" is.
+</Aside>
+
+## What toolnexus adds on top
+
+The skill *format* is simple by design. toolnexus makes it a first-class tool source — the same
+way in five languages:
+
+- **One `skill` tool, every skill.** No matter how many skills the folder holds, the model sees
+  one tool and a menu of names + descriptions. That is progressive disclosure, done for you.
+- **On-demand injection.** A skill's full body and file listing enter the conversation only when
+  it's actually loaded — the rest stay out of the context budget.
+- **Base-directory resolution.** Resource paths are resolved and surfaced so scripts and templates
+  Just Work when the agent runs them.
+- **Same registry as everything else.** The `skill` tool sits beside MCP tools, your functions,
+  HTTP tools, built-ins, and A2A agents.
+- **Byte-identical parity.** The same `skills/` folder behaves the same in JavaScript, Python, Go,
+  Java and C#.
+
+<LinkButton href="https://www.anthropic.com/news/skills" variant="secondary" icon="external">Learn about Agent Skills</LinkButton>

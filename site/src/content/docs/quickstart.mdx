@@ -1,0 +1,198 @@
+---
+title: Quickstart
+description: Zero to a working agent in three steps — install, point at your tools, run. Same shape in JavaScript, Python, Go, Java and C#.
+---
+
+import { Tabs, TabItem, Steps, Aside } from '@astrojs/starlight/components';
+
+Three steps to a working agent. Pick your language once — the tabs stay in sync across the page.
+
+<div class="tn-video-placeholder">
+	<span class="tn-video-badge">Quickstart video · coming soon</span>
+	<span class="tn-video-play">▶</span>
+	<span class="tn-video-title">Watch the JavaScript quickstart</span>
+	<span class="tn-video-note">A narrated walkthrough — typed live in the editor, then run — lands here.</span>
+</div>
+
+<Steps>
+
+1. **Install the package.**
+
+   <Tabs syncKey="lang">
+   <TabItem label="JavaScript">
+   ```sh
+   npm install toolnexus
+   ```
+   </TabItem>
+   <TabItem label="Python">
+   ```sh
+   pip install toolnexus
+   ```
+   </TabItem>
+   <TabItem label="Go">
+   ```sh
+   go get github.com/muthuishere/toolnexus/golang
+   ```
+   </TabItem>
+   <TabItem label="Java">
+   ```xml
+   <!-- Maven -->
+   <dependency>
+     <groupId>io.github.muthuishere</groupId>
+     <artifactId>toolnexus</artifactId>
+     <version>0.6.0</version>
+   </dependency>
+   ```
+   </TabItem>
+   <TabItem label="C#">
+   ```sh
+   dotnet add package Toolnexus
+   ```
+   </TabItem>
+   </Tabs>
+
+2. **Create a toolkit and a client.** The toolkit starts with 10 built-in tools
+   (bash / read / write / edit / grep / glob / …). Point the client at any OpenAI- or
+   Anthropic-style endpoint.
+
+   <Tabs syncKey="lang">
+   <TabItem label="JavaScript">
+   ```ts
+   import { createToolkit, createClient } from "toolnexus"
+
+   const tk = await createToolkit()
+   const agent = createClient({
+     baseUrl: "https://openrouter.ai/api/v1",
+     style: "openai",
+     model: "openai/gpt-4o-mini",
+   })
+   ```
+   </TabItem>
+   <TabItem label="Python">
+   ```python
+   from toolnexus import create_toolkit, create_client
+
+   tk = await create_toolkit()
+   agent = create_client(
+       base_url="https://openrouter.ai/api/v1", style="openai",
+       model="deepseek/deepseek-chat",
+   )
+   ```
+   </TabItem>
+   <TabItem label="Go">
+   ```go
+   tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{})
+   defer tk.Close()
+   agent := toolnexus.CreateClient(toolnexus.ClientOptions{
+       BaseURL: "https://openrouter.ai/api/v1",
+       Style:   "openai",
+       Model:   "openai/gpt-4o-mini",
+   })
+   ```
+   </TabItem>
+   <TabItem label="Java">
+   ```java
+   Toolkit tk = Toolkit.create(new Toolkit.Options());
+   LlmClient agent = LlmClient.create(new LlmClient.Options()
+           .baseUrl("https://openrouter.ai/api/v1").style("openai").model("openai/gpt-4o-mini"));
+   ```
+   </TabItem>
+   <TabItem label="C#">
+   ```csharp
+   await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+   var agent = LlmClient.Create(new LlmClient.Options
+   {
+       BaseUrl = "https://openrouter.ai/api/v1",
+       Style   = "openai",
+       Model   = "anthropic/claude-3.5-sonnet",
+   });
+   ```
+   </TabItem>
+   </Tabs>
+
+3. **Run.** Tools are called for you and the loop runs to a final answer.
+
+   <Tabs syncKey="lang">
+   <TabItem label="JavaScript">
+   ```ts
+   const { text } = await agent.run("What files are in this folder?", { toolkit: tk })
+   console.log(text)
+   ```
+   </TabItem>
+   <TabItem label="Python">
+   ```python
+   res = await agent.run("List the files here, then count them.", tk)
+   print(res.text)
+   ```
+   </TabItem>
+   <TabItem label="Go">
+   ```go
+   res, _ := agent.Run(ctx, "List the Go files here and count them.", tk)
+   fmt.Println(res.Text)
+   ```
+   </TabItem>
+   <TabItem label="Java">
+   ```java
+   System.out.println(agent.run("List the files here, then read the largest one.", tk).text);
+   ```
+   </TabItem>
+   <TabItem label="C#">
+   ```csharp
+   var res = await agent.RunAsync("List the files here, then summarise the README.", tk);
+   Console.WriteLine(res.Text);
+   ```
+   </TabItem>
+   </Tabs>
+
+</Steps>
+
+## Add MCP servers and agent skills
+
+Give the toolkit an [`mcp.json`](/toolnexus/mcp/) and a [`skills/`](/toolnexus/skills/) folder and
+every server tool + a `skill` tool appear in the same registry:
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const tk = await createToolkit({
+  mcpConfig: "./mcp.json",     // local stdio + remote streamable-HTTP servers
+  skillsDir: "./skills",       // every SKILL.md becomes loadable via one `skill` tool
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+tk = await create_toolkit(mcp_config="./mcp.json", skills_dir="./skills")
+```
+</TabItem>
+<TabItem label="Go">
+```go
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{
+    MCPConfig: "./mcp.json",
+    SkillsDir: "./skills",
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Toolkit tk = Toolkit.create(new Toolkit.Options()
+        .mcpConfig("./mcp.json").skillsDir("./skills"));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    McpConfig = "./mcp.json",
+    SkillsDir = "./skills",
+});
+```
+</TabItem>
+</Tabs>
+
+Go deeper on each source: [MCP servers](/toolnexus/mcp/) · [Agent skills](/toolnexus/skills/).
+
+<Aside type="tip">
+Next: see all five tool sources — a function, MCP, a skill, a remote A2A agent, and a
+human-in-the-loop question — in [one demo](/toolnexus/demo/).
+</Aside>
