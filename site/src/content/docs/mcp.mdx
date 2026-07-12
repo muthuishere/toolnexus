@@ -22,12 +22,14 @@ Servers speak one of two transports:
 
 MCP is vendor-neutral: the same server works with any client that speaks the protocol.
 
-## How toolnexus uses MCP
+## You're the host — consume the world's servers
 
-toolnexus reads a single **`mcp.json`**, connects to **every** server listed (local *and*
-remote), discovers each server's tools, and exposes them in the same uniform `Tool` registry as
-everything else. You point at the config; the connection, discovery, and schema translation are
-handled for you.
+People all over the world ship MCP servers — for GitHub, Postgres, Slack, filesystems, anything.
+**toolnexus is the host that connects your LLM to them.** You don't author MCP servers with
+toolnexus; you *use the ones that already exist*. Point it at a single **`mcp.json`** and it dials
+**every** server listed (local stdio *and* remote HTTP), discovers their tools, and hands your
+model one uniform `Tool` interface — the connection, discovery, and schema translation handled for
+you, no per-server glue.
 
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">
@@ -114,5 +116,21 @@ so identically in five languages:
   answers it. Advertised to servers only when you provide a `waitFor`.
 - **Byte-identical parity.** The same `mcp.json` yields the same tools and behavior in
   JavaScript, Python, Go, Java and C#.
+
+## Inbound: serve your toolkit *as* an MCP server
+
+Because every source is unified behind one `Tool` interface, toolnexus can turn around and
+re-serve the whole toolkit back out. `toolkit.serve(addr, { mcp })` exposes everything you
+assembled — MCP tools, skills, native + HTTP tools, built-ins, and A2A agents — as a **single MCP
+server** any other host can consume:
+
+```ts
+await tk.serve("127.0.0.1:8080", { mcp: {} })   // mounts POST /mcp — your whole toolkit, as one MCP server
+```
+
+This is a *re-export of the aggregate*, not a framework for hand-authoring servers — you never
+write protocol handlers or transports. The same `serve(...)` can also expose your toolkit as an
+[A2A agent](/toolnexus/references/). So what you assembled as a host is instantly consumable by
+other hosts, too.
 
 <LinkButton href="https://modelcontextprotocol.io" variant="secondary" icon="external">Learn MCP at modelcontextprotocol.io</LinkButton>
