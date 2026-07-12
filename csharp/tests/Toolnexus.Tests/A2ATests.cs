@@ -205,8 +205,13 @@ public class A2ATests
 
         Assert.True(r.IsError);
         Assert.Equal("canceled", r.Metadata!["state"]);
+
+        // A GetTask already on the wire when cancel fired is abandoned by the client but
+        // still counted asynchronously by the stub's listener thread — let that straggler
+        // land first, THEN prove no *new* poll starts after cancellation (the real intent).
+        await Task.Delay(50);
         var afterAbort = stub.Seen.GetTaskCalls;
-        await Task.Delay(60);
+        await Task.Delay(80);
         Assert.Equal(afterAbort, stub.Seen.GetTaskCalls);
     }
 
