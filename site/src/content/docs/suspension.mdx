@@ -55,18 +55,21 @@ Give the client a **`waitFor`**: the loop pauses, asks, and resumes to `done` in
 <TabItem label="JavaScript">
 ```ts
 import { createClient, type Answer, type Request } from "toolnexus"
+import { createInterface } from "node:readline/promises"
+
+const rl = createInterface({ input: process.stdin, output: process.stdout })
 
 const client = createClient({
   baseUrl, style: "openai", model,
-  // Called whenever a tool suspends. Prompt the operator however you like — here, synchronously.
+  // Called whenever a tool suspends. Read the operator's decision straight off the terminal.
   waitFor: async (req: Request): Promise<Answer> => {
-    const ok = await askOperator(req.prompt)          // CLI prompt, Slack round-trip, …
-    return { id: req.id, ok }                          // ok:false → the loop tells the model it was declined
+    const line = await rl.question(`${req.prompt} [y/N] `)
+    return { id: req.id, ok: line.trim().toLowerCase() === "y" }   // ok:false → loop tells the model it was declined
   },
 })
 
 const result = await client.run("Refund order #4021 if policy allows.", { toolkit })
-// result.status === "done" — the refund tool ran only after approval
+// result.status === "done" — the refund tool ran only after you typed y
 ```
 </TabItem>
 <TabItem label="Python">
@@ -74,35 +77,41 @@ const result = await client.run("Refund order #4021 if policy allows.", { toolki
 from toolnexus import create_client, Answer
 
 async def wait_for(req):
-    ok = await ask_operator(req.prompt)                # CLI prompt, Slack round-trip, …
-    return Answer(id=req.id, ok=ok)
+    line = input(f"{req.prompt} [y/N] ")               # read the operator's decision off the terminal
+    return Answer(id=req.id, ok=line.strip().lower() == "y")
 
 client = create_client(base_url=base, style="openai", model=model, wait_for=wait_for)
 result = await client.run("Refund order #4021 if policy allows.", toolkit)
-# result.status == "done"
+# result.status == "done" — the refund tool ran only after you typed y
 ```
 </TabItem>
 <TabItem label="Go">
 ```go
+reader := bufio.NewReader(os.Stdin)
 c := toolnexus.CreateClient(toolnexus.ClientOptions{
     BaseURL: baseURL, Style: toolnexus.StyleOpenAI, Model: model,
     WaitFor: func(req toolnexus.Request) (toolnexus.Answer, error) {
-        ok := askOperator(req.Prompt)                  // CLI prompt, Slack round-trip, …
-        return toolnexus.Answer{ID: req.ID, Ok: ok}, nil
+        fmt.Printf("%s [y/N] ", req.Prompt)            // read the operator's decision off the terminal
+        line, _ := reader.ReadString('\n')
+        return toolnexus.Answer{ID: req.ID, Ok: strings.TrimSpace(line) == "y"}, nil
     },
 })
 res, _ := c.Run(ctx, "Refund order #4021 if policy allows.", tk)
-// res.Status == "done"
+// res.Status == "done" — the refund tool ran only after you typed y
 ```
 </TabItem>
 <TabItem label="Java">
 ```java
+Scanner in = new Scanner(System.in);
 LlmClient client = LlmClient.create(new LlmClient.Options()
         .baseUrl(base).style("openai").model(model)
-        .waitFor(req -> new Answer(req.id(), askOperator(req.prompt()))));
+        .waitFor(req -> {
+            System.out.print(req.prompt() + " [y/N] ");   // read the operator's decision off the terminal
+            return new Answer(req.id(), in.nextLine().trim().equalsIgnoreCase("y"));
+        }));
 
 LlmClient.RunResult result = client.run("Refund order #4021 if policy allows.", tk);
-// result.status.equals("done")
+// result.status.equals("done") — the refund tool ran only after you typed y
 ```
 </TabItem>
 <TabItem label="C#">
@@ -110,10 +119,15 @@ LlmClient.RunResult result = client.run("Refund order #4021 if policy allows.", 
 var client = LlmClient.Create(new LlmClient.Options
 {
     BaseUrl = baseUrl, Style = "openai", Model = model,
-    WaitFor = async req => new Answer { Id = req.Id, Ok = await AskOperator(req.Prompt) },
+    WaitFor = req =>
+    {
+        Console.Write($"{req.Prompt} [y/N] ");         // read the operator's decision off the terminal
+        var line = Console.ReadLine();
+        return Task.FromResult(new Answer { Id = req.Id, Ok = line?.Trim().ToLower() == "y" });
+    },
 });
 var result = await client.RunAsync("Refund order #4021 if policy allows.", tk);
-// result.Status == "done"
+// result.Status == "done" — the refund tool ran only after you typed y
 ```
 </TabItem>
 </Tabs>
