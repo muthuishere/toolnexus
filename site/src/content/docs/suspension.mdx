@@ -3,7 +3,7 @@ title: Suspension & the human loop
 description: An agent can pause mid-loop, ask you a question or for authorization, and resume — a durable, resumable halt. Plus an MCP elicitation bridge that maps server requests to the same primitive.
 ---
 
-import { Aside } from '@astrojs/starlight/components';
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
 Real agents sometimes need a human. The suspension layer lets any tool **pause the loop**, surface
 a `Request`, and resume once it's answered — the same way in all five ports.
@@ -30,6 +30,124 @@ What happens next depends on whether the client has a `waitFor` host:
 
 `ok: false` declines; the optional `reason` (`"declined"` | `"cancelled"` | `"expired"`) is
 advisory — the loop always branches on `ok`.
+
+## Handling a suspension
+
+**Auto-resume with a `waitFor` host.** Give the client a `waitFor`; when a tool suspends, the loop
+calls it, feeds the `Answer` back, and runs on to `status: "done"` — the pause is invisible.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createClient, type Answer, type Request } from "toolnexus"
+
+const client = createClient({
+  baseUrl, style: "openai", model,
+  waitFor: async (req: Request): Promise<Answer> =>
+    ({ id: req.id, ok: true, data: { answers: ["yes"] } }),
+})
+
+const result = await client.run("Ask me, then finish.", { toolkit })
+// result.status === "done"
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_client, Answer
+
+async def wait_for(req):
+    return Answer(id=req.id, ok=True, data={"answers": ["yes"]})
+
+client = create_client(base_url=base, style="openai", model=model, wait_for=wait_for)
+result = await client.run("Ask me, then finish.", toolkit)
+# result.status == "done"
+```
+</TabItem>
+<TabItem label="Go">
+```go
+c := toolnexus.CreateClient(toolnexus.ClientOptions{
+    BaseURL: baseURL, Style: toolnexus.StyleOpenAI, Model: model,
+    WaitFor: func(req toolnexus.Request) (toolnexus.Answer, error) {
+        return toolnexus.Answer{ID: req.ID, Ok: true,
+            Data: map[string]any{"answers": []string{"yes"}}}, nil
+    },
+})
+res, _ := c.Run(ctx, "Ask me, then finish.", tk)
+// res.Status == "done"
+```
+</TabItem>
+<TabItem label="Java">
+```java
+LlmClient client = LlmClient.create(new LlmClient.Options()
+        .baseUrl(base).style("openai").model(model)
+        .waitFor(req -> new Answer(req.id(), true, Map.of("answers", List.of("yes")))));
+
+LlmClient.RunResult result = client.run("Ask me, then finish.", tk);
+// result.status.equals("done")
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = baseUrl, Style = "openai", Model = model,
+    WaitFor = req => Task.FromResult(new Answer
+    {
+        Id = req.Id, Ok = true,
+        Data = new Dictionary<string, object?> { ["answers"] = new[] { "yes" } },
+    }),
+});
+var result = await client.RunAsync("Ask me, then finish.", tk);
+// result.Status == "done"
+```
+</TabItem>
+</Tabs>
+
+**Or halt durably — no `waitFor`.** `run()` returns `status: "pending"` and hands you the
+`Request`. Persist it, answer out of band, resume whenever.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const result = await client.run("...", { toolkit })   // no waitFor set
+if (result.status === "pending") {
+  const req = result.pending!   // Request{ id, kind, prompt, url?, data? } — persist, answer later
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python
+result = await client.run("...", toolkit)   # no wait_for
+if result.status == "pending":
+    req = result.pending   # Request(id, kind, prompt, data) — persist, answer later
+```
+</TabItem>
+<TabItem label="Go">
+```go
+res, _ := c.Run(ctx, "...", tk)   // no WaitFor
+if res.Status == "pending" {
+    req := res.Pending   // *toolnexus.Request{ ID, Kind, Prompt, Data } — persist, answer later
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java
+LlmClient.RunResult result = client.run("...", tk);   // no waitFor
+if ("pending".equals(result.status)) {
+    Request req = result.pending;   // Request{ id(), kind(), prompt(), data() } — persist, answer later
+}
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var result = await client.RunAsync("...", tk);   // no WaitFor
+if (result.Status == "pending")
+{
+    var req = result.Pending!;   // Request{ Id, Kind, Prompt, Data } — persist, answer later
+}
+```
+</TabItem>
+</Tabs>
 
 ## Question and authorization
 
