@@ -1,40 +1,55 @@
 ---
 title: Suspension & the human loop
-description: An agent can pause mid-loop, ask you a question or for authorization, and resume — a durable, resumable halt. Plus an MCP elicitation bridge that maps server requests to the same primitive.
+description: Sometimes an agent hits a wall only a human can clear — approve a risky action, log in, answer a question. Suspension lets any tool pause the loop and resume once the answer arrives, whether that's in seconds or in days. The same primitive in all five ports.
 ---
 
-import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
 
-Real agents sometimes need a human. The suspension layer lets any tool **pause the loop**, surface
-a `Request`, and resume once it's answered — the same way in all five ports.
+Your agent is halfway through a task and hits a wall only a person can clear: **approve a refund**,
+**log into a bank**, **pick between two options**, **sign off on a risky action**. What should the
+loop do — crash? Block a thread for six hours? Guess?
+
+toolnexus gives you a fourth answer: **suspend**. Any tool can pause the loop, surface a `Request`,
+and resume once it's answered — the same way in all five ports.
+
+## The one decision: can the human answer *now*, or *later*?
+
+This is the whole mental model. Everything else follows from it.
+
+| The answer arrives… | Give the client… | What `run()` does |
+|---------------------|------------------|-------------------|
+| **Now** — a person is right there, or a service resolves it inside the same request (seconds) | a **`waitFor`** host | Blocks on `waitFor`, feeds the answer back, runs on to `status: "done"`. The pause is invisible. |
+| **Later** — minutes to days later, maybe in another process, after the web request already returned | **no `waitFor`** | Returns `status: "pending"` with the `Request`. You persist it, resume when the world changes. A durable halt. |
+
+Same primitive, two postures. Pick by *when the human answers*, not by what you're asking.
 
 ## The primitive
 
-A tool suspends by returning a `pending(Request)`:
+A tool suspends by returning `pending(Request)`. The client resolves it to an `Answer`.
 
 ```ts
+// A tool returns this instead of a result:
 pending({ kind: "question", prompt: "Ship it?", data: { questions: [...] } })
-```
 
-What happens next depends on whether the client has a `waitFor` host:
-
-- **With `waitFor`** — the loop calls `waitFor(request)`, gets back an `Answer`, feeds it to the
-  tool, and continues to `status: "done"`. The pause is invisible to the caller.
-- **Without `waitFor`** — `run()` returns `status: "pending"` and hands you the `Request`. You can
-  persist it, answer out of band, and resume later. A durable halt.
-
-```ts
 // Request  → { id, kind, prompt, url?, data?, expiresAt? }
 // Answer   → { id, ok, data?, reason? }
 ```
 
 `ok: false` declines; the optional `reason` (`"declined"` | `"cancelled"` | `"expired"`) is
-advisory — the loop always branches on `ok`.
+advisory — the loop always branches on `ok`. `kind` is just data: `"question"`, `"input"`,
+`"authorization"`. There is no auth subsystem — [authorization is the same primitive](#scenario-2--login--oauth-wait-authorization) with a `url`.
 
-## Handling a suspension
+<Aside type="tip">
+A suspension is nothing more than a **tool's return value**. Any tool — one that calls an external
+API, checks a policy, or just needs a human — can decide mid-execution that it can't finish alone and
+return `pending(...)`. It's not a separate mechanism bolted onto the loop.
+</Aside>
 
-**Auto-resume with a `waitFor` host.** Give the client a `waitFor`; when a tool suspends, the loop
-calls it, feeds the `Answer` back, and runs on to `status: "done"` — the pause is invisible.
+## Scenario 1 — Approval gate (answer *now*)
+
+An agent is about to do something irreversible — issue a refund, delete a resource, send money.
+You want a human to approve first, and they're on the other end of a CLI or a chat you can await.
+Give the client a **`waitFor`**: the loop pauses, asks, and resumes to `done` in one call.
 
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">
@@ -43,12 +58,15 @@ import { createClient, type Answer, type Request } from "toolnexus"
 
 const client = createClient({
   baseUrl, style: "openai", model,
-  waitFor: async (req: Request): Promise<Answer> =>
-    ({ id: req.id, ok: true, data: { answers: ["yes"] } }),
+  // Called whenever a tool suspends. Prompt the operator however you like — here, synchronously.
+  waitFor: async (req: Request): Promise<Answer> => {
+    const ok = await askOperator(req.prompt)          // CLI prompt, Slack round-trip, …
+    return { id: req.id, ok }                          // ok:false → the loop tells the model it was declined
+  },
 })
 
-const result = await client.run("Ask me, then finish.", { toolkit })
-// result.status === "done"
+const result = await client.run("Refund order #4021 if policy allows.", { toolkit })
+// result.status === "done" — the refund tool ran only after approval
 ```
 </TabItem>
 <TabItem label="Python">
@@ -56,10 +74,11 @@ const result = await client.run("Ask me, then finish.", { toolkit })
 from toolnexus import create_client, Answer
 
 async def wait_for(req):
-    return Answer(id=req.id, ok=True, data={"answers": ["yes"]})
+    ok = await ask_operator(req.prompt)                # CLI prompt, Slack round-trip, …
+    return Answer(id=req.id, ok=ok)
 
 client = create_client(base_url=base, style="openai", model=model, wait_for=wait_for)
-result = await client.run("Ask me, then finish.", toolkit)
+result = await client.run("Refund order #4021 if policy allows.", toolkit)
 # result.status == "done"
 ```
 </TabItem>
@@ -68,11 +87,11 @@ result = await client.run("Ask me, then finish.", toolkit)
 c := toolnexus.CreateClient(toolnexus.ClientOptions{
     BaseURL: baseURL, Style: toolnexus.StyleOpenAI, Model: model,
     WaitFor: func(req toolnexus.Request) (toolnexus.Answer, error) {
-        return toolnexus.Answer{ID: req.ID, Ok: true,
-            Data: map[string]any{"answers": []string{"yes"}}}, nil
+        ok := askOperator(req.Prompt)                  // CLI prompt, Slack round-trip, …
+        return toolnexus.Answer{ID: req.ID, Ok: ok}, nil
     },
 })
-res, _ := c.Run(ctx, "Ask me, then finish.", tk)
+res, _ := c.Run(ctx, "Refund order #4021 if policy allows.", tk)
 // res.Status == "done"
 ```
 </TabItem>
@@ -80,9 +99,9 @@ res, _ := c.Run(ctx, "Ask me, then finish.", tk)
 ```java
 LlmClient client = LlmClient.create(new LlmClient.Options()
         .baseUrl(base).style("openai").model(model)
-        .waitFor(req -> new Answer(req.id(), true, Map.of("answers", List.of("yes")))));
+        .waitFor(req -> new Answer(req.id(), askOperator(req.prompt()))));
 
-LlmClient.RunResult result = client.run("Ask me, then finish.", tk);
+LlmClient.RunResult result = client.run("Refund order #4021 if policy allows.", tk);
 // result.status.equals("done")
 ```
 </TabItem>
@@ -91,88 +110,227 @@ LlmClient.RunResult result = client.run("Ask me, then finish.", tk);
 var client = LlmClient.Create(new LlmClient.Options
 {
     BaseUrl = baseUrl, Style = "openai", Model = model,
-    WaitFor = req => Task.FromResult(new Answer
-    {
-        Id = req.Id, Ok = true,
-        Data = new Dictionary<string, object?> { ["answers"] = new[] { "yes" } },
-    }),
+    WaitFor = async req => new Answer { Id = req.Id, Ok = await AskOperator(req.Prompt) },
 });
-var result = await client.RunAsync("Ask me, then finish.", tk);
+var result = await client.RunAsync("Refund order #4021 if policy allows.", tk);
 // result.Status == "done"
 ```
 </TabItem>
 </Tabs>
 
-**Or halt durably — no `waitFor`.** `run()` returns `status: "pending"` and hands you the
-`Request`. Persist it, answer out of band, resume whenever.
+The tool that gated the action simply returned `pending({ kind: "question", prompt: "Approve refund?" })`.
+The loop did the rest.
+
+## Scenario 2 — Login / OAuth wait (`authorization`)
+
+A tool needs the user to authenticate — connect a bank, grant an OAuth scope, click a consent
+link. There's no auth subsystem: the tool returns a suspension whose `kind` is `"authorization"`
+and whose `url` is where the human goes. Your `waitFor` delivers that link (open a browser, text it
+to a channel) and returns once the world has changed — the session is now valid, so the retried
+tool just succeeds.
+
+```ts
+import { defineTool, authRequired } from "toolnexus"
+
+let authed = false
+const getBalance = defineTool({
+  name: "get_balance",
+  description: "Return the account balance. Requires login first.",
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  run: (_args, ctx) =>
+    authed
+      ? `balance: ₹67,417`
+      : authRequired("https://bank.example/login?t=abc", "Log in to view your balance"),
+})
+
+const client = createClient({
+  baseUrl, style: "openai", model,
+  waitFor: async (req) => {
+    await deliverLink(req.url!)   // open a browser, OR text the link to #ops, OR forward over A2A
+    authed = true                 // the world changed out-of-band; the retry now succeeds
+    return { id: req.id, ok: true }   // kind:"authorization" ignores answer.data — the session is enough
+  },
+})
+```
+
+<Aside type="note">
+`authRequired(url, prompt)` is a one-liner over the same primitive — it returns
+`pending({ kind: "authorization", url, prompt })`. The **same shape works in all five ports**;
+only the surface syntax differs. Nothing here is special-cased for auth.
+</Aside>
+
+## Scenario 3 — Answer later, in chat (the durable halt)
+
+This is the one most frameworks can't do. The agent asks a question your user **won't answer for
+hours** — it posts to a Slack thread, or an email, and the web request that started the run has to
+return *now*. There's no thread to block. So you give the client **no `waitFor`**: `run()` halts and
+hands you the `Request`. You persist it, post it, and let the HTTP request finish. When the human
+replies — maybe in a different process, the next day — you **resume by running the same conversation
+again**, this time with a `waitFor` that returns the answer you now hold.
+
+**Phase 1 — halt and hand back the request:**
 
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">
 ```ts
-const result = await client.run("...", { toolkit })   // no waitFor set
+// No waitFor set → the run halts durably instead of blocking.
+// ask(…, { id }) records the transcript under that id so you can resume it later.
+const result = await client.ask(prompt, { toolkit, id: conversationId })
 if (result.status === "pending") {
-  const req = result.pending!   // Request{ id, kind, prompt, url?, data? } — persist, answer later
+  const req = result.pending!                 // { id, kind, prompt, url?, data? }
+  await db.save(conversationId, req)           // persist — plain serializable data
+  await slack.post(channel, req.prompt)        // ask the human, out of band
+  return                                       // the HTTP request returns; nothing is blocked
 }
 ```
 </TabItem>
 <TabItem label="Python">
 ```python
-result = await client.run("...", toolkit)   # no wait_for
+result = await client.ask(prompt, toolkit, id=conversation_id)   # no wait_for; ask records the id
 if result.status == "pending":
-    req = result.pending   # Request(id, kind, prompt, data) — persist, answer later
+    req = result.pending                        # Request(id, kind, prompt, url, data)
+    await db.save(conversation_id, req)          # persist — plain serializable data
+    await slack.post(channel, req.prompt)        # ask the human, out of band
+    return                                        # request returns; nothing is blocked
 ```
 </TabItem>
 <TabItem label="Go">
 ```go
-res, _ := c.Run(ctx, "...", tk)   // no WaitFor
+res, _ := c.Ask(ctx, prompt, tk, conversationID)   // no WaitFor; Ask records the id
 if res.Status == "pending" {
-    req := res.Pending   // *toolnexus.Request{ ID, Kind, Prompt, Data } — persist, answer later
+    req := res.Pending                          // *toolnexus.Request{ ID, Kind, Prompt, URL, Data }
+    db.Save(conversationID, req)                 // persist — plain serializable data
+    slack.Post(channel, req.Prompt)              // ask the human, out of band
+    return                                        // request returns; nothing is blocked
 }
 ```
 </TabItem>
 <TabItem label="Java">
 ```java
-LlmClient.RunResult result = client.run("...", tk);   // no waitFor
-if ("pending".equals(result.status)) {
-    Request req = result.pending;   // Request{ id(), kind(), prompt(), data() } — persist, answer later
+LlmClient.RunResult res = client.ask(prompt, tk, conversationId);   // no waitFor
+if ("pending".equals(res.status)) {
+    Request req = res.pending;                  // Request{ id(), kind(), prompt(), url(), data() }
+    db.save(conversationId, req);                // persist — plain serializable data
+    slack.post(channel, req.prompt());           // ask the human, out of band
+    return;                                       // request returns; nothing is blocked
 }
 ```
 </TabItem>
 <TabItem label="C#">
 ```csharp
-var result = await client.RunAsync("...", tk);   // no WaitFor
-if (result.Status == "pending")
+var res = await client.AskAsync(prompt, tk, conversationId);   // no WaitFor
+if (res.Status == "pending")
 {
-    var req = result.Pending!;   // Request{ Id, Kind, Prompt, Data } — persist, answer later
+    var req = res.Pending!;                     // Request{ Id, Kind, Prompt, Url, Data }
+    await db.SaveAsync(conversationId, req);     // persist — plain serializable data
+    await slack.PostAsync(channel, req.Prompt);  // ask the human, out of band
+    return;                                       // request returns; nothing is blocked
 }
 ```
 </TabItem>
 </Tabs>
 
-## Question and authorization
+**Phase 2 — hours later, the reply arrives; resume the same conversation:**
 
-The built-in `question` tool suspends to ask the user structured questions and resumes with their
-answers. The same primitive covers **authorization** — an agent that needs the user to approve an
-action or visit a URL suspends with `kind: "authorization"` and a `url`.
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+// A different request handler, maybe a different process. You now hold the human's answer.
+const resumeClient = createClient({
+  baseUrl, style: "openai", model,
+  waitFor: async (req) => ({ id: req.id, ok: true, data: { answers: [reply] } }),
+})
+// Same conversation id → memory replays the thread; the suspended tool re-runs and resolves.
+const done = await resumeClient.ask(prompt, { toolkit, id: conversationId })
+// done.status === "done"
+```
+</TabItem>
+<TabItem label="Python">
+```python
+resume_client = create_client(
+    base_url=base, style="openai", model=model,
+    wait_for=lambda req: Answer(id=req.id, ok=True, data={"answers": [reply]}),
+)
+done = await resume_client.ask(prompt, toolkit, id=conversation_id)
+# done.status == "done"
+```
+</TabItem>
+<TabItem label="Go">
+```go
+resume := toolnexus.CreateClient(toolnexus.ClientOptions{
+    BaseURL: baseURL, Style: toolnexus.StyleOpenAI, Model: model,
+    WaitFor: func(req toolnexus.Request) (toolnexus.Answer, error) {
+        return toolnexus.Answer{ID: req.ID, Ok: true,
+            Data: map[string]any{"answers": []string{reply}}}, nil
+    },
+})
+done, _ := resume.Ask(ctx, prompt, tk, conversationID)
+// done.Status == "done"
+```
+</TabItem>
+<TabItem label="Java">
+```java
+LlmClient resume = LlmClient.create(new LlmClient.Options()
+        .baseUrl(base).style("openai").model(model)
+        .waitFor(req -> new Answer(req.id(), true, Map.of("answers", List.of(reply)))));
+LlmClient.RunResult done = resume.ask(prompt, tk, conversationId);
+// done.status.equals("done")
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var resume = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = baseUrl, Style = "openai", Model = model,
+    WaitFor = req => Task.FromResult(new Answer
+    {
+        Id = req.Id, Ok = true,
+        Data = new Dictionary<string, object?> { ["answers"] = new[] { reply } },
+    }),
+});
+var done = await resume.AskAsync(prompt, tk, conversationId);
+// done.Status == "done"
+```
+</TabItem>
+</Tabs>
+
+<Aside type="note" title="Why this survives restarts">
+`Request` and `Answer` are **plain serializable data** — no live handle, no open socket. Phase 1
+can run on one machine and Phase 2 on another, a day apart. The durable halt and the in-process
+`waitFor` are the *same contract*; the only difference is whether you bridge the time gap with
+persistence. Resuming replays the conversation by `id` — the suspended tool call re-issues and the
+`waitFor` you supply at resume time resolves it.
+</Aside>
+
+## The `question` tool
+
+You don't have to write a suspending tool to use any of this. The built-in **`question`** tool
+suspends to ask the user structured questions and resumes with their answers — the same
+sync-or-durable fork applies. It's how the agent asks *you* something mid-run without any custom code.
 
 ## MCP elicitation bridge
 
 MCP servers can send a reverse request — `elicitation/create` — mid tool-call, asking the client
-to collect input. toolnexus **bridges that to the same primitive**: a form request maps to `kind: "input"` (with
-the server's schema in `data.schema`), a URL request maps to `kind: "authorization"`. Your single
-`waitFor` host answers both your own agent's questions and any MCP server's elicitations — one
-human-in-the-loop surface for everything. The capability is advertised to servers only when a
-`waitFor` is present.
+to collect input. toolnexus **bridges that onto the same primitive**: a form request maps to
+`kind: "input"` (with the server's schema in `data.schema`), a URL request maps to
+`kind: "authorization"`. Your single `waitFor` answers both your own agent's questions and any MCP
+server's elicitations — one human-in-the-loop surface for everything. The capability is advertised
+to servers only when a `waitFor` is present.
 
 ## Guarantees
 
-- A suspension is **never** counted as a tool error — the loop emits `pending`, not `isError`.
+- A suspension is **never** counted as a tool error — the loop emits `pending`, not `isError`, so
+  error-rate metrics and circuit-breakers don't trip on a human wait.
 - If several tools suspend at once with no `waitFor`, the **first in tool-call order** is
   surfaced — deterministically, with no transcript leak — in both the non-streaming and streaming
   loops.
+- Streaming emits a `{ type: "pending", request }` event *before* `waitFor` runs, so a channel
+  handler can push the link the instant the agent asks.
 
 <Aside type="note">
-This layer shipped byte-identical across JavaScript, Python, Go, Java and C#. The `A2A`
-fulfilment path maps a suspended run to the A2A `input-required` state, so a served toolnexus
-agent can ask its caller a question too.
+This layer shipped byte-identical across JavaScript, Python, Go, Java and C#. The A2A fulfilment
+path maps a suspended run to the A2A `input-required` state, so a *served* toolnexus agent can ask
+its caller a question too.
 </Aside>
+
+<LinkButton href="/toolnexus/demo/" variant="secondary" icon="right-arrow">See it in the five-source demo</LinkButton>
