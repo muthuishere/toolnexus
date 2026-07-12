@@ -62,7 +62,13 @@ export class FileTaskStore implements TaskStore {
     }
   }
   async save(task: A2ATask): Promise<void> {
-    fs.writeFileSync(this.file(task.id), JSON.stringify(task))
+    // Atomic write: a concurrent get() must never read a half-written file (that
+    // would surface as a spurious "Task not found" mid-poll). Write a temp file in
+    // the same dir, then rename over the target.
+    const target = this.file(task.id)
+    const tmp = `${target}.tmp`
+    fs.writeFileSync(tmp, JSON.stringify(task))
+    fs.renameSync(tmp, target)
   }
 }
 

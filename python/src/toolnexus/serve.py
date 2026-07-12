@@ -90,8 +90,14 @@ class FileTaskStore(TaskStore):
             return None
 
     async def save(self, task: A2ATask) -> None:
-        with open(self._file(task["id"]), "w", encoding="utf-8") as f:
+        # Atomic write: a concurrent get() must never read a half-written file (that
+        # would surface as a spurious "Task not found" mid-poll). Write a temp file in
+        # the same dir, then os.replace (atomic) over the target.
+        target = self._file(task["id"])
+        tmp = f"{target}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             f.write(json.dumps(task))
+        os.replace(tmp, target)
 
 
 def resolve_store(store: Union[TaskStore, str, None] = None) -> TaskStore:

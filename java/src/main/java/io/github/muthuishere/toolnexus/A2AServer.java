@@ -9,6 +9,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -103,8 +104,18 @@ public final class A2AServer {
 
         @Override
         public void save(Map<String, Object> task) {
+            // Atomic write: a concurrent get() must never read a half-written file
+            // (that would surface as a spurious "Task not found" mid-poll). Write to a
+            // temp file in the same dir, then rename over the target.
+            Path target = file(String.valueOf(task.get("id")));
             try {
-                Files.writeString(file(String.valueOf(task.get("id"))), Json.stringify(task));
+                Path tmp = Files.createTempFile(dir, ".task", ".tmp");
+                Files.writeString(tmp, Json.stringify(task));
+                try {
+                    Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                } catch (java.nio.file.AtomicMoveNotSupportedException amns) {
+                    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+                }
             } catch (IOException e) {
                 throw new RuntimeException("Cannot write A2A task: " + e.getMessage(), e);
             }

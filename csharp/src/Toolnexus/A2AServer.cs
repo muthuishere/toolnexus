@@ -84,7 +84,13 @@ public sealed class FileTaskStore : ITaskStore
 
     public Task SaveAsync(A2ATask task)
     {
-        System.IO.File.WriteAllText(File(task.Id ?? ""), JsonSerializer.Serialize(task, A2AServer.TaskJson));
+        // Atomic write: a concurrent GetAsync must never read a half-written file (that
+        // would surface as a spurious "Task not found" mid-poll). Write a temp file in
+        // the same dir, then move (atomic on the same volume) over the target.
+        var target = File(task.Id ?? "");
+        var tmp = target + ".tmp";
+        System.IO.File.WriteAllText(tmp, JsonSerializer.Serialize(task, A2AServer.TaskJson));
+        System.IO.File.Move(tmp, target, overwrite: true);
         return Task.CompletedTask;
     }
 }

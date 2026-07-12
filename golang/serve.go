@@ -118,7 +118,15 @@ func (s *FileTaskStore) Save(task A2ATask) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.file(task.ID), data, 0o644)
+	// Atomic write: a concurrent Get must never read a half-written file (that would
+	// surface as a spurious "Task not found" mid-poll). Write a temp file in the same
+	// dir, then rename (atomic) over the target.
+	target := s.file(task.ID)
+	tmp := target + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, target)
 }
 
 // ResolveStore maps a store selector to a concrete TaskStore:
