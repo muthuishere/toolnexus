@@ -1,0 +1,137 @@
+---
+title: Native tools — your own functions
+description: Turn any plain function into a first-class Tool with defineTool, sitting in the same registry as MCP servers, agent skills, HTTP endpoints and A2A agents. Schema is explicit or inferred, and the same shape works across all five languages.
+---
+
+import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
+
+The fastest tool source is the one you already have: **a function you wrote**. `defineTool` wraps a
+plain function as a uniform `Tool` (`source: "native"`), so it sits in the exact same registry as
+your MCP servers, agent skills, HTTP endpoints and A2A agents — and the model calls it the same way
+it calls any of them.
+
+## Wrap a function, register it, done
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { defineTool } from "toolnexus"
+
+const add = defineTool({
+  name: "add",
+  description: "Add two numbers",
+  inputSchema: {
+    type: "object",
+    properties: { a: { type: "number" }, b: { type: "number" } },
+    required: ["a", "b"],
+  },
+  run: ({ a, b }) => `${a + b}`,        // return a string, or a richer ToolResult
+})
+
+tk.register(add)                        // now in the toolkit, beside every other source
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import define_tool
+
+@define_tool                            # schema inferred from type hints + docstring
+def add(a: int, b: int) -> str:
+    """Add two numbers."""
+    return str(a + b)
+
+tk.register(add)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+type addArgs struct {
+    A float64 `json:"a"`
+    B float64 `json:"b"`
+}
+
+// NativeToolReflect derives the JSON schema from the struct tags.
+add := toolnexus.NativeToolReflect("add", "Add two numbers",
+    func(ctx context.Context, in addArgs) (string, error) {
+        return fmt.Sprintf("%g", in.A+in.B), nil
+    })
+
+tk.Register(add)
+```
+</TabItem>
+<TabItem label="Java">
+```java
+NativeTool add = NativeTool.of("add", "Add two numbers",
+    Map.of("type", "object",
+           "properties", Map.of("a", Map.of("type", "number"),
+                                "b", Map.of("type", "number")),
+           "required", List.of("a", "b")),
+    args -> {
+        double a = ((Number) args.get("a")).doubleValue();
+        double b = ((Number) args.get("b")).doubleValue();
+        return String.valueOf(a + b);
+    });
+
+tk.register(add);
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var add = NativeTool.Of("add", "Add two numbers",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?>
+        {
+            ["a"] = new Dictionary<string, object?> { ["type"] = "number" },
+            ["b"] = new Dictionary<string, object?> { ["type"] = "number" },
+        },
+        ["required"] = new[] { "a", "b" },
+    },
+    args => Convert.ToDouble(args["a"]) + Convert.ToDouble(args["b"]));
+
+tk.Register(add);
+```
+</TabItem>
+</Tabs>
+
+That's the whole thing. `add` is now indistinguishable from an MCP tool to the model — it shows up
+in `tk.toOpenAI()` / `toAnthropic()` / `toGemini()` and runs through `tk.execute("add", …)` and the
+client loop like any other call.
+
+## Schema: inferred or explicit
+
+There are two ergonomic forms, and each language leans on its own idiom — same behavior, native
+shape:
+
+- **Inferred** — **Python** reads the JSON input schema from your **type hints**, and the
+  description from the **first docstring line**. **Go**'s `NativeToolReflect[T]` derives the schema
+  from a struct's `json` tags. You write a function; the schema falls out of the types.
+- **Explicit** — **JS/TS**, **Java** and **C#** take an `inputSchema` object directly. Go's plain
+  `NativeTool(name, description, schema, fn)` does too when you'd rather hand-write the schema.
+
+<Aside type="tip">
+Explicit or inferred, the emitted schema is the same JSON Schema the model sees for MCP tools — so
+providers validate and fill arguments identically no matter which source a tool came from.
+</Aside>
+
+## Return a string or a `ToolResult`
+
+The simplest tool returns a string. When you need to signal an error, attach metadata, or
+**suspend for a human**, return a `ToolResult` instead — including `pending(...)` to pause the loop
+and ask a question (see [Suspension & the human loop](/toolnexus/suspension/)). The function
+receives a context argument (`ctx`) carrying, among other things, the resolved `answer` when a
+suspended call resumes.
+
+## When to reach for a native tool
+
+- **Native** — logic that lives in *your* process: a calculation, a DB lookup, a call into your own
+  service, a guard. No protocol, no subprocess — just a function.
+- **[MCP](/toolnexus/mcp/)** — capabilities the world already ships as servers (GitHub, Postgres,
+  Slack, filesystems). You host them; you don't rebuild them.
+- **[HTTP](/toolnexus/http/)** — a REST endpoint you want exposed as a tool without writing a client.
+- **[Agent skills](/toolnexus/skills/)** — reusable instructions + resources, loaded on demand.
+
+They all land in one registry. Mix freely.
+
+<LinkButton href="/toolnexus/demo/" variant="secondary" icon="right-arrow">See a native tool in the five-source demo</LinkButton>

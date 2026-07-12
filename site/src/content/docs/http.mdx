@@ -1,0 +1,135 @@
+---
+title: HTTP / REST tools
+description: Expose any REST endpoint as a tool without writing a client — URL placeholders filled from args, ${ENV} header auth expanded at call time and never logged, JSON/form/raw bodies, and querystring params. The same declaration across all five languages.
+---
+
+import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
+
+Some capabilities are just an HTTP endpoint away. `httpTool` turns a REST call into a uniform
+`Tool` (`source: "http"`) — you declare the method, URL, headers and input schema, and toolnexus
+handles the request, argument substitution, and response for you. No client code, no glue.
+
+## Declare an endpoint as a tool
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { httpTool } from "toolnexus"
+
+const getPost = httpTool({
+  name: "get_post",
+  description: "Fetch a blog post by id",
+  method: "GET",
+  url: "https://api.example.com/posts/{id}",              // {id} filled from args
+  headers: { Authorization: "Bearer ${API_TOKEN}" },      // ${ENV} expands at call time, never logged
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "number" } },
+    required: ["id"],
+  },
+})
+
+tk.register(getPost)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import http_tool
+
+get_post = http_tool(
+    name="get_post",
+    description="Fetch a blog post by id",
+    method="GET",
+    url="https://api.example.com/posts/{id}",
+    headers={"Authorization": "Bearer ${API_TOKEN}"},
+    input_schema={
+        "type": "object",
+        "properties": {"id": {"type": "number"}},
+        "required": ["id"],
+    },
+)
+
+tk.register(get_post)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+getPost := toolnexus.HTTPTool(toolnexus.HTTPToolOptions{
+    Name: "get_post", Description: "Fetch a blog post by id",
+    Method: "GET", URL: "https://api.example.com/posts/{id}",
+    Headers: map[string]string{"Authorization": "Bearer ${API_TOKEN}"},
+    InputSchema: toolnexus.JSONSchema{
+        "type":       "object",
+        "properties": map[string]any{"id": map[string]any{"type": "number"}},
+        "required":   []string{"id"},
+    },
+})
+
+tk.Register(getPost)
+```
+</TabItem>
+<TabItem label="Java">
+```java
+HttpTool.Options opts = new HttpTool.Options();
+opts.name = "get_post";
+opts.description = "Fetch a blog post by id";
+opts.method = "GET";
+opts.url = "https://api.example.com/posts/{id}";
+opts.headers = Map.of("Authorization", "Bearer ${API_TOKEN}");
+opts.inputSchema = Map.of("type", "object",
+    "properties", Map.of("id", Map.of("type", "number")),
+    "required", List.of("id"));
+
+tk.register(HttpTool.of(opts));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var getPost = HttpTool.Of(new HttpTool.Options
+{
+    Name = "get_post",
+    Description = "Fetch a blog post by id",
+    Method = "GET",
+    Url = "https://api.example.com/posts/{id}",
+    Headers = new Dictionary<string, string> { ["Authorization"] = "Bearer ${API_TOKEN}" },
+    InputSchema = new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?>
+        {
+            ["id"] = new Dictionary<string, object?> { ["type"] = "number" },
+        },
+        ["required"] = new[] { "id" },
+    },
+});
+
+tk.Register(getPost);
+```
+</TabItem>
+</Tabs>
+
+## How arguments flow
+
+- **URL placeholders** — `{id}` in the URL is filled from the matching arg and *consumed* (it
+  won't be re-sent in the body). Great for path params.
+- **Querystring** — name specific args as `query` (Go `Query`, Python `query=[...]`) and they're
+  sent as `?a=…&b=…` instead of in the body.
+- **Body encoding** — for non-GET requests, `body` selects `"json"` (default), `"form"`, or `"raw"`.
+- **Result mode** — `"text"` (default), `"json"`, or `"status+text"` shapes what the tool returns
+  to the model.
+
+## Secrets stay secret
+
+<Aside type="caution" title="${ENV} expands at the edge, never logs">
+`headers` values expand `${ENV_VAR}` from the environment **at call time**, and header values are
+**never logged**. Never bake a real key into the tool declaration, a commit, or an example —
+reference it by variable name (`Bearer ${API_TOKEN}`) and let it expand at the request boundary.
+</Aside>
+
+## OpenAPI import
+
+Rather than declare endpoints one by one, you can import an OpenAPI spec and get a tool per
+operation (best-effort). It's the bulk path to the same `source: "http"` tools; see the per-language
+README for the import entry point and current coverage.
+
+<LinkButton href="/toolnexus/native/" variant="secondary" icon="right-arrow">Compare with native function tools</LinkButton>

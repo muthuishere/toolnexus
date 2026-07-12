@@ -43,6 +43,8 @@ export default defineConfig({
 					items: [
 						{ label: 'MCP servers', slug: 'mcp' },
 						{ label: 'Agent skills', slug: 'skills' },
+						{ label: 'Native tools — your functions', slug: 'native' },
+						{ label: 'HTTP / REST tools', slug: 'http' },
 						{ label: 'Suspension & the human loop', slug: 'suspension' },
 					],
 				},
