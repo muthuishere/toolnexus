@@ -1,0 +1,11 @@
+Every LLM gets smarter with tools. But every tool source speaks its own dialect — MCP servers, agent skills, a remote agent, your own functions. toolnexus makes them one thing.
+
+Point it at your MCP config, a folder of skills, a remote agent's card — and each one becomes a tool in a single toolkit. Then register a plain function of your own; it joins the same set, indistinguishable to the model.
+
+Wrap any model in a client, and its loop does the work — calling tools, feeding the results back, calling the next, until the answer is ready.
+
+And when a tool needs a human — an approval, a login, a decision — the loop doesn't fail. It suspends. It asks you. You answer... and it resumes, exactly where it left off.
+
+Five tool sources. One toolkit. One loop. And the same bytes in JavaScript, Python, Go, Java, and C#.
+
+toolnexus. Your LLM, with everything built in.

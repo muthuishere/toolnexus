@@ -118,3 +118,15 @@ starlight-tabs [role='tab'][aria-selected='true'] {
 	font-size: 0.85rem;
 	max-width: 34ch;
 }
+
+/* ── The launch explainer video ── */
+.tn-video {
+	display: block;
+	width: 100%;
+	aspect-ratio: 16 / 9;
+	margin: 1.5rem 0;
+	border-radius: 12px;
+	border: 1px solid var(--sl-color-hairline);
+	background: #121212;
+	box-shadow: 0 24px 60px -20px rgba(0, 0, 0, 0.6);
+}

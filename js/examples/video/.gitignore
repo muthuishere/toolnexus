@@ -1,0 +1,9 @@
+# generated recording artifacts — source of truth is agent.ts + maketape.mjs + vo.txt
+demo.ts
+demo.tape
+demo.mp4
+demo-final.mp4
+vo.mp3
+vo-payload.json
+posh-final.mp4
+scene/

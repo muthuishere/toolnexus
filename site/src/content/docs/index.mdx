@@ -20,12 +20,15 @@ hero:
 
 import { Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
 
-<div class="tn-video-placeholder">
-	<span class="tn-video-badge">Demo · coming soon</span>
-	<span class="tn-video-play">▶</span>
-	<span class="tn-video-title">Zero to agent — five tool sources, one loop</span>
-	<span class="tn-video-note">A walkthrough video lands here: a plain function, an MCP server, an agent skill, a remote A2A agent, and a human-in-the-loop question — all in one run.</span>
-</div>
+<video
+	class="tn-video"
+	controls
+	playsinline
+	preload="metadata"
+	poster="/toolnexus/toolnexus-explainer-poster.jpg"
+>
+	<source src="/toolnexus/toolnexus-explainer.mp4" type="video/mp4" />
+</video>
 
 ## Point it at your tools. Get a working agent.
 
