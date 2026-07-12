@@ -1,0 +1,161 @@
+---
+title: Memory & conversations
+description: The client loop remembers a thread for you. ask(prompt, id) loads a conversation's transcript, runs, and saves it back — with a pluggable store you can point at a file, database, or Redis. The same shape across all five languages.
+---
+
+import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
+
+A single `run()` is stateless — each call starts fresh. Real assistants need to **remember the
+thread**. `ask(prompt, id)` loads that conversation's transcript from a **ConversationStore**, runs
+the loop with it as history, and saves the updated transcript back. The next `ask` with the same
+`id` continues where it left off.
+
+## Remember a thread with an `id`
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const agent = createClient({ baseUrl, style: "openai", model })   // in-memory store by default
+
+await agent.ask("Book me a flight to Berlin.", { toolkit: tk, id: "user-42" })
+await agent.ask("Actually, make it Munich.",   { toolkit: tk, id: "user-42" })  // same thread — remembered
+await agent.ask("What is 21 + 21?",            { toolkit: tk })                 // no id → one-shot
+```
+</TabItem>
+<TabItem label="Python">
+```python
+agent = create_client(base_url=base, style="openai", model=model)   # in-memory store by default
+
+await agent.ask("Book me a flight to Berlin.", tk, id="user-42")
+await agent.ask("Actually, make it Munich.",   tk, id="user-42")   # same thread — remembered
+await agent.ask("What is 21 + 21?",            tk)                 # no id → one-shot
+```
+</TabItem>
+<TabItem label="Go">
+```go
+agent := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: baseURL, Style: toolnexus.StyleOpenAI, Model: model})
+
+agent.Ask(ctx, "Book me a flight to Berlin.", tk, "user-42")
+agent.Ask(ctx, "Actually, make it Munich.",   tk, "user-42")   // same thread — remembered
+agent.Ask(ctx, "What is 21 + 21?",             tk, "")          // empty id → one-shot
+```
+</TabItem>
+<TabItem label="Java">
+```java
+LlmClient agent = LlmClient.create(new LlmClient.Options().baseUrl(base).style("openai").model(model));
+
+agent.ask("Book me a flight to Berlin.", tk, "user-42");
+agent.ask("Actually, make it Munich.",   tk, "user-42");   // same thread — remembered
+agent.ask("What is 21 + 21?",            tk, null);         // null id → one-shot
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var agent = LlmClient.Create(new LlmClient.Options { BaseUrl = baseUrl, Style = "openai", Model = model });
+
+await agent.AskAsync("Book me a flight to Berlin.", tk, "user-42");
+await agent.AskAsync("Actually, make it Munich.",   tk, "user-42");   // same thread — remembered
+await agent.AskAsync("What is 21 + 21?",            tk);              // no id → one-shot
+```
+</TabItem>
+</Tabs>
+
+No `id` ⇒ a stateless one-shot, identical to `run`. That's the whole memory model: an id is a thread.
+
+## Pluggable store — persist across processes
+
+The default store keeps transcripts in memory for the client's lifetime. To survive restarts or
+share a thread across processes, implement two methods — `get(id) → messages` and
+`save(id, messages)` — over a file, database, or Redis, and pass it to the client.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createClient, type ConversationStore } from "toolnexus"
+
+const redisStore: ConversationStore = {
+  async get(id) {
+    const raw = await redis.get(`conv:${id}`)
+    return raw ? JSON.parse(raw) : undefined
+  },
+  async save(id, messages) {
+    await redis.set(`conv:${id}`, JSON.stringify(messages))
+  },
+}
+
+const agent = createClient({ baseUrl, style: "openai", model, store: redisStore })
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_client, ConversationStore
+
+class RedisStore(ConversationStore):
+    async def get(self, id):
+        raw = await redis.get(f"conv:{id}")
+        return json.loads(raw) if raw else None
+    async def save(self, id, messages):
+        await redis.set(f"conv:{id}", json.dumps(messages))
+
+agent = create_client(base_url=base, style="openai", model=model, store=RedisStore())
+```
+</TabItem>
+<TabItem label="Go">
+```go
+type redisStore struct{ /* client */ }
+func (s redisStore) Get(id string) ([]any, error)      { /* load + json.Unmarshal */ }
+func (s redisStore) Save(id string, msgs []any) error  { /* json.Marshal + store */ }
+
+agent := toolnexus.CreateClient(toolnexus.ClientOptions{
+    BaseURL: baseURL, Style: toolnexus.StyleOpenAI, Model: model, Store: redisStore{},
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+ConversationStore redisStore = new ConversationStore() {
+    public List<Object> get(String id) { /* load + parse */ }
+    public void save(String id, List<Object> messages) { /* serialize + store */ }
+};
+
+LlmClient agent = LlmClient.create(new LlmClient.Options()
+        .baseUrl(base).style("openai").model(model).store(redisStore));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+public sealed class RedisStore : IConversationStore
+{
+    public Task<List<object?>?> GetAsync(string id) { /* load + deserialize */ }
+    public Task SaveAsync(string id, List<object?> messages) { /* serialize + store */ }
+}
+
+var agent = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = baseUrl, Style = "openai", Model = model, Store = new RedisStore(),
+});
+```
+</TabItem>
+</Tabs>
+
+## Streaming remembers too
+
+The same `id` works on the streaming paths. Pass `on_text` to `ask` to stream assistant deltas while
+`ask` still returns the final result, or use `stream(prompt, { toolkit, id })` to iterate events
+(`text` / `tool_call` / `tool_result` / `usage` / `done`). With an `id`, the thread is loaded before
+streaming and saved on the terminal `done` event.
+
+<Aside type="note" title="Served A2A agents remember by contextId">
+When you [serve your toolkit as an A2A agent](/toolnexus/a2a/), each inbound `SendMessage` is
+fulfilled via `ask(text, id: contextId)` — so a peer's turns are remembered by the A2A `contextId`
+through the *same* store. A message with no `contextId` is a one-shot. Memory is one mechanism,
+whether the caller is your code or another agent.
+</Aside>
+
+## When you'd rather own the transcript
+
+The lower-level `run(prompt, { toolkit, history })` takes an explicit history array, and a stateful
+`client.conversation({ toolkit })` wrapper retains history across `send` calls — both there when you
+want to manage the transcript yourself instead of by `id`.
+
+<LinkButton href="/toolnexus/suspension/" variant="secondary" icon="right-arrow">Memory is also how durable suspension resumes</LinkButton>

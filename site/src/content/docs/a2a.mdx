@@ -1,0 +1,144 @@
+---
+title: A2A — call remote agents, or be one
+description: Point the toolkit at a remote agent-to-agent (A2A) agent and each of its skills becomes a tool; the same toolkit can serve itself as an A2A agent others call. A minimal, verified subset of A2A — outbound and inbound — in all five languages.
+---
+
+import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
+
+An agent is just another tool source. Point toolnexus at a remote **A2A agent** and each of its
+advertised skills becomes a tool (named `<agent>_<skill>`, `source: "a2a"`). The *same* toolkit can
+turn around and **serve itself** as an A2A agent, so other agents — toolnexus or not — can call it.
+
+It's a genuine, minimal subset of real A2A (verified against `a2a-python`): JSON-RPC 2.0, the Agent
+Card at `/.well-known/agent-card.json`, and `SendMessage` → poll `GetTask`. No streaming / push /
+auth in v1.
+
+## Outbound — a remote agent's skills become tools
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createToolkit, agent } from "toolnexus"
+
+const tk = await createToolkit({
+  agents: [agent({ card: "https://peer.example.com/.well-known/agent-card.json" })],
+})
+// each advertised skill is now a tool named <agent>_<skill>, source "a2a"
+
+await tk.addAgent("https://other.example.com/.well-known/agent-card.json")   // or add one at runtime
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_toolkit, agent
+
+tk = await create_toolkit(
+    agents=[agent("https://peer.example.com/.well-known/agent-card.json")],
+)
+
+await tk.add_agent("https://other.example.com/.well-known/agent-card.json")   # or at runtime
+```
+</TabItem>
+<TabItem label="Go">
+```go
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{
+    Agents: []toolnexus.Agent{{Card: "https://peer.example.com/.well-known/agent-card.json"}},
+})
+
+tk.AddAgent(ctx, "https://other.example.com/.well-known/agent-card.json", nil)   // or at runtime
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Toolkit tk = Toolkit.create(new Toolkit.Options()
+        .agents(List.of(A2A.agent("https://peer.example.com/.well-known/agent-card.json", null, null, null))));
+
+tk.addAgent(A2A.agent("https://other.example.com/.well-known/agent-card.json", null, null, null));  // runtime
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Agents = new List<Agent> { new() { Card = "https://peer.example.com/.well-known/agent-card.json" } },
+});
+
+await tk.AddAgentAsync("https://other.example.com/.well-known/agent-card.json");   // or at runtime
+```
+</TabItem>
+</Tabs>
+
+The `agents` block mirrors `mcpServers` — a config list you can also load from a top-level `agents`
+key. Each descriptor takes optional `headers` (`${ENV}` expanded at call time, never logged), a poll
+`timeout`, and `pollEvery` interval.
+
+## Inbound — serve your toolkit as an agent
+
+The other direction: expose *your* toolkit as an A2A agent. The Agent Card is built from your
+`SKILL.md` skills (never raw tools), and each inbound `SendMessage` is fulfilled by a client running
+the tool-calling loop.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const llm = createClient({ baseUrl, style: "openai", model })
+const handle = await tk.serve("127.0.0.1:0", {
+  client: llm,
+  a2a: { name: "my-agent", store: "memory" },   // store: "memory" | "file:<dir>" | your own TaskStore
+})
+// handle.url now speaks A2A; stop with handle.stop()
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import A2AConfig
+
+llm = create_client(base_url=base, style="openai", model=model)
+handle = await tk.serve("127.0.0.1:0", client=llm, a2a=A2AConfig(name="my-agent", store="memory"))
+```
+</TabItem>
+<TabItem label="Go">
+```go
+llm := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: baseURL, Style: toolnexus.StyleOpenAI, Model: model})
+handle, _ := tk.Serve("127.0.0.1:0", toolnexus.ServeOptions{
+    Client: llm,
+    A2A:    &toolnexus.A2AConfig{Name: "my-agent", Store: "memory"},
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+LlmClient llm = LlmClient.create(new LlmClient.Options().baseUrl(base).style("openai").model(model));
+A2AServer.ServeHandle handle = tk.serve("127.0.0.1:0",
+    new Toolkit.ServeOptions().client(llm).a2a(new A2AServer.A2AConfig().name("my-agent")));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var handle = await tk.ServeAsync("127.0.0.1:0", new Toolkit.ServeOptions
+{
+    Client = ClientFor(llm),
+    A2A = new A2AConfig { Name = "my-agent" },
+});
+```
+</TabItem>
+</Tabs>
+
+## Tasks persist through a pluggable store
+
+A served agent fulfils each request as a **Task**. The `store` selects where tasks live:
+`"memory"` (default), `"file:<dir>"`, or your own **TaskStore** (`get(id)` / `save(task)`) — so a
+served agent can survive restarts and be scaled across processes.
+
+<Aside type="note" title="Suspension crosses A2A">
+If a served run [suspends for a human](/toolnexus/suspension/) with no `waitFor`, the A2A layer maps
+it to the A2A `input-required` state (the question in the task's status message) — never a
+`completed` task. So a served toolnexus agent can ask *its caller* a question, and the caller
+resumes it by answering. The human-in-the-loop primitive reaches across the agent boundary.
+</Aside>
+
+Both directions exist in all five ports. The same `serve(...)` can co-mount an
+[MCP server](/toolnexus/mcp/) endpoint, so what you assemble is consumable as an agent *and* as an
+MCP server at once.
+
+<LinkButton href="/toolnexus/demo/" variant="secondary" icon="right-arrow">See an A2A agent in the five-source demo</LinkButton>
