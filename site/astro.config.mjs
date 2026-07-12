@@ -45,6 +45,7 @@ export default defineConfig({
 						{ label: 'Agent skills', slug: 'skills' },
 						{ label: 'Native tools — your functions', slug: 'native' },
 						{ label: 'HTTP / REST tools', slug: 'http' },
+						{ label: 'Built-in tools', slug: 'builtins' },
 						{ label: 'A2A — remote agents', slug: 'a2a' },
 						{ label: 'Suspension & the human loop', slug: 'suspension' },
 					],
@@ -53,6 +54,8 @@ export default defineConfig({
 					label: 'The client & loop',
 					items: [
 						{ label: 'Memory & conversations', slug: 'memory' },
+						{ label: 'Streaming & hooks', slug: 'streaming' },
+						{ label: 'Observability & metrics', slug: 'observability' },
 					],
 				},
 				{

@@ -1,0 +1,100 @@
+---
+title: Observability — metrics & Prometheus
+description: One internal instrumentation, two opt-in outputs — a semantic on_metric event feed you can forward anywhere, and a zero-dependency client.metrics() that renders Prometheus text. No cost when unused, byte-identical across five languages.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+You can't run an agent in production you can't see. toolnexus instruments the loop once and gives you
+**two outputs** from it — both opt-in, both zero-cost when unused.
+
+## The `onMetric` event feed
+
+Pass a sink and it receives a readable, semantic record at each significant point: one `llm` event
+per model call, one `tool` event per tool call, and one terminal `run` event per `run`/`ask`.
+Forward it to statsd, structured logs, or OpenTelemetry — the library holds no opinion.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const client = createClient({
+  baseUrl, style: "openai", model,
+  onMetric: (ev) => {
+    if (ev.event === "run") console.log(`run: ${ev.turns} turns, ${ev.totalTokens} tokens, ${ev.ms}ms`)
+  },
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+def on_metric(ev):
+    if ev["event"] == "run":
+        print(f"run: {ev['turns']} turns, {ev['total_tokens']} tokens, {ev['ms']}ms")
+
+client = create_client(base_url=base, style="openai", model=model, on_metric=on_metric)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+c := toolnexus.CreateClient(toolnexus.ClientOptions{
+    BaseURL: baseURL, Style: toolnexus.StyleOpenAI, Model: model,
+    OnMetric: func(ev toolnexus.MetricEvent) {
+        if ev.Event == "run" {
+            log.Printf("run: %d turns, %d tokens, %dms", ev.Turns, ev.TotalTokens, ev.Ms)
+        }
+    },
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+LlmClient client = LlmClient.create(new LlmClient.Options()
+        .baseUrl(base).style("openai").model(model)
+        .onMetric(ev -> {
+            if ("run".equals(ev.event())) System.out.println("run: " + ev.turns() + " turns");
+        }));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = baseUrl, Style = "openai", Model = model,
+    OnMetric = ev =>
+    {
+        if (ev.Event == "run") Console.WriteLine($"run: {ev.Turns} turns");
+    },
+});
+```
+</TabItem>
+</Tabs>
+
+The three event shapes: `{ event: "llm", model, status, ms, promptTokens, completionTokens }`,
+`{ event: "tool", tool, source, isError, ms, pending? }`, and
+`{ event: "run", model, turns, toolCalls, totalTokens, ms, error? }` — names idiomatic per port
+(snake_case in Python).
+
+## Built-in Prometheus — `client.metrics()`
+
+The *same* events feed a tiny in-memory registry that renders the Prometheus text exposition format
+— **no third-party dependency**. Mount it at `GET /metrics`:
+
+```ts
+// in your HTTP handler:
+res.setHeader("Content-Type", "text/plain")
+res.end(client.metrics())        // client.Metrics() in Go / Java / C#
+```
+
+It exposes `toolnexus_llm_requests_total`, `toolnexus_llm_tokens_total`,
+`toolnexus_tool_calls_total`, plus the `toolnexus_llm_request_duration_seconds` and
+`toolnexus_tool_duration_seconds` histograms.
+
+<Aside type="note">
+The rendered Prometheus text is **byte-identical across all five ports** — same metric names, labels,
+and bucket layout — so a dashboard built against one language works against any of them. OTLP push is
+a planned future companion.
+</Aside>
+
+A suspension is **never** counted as a tool error: its `tool` event carries `isError: false` and a
+`pending: true` marker, so error-rate metrics and circuit-breakers don't trip on a human wait (see
+[Suspension](/toolnexus/suspension/)).

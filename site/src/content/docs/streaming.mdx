@@ -1,0 +1,160 @@
+---
+title: Streaming & hooks
+description: Stream the loop's events live — text deltas, tool calls, results, usage, done — and wrap every tool call with beforeTool/afterTool hooks to rewrite args, deny a call, or redact output. The same shapes across all five languages.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Two ways to get *inside* the loop while it runs: **stream** its events for a live UI, and **hook**
+every tool call to guard, rewrite, or transform it.
+
+## Streaming the loop
+
+`stream` emits events as they happen: `text` (assistant token deltas), `tool_call`, `tool_result`,
+`usage`, `pending` ([a suspension](/toolnexus/suspension/)), and a terminal `done` carrying the final
+result. With an `id` it's stateful, exactly like [`ask`](/toolnexus/memory/) — the thread loads
+first and saves on `done`.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+for await (const ev of client.stream("Summarize the repo.", { toolkit: tk, id: "user-42" })) {
+  if (ev.type === "text") process.stdout.write(ev.delta)
+  else if (ev.type === "tool_call") console.log(`\n→ ${ev.name}`)
+  else if (ev.type === "done") console.log(`\n(${ev.result.turns} turns)`)
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python
+async for ev in client.stream("Summarize the repo.", tk, id="user-42"):
+    if ev["type"] == "text":
+        print(ev["delta"], end="")
+    elif ev["type"] == "tool_call":
+        print(f"\n→ {ev['name']}")
+    elif ev["type"] == "done":
+        print(f"\n({ev['result'].turns} turns)")
+```
+</TabItem>
+<TabItem label="Go">
+```go
+ch, _ := client.StreamWithID(ctx, "Summarize the repo.", tk, "user-42")
+for ev := range ch {
+    switch ev.Type {
+    case "text":
+        fmt.Print(ev.Delta)
+    case "tool_call":
+        fmt.Printf("\n→ %s\n", ev.Name)
+    }
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java
+client.stream("Summarize the repo.", tk, ev -> {
+    if (ev.type() == LlmClient.StreamEvent.Kind.TEXT) System.out.print(ev.delta());
+    else if (ev.type() == LlmClient.StreamEvent.Kind.TOOL_CALL) System.out.println("\n→ " + ev.name());
+}, "user-42");
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+await client.StreamAsync("Summarize the repo.", tk, ev =>
+{
+    if (ev.Type == StreamKind.Text) Console.Write(ev.Delta);
+    else if (ev.Type == StreamKind.ToolCall) Console.WriteLine($"\n→ {ev.Name}");
+}, id: "user-42");
+```
+</TabItem>
+</Tabs>
+
+<Aside type="tip">
+Prefer the final result but still want live text? `ask(prompt, { id, on_text })` streams deltas to a
+callback while still returning the completed `RunResult` — no need to consume the event iterator
+yourself.
+</Aside>
+
+## Hooks — guard and transform every tool call
+
+`beforeTool` runs before a tool executes: return an override with **args** to rewrite the call, or
+with **result** to *short-circuit* it (deny, cache-hit, dry-run — the real tool never runs).
+`afterTool` runs after, and can replace the result (redact, annotate). Here's a policy guard that
+blocks a dangerous `bash`:
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const client = createClient({
+  baseUrl, style: "openai", model,
+  hooks: {
+    beforeTool: ({ name, args }) => {
+      if (name === "bash" && /rm -rf/.test(String(args.command)))
+        return { result: { output: "denied by policy", isError: true } }   // tool never runs
+    },
+    afterTool: ({ result }) => ({ result: { ...result, output: redact(result.output) } }),
+  },
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+def before_tool(ev):
+    if ev["name"] == "bash" and "rm -rf" in str(ev["args"].get("command", "")):
+        return {"result": {"output": "denied by policy", "is_error": True}}   # tool never runs
+
+client = create_client(base_url=base, style="openai", model=model,
+                       hooks={"before_tool": before_tool})
+```
+</TabItem>
+<TabItem label="Go">
+```go
+c := toolnexus.CreateClient(toolnexus.ClientOptions{
+    BaseURL: baseURL, Style: toolnexus.StyleOpenAI, Model: model,
+    Hooks: &toolnexus.Hooks{
+        BeforeTool: func(ctx context.Context, ev toolnexus.BeforeToolEvent) (*toolnexus.ToolOverride, error) {
+            if ev.Name == "bash" && strings.Contains(fmt.Sprint(ev.Args["command"]), "rm -rf") {
+                return &toolnexus.ToolOverride{
+                    Result: &toolnexus.ToolResult{Output: "denied by policy", IsError: true},
+                }, nil   // tool never runs
+            }
+            return nil, nil
+        },
+    },
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+LlmClient.Hooks hooks = new LlmClient.Hooks();
+hooks.beforeTool = ev -> {
+    if ("bash".equals(ev.name()) && String.valueOf(ev.args().get("command")).contains("rm -rf"))
+        return LlmClient.ToolOverride.withResult(new ToolResult("denied by policy", true, null));  // tool never runs
+    return null;
+};
+LlmClient client = LlmClient.create(new LlmClient.Options()
+        .baseUrl(base).style("openai").model(model).hooks(hooks));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var hooks = new LlmClient.Hooks
+{
+    BeforeTool = ev =>
+    {
+        if (ev.Name == "bash" && ev.Args["command"]?.ToString()?.Contains("rm -rf") == true)
+            return LlmClient.ToolOverride.WithResult(new ToolResult("denied by policy", true));  // tool never runs
+        return null;
+    },
+};
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = baseUrl, Style = "openai", Model = model, Hooks = hooks,
+});
+```
+</TabItem>
+</Tabs>
+
+There are `beforeLLM` / `afterLLM` hooks too — `beforeLLM` can trim or inject history and swap the
+tool set before each model call. A `beforeTool` short-circuit that returns a *suspension* is treated
+as a guard-raised pending, not an error — the same [suspension](/toolnexus/suspension/) guarantees
+apply.
