@@ -313,7 +313,7 @@ res = await tk.execute(name, arguments)   # -> ToolResult(output, is_error, meta
 |--------|-----|
 | **MCP servers** | an `mcp.json` (`mcpServers`/`servers`/`mcp`); local stdio + remote streamable-HTTP, `headers` for auth |
 | **Agent skills** | a folder of `<name>/SKILL.md`; a `skill` tool loads each on demand + a system-prompt catalog |
-| **Native tools** | `define_tool(fn)` / the `@tool` decorator — a function becomes a tool |
+| **Native tools** | `define_tool(fn)` — a function becomes a tool (usable directly or as a decorator) |
 | **HTTP / REST** | `http_tool(...)` — an endpoint becomes a tool, `${ENV}` headers |
 
 All four appear as one uniform `Tool` in `tk.tools()`, with `source` in `"mcp" | "skill" | "custom"`.

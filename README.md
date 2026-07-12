@@ -41,7 +41,7 @@ unifies **every tool source** behind one `Tool` interface and drives **any** mod
  │  (SKILL.md)      │  ├────▶│  • skillsPrompt()         │─────▶│ Anthropic    │
  ├──────────────────┤  │     │  • toOpenAI/Anthropic/    │      ├──────────────┤
  │ Native fns       │  │     │    Gemini()               │─────▶│ Gemini       │
- │  (@tool)         │  │     └────────────┬─────────────┘      └──────────────┘
+ │  (defineTool)    │  │     └────────────┬─────────────┘      └──────────────┘
  ├──────────────────┤  │                  ▼
  │ HTTP / OpenAPI   │  │     ┌───────────────────────────────────┐
  │  (url+headers)   │  ├────▶│ UNIFIED CLIENT (host loop):        │
@@ -130,7 +130,7 @@ Everything below surfaces as the same uniform `Tool` — one registry, any model
 |---|--------|--------------|--------------|
 | 1 | **MCP servers** | `mcp.json` | Claude-desktop superset (`mcpServers`/`servers`/`mcp`); local stdio + remote streamable-HTTP/SSE; `${ENV}` header auth; one bad server is isolated, never fatal. |
 | 2 | **Agent skills** | `skills/**/SKILL.md` | One `skill` tool loads each on demand (progressive disclosure) + a system-prompt catalog. Same format as Claude/opencode. |
-| 3 | **Native functions** | `defineTool` / `@tool` | A plain function → a tool; schema inferred from type hints / struct tags. |
+| 3 | **Native functions** | `defineTool` | A plain function → a tool; schema inferred from type hints / struct tags. |
 | 4 | **HTTP / REST** | `httpTool` | Declare an endpoint; `{ph}` URL substitution, `${ENV}` header expansion; OpenAPI import (best-effort). |
 | 5 | **Built-in tools** | on by default | 10 opencode shell/file tools so an agent can *act* with zero wiring (see below). |
 

@@ -428,10 +428,11 @@ Turn a plain function into a `Tool`. Two ergonomic forms per language; both prod
 the same uniform `Tool` (`source: "native"`).
 
 - **JS/TS** — `defineTool({ name, description, inputSchema, run })` where `run(args, ctx)`
-  returns a string or `ToolResult`. (A `@tool` decorator is optional sugar.)
-- **Python** — a `@tool` decorator on a function; the input schema is **inferred**
-  from type hints + the docstring (first line = description). Explicit
-  `@tool(name=..., description=..., input_schema=...)` overrides inference.
+  returns a string or `ToolResult`.
+- **Python** — `define_tool(fn, name=..., description=..., input_schema=...)`, usable
+  directly or as a decorator; the input schema is **inferred** from type hints + the
+  docstring (first line = description). Explicit `name`/`description`/`input_schema`
+  override inference.
 - **Go** — `NativeTool(name, description, inputSchema, func(ctx, args) (string, error))`,
   plus `NativeToolReflect[T](name, desc, func(ctx, T) (string,error))` that derives the
   schema from the struct `T` via `json`/`jsonschema` tags.

@@ -13,7 +13,7 @@ across five languages** (`js/`, `python/`, `golang/`, `java/`, `csharp/`):
 2. **Dynamic agent skills** — glob a `skills/` folder (`**/SKILL.md`) and expose one `skill`
    tool that loads a skill's instructions + resources on demand (progressive disclosure).
 
-The insight: MCP tools, agent skills, your own functions (`@tool`), remote HTTP endpoints, the
+The insight: MCP tools, agent skills, your own functions (`defineTool`), remote HTTP endpoints, the
 built-in shell/file tools, and remote **A2A agents** are *the same thing* to an LLM — a named,
 described, schema'd callable. toolnexus unifies all these tool sources behind one `Tool`
 interface, emits the schema in **OpenAI / Anthropic / Gemini** formats, and ships a **unified
