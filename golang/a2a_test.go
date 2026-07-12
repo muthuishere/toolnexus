@@ -272,8 +272,12 @@ func TestA2ACancelStopsPolling(t *testing.T) {
 	if r.Metadata["state"] != "canceled" {
 		t.Fatalf("metadata.state = %v, want canceled", r.Metadata["state"])
 	}
+	// A GetTask already in flight when cancel fired is abandoned by the client but still
+	// counted by the stub's handler goroutine — let that straggler land first, then assert
+	// no NEW poll starts after cancellation (the real intent; unchanged behavior).
+	time.Sleep(50 * time.Millisecond)
 	afterAbort := atomic.LoadInt64(&seen.getTaskCalls)
-	time.Sleep(60 * time.Millisecond)
+	time.Sleep(80 * time.Millisecond)
 	if got := atomic.LoadInt64(&seen.getTaskCalls); got != afterAbort {
 		t.Fatalf("GetTask calls after abort = %d, want %d (no further polling)", got, afterAbort)
 	}
