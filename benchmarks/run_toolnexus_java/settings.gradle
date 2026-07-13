@@ -1,0 +1,6 @@
+rootProject.name = 'run-toolnexus-java'
+
+// Composite build: compile against the local toolnexus Java port source and
+// pull in all its transitive dependencies (MCP SDK, Jackson, SnakeYAML) without
+// publishing a jar anywhere.
+includeBuild '../../java'
