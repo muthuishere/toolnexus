@@ -8,6 +8,7 @@ the lifetime of the source (released by :meth:`McpSource.close`).
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 import itertools
 import json
@@ -191,16 +192,48 @@ async def _paginate_tools(session: ClientSession) -> list[McpToolDef]:
     raise RuntimeError(f"MCP list exceeded {MAX_LIST_PAGES} pages")
 
 
-def _convert_tool(
-    server: str, defn: McpToolDef, session: ClientSession, timeout: float
-) -> Tool:
+def _build_input_schema(defn: McpToolDef) -> JSONSchema:
+    """Convert a listed MCP tool def's schema: spread the server's schema, then force
+    type:"object", default properties to {}, and additionalProperties:false. Shared by
+    tool conversion (§2) and the list-only inventory (Gap 6)."""
     src_schema = defn.inputSchema or {}
-    input_schema: JSONSchema = {
+    return {
         **src_schema,
         "type": "object",
         "properties": src_schema.get("properties", {}) or {},
         "additionalProperties": False,
     }
+
+
+def apply_tools_filter(
+    server: str, defs: list[McpToolDef], filter: Optional[dict[str, bool]]
+) -> list[McpToolDef]:
+    """Per-server tool allowlist (§2 Gap 7), keyed on the ORIGINAL tool name. Same
+    semantics as the skills/builtins filter: nil/empty ⇒ all; ≥1 True ⇒ allowlist;
+    only-False ⇒ drop-list over all-on; unknown names ignored + warned once. Applied
+    to the listed defs before sanitize/prefix. Mirrors Go ``applyToolsFilter``."""
+    if not filter:
+        return defs
+    has_true = any(v is True for v in filter.values())
+    present = {d.name for d in defs}
+    for k in filter:
+        if k not in present:
+            print(
+                f'[toolnexus] server "{server}" tools filter name "{k}" matched no tool',
+                file=sys.stderr,
+            )
+    out: list[McpToolDef] = []
+    for d in defs:
+        keep = (filter.get(d.name) is True) if has_true else (filter.get(d.name) is not False)
+        if keep:
+            out.append(d)
+    return out
+
+
+def _convert_tool(
+    server: str, defn: McpToolDef, session: ClientSession, timeout: float
+) -> Tool:
+    input_schema: JSONSchema = _build_input_schema(defn)
 
     async def execute(
         args: Optional[dict[str, Any]] = None, ctx: Optional[ToolContext] = None
@@ -313,39 +346,185 @@ async def _connect_session(
     return session
 
 
+async def _safe_aclose(stack: AsyncExitStack) -> None:
+    """Close a nested server stack, tolerating a self-inflicted timeout cancellation
+    (the MCP SDK's anyio transports can leave the task cancelling as they unwind)."""
+    try:
+        await stack.aclose()
+    except BaseException:  # noqa: BLE001 - teardown is best-effort
+        pass
+
+
 async def load_mcp(input: str | dict[str, Any], wait_for: Any = None) -> McpSource:
     """Connect to every enabled server, list + convert tools. Failures are isolated:
-    one bad server records status ``"failed"`` and never breaks the toolkit."""
+    one bad server records status ``"failed"`` and never breaks the toolkit.
+
+    Delegates to :func:`load_mcp_with_context` (parity with Go's ``LoadMcp`` →
+    ``LoadMcpWithContext``); a healthy config behaves byte-identically to before.
+    """
+    return await load_mcp_with_context(input, wait_for=wait_for)
+
+
+async def load_mcp_with_context(
+    input: str | dict[str, Any],
+    wait_for: Any = None,
+    *,
+    cancel: Optional[asyncio.Event] = None,
+) -> McpSource:
+    """Cancellation/timeout-aware MCP load (§2 Gap 3). Mirrors Go
+    ``LoadMcpWithContext``: each server's connect + list is bounded by that server's
+    ``timeout`` (the SSE fallback included — previously unbounded), so a hung endpoint
+    marks only that server ``failed`` and the build continues. A pre-set / fired
+    ``cancel`` :class:`asyncio.Event` (the Python analogue of a parent context being
+    cancelled) aborts the WHOLE load, tears down whatever connected so far, and raises
+    :class:`asyncio.CancelledError`. Per-server failure isolation is unchanged.
+    """
     config = parse_mcp_config(input)
     tools: list[Tool] = []
     status: dict[str, McpStatus] = {}
     stack = AsyncExitStack()
 
+    def _cancelled() -> bool:
+        return cancel is not None and cancel.is_set()
+
+    try:
+        for name, cfg in config.items():
+            if not is_enabled(cfg):
+                status[name] = "disabled"
+                continue
+            # Parent cancellation aborts the whole load (Gap 3, A1).
+            if _cancelled():
+                raise asyncio.CancelledError()
+            timeout = _to_seconds(cfg.get("timeout", DEFAULT_TIMEOUT * 1000))
+            # Each server gets its own nested stack so a failure mid-connect is rolled
+            # back cleanly without tearing down already-connected servers.
+            server_stack = AsyncExitStack()
+            try:
+                # asyncio.timeout bounds connect + init + list (SSE fallback included)
+                # in the CURRENT task, so the anyio transports are entered/exited in the
+                # same task (no cross-task cancel-scope error).
+                async with asyncio.timeout(timeout):
+                    session = await _connect_session(server_stack, name, cfg, wait_for)
+                    defs = await _paginate_tools(session)
+                defs = apply_tools_filter(name, defs, cfg.get("tools"))
+                for defn in defs:
+                    tools.append(_convert_tool(name, defn, session, timeout))
+                # hand the server's lifetime to the parent stack
+                await stack.enter_async_context(server_stack)
+                status[name] = "connected"
+            except asyncio.CancelledError:
+                # A per-server ``asyncio.timeout`` expiry can surface as a bare
+                # CancelledError (leaking from the MCP SDK's anyio cancel scope) instead
+                # of TimeoutError. Distinguish a genuine parent cancellation (the cancel
+                # Event is set) — which aborts the whole load — from a per-server timeout,
+                # which isolates that one server and continues.
+                try:
+                    await _safe_aclose(server_stack)
+                except Exception:  # noqa: BLE001
+                    pass
+                if _cancelled():
+                    raise
+                status[name] = "failed"
+                print(f'[toolnexus] MCP server "{name}" failed: timed out', file=sys.stderr)
+            except (TimeoutError, Exception) as e:  # noqa: BLE001 - isolate failures
+                status[name] = "failed"
+                await _safe_aclose(server_stack)
+                print(
+                    f'[toolnexus] MCP server "{name}" failed: {e}',
+                    file=sys.stderr,
+                )
+    except BaseException:
+        # Whole-load abort (cancellation): release everything connected so far.
+        try:
+            await stack.aclose()
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+
+    return McpSource(tools=tools, status=status, _stack=stack)
+
+
+# ---------------------------------------------------------------------------
+# List-only inventory (§2 Gap 6).
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ToolInfo:
+    """One listed tool definition (original, unprefixed name). Mirrors Go ``ToolInfo``."""
+
+    name: str
+    description: str
+    input_schema: JSONSchema
+
+
+@dataclass
+class McpInventory:
+    """Result of a list-only pass over an MCP config (Gap 6). Mirrors Go ``McpInventory``.
+
+    ``tools`` maps server name → its full listed tool defs, UNFILTERED by the per-server
+    ``tools`` allowlist (it exists to author/validate those filters). ``status`` is the
+    per-server ``connected | disabled | failed``.
+    """
+
+    tools: dict[str, list[ToolInfo]]
+    status: dict[str, McpStatus]
+
+
+async def list_mcp_tools(
+    input: str | dict[str, Any],
+    *,
+    cancel: Optional[asyncio.Event] = None,
+) -> McpInventory:
+    """Connect to every enabled server, list tool definitions, and DISCONNECT before
+    returning — no toolkit, no skills/builtins/agents, no Execute wiring, nothing left
+    running (§2 Gap 6). Cancellation/timeout-aware per Gap 3. Failure isolation as in
+    :func:`load_mcp`: a bad server is status ``failed``, never an error for the whole
+    call. Returns the UNFILTERED tool set (original names) so it can validate the
+    per-server ``tools`` allowlists. Mirrors Go ``ListMcpTools``.
+    """
+    config = parse_mcp_config(input)
+    by_server: dict[str, list[ToolInfo]] = {}
+    status: dict[str, McpStatus] = {}
+
     for name, cfg in config.items():
         if not is_enabled(cfg):
             status[name] = "disabled"
             continue
+        if cancel is not None and cancel.is_set():
+            raise asyncio.CancelledError()
         timeout = _to_seconds(cfg.get("timeout", DEFAULT_TIMEOUT * 1000))
-        # Each server gets its own nested stack so a failure mid-connect is rolled
-        # back cleanly without tearing down already-connected servers.
         server_stack = AsyncExitStack()
         try:
-            session = await _connect_session(server_stack, name, cfg, wait_for)
-            defs = await _paginate_tools(session)
-            for defn in defs:
-                tools.append(_convert_tool(name, defn, session, timeout))
-            # hand the server's lifetime to the parent stack
-            await stack.enter_async_context(server_stack)
+            async with asyncio.timeout(timeout):
+                session = await _connect_session(server_stack, name, cfg, None)
+                defs = await _paginate_tools(session)
+            by_server[name] = [
+                ToolInfo(
+                    name=d.name,
+                    description=d.description or "",
+                    input_schema=_build_input_schema(d),
+                )
+                for d in defs
+            ]
             status[name] = "connected"
-        except Exception as e:  # noqa: BLE001 - isolate failures
+        except asyncio.CancelledError:
+            # Per-server timeout can leak as a bare CancelledError (anyio scope). A set
+            # cancel Event ⇒ genuine parent cancellation (abort); else ⇒ this server
+            # timed out — isolate and continue.
+            await _safe_aclose(server_stack)
+            if cancel is not None and cancel.is_set():
+                raise
             status[name] = "failed"
-            try:
-                await server_stack.aclose()
-            except Exception:  # noqa: BLE001
-                pass
+            print(f'[toolnexus] MCP server "{name}" failed: timed out', file=sys.stderr)
+            continue
+        except (TimeoutError, Exception) as e:  # noqa: BLE001 - isolate failures
+            status[name] = "failed"
             print(
                 f'[toolnexus] MCP server "{name}" failed: {e}',
                 file=sys.stderr,
             )
+        # DISCONNECT before returning — nothing left running.
+        await _safe_aclose(server_stack)
 
-    return McpSource(tools=tools, status=status, _stack=stack)
+    return McpInventory(tools=by_server, status=status)

@@ -25,6 +25,7 @@ import inspect
 import json
 import os
 import random
+import sys
 import threading
 import time
 import urllib.error
@@ -174,6 +175,38 @@ def _post(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: f
     """Blocking JSON POST → parsed dict (raises ``_HttpError`` on HTTP error)."""
     with _open(url, headers, payload, timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+# --------------------------------------------------------------------------- #
+# Gap 2 — injectable HTTP transport for the LLM path.
+# --------------------------------------------------------------------------- #
+#
+# This port drives LLM requests with the standard library (``urllib``) in worker
+# threads, not ``httpx``, so the idiomatic injection point is a small transport
+# object exposing the two workers the loop uses: ``post`` (non-streaming, returns a
+# parsed dict) and ``open`` (streaming, returns a live response with ``read1``/``read``/
+# ``close``). Supply an ``http_transport`` to route the LLM path through a custom
+# implementation (observability, proxying, a recording double in tests); None ⇒ the
+# default urllib transport. Scope is the LLM path only — MCP transports use the MCP
+# SDK's own clients (§8 Gap 2, A5). Mirrors Go's injectable ``*http.Client``.
+class HttpTransport(Protocol):
+    def post(self, url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        """Blocking JSON POST → parsed dict (raise ``_HttpError`` on HTTP error)."""
+        ...
+
+    def open(self, url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float):  # noqa: A003
+        """Open a streaming POST, returning a live response object the caller reads/closes."""
+        ...
+
+
+class UrllibTransport:
+    """Default HTTP transport for the LLM path — stdlib ``urllib`` (today's behavior)."""
+
+    def post(self, url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        return _post(url, headers, payload, timeout)
+
+    def open(self, url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float):  # noqa: A003
+        return _open(url, headers, payload, timeout)
 
 
 def _safe_json(s: Any) -> dict[str, Any]:
@@ -395,6 +428,9 @@ class Client:
         store: Optional[ConversationStore] = None,
         on_metric: Optional[OnMetric] = None,
         wait_for: Optional[WaitFor] = None,
+        request_params: Optional[dict[str, Any]] = None,
+        body_transform: Optional[Callable[[dict[str, Any]], Optional[dict[str, Any]]]] = None,
+        http_transport: Optional[HttpTransport] = None,
     ) -> None:
         self.base_url = base_url
         self.style = style
@@ -407,6 +443,12 @@ class Client:
         self.retries = retries
         self.retry_base_ms = retry_base_ms
         self.timeout_ms = timeout_ms
+        # Gap 1: extra top-level body keys shallow-merged into EVERY LLM body (caller
+        # wins); messages/tools/stream forbidden here. body_transform runs LAST.
+        self.request_params = request_params
+        self.body_transform = body_transform
+        # Gap 2: injectable HTTP transport for the LLM path; None ⇒ default urllib.
+        self._transport: HttpTransport = http_transport if http_transport is not None else UrllibTransport()
         # Conversation provider for ask() — from the `store` arg, else in-memory.
         self.store: ConversationStore = store if store is not None else InMemoryConversationStore()
         # §10 Suspension resolver — when a tool returns Pending, the client calls
@@ -421,6 +463,35 @@ class Client:
         """Prometheus text exposition of cumulative metrics (§8). Always valid, and
         empty-but-valid (HELP/TYPE only) before any activity."""
         return self._registry.render()
+
+    @property
+    def conversation_store(self) -> ConversationStore:
+        """The client's conversation provider (§8 Gap 4) — the exact instance passed as
+        ``store``, else the default in-memory store the client created. Read (``get``)
+        and write (``save``) it directly to share state with :meth:`ask` /
+        :meth:`stream`, so no consumer needs a shadow copy. Mirrors Go
+        ``Client.ConversationStore()``."""
+        return self.store
+
+    def _finalize_body(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Apply the Gap 1 request-shaping contract to an assembled body: strip
+        forbidden keys from ``request_params``, shallow-merge ``request_params`` (caller
+        wins), then run ``body_transform`` last (its return replaces the body; None ⇒
+        unchanged). Called at every LLM body-build site. Mirrors Go ``finalizeBody``."""
+        if self.request_params:
+            for k, v in self.request_params.items():
+                if k in ("messages", "tools", "stream"):
+                    print(
+                        f'[toolnexus] request_params key "{k}" is not allowed — ignored (use body_transform)',
+                        file=sys.stderr,
+                    )
+                    continue
+                body[k] = v
+        if self.body_transform is not None:
+            out = self.body_transform(body)
+            if out is not None:
+                return out
+        return body
 
     def _emit(self, ev: MetricEvent) -> None:
         """Feed a semantic metric event to the built-in registry + the optional sink."""
@@ -722,7 +793,7 @@ class Client:
         tokens + ms). Mirrors JS ``llmCallJson``."""
         t0 = _now()
         try:
-            data = await self._llm_fetch(_post, url, headers, payload, deadline, cancel)
+            data = await self._llm_fetch(self._transport.post, url, headers, payload, deadline, cancel)
             prompt, completion = _per_call(data.get("usage"), style)
             self._emit({"event": "llm", "model": self.model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": prompt, "completion_tokens": completion})
             return data
@@ -853,12 +924,16 @@ class Client:
                             messages = ov["messages"]
                         if ov.get("tools") is not None:
                             tools = ov["tools"]
-                payload = {
+                payload: dict[str, Any] = {
                     "model": self.model,
                     "messages": messages,
-                    "tools": tools,
-                    "tool_choice": "auto",
                 }
+                # Gap 5: omit tools/tool_choice entirely when the effective list is empty
+                # (including after a before_llm override) — many providers 400 on [].
+                if tools:
+                    payload["tools"] = tools
+                    payload["tool_choice"] = "auto"
+                payload = self._finalize_body(payload)
                 data = await self._llm_call_json(url, req_headers, payload, deadline, cancel, "openai")
                 _add_usage(usage, data.get("usage"), "openai")
                 after = _get_hook(self.hooks, "after_llm")
@@ -961,13 +1036,16 @@ class Client:
                             messages = ov["messages"]
                         if ov.get("tools") is not None:
                             tools = ov["tools"]
-                payload = {
+                payload: dict[str, Any] = {
                     "model": self.model,
                     "max_tokens": 4096,
                     "system": system,
                     "messages": messages,
-                    "tools": tools,
                 }
+                # Gap 5: omit tools when the effective list is empty.
+                if tools:
+                    payload["tools"] = tools
+                payload = self._finalize_body(payload)
                 data = await self._llm_call_json(endpoint, req_headers, payload, deadline, cancel, "anthropic")
                 _add_usage(usage, data.get("usage"), "anthropic")
                 after = _get_hook(self.hooks, "after_llm")
@@ -1073,14 +1151,17 @@ class Client:
                             messages = ov["messages"]
                         if ov.get("tools") is not None:
                             tools = ov["tools"]
-                payload = {
+                payload: dict[str, Any] = {
                     "model": self.model,
                     "messages": messages,
-                    "tools": tools,
-                    "tool_choice": "auto",
                     "stream": True,
                     "stream_options": {"include_usage": True},
                 }
+                # Gap 5: omit tools/tool_choice when the effective list is empty.
+                if tools:
+                    payload["tools"] = tools
+                    payload["tool_choice"] = "auto"
+                payload = self._finalize_body(payload)
 
                 t0 = _now()
                 before_p, before_c = usage["prompt_tokens"], usage["completion_tokens"]
@@ -1238,14 +1319,17 @@ class Client:
                             messages = ov["messages"]
                         if ov.get("tools") is not None:
                             tools = ov["tools"]
-                payload = {
+                payload: dict[str, Any] = {
                     "model": self.model,
                     "max_tokens": 4096,
                     "system": system,
                     "messages": messages,
-                    "tools": tools,
                     "stream": True,
                 }
+                # Gap 5: omit tools when the effective list is empty.
+                if tools:
+                    payload["tools"] = tools
+                payload = self._finalize_body(payload)
 
                 t0 = _now()
                 before_p, before_c = usage["prompt_tokens"], usage["completion_tokens"]
@@ -1372,7 +1456,7 @@ class Client:
         """
         loop = asyncio.get_running_loop()
         # Initial connection uses the retrying fetch (retries transient connect errors).
-        resp = await self._llm_fetch(_open, url, headers, payload, deadline, cancel)
+        resp = await self._llm_fetch(self._transport.open, url, headers, payload, deadline, cancel)
 
         queue: asyncio.Queue = asyncio.Queue(maxsize=256)
         _SENTINEL = object()
@@ -1480,6 +1564,9 @@ def create_client(
     store: Optional[ConversationStore] = None,
     on_metric: Optional[OnMetric] = None,
     wait_for: Optional[WaitFor] = None,
+    request_params: Optional[dict[str, Any]] = None,
+    body_transform: Optional[Callable[[dict[str, Any]], Optional[dict[str, Any]]]] = None,
+    http_transport: Optional[HttpTransport] = None,
 ) -> Client:
     return Client(
         base_url=base_url,
@@ -1496,4 +1583,7 @@ def create_client(
         store=store,
         on_metric=on_metric,
         wait_for=wait_for,
+        request_params=request_params,
+        body_transform=body_transform,
+        http_transport=http_transport,
     )

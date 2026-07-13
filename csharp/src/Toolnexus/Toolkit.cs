@@ -37,6 +37,20 @@ public sealed class Toolkit : IAsyncDisposable
         /// <summary>Sibling-file sample cap: 0 ⇒ default 10, n&gt;0 ⇒ cap, -1 ⇒ omit &lt;skill_files&gt; (§3, S5).</summary>
         public int SkillSampleLimit { get; set; }
 
+        /// <summary>
+        /// Drop tools by their FINAL exposed name across every source (MCP <c>server_tool</c>,
+        /// builtins, native, A2A) — the simple "just turn these off" list, applied after aggregation.
+        /// Composes with the per-server/per-skill filters. Empty ⇒ nothing disabled.
+        /// </summary>
+        public IReadOnlyList<string>? DisableTools { get; set; }
+
+        /// <summary>
+        /// Drop skills by name from the <c>skill</c> catalog — sugar over a drop-list folded into
+        /// <see cref="SkillsFilter"/> as <c>false</c> (without overriding an explicit filter entry).
+        /// Empty ⇒ nothing disabled.
+        /// </summary>
+        public IReadOnlyList<string>? DisableSkills { get; set; }
+
         /// <summary>Custom/native/http tools.</summary>
         public List<ITool>? ExtraTools { get; set; }
 
@@ -72,7 +86,7 @@ public sealed class Toolkit : IAsyncDisposable
         public Options WithWaitFor(Func<Request, Task<Answer>> v) { WaitFor = v; return this; }
     }
 
-    private Toolkit(McpSource? mcp, SkillSource? skill, List<ITool> builtins, List<ITool> agents, List<ITool> extraTools, A2AConfig? a2aConfig, MCPServeConfig? mcpServerConfig)
+    private Toolkit(McpSource? mcp, SkillSource? skill, List<ITool> builtins, List<ITool> agents, List<ITool> extraTools, A2AConfig? a2aConfig, MCPServeConfig? mcpServerConfig, IReadOnlyList<string>? disableTools)
     {
         _mcp = mcp;
         _skill = skill;
@@ -89,12 +103,19 @@ public sealed class Toolkit : IAsyncDisposable
         all.AddRange(activeBuiltins);
         all.AddRange(agents);
         all.AddRange(extraTools);
-        foreach (var t in all) Add(t);
+        // DisableTools drops tools by their final exposed name across every source, at aggregation.
+        var disabled = disableTools != null && disableTools.Count > 0 ? new HashSet<string>(disableTools) : null;
+        foreach (var t in all)
+        {
+            if (disabled != null && disabled.Contains(t.Name)) continue;
+            Add(t);
+        }
     }
 
-    public static async Task<Toolkit> CreateAsync(Options opts)
+    public static async Task<Toolkit> CreateAsync(Options opts, CancellationToken cancellationToken = default)
     {
-        var mcp = opts.McpConfig != null ? await McpSource.LoadAsync(opts.McpConfig, opts.WaitFor).ConfigureAwait(false) : null;
+        // §2 Gap 3: the caller's token propagates through the MCP connect/list.
+        var mcp = opts.McpConfig != null ? await McpSource.LoadAsync(opts.McpConfig, opts.WaitFor, cancellationToken).ConfigureAwait(false) : null;
         // Skills come from directories, in-memory data, and/or a lazy provider (§3,
         // S1). The provider is resolved here and merged with the data list; a
         // provider failure is isolated so other sources still load.
@@ -115,11 +136,23 @@ public sealed class Toolkit : IAsyncDisposable
                     Console.Error.WriteLine($"[toolnexus] skill provider failed: {e.Message}");
                 }
             }
+            // DisableSkills is sugar over a drop-list: fold each name into the filter as false
+            // (without overriding an explicit SkillsFilter entry).
+            var filter = opts.SkillsFilter;
+            if (opts.DisableSkills != null && opts.DisableSkills.Count > 0)
+            {
+                var merged = new Dictionary<string, bool>();
+                if (opts.SkillsFilter != null)
+                    foreach (var (k, v) in opts.SkillsFilter) merged[k] = v;
+                foreach (var n in opts.DisableSkills)
+                    if (!merged.ContainsKey(n)) merged[n] = false;
+                filter = merged;
+            }
             skill = SkillSource.LoadWith(new SkillSource.LoadOptions
             {
                 Dirs = opts.SkillsDir,
                 Skills = dataDefs.Count > 0 ? dataDefs : null,
-                Filter = opts.SkillsFilter,
+                Filter = filter,
                 SampleLimit = opts.SkillSampleLimit,
             });
         }
@@ -168,7 +201,7 @@ public sealed class Toolkit : IAsyncDisposable
         if (opts.McpConfig is IDictionary<string, object?> mcpmc && mcpmc.ContainsKey("mcpServer"))
             mcpServerConfig = ParseMcpServeConfig(mcpmc.Get("mcpServer"));
 
-        return new Toolkit(mcp, skill, builtins, agentTools, extras, a2aConfig, mcpServerConfig);
+        return new Toolkit(mcp, skill, builtins, agentTools, extras, a2aConfig, mcpServerConfig, opts.DisableTools);
     }
 
     /// <summary>Coerce a top-level <c>mcpServer</c> config value (an <see cref="MCPServeConfig"/> or a parsed dict) into an <see cref="MCPServeConfig"/>.</summary>

@@ -40,10 +40,14 @@ public sealed class InMemoryConversationStore : IConversationStore
 /// </summary>
 public sealed class LlmClient
 {
-    private static readonly HttpClient Http = new() { Timeout = Timeout.InfiniteTimeSpan };
+    private static readonly HttpClient DefaultHttp = new() { Timeout = Timeout.InfiniteTimeSpan };
     private static readonly HashSet<int> Retryable = new() { 429, 500, 502, 503, 504 };
 
     private readonly Options _opts;
+
+    /// <summary>HTTP client for LLM requests — from <c>opts.HttpClient</c>/<c>opts.HttpHandler</c>, else the
+    /// shared default (§8 Gap 2). LLM path only; MCP transports use their own clients.</summary>
+    private readonly HttpClient _http;
 
     /// <summary>Conversation provider for <see cref="AskAsync"/> — from <c>opts.Store</c>, else in-memory.</summary>
     private readonly IConversationStore _store;
@@ -55,9 +59,49 @@ public sealed class LlmClient
     {
         _opts = opts;
         _store = opts.Store ?? new InMemoryConversationStore();
+        _http = opts.HttpClient
+            ?? (opts.HttpHandler != null
+                ? new HttpClient(opts.HttpHandler, disposeHandler: false) { Timeout = Timeout.InfiniteTimeSpan }
+                : DefaultHttp);
     }
 
     public static LlmClient Create(Options opts) => new(opts);
+
+    /// <summary>
+    /// (§8 Gap 4) The client's conversation provider — the exact instance passed in
+    /// <see cref="Options.Store"/>, else the default in-memory store the client created. Callers may
+    /// read (<c>GetAsync</c>) and write (<c>SaveAsync</c>) it directly to share state with
+    /// <see cref="AskAsync"/>, so no consumer needs a shadow copy.
+    /// </summary>
+    public IConversationStore ConversationStore() => _store;
+
+    /// <summary>
+    /// (§8 Gap 1 + Gap 5) Finalize an assembled request body just before marshal: shallow-merge
+    /// <see cref="Options.RequestParams"/> (caller WINS on collision) after stripping the forbidden
+    /// <c>messages</c>/<c>tools</c>/<c>stream</c> keys, then run <see cref="Options.BodyTransform"/>
+    /// last (returning null ⇒ unchanged). Applied at every LLM body-build site.
+    /// </summary>
+    private Dictionary<string, object?> FinalizeBody(Dictionary<string, object?> body)
+    {
+        if (_opts.RequestParams != null)
+        {
+            foreach (var (k, v) in _opts.RequestParams)
+            {
+                if (k is "messages" or "tools" or "stream")
+                {
+                    Console.Error.WriteLine($"[toolnexus] requestParams key \"{k}\" is not allowed — ignored (use BodyTransform)");
+                    continue;
+                }
+                body[k] = v;
+            }
+        }
+        if (_opts.BodyTransform != null)
+        {
+            var output = _opts.BodyTransform(body);
+            if (output != null) return output is Dictionary<string, object?> d ? d : new Dictionary<string, object?>(output);
+        }
+        return body;
+    }
 
     /// <summary>Prometheus text exposition of cumulative metrics (SPEC §8). Always valid — before any
     /// activity, only the <c># HELP</c>/<c># TYPE</c> lines render.</summary>
@@ -128,7 +172,41 @@ public sealed class LlmClient
         /// </summary>
         public Func<Request, Task<Answer>>? WaitFor { get; set; }
 
+        /// <summary>
+        /// (§8 Gap 1) Extra top-level keys shallow-merged into EVERY LLM request body after the client
+        /// builds its own — a RequestParams key WINS on collision (e.g. <c>max_tokens</c> overrides the
+        /// anthropic default 4096). The keys <c>messages</c>/<c>tools</c>/<c>stream</c> are forbidden here
+        /// (stripped + warned) — rewrite messages via <see cref="BodyTransform"/>. Applied on all four
+        /// paths (run + stream × openai + anthropic). Null ⇒ body byte-identical to today.
+        /// </summary>
+        public IReadOnlyDictionary<string, object?>? RequestParams { get; set; }
+
+        /// <summary>
+        /// (§8 Gap 1) When non-null, receives the fully assembled request body (after the
+        /// <see cref="RequestParams"/> merge) just before marshal and returns the body to send — the
+        /// escape hatch for provider-specific rewriting (including <c>messages</c>) without a proxy.
+        /// Returning null ⇒ unchanged. Runs on every LLM call, all four paths.
+        /// </summary>
+        public Func<IDictionary<string, object?>, IDictionary<string, object?>?>? BodyTransform { get; set; }
+
+        /// <summary>
+        /// (§8 Gap 2) Overrides the HTTP client used for LLM requests (retries included). Null ⇒ default.
+        /// Scope is the LLM path only; MCP transports use the MCP SDK's own clients. Takes precedence
+        /// over <see cref="HttpHandler"/>.
+        /// </summary>
+        public HttpClient? HttpClient { get; set; }
+
+        /// <summary>
+        /// (§8 Gap 2) An <see cref="HttpMessageHandler"/> to build the LLM HTTP client from (e.g. a
+        /// recording/proxying handler). Ignored when <see cref="HttpClient"/> is set. Null ⇒ default.
+        /// </summary>
+        public HttpMessageHandler? HttpHandler { get; set; }
+
         public Options WithWaitFor(Func<Request, Task<Answer>> v) { WaitFor = v; return this; }
+        public Options WithRequestParams(IReadOnlyDictionary<string, object?> v) { RequestParams = v; return this; }
+        public Options WithBodyTransform(Func<IDictionary<string, object?>, IDictionary<string, object?>?> v) { BodyTransform = v; return this; }
+        public Options WithHttpClient(HttpClient v) { HttpClient = v; return this; }
+        public Options WithHttpHandler(HttpMessageHandler v) { HttpHandler = v; return this; }
 
         public Options WithBaseUrl(string v) { BaseUrl = v; return this; }
         public Options WithStyle(string v) { Style = v; return this; }
@@ -495,9 +573,14 @@ public sealed class LlmClient
                 {
                     ["model"] = _opts.Model,
                     ["messages"] = messages,
-                    ["tools"] = tools,
-                    ["tool_choice"] = "auto",
                 };
+                // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
+                if (tools.Count > 0)
+                {
+                    body["tools"] = tools;
+                    body["tool_choice"] = "auto";
+                }
+                body = FinalizeBody(body);
                 var url = StripTrailingSlash(_opts.BaseUrl) + "/chat/completions";
                 var data = await LlmCallJsonAsync(url, BaseHeaders(key, false), body, deadline, external, "openai").ConfigureAwait(false);
                 AddUsage(usage, data.Get("usage") as IDictionary<string, object?>, "openai");
@@ -592,9 +675,11 @@ public sealed class LlmClient
                     ["model"] = _opts.Model,
                     ["max_tokens"] = 4096,
                     ["messages"] = messages,
-                    ["tools"] = tools,
                 };
                 if (system.Length > 0) body["system"] = system;
+                // §8 Gap 5: omit tools when the effective tool list is empty.
+                if (tools.Count > 0) body["tools"] = tools;
+                body = FinalizeBody(body);
 
                 var data = await LlmCallJsonAsync(endpoint, BaseHeaders(key, true), body, deadline, external, "anthropic").ConfigureAwait(false);
                 AddUsage(usage, data.Get("usage") as IDictionary<string, object?>, "anthropic");
@@ -715,11 +800,16 @@ public sealed class LlmClient
                 {
                     ["model"] = _opts.Model,
                     ["messages"] = messages,
-                    ["tools"] = tools,
-                    ["tool_choice"] = "auto",
                     ["stream"] = true,
                     ["stream_options"] = new Dictionary<string, object?> { ["include_usage"] = true },
                 };
+                // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
+                if (tools.Count > 0)
+                {
+                    body["tools"] = tools;
+                    body["tool_choice"] = "auto";
+                }
+                body = FinalizeBody(body);
                 var url = StripTrailingSlash(_opts.BaseUrl) + "/chat/completions";
 
                 var content = new StringBuilder();
@@ -878,10 +968,12 @@ public sealed class LlmClient
                     ["model"] = _opts.Model,
                     ["max_tokens"] = 4096,
                     ["messages"] = messages,
-                    ["tools"] = tools,
                     ["stream"] = true,
                 };
                 if (system.Length > 0) body["system"] = system;
+                // §8 Gap 5: omit tools when the effective tool list is empty.
+                if (tools.Count > 0) body["tools"] = tools;
+                body = FinalizeBody(body);
 
                 var blocks = new Dictionary<int, Dictionary<string, object?>>();
                 var order = new List<int>();
@@ -1112,7 +1204,7 @@ public sealed class LlmClient
             try
             {
                 var completion = streaming ? HttpCompletionOption.ResponseHeadersRead : HttpCompletionOption.ResponseContentRead;
-                var res = await Http.SendAsync(req, completion, cts.Token).ConfigureAwait(false);
+                var res = await _http.SendAsync(req, completion, cts.Token).ConfigureAwait(false);
                 var status = (int)res.StatusCode;
                 if (status is >= 200 and < 300) return res;
                 if (!Retryable.Contains(status) || attempt == retries) return res; // caller handles non-2xx

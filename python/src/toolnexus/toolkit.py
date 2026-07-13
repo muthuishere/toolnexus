@@ -19,7 +19,7 @@ from .mcp_serve import (
     MCPServeConfig,
     OnCall,
 )
-from .mcp_source import McpSource, load_mcp
+from .mcp_source import McpSource, load_mcp_with_context
 from .serve import A2AConfig, OnTask, ServeHandle, start_a2a_server
 from .skill import SkillDef, SkillProvider, SkillSource, load_skills
 from .types import McpStatus, Tool, ToolContext, ToolResult
@@ -38,6 +38,7 @@ class Toolkit:
         extra_tools: list[Tool],
         a2a_config: Optional[A2AConfig] = None,
         mcp_server_config: Optional[MCPServeConfig] = None,
+        disable_tools: Optional[list[str]] = None,
     ) -> None:
         self._mcp = mcp
         self._skill = skill
@@ -61,7 +62,13 @@ class Toolkit:
         all_tools.extend(active_builtins)
         all_tools.extend(agents)
         all_tools.extend(extra_tools)
+        # DisableTools drops tools by their FINAL exposed name across every source
+        # (MCP `server_tool`, builtins, native, a2a), applied at aggregation. Composes
+        # with the per-server/per-skill map filters. Mirrors Go's DisableTools.
+        disabled = set(disable_tools or ())
         for t in all_tools:
+            if t.name in disabled:
+                continue
             if t.name in self._by_name:
                 print(
                     f'[toolnexus] duplicate tool name "{t.name}" — keeping first',
@@ -83,13 +90,18 @@ class Toolkit:
         builtins: Optional[BuiltinsConfig] = None,
         agents: Optional[list[Agent]] = None,
         wait_for: Optional[Any] = None,
+        disable_tools: Optional[list[str]] = None,
+        disable_skills: Optional[list[str]] = None,
+        cancel: Optional[Any] = None,
     ) -> "Toolkit":
         # ``wait_for`` (§10): when set, connected MCP servers may elicit input from the
         # human mid-``tools/call``, bridged onto this resolver (form→kind:"input",
         # URL→kind:"authorization"). Typically the same function passed to the client.
         # Omit ⇒ MCP elicitation is not advertised.
+        # ``cancel`` (§2 Gap 3): an optional asyncio.Event; when set it aborts the whole
+        # MCP load (the Python analogue of a cancelled parent context).
         mcp = (
-            await load_mcp(mcp_config, wait_for=wait_for)
+            await load_mcp_with_context(mcp_config, wait_for=wait_for, cancel=cancel)
             if mcp_config is not None
             else None
         )
@@ -110,10 +122,18 @@ class Toolkit:
                     print(f"[toolnexus] skill provider failed: {e}", file=sys.stderr)
                     provider_defs = []
             data_defs = list(skills or []) + provider_defs
+            # DisableSkills is sugar over a drop-list: fold each name into the filter as
+            # False (without overriding an explicit skills_filter entry). Mirrors Go.
+            eff_filter = skills_filter
+            if disable_skills:
+                merged = dict(skills_filter or {})
+                for n in disable_skills:
+                    merged.setdefault(n, False)
+                eff_filter = merged
             skill = load_skills(
                 skills_dir,
                 skills=data_defs or None,
-                filter=skills_filter,
+                filter=eff_filter,
                 sample_limit=skill_sample_limit,
             )
         # The toggle comes from the `builtins` option, or a top-level `builtins`
@@ -168,6 +188,7 @@ class Toolkit:
             extra_tools or [],
             a2a_config,
             mcp_server_config,
+            disable_tools=disable_tools,
         )
 
     def register(self, *tools: Tool) -> "Toolkit":
@@ -308,6 +329,9 @@ async def create_toolkit(
     builtins: Optional[BuiltinsConfig] = None,
     agents: Optional[list[Agent]] = None,
     wait_for: Optional[Any] = None,
+    disable_tools: Optional[list[str]] = None,
+    disable_skills: Optional[list[str]] = None,
+    cancel: Optional[Any] = None,
 ) -> Toolkit:
     """Async factory. The returned Toolkit is also an async context manager.
 
@@ -315,6 +339,11 @@ async def create_toolkit(
     ``{"disabled": True}`` / ``{"enabled": False}`` to turn the whole source off.
     Remote A2A agents (§7A) are supplied via ``agents=[agent(...), ...]`` and/or a
     top-level ``agents`` block on a parsed config dict.
+
+    ``disable_tools`` drops tools by their final exposed name across every source;
+    ``disable_skills`` drops skills by name from the ``skill`` catalog (both compose
+    with the per-server/per-skill map filters). ``cancel`` is an optional
+    :class:`asyncio.Event` propagated into the MCP load (§2 Gap 3).
     """
     return await Toolkit.create(
         mcp_config=mcp_config,
@@ -327,4 +356,7 @@ async def create_toolkit(
         builtins=builtins,
         agents=agents,
         wait_for=wait_for,
+        disable_tools=disable_tools,
+        disable_skills=disable_skills,
+        cancel=cancel,
     )
