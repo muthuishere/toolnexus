@@ -47,6 +47,30 @@ public final class McpSource implements AutoCloseable {
     private final Map<String, String> status; // server -> "connected" | "disabled" | "failed"
     private final List<McpSyncClient> clients;
 
+    /**
+     * §2 Gap 3: a cooperative cancellation signal for {@link #load} / {@link #listMcpTools}. Java's
+     * MCP transports are not {@code Context}-aware, so this is the port's idiom for the caller's
+     * cancel/deadline: each per-server connect+list is bounded by the server {@code timeout} (marking
+     * only that server {@code failed} within budget), and a {@code cancelled()} signal aborts the whole
+     * load promptly with a {@link java.util.concurrent.CancellationException}. Mirrors Go's
+     * {@code LoadMcpWithContext} parent-ctx behavior (ADR A1).
+     */
+    @FunctionalInterface
+    public interface CancelSignal {
+        boolean cancelled();
+    }
+
+    /** §2 Gap 6: one listed tool definition (original, unprefixed name). */
+    public record ToolInfo(String name, String description, Map<String, Object> inputSchema) {}
+
+    /**
+     * §2 Gap 6: the result of a list-only pass over an MCP config. {@code tools} maps server name →
+     * its full listed tool defs, UNFILTERED by the per-server {@code tools} allowlist (Gap 7) — the
+     * inventory exists to author/validate those filters. {@code status} is per server:
+     * {@code connected | disabled | failed}.
+     */
+    public record McpInventory(Map<String, List<ToolInfo>> tools, Map<String, String> status) {}
+
     // -----------------------------------------------------------------------
     // MCP elicitation bridge (§10). A server can ask US for input mid-`tools/call`
     // (a reverse-request). We map it onto the one `waitFor`: form mode → kind:"input",
@@ -216,8 +240,19 @@ public final class McpSource implements AutoCloseable {
      * onto the one §10 {@code waitFor} (form→kind:"input", URL→kind:"authorization").
      * A {@code null} {@code waitFor} degrades cleanly — the capability is not advertised.
      */
-    @SuppressWarnings("unchecked")
     public static McpSource load(Object input, Function<Request, Answer> waitFor) {
+        return load(input, waitFor, null);
+    }
+
+    /**
+     * §2 Gap 3: cancellation/timeout-aware load. Each per-server connect+list is bounded by the
+     * server {@code timeout} (a per-server timeout within budget marks only that server
+     * {@code failed} and the build continues); a {@code cancel} signal aborts the whole load promptly
+     * and throws {@link java.util.concurrent.CancellationException} (mirrors Go's parent-ctx abort,
+     * ADR A1). A {@code null} {@code cancel} ⇒ today's behavior (join every server).
+     */
+    @SuppressWarnings("unchecked")
+    public static McpSource load(Object input, Function<Request, Answer> waitFor, CancelSignal cancel) {
         Map<String, Object> config = parseConfig(input);
         List<Tool> tools = new ArrayList<>();
         Map<String, String> status = new LinkedHashMap<>();
@@ -259,7 +294,9 @@ public final class McpSource implements AutoCloseable {
                     }
                     client = spec.build();
                     client.initialize();
-                    List<McpSchema.Tool> defs = paginateTools(client);
+                    // §2 Gap 7: apply the per-server tool allowlist (keyed on ORIGINAL name) to the
+                    // listed defs BEFORE sanitize/prefix, same semantics as the builtins/skills filter.
+                    List<McpSchema.Tool> defs = applyToolsFilter(name, paginateTools(client), toolsFilterOf(cfg));
                     List<Tool> converted = new ArrayList<>();
                     for (McpSchema.Tool def : defs) {
                         converted.add(convertTool(name, def, client, timeout));
@@ -282,18 +319,183 @@ public final class McpSource implements AutoCloseable {
                     System.err.println("[toolnexus] MCP server \"" + name + "\" failed: " + e.getMessage());
                 }
             }, "toolnexus-mcp-" + name);
+            th.setDaemon(true);
             threads.add(th);
             th.start();
         }
-        for (Thread th : threads) {
-            try {
-                th.join();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+        try {
+            awaitOrCancel(threads, cancel);
+        } catch (java.util.concurrent.CancellationException ce) {
+            // Parent-ctx cancel: release any already-connected clients before surfacing (ADR A1).
+            synchronized (lock) {
+                for (McpSyncClient c : clients) {
+                    try {
+                        c.closeGracefully();
+                    } catch (Exception ignored) {
+                    }
+                }
             }
+            throw ce;
         }
 
         return new McpSource(tools, status, clients);
+    }
+
+    /**
+     * §2 Gap 6: connect to every enabled server, list tool definitions, and DISCONNECT before
+     * returning — no toolkit, no Execute wiring, nothing left running. UNFILTERED by the per-server
+     * {@code tools} allowlist (Gap 7): the inventory exists to author/validate those filters. Failure
+     * isolation as in {@link #load} (a bad server is {@code failed}, never an error for the whole call);
+     * cancellation/timeout per Gap 3.
+     */
+    public static McpInventory listMcpTools(Object input) {
+        return listMcpTools(input, null);
+    }
+
+    /** §2 Gap 6 with a Gap 3 cancellation signal. See {@link #listMcpTools(Object)}. */
+    @SuppressWarnings("unchecked")
+    public static McpInventory listMcpTools(Object input, CancelSignal cancel) {
+        Map<String, Object> config = parseConfig(input);
+        Map<String, List<ToolInfo>> byServer = new LinkedHashMap<>();
+        Map<String, String> status = new LinkedHashMap<>();
+        List<Thread> threads = new ArrayList<>();
+        Object lock = new Object();
+        for (Map.Entry<String, Object> entry : config.entrySet()) {
+            String name = entry.getKey();
+            if (!(entry.getValue() instanceof Map)) {
+                continue;
+            }
+            Map<String, Object> cfg = (Map<String, Object>) entry.getValue();
+            Thread th = new Thread(() -> {
+                if (!isEnabled(cfg)) {
+                    synchronized (lock) {
+                        status.put(name, "disabled");
+                    }
+                    return;
+                }
+                long timeout = timeoutOf(cfg);
+                McpSyncClient client = null;
+                try {
+                    McpClientTransport transport = isRemote(cfg)
+                            ? buildRemoteTransport(cfg)
+                            : buildLocalTransport(cfg);
+                    client = McpClient.sync(transport)
+                            .requestTimeout(Duration.ofMillis(timeout))
+                            .initializationTimeout(Duration.ofMillis(timeout))
+                            .clientInfo(new McpSchema.Implementation("toolnexus", "0.1.0"))
+                            .build();
+                    client.initialize();
+                    List<McpSchema.Tool> defs = paginateTools(client);
+                    List<ToolInfo> infos = new ArrayList<>();
+                    for (McpSchema.Tool def : defs) {
+                        infos.add(new ToolInfo(def.name(),
+                                def.description() == null ? "" : def.description(),
+                                normalizeSchema(def)));
+                    }
+                    synchronized (lock) {
+                        byServer.put(name, infos);
+                        status.put(name, "connected");
+                    }
+                } catch (Exception e) {
+                    synchronized (lock) {
+                        status.put(name, "failed");
+                    }
+                    System.err.println("[toolnexus] MCP server \"" + name + "\" failed: " + e.getMessage());
+                } finally {
+                    // list-only: disconnect immediately, nothing is left running.
+                    if (client != null) {
+                        try {
+                            client.closeGracefully();
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+            }, "toolnexus-mcp-list-" + name);
+            th.setDaemon(true);
+            threads.add(th);
+            th.start();
+        }
+        awaitOrCancel(threads, cancel);
+        return new McpInventory(byServer, status);
+    }
+
+    /**
+     * §2 Gap 7: per-server tool allowlist keyed on ORIGINAL tool name. Same semantics as the
+     * builtins/skills filter: {@code null}/empty ⇒ all tools; ≥1 {@code true} ⇒ allowlist (only
+     * true names load); only {@code false} entries ⇒ drop-list over the all-on baseline; unknown
+     * names are ignored + warned once. Mirrors Go {@code applyToolsFilter}.
+     */
+    static List<McpSchema.Tool> applyToolsFilter(String server, List<McpSchema.Tool> defs,
+                                                 Map<String, Boolean> filter) {
+        if (filter == null || filter.isEmpty()) return defs;
+        boolean hasTrue = filter.values().stream().anyMatch(Boolean.TRUE::equals);
+        Set<String> present = new HashSet<>();
+        for (McpSchema.Tool d : defs) present.add(d.name());
+        for (String k : filter.keySet()) {
+            if (!present.contains(k)) {
+                System.err.println("[toolnexus] server \"" + server + "\" tools filter name \""
+                        + k + "\" matched no tool");
+            }
+        }
+        List<McpSchema.Tool> out = new ArrayList<>();
+        for (McpSchema.Tool d : defs) {
+            Boolean v = filter.get(d.name());
+            boolean keep = hasTrue ? Boolean.TRUE.equals(v) : !Boolean.FALSE.equals(v);
+            if (keep) out.add(d);
+        }
+        return out;
+    }
+
+    /** Read the per-server {@code tools} allowlist (Gap 7) from a server config, coercing to booleans. */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Boolean> toolsFilterOf(Map<String, Object> cfg) {
+        Object t = cfg.get("tools");
+        if (!(t instanceof Map)) return null;
+        Map<String, Object> raw = (Map<String, Object>) t;
+        Map<String, Boolean> out = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> e : raw.entrySet()) {
+            out.put(e.getKey(), Boolean.TRUE.equals(e.getValue()));
+        }
+        return out;
+    }
+
+    /**
+     * Wait for every worker thread. When {@code cancel} is null this is a plain join; otherwise it
+     * polls the signal and, on cancellation, interrupts the workers and throws
+     * {@link java.util.concurrent.CancellationException} (§2 Gap 3). Abandoned workers are daemon and
+     * fall away on their own per-server timeout.
+     */
+    private static void awaitOrCancel(List<Thread> threads, CancelSignal cancel) {
+        if (cancel == null) {
+            for (Thread th : threads) {
+                try {
+                    th.join();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return;
+        }
+        while (true) {
+            boolean allDone = true;
+            for (Thread th : threads) {
+                if (th.isAlive()) {
+                    allDone = false;
+                    break;
+                }
+            }
+            if (allDone) return;
+            if (cancel.cancelled()) {
+                for (Thread th : threads) th.interrupt();
+                throw new java.util.concurrent.CancellationException("MCP load cancelled");
+            }
+            try {
+                Thread.sleep(20);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -392,7 +594,11 @@ public final class McpSource implements AutoCloseable {
         throw new RuntimeException("MCP list exceeded " + MAX_LIST_PAGES + " pages");
     }
 
-    private static Tool convertTool(String server, McpSchema.Tool def, McpSyncClient client, long timeout) {
+    /**
+     * Normalize an MCP tool def's inputSchema: force {@code type:object}, default
+     * {@code properties:{}}, {@code additionalProperties:false}. Mirrors the JS/Go reference.
+     */
+    private static Map<String, Object> normalizeSchema(McpSchema.Tool def) {
         Map<String, Object> base = def.inputSchema() == null
                 ? new LinkedHashMap<>()
                 : new LinkedHashMap<>(def.inputSchema());
@@ -400,7 +606,11 @@ public final class McpSource implements AutoCloseable {
         Object props = base.get("properties");
         base.put("properties", props == null ? new LinkedHashMap<>() : props);
         base.put("additionalProperties", false);
-        final Map<String, Object> inputSchema = base;
+        return base;
+    }
+
+    private static Tool convertTool(String server, McpSchema.Tool def, McpSyncClient client, long timeout) {
+        final Map<String, Object> inputSchema = normalizeSchema(def);
         final String description = def.description() == null ? "" : def.description();
         final String toolName = Tool.sanitize(server) + "_" + Tool.sanitize(def.name());
         final String mcpName = def.name();

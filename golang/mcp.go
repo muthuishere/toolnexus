@@ -112,6 +112,11 @@ type ServerConfig struct {
 	Enabled     *bool             `json:"enabled"`
 	Disabled    *bool             `json:"disabled"`
 	Timeout     int               `json:"timeout"` // milliseconds
+	// Tools (§2 Gap 7) is a per-server tool allowlist keyed on ORIGINAL tool name;
+	// same semantics as the builtins/skills filter (nil/empty ⇒ all; ≥1 true ⇒
+	// allowlist; only-false ⇒ drop-list; unknown ⇒ ignore+warn). Applied to the
+	// listed defs before sanitize/prefix.
+	Tools map[string]bool `json:"tools"`
 }
 
 // McpConfig maps server name -> config.
@@ -336,15 +341,53 @@ func (m *McpSource) Close() {
 	}
 }
 
-func connectServer(name string, cfg ServerConfig, waitFor func(Request) (Answer, error)) (*mcpclient.Client, error) {
+// applyToolsFilter (§2 Gap 7) applies a per-server tool allowlist to the listed
+// defs. Same semantics as the builtins/skills filter. Keyed on ORIGINAL tool name.
+func applyToolsFilter(server string, defs []mcp.Tool, filter map[string]bool) []mcp.Tool {
+	if len(filter) == 0 {
+		return defs
+	}
+	hasTrue := false
+	for _, v := range filter {
+		if v {
+			hasTrue = true
+			break
+		}
+	}
+	present := map[string]bool{}
+	for _, d := range defs {
+		present[d.Name] = true
+	}
+	for k := range filter {
+		if !present[k] {
+			log.Printf("[toolnexus] server %q tools filter name %q matched no tool", server, k)
+		}
+	}
+	out := make([]mcp.Tool, 0, len(defs))
+	for _, d := range defs {
+		v, ok := filter[d.Name]
+		keep := false
+		if hasTrue {
+			keep = ok && v
+		} else {
+			keep = !(ok && !v)
+		}
+		if keep {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+func connectServer(ctx context.Context, name string, cfg ServerConfig, waitFor func(Request) (Answer, error)) (*mcpclient.Client, error) {
 	timeout := cfg.timeout()
 
 	if cfg.isRemote() {
-		client, err := newRemoteClient(cfg, waitFor)
+		client, err := newRemoteClient(ctx, cfg, waitFor)
 		if err != nil {
 			return nil, err
 		}
-		if err := initClient(client, timeout); err != nil {
+		if err := initClient(ctx, client, timeout); err != nil {
 			client.Close()
 			return nil, err
 		}
@@ -374,18 +417,21 @@ func connectServer(name string, cfg ServerConfig, waitFor func(Request) (Answer,
 	// Build the transport + client directly (instead of the NewStdioMCPClientWithOptions
 	// convenience) so the elicitation handler can be attached when a waitFor is present.
 	stdioTransport := transport.NewStdioWithOptions(cfg.Command[0], env, cfg.Command[1:], opts...)
-	if err := stdioTransport.Start(context.Background()); err != nil {
+	startCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := stdioTransport.Start(startCtx); err != nil {
 		return nil, fmt.Errorf("failed to start stdio transport: %w", err)
 	}
 	client := mcpclient.NewClient(stdioTransport, elicitationOptions(waitFor)...)
-	if err := initClient(client, timeout); err != nil {
+	if err := initClient(ctx, client, timeout); err != nil {
 		client.Close()
 		return nil, err
 	}
 	return client, nil
 }
 
-func newRemoteClient(cfg ServerConfig, waitFor func(Request) (Answer, error)) (*mcpclient.Client, error) {
+func newRemoteClient(ctx context.Context, cfg ServerConfig, waitFor func(Request) (Answer, error)) (*mcpclient.Client, error) {
+	timeout := cfg.timeout()
 	// Expand ${ENV_VAR} in header values so tokens live in the environment, not
 	// the committed config. Values are never logged.
 	headers := ExpandEnvHeaders(cfg.Headers)
@@ -404,7 +450,10 @@ func newRemoteClient(cfg ServerConfig, waitFor func(Request) (Answer, error)) (*
 			clientOpts = append(clientOpts, mcpclient.WithSession())
 		}
 		httpClient := mcpclient.NewClient(httpTransport, clientOpts...)
-		if startErr := httpClient.Start(context.Background()); startErr == nil {
+		httpStartCtx, httpCancel := context.WithTimeout(ctx, timeout)
+		startErr := httpClient.Start(httpStartCtx)
+		httpCancel()
+		if startErr == nil {
 			return httpClient, nil
 		} else {
 			httpClient.Close()
@@ -421,15 +470,21 @@ func newRemoteClient(cfg ServerConfig, waitFor func(Request) (Answer, error)) (*
 		return nil, fmt.Errorf("streamable-http failed (%v) and sse setup failed: %w", err, sseErr)
 	}
 	sseClient := mcpclient.NewClient(sseTransport, elicitationOptions(waitFor)...)
-	if startErr := sseClient.Start(context.Background()); startErr != nil {
+	// §2 Gap 3: the SSE fallback start gains the same timeout bound it previously
+	// lacked (was context.Background() with no deadline — a hung endpoint blocked
+	// the whole load unboundedly).
+	sseStartCtx, sseCancel := context.WithTimeout(ctx, timeout)
+	startErr := sseClient.Start(sseStartCtx)
+	sseCancel()
+	if startErr != nil {
 		sseClient.Close()
 		return nil, fmt.Errorf("streamable-http failed (%v) and sse start failed: %w", err, startErr)
 	}
 	return sseClient, nil
 }
 
-func initClient(client *mcpclient.Client, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+func initClient(ctx context.Context, client *mcpclient.Client, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req := mcp.InitializeRequest{}
 	req.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
@@ -438,8 +493,8 @@ func initClient(client *mcpclient.Client, timeout time.Duration) error {
 	return err
 }
 
-func listTools(client *mcpclient.Client, timeout time.Duration) ([]mcp.Tool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+func listTools(ctx context.Context, client *mcpclient.Client, timeout time.Duration) ([]mcp.Tool, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	// ListTools follows nextCursor pagination internally.
 	res, err := client.ListTools(ctx, mcp.ListToolsRequest{})
@@ -454,6 +509,16 @@ func listTools(client *mcpclient.Client, timeout time.Duration) ([]mcp.Tool, err
 // waitFor is given, connected clients advertise the elicitation capability and
 // bridge server elicitation mid-`tools/call` onto it (§10); omit ⇒ not advertised.
 func LoadMcp(input any, waitFor ...func(Request) (Answer, error)) (*McpSource, error) {
+	return LoadMcpWithContext(context.Background(), input, waitFor...)
+}
+
+// LoadMcpWithContext (§2 Gap 3) is the context-aware entry point. The caller's
+// ctx propagates through connect, initialize, and list (and bounds the SSE
+// fallback start); a per-server timeout within budget marks only that server
+// failed and the build continues, but parent-ctx cancellation/deadline aborts the
+// whole load and returns ctx.Err(). LoadMcp keeps its signature and delegates here
+// with context.Background().
+func LoadMcpWithContext(ctx context.Context, input any, waitFor ...func(Request) (Answer, error)) (*McpSource, error) {
 	config, err := ParseMcpConfig(input)
 	if err != nil {
 		return nil, err
@@ -480,7 +545,7 @@ func LoadMcp(input any, waitFor ...func(Request) (Answer, error)) (*McpSource, e
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			client, cErr := connectServer(name, cfg, wf)
+			client, cErr := connectServer(ctx, name, cfg, wf)
 			if cErr != nil {
 				mu.Lock()
 				status[name] = StatusFailed
@@ -488,7 +553,7 @@ func LoadMcp(input any, waitFor ...func(Request) (Answer, error)) (*McpSource, e
 				log.Printf("[toolnexus] MCP server %q failed: %v", name, cErr)
 				return
 			}
-			defs, lErr := listTools(client, cfg.timeout())
+			defs, lErr := listTools(ctx, client, cfg.timeout())
 			if lErr != nil {
 				client.Close()
 				mu.Lock()
@@ -497,6 +562,7 @@ func LoadMcp(input any, waitFor ...func(Request) (Answer, error)) (*McpSource, e
 				log.Printf("[toolnexus] MCP server %q list tools failed: %v", name, lErr)
 				return
 			}
+			defs = applyToolsFilter(name, defs, cfg.Tools)
 			converted := make([]Tool, 0, len(defs))
 			for _, def := range defs {
 				converted = append(converted, convertTool(name, def, client, cfg.timeout()))
@@ -510,6 +576,14 @@ func LoadMcp(input any, waitFor ...func(Request) (Answer, error)) (*McpSource, e
 	}
 	wg.Wait()
 
+	// Parent cancellation/deadline aborts the whole build (§2 Gap 3, A1).
+	if ctx.Err() != nil {
+		for _, c := range clients {
+			_ = c.Close()
+		}
+		return nil, ctx.Err()
+	}
+
 	return &McpSource{
 		Tools:  tools,
 		Status: status,
@@ -519,4 +593,77 @@ func LoadMcp(input any, waitFor ...func(Request) (Answer, error)) (*McpSource, e
 			}
 		},
 	}, nil
+}
+
+// ToolInfo (§2 Gap 6) is one listed tool definition (original, unprefixed name).
+type ToolInfo struct {
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	InputSchema JSONSchema `json:"inputSchema"`
+}
+
+// McpInventory (§2 Gap 6) is the result of a list-only pass over an MCP config.
+type McpInventory struct {
+	// Tools maps server name → its full listed tool defs, UNFILTERED by
+	// ServerConfig.Tools (it exists to author/validate those allowlists).
+	Tools  map[string][]ToolInfo `json:"tools"`
+	Status map[string]McpStatus  `json:"status"`
+}
+
+// ListMcpTools (§2 Gap 6) connects to every enabled server in the config, lists
+// tool definitions, and DISCONNECTS before returning — no toolkit, no Execute
+// wiring, nothing left running. ctx-aware per Gap 3. Failure isolation as in
+// LoadMcp: a bad server is Status failed, never an error for the whole call.
+func ListMcpTools(ctx context.Context, input any) (*McpInventory, error) {
+	config, err := ParseMcpConfig(input)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		mu       sync.Mutex
+		byServer = map[string][]ToolInfo{}
+		status   = map[string]McpStatus{}
+		wg       sync.WaitGroup
+	)
+	for name, cfg := range config {
+		name, cfg := name, cfg
+		if !cfg.isEnabled() {
+			status[name] = StatusDisabled
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			client, cErr := connectServer(ctx, name, cfg, nil)
+			if cErr != nil {
+				mu.Lock()
+				status[name] = StatusFailed
+				mu.Unlock()
+				log.Printf("[toolnexus] MCP server %q failed: %v", name, cErr)
+				return
+			}
+			defs, lErr := listTools(ctx, client, cfg.timeout())
+			client.Close()
+			if lErr != nil {
+				mu.Lock()
+				status[name] = StatusFailed
+				mu.Unlock()
+				log.Printf("[toolnexus] MCP server %q list tools failed: %v", name, lErr)
+				return
+			}
+			infos := make([]ToolInfo, 0, len(defs))
+			for _, def := range defs {
+				infos = append(infos, ToolInfo{Name: def.Name, Description: def.Description, InputSchema: buildInputSchema(def)})
+			}
+			mu.Lock()
+			byServer[name] = infos
+			status[name] = StatusConnected
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return &McpInventory{Tools: byServer, Status: status}, nil
 }

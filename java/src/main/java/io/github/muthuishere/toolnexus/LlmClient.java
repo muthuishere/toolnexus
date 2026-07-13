@@ -63,6 +63,21 @@ public final class LlmClient {
          * NOT hang: {@link #run} returns {@code status="pending"} + the {@code pending} request so a
          * durable host can resolve it out-of-band and resume by calling {@code run} again later. */
         public Function<Request, Answer> waitFor; // optional; null = durable/halt posture
+        /** §8 Gap 1: extra top-level keys shallow-merged into EVERY LLM request body after the
+         * client builds its own — a {@code requestParams} key WINS on collision (e.g. {@code max_tokens}
+         * overrides the anthropic default 4096). The keys {@code messages}/{@code tools}/{@code stream}
+         * are forbidden here (stripped + warned) — rewrite messages via {@link #bodyTransform}. Applied
+         * on all four paths (run/stream × openai/anthropic). Null ⇒ body byte-identical. */
+        public Map<String, Object> requestParams; // optional; null = no change
+        /** §8 Gap 1: when non-null, receives the fully assembled request body (AFTER the
+         * {@code requestParams} merge) just before marshal and returns the body to send — the escape
+         * hatch for provider-specific rewriting (e.g. tool-role preprocessing) without a proxy.
+         * Returning null ⇒ unchanged. Runs on every LLM call, all four paths. */
+        public Function<Map<String, Object>, Map<String, Object>> bodyTransform; // optional; null = no transform
+        /** §8 Gap 2: overrides the {@link HttpClient} used for LLM requests (retries included).
+         * Null ⇒ the shared default client. Scope is the LLM path only; MCP transports use their own
+         * clients. */
+        public HttpClient httpClient; // optional; null = default
 
         public Options baseUrl(String v) { this.baseUrl = v; return this; }
         public Options style(String v) { this.style = v; return this; }
@@ -78,6 +93,9 @@ public final class LlmClient {
         public Options store(ConversationStore v) { this.store = v; return this; }
         public Options onMetric(Consumer<MetricEvent> v) { this.onMetric = v; return this; }
         public Options waitFor(Function<Request, Answer> v) { this.waitFor = v; return this; }
+        public Options requestParams(Map<String, Object> v) { this.requestParams = v; return this; }
+        public Options bodyTransform(Function<Map<String, Object>, Map<String, Object>> v) { this.bodyTransform = v; return this; }
+        public Options httpClient(HttpClient v) { this.httpClient = v; return this; }
     }
 
     // ------------------------------------------------------------------
@@ -453,12 +471,49 @@ public final class LlmClient {
     private final Options opts;
     /** Conversation provider for {@link #ask} — from {@code opts.store}, else in-memory. */
     private final ConversationStore store;
+    /** §8 Gap 2: HTTP client for LLM requests — from {@code opts.httpClient}, else the shared default. */
+    private final HttpClient http;
     /** Cumulative Prometheus registry fed by the same events {@code onMetric} sees. */
     private final MetricsRegistry registry = new MetricsRegistry();
 
     private LlmClient(Options opts) {
         this.opts = opts;
         this.store = opts.store != null ? opts.store : new InMemoryConversationStore();
+        this.http = opts.httpClient != null ? opts.httpClient : HTTP;
+    }
+
+    /**
+     * §8 Gap 4: the client's conversation provider — the exact instance passed in
+     * {@code Options.store}, else the default in-memory store the client created. Callers may read
+     * ({@link ConversationStore#get}) and write ({@link ConversationStore#save}) it directly to share
+     * state with {@link #ask}, so no consumer needs a shadow copy.
+     */
+    public ConversationStore conversationStore() {
+        return store;
+    }
+
+    /**
+     * §8 Gap 1: apply the request-shaping contract to an assembled body — strip forbidden keys from
+     * {@code requestParams}, shallow-merge {@code requestParams} (caller wins), then run
+     * {@code bodyTransform} last. Called at every LLM body-build site (run/stream × openai/anthropic).
+     */
+    private Map<String, Object> finalizeBody(Map<String, Object> body) {
+        if (opts.requestParams != null) {
+            for (Map.Entry<String, Object> e : opts.requestParams.entrySet()) {
+                String k = e.getKey();
+                if ("messages".equals(k) || "tools".equals(k) || "stream".equals(k)) {
+                    System.err.println("[toolnexus] requestParams key \"" + k
+                            + "\" is not allowed — ignored (use bodyTransform)");
+                    continue;
+                }
+                body.put(k, e.getValue());
+            }
+        }
+        if (opts.bodyTransform != null) {
+            Map<String, Object> out = opts.bodyTransform.apply(body);
+            if (out != null) return out;
+        }
+        return body;
     }
 
     public static LlmClient create(Options opts) {
@@ -681,8 +736,12 @@ public final class LlmClient {
                 Map<String, Object> body = new LinkedHashMap<>();
                 body.put("model", opts.model);
                 body.put("messages", messages);
-                body.put("tools", tools);
-                body.put("tool_choice", "auto");
+                // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
+                if (tools != null && !tools.isEmpty()) {
+                    body.put("tools", tools);
+                    body.put("tool_choice", "auto");
+                }
+                body = finalizeBody(body);
 
                 String url = stripTrailingSlash(opts.baseUrl) + "/chat/completions";
                 Map<String, String> headers = new LinkedHashMap<>();
@@ -792,7 +851,9 @@ public final class LlmClient {
                 body.put("max_tokens", 4096);
                 if (!system.isEmpty()) body.put("system", system);
                 body.put("messages", messages);
-                body.put("tools", tools);
+                // §8 Gap 5: omit tools when the effective tool list is empty.
+                if (tools != null && !tools.isEmpty()) body.put("tools", tools);
+                body = finalizeBody(body);
 
                 Map<String, String> headers = new LinkedHashMap<>();
                 headers.put("x-api-key", key);
@@ -918,12 +979,16 @@ public final class LlmClient {
                 Map<String, Object> body = new LinkedHashMap<>();
                 body.put("model", opts.model);
                 body.put("messages", messages);
-                body.put("tools", tools);
-                body.put("tool_choice", "auto");
+                // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
+                if (tools != null && !tools.isEmpty()) {
+                    body.put("tools", tools);
+                    body.put("tool_choice", "auto");
+                }
                 body.put("stream", true);
                 Map<String, Object> streamOpts = new LinkedHashMap<>();
                 streamOpts.put("include_usage", true);
                 body.put("stream_options", streamOpts);
+                body = finalizeBody(body);
 
                 String url = stripTrailingSlash(opts.baseUrl) + "/chat/completions";
                 Map<String, String> headers = new LinkedHashMap<>();
@@ -1104,8 +1169,10 @@ public final class LlmClient {
                 body.put("max_tokens", 4096);
                 if (!system.isEmpty()) body.put("system", system);
                 body.put("messages", messages);
-                body.put("tools", tools);
+                // §8 Gap 5: omit tools when the effective tool list is empty.
+                if (tools != null && !tools.isEmpty()) body.put("tools", tools);
                 body.put("stream", true);
+                body = finalizeBody(body);
 
                 Map<String, String> headers = new LinkedHashMap<>();
                 headers.put("x-api-key", key);
@@ -1490,7 +1557,7 @@ public final class LlmClient {
             deadline.check();
             HttpRequest req = buildRequest(url, headers, body, deadline);
             try {
-                HttpResponse<T> res = HTTP.send(req, handler);
+                HttpResponse<T> res = http.send(req, handler);
                 int status = res.statusCode();
                 if (status >= 200 && status < 300) return res;
                 if (!RETRYABLE.contains(status) || attempt == retries) return res; // caller handles non-2xx

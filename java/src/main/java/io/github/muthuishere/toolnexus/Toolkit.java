@@ -45,6 +45,22 @@ public final class Toolkit implements AutoCloseable {
          * client. Omit ⇒ MCP elicitation is not advertised.
          */
         public java.util.function.Function<Request, Answer> waitFor;
+        /**
+         * Drop tools by their FINAL exposed name across every source (MCP {@code server_tool},
+         * builtins, native, A2A) — the simple "just turn these off" list, applied after aggregation.
+         * Composes with the per-server/per-skill filters. Empty/null ⇒ nothing disabled.
+         */
+        public List<String> disableTools;
+        /**
+         * Drop skills by name from the {@code skill} catalog — sugar over a drop-list in
+         * {@link #skillsFilter} (each name folded in as {@code false}). Empty/null ⇒ nothing disabled.
+         */
+        public List<String> disableSkills;
+        /**
+         * §2 Gap 3: a cooperative cancellation signal threaded into the MCP load (connect/init/list).
+         * Null ⇒ today's behavior. See {@link McpSource.CancelSignal}.
+         */
+        public McpSource.CancelSignal cancelSignal;
 
         public Options mcpConfig(Object v) { this.mcpConfig = v; return this; }
         public Options skillsDir(String... v) { this.skillsDir = List.of(v); return this; }
@@ -60,14 +76,22 @@ public final class Toolkit implements AutoCloseable {
         public Options agents(List<A2A.Agent> v) { this.agents = v; return this; }
         public Options agents(A2A.Agent... v) { this.agents = List.of(v); return this; }
         public Options waitFor(java.util.function.Function<Request, Answer> v) { this.waitFor = v; return this; }
+        public Options disableTools(List<String> v) { this.disableTools = v; return this; }
+        public Options disableTools(String... v) { this.disableTools = List.of(v); return this; }
+        public Options disableSkills(List<String> v) { this.disableSkills = v; return this; }
+        public Options disableSkills(String... v) { this.disableSkills = List.of(v); return this; }
+        public Options cancelSignal(McpSource.CancelSignal v) { this.cancelSignal = v; return this; }
     }
 
     private Toolkit(McpSource mcp, SkillSource skill, List<Tool> builtins, List<Tool> agents, List<Tool> extraTools,
-                   A2AServer.A2AConfig a2aConfig, McpServe.MCPServeConfig mcpServerConfig) {
+                   A2AServer.A2AConfig a2aConfig, McpServe.MCPServeConfig mcpServerConfig, List<String> disableTools) {
         this.mcp = mcp;
         this.skill = skill;
         this.a2aConfig = a2aConfig;
         this.mcpServerConfig = mcpServerConfig;
+        // DisableTools drops tools by their final exposed name across every source.
+        Set<String> disabled = new HashSet<>();
+        if (disableTools != null) disabled.addAll(disableTools);
         // Builtins are the lowest-precedence source: a host extraTools entry with
         // the same name shadows a builtin (SPEC §4). Drop shadowed builtins up
         // front, then apply the normal first-wins dedupe for MCP/skill/agents/extras.
@@ -82,6 +106,7 @@ public final class Toolkit implements AutoCloseable {
         all.addAll(agents);
         all.addAll(extraTools);
         for (Tool t : all) {
+            if (disabled.contains(t.name())) continue;
             if (byName.containsKey(t.name())) {
                 System.err.println("[toolnexus] duplicate tool name \"" + t.name() + "\" — keeping first");
                 continue;
@@ -91,7 +116,9 @@ public final class Toolkit implements AutoCloseable {
     }
 
     public static Toolkit create(Options opts) {
-        McpSource mcp = opts.mcpConfig != null ? McpSource.load(opts.mcpConfig, opts.waitFor) : null;
+        // §2 Gap 3: thread the caller's cancellation signal into the MCP connect/init/list.
+        McpSource mcp = opts.mcpConfig != null
+                ? McpSource.load(opts.mcpConfig, opts.waitFor, opts.cancelSignal) : null;
         // Skills come from directories, in-memory data, and/or a lazy provider (§3,
         // S1). The provider is resolved here and merged with the data list; a
         // provider failure is isolated so other sources still load.
@@ -107,10 +134,19 @@ public final class Toolkit implements AutoCloseable {
                     System.err.println("[toolnexus] skill provider failed: " + e.getMessage());
                 }
             }
+            // DisableSkills is sugar over a drop-list: fold each name into the filter as false
+            // (without overriding an explicit skillsFilter entry).
+            Map<String, Boolean> filter = opts.skillsFilter;
+            if (opts.disableSkills != null && !opts.disableSkills.isEmpty()) {
+                Map<String, Boolean> merged = new LinkedHashMap<>();
+                if (opts.skillsFilter != null) merged.putAll(opts.skillsFilter);
+                for (String n : opts.disableSkills) merged.putIfAbsent(n, false);
+                filter = merged;
+            }
             SkillSource.LoadOptions so = new SkillSource.LoadOptions();
             so.dirs = opts.skillsDir;
             so.skills = dataDefs.isEmpty() ? null : dataDefs;
-            so.filter = opts.skillsFilter;
+            so.filter = filter;
             so.sampleLimit = opts.skillSampleLimit;
             skill = SkillSource.loadWith(so);
         }
@@ -178,7 +214,7 @@ public final class Toolkit implements AutoCloseable {
             }
         }
 
-        return new Toolkit(mcp, skill, builtins, agentTools, extras, a2aConfig, mcpServerConfig);
+        return new Toolkit(mcp, skill, builtins, agentTools, extras, a2aConfig, mcpServerConfig, opts.disableTools);
     }
 
     public List<Tool> tools() {
