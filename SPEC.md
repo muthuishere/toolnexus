@@ -771,6 +771,55 @@ convention in every port.
 OTLP/OpenTelemetry push is intentionally a **future opt-in companion** (heavy SDK per language), not
 core. Each port exposes the idiomatic `on_metric` callback + a `metrics()` returning the Prometheus text.
 
+### Right-size routing (model faithfulness + the route-gate seam)
+
+toolnexus is the substrate the fleet routes work *through*: the routing **policy** (which model
+for which job class) lives with the operator, and toolnexus guarantees the route is executed
+faithfully and can be gated. This follows the model-cascade / routing literature — **FrugalGPT**
+(Chen, Zaharia, Zou, arXiv:2305.05176: route each job to the cheapest model that clears a quality
+bar; up to ~98% cost reduction at matched quality) and **RouteLLM** (Ong et al., arXiv:2406.18665:
+learned strong/weak routing riding the cost–quality Pareto frontier). toolnexus + the fleet
+registry implement the **deterministic, per-job-class** point on that frontier (static
+operator-chosen tiers), not a learned per-query router — auditable and reproducible, consistent
+with the governance ethos (§8 hooks, and `add-governed-execution-layer`).
+
+Two properties are contractual and conformance-tested:
+
+- **Model faithfulness.** `Client.run` (and `toolnexus run --model`) transmits the caller's
+  configured `model` id to the endpoint **verbatim** on every turn — no rewrite, alias, or silent
+  default when the caller supplied one. A route the operator chose as cheap
+  (e.g. `deepseek/deepseek-chat`) is the model actually billed. Identical in all five ports (the
+  client loop sends `model` unchanged); pinned by `golang/routing_conformance_test.go`.
+- **The route-gate seam.** The `beforeLLM` hook (§8) receives the `model` for each turn and may
+  abort the call (raise/error). This is where an expensive-tier route is gated: the reference
+  pattern shells out to `brain check "<why this model>" --json` and aborts unless the shield
+  returns `guaranteed`. toolnexus does **not** hard-depend on `brain`; the adapter is
+  host-supplied. Hard veto at the *tool* layer is `add-governed-execution-layer`; the two compose
+  (route-gate at the model call, tool-veto at `execute()`).
+
+**Routing-tier registry contract (fleet interop).** `fleet-nexus` / `huddle-nexus` drive toolnexus
+from a runtime registry (`~/.config/deemwar-one-os/openrouter.json`) with this shape — the
+contract between the fleet skills and toolnexus, which toolnexus itself never reads:
+
+```jsonc
+{
+  "base_url": "https://openrouter.ai/api/v1",
+  "style": "openai",
+  "api_key_env": "OPENROUTER_API_KEY",   // the NAME of the env var, never the value
+  "models": {
+    "classify_verify": "deepseek/deepseek-chat",  // cheap tier: verify/classify
+    "route":           "deepseek/deepseek-chat",
+    "aux_default":     "deepseek/deepseek-chat",
+    "huddle_voice":    "deepseek/deepseek-chat",
+    "fleet_agentic":   "moonshotai/kimi-k2"        // strong tier: agentic work
+  }
+}
+```
+
+A fleet skill maps `base_url`→`baseUrl`, `style`→`style`, `models.<tier>`→`model` onto
+`ClientOptions` and reads the key from the env var named by `api_key_env` at call time. Per the
+secrets rule, toolnexus reads that key from the environment and never logs it.
+
 ---
 
 ## 9. Go CLI (`toolnexus`)
