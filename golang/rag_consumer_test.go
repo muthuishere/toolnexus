@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,50 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 )
+
+// TestMain re-execs this test binary as a real stdio MCP server (exposing a,b,c) when
+// TN_STDIO_MCP=1, so TestStdioOutboundChildStaysAlive can drive a genuine outbound stdio
+// connection hermetically (no external process, no network).
+func TestMain(m *testing.M) {
+	if os.Getenv("TN_STDIO_MCP") == "1" {
+		_ = server.ServeStdio(buildMcpServer([]Tool{mkTool("a"), mkTool("b"), mkTool("c")}, nil, nil))
+		return
+	}
+	os.Exit(m.Run())
+}
+
+// TestStdioOutboundChildStaysAlive is the regression guard for the v0.9.0 stdio bug: the child
+// process must NOT be killed after connect. It was, when the transport Start ran on a
+// timeout/cancel context (mark3labs spawns via exec.CommandContext), so tools/list hit a dead
+// pipe. This drives a real outbound stdio server and asserts the tools load AND one executes.
+func TestStdioOutboundChildStaysAlive(t *testing.T) {
+	cfg := map[string]any{"srv": map[string]any{
+		"command":     []any{os.Args[0]},
+		"environment": map[string]any{"TN_STDIO_MCP": "1"},
+	}}
+	src, err := LoadMcp(cfg)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	defer src.Close()
+	if src.Status["srv"] != StatusConnected {
+		t.Fatalf("stdio server not connected: status=%v", src.Status["srv"])
+	}
+	names := rcNames(src.Tools)
+	if !names["srv_a"] || !names["srv_b"] || !names["srv_c"] {
+		t.Fatalf("stdio tools/list returned %v (child likely killed after connect)", names)
+	}
+	var srvA Tool
+	for _, tl := range src.Tools {
+		if tl.Name == "srv_a" {
+			srvA = tl
+		}
+	}
+	res, err := srvA.Execute(map[string]any{}, nil)
+	if err != nil || res.IsError {
+		t.Fatalf("execute srv_a on live stdio child: err=%v res=%+v", err, res)
+	}
+}
 
 // captureLLM returns an httptest server that records the last decoded request body.
 func captureLLM(t *testing.T) (*httptest.Server, func() map[string]any) {

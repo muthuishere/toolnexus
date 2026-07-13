@@ -417,9 +417,12 @@ func connectServer(ctx context.Context, name string, cfg ServerConfig, waitFor f
 	// Build the transport + client directly (instead of the NewStdioMCPClientWithOptions
 	// convenience) so the elicitation handler can be attached when a waitFor is present.
 	stdioTransport := transport.NewStdioWithOptions(cfg.Command[0], env, cfg.Command[1:], opts...)
-	startCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	if err := stdioTransport.Start(startCtx); err != nil {
+	// The stdio child is spawned via exec.CommandContext, so its lifetime is bound to the context
+	// passed to Start — it must be a background context torn down by client.Close(), NOT a
+	// timeout/cancel context, or the child is SIGKILL'd the moment Start returns (breaking
+	// tools/list). Local exec Start does not meaningfully block; parent-ctx cancellation is honored
+	// by initClient/listTools below.
+	if err := stdioTransport.Start(context.Background()); err != nil {
 		return nil, fmt.Errorf("failed to start stdio transport: %w", err)
 	}
 	client := mcpclient.NewClient(stdioTransport, elicitationOptions(waitFor)...)
@@ -470,13 +473,11 @@ func newRemoteClient(ctx context.Context, cfg ServerConfig, waitFor func(Request
 		return nil, fmt.Errorf("streamable-http failed (%v) and sse setup failed: %w", err, sseErr)
 	}
 	sseClient := mcpclient.NewClient(sseTransport, elicitationOptions(waitFor)...)
-	// §2 Gap 3: the SSE fallback start gains the same timeout bound it previously
-	// lacked (was context.Background() with no deadline — a hung endpoint blocked
-	// the whole load unboundedly).
-	sseStartCtx, sseCancel := context.WithTimeout(ctx, timeout)
-	startErr := sseClient.Start(sseStartCtx)
-	sseCancel()
-	if startErr != nil {
+	// The SSE transport owns its event stream via context.WithCancel(startCtx), so the start
+	// context must live for the client's lifetime (torn down by client.Close()) — a timeout/cancel
+	// context would drop the stream the moment Start returns. Use background; the primary
+	// streamable-HTTP path above stays timeout-bounded, and initClient/listTools remain ctx-aware.
+	if startErr := sseClient.Start(context.Background()); startErr != nil {
 		sseClient.Close()
 		return nil, fmt.Errorf("streamable-http failed (%v) and sse start failed: %w", err, startErr)
 	}
