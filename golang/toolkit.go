@@ -16,6 +16,17 @@ type Options struct {
 	McpConfig any
 	// SkillsDir is one or more skill roots. Empty skips skill loading.
 	SkillsDir []string
+	// Skills are skills supplied as data, bypassing the filesystem (§3, S1).
+	Skills []SkillDef
+	// SkillProvider lazily supplies data skills, resolved once at build (§3, S1).
+	// A provider failure is isolated: other skill sources still load.
+	SkillProvider func(context.Context) ([]SkillDef, error)
+	// SkillsFilter is a per-agent skill allowlist keyed on name; same semantics
+	// as the MCP per-server tools filter and builtins (§3, S2).
+	SkillsFilter map[string]bool
+	// SkillSampleLimit caps the invoke-time sibling-file sample: 0 ⇒ default 10,
+	// n>0 ⇒ cap, -1 ⇒ omit the <skill_files> block (§3, S5).
+	SkillSampleLimit int
 	// ExtraTools are your own custom tools, always added to the toolkit.
 	ExtraTools []Tool
 	// Builtins toggles the built-in tool source (§4A). Default ON. Accepts nil
@@ -62,8 +73,24 @@ func CreateToolkit(ctx context.Context, opts Options) (*Toolkit, error) {
 		}
 		mcp = m
 	}
-	if len(opts.SkillsDir) > 0 {
-		skill = LoadSkills(opts.SkillsDir...)
+	// Skills come from directories, in-memory data, and/or a lazy provider (§3,
+	// S1). The provider is resolved here and merged with the data list; a
+	// provider failure is isolated so other sources still load.
+	if len(opts.SkillsDir) > 0 || len(opts.Skills) > 0 || opts.SkillProvider != nil {
+		dataDefs := append([]SkillDef{}, opts.Skills...)
+		if opts.SkillProvider != nil {
+			if provided, pErr := opts.SkillProvider(ctx); pErr != nil {
+				log.Printf("[toolnexus] skill provider failed: %v", pErr)
+			} else {
+				dataDefs = append(dataDefs, provided...)
+			}
+		}
+		skill = LoadSkillsWith(LoadSkillsOptions{
+			Dirs:        opts.SkillsDir,
+			Skills:      dataDefs,
+			Filter:      opts.SkillsFilter,
+			SampleLimit: opts.SkillSampleLimit,
+		})
 	}
 
 	tk := &Toolkit{byName: map[string]Tool{}, mcp: mcp, skill: skill}

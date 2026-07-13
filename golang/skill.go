@@ -2,6 +2,11 @@
 // discover **/SKILL.md, parse YAML frontmatter, and expose ONE `skill` tool that
 // loads a skill's instructions + sampled resources on demand (progressive
 // disclosure).
+//
+// Beyond on-disk discovery the source also accepts skills supplied as data
+// (SkillDef) — SPEC.md §3. Directory-sourced skills keep the exact file:// base
+// + on-disk sibling sampling (byte-identical); data-sourced skills use a logical
+// skill://name/ base + a supplied resource list and never touch disk.
 package toolnexus
 
 import (
@@ -34,8 +39,52 @@ const SkillsPromptPreamble = "Skills provide specialized instructions and workfl
 type SkillInfo struct {
 	Name        string
 	Description string
-	Location    string // absolute path to SKILL.md
+	Location    string // absolute path to SKILL.md (fs) or logical base (data)
 	Content     string // body after frontmatter
+	Origin      string // "fs" (default) or "logical" — internal discriminator
+	Resources   []string
+	Base        string
+}
+
+// SkillDef supplies one skill directly as data, bypassing the filesystem
+// (SPEC.md §3, S1). Resources is an optional logical resource list; nil ⇒
+// instruction-only. Base is an optional logical base (default skill://<name>/).
+type SkillDef struct {
+	Name        string
+	Description string
+	Content     string
+	Resources   []string
+	Base        string
+}
+
+// SkillSkipReason is why a candidate SKILL.md did not become a skill (S3).
+type SkillSkipReason string
+
+const (
+	SkipMissingName   SkillSkipReason = "missing-name"
+	SkipMalformed     SkillSkipReason = "malformed-frontmatter"
+	SkipDuplicateName SkillSkipReason = "duplicate-name"
+	SkipUnreadable    SkillSkipReason = "unreadable"
+)
+
+// SkillSkip records a skipped candidate and the reason.
+type SkillSkip struct {
+	Location string
+	Reason   SkillSkipReason
+}
+
+// SkillInventory is the result of a list-only validate pass (S3).
+type SkillInventory struct {
+	Skills  []SkillInfo
+	Skipped []SkillSkip
+}
+
+// LoadSkillsOptions configures LoadSkillsWith / ListSkills (SPEC.md §3, S1/S2/S5).
+type LoadSkillsOptions struct {
+	Dirs        []string
+	Skills      []SkillDef
+	Filter      map[string]bool // per-agent allowlist; same semantics as the MCP tools filter
+	SampleLimit int             // 0 ⇒ default 10, n>0 ⇒ cap, -1 ⇒ omit <skill_files>
 }
 
 var frontmatterRe = regexp.MustCompile(`(?s)^---\r?\n(.*?)\r?\n---\r?\n?(.*)$`)
@@ -45,22 +94,20 @@ type frontmatter struct {
 	Description string
 }
 
-// parseFrontmatter parses the `---`-fenced YAML header with a real YAML parser
-// (gopkg.in/yaml.v3) so folded (`>`)/literal (`|`) block scalars, chomping,
-// quoting, and multi-line values all resolve — NOT a hand-rolled key:value
-// split. Scalar values are coerced to string and trimmed, so block-scalar
-// trailing newlines (which chomp slightly differently per lib) don't leak and
-// the ports stay byte-identical. Malformed YAML fails gracefully to an empty
-// map, never crashing discovery. Mirrors js/src/skill.ts parseFrontmatter.
-// See SPEC.md §3.
-func parseFrontmatter(text string) (data frontmatter, content string) {
+// parseFrontmatter parses the `---`-fenced YAML header with a real YAML parser.
+// `malformed` is true only when fences are present but the YAML fails to parse —
+// distinguishing a malformed header from a body with no frontmatter, so the
+// inventory (S3) reports the right skip reason. LoadSkills' behavior is
+// unchanged. See SPEC.md §3.
+func parseFrontmatter(text string) (data frontmatter, content string, malformed bool) {
 	m := frontmatterRe.FindStringSubmatch(text)
 	if m == nil {
-		return frontmatter{}, text
+		return frontmatter{}, text, false
 	}
 	var raw map[string]any
 	if err := yaml.Unmarshal([]byte(m[1]), &raw); err != nil {
-		raw = nil // malformed YAML → empty frontmatter, skill skipped for missing name
+		raw = nil
+		malformed = true
 	}
 	fm := frontmatter{}
 	if s, ok := scalarString(raw["name"]); ok {
@@ -69,12 +116,11 @@ func parseFrontmatter(text string) (data frontmatter, content string) {
 	if s, ok := scalarString(raw["description"]); ok {
 		fm.Description = s
 	}
-	return fm, m[2]
+	return fm, m[2], malformed
 }
 
 // scalarString returns a trimmed string for scalar YAML values (string, number,
-// bool) and ok=false for anything else (maps, sequences, null), mirroring the
-// JS port's `typeof value === "string" | "number" | "boolean"` guard.
+// bool) and ok=false for anything else (maps, sequences, null).
 func scalarString(v any) (string, bool) {
 	switch v.(type) {
 	case string, int, int64, uint64, float64, float32, bool:
@@ -84,12 +130,10 @@ func scalarString(v any) (string, bool) {
 	}
 }
 
-// resolveEntry classifies a directory entry, following symlinks to their target
-// (like opencode's `symlink: true` glob). A symlink is stat'd so isDir/isFile
-// reflect the target; a broken symlink returns ok=false so the caller skips it.
+// resolveEntry classifies a directory entry, following symlinks to their target.
 func resolveEntry(full string, entry fs.DirEntry) (isDir, isFile, ok bool) {
 	if entry.Type()&fs.ModeSymlink != 0 {
-		info, err := os.Stat(full) // follows the link
+		info, err := os.Stat(full)
 		if err != nil {
 			return false, false, false
 		}
@@ -101,8 +145,6 @@ func resolveEntry(full string, entry fs.DirEntry) (isDir, isFile, ok bool) {
 func walkSkillFiles(root string) []string {
 	var out []string
 	stack := []string{root}
-	// Follow symlinked directories; guard against symlink cycles by tracking
-	// resolved real paths already visited.
 	seen := map[string]bool{}
 	for len(stack) > 0 {
 		dir := stack[len(stack)-1]
@@ -179,14 +221,148 @@ func sampleSiblingFiles(dir string, limit int) []string {
 	return out
 }
 
+// rawCandidate is one candidate before cross-source dedupe.
+type rawCandidate struct {
+	info *SkillInfo
+	skip *SkillSkip
+}
+
+func candidatesFromDir(root string) []rawCandidate {
+	var out []rawCandidate
+	fi, err := os.Stat(root)
+	if err != nil || !fi.IsDir() {
+		log.Printf("[toolnexus] skills dir not found: %s", root)
+		return out
+	}
+	for _, file := range walkSkillFiles(root) {
+		raw, rErr := os.ReadFile(file)
+		if rErr != nil {
+			out = append(out, rawCandidate{skip: &SkillSkip{Location: file, Reason: SkipUnreadable}})
+			continue
+		}
+		data, content, malformed := parseFrontmatter(string(raw))
+		if malformed {
+			out = append(out, rawCandidate{skip: &SkillSkip{Location: file, Reason: SkipMalformed}})
+			continue
+		}
+		if data.Name == "" {
+			out = append(out, rawCandidate{skip: &SkillSkip{Location: file, Reason: SkipMissingName}})
+			continue
+		}
+		abs, aErr := filepath.Abs(file)
+		if aErr != nil {
+			abs = file
+		}
+		out = append(out, rawCandidate{info: &SkillInfo{
+			Name:        data.Name,
+			Description: data.Description,
+			Location:    abs,
+			Content:     content,
+			Origin:      "fs",
+		}})
+	}
+	return out
+}
+
+func candidatesFromDefs(defs []SkillDef) []rawCandidate {
+	out := make([]rawCandidate, 0, len(defs))
+	for _, d := range defs {
+		if d.Name == "" {
+			loc := d.Base
+			if loc == "" {
+				loc = "skill://"
+			}
+			out = append(out, rawCandidate{skip: &SkillSkip{Location: loc, Reason: SkipMissingName}})
+			continue
+		}
+		base := d.Base
+		if base == "" {
+			base = fmt.Sprintf("skill://%s/", d.Name)
+		}
+		out = append(out, rawCandidate{info: &SkillInfo{
+			Name:        d.Name,
+			Description: d.Description,
+			Location:    base,
+			Content:     d.Content,
+			Origin:      "logical",
+			Resources:   append([]string{}, d.Resources...),
+			Base:        base,
+		}})
+	}
+	return out
+}
+
+func collectCandidates(opts LoadSkillsOptions) []rawCandidate {
+	var cands []rawCandidate
+	for _, root := range opts.Dirs {
+		cands = append(cands, candidatesFromDir(root)...)
+	}
+	if len(opts.Skills) > 0 {
+		cands = append(cands, candidatesFromDefs(opts.Skills)...)
+	}
+	return cands
+}
+
+func mergeCandidates(cands []rawCandidate) (map[string]SkillInfo, []SkillSkip) {
+	skills := map[string]SkillInfo{}
+	var skipped []SkillSkip
+	for _, c := range cands {
+		if c.skip != nil {
+			skipped = append(skipped, *c.skip)
+			continue
+		}
+		info := c.info
+		if _, exists := skills[info.Name]; exists {
+			log.Printf("[toolnexus] duplicate skill name %q (%s) — keeping first", info.Name, info.Location)
+			skipped = append(skipped, SkillSkip{Location: info.Location, Reason: SkipDuplicateName})
+			continue
+		}
+		skills[info.Name] = *info
+	}
+	return skills, skipped
+}
+
+// applySkillsFilter applies the per-agent allowlist (S2): nil/empty ⇒ all; ≥1
+// true ⇒ allowlist; only-false ⇒ drop-list over all-on; unknown ⇒ ignore+warn.
+func applySkillsFilter(skills map[string]SkillInfo, filter map[string]bool) map[string]SkillInfo {
+	if len(filter) == 0 {
+		return skills
+	}
+	hasTrue := false
+	for _, v := range filter {
+		if v {
+			hasTrue = true
+			break
+		}
+	}
+	for k := range filter {
+		if _, ok := skills[k]; !ok {
+			log.Printf("[toolnexus] skill filter name %q matched no skill", k)
+		}
+	}
+	out := map[string]SkillInfo{}
+	for name, info := range skills {
+		v, present := filter[name]
+		keep := false
+		if hasTrue {
+			keep = present && v
+		} else {
+			keep = !(present && !v)
+		}
+		if keep {
+			out[name] = info
+		}
+	}
+	return out
+}
+
 // SkillSource is the result of discovering skills.
 type SkillSource struct {
 	Skills map[string]SkillInfo
 	Tool   Tool
 }
 
-// Prompt returns the markdown catalog for the system prompt (mirrors opencode
-// Skill.fmt).
+// Prompt returns the markdown catalog for the system prompt.
 func (s *SkillSource) Prompt() string {
 	described := make([]SkillInfo, 0, len(s.Skills))
 	for _, info := range s.Skills {
@@ -205,42 +381,30 @@ func (s *SkillSource) Prompt() string {
 	return strings.Join(lines, "\n")
 }
 
-// LoadSkills discovers skills under one or more roots and builds the `skill`
-// loader tool.
-func LoadSkills(dirs ...string) *SkillSource {
-	skills := map[string]SkillInfo{}
-
-	for _, root := range dirs {
-		fi, err := os.Stat(root)
-		if err != nil || !fi.IsDir() {
-			log.Printf("[toolnexus] skills dir not found: %s", root)
-			continue
-		}
-		for _, file := range walkSkillFiles(root) {
-			raw, rErr := os.ReadFile(file)
-			if rErr != nil {
-				continue
-			}
-			data, content := parseFrontmatter(string(raw))
-			if data.Name == "" {
-				continue
-			}
-			if _, exists := skills[data.Name]; exists {
-				log.Printf("[toolnexus] duplicate skill name %q (%s) — keeping first", data.Name, file)
-				continue
-			}
-			abs, aErr := filepath.Abs(file)
-			if aErr != nil {
-				abs = file
-			}
-			skills[data.Name] = SkillInfo{
-				Name:        data.Name,
-				Description: data.Description,
-				Location:    abs,
-				Content:     content,
-			}
-		}
+// ListSkills discovers + validates skills from the same sources LoadSkills
+// accepts, returning parsed skills plus typed skip reasons — no toolkit wired
+// (SPEC.md §3, S3). The inventory is UNFILTERED (it authors the S2 allowlist).
+func ListSkills(opts LoadSkillsOptions) *SkillInventory {
+	merged, skipped := mergeCandidates(collectCandidates(opts))
+	skills := make([]SkillInfo, 0, len(merged))
+	for _, info := range merged {
+		skills = append(skills, info)
 	}
+	return &SkillInventory{Skills: skills, Skipped: skipped}
+}
+
+// LoadSkills discovers skills under one or more roots and builds the `skill`
+// loader tool. Back-compatible variadic entry; use LoadSkillsWith for data
+// sources, filters, or a sample cap.
+func LoadSkills(dirs ...string) *SkillSource {
+	return LoadSkillsWith(LoadSkillsOptions{Dirs: dirs})
+}
+
+// LoadSkillsWith discovers skills (dirs and/or data) and builds the `skill` tool.
+func LoadSkillsWith(opts LoadSkillsOptions) *SkillSource {
+	merged, _ := mergeCandidates(collectCandidates(opts))
+	skills := applySkillsFilter(merged, opts.Filter)
+	sampleLimit := opts.SampleLimit
 
 	tool := Tool{
 		Name:        "skill",
@@ -275,14 +439,41 @@ func LoadSkills(dirs ...string) *SkillSource {
 					IsError: true,
 				}, nil
 			}
-			dir := filepath.Dir(info.Location)
-			base := fileURL(dir)
-			files := sampleSiblingFiles(dir, 10)
+			// effLimit: 0 ⇒ default 10 (byte-identical), n>0 ⇒ cap, -1 ⇒ omit.
+			effLimit := sampleLimit
+			if effLimit == 0 {
+				effLimit = 10
+			}
+			emitFiles := effLimit != -1
+			var base, metaDir string
+			var files []string
+			if info.Origin == "logical" {
+				base = info.Base
+				if base == "" {
+					base = fmt.Sprintf("skill://%s/", info.Name)
+				}
+				res := info.Resources
+				if len(res) == 0 {
+					emitFiles = false
+				}
+				if effLimit > 0 && len(res) > effLimit {
+					res = res[:effLimit]
+				}
+				files = res
+				metaDir = base
+			} else {
+				dir := filepath.Dir(info.Location)
+				base = fileURL(dir)
+				if effLimit != -1 {
+					files = sampleSiblingFiles(dir, effLimit)
+				}
+				metaDir = dir
+			}
 			fileLines := make([]string, 0, len(files))
 			for _, f := range files {
 				fileLines = append(fileLines, fmt.Sprintf("<file>%s</file>", f))
 			}
-			output := strings.Join([]string{
+			lines := []string{
 				fmt.Sprintf("<skill_content name=%q>", info.Name),
 				fmt.Sprintf("# Skill: %s", info.Name),
 				"",
@@ -290,17 +481,21 @@ func LoadSkills(dirs ...string) *SkillSource {
 				"",
 				fmt.Sprintf("Base directory for this skill: %s", base),
 				"Relative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.",
-				"Note: file list is sampled.",
-				"",
-				"<skill_files>",
-				strings.Join(fileLines, "\n"),
-				"</skill_files>",
-				"</skill_content>",
-			}, "\n")
+			}
+			if emitFiles {
+				lines = append(lines,
+					"Note: file list is sampled.",
+					"",
+					"<skill_files>",
+					strings.Join(fileLines, "\n"),
+					"</skill_files>",
+				)
+			}
+			lines = append(lines, "</skill_content>")
 			return ToolResult{
-				Output:   output,
+				Output:   strings.Join(lines, "\n"),
 				IsError:  false,
-				Metadata: map[string]any{"name": info.Name, "dir": dir},
+				Metadata: map[string]any{"name": info.Name, "dir": metaDir},
 			}, nil
 		},
 	}

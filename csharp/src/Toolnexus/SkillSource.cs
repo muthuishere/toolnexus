@@ -8,6 +8,12 @@ namespace Toolnexus;
 /// discover <c>**/SKILL.md</c>, parse YAML frontmatter, and expose ONE <c>skill</c>
 /// tool that loads a skill's instructions + sampled resources on demand
 /// (progressive disclosure).
+///
+/// Beyond on-disk discovery the source also accepts skills supplied as data
+/// (<see cref="SkillDef"/>) — SPEC.md §3. Directory-sourced skills keep the exact
+/// <c>file://</c> base + on-disk sibling sampling (byte-identical); data-sourced
+/// skills use a logical <c>skill://name/</c> base + a supplied resource list and
+/// never touch disk.
 /// </summary>
 public sealed partial class SkillSource
 {
@@ -29,17 +35,45 @@ public sealed partial class SkillSource
     [GeneratedRegex(@"^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$")]
     private static partial Regex Frontmatter();
 
-    public sealed record SkillInfo(string Name, string? Description, string Location, string Content);
+    public sealed record SkillInfo(
+        string Name, string? Description, string Location, string Content,
+        string Origin = "fs", IReadOnlyList<string>? Resources = null, string? Base = null);
+
+    /// <summary>A skill supplied directly as data, bypassing the filesystem (SPEC.md §3, S1).</summary>
+    public sealed record SkillDef(
+        string Name, string? Description, string Content,
+        IReadOnlyList<string>? Resources = null, string? Base = null);
+
+    /// <summary>Why a candidate SKILL.md did not become a skill (S3).</summary>
+    public sealed record SkillSkip(string Location, string Reason)
+    {
+        public const string MissingName = "missing-name";
+        public const string Malformed = "malformed-frontmatter";
+        public const string DuplicateName = "duplicate-name";
+        public const string Unreadable = "unreadable";
+    }
+
+    /// <summary>Result of a list-only validate pass (S3).</summary>
+    public sealed record SkillInventory(IReadOnlyList<SkillInfo> Skills, IReadOnlyList<SkillSkip> Skipped);
+
+    /// <summary>Options for <see cref="LoadWith"/> / <see cref="ListSkills"/> (SPEC.md §3, S1/S2/S5).</summary>
+    public sealed class LoadOptions
+    {
+        public IEnumerable<string>? Dirs { get; set; }
+        public IReadOnlyList<SkillDef>? Skills { get; set; }
+        public IReadOnlyDictionary<string, bool>? Filter { get; set; }
+        public int SampleLimit { get; set; } // 0 ⇒ default 10, n>0 ⇒ cap, -1 ⇒ omit <skill_files>
+    }
 
     private readonly Dictionary<string, SkillInfo> _skills;
 
     public IReadOnlyDictionary<string, SkillInfo> Skills => _skills;
     public ITool Tool { get; }
 
-    private SkillSource(Dictionary<string, SkillInfo> skills)
+    private SkillSource(Dictionary<string, SkillInfo> skills, int sampleLimit)
     {
         _skills = skills;
-        Tool = new SkillTool(skills);
+        Tool = new SkillTool(skills, sampleLimit);
     }
 
     /// <summary>Markdown catalog for the system prompt (mirrors opencode Skill.fmt).</summary>
@@ -60,52 +94,153 @@ public sealed partial class SkillSource
     public static SkillSource Load(params string[] dirs) => Load((IEnumerable<string>)dirs);
 
     /// <summary>Discover skills under one or more roots and build the <c>skill</c> loader tool.</summary>
-    public static SkillSource Load(IEnumerable<string> dirs)
-    {
-        var skills = new Dictionary<string, SkillInfo>();
+    public static SkillSource Load(IEnumerable<string> dirs) => LoadWith(new LoadOptions { Dirs = dirs });
 
-        foreach (var root in dirs)
+    private readonly record struct RawCandidate(SkillInfo? Info, SkillSkip? Skip);
+
+    private static List<RawCandidate> CandidatesFromDir(string root)
+    {
+        var output = new List<RawCandidate>();
+        if (!Directory.Exists(root))
         {
-            if (!Directory.Exists(root))
+            Console.Error.WriteLine($"[toolnexus] skills dir not found: {root}");
+            return output;
+        }
+        foreach (var file in WalkSkillFiles(root))
+        {
+            string text;
+            try { text = File.ReadAllText(file); }
+            catch
             {
-                Console.Error.WriteLine($"[toolnexus] skills dir not found: {root}");
+                output.Add(new RawCandidate(null, new SkillSkip(Path.GetFullPath(file), SkillSkip.Unreadable)));
                 continue;
             }
-            foreach (var file in WalkSkillFiles(root))
+            var (data, content, malformed) = ParseFrontmatter(text);
+            var abs = Path.GetFullPath(file);
+            if (malformed)
             {
-                string text;
-                try { text = File.ReadAllText(file); }
-                catch { continue; }
-
-                var (data, content) = ParseFrontmatter(text);
-                if (!data.TryGetValue("name", out var name) || string.IsNullOrEmpty(name))
-                    continue;
-                if (skills.ContainsKey(name))
-                {
-                    Console.Error.WriteLine(
-                        $"[toolnexus] duplicate skill name \"{name}\" ({Path.GetFullPath(file)}) — keeping first");
-                    continue;
-                }
-                data.TryGetValue("description", out var description);
-                skills[name] = new SkillInfo(name, description, Path.GetFullPath(file), content);
+                output.Add(new RawCandidate(null, new SkillSkip(abs, SkillSkip.Malformed)));
+                continue;
             }
+            if (!data.TryGetValue("name", out var name) || string.IsNullOrEmpty(name))
+            {
+                output.Add(new RawCandidate(null, new SkillSkip(abs, SkillSkip.MissingName)));
+                continue;
+            }
+            data.TryGetValue("description", out var description);
+            output.Add(new RawCandidate(new SkillInfo(name, description, abs, content, "fs"), null));
         }
+        return output;
+    }
 
-        return new SkillSource(skills);
+    private static List<RawCandidate> CandidatesFromDefs(IReadOnlyList<SkillDef> defs)
+    {
+        var output = new List<RawCandidate>();
+        foreach (var d in defs)
+        {
+            if (string.IsNullOrEmpty(d.Name))
+            {
+                output.Add(new RawCandidate(null, new SkillSkip(d.Base ?? "skill://", SkillSkip.MissingName)));
+                continue;
+            }
+            var baseUrl = string.IsNullOrEmpty(d.Base) ? $"skill://{d.Name}/" : d.Base!;
+            var res = d.Resources != null ? new List<string>(d.Resources) : new List<string>();
+            output.Add(new RawCandidate(
+                new SkillInfo(d.Name, d.Description, baseUrl, d.Content ?? "", "logical", res, baseUrl), null));
+        }
+        return output;
+    }
+
+    private static List<RawCandidate> CollectCandidates(LoadOptions opts)
+    {
+        var cands = new List<RawCandidate>();
+        if (opts.Dirs != null)
+            foreach (var root in opts.Dirs) cands.AddRange(CandidatesFromDir(root));
+        if (opts.Skills != null && opts.Skills.Count > 0)
+            cands.AddRange(CandidatesFromDefs(opts.Skills));
+        return cands;
+    }
+
+    private static (Dictionary<string, SkillInfo> Skills, List<SkillSkip> Skipped) MergeCandidates(
+        List<RawCandidate> cands)
+    {
+        var skills = new Dictionary<string, SkillInfo>();
+        var skipped = new List<SkillSkip>();
+        foreach (var c in cands)
+        {
+            if (c.Skip != null)
+            {
+                skipped.Add(c.Skip);
+                continue;
+            }
+            var info = c.Info!;
+            if (skills.ContainsKey(info.Name))
+            {
+                Console.Error.WriteLine(
+                    $"[toolnexus] duplicate skill name \"{info.Name}\" ({info.Location}) — keeping first");
+                skipped.Add(new SkillSkip(info.Location, SkillSkip.DuplicateName));
+                continue;
+            }
+            skills[info.Name] = info;
+        }
+        return (skills, skipped);
+    }
+
+    /// <summary>
+    /// Per-agent skill allowlist (S2): null/empty ⇒ all; ≥1 true ⇒ allowlist;
+    /// only-false ⇒ drop-list over all-on; unknown names ignored + warned once.
+    /// </summary>
+    private static Dictionary<string, SkillInfo> ApplyFilter(
+        Dictionary<string, SkillInfo> skills, IReadOnlyDictionary<string, bool>? filter)
+    {
+        if (filter == null || filter.Count == 0) return skills;
+        var hasTrue = filter.Values.Any(v => v);
+        foreach (var k in filter.Keys)
+            if (!skills.ContainsKey(k))
+                Console.Error.WriteLine($"[toolnexus] skill filter name \"{k}\" matched no skill");
+        var output = new Dictionary<string, SkillInfo>();
+        foreach (var (name, info) in skills)
+        {
+            var present = filter.TryGetValue(name, out var v);
+            var keep = hasTrue ? (present && v) : !(present && !v);
+            if (keep) output[name] = info;
+        }
+        return output;
+    }
+
+    /// <summary>
+    /// Discover + validate skills from the same sources <see cref="Load"/> accepts,
+    /// returning parsed skills plus typed skip reasons — no toolkit wired
+    /// (SPEC.md §3, S3). The inventory is UNFILTERED (it authors the S2 allowlist).
+    /// </summary>
+    public static SkillInventory ListSkills(LoadOptions opts)
+    {
+        var (skills, skipped) = MergeCandidates(CollectCandidates(opts));
+        return new SkillInventory(skills.Values.ToList(), skipped);
+    }
+
+    /// <summary>Discover skills (dirs and/or data) and build the <c>skill</c> loader tool.</summary>
+    public static SkillSource LoadWith(LoadOptions opts)
+    {
+        var (merged, _) = MergeCandidates(CollectCandidates(opts));
+        var resolved = ApplyFilter(merged, opts.Filter);
+        return new SkillSource(resolved, opts.SampleLimit);
     }
 
     private sealed class SkillTool : ITool
     {
         private readonly Dictionary<string, SkillInfo> _skills;
+        private readonly int _sampleLimit;
 
         public string Name => "skill";
         public string Description => SkillToolDescription;
         public IDictionary<string, object?> InputSchema { get; }
         public string Source => "skill";
 
-        public SkillTool(Dictionary<string, SkillInfo> skills)
+        public SkillTool(Dictionary<string, SkillInfo> skills, int sampleLimit)
         {
             _skills = skills;
+            _sampleLimit = sampleLimit;
             InputSchema = new Dictionary<string, object?>
             {
                 ["type"] = "object",
@@ -133,9 +268,27 @@ public sealed partial class SkillSource
                     $"Skill \"{name}\" not found. Available skills: {list}"));
             }
 
-            var dir = Path.GetDirectoryName(info.Location)!;
-            var baseUrl = PathToFileUrl(dir);
-            var files = SampleSiblingFiles(dir, 10);
+            // effLimit: 0 ⇒ default 10 (byte-identical), n>0 ⇒ cap, -1 ⇒ omit.
+            var effLimit = _sampleLimit == 0 ? 10 : _sampleLimit;
+            var emitFiles = effLimit != -1;
+            string baseUrl;
+            string metaDir;
+            IReadOnlyList<string> files;
+            if (info.Origin == "logical")
+            {
+                baseUrl = string.IsNullOrEmpty(info.Base) ? $"skill://{info.Name}/" : info.Base!;
+                var res = info.Resources ?? Array.Empty<string>();
+                if (res.Count == 0) emitFiles = false;
+                files = effLimit > 0 && res.Count > effLimit ? res.Take(effLimit).ToList() : res;
+                metaDir = baseUrl;
+            }
+            else
+            {
+                var dir = Path.GetDirectoryName(info.Location)!;
+                baseUrl = PathToFileUrl(dir);
+                files = effLimit == -1 ? Array.Empty<string>() : SampleSiblingFiles(dir, effLimit);
+                metaDir = dir;
+            }
 
             var filesBlock = new System.Text.StringBuilder();
             for (var i = 0; i < files.Count; i++)
@@ -144,7 +297,8 @@ public sealed partial class SkillSource
                 filesBlock.Append("<file>").Append(files[i]).Append("</file>");
             }
 
-            var output = string.Join("\n",
+            var lines = new List<string>
+            {
                 $"<skill_content name=\"{info.Name}\">",
                 $"# Skill: {info.Name}",
                 "",
@@ -152,35 +306,38 @@ public sealed partial class SkillSource
                 "",
                 $"Base directory for this skill: {baseUrl}",
                 "Relative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.",
-                "Note: file list is sampled.",
-                "",
-                "<skill_files>",
-                filesBlock.ToString(),
-                "</skill_files>",
-                "</skill_content>");
+            };
+            if (emitFiles)
+            {
+                lines.Add("Note: file list is sampled.");
+                lines.Add("");
+                lines.Add("<skill_files>");
+                lines.Add(filesBlock.ToString());
+                lines.Add("</skill_files>");
+            }
+            lines.Add("</skill_content>");
 
-            var meta = new Dictionary<string, object?> { ["name"] = info.Name, ["dir"] = dir };
-            return Task.FromResult(new ToolResult(output, false, meta));
+            var meta = new Dictionary<string, object?> { ["name"] = info.Name, ["dir"] = metaDir };
+            return Task.FromResult(new ToolResult(string.Join("\n", lines), false, meta));
         }
     }
 
     /// <summary>
     /// Parse the <c>---</c>-fenced YAML frontmatter with a real YAML parser
-    /// (YamlDotNet), so folded (<c>&gt;</c>)/literal (<c>|</c>) block scalars,
-    /// chomping, quoting, and multi-line values all resolve correctly. Scalar
-    /// values (string/number/bool) are coerced to string and <c>.Trim()</c>'d,
-    /// keeping the five ports byte-identical. Malformed YAML fails gracefully to
-    /// an empty mapping, never crashing discovery. Mirrors js/src/skill.ts and
-    /// SPEC.md §3.
+    /// (YamlDotNet). <c>Malformed</c> is true only when fences are present but the
+    /// YAML fails to parse — distinguishing a malformed header from a body with no
+    /// frontmatter, so the inventory (S3) reports the right skip reason. Load's
+    /// behavior is unchanged. Mirrors js/src/skill.ts and SPEC.md §3.
     /// </summary>
-    internal static (Dictionary<string, string> Data, string Content) ParseFrontmatter(string text)
+    internal static (Dictionary<string, string> Data, string Content, bool Malformed) ParseFrontmatter(string text)
     {
         var data = new Dictionary<string, string>();
         var m = Frontmatter().Match(text);
         if (!m.Success)
-            return (data, text);
+            return (data, text, false);
 
         Dictionary<object, object> parsed;
+        var malformed = false;
         try
         {
             var deserializer = new DeserializerBuilder().Build();
@@ -191,6 +348,7 @@ public sealed partial class SkillSource
         {
             // Malformed YAML — fall back to an empty mapping, never crash discovery.
             parsed = new Dictionary<object, object>();
+            malformed = true;
         }
 
         foreach (var (rawKey, rawValue) in parsed)
@@ -198,13 +356,10 @@ public sealed partial class SkillSource
             if (rawKey is null) continue;
             var key = rawKey.ToString();
             if (string.IsNullOrEmpty(key)) continue;
-            // Take only scalar values (YamlDotNet yields strings for scalars);
-            // skip nested mappings/sequences. Trim so block-scalar trailing
-            // newlines (chomping differs subtly per lib) don't leak.
             if (rawValue is string or bool || (rawValue is not null && rawValue.GetType().IsPrimitive))
                 data[key] = rawValue!.ToString()!.Trim();
         }
-        return (data, m.Groups[2].Value);
+        return (data, m.Groups[2].Value, malformed);
     }
 
     private static List<string> WalkSkillFiles(string root)
@@ -212,9 +367,6 @@ public sealed partial class SkillSource
         var output = new List<string>();
         var stack = new Stack<string>();
         stack.Push(root);
-        // Follow symlinked directories (like opencode's `symlink: true` glob);
-        // guard against symlink cycles by tracking resolved real paths already
-        // visited. See SPEC.md §3.
         var seen = new HashSet<string>();
         while (stack.Count > 0)
         {
@@ -287,7 +439,6 @@ public sealed partial class SkillSource
 
         if (attrs.HasFlag(FileAttributes.ReparsePoint))
         {
-            // Symlink: resolve the final target, then stat it to decide.
             try
             {
                 FileSystemInfo fsi = new DirectoryInfo(entry);
@@ -316,7 +467,6 @@ public sealed partial class SkillSource
     internal static string PathToFileUrl(string dir)
     {
         var abs = Path.GetFullPath(dir);
-        // On POSIX the absolute path already starts with '/'.
         if (!abs.StartsWith('/')) abs = "/" + abs.Replace('\\', '/');
         return "file://" + abs;
     }

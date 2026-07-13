@@ -1,0 +1,31 @@
+---
+title: API Reference — Python
+description: The toolnexus (PyPI) public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other four ports.
+---
+
+Package **`toolnexus`** (PyPI, Python ≥ 3.11). See the [combined API Reference](/api/) for every
+symbol shown in five-language synced tabs.
+
+## Toolkit
+
+- `create_toolkit(...) -> Toolkit` (async)
+- Keyword args: `mcp_config`, `skills_dir`, `skills`, `skill_provider`, `skills_filter`,
+  `skill_sample_limit`, `builtins`, `agents`, `extra_tools`, `wait_for`.
+- Equivalents: `createToolkit` (js) · `CreateToolkit` (go) · `Toolkit.create` (java) ·
+  `Toolkit.CreateAsync` (c#).
+
+## Skills
+
+- `load_skills(dirs=None, *, skills=None, filter=None, sample_limit=0) -> SkillSource`
+- `list_skills(dirs=None, *, skills=None) -> SkillInventory` — `.skills`, `.skipped`
+  (`SkillSkip.reason`: `missing-name` · `malformed-frontmatter` · `duplicate-name` · `unreadable`).
+- `SkillDef(name, content, description=None, resources=None, base=None)`
+- `skill_provider` may be sync or async.
+- Equivalents: `loadSkills` / `listSkills` (js) · `LoadSkillsWith` / `ListSkills` (go) ·
+  `SkillSource.loadWith` / `listSkills` (java) · `SkillSource.LoadWith` / `ListSkills` (c#).
+
+## MCP · Adapters · Client
+
+- `load_mcp(config) -> McpSource` (async)
+- `to_openai(tk)` · `to_anthropic(tk)` · `to_gemini(tk)`
+- `create_client(...) -> Client` → `await client.ask(prompt, tk)`.

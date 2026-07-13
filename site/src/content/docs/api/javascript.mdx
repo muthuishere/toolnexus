@@ -1,0 +1,32 @@
+---
+title: API Reference — JavaScript
+description: The toolnexus (npm) public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other four ports.
+---
+
+Package **`toolnexus`** (npm). See the [combined API Reference](/api/) for every symbol shown in
+five-language synced tabs.
+
+## Toolkit
+
+- `createToolkit(opts: ToolkitOptions): Promise<Toolkit>` — the aggregator.
+- `ToolkitOptions`: `mcpConfig`, `skillsDir`, `skills`, `skillProvider`, `skillsFilter`,
+  `skillSampleLimit`, `builtins`, `agents`, `extraTools`, `waitFor`.
+- Equivalents: `create_toolkit` (py) · `CreateToolkit` (go) · `Toolkit.create` (java) ·
+  `Toolkit.CreateAsync` (c#).
+
+## Skills
+
+- `loadSkills(input: string | string[] | LoadSkillsOptions): SkillSource`
+- `listSkills(input): SkillInventory` — `{ skills, skipped }`; skip reasons `missing-name` ·
+  `malformed-frontmatter` · `duplicate-name` · `unreadable`.
+- `SkillDef { name, description?, content, resources?, base? }`
+- `LoadSkillsOptions { dirs?, skills?, filter?, sampleLimit? }`
+- Equivalents: `load_skills` / `list_skills` (py) · `LoadSkills` / `LoadSkillsWith` / `ListSkills`
+  (go) · `SkillSource.load` / `loadWith` / `listSkills` (java) · `SkillSource.Load` / `LoadWith` /
+  `ListSkills` (c#).
+
+## MCP · Adapters · Client
+
+- `loadMcp(config): Promise<McpSource>`
+- `toOpenAI(tk)` · `toAnthropic(tk)` · `toGemini(tk)`
+- `createClient(opts): Client` → `client.ask(prompt, tk)`, `client.stream(...)`.

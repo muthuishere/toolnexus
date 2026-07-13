@@ -14,6 +14,7 @@ import {
   parseMcpConfig,
   expandEnvHeaders,
   loadSkills,
+  listSkills,
   defineTool,
   httpTool,
   toOpenAI,
@@ -94,6 +95,130 @@ test("skills: discovery, prompt, and byte-exact skill block", async () => {
   const miss = await src.tool.execute({ name: "nope" })
   assert.equal(miss.isError, true)
   assert.match(miss.output, /not found/)
+})
+
+// --- extend-skill-source: S1–S5 (SPEC.md §3) ---
+
+test("S4: on-disk hello-world skill block is byte-identical (regression baseline)", async () => {
+  // The exact bytes the fs path must never move. If this fails, S1/S4 perturbed
+  // the on-disk branch — the whole point of the parity contract.
+  const dir = path.join(SKILLS_DIR, "hello-world")
+  const base = new URL(`file://${dir}`).href
+  const src = loadSkills(SKILLS_DIR)
+  const res = await src.tool.execute({ name: "hello-world" })
+  const content = src.skills["hello-world"].content.trim()
+  const expected = [
+    `<skill_content name="hello-world">`,
+    `# Skill: hello-world`,
+    "",
+    content,
+    "",
+    `Base directory for this skill: ${base}`,
+    "Relative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.",
+    "Note: file list is sampled.",
+    "",
+    "<skill_files>",
+    `<file>${path.join(dir, "scripts", "greet.sh")}</file>`,
+    "</skill_files>",
+    "</skill_content>",
+  ].join("\n")
+  assert.equal(res.output, expected)
+})
+
+test("S1: skills supplied as data (no dir), logical base + resources", async () => {
+  const src = loadSkills({
+    skills: [{ name: "x", description: "d", content: "body", resources: ["scripts/foo.sh"] }],
+  })
+  assert.ok(src.skills["x"], "data skill discovered")
+  assert.match(src.prompt(), /\*\*x\*\*: d/)
+  const res = await src.tool.execute({ name: "x" })
+  assert.equal(res.isError, false)
+  assert.match(res.output, /Base directory for this skill: skill:\/\/x\//)
+  assert.match(res.output, /<file>scripts\/foo\.sh<\/file>/)
+  assert.doesNotMatch(res.output, /file:\/\//, "no absolute host path leaks")
+})
+
+test("S1: instruction-only data skill has no <skill_files>", async () => {
+  const src = loadSkills({ skills: [{ name: "y", description: "d", content: "just text" }] })
+  const res = await src.tool.execute({ name: "y" })
+  assert.doesNotMatch(res.output, /<skill_files>/)
+  assert.match(res.output, /just text/)
+})
+
+test("S1: provider + data compose; provider failure is isolated (toolkit)", async () => {
+  const tk = await createToolkit({
+    skillsDir: SKILLS_DIR,
+    skillProvider: () => {
+      throw new Error("boom")
+    },
+  })
+  // Provider threw, but the directory skill still loaded.
+  assert.match(tk.skillsPrompt(), /hello-world/)
+})
+
+test("S1: dir + data first-wins dedupe (dir wins)", async () => {
+  const src = loadSkills({
+    dirs: SKILLS_DIR,
+    skills: [{ name: "hello-world", description: "shadow", content: "shadow body" }],
+  })
+  const res = await src.tool.execute({ name: "hello-world" })
+  // dir came first → its file:// output wins, the data shadow is dropped
+  assert.match(res.output, /file:\/\//)
+  assert.doesNotMatch(res.output, /shadow body/)
+})
+
+test("S2: allowlist exposes only enabled skills", async () => {
+  const defs = [
+    { name: "a", description: "A", content: "a" },
+    { name: "b", description: "B", content: "b" },
+    { name: "c", description: "C", content: "c" },
+  ]
+  const src = loadSkills({ skills: defs, filter: { a: true, b: true } })
+  assert.deepEqual(Object.keys(src.skills).sort(), ["a", "b"])
+  const miss = await src.tool.execute({ name: "c" })
+  assert.equal(miss.isError, true)
+})
+
+test("S2: drop-list removes named skills; unknown ignored; nil/empty ⇒ all", async () => {
+  const defs = [
+    { name: "a", description: "A", content: "a" },
+    { name: "b", description: "B", content: "b" },
+    { name: "c", description: "C", content: "c" },
+  ]
+  assert.deepEqual(Object.keys(loadSkills({ skills: defs, filter: { c: false } }).skills).sort(), ["a", "b"])
+  assert.deepEqual(Object.keys(loadSkills({ skills: defs, filter: { a: true, nope: true } }).skills).sort(), ["a"])
+  assert.deepEqual(Object.keys(loadSkills({ skills: defs, filter: {} }).skills).sort(), ["a", "b", "c"])
+  assert.deepEqual(Object.keys(loadSkills({ skills: defs }).skills).sort(), ["a", "b", "c"])
+})
+
+test("S3: listSkills reports parsed skills + typed skip reasons", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tn-skills-"))
+  const mk = (name: string, body: string) => {
+    const d = path.join(root, name)
+    fs.mkdirSync(d, { recursive: true })
+    fs.writeFileSync(path.join(d, "SKILL.md"), body)
+  }
+  mk("good", "---\nname: good\ndescription: ok\n---\nbody")
+  mk("noname", "---\ndescription: no name here\n---\nbody")
+  mk("bad", "---\nname: [unclosed\n---\nbody")
+  const inv = listSkills({
+    dirs: root,
+    skills: [{ name: "good", description: "dup", content: "dup" }], // duplicate of dir's good
+  })
+  assert.deepEqual(inv.skills.map((s) => s.name), ["good"])
+  const reasons = inv.skipped.map((s) => s.reason).sort()
+  assert.deepEqual(reasons, ["duplicate-name", "malformed-frontmatter", "missing-name"])
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test("S5: sample cap — n caps, -1 omits the block, 0 is default", async () => {
+  const defs = [{ name: "z", content: "z", resources: ["one", "two", "three"] }]
+  const capped = await loadSkills({ skills: defs, sampleLimit: 2 }).tool.execute({ name: "z" })
+  assert.match(capped.output, /<file>one<\/file>\n<file>two<\/file>/)
+  assert.doesNotMatch(capped.output, /three/)
+  const off = await loadSkills({ skills: defs, sampleLimit: -1 }).tool.execute({ name: "z" })
+  assert.doesNotMatch(off.output, /<skill_files>/)
+  assert.doesNotMatch(off.output, /Note: file list is sampled/)
 })
 
 test("defineTool: string, ToolResult, and thrown error", async () => {

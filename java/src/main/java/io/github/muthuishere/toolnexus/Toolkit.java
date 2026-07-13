@@ -24,6 +24,14 @@ public final class Toolkit implements AutoCloseable {
     public static final class Options {
         public Object mcpConfig;            // path string, raw JSON string, or parsed Map
         public List<String> skillsDir;      // one or more skill roots
+        /** Skills supplied as data, bypassing the filesystem (§3, S1). */
+        public List<SkillSource.SkillDef> skills;
+        /** Lazy provider of data skills, resolved once at build; failure isolated (§3, S1). */
+        public java.util.function.Supplier<List<SkillSource.SkillDef>> skillProvider;
+        /** Per-agent skill allowlist keyed on name; same semantics as the MCP tools filter (§3, S2). */
+        public Map<String, Boolean> skillsFilter;
+        /** Sibling-file sample cap: 0 ⇒ default 10, n>0 ⇒ cap, -1 ⇒ omit &lt;skill_files&gt; (§3, S5). */
+        public int skillSampleLimit;
         public List<Tool> extraTools;       // custom/native/http tools
         public List<Object> annotatedObjects; // objects scanned via Tools.fromObject
         /** Built-in tools (§4A). On by default. false | {disabled:true} | {enabled:false} => off. */
@@ -41,6 +49,10 @@ public final class Toolkit implements AutoCloseable {
         public Options mcpConfig(Object v) { this.mcpConfig = v; return this; }
         public Options skillsDir(String... v) { this.skillsDir = List.of(v); return this; }
         public Options skillsDir(List<String> v) { this.skillsDir = v; return this; }
+        public Options skills(List<SkillSource.SkillDef> v) { this.skills = v; return this; }
+        public Options skillProvider(java.util.function.Supplier<List<SkillSource.SkillDef>> v) { this.skillProvider = v; return this; }
+        public Options skillsFilter(Map<String, Boolean> v) { this.skillsFilter = v; return this; }
+        public Options skillSampleLimit(int v) { this.skillSampleLimit = v; return this; }
         public Options extraTools(List<Tool> v) { this.extraTools = v; return this; }
         public Options extraTools(Tool... v) { this.extraTools = List.of(v); return this; }
         public Options annotatedObjects(Object... v) { this.annotatedObjects = List.of(v); return this; }
@@ -80,7 +92,28 @@ public final class Toolkit implements AutoCloseable {
 
     public static Toolkit create(Options opts) {
         McpSource mcp = opts.mcpConfig != null ? McpSource.load(opts.mcpConfig, opts.waitFor) : null;
-        SkillSource skill = opts.skillsDir != null ? SkillSource.load(opts.skillsDir) : null;
+        // Skills come from directories, in-memory data, and/or a lazy provider (§3,
+        // S1). The provider is resolved here and merged with the data list; a
+        // provider failure is isolated so other sources still load.
+        SkillSource skill = null;
+        if (opts.skillsDir != null || opts.skills != null || opts.skillProvider != null) {
+            java.util.List<SkillSource.SkillDef> dataDefs = new java.util.ArrayList<>();
+            if (opts.skills != null) dataDefs.addAll(opts.skills);
+            if (opts.skillProvider != null) {
+                try {
+                    java.util.List<SkillSource.SkillDef> provided = opts.skillProvider.get();
+                    if (provided != null) dataDefs.addAll(provided);
+                } catch (RuntimeException e) {
+                    System.err.println("[toolnexus] skill provider failed: " + e.getMessage());
+                }
+            }
+            SkillSource.LoadOptions so = new SkillSource.LoadOptions();
+            so.dirs = opts.skillsDir;
+            so.skills = dataDefs.isEmpty() ? null : dataDefs;
+            so.filter = opts.skillsFilter;
+            so.sampleLimit = opts.skillSampleLimit;
+            skill = SkillSource.loadWith(so);
+        }
 
         List<Tool> extras = new ArrayList<>();
         if (opts.extraTools != null) extras.addAll(opts.extraTools);

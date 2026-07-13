@@ -1,0 +1,34 @@
+---
+title: API Reference — Java
+description: The io.github.muthuishere:toolnexus public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other four ports.
+---
+
+Artifact **`io.github.muthuishere:toolnexus`** (Java 21). See the [combined API Reference](/api/)
+for every symbol shown in five-language synced tabs.
+
+## Toolkit
+
+- `Toolkit.create(Toolkit.Options opts)`
+- `Options` builder: `.mcpConfig`, `.skillsDir`, `.skills`, `.skillProvider`, `.skillsFilter`,
+  `.skillSampleLimit`, `.builtins`, `.agents`, `.extraTools`, `.waitFor`.
+- Equivalents: `createToolkit` (js) · `create_toolkit` (py) · `CreateToolkit` (go) ·
+  `Toolkit.CreateAsync` (c#).
+
+## Skills
+
+- `SkillSource.load(String... dirs)` — back-compat.
+- `SkillSource.loadWith(SkillSource.LoadOptions opts)`
+- `SkillSource.listSkills(LoadOptions opts) -> SkillInventory` — `.skills`, `.skipped`
+  (`SkillSkip.reason`; constants `SkillSkip.MISSING_NAME`, `MALFORMED`, `DUPLICATE_NAME`,
+  `UNREADABLE`).
+- `new SkillSource.SkillDef(name, description, content[, resources, base])`
+- `LoadOptions` builder: `.dirs`, `.skills`, `.filter`, `.sampleLimit`.
+- `skillProvider` is a `Supplier<List<SkillDef>>`.
+- Equivalents: `loadSkills` / `listSkills` (js) · `load_skills` / `list_skills` (py) ·
+  `LoadSkillsWith` / `ListSkills` (go) · `SkillSource.LoadWith` / `ListSkills` (c#).
+
+## MCP · Adapters · Client
+
+- `McpSource.load(config)`
+- `Adapters.toOpenAI(tk)` · `toAnthropic(tk)` · `toGemini(tk)`
+- `Client.create(Client.Options)` → `client.ask(prompt, tk)`.
