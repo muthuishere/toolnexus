@@ -8,3 +8,4 @@ venv/
 run_toolnexus_go/run_toolnexus_go
 run_toolnexus_go/bench
 node_modules/
+.gradle/
