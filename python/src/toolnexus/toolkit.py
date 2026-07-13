@@ -8,6 +8,7 @@ call :meth:`Toolkit.close`). Mirrors the JS reference (``js/src/toolkit.ts``).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -20,7 +21,7 @@ from .mcp_serve import (
 )
 from .mcp_source import McpSource, load_mcp
 from .serve import A2AConfig, OnTask, ServeHandle, start_a2a_server
-from .skill import SkillSource, load_skills
+from .skill import SkillDef, SkillProvider, SkillSource, load_skills
 from .types import McpStatus, Tool, ToolContext, ToolResult
 
 if TYPE_CHECKING:  # typing-only, avoid a runtime import cycle with client.py
@@ -74,6 +75,10 @@ class Toolkit:
         cls,
         mcp_config: Optional[str | dict[str, Any]] = None,
         skills_dir: Optional[str | list[str]] = None,
+        skills: Optional[list[SkillDef]] = None,
+        skill_provider: Optional[SkillProvider] = None,
+        skills_filter: Optional[dict[str, bool]] = None,
+        skill_sample_limit: int = 0,
         extra_tools: Optional[list[Tool]] = None,
         builtins: Optional[BuiltinsConfig] = None,
         agents: Optional[list[Agent]] = None,
@@ -88,7 +93,29 @@ class Toolkit:
             if mcp_config is not None
             else None
         )
-        skill = load_skills(skills_dir) if skills_dir is not None else None
+        # Skills come from directories, in-memory data, and/or a lazy provider
+        # (§3, S1). The provider is resolved here (create() is async) and merged
+        # with the data list; a provider failure is isolated so other sources
+        # still load.
+        skill = None
+        if skills_dir is not None or skills is not None or skill_provider is not None:
+            provider_defs: list[SkillDef] = []
+            if skill_provider is not None:
+                try:
+                    result = skill_provider()
+                    if inspect.isawaitable(result):
+                        result = await result
+                    provider_defs = list(result)
+                except Exception as e:  # noqa: BLE001 — provider failure is isolated
+                    print(f"[toolnexus] skill provider failed: {e}", file=sys.stderr)
+                    provider_defs = []
+            data_defs = list(skills or []) + provider_defs
+            skill = load_skills(
+                skills_dir,
+                skills=data_defs or None,
+                filter=skills_filter,
+                sample_limit=skill_sample_limit,
+            )
         # The toggle comes from the `builtins` option, or a top-level `builtins`
         # key on a parsed config dict — same precedence as MCP's is_enabled.
         builtins_cfg = builtins
@@ -273,6 +300,10 @@ class Toolkit:
 async def create_toolkit(
     mcp_config: Optional[str | dict[str, Any]] = None,
     skills_dir: Optional[str | list[str]] = None,
+    skills: Optional[list[SkillDef]] = None,
+    skill_provider: Optional[SkillProvider] = None,
+    skills_filter: Optional[dict[str, bool]] = None,
+    skill_sample_limit: int = 0,
     extra_tools: Optional[list[Tool]] = None,
     builtins: Optional[BuiltinsConfig] = None,
     agents: Optional[list[Agent]] = None,
@@ -288,6 +319,10 @@ async def create_toolkit(
     return await Toolkit.create(
         mcp_config=mcp_config,
         skills_dir=skills_dir,
+        skills=skills,
+        skill_provider=skill_provider,
+        skills_filter=skills_filter,
+        skill_sample_limit=skill_sample_limit,
         extra_tools=extra_tools,
         builtins=builtins,
         agents=agents,

@@ -59,6 +59,17 @@ export default defineConfig({
 					],
 				},
 				{
+					label: 'API Reference',
+					items: [
+						{ label: 'All languages — the surface', slug: 'api' },
+						{ label: 'JavaScript', slug: 'api/javascript' },
+						{ label: 'Python', slug: 'api/python' },
+						{ label: 'Go', slug: 'api/go' },
+						{ label: 'Java', slug: 'api/java' },
+						{ label: 'C#', slug: 'api/csharp' },
+					],
+				},
+				{
 					label: 'Reference',
 					items: [
 						{ label: 'Install — all five languages', slug: 'install' },

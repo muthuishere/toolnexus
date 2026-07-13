@@ -25,6 +25,18 @@ public sealed class Toolkit : IAsyncDisposable
         /// <summary>One or more skill roots.</summary>
         public List<string>? SkillsDir { get; set; }
 
+        /// <summary>Skills supplied as data, bypassing the filesystem (§3, S1).</summary>
+        public IReadOnlyList<SkillSource.SkillDef>? Skills { get; set; }
+
+        /// <summary>Lazy provider of data skills, resolved once at build; failure isolated (§3, S1).</summary>
+        public Func<IEnumerable<SkillSource.SkillDef>>? SkillProvider { get; set; }
+
+        /// <summary>Per-agent skill allowlist keyed on name; same semantics as the MCP tools filter (§3, S2).</summary>
+        public IReadOnlyDictionary<string, bool>? SkillsFilter { get; set; }
+
+        /// <summary>Sibling-file sample cap: 0 ⇒ default 10, n&gt;0 ⇒ cap, -1 ⇒ omit &lt;skill_files&gt; (§3, S5).</summary>
+        public int SkillSampleLimit { get; set; }
+
         /// <summary>Custom/native/http tools.</summary>
         public List<ITool>? ExtraTools { get; set; }
 
@@ -83,7 +95,34 @@ public sealed class Toolkit : IAsyncDisposable
     public static async Task<Toolkit> CreateAsync(Options opts)
     {
         var mcp = opts.McpConfig != null ? await McpSource.LoadAsync(opts.McpConfig, opts.WaitFor).ConfigureAwait(false) : null;
-        var skill = opts.SkillsDir != null ? SkillSource.Load(opts.SkillsDir) : null;
+        // Skills come from directories, in-memory data, and/or a lazy provider (§3,
+        // S1). The provider is resolved here and merged with the data list; a
+        // provider failure is isolated so other sources still load.
+        SkillSource? skill = null;
+        if (opts.SkillsDir != null || opts.Skills != null || opts.SkillProvider != null)
+        {
+            var dataDefs = new List<SkillSource.SkillDef>();
+            if (opts.Skills != null) dataDefs.AddRange(opts.Skills);
+            if (opts.SkillProvider != null)
+            {
+                try
+                {
+                    var provided = opts.SkillProvider();
+                    if (provided != null) dataDefs.AddRange(provided);
+                }
+                catch (Exception e)
+                {
+                    Console.Error.WriteLine($"[toolnexus] skill provider failed: {e.Message}");
+                }
+            }
+            skill = SkillSource.LoadWith(new SkillSource.LoadOptions
+            {
+                Dirs = opts.SkillsDir,
+                Skills = dataDefs.Count > 0 ? dataDefs : null,
+                Filter = opts.SkillsFilter,
+                SampleLimit = opts.SkillSampleLimit,
+            });
+        }
 
         var extras = new List<ITool>();
         if (opts.ExtraTools != null) extras.AddRange(opts.ExtraTools);

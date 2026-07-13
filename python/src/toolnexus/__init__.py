@@ -71,8 +71,12 @@ from .serve import (
 from .skill import (
     SKILL_TOOL_DESCRIPTION,
     SKILLS_PROMPT_PREAMBLE,
+    SkillDef,
     SkillInfo,
+    SkillInventory,
+    SkillSkip,
     SkillSource,
+    list_skills,
     load_skills,
 )
 from .toolkit import Toolkit, create_toolkit
@@ -121,8 +125,12 @@ __all__ = [
     # skill
     "SKILL_TOOL_DESCRIPTION",
     "SKILLS_PROMPT_PREAMBLE",
+    "SkillDef",
     "SkillInfo",
+    "SkillInventory",
+    "SkillSkip",
     "SkillSource",
+    "list_skills",
     "load_skills",
     # builtin tools
     "BuiltinsConfig",

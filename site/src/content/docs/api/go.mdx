@@ -1,0 +1,34 @@
+---
+title: API Reference — Go
+description: The github.com/muthuishere/toolnexus/golang public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other four ports.
+---
+
+Module **`github.com/muthuishere/toolnexus/golang`** (Go 1.23). See the
+[combined API Reference](/api/) for every symbol shown in five-language synced tabs.
+
+## Toolkit
+
+- `CreateToolkit(ctx context.Context, opts Options) (*Toolkit, error)`
+- `Options` fields: `McpConfig`, `SkillsDir`, `Skills`, `SkillProvider`, `SkillsFilter`,
+  `SkillSampleLimit`, `Builtins`, `Agents`, `ExtraTools`, `WaitFor`.
+- Equivalents: `createToolkit` (js) · `create_toolkit` (py) · `Toolkit.create` (java) ·
+  `Toolkit.CreateAsync` (c#).
+
+## Skills
+
+- `LoadSkills(dirs ...string) *SkillSource` — back-compat variadic.
+- `LoadSkillsWith(opts LoadSkillsOptions) *SkillSource`
+- `ListSkills(opts LoadSkillsOptions) *SkillInventory` — `.Skills`, `.Skipped`
+  (`SkillSkip.Reason`; constants `SkipMissingName`, `SkipMalformed`, `SkipDuplicateName`,
+  `SkipUnreadable`).
+- `SkillDef{ Name, Description, Content, Resources, Base }`
+- `LoadSkillsOptions{ Dirs, Skills, Filter, SampleLimit }`
+- `SkillProvider func(context.Context) ([]SkillDef, error)` (on `Options`).
+- Equivalents: `loadSkills` / `listSkills` (js) · `load_skills` / `list_skills` (py) ·
+  `SkillSource.loadWith` / `listSkills` (java) · `SkillSource.LoadWith` / `ListSkills` (c#).
+
+## MCP · Adapters · Client
+
+- `LoadMcp(config any) (*McpSource, error)`
+- `tk.ToOpenAI()` · `tk.ToAnthropic()` · `tk.ToGemini()`
+- `CreateClient(opts ClientOptions) *Client` → `client.Ask(ctx, prompt, tk, id)`.

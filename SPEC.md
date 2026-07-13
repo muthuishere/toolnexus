@@ -306,6 +306,41 @@ Use this tool to inject the skill's instructions and resources into current conv
 The skill name must match one of the skills listed in your system prompt.
 ```
 
+### Host-facing extensions (injectable sources, filter, inventory, sample cap)
+
+All additive: a caller supplying only skill **directories** and nothing else gets byte-identical
+behavior to the sections above. Grounded in `docs/adr/0002-skills-consumer-needs.md`.
+
+**S1 — Skills supplied as data / provider.** Besides directories, the source accepts skills as
+data — `SkillDef { name, description?, content, resources? (logical names), base? (logical, default
+`skill://<name>/`) }` — and/or a lazy provider resolved once at toolkit build. The three sources
+compose and dedupe by `name` with the existing **first-wins** rule (directory candidates precede
+data candidates). A failing provider is isolated (other sources still load), mirroring MCP
+per-server isolation.
+
+**S2 — Per-agent skill allowlist.** An optional `name → bool` filter selects which discovered
+skills are exposed, with semantics **identical to the MCP per-server `tools` filter and builtins
+§4A**: nil/empty ⇒ all; ≥1 `true` ⇒ allowlist (only true-mapped names); only-`false` ⇒ drop-list
+over the all-on baseline; unknown names ignored + warned once. Applied after discovery, before the
+`skill` tool is built, so the prompt catalog and the tool's lookup agree.
+
+**S3 — List/validate inventory.** A list-only operation (`listSkills` / `list_skills` / `ListSkills`)
+discovers + validates from the same sources and returns `{ skills, skipped }`, where each skip
+carries a typed reason: `missing-name` | `malformed-frontmatter` | `duplicate-name` | `unreadable`.
+It wires **no** toolkit and leaves nothing open. The inventory is **unfiltered** (it exists to author
+the S2 allowlist).
+
+**S4 — Logical output base for non-filesystem skills.** In the `skill` tool output:
+- A **directory-sourced** skill is **byte-identical** to the section above — a `file://` base plus
+  on-disk sibling sampling (the shared `examples/skills/hello-world` output must not move).
+- A **data/provider-sourced** skill uses the logical `base` (default `skill://<name>/`) and lists
+  the supplied `resources` in `<skill_files>`, emitting **no** absolute host path. A data skill with
+  **no** resources is instruction-only: the `<skill_files>` block (and its "Note: file list is
+  sampled." line) is omitted entirely.
+
+**S5 — Configurable sibling-file sample cap.** An optional `sampleLimit`: `0` ⇒ default 10 (today's
+behavior), `n > 0` ⇒ cap the sample at `n`, `-1` ⇒ omit the `<skill_files>` block entirely.
+
 ---
 
 ## 4. Toolkit (aggregator)

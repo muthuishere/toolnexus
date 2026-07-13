@@ -5,6 +5,9 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -166,5 +169,121 @@ class SkillSourceTest {
                 "Runs a repo-aware expert huddle for engineering decisions, planning, research, verification, and spec capture. "
                         + "Trigger when the user says \"start a huddle\" or \"assemble the team\".",
                 info.description);
+    }
+
+    // --- extend-skill-source: S1–S5 (SPEC.md §3) ---
+
+    private static List<String> keys(SkillSource s) {
+        List<String> out = new ArrayList<>(s.skills().keySet());
+        out.sort(null);
+        return out;
+    }
+
+    @Test
+    void s4_onDiskBlockByteIdentical() {
+        SkillSource src = SkillSource.load(TestFixtures.skillsDir());
+        ToolResult res = src.tool().execute(Map.of("name", "hello-world"), null);
+        Path dir = Path.of(TestFixtures.skillsDir(), "hello-world").toAbsolutePath();
+        String content = src.skills().get("hello-world").content.trim();
+        String want = String.join("\n",
+                "<skill_content name=\"hello-world\">",
+                "# Skill: hello-world",
+                "",
+                content,
+                "",
+                "Base directory for this skill: " + SkillSource.pathToFileUrl(dir),
+                "Relative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.",
+                "Note: file list is sampled.",
+                "",
+                "<skill_files>",
+                "<file>" + dir.resolve("scripts").resolve("greet.sh") + "</file>",
+                "</skill_files>",
+                "</skill_content>");
+        assertEquals(want, res.output());
+    }
+
+    @Test
+    void s1_dataSkillLogicalBaseAndResources() {
+        SkillSource.LoadOptions opts = new SkillSource.LoadOptions()
+                .skills(List.of(new SkillSource.SkillDef("x", "d", "body", List.of("scripts/foo.sh"), null)));
+        SkillSource src = SkillSource.loadWith(opts);
+        assertNotNull(src.skills().get("x"));
+        assertTrue(src.prompt().contains("**x**: d"));
+        ToolResult res = src.tool().execute(Map.of("name", "x"), null);
+        assertTrue(res.output().contains("Base directory for this skill: skill://x/"));
+        assertTrue(res.output().contains("<file>scripts/foo.sh</file>"));
+        assertFalse(res.output().contains("file://"), "no absolute host path leaks");
+    }
+
+    @Test
+    void s1_instructionOnlyHasNoFilesBlock() {
+        SkillSource src = SkillSource.loadWith(new SkillSource.LoadOptions()
+                .skills(List.of(new SkillSource.SkillDef("y", "d", "just text"))));
+        ToolResult res = src.tool().execute(Map.of("name", "y"), null);
+        assertFalse(res.output().contains("<skill_files>"));
+        assertTrue(res.output().contains("just text"));
+    }
+
+    @Test
+    void s1_dirDataFirstWins() {
+        SkillSource src = SkillSource.loadWith(new SkillSource.LoadOptions()
+                .dirs(TestFixtures.skillsDir())
+                .skills(List.of(new SkillSource.SkillDef("hello-world", "shadow", "shadow body"))));
+        ToolResult res = src.tool().execute(Map.of("name", "hello-world"), null);
+        assertTrue(res.output().contains("file://"));
+        assertFalse(res.output().contains("shadow body"));
+    }
+
+    @Test
+    void s2_filterSemantics() {
+        List<SkillSource.SkillDef> defs = List.of(
+                new SkillSource.SkillDef("a", "A", "a"),
+                new SkillSource.SkillDef("b", "B", "b"),
+                new SkillSource.SkillDef("c", "C", "c"));
+        assertEquals(List.of("a", "b"),
+                keys(SkillSource.loadWith(new SkillSource.LoadOptions().skills(defs).filter(Map.of("a", true, "b", true)))));
+        assertEquals(List.of("a", "b"),
+                keys(SkillSource.loadWith(new SkillSource.LoadOptions().skills(defs).filter(Map.of("c", false)))));
+        assertEquals(List.of("a"),
+                keys(SkillSource.loadWith(new SkillSource.LoadOptions().skills(defs).filter(Map.of("a", true, "nope", true)))));
+        assertEquals(List.of("a", "b", "c"),
+                keys(SkillSource.loadWith(new SkillSource.LoadOptions().skills(defs).filter(new LinkedHashMap<>()))));
+    }
+
+    @Test
+    void s3_listSkillsTypedSkips() throws IOException {
+        Path root = Files.createTempDirectory("tn-skills-inv");
+        mkSkill(root, "good", "---\nname: good\ndescription: ok\n---\nbody");
+        mkSkill(root, "noname", "---\ndescription: no name\n---\nbody");
+        mkSkill(root, "bad", "---\nname: [unclosed\n---\nbody");
+        SkillSource.SkillInventory inv = SkillSource.listSkills(new SkillSource.LoadOptions()
+                .dirs(root.toString())
+                .skills(List.of(new SkillSource.SkillDef("good", "dup", "dup"))));
+        assertEquals(1, inv.skills.size());
+        assertEquals("good", inv.skills.get(0).name);
+        List<String> reasons = new ArrayList<>();
+        for (SkillSource.SkillSkip s : inv.skipped) reasons.add(s.reason);
+        reasons.sort(null);
+        assertEquals(List.of("duplicate-name", "malformed-frontmatter", "missing-name"), reasons);
+    }
+
+    @Test
+    void s5_sampleCapAndDisable() {
+        List<SkillSource.SkillDef> defs = List.of(
+                new SkillSource.SkillDef("z", null, "z", List.of("one", "two", "three"), null));
+        ToolResult capped = SkillSource.loadWith(new SkillSource.LoadOptions().skills(defs).sampleLimit(2))
+                .tool().execute(Map.of("name", "z"), null);
+        assertTrue(capped.output().contains("<file>one</file>\n<file>two</file>"));
+        assertFalse(capped.output().contains("three"));
+        ToolResult off = SkillSource.loadWith(new SkillSource.LoadOptions().skills(defs).sampleLimit(-1))
+                .tool().execute(Map.of("name", "z"), null);
+        assertFalse(off.output().contains("<skill_files>"));
+        assertFalse(off.output().contains("Note: file list is sampled"));
+    }
+
+    private static void mkSkill(Path root, String name, String body) throws IOException {
+        Path d = root.resolve(name);
+        Files.createDirectories(d);
+        Files.writeString(d.resolve("SKILL.md"), body);
     }
 }

@@ -156,6 +156,130 @@ public class SkillSourceTests
             src.Skills["huddle"].Description);
     }
 
+    // --- extend-skill-source: S1–S5 (SPEC.md §3) ---
+
+    private static List<string> Keys(SkillSource s) => s.Skills.Keys.OrderBy(k => k, StringComparer.Ordinal).ToList();
+
+    [Fact]
+    public async Task S4_OnDiskBlockByteIdentical()
+    {
+        var src = SkillSource.Load(TestFixtures.SkillsDir());
+        var res = await src.Tool.ExecuteAsync(new Dictionary<string, object?> { ["name"] = "hello-world" });
+        var dir = Path.GetFullPath(Path.Combine(TestFixtures.SkillsDir(), "hello-world"));
+        var content = src.Skills["hello-world"].Content.Trim();
+        var want = string.Join("\n",
+            "<skill_content name=\"hello-world\">",
+            "# Skill: hello-world",
+            "",
+            content,
+            "",
+            "Base directory for this skill: " + SkillSource.PathToFileUrl(dir),
+            "Relative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.",
+            "Note: file list is sampled.",
+            "",
+            "<skill_files>",
+            "<file>" + Path.Combine(dir, "scripts", "greet.sh") + "</file>",
+            "</skill_files>",
+            "</skill_content>");
+        Assert.Equal(want, res.Output);
+    }
+
+    [Fact]
+    public async Task S1_DataSkillLogicalBaseAndResources()
+    {
+        var src = SkillSource.LoadWith(new SkillSource.LoadOptions
+        {
+            Skills = new List<SkillSource.SkillDef>
+            {
+                new("x", "d", "body", new List<string> { "scripts/foo.sh" }),
+            },
+        });
+        Assert.True(src.Skills.ContainsKey("x"));
+        Assert.Contains("**x**: d", src.Prompt());
+        var res = await src.Tool.ExecuteAsync(new Dictionary<string, object?> { ["name"] = "x" });
+        Assert.Contains("Base directory for this skill: skill://x/", res.Output);
+        Assert.Contains("<file>scripts/foo.sh</file>", res.Output);
+        Assert.DoesNotContain("file://", res.Output);
+    }
+
+    [Fact]
+    public async Task S1_InstructionOnlyHasNoFilesBlock()
+    {
+        var src = SkillSource.LoadWith(new SkillSource.LoadOptions
+        {
+            Skills = new List<SkillSource.SkillDef> { new("y", "d", "just text") },
+        });
+        var res = await src.Tool.ExecuteAsync(new Dictionary<string, object?> { ["name"] = "y" });
+        Assert.DoesNotContain("<skill_files>", res.Output);
+        Assert.Contains("just text", res.Output);
+    }
+
+    [Fact]
+    public async Task S1_DirDataFirstWins()
+    {
+        var src = SkillSource.LoadWith(new SkillSource.LoadOptions
+        {
+            Dirs = new List<string> { TestFixtures.SkillsDir() },
+            Skills = new List<SkillSource.SkillDef> { new("hello-world", "shadow", "shadow body") },
+        });
+        var res = await src.Tool.ExecuteAsync(new Dictionary<string, object?> { ["name"] = "hello-world" });
+        Assert.Contains("file://", res.Output);
+        Assert.DoesNotContain("shadow body", res.Output);
+    }
+
+    [Fact]
+    public void S2_FilterSemantics()
+    {
+        var defs = new List<SkillSource.SkillDef> { new("a", "A", "a"), new("b", "B", "b"), new("c", "C", "c") };
+        SkillSource With(IReadOnlyDictionary<string, bool>? f) =>
+            SkillSource.LoadWith(new SkillSource.LoadOptions { Skills = defs, Filter = f });
+        Assert.Equal(new List<string> { "a", "b" }, Keys(With(new Dictionary<string, bool> { ["a"] = true, ["b"] = true })));
+        Assert.Equal(new List<string> { "a", "b" }, Keys(With(new Dictionary<string, bool> { ["c"] = false })));
+        Assert.Equal(new List<string> { "a" }, Keys(With(new Dictionary<string, bool> { ["a"] = true, ["nope"] = true })));
+        Assert.Equal(new List<string> { "a", "b", "c" }, Keys(With(new Dictionary<string, bool>())));
+    }
+
+    [Fact]
+    public void S3_ListSkillsTypedSkips()
+    {
+        var root = TempDir();
+        void Mk(string name, string body)
+        {
+            var d = Path.Combine(root, name);
+            Directory.CreateDirectory(d);
+            File.WriteAllText(Path.Combine(d, "SKILL.md"), body);
+        }
+        Mk("good", "---\nname: good\ndescription: ok\n---\nbody");
+        Mk("noname", "---\ndescription: no name\n---\nbody");
+        Mk("bad", "---\nname: [unclosed\n---\nbody");
+        var inv = SkillSource.ListSkills(new SkillSource.LoadOptions
+        {
+            Dirs = new List<string> { root },
+            Skills = new List<SkillSource.SkillDef> { new("good", "dup", "dup") },
+        });
+        Assert.Single(inv.Skills);
+        Assert.Equal("good", inv.Skills[0].Name);
+        var reasons = inv.Skipped.Select(s => s.Reason).OrderBy(r => r, StringComparer.Ordinal).ToList();
+        Assert.Equal(new List<string> { "duplicate-name", "malformed-frontmatter", "missing-name" }, reasons);
+    }
+
+    [Fact]
+    public async Task S5_SampleCapAndDisable()
+    {
+        var defs = new List<SkillSource.SkillDef>
+        {
+            new("z", null, "z", new List<string> { "one", "two", "three" }),
+        };
+        var capped = await SkillSource.LoadWith(new SkillSource.LoadOptions { Skills = defs, SampleLimit = 2 })
+            .Tool.ExecuteAsync(new Dictionary<string, object?> { ["name"] = "z" });
+        Assert.Contains("<file>one</file>\n<file>two</file>", capped.Output);
+        Assert.DoesNotContain("three", capped.Output);
+        var off = await SkillSource.LoadWith(new SkillSource.LoadOptions { Skills = defs, SampleLimit = -1 })
+            .Tool.ExecuteAsync(new Dictionary<string, object?> { ["name"] = "z" });
+        Assert.DoesNotContain("<skill_files>", off.Output);
+        Assert.DoesNotContain("Note: file list is sampled", off.Output);
+    }
+
     private static string TempDir()
     {
         var dir = Path.Combine(Path.GetTempPath(), "tnx-skill-" + Guid.NewGuid().ToString("N"));
@@ -203,5 +327,34 @@ public class ToolkitTests
     {
         await using var tk = await Build();
         Assert.Empty(tk.McpStatus());
+    }
+
+    // extend-skill-source (§3, S1/S2): toolkit wires data skills, a lazy provider
+    // (failure isolated), and the per-agent filter.
+    [Fact]
+    public async Task SkillProviderFailureIsolatedAndDataSkillsWired()
+    {
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+        {
+            SkillsDir = new List<string> { TestFixtures.SkillsDir() },
+            Skills = new List<SkillSource.SkillDef> { new("extra", "e", "e-body") },
+            SkillProvider = () => throw new InvalidOperationException("boom"),
+            Builtins = false,
+        });
+        Assert.Contains("hello-world", tk.SkillsPrompt());
+        Assert.Contains("extra", tk.SkillsPrompt());
+    }
+
+    [Fact]
+    public async Task SkillsFilterAppliedThroughToolkit()
+    {
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+        {
+            Skills = new List<SkillSource.SkillDef> { new("a", "A", "a"), new("b", "B", "b") },
+            SkillsFilter = new Dictionary<string, bool> { ["a"] = true },
+            Builtins = false,
+        });
+        Assert.Contains("**a**", tk.SkillsPrompt());
+        Assert.DoesNotContain("**b**", tk.SkillsPrompt());
     }
 }

@@ -53,4 +53,34 @@ class ToolkitTest {
             assertTrue(tk.mcpStatus().isEmpty(), "no MCP config => no network, empty status");
         }
     }
+
+    // extend-skill-source (§3, S1/S2): the toolkit wires data skills, a lazy
+    // provider (failure isolated), and the per-agent filter.
+    @Test
+    void skillProviderFailureIsolatedAndDataSkillsWired() {
+        Toolkit.Options opts = new Toolkit.Options()
+                .skillsDir(TestFixtures.skillsDir())
+                .skills(java.util.List.of(new SkillSource.SkillDef("extra", "e", "e-body")))
+                .skillProvider(() -> { throw new RuntimeException("boom"); })
+                .builtins(false);
+        try (Toolkit tk = Toolkit.create(opts)) {
+            // Provider threw, but the dir skill AND the data skill still loaded.
+            assertTrue(tk.skillsPrompt().contains("hello-world"), "dir skill survives provider failure");
+            assertTrue(tk.skillsPrompt().contains("extra"), "data skill wired via toolkit");
+        }
+    }
+
+    @Test
+    void skillsFilterAppliedThroughToolkit() {
+        Toolkit.Options opts = new Toolkit.Options()
+                .skills(java.util.List.of(
+                        new SkillSource.SkillDef("a", "A", "a"),
+                        new SkillSource.SkillDef("b", "B", "b")))
+                .skillsFilter(Map.of("a", true))
+                .builtins(false);
+        try (Toolkit tk = Toolkit.create(opts)) {
+            assertTrue(tk.skillsPrompt().contains("**a**"), "allowlisted skill present");
+            assertTrue(!tk.skillsPrompt().contains("**b**"), "non-allowlisted skill filtered out");
+        }
+    }
 }

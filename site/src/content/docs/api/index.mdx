@@ -1,0 +1,297 @@
+---
+title: API Reference
+description: The public surface of every port — toolkit options, client options, skill loading and inventory, MCP load, and adapters — with the exact symbol in all five languages side by side.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+The same API, five languages. Every entry below shows its **exact per-language equivalent** in
+synced tabs — pick your language once and it sticks across the page. Per-port index pages:
+[JavaScript](/api/javascript/) · [Python](/api/python/) · [Go](/api/go/) · [Java](/api/java/) ·
+[C#](/api/csharp/).
+
+<Aside type="tip">These are the public entry points. Behavior is identical across ports by
+contract — see <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC.md</a>.</Aside>
+
+## Build a toolkit
+
+The one aggregator: MCP tools + skills + built-ins + A2A agents + your own tools behind one `Tool`
+interface.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createToolkit } from "toolnexus"
+
+const tk = await createToolkit({
+  mcpConfig: "./mcp.json",      // path | object
+  skillsDir: "./skills",        // string | string[]
+  skills: [/* SkillDef[] */],   // data skills (§3, S1)
+  skillProvider: async () => [/* SkillDef[] */], // lazy, resolved once
+  skillsFilter: { deploy: true },   // per-agent allowlist (§3, S2)
+  skillSampleLimit: 0,              // 0=10, n=cap, -1=off (§3, S5)
+  builtins: true,
+  agents: [/* Agent[] */],
+  extraTools: [/* Tool[] */],
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_toolkit
+
+tk = await create_toolkit(
+    mcp_config="./mcp.json",
+    skills_dir="./skills",
+    skills=[...],                  # SkillDef list (§3, S1)
+    skill_provider=lambda: [...],  # sync or async
+    skills_filter={"deploy": True},
+    skill_sample_limit=0,
+    builtins=True,
+    agents=[...],
+    extra_tools=[...],
+)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{
+    McpConfig:        "./mcp.json",
+    SkillsDir:        []string{"./skills"},
+    Skills:           []toolnexus.SkillDef{ /* … */ },
+    SkillProvider:    func(ctx context.Context) ([]toolnexus.SkillDef, error) { return nil, nil },
+    SkillsFilter:     map[string]bool{"deploy": true},
+    SkillSampleLimit: 0,
+    Builtins:         true,
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Toolkit tk = Toolkit.create(new Toolkit.Options()
+    .mcpConfig("./mcp.json")
+    .skillsDir("./skills")
+    .skills(List.of(/* SkillDef */))
+    .skillProvider(() -> List.of(/* SkillDef */))
+    .skillsFilter(Map.of("deploy", true))
+    .skillSampleLimit(0)
+    .builtins(true));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    McpConfig = "./mcp.json",
+    SkillsDir = new List<string> { "./skills" },
+    Skills = new List<SkillSource.SkillDef> { /* … */ },
+    SkillProvider = () => new List<SkillSource.SkillDef>(),
+    SkillsFilter = new Dictionary<string, bool> { ["deploy"] = true },
+    SkillSampleLimit = 0,
+    Builtins = true,
+});
+```
+</TabItem>
+</Tabs>
+
+## Skills — load, supply as data, filter, inventory
+
+Directories, in-memory `SkillDef`s, and a lazy provider all compose (first-wins dedupe). See the
+[Agent skills](/skills/) guide for the concepts; this is the exact surface.
+
+### `SkillDef` — a skill as data (§3, S1)
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+interface SkillDef {
+  name: string
+  description?: string
+  content: string
+  resources?: string[]   // logical names; nil ⇒ instruction-only
+  base?: string          // logical base; default "skill://<name>/"
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python
+@dataclass
+class SkillDef:
+    name: str
+    content: str
+    description: str | None = None
+    resources: list[str] | None = None
+    base: str | None = None
+```
+</TabItem>
+<TabItem label="Go">
+```go
+type SkillDef struct {
+    Name        string
+    Description string
+    Content     string
+    Resources   []string
+    Base        string
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java
+new SkillSource.SkillDef(name, description, content);             // instruction-only
+new SkillSource.SkillDef(name, description, content, resources, base);
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+new SkillSource.SkillDef(Name, Description, Content,
+    Resources: null, Base: null);   // record
+```
+</TabItem>
+</Tabs>
+
+### List & validate — `ListSkills` (§3, S3)
+
+Discover + validate without building a toolkit. Returns parsed skills plus **typed skip reasons**:
+`missing-name` · `malformed-frontmatter` · `duplicate-name` · `unreadable`.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { listSkills } from "toolnexus"
+
+const inv = listSkills({ dirs: "./skills" })
+// inv.skills: SkillInfo[]   inv.skipped: { location, reason }[]
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import list_skills
+
+inv = list_skills("./skills")
+# inv.skills: list[SkillInfo]   inv.skipped: list[SkillSkip]
+```
+</TabItem>
+<TabItem label="Go">
+```go
+inv := toolnexus.ListSkills(toolnexus.LoadSkillsOptions{Dirs: []string{"./skills"}})
+// inv.Skills []SkillInfo   inv.Skipped []SkillSkip
+```
+</TabItem>
+<TabItem label="Java">
+```java
+var inv = SkillSource.listSkills(new SkillSource.LoadOptions().dirs("./skills"));
+// inv.skills   inv.skipped  (SkillSkip.reason)
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var inv = SkillSource.ListSkills(new SkillSource.LoadOptions { Dirs = new[] { "./skills" } });
+// inv.Skills   inv.Skipped  (SkillSkip.Reason)
+```
+</TabItem>
+</Tabs>
+
+## Load MCP servers
+
+Read an `mcp.json`, connect every server (stdio + streamable-HTTP), expose each tool as a `Tool`.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { loadMcp } from "toolnexus"
+const mcp = await loadMcp("./mcp.json")   // mcp.tools: Tool[]
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import load_mcp
+mcp = await load_mcp("./mcp.json")
+```
+</TabItem>
+<TabItem label="Go">
+```go
+mcp, _ := toolnexus.LoadMcp("./mcp.json")
+```
+</TabItem>
+<TabItem label="Java">
+```java
+McpSource mcp = McpSource.load("./mcp.json");
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var mcp = await McpSource.LoadAsync("./mcp.json");
+```
+</TabItem>
+</Tabs>
+
+## Adapters — emit provider schema
+
+Turn a toolkit into the tool-schema shape each provider expects.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { toOpenAI, toAnthropic, toGemini } from "toolnexus"
+const tools = toOpenAI(tk)   // toAnthropic(tk) · toGemini(tk)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import to_openai, to_anthropic, to_gemini
+tools = to_openai(tk)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+tools := tk.ToOpenAI()   // tk.ToAnthropic() · tk.ToGemini()
+```
+</TabItem>
+<TabItem label="Java">
+```java
+var tools = Adapters.toOpenAI(tk);   // toAnthropic · toGemini
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var tools = Adapters.ToOpenAI(tk);   // ToAnthropic · ToGemini
+```
+</TabItem>
+</Tabs>
+
+## Build a client (the tool-calling loop)
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createClient } from "toolnexus"
+const client = createClient({ model: "gpt-5", baseURL: "…", apiKey: "…" })
+const res = await client.ask("…", tk)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_client
+client = create_client(model="gpt-5", base_url="…", api_key="…")
+res = await client.ask("…", tk)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+client := toolnexus.CreateClient(toolnexus.ClientOptions{Model: "gpt-5", BaseURL: "…", APIKey: "…"})
+res, _ := client.Ask(ctx, "…", tk, "")
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Client client = Client.create(new Client.Options().model("gpt-5").baseUrl("…").apiKey("…"));
+var res = client.ask("…", tk);
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var client = Client.Create(new Client.Options { Model = "gpt-5", BaseUrl = "…", ApiKey = "…" });
+var res = await client.AskAsync("…", tk);
+```
+</TabItem>
+</Tabs>

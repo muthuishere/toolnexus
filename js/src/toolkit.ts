@@ -4,7 +4,7 @@
  */
 import { type Tool, type ToolContext, type ToolResult, type McpStatus } from "./types.js"
 import { loadMcp, type McpSource } from "./mcp.js"
-import { loadSkills, type SkillSource } from "./skill.js"
+import { loadSkills, type SkillDef, type SkillSource } from "./skill.js"
 import { selectBuiltins, type BuiltinsConfig } from "./builtin.js"
 import { agentTools, parseAgentsConfig, type Agent } from "./a2a.js"
 import { startA2AServer, type A2AConfig, type OnTask, type ServeHandle } from "./serve.js"
@@ -15,6 +15,14 @@ import type { Client } from "./client.js"
 export interface ToolkitOptions {
   mcpConfig?: string | object
   skillsDir?: string | string[]
+  /** Skills supplied as data, bypassing the filesystem (§3, S1). */
+  skills?: SkillDef[]
+  /** Lazy provider of data-supplied skills, resolved once at toolkit build (§3, S1). */
+  skillProvider?: () => SkillDef[] | Promise<SkillDef[]>
+  /** Per-agent skill allowlist keyed on name; same semantics as the MCP tools filter (§3, S2). */
+  skillsFilter?: Record<string, boolean>
+  /** Sibling-file sample cap: 0 ⇒ default 10, n>0 ⇒ cap, -1 ⇒ omit <skill_files> (§3, S5). */
+  skillSampleLimit?: number
   extraTools?: Tool[]
   /** Built-in tools (§4A). On by default. false | { disabled:true } | { enabled:false } ⇒ off. */
   builtins?: BuiltinsConfig
@@ -59,7 +67,28 @@ export class Toolkit {
 
   static async create(opts: ToolkitOptions): Promise<Toolkit> {
     const mcp = opts.mcpConfig !== undefined ? await loadMcp(opts.mcpConfig, { waitFor: opts.waitFor }) : undefined
-    const skill = opts.skillsDir !== undefined ? loadSkills(opts.skillsDir) : undefined
+    // Skills come from directories, in-memory data, and/or a lazy provider (§3,
+    // S1). The provider is resolved here (create() is async) and merged with the
+    // data list; a provider failure is isolated so other sources still load.
+    let skill: SkillSource | undefined
+    if (opts.skillsDir !== undefined || opts.skills !== undefined || opts.skillProvider !== undefined) {
+      let providerDefs: SkillDef[] = []
+      if (opts.skillProvider) {
+        try {
+          providerDefs = await opts.skillProvider()
+        } catch (e) {
+          console.warn(`[toolnexus] skill provider failed: ${e instanceof Error ? e.message : String(e)}`)
+          providerDefs = []
+        }
+      }
+      const dataDefs = [...(opts.skills ?? []), ...providerDefs]
+      skill = loadSkills({
+        dirs: opts.skillsDir,
+        skills: dataDefs.length > 0 ? dataDefs : undefined,
+        filter: opts.skillsFilter,
+        sampleLimit: opts.skillSampleLimit,
+      })
+    }
     // The toggle comes from the `builtins` option, or a top-level `builtins`
     // key on a parsed config object — same precedence as MCP's isEnabled.
     let builtinsCfg = opts.builtins

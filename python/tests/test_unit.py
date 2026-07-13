@@ -29,6 +29,7 @@ from toolnexus import (
     elicitation_to_request,
     expand_env_headers,
     http_tool,
+    list_skills,
     load_skills,
     parse_mcp_config,
     sanitize,
@@ -104,6 +105,123 @@ async def test_skills_discovery_prompt_and_block():
     miss = await src.tool.execute({"name": "nope"})
     assert miss.is_error is True
     assert "not found" in miss.output
+
+
+# --------------------------------------------------------------------------- #
+# extend-skill-source: S1–S5 (SPEC.md §3)
+# --------------------------------------------------------------------------- #
+async def test_s4_on_disk_block_byte_identical():
+    from pathlib import Path as _P
+
+    from toolnexus import SkillDef  # noqa: F401 (import parity)
+
+    directory = os.path.join(SKILLS_DIR, "hello-world")
+    base = _P(directory).as_uri()
+    src = load_skills(SKILLS_DIR)
+    res = await src.tool.execute({"name": "hello-world"})
+    content = src.skills["hello-world"].content.strip()
+    expected = "\n".join(
+        [
+            '<skill_content name="hello-world">',
+            "# Skill: hello-world",
+            "",
+            content,
+            "",
+            f"Base directory for this skill: {base}",
+            "Relative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.",
+            "Note: file list is sampled.",
+            "",
+            "<skill_files>",
+            f"<file>{os.path.join(directory, 'scripts', 'greet.sh')}</file>",
+            "</skill_files>",
+            "</skill_content>",
+        ]
+    )
+    assert res.output == expected
+
+
+async def test_s1_data_skill_logical_base_and_resources():
+    from toolnexus import SkillDef
+
+    src = load_skills(skills=[SkillDef(name="x", description="d", content="body", resources=["scripts/foo.sh"])])
+    assert "x" in src.skills
+    assert "**x**: d" in src.prompt()
+    res = await src.tool.execute({"name": "x"})
+    assert res.is_error is False
+    assert "Base directory for this skill: skill://x/" in res.output
+    assert "<file>scripts/foo.sh</file>" in res.output
+    assert "file://" not in res.output
+
+
+async def test_s1_instruction_only_has_no_files_block():
+    from toolnexus import SkillDef
+
+    src = load_skills(skills=[SkillDef(name="y", description="d", content="just text")])
+    res = await src.tool.execute({"name": "y"})
+    assert "<skill_files>" not in res.output
+    assert "just text" in res.output
+
+
+async def test_s1_provider_failure_isolated():
+    def boom():
+        raise RuntimeError("boom")
+
+    tk = await create_toolkit(skills_dir=SKILLS_DIR, skill_provider=boom, builtins=False)
+    assert "hello-world" in tk.skills_prompt()
+
+
+async def test_s1_dir_data_first_wins_dedupe():
+    from toolnexus import SkillDef
+
+    src = load_skills(SKILLS_DIR, skills=[SkillDef(name="hello-world", description="shadow", content="shadow body")])
+    res = await src.tool.execute({"name": "hello-world"})
+    assert "file://" in res.output
+    assert "shadow body" not in res.output
+
+
+def test_s2_allowlist_droplist_unknown_nil():
+    from toolnexus import SkillDef
+
+    defs = [SkillDef(name=n, description=n, content=n) for n in ("a", "b", "c")]
+    assert sorted(load_skills(skills=defs, filter={"a": True, "b": True}).skills) == ["a", "b"]
+    assert sorted(load_skills(skills=defs, filter={"c": False}).skills) == ["a", "b"]
+    assert sorted(load_skills(skills=defs, filter={"a": True, "nope": True}).skills) == ["a"]
+    assert sorted(load_skills(skills=defs, filter={}).skills) == ["a", "b", "c"]
+    assert sorted(load_skills(skills=defs).skills) == ["a", "b", "c"]
+
+
+def test_s3_list_skills_typed_skips():
+    from toolnexus import SkillDef
+
+    with tempfile.TemporaryDirectory() as root:
+        def mk(name: str, body: str) -> None:
+            d = os.path.join(root, name)
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write(body)
+
+        mk("good", "---\nname: good\ndescription: ok\n---\nbody")
+        mk("noname", "---\ndescription: no name\n---\nbody")
+        mk("bad", "---\nname: [unclosed\n---\nbody")
+        inv = list_skills(root, skills=[SkillDef(name="good", description="dup", content="dup")])
+        assert [s.name for s in inv.skills] == ["good"]
+        assert sorted(s.reason for s in inv.skipped) == [
+            "duplicate-name",
+            "malformed-frontmatter",
+            "missing-name",
+        ]
+
+
+async def test_s5_sample_cap_and_disable():
+    from toolnexus import SkillDef
+
+    defs = [SkillDef(name="z", content="z", resources=["one", "two", "three"])]
+    capped = await load_skills(skills=defs, sample_limit=2).tool.execute({"name": "z"})
+    assert "<file>one</file>\n<file>two</file>" in capped.output
+    assert "three" not in capped.output
+    off = await load_skills(skills=defs, sample_limit=-1).tool.execute({"name": "z"})
+    assert "<skill_files>" not in off.output
+    assert "Note: file list is sampled" not in off.output
 
 
 # --------------------------------------------------------------------------- #
