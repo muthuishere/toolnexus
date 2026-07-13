@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net/http"
 	"os"
@@ -72,6 +73,21 @@ type ClientOptions struct {
 	// host can deliver it out-of-band and resume later. Named WaitFor, never
 	// "await" (a reserved word). Mirrors js ClientOptions.waitFor.
 	WaitFor func(Request) (Answer, error)
+	// RequestParams (§8 Gap 1) are extra top-level keys shallow-merged into EVERY
+	// LLM request body after the client builds its own — a RequestParams key WINS
+	// on collision (e.g. max_tokens overrides the anthropic default 4096). The keys
+	// "messages"/"tools"/"stream" are forbidden here (stripped + warned) — rewrite
+	// messages via BodyTransform. Applied on all four paths. Nil ⇒ body byte-identical.
+	RequestParams map[string]any
+	// BodyTransform (§8 Gap 1), when non-nil, receives the fully assembled request
+	// body (after the RequestParams merge) just before marshal and returns the body
+	// to send — the escape hatch for provider-specific rewriting without a proxy.
+	// Returning nil ⇒ unchanged. Runs on every LLM call, all four paths.
+	BodyTransform func(body map[string]any) map[string]any
+	// HTTPClient (§8 Gap 2) overrides the HTTP client for LLM requests (retries
+	// included). Nil ⇒ http.DefaultClient. Scope is the LLM path only; MCP transports
+	// use the MCP SDK's own clients.
+	HTTPClient *http.Client
 }
 
 // MetricEvent is a semantic observability record fired as the loop runs (§8).
@@ -305,7 +321,11 @@ func CreateClient(opts ClientOptions) *Client {
 	if store == nil {
 		store = NewInMemoryConversationStore()
 	}
-	return &Client{opts: opts, http: http.DefaultClient, store: store, registry: newMetricsRegistry()}
+	httpClient := opts.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	return &Client{opts: opts, http: httpClient, store: store, registry: newMetricsRegistry()}
 }
 
 // Metrics renders the cumulative metrics as Prometheus text exposition format
@@ -648,6 +668,33 @@ func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[stri
 	return nil, fmt.Errorf("LLM request failed after %d retries", retries)
 }
 
+// ConversationStore (§8 Gap 4) returns the client's conversation provider — the
+// exact instance passed in ClientOptions.Store, else the default in-memory store
+// the client created. Callers may read (Get) and write (Save) it directly to
+// share state with Ask, so no consumer needs a shadow copy.
+func (c *Client) ConversationStore() ConversationStore {
+	return c.store
+}
+
+// finalizeBody (§8 Gap 1) applies the request-shaping contract to an assembled
+// body: strip forbidden keys from RequestParams, shallow-merge RequestParams
+// (caller wins), then run BodyTransform last. Called at every LLM body-build site.
+func (c *Client) finalizeBody(body map[string]any) map[string]any {
+	for k, v := range c.opts.RequestParams {
+		if k == "messages" || k == "tools" || k == "stream" {
+			log.Printf("[toolnexus] requestParams key %q is not allowed — ignored (use BodyTransform)", k)
+			continue
+		}
+		body[k] = v
+	}
+	if c.opts.BodyTransform != nil {
+		if out := c.opts.BodyTransform(body); out != nil {
+			return out
+		}
+	}
+	return body
+}
+
 func (c *Client) postJSON(ctx context.Context, endpoint string, headers map[string]string, body any) ([]byte, error) {
 	raw, err := json.Marshal(body)
 	if err != nil {
@@ -712,11 +759,14 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 			}
 		}
 		body := map[string]any{
-			"model":       c.opts.Model,
-			"messages":    messages,
-			"tools":       tools,
-			"tool_choice": "auto",
+			"model":    c.opts.Model,
+			"messages": messages,
 		}
+		if len(tools) > 0 {
+			body["tools"] = tools
+			body["tool_choice"] = "auto"
+		}
+		body = c.finalizeBody(body)
 		t0 := time.Now()
 		raw, err := c.postJSON(ctx, endpoint, map[string]string{"Authorization": "Bearer " + key}, body)
 		if err != nil {
@@ -977,11 +1027,14 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 			"model":      c.opts.Model,
 			"max_tokens": 4096,
 			"messages":   messages,
-			"tools":      tools,
 		}
 		if system != "" {
 			body["system"] = system
 		}
+		if len(tools) > 0 {
+			body["tools"] = tools
+		}
+		body = c.finalizeBody(body)
 		t0 := time.Now()
 		raw, err := c.postJSON(ctx, endpoint, headers, body)
 		if err != nil {
@@ -1261,14 +1314,17 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, h
 				}
 			}
 		}
-		body, err := json.Marshal(map[string]any{
+		sbody := map[string]any{
 			"model":          c.opts.Model,
 			"messages":       messages,
-			"tools":          tools,
-			"tool_choice":    "auto",
 			"stream":         true,
 			"stream_options": map[string]any{"include_usage": true},
-		})
+		}
+		if len(tools) > 0 {
+			sbody["tools"] = tools
+			sbody["tool_choice"] = "auto"
+		}
+		body, err := json.Marshal(c.finalizeBody(sbody))
 		if err != nil {
 			return err
 		}
@@ -1500,13 +1556,15 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 			"model":      c.opts.Model,
 			"max_tokens": 4096,
 			"messages":   messages,
-			"tools":      tools,
 			"stream":     true,
 		}
 		if system != "" {
 			reqBody["system"] = system
 		}
-		body, err := json.Marshal(reqBody)
+		if len(tools) > 0 {
+			reqBody["tools"] = tools
+		}
+		body, err := json.Marshal(c.finalizeBody(reqBody))
 		if err != nil {
 			return err
 		}

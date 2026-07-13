@@ -32,10 +32,13 @@ import {
   parseAgentsConfig,
   SKILLS_PROMPT_PREAMBLE,
   InMemoryTaskStore,
+  InMemoryConversationStore,
   FileTaskStore,
   resolveStore,
   buildAgentCard,
   buildMcpServer,
+  loadMcp,
+  listMcpTools,
   exposedMcpTools,
 } from "../dist/index.js"
 import { Client as MCPClient } from "@modelcontextprotocol/sdk/client/index.js"
@@ -1755,5 +1758,214 @@ test("mcp inbound: top-level mcpServer config block is picked up by serve", asyn
     await client.close()
     await srv.stop()
     await tk.close()
+  }
+})
+
+// --- implement-rag-go-consumer-needs: Cluster A (gaps 1,2,5) + gap 4 (§8) ---
+
+// Capturing OpenAI-style server: records the last decoded request body, replies non-stream.
+function captureOpenAI() {
+  let lastBody = null
+  const server = http.createServer((req, res) => {
+    let b = ""
+    req.on("data", (c) => (b += c))
+    req.on("end", () => {
+      lastBody = JSON.parse(b)
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+    })
+  })
+  return { server, body: () => lastBody }
+}
+
+test("gap1: requestParams merges into openai + anthropic bodies (caller wins)", async () => {
+  const cap = captureOpenAI()
+  await new Promise((r) => cap.server.listen(0, r))
+  const port = cap.server.address().port
+  const tk = await createToolkit({ builtins: false })
+
+  const oa = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "m", apiKey: "k",
+    requestParams: { temperature: 0.42, chat_template_kwargs: { enable_thinking: false } } })
+  await oa.run("hi", { toolkit: tk })
+  assert.equal(cap.body().temperature, 0.42)
+  assert.deepEqual(cap.body().chat_template_kwargs, { enable_thinking: false })
+
+  const an = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "anthropic", model: "m", apiKey: "k",
+    requestParams: { max_tokens: 999 } })
+  // anthropic path posts to /v1/messages; our server accepts any path
+  await an.run("hi", { toolkit: tk }).catch(() => {})
+  assert.equal(cap.body().max_tokens, 999, "requestParams max_tokens overrides the 4096 default")
+
+  await tk.close(); cap.server.close()
+})
+
+test("gap1: bodyTransform runs last; forbidden keys stripped from requestParams", async () => {
+  const cap = captureOpenAI()
+  await new Promise((r) => cap.server.listen(0, r))
+  const port = cap.server.address().port
+  const tk = await createToolkit({ builtins: false })
+  const c = createClient({
+    baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "m", apiKey: "k",
+    requestParams: { temperature: 0.5, messages: [{ role: "x" }], tools: [1], stream: true }, // forbidden ones ignored
+    bodyTransform: (b) => { b.injected = "yes"; delete b.temperature; return b },
+  })
+  await c.run("hi", { toolkit: tk })
+  const body = cap.body()
+  assert.equal(body.injected, "yes", "bodyTransform output is sent")
+  assert.equal("temperature" in body, false, "bodyTransform ran after merge and dropped the key")
+  assert.equal(Array.isArray(body.messages) && body.messages.length >= 1 && body.messages[0].role === "user", true, "forbidden messages override ignored")
+  assert.equal(body.stream, undefined, "forbidden stream override ignored (non-stream call)")
+  await tk.close(); cap.server.close()
+})
+
+test("gap2: injectable fetch receives the LLM call", async () => {
+  let seen = 0
+  const myFetch = async (_url, _init) => {
+    seen++
+    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }], usage: {} }), { status: 200, headers: { "content-type": "application/json" } })
+  }
+  const tk = await createToolkit({ builtins: false })
+  const c = createClient({ baseUrl: "http://never.invalid", style: "openai", model: "m", apiKey: "k", fetch: myFetch })
+  const res = await c.run("hi", { toolkit: tk })
+  assert.equal(res.text, "ok")
+  assert.ok(seen >= 1, "custom fetch was used (no real network hit)")
+  await tk.close()
+})
+
+test("gap5: empty toolkit omits tools/tool_choice; non-empty keeps them", async () => {
+  const cap = captureOpenAI()
+  await new Promise((r) => cap.server.listen(0, r))
+  const port = cap.server.address().port
+
+  const empty = await createToolkit({ builtins: false })
+  const c1 = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "m", apiKey: "k" })
+  await c1.run("hi", { toolkit: empty })
+  assert.equal("tools" in cap.body(), false, "no tools key when empty")
+  assert.equal("tool_choice" in cap.body(), false, "no tool_choice key when empty")
+  await empty.close()
+
+  const one = await createToolkit({ builtins: false })
+  one.register(defineTool({ name: "t", description: "d", run: () => "x" }))
+  const c2 = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "m", apiKey: "k" })
+  await c2.run("hi", { toolkit: one })
+  assert.equal(Array.isArray(cap.body().tools), true, "tools present when non-empty")
+  assert.equal(cap.body().tool_choice, "auto")
+  await one.close(); cap.server.close()
+})
+
+test("gap5: anthropic empty toolkit omits tools", async () => {
+  const cap = captureOpenAI()
+  await new Promise((r) => cap.server.listen(0, r))
+  const port = cap.server.address().port
+  const tk = await createToolkit({ builtins: false })
+  const c = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "anthropic", model: "m", apiKey: "k" })
+  await c.run("hi", { toolkit: tk }).catch(() => {})
+  assert.equal("tools" in cap.body(), false, "anthropic: no tools key when empty")
+  await tk.close(); cap.server.close()
+})
+
+test("gap4: conversationStore() — identity + default reflects saved turns", async () => {
+  const custom = new InMemoryConversationStore()
+  const c1 = createClient({ baseUrl: "http://x", style: "openai", model: "m", store: custom })
+  assert.equal(c1.conversationStore(), custom, "returns the supplied instance")
+
+  const cap = captureOpenAI()
+  await new Promise((r) => cap.server.listen(0, r))
+  const port = cap.server.address().port
+  const tk = await createToolkit({ builtins: false })
+  const c2 = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "m", apiKey: "k" })
+  assert.ok(c2.conversationStore(), "default store is non-nil")
+  await c2.ask("hi", { toolkit: tk, id: "conv1" })
+  const saved = await c2.conversationStore().get("conv1")
+  assert.ok(saved && saved.length >= 2, "default store holds the saved transcript")
+  await tk.close(); cap.server.close()
+})
+
+// --- implement-rag-go-consumer-needs: Cluster B (gaps 3,6,7 — MCP load) ---
+// Spins a real MCP server over stdio as a child process (hermetic, no network).
+
+function writeStdioServer(bodyJs) {
+  // Written into js/ so node resolves ./dist + node_modules.
+  const p = path.resolve(fileURLToPath(import.meta.url), "../../._mcpsrv_" + Math.random().toString(36).slice(2) + ".mjs")
+  fs.writeFileSync(p, bodyJs)
+  return p
+}
+const ABC_SERVER = `
+import { buildMcpServer, defineTool } from "./dist/index.js"
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
+const tools = ["a","b","c"].map((n) => defineTool({ name: n, description: n, run: () => n }))
+const server = buildMcpServer(tools, { name: "srv" })
+await server.connect(new StdioServerTransport())
+`
+const HANG_LIST_SERVER = `
+import { Server } from "@modelcontextprotocol/sdk/server/index.js"
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
+const server = new Server({ name: "hang", version: "0" }, { capabilities: { tools: {} } })
+server.setRequestHandler(ListToolsRequestSchema, () => new Promise(() => {})) // never resolves
+await server.connect(new StdioServerTransport())
+`
+
+test("gap7: per-server tools allowlist filters MCP tools", async () => {
+  const script = writeStdioServer(ABC_SERVER)
+  try {
+    const mcp = await loadMcp({ srv: { command: ["node", script], tools: { a: true, b: true } } })
+    const names = mcp.tools.map((t) => t.name).sort()
+    assert.deepEqual(names, ["srv_a", "srv_b"], "allowlist keeps only a,b (prefixed)")
+    assert.equal(mcp.status.srv, "connected")
+    await mcp.close()
+
+    const drop = await loadMcp({ srv: { command: ["node", script], tools: { c: false } } })
+    assert.deepEqual(drop.tools.map((t) => t.name).sort(), ["srv_a", "srv_b"], "drop-list removes c")
+    await drop.close()
+
+    const all = await loadMcp({ srv: { command: ["node", script] } })
+    assert.deepEqual(all.tools.map((t) => t.name).sort(), ["srv_a", "srv_b", "srv_c"], "nil filter = all")
+    await all.close()
+  } finally {
+    fs.rmSync(script, { force: true })
+  }
+})
+
+test("gap6: listMcpTools returns unfiltered original names + status, disconnects", async () => {
+  const script = writeStdioServer(ABC_SERVER)
+  try {
+    const inv = await listMcpTools({
+      good: { command: ["node", script], tools: { a: true } }, // filter is IGNORED by inventory
+      bad: { command: ["node", "/no/such/script/xyz.mjs"] },
+    })
+    assert.deepEqual(inv.tools.good.map((t) => t.name).sort(), ["a", "b", "c"], "inventory is unfiltered, original names")
+    assert.equal(inv.status.good, "connected")
+    assert.equal(inv.status.bad, "failed")
+  } finally {
+    fs.rmSync(script, { force: true })
+  }
+})
+
+test("gap3: hanging list is bounded by the server timeout (server failed, not hung)", async () => {
+  const script = writeStdioServer(HANG_LIST_SERVER)
+  try {
+    const t0 = Date.now()
+    const mcp = await loadMcp({ hang: { command: ["node", script], timeout: 400 } })
+    const dt = Date.now() - t0
+    assert.equal(mcp.status.hang, "failed", "hanging server is isolated as failed")
+    assert.ok(dt < 3000, `bounded by timeout, took ${dt}ms`)
+    await mcp.close()
+  } finally {
+    fs.rmSync(script, { force: true })
+  }
+})
+
+test("gap3: parent signal aborts the whole load promptly", async () => {
+  const script = writeStdioServer(HANG_LIST_SERVER)
+  const ctrl = new AbortController()
+  setTimeout(() => ctrl.abort(), 150)
+  try {
+    await assert.rejects(
+      loadMcp({ hang: { command: ["node", script], timeout: 60000 } }, { signal: ctrl.signal }),
+      "parent-signal abort rejects the load rather than waiting the full timeout",
+    )
+  } finally {
+    fs.rmSync(script, { force: true })
   }
 })

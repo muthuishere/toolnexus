@@ -27,6 +27,14 @@ type Options struct {
 	// SkillSampleLimit caps the invoke-time sibling-file sample: 0 ⇒ default 10,
 	// n>0 ⇒ cap, -1 ⇒ omit the <skill_files> block (§3, S5).
 	SkillSampleLimit int
+	// DisableTools drops tools by their FINAL exposed name across every source
+	// (MCP `server_tool`, builtins, native, A2A) — the simple "just turn these
+	// off" list. Applied after aggregation. Composes with the per-server/per-skill
+	// filters. Empty ⇒ nothing disabled.
+	DisableTools []string
+	// DisableSkills drops skills by name from the `skill` catalog (sugar over a
+	// drop-list in SkillsFilter). Empty ⇒ nothing disabled.
+	DisableSkills []string
 	// ExtraTools are your own custom tools, always added to the toolkit.
 	ExtraTools []Tool
 	// Builtins toggles the built-in tool source (§4A). Default ON. Accepts nil
@@ -67,7 +75,8 @@ func CreateToolkit(ctx context.Context, opts Options) (*Toolkit, error) {
 	)
 
 	if opts.McpConfig != nil {
-		m, err := LoadMcp(opts.McpConfig, opts.WaitFor)
+		// §2 Gap 3: the caller's ctx propagates through the MCP connect/init/list.
+		m, err := LoadMcpWithContext(ctx, opts.McpConfig, opts.WaitFor)
 		if err != nil {
 			return nil, err
 		}
@@ -85,10 +94,25 @@ func CreateToolkit(ctx context.Context, opts Options) (*Toolkit, error) {
 				dataDefs = append(dataDefs, provided...)
 			}
 		}
+		// DisableSkills is sugar over a drop-list: fold each name into the filter
+		// as false (without overriding an explicit SkillsFilter entry).
+		filter := opts.SkillsFilter
+		if len(opts.DisableSkills) > 0 {
+			merged := map[string]bool{}
+			for k, v := range opts.SkillsFilter {
+				merged[k] = v
+			}
+			for _, n := range opts.DisableSkills {
+				if _, ok := merged[n]; !ok {
+					merged[n] = false
+				}
+			}
+			filter = merged
+		}
 		skill = LoadSkillsWith(LoadSkillsOptions{
 			Dirs:        opts.SkillsDir,
 			Skills:      dataDefs,
-			Filter:      opts.SkillsFilter,
+			Filter:      filter,
 			SampleLimit: opts.SkillSampleLimit,
 		})
 	}
@@ -179,7 +203,16 @@ func CreateToolkit(ctx context.Context, opts Options) (*Toolkit, error) {
 	all = append(all, agentTools...)
 	all = append(all, opts.ExtraTools...)
 
+	// DisableTools drops tools by their final exposed name across every source.
+	disabled := make(map[string]bool, len(opts.DisableTools))
+	for _, n := range opts.DisableTools {
+		disabled[n] = true
+	}
+
 	for _, t := range all {
+		if disabled[t.Name] {
+			continue
+		}
 		if _, exists := tk.byName[t.Name]; exists {
 			log.Printf("[toolnexus] duplicate tool name %q — keeping first", t.Name)
 			continue

@@ -35,6 +35,18 @@ export interface ClientOptions {
    * (open a browser, message a channel, watch a file, forward to another agent). Omit for a durable
    * host: run() does not hang — it returns { status:"pending", pending:request } to resume later. */
   waitFor?: (request: Request) => Promise<Answer>
+  /** §8 Gap 1. Extra top-level keys shallow-merged into EVERY LLM body after the client builds
+   * its own — a requestParams key WINS on collision (e.g. max_tokens overrides the anthropic
+   * default). `messages`/`tools`/`stream` are forbidden here (stripped + warned) — rewrite
+   * messages via bodyTransform. Applied on all four paths. Omit ⇒ body byte-identical to today. */
+  requestParams?: Record<string, unknown>
+  /** §8 Gap 1. Receives the fully assembled body (after requestParams merge) just before marshal
+   * and returns the body to send — the escape hatch for provider-specific rewriting (e.g. tool-role
+   * message preprocessing) without a proxy. Returning a falsy value ⇒ unchanged. Runs on every call. */
+  bodyTransform?: (body: Record<string, any>) => Record<string, any> | undefined | void
+  /** §8 Gap 2. HTTP transport for LLM requests (retries included). Omit ⇒ global fetch. Scope is the
+   * LLM path only; MCP transports use the SDK's own client. */
+  fetch?: typeof fetch
 }
 
 /**
@@ -281,6 +293,61 @@ export class Client {
     this.store = opts.store ?? new InMemoryConversationStore()
   }
 
+  /**
+   * §8 Gap 4. The client's conversation store — the exact instance passed in `opts.store`, else
+   * the default in-memory store the client created. Read (`get`) and write (`save`) it directly to
+   * share state with `ask`; no consumer needs a shadow copy.
+   */
+  conversationStore(): ConversationStore {
+    return this.store
+  }
+
+  /**
+   * §8 Gap 1. Apply the request-shaping contract to an assembled body: strip forbidden keys from
+   * requestParams, shallow-merge requestParams (caller wins), then run bodyTransform last. Called at
+   * every LLM body-build site so the ordering contract holds identically on all four paths.
+   */
+  private finalizeBody(body: Record<string, any>): Record<string, any> {
+    const rp = this.opts.requestParams
+    if (rp) {
+      for (const [k, v] of Object.entries(rp)) {
+        if (k === "messages" || k === "tools" || k === "stream") {
+          console.warn(`[toolnexus] requestParams key "${k}" is not allowed — ignored (use bodyTransform)`)
+          continue
+        }
+        body[k] = v
+      }
+    }
+    if (this.opts.bodyTransform) {
+      const out = this.opts.bodyTransform(body)
+      if (out) return out
+    }
+    return body
+  }
+
+  /** §8 Gap 5. OpenAI-style body; omits tools/tool_choice when the tool list is empty. Key order
+   * matches the pre-change body so a no-options call is byte-identical. */
+  private openaiBody(messages: any[], tools: any[], stream: boolean): Record<string, any> {
+    const b: Record<string, any> = { model: this.opts.model, messages }
+    if (tools.length) {
+      b.tools = tools
+      b.tool_choice = "auto"
+    }
+    if (stream) {
+      b.stream = true
+      b.stream_options = { include_usage: true }
+    }
+    return this.finalizeBody(b)
+  }
+
+  /** §8 Gap 5. Anthropic-style body; omits tools when the tool list is empty. */
+  private anthropicBody(system: string, messages: any[], tools: any[], stream: boolean): Record<string, any> {
+    const b: Record<string, any> = { model: this.opts.model, max_tokens: 4096, system, messages }
+    if (tools.length) b.tools = tools
+    if (stream) b.stream = true
+    return this.finalizeBody(b)
+  }
+
   /** Prometheus text exposition of cumulative metrics (§8). Always valid, empty-but-valid before activity. */
   metrics(): string {
     return this.registry.render()
@@ -379,7 +446,7 @@ export class Client {
     let lastErr: unknown
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        const res = await fetch(url, { ...init, signal })
+        const res = await (this.opts.fetch ?? fetch)(url, { ...init, signal })
         if (res.ok || !RETRYABLE.has(res.status) || attempt === retries) return res
         const ra = Number(res.headers.get("retry-after"))
         await delay(ra ? ra * 1000 : base * 2 ** attempt + Math.random() * 100, signal)
@@ -470,7 +537,7 @@ export class Client {
         const data: any = await this.llmCallJson(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
           method: "POST",
           headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
-          body: JSON.stringify({ model: this.opts.model, messages, tools, tool_choice: "auto" }),
+          body: JSON.stringify(this.openaiBody(messages, tools, false)),
         }, signal, "openai")
         addUsage(usage, data.usage, "openai")
         if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: this.opts.model, turn })
@@ -570,7 +637,7 @@ export class Client {
             "Content-Type": "application/json",
             ...this.opts.headers,
           },
-          body: JSON.stringify({ model: this.opts.model, max_tokens: 4096, system, messages, tools }),
+          body: JSON.stringify(this.anthropicBody(system, messages, tools, false)),
         }, signal, "anthropic")
         addUsage(usage, data.usage, "anthropic")
         if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: this.opts.model, turn })
@@ -646,7 +713,7 @@ export class Client {
           const res = await this.llmFetch(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
             method: "POST",
             headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
-            body: JSON.stringify({ model: this.opts.model, messages, tools, tool_choice: "auto", stream: true, stream_options: { include_usage: true } }),
+            body: JSON.stringify(this.openaiBody(messages, tools, true)),
           }, signal)
           if (!res.ok || !res.body) throw new Error(`LLM ${res.status}: ${await res.text()}`)
           for await (const line of sseLines(res.body)) {
@@ -740,7 +807,7 @@ export class Client {
           const res = await this.llmFetch(endpoint, {
             method: "POST",
             headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json", ...this.opts.headers },
-            body: JSON.stringify({ model: this.opts.model, max_tokens: 4096, system, messages, tools, stream: true }),
+            body: JSON.stringify(this.anthropicBody(system, messages, tools, true)),
           }, signal)
           if (!res.ok || !res.body) throw new Error(`LLM ${res.status}: ${await res.text()}`)
           for await (const line of sseLines(res.body)) {

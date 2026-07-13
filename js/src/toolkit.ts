@@ -35,6 +35,9 @@ export interface ToolkitOptions {
    * elicitation is not advertised.
    */
   waitFor?: (request: import("./types.js").Request) => Promise<import("./types.js").Answer>
+  /** §2 Gap 3. Bounds the MCP load: each connect/list is capped by the server timeout and the
+   * whole load aborts promptly if this signal fires. Omit ⇒ unbounded as before. */
+  signal?: AbortSignal
 }
 
 export class Toolkit {
@@ -66,7 +69,7 @@ export class Toolkit {
   }
 
   static async create(opts: ToolkitOptions): Promise<Toolkit> {
-    const mcp = opts.mcpConfig !== undefined ? await loadMcp(opts.mcpConfig, { waitFor: opts.waitFor }) : undefined
+    const mcp = opts.mcpConfig !== undefined ? await loadMcp(opts.mcpConfig, { waitFor: opts.waitFor, signal: opts.signal }) : undefined
     // Skills come from directories, in-memory data, and/or a lazy provider (§3,
     // S1). The provider is resolved here (create() is async) and merged with the
     // data list; a provider failure is isolated so other sources still load.

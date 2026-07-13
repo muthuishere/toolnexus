@@ -222,6 +222,28 @@ bridges it onto the one §10 `waitFor` rather than inventing a second input path
   uses URL mode → `kind:"authorization"`, entered out-of-band. v1 ships form mode across all ports; URL
   mode where the port's MCP SDK supports it.
 
+### Host-facing extensions (ctx-aware load, per-server allowlist, list-only inventory)
+
+Additive; grounded in `docs/adr/0001-rag-go-consumer-needs.md`. A caller passing none of these gets
+byte-identical behavior.
+
+- **Gap 3 — ctx-aware load + bounded SSE.** A context-aware entry point (`LoadMcpWithContext` /
+  `signal` passthrough) propagates the caller's cancellation/deadline through connect, initialize, and
+  list, and the SSE-fallback start is bounded by the server `timeout` (it previously ran unbounded).
+  A per-server timeout **within** budget marks only that server `failed` and the build continues;
+  parent-ctx cancellation/deadline aborts the **whole** load and returns the context error.
+- **Gap 7 — per-server tool allowlist.** `ServerConfig.tools` (`name → bool`, keyed on the server's
+  ORIGINAL tool name) selects which of a server's tools are exposed, with semantics identical to the
+  builtins §4A and skills §3 filters (nil/empty ⇒ all; ≥1 `true` ⇒ allowlist; only-`false` ⇒ drop-list;
+  unknown ⇒ ignore+warn). Applied to the listed defs before sanitize/prefix.
+- **Gap 6 — list-only inventory.** `ListMcpTools` connects to every enabled server, lists its tool
+  defs, and disconnects — no toolkit, nothing left running. Returns per server the full **unfiltered**
+  tool defs under their original names (`ToolInfo{name, description, inputSchema}`) plus a per-server
+  status (`connected|disabled|failed`); failure isolation as in the normal load.
+- **Toolkit sugar.** `DisableTools []string` drops tools by their final exposed name across every
+  source; `DisableSkills []string` drops skills by name from the `skill` catalog. Both compose with the
+  map filters above.
+
 ---
 
 ## 3. Skill source
@@ -854,6 +876,27 @@ contract between the fleet skills and toolnexus, which toolnexus itself never re
 A fleet skill maps `base_url`→`baseUrl`, `style`→`style`, `models.<tier>`→`model` onto
 `ClientOptions` and reads the key from the env var named by `api_key_env` at call time. Per the
 secrets rule, toolnexus reads that key from the environment and never logs it.
+
+### Host-facing extensions (request shaping, empty-tools omission, store accessor)
+
+Additive; grounded in `docs/adr/0001-rag-go-consumer-needs.md`. Neither option set ⇒ body
+byte-identical to today.
+
+- **Gap 1 — request shaping.** `RequestParams` (map) is shallow-merged into **every** LLM body after
+  the client builds its own keys — a `RequestParams` key **wins** on collision (e.g. `max_tokens`
+  overrides the anthropic default 4096). The keys `messages`/`tools`/`stream` are forbidden there
+  (stripped + warned). `BodyTransform` receives the fully assembled body (after the merge) just before
+  marshal and returns the body to send — the escape hatch for provider-specific rewriting (including
+  message rewriting) without a proxy. Ordering: base body → `BeforeLLM` hook → `RequestParams` merge →
+  `BodyTransform` → marshal → wire. Applied on all four paths (run/stream × openai/anthropic).
+- **Gap 2 — injectable HTTP transport.** The host may supply the HTTP client/transport for LLM
+  requests (retries included); nil ⇒ the default. Scope is the LLM path only.
+- **Gap 5 — omit empty tool keys.** When the effective tool list is empty (including after a
+  `BeforeLLM` override), the `tools` key — and, on the openai style, `tool_choice` — is omitted from
+  the body entirely. This is a five-port behavior change (the keys were previously sent unconditionally).
+- **Gap 4 — conversation-store accessor.** `Client.ConversationStore()` returns the client's store
+  (the instance passed in, else the default in-memory one) so a host can read/rewind the transcript
+  and share state with the stateful `ask` — no shadow copy needed.
 
 ---
 
