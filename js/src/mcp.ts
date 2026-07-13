@@ -222,15 +222,22 @@ export interface McpSource {
   close(): Promise<void>
 }
 
-/** Connect to every enabled server, list + convert tools. Failures are isolated. */
-/** Connect a fresh client to one server (remote streamable-HTTP with SSE fallback, or local stdio). */
-async function connectServer(name: string, cfg: ServerConfig, waitFor?: (request: Request) => Promise<Answer>): Promise<Client> {
+/** Create a fresh (not-yet-connected) client, with the elicitation bridge attached if a waitFor
+ *  exists. Separated from connect so the caller ALWAYS holds a closeable reference — even if the
+ *  connect is later abandoned by a timeout/abort, `client.close()` still terminates any spawned
+ *  stdio child (no orphaned processes on cancellation). */
+function newMcpClient(waitFor?: (request: Request) => Promise<Answer>): Client {
   const client = new Client({ name: "toolnexus", version: "0.1.0" }, { capabilities: waitFor ? { elicitation: {} } : {} })
   if (waitFor) {
     client.setRequestHandler(ElicitRequestSchema, async (request) =>
       answerToElicitResult(await waitFor(elicitationToRequest(request.params))),
     )
   }
+  return client
+}
+
+/** Connect an existing client's transport (remote streamable-HTTP with SSE fallback, or local stdio). */
+async function connectTransport(client: Client, cfg: ServerConfig): Promise<void> {
   if (isRemote(cfg)) {
     const url = new URL(cfg.url)
     const expanded = expandEnvHeaders(cfg.headers)
@@ -253,7 +260,6 @@ async function connectServer(name: string, cfg: ServerConfig, waitFor?: (request
       }),
     )
   }
-  return client
 }
 
 /** Connect to every enabled server, list + convert tools. Failures are isolated.
@@ -277,9 +283,11 @@ export async function loadMcp(
         return
       }
       const timeout = cfg.timeout ?? DEFAULT_TIMEOUT
-      let client: Client | undefined
+      // Create the client up front so a timed-out/aborted connect still has a closeable handle
+      // (its stdio child is killed by close() — never orphaned).
+      const client = newMcpClient(waitFor)
       try {
-        client = await raceTimeout(connectServer(name, cfg, waitFor), timeout, signal)
+        await raceTimeout(connectTransport(client, cfg), timeout, signal)
         const defs = await raceTimeout(paginateTools(client, timeout), timeout, signal)
         const kept = applyToolsFilter(name, defs, (cfg as { tools?: Record<string, boolean> }).tools)
         for (const def of kept) tools.push(convertTool(name, def, client, timeout))
@@ -287,7 +295,7 @@ export async function loadMcp(
         status[name] = "connected"
       } catch (e) {
         status[name] = "failed"
-        await client?.close().catch(() => {})
+        await client.close().catch(() => {})
         // Parent cancellation/deadline aborts the whole load (§2 Gap 3, A1); a per-server timeout
         // within budget isolates just this server.
         if (signal?.aborted) throw e
@@ -336,9 +344,10 @@ export async function listMcpTools(input: string | object, opts?: { signal?: Abo
         return
       }
       const timeout = cfg.timeout ?? DEFAULT_TIMEOUT
-      let client: Client | undefined
+      // Client created up front so an aborted/timed-out connect is still closed (no orphaned child).
+      const client = newMcpClient()
       try {
-        client = await raceTimeout(connectServer(name, cfg), timeout, signal)
+        await raceTimeout(connectTransport(client, cfg), timeout, signal)
         const defs = await raceTimeout(paginateTools(client, timeout), timeout, signal)
         toolsByServer[name] = defs.map((d) => ({
           name: d.name,
@@ -352,10 +361,10 @@ export async function listMcpTools(input: string | object, opts?: { signal?: Abo
         status[name] = "connected"
       } catch (e) {
         status[name] = "failed"
-        if (signal?.aborted) { await client?.close().catch(() => {}); throw e }
+        if (signal?.aborted) { await client.close().catch(() => {}); throw e }
         console.warn(`[toolnexus] MCP server "${name}" failed: ${e instanceof Error ? e.message : String(e)}`)
       } finally {
-        await client?.close().catch(() => {})
+        await client.close().catch(() => {})
       }
     }),
   )
