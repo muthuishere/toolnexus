@@ -35,10 +35,10 @@ Porting order follows design.md (JS is the reference; conformance tests land per
 - [x] 4.7 Hermetic stub servers in `test/support/` (stdio script + Bandit HTTP stub)
 
 ## 5. Toolkit (§4) + built-ins (§4A)
-- [ ] 5.1 Aggregator: mcp+skills+builtins+agents+extra, first-wins dedupe, `close/1`
+- [x] 5.1 Aggregator: mcp+skills+builtins+agents+extra, first-wins dedupe, `close/1`
 - [x] 5.2 All ten builtins (bash, read, write, edit, grep, glob, webfetch, question,
       apply_patch, todowrite) with §4A schemas; global + per-tool toggles
-- [ ] 5.3 DisableTools/DisableSkills equivalents (ADR-0001 shipped surface)
+- [x] 5.3 DisableTools/DisableSkills equivalents (ADR-0001 shipped surface)
 
 ## 6. Client loop (§8) + suspension (§10)
 - [x] 6.1 run/ask (openai + anthropic styles), parallel ordered tool calls, maxTurns 10
@@ -51,17 +51,17 @@ Porting order follows design.md (JS is the reference; conformance tests land per
 - [x] 6.6 Mock-LLM loop tests (httptest-style Bandit stub)
 
 ## 7. Inbound serve (§7A/§7B/§7C)
-- [ ] 7.1 A2A outbound: agent card fetch, SendMessage→poll GetTask subset
-- [ ] 7.2 A2A inbound serve: Plug router, agent card, JSON-RPC, input-required on suspension
-- [ ] 7.3 MCP inbound serve: streamable-HTTP profile over the same toolkit
+- [x] 7.1 A2A outbound: agent card fetch, SendMessage→poll GetTask subset
+- [x] 7.2 A2A inbound serve: Plug router, agent card, JSON-RPC, input-required on suspension
+- [x] 7.3 MCP inbound serve: streamable-HTTP profile over the same toolkit
 
 ## 8. Repo wiring
 - [x] 8.1 CI job (erlef/setup-beam, mix test + coverage gate ≥95%, hermetic)
 - [x] 8.2 release.yml: hex publish job gated on ENABLE_ELIXIR + HEX_API_KEY (use-only);
       preflight checks mix.exs version
-- [ ] 8.3 `elixir/README.md`; SPEC.md five→six wording; CLAUDE.md layout row; root README pitch
-- [ ] 8.4 Full-suite run + cross-port conformance spot-check (skill bytes, naming, adapters)
+- [x] 8.3 `elixir/README.md`; SPEC.md five→six wording; CLAUDE.md layout row; root README pitch
+- [x] 8.4 Full-suite run + cross-port conformance spot-check (skill bytes, naming, adapters)
 
 ## Parity checklist (this change IS the parity)
-- [ ] elixir — full §0
+- [x] elixir — full §0
 - [x] js / python / golang / java / csharp — unchanged (reference only)
