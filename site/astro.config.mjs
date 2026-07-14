@@ -11,6 +11,8 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			title: 'toolnexus',
+			// Remove the right-hand "On this page" table of contents site-wide.
+			tableOfContents: false,
 			description:
 				'Your LLM, with MCP tools and agent skills built in — in 3 lines, in 5 languages. Vendor-neutral, byte-identical across JavaScript, Python, Go, Java and C#.',
 			plugins: [

@@ -33,7 +33,7 @@ only where tagged.
 | **MCP client** (stdio) | ✅ | ✅ | 🟡 via `langchain-mcp-adapters` | ✅ |
 | **MCP client** (streamable-HTTP / SSE) | ✅ | ✅ | 🟡 | ✅ |
 | **MCP elicitation** (server→client input) | 🟡 form mode all ports; URL mode where SDK supports | 🟡 | ❌ | 🟡 |
-| **MCP authorization** (static + interactive) | 🟡 static bearer (`${ENV}`) **+ interactive URL authz** via §10 suspension; no built-in OAuth token client | 🟡 | ❌ | 🟡 |
+| **MCP authorization** (static + interactive) | 🟡 static bearer (`${ENV}`) **+ interactive URL authz** via the suspension primitive; no built-in OAuth token client | 🟡 | ❌ | 🟡 |
 | **MCP server** (expose your tools) | 🟡 streamable-HTTP only; no stdio, no resources/prompts/sampling | ✅ stdio + streamable-HTTP + stateless, resources/prompts | ❌ | ✅ |
 | **A2A outbound** (call remote agents) | ✅ (submit→poll subset) | ✅ (A2A Java SDK) | 🟡 platform/community | ✅ native |
 | **A2A inbound** (be an agent, Agent Card) | ✅ (subset) | ✅ | 🟡 (LangGraph Platform) | ✅ native |
@@ -58,33 +58,33 @@ We asked the same question of all four: *for MCP and A2A, which parts are actual
 
 ### toolnexus — a deliberate, spec-pinned subset
 
-Grounded in [`SPEC.md`](../SPEC.md) (§2 MCP, §7A/B/C A2A + MCP inbound, §10 suspension):
+Covering the MCP client, MCP server (inbound), A2A inbound/outbound, and the suspension primitive:
 
 - **MCP client** — stdio + streamable-HTTP with **SSE fallback**; `${ENV}` header auth; per-server
-  failure isolation; 30 s default timeout; ctx-aware cancellation (`SPEC.md §2`). **Full for the
+  failure isolation; 30 s default timeout; ctx-aware cancellation. **Full for the
   client tool-use path.**
 - **MCP elicitation** — bridged onto the one suspension primitive: **form mode ships in all five
-  ports; URL mode ships where the port's MCP SDK supports it** (`SPEC.md §2`, "Elicitation bridge").
+  ports; URL mode ships where the port's MCP SDK supports it**.
   This is a genuine 🟡 — it's not uniformly complete across ports.
 - **MCP authorization** — **partial, and more than a static token.** Two real mechanisms
   [MEASURED against the repo]: (1) **static** bearer/API-key auth via remote-server `headers` with
-  `${ENV_VAR}` expansion (never logged, `SPEC.md §2`); (2) **interactive authorization** — an MCP
-  server's `elicitation/create` in **URL mode** is bridged onto the one §10 suspension primitive as a
+  `${ENV_VAR}` expansion (never logged); (2) **interactive authorization** — an MCP
+  server's `elicitation/create` in **URL mode** is bridged onto the one suspension primitive as a
   `Request{kind:"authorization", url}`, and the host's `waitFor` completes it out-of-band (open the
   URL → user authorizes, including driving an **OAuth consent flow**) → the tool resumes with the
-  answer (`SPEC.md §2` elicitation bridge + `§10`; `elicitationToRequest` in `js/src/mcp.ts:28-31`,
+  answer (`elicitationToRequest` in `js/src/mcp.ts:28-31`,
   `ElicitationToRequest` in `golang/mcp.go:44-46`). **What we do *not* have:** a built-in automatic
   **OAuth 2.0 client** that runs the MCP authorization-spec token handshake/refresh for you — the
-  host/user completes auth; toolnexus bridges the *requirement*, it does not negotiate tokens. And per
-  `SPEC.md §2`, **URL mode ships where the port's MCP SDK supports it; form mode ships in all five
+  host/user completes auth; toolnexus bridges the *requirement*, it does not negotiate tokens.
+  **URL mode ships where the port's MCP SDK supports it; form mode ships in all five
   ports.** So: 🟡, not ❌.
 - **MCP server (inbound)** — expose the toolkit as an MCP server, but **streamable-HTTP only**;
-  **stdio, resources, prompts, sampling, and completion are out of scope in v1** (`SPEC.md §7C`
-  "Deferred"). 🟡 — narrower than Spring AI / ADK on purpose.
+  **stdio, resources, prompts, sampling, and completion are out of scope in v1** (deferred).
+  🟡 — narrower than Spring AI / ADK on purpose.
 - **A2A** — "a genuine, minimal **subset** of real A2A, verified against `a2a-python`": JSON-RPC 2.0,
   Agent Card at `/.well-known/agent-card.json`, `SendMessage` → poll `GetTask`. Task lifecycle
-  `submitted|working|completed|failed|canceled`, plus `input-required` when a run suspends
-  (`SPEC.md §7A/§7B/§10`). **No streaming, push, gRPC, or auth in core.** 🟡, and we label it a subset
+  `submitted|working|completed|failed|canceled`, plus `input-required` when a run suspends.
+  **No streaming, push, gRPC, or auth in core.** 🟡, and we label it a subset
   in our own README.
 
 ### Spring AI — fuller MCP + A2A via official SDKs [FROM DOCS]
@@ -152,7 +152,7 @@ which none of the three competitors offer [MEASURED].
 ## Language coverage / parity — the genuine differentiator
 
 - **toolnexus: 5 languages, byte-identical.** JS · Python · Go · Java · C#, pinned by
-  [`SPEC.md §0`](../SPEC.md) — the `skill`-tool loader output and the `metrics()` Prometheus text are
+  a shared conformance contract — the `skill`-tool loader output and the `metrics()` Prometheus text are
   **byte-for-byte** across ports, enforced by hermetic conformance tests against shared
   `examples/` fixtures. [MEASURED / structural]
 - **Spring AI: JVM only.** Deep and idiomatic there; nothing outside the JVM. [FROM DOCS]
@@ -176,14 +176,14 @@ toolnexus.
 
 **We did not invent the multi-language agent framework.** Several mature projects already ship in more
 than one language. The honest, defensible toolnexus claim is narrower and testable: **byte-identical
-conformance across five languages, pinned by a shared spec ([`SPEC.md §0`](../SPEC.md)) and verified
+conformance across five languages, pinned by a shared spec and verified
 by a shared conformance suite** — not merely "an SDK exists in language X." Almost everyone else ships
 **separate idiomatic SDKs with best-effort, flagship-first parity and documented feature gaps.** Here
 is the field, positioned fairly. [FROM DOCS]
 
 | Framework | Languages | Cross-language promise | Byte-identical + shared conformance suite? |
 |---|---|---|---|
-| **toolnexus** | JS · Python · Go · Java · C# (**5**) | One `SPEC.md` contract; shared `examples/` fixtures | ✅ **Yes** — the explicit design goal [MEASURED / structural] |
+| **toolnexus** | JS · Python · Go · Java · C# (**5**) | One shared contract; shared `examples/` fixtures | ✅ **Yes** — the explicit design goal [MEASURED / structural] |
 | **Microsoft Semantic Kernel** | C# · Python · Java (**3**) | Aims for parity; **not at complete parity** — per-language feature tables, Java lags, GA-parity only for C#+Python | 🟡 Separate idiomatic SDKs, documented gaps — **not byte-identical** |
 | **Google ADK** | Python · Go · Java · TS (**4**) | "Near-complete parity," shared runtime contract, Python-first | 🟡 Separate SDKs, maturity skew — no byte-exact conformance suite |
 | **LangChain / LangGraph** | Python · JS/TS (**2**) | Two ecosystems; JS trails Python | 🟡 Separate ports, partial parity |
@@ -206,7 +206,7 @@ industry posture: **separate idiomatic ports, best-effort parity, flagship langu
 - We are **not** the first or the biggest multi-language framework — SK, ADK, LangChain, LlamaIndex,
   and OpenAI Agents SDK all got there, several with far more resources and mileage.
 - Our **distinct** claim is the *mechanism and the bar*, not the mere fact of multiple SDKs: a single
-  shared `SPEC.md` + shared `examples/` fixtures producing **byte-identical** outputs (the skill-loader
+  shared contract + shared `examples/` fixtures producing **byte-identical** outputs (the skill-loader
   block and the Prometheus `metrics()` text are pinned byte-for-byte), enforced by a conformance suite
   every port must pass. To our knowledge no listed competitor makes — or tests — a byte-identical
   cross-language guarantee; they promise "available in N languages," which is a weaker, untested claim.
@@ -238,7 +238,7 @@ result = await agent.run("Refund order 1234 for the customer.", tk)
 
 `my_approval(request) -> Answer` is the *only* behavior you write for human-approval — open a browser,
 message a channel, or forward to another agent; the engine resolves and retries the tool
-transparently (`SPEC.md §10`). No graph, no builders, no runtime. `create_toolkit()` with **no config
+transparently. No graph, no builders, no runtime. `create_toolkit()` with **no config
 at all** still returns a working agent (the 10 built-in tools are on by default). The identical shape
 works in JS, Go, Java, and C#.
 
@@ -343,7 +343,7 @@ a byte-identical spec verified by a shared conformance suite.
 **Honest read:** ADK's four-language story is real and 1.0-GA — a genuine peer to us on reach, and
 *ahead* of us on managed runtime, eval, and A2A depth. Where we differ is the **parity guarantee**:
 ADK promises "available in four languages with near-parity, Python-first"; toolnexus promises
-"**byte-identical output across five languages, pinned by [`SPEC.md §0`](../SPEC.md) and enforced by a
+"**byte-identical output across five languages, pinned by a shared contract and enforced by a
 shared conformance suite** against the same `examples/` fixtures." Those are different promises.
 ADK's is backed by Google's scale; ours is a narrower surface held to a stricter, testable bar.
 ([Google's ADK 1.0 / parity framing](https://fast.io/resources/google-adk-vs-openai-agents-sdk/))
@@ -357,16 +357,16 @@ ADK's is backed by Google's scale; ours is a narrower surface held to a stricter
 > - **No performance numbers.** We publish **no** latency, throughput, or tokens/sec figures. We did
 >   not run a controlled head-to-head; any such number here would be invented, so there is none.
 > - **MCP authorization is partial, not absent.** Static bearer (`${ENV}` headers) **and** interactive
->   URL authorization (server URL-elicitation → §10 `kind:"authorization"` suspension → host completes
->   out-of-band, incl. OAuth consent → resume) both work (`SPEC.md §2`/§10). What's missing is a
+>   URL authorization (server URL-elicitation → `kind:"authorization"` suspension → host completes
+>   out-of-band, incl. OAuth consent → resume) both work. What's missing is a
 >   built-in **OAuth 2.0 token client** (no automatic handshake/refresh) — the host completes auth, we
 >   bridge the requirement. URL mode ships where the port's MCP SDK supports it; form mode in all five.
 > - **MCP elicitation is partial:** **form mode in all five ports; URL mode only where the port's MCP
->   SDK supports it** — genuinely uneven across ports (`SPEC.md §2`).
+>   SDK supports it** — genuinely uneven across ports.
 > - **MCP server is streamable-HTTP only.** No stdio; **no resources, prompts, sampling, or
->   completion** (`SPEC.md §7C`). Spring AI and ADK expose more.
+>   completion**. Spring AI and ADK expose more.
 > - **A2A is an explicit *subset*:** Agent Card + JSON-RPC `SendMessage`/`GetTask` submit→poll. **No
->   streaming, push notifications, gRPC, or auth** in core (`SPEC.md §7A/B`). We call it a subset in
+>   streaming, push notifications, gRPC, or auth** in core. We call it a subset in
 >   our own README.
 > - **No graph/state-machine orchestration.** A linear tool-calling loop with durable suspension —
 >   not LangGraph-style branching/checkpointing.
@@ -398,7 +398,7 @@ own — that's toolnexus, and the trade-offs above are exactly what you're buyin
 
 ### Sources
 
-Repo (this codebase): [`SPEC.md`](../SPEC.md) · [`README.md`](../README.md) ·
+Repo (this codebase): [`README.md`](../README.md) ·
 [`docs/adr/0001-rag-go-consumer-needs.md`](adr/0001-rag-go-consumer-needs.md) ·
 [`docs/adr/0002-skills-consumer-needs.md`](adr/0002-skills-consumer-needs.md) · manifests
 (`js/package.json`, `python/pyproject.toml`, `golang/go.mod`, `java/build.gradle`,

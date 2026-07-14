@@ -119,6 +119,14 @@ starlight-tabs [role='tab'][aria-selected='true'] {
 	max-width: 34ch;
 }
 
+/* ── Wide markdown tables — scroll instead of clipping at the edge ── */
+.sl-markdown-content table {
+	display: block;
+	width: max-content;
+	max-width: 100%;
+	overflow-x: auto;
+}
+
 /* ── The launch explainer video ── */
 .tn-video {
 	display: block;
