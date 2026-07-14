@@ -35,6 +35,14 @@ export default defineConfig({
 					],
 				},
 				{
+					label: 'Why & benchmarks',
+					items: [
+						{ label: 'Why toolnexus', slug: 'why-toolnexus' },
+						{ label: 'Comparison — Spring AI · LangGraph · ADK', slug: 'comparison' },
+						{ label: 'Performance benchmarks', slug: 'performance' },
+					],
+				},
+				{
 					label: 'Concepts',
 					items: [{ label: 'A tool is a tool is a tool', slug: 'concepts' }],
 				},
