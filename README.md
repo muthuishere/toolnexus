@@ -7,11 +7,11 @@
 [![Maven Central](https://img.shields.io/maven-central/v/io.github.muthuishere/toolnexus?label=Maven%20Central)](https://central.sonatype.com/artifact/io.github.muthuishere/toolnexus)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-### Your LLM, with MCP tools and agent skills built in — in 3 lines, in 5 languages.
+### Your LLM, with MCP tools and agent skills built in — in 3 lines, in 6 languages.
 
 Point toolnexus at an `mcp.json` and a `skills/` folder and you get a **working agent**: the
 tool-calling loop, skills injection, five unified tool sources, and conversation memory — all
-included. Vendor-neutral, byte-identical across **JavaScript · Python · Go · Java · C#**.
+included. Vendor-neutral, byte-identical across **JavaScript · Python · Go · Java · C# · Elixir**.
 
 > **Right-sized.** Not a framework — no builders, advisors, runnables, or config to wade through.
 > Not a toy that falls over the moment you need streaming or a retry. Exactly what a real agent
@@ -23,6 +23,7 @@ npm i toolnexus                                   # JS / TypeScript
 pip install toolnexus                             # Python
 go get github.com/muthuishere/toolnexus/golang    # Go
 dotnet add package Toolnexus                       # C#
+{:toolnexus, "~> 0.9"}                             # Elixir (mix.exs deps)
 # Java (Maven): io.github.muthuishere:toolnexus:0.5.0
 ```
 
@@ -89,16 +90,16 @@ const { text } = await agent.run("Refund order 1234 for the customer.", { toolki
 That's the whole thing. `createToolkit()` alone (no config) still gives you a working agent —
 the 10 built-in tools are on by default. Bring your own loop instead? Use `tk.toOpenAI()` /
 `toAnthropic()` / `toGemini()` for the schema and `tk.execute(name, args)` to run a call.
-The same three steps work in Python, Go, Java, and C#.
+The same three steps work in Python, Go, Java, C#, and Elixir.
 
 ## Why toolnexus
 
 The individual pieces — MCP, agent skills (`SKILL.md`), native tools, HTTP tools — each landed in
 the big frameworks during 2026: **Spring AI**, **LangChain** (Deep Agents) and **Google ADK** now
 do most of them. What none of them combine is **every tool source behind one interface,
-byte-identical across five languages, vendor-neutral, in a small à-la-carte library:**
+byte-identical across six languages, vendor-neutral, in a small à-la-carte library:**
 
-- **Five languages, one behavior** — JS · Python · Go · Java · C#, pinned by a shared
+- **Six languages, one behavior** — JS · Python · Go · Java · C# · Elixir, pinned by a shared
   [SPEC.md](SPEC.md) so they stay byte-compatible (the skill-loader output is byte-for-byte).
   First-class **Go and C#** — where Spring AI (Java-only) and LangChain (no Go/C#) don't reach.
 - **Vendor-neutral** — a plain base URL + `openai`/`anthropic` style; not tied to one provider
@@ -118,8 +119,9 @@ from scratch:
 | Go     | [`golang/`](golang/) | `github.com/mark3labs/mcp-go`                   |
 | Java   | [`java/`](java/)     | `io.modelcontextprotocol.sdk:mcp` (official)    |
 | C#     | [`csharp/`](csharp/) | `ModelContextProtocol` (official)               |
+| Elixir | [`elixir/`](elixir/) | in-house MCP client (OTP-supervised, no SDK)    |
 
-The language-independent behavior is pinned in **[SPEC.md](SPEC.md)** so all five stay
+The language-independent behavior is pinned in **[SPEC.md](SPEC.md)** so all six stay
 byte-compatible (especially the skill loader output).
 
 ## Five tool sources, one interface
