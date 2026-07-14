@@ -79,3 +79,25 @@ jobs:
           dotnet-version: "10.0.x"
       - run: dotnet build
       - run: dotnet test
+
+  elixir:
+    name: Elixir (mix)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: elixir
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.17"
+          otp-version: "27"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            elixir/deps
+            elixir/_build
+          key: mix-${{ runner.os }}-${{ hashFiles('elixir/mix.lock') }}
+      - run: mix deps.get
+      - run: mix compile --warnings-as-errors
+      - run: mix coveralls   # runs the suite + enforces minimum_coverage 95 (coveralls.json)

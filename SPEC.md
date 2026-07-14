@@ -14,8 +14,10 @@ The output is a single **Toolkit** of uniform `Tool`s plus adapters that emit th
 tool schema in OpenAI / Anthropic / Gemini formats. You wire the schema into your
 LLM call; when the model asks for a tool, you call `toolkit.execute(name, args)`.
 
-This contract is identical across the `js/`, `python/`, `golang/`, and `java/`
-implementations. Each builds on the most popular MCP SDK for that language:
+This contract is identical across the `js/`, `python/`, `golang/`, `java/`,
+`csharp/`, and `elixir/` implementations. Each builds on the most popular MCP SDK
+for that language — except Elixir, which (lacking a mature SDK) owns its MCP
+client in-house:
 
 | Lang   | MCP SDK                                  |
 |--------|------------------------------------------|
@@ -23,6 +25,8 @@ implementations. Each builds on the most popular MCP SDK for that language:
 | Python | `mcp` (modelcontextprotocol/python-sdk)  |
 | Go     | `github.com/mark3labs/mcp-go`            |
 | Java   | `io.modelcontextprotocol.sdk:mcp` (official)   |
+| C#     | `ModelContextProtocol` (official)        |
+| Elixir | in-house client (`Toolnexus.Mcp.*` — JSON-RPC 2.0, stdio + streamable-HTTP) |
 
 > **Who reads this:** nobody, normally. End users read the per-language READMEs.
 > This file exists only so a future porter keeps JS/Python/Go byte-identical.
@@ -304,7 +308,7 @@ Note: file list is sampled.
 `skillsPrompt()` returns the markdown catalog to inject into the system prompt so
 the model knows which skills exist (mirrors opencode `Skill.fmt` + `SystemPrompt.skills`).
 When ≥1 described skill exists, it begins with a fixed **instruction preamble** (byte-identical
-across all four ports) telling the model to load a skill via the `skill` tool, then the list:
+across all ports) telling the model to load a skill via the `skill` tool, then the list:
 
 ```
 Skills provide specialized instructions and workflows for specific tasks.
@@ -428,7 +432,7 @@ nothing about them is added to the system prompt.
 ## 4A. Built-in tools (source: "builtin")
 
 The default toolset toolnexus ships so an agent can act with zero custom wiring — opencode's
-built-ins, ported with **identical tool names and input schemas** across all four ports. Every tool
+built-ins, ported with **identical tool names and input schemas** across all ports. Every tool
 here has `source:"builtin"` and obeys the uniform `Tool`/`ToolResult` contract (§1): a failure is a
 `ToolResult{isError:true, output:<message>}`, never a thrown exception across the boundary. Paths are
 resolved relative to the process working directory unless absolute. Implementations are **native per
@@ -816,7 +820,7 @@ dependency — the format is plain text). The host mounts it at `GET /metrics`. 
   `toolnexus_tool_calls_total{tool,source,is_error}` · `toolnexus_tool_duration_seconds{tool}`
   (histogram) · `toolnexus_run_errors_total{model}`
 
-The `metrics()` **text is byte-identical across all five ports** — pin: metrics in the fixed order
+The `metrics()` **text is byte-identical across all ports** — pin: metrics in the fixed order
 above; each with `# HELP`/`# TYPE` lines; series within a metric sorted lexicographically by their
 rendered label string; histogram buckets (seconds) fixed at
 `[0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60]` + `+Inf` (cumulative `_bucket{le=…}` + `_sum` +
@@ -845,7 +849,7 @@ Two properties are contractual and conformance-tested:
 - **Model faithfulness.** `Client.run` (and `toolnexus run --model`) transmits the caller's
   configured `model` id to the endpoint **verbatim** on every turn — no rewrite, alias, or silent
   default when the caller supplied one. A route the operator chose as cheap
-  (e.g. `deepseek/deepseek-chat`) is the model actually billed. Identical in all five ports (the
+  (e.g. `deepseek/deepseek-chat`) is the model actually billed. Identical in all ports (the
   client loop sends `model` unchanged); pinned by `golang/routing_conformance_test.go`.
 - **The route-gate seam.** The `beforeLLM` hook (§8) receives the `model` for each turn and may
   abort the call (raise/error). This is where an expensive-tier route is gated: the reference
@@ -893,7 +897,7 @@ byte-identical to today.
   requests (retries included); nil ⇒ the default. Scope is the LLM path only.
 - **Gap 5 — omit empty tool keys.** When the effective tool list is empty (including after a
   `BeforeLLM` override), the `tools` key — and, on the openai style, `tool_choice` — is omitted from
-  the body entirely. This is a five-port behavior change (the keys were previously sent unconditionally).
+  the body entirely. This is an all-port behavior change (the keys were previously sent unconditionally).
 - **Gap 4 — conversation-store accessor.** `Client.ConversationStore()` returns the client's store
   (the instance passed in, else the default in-memory one) so a host can read/rewind the transcript
   and share state with the stateful `ask` — no shadow copy needed.
@@ -939,7 +943,7 @@ The whole thing in one sentence:
 > host's **`waitFor(request) → answer`**, then **retries the tool** and resumes.
 
 Everything crossing a boundary is **data** (`request`, `answer`) — so this works
-identically across the five ports, across processes, across agents (A2A), and across
+identically across the ports, across processes, across agents (A2A), and across
 restarts. Only the host's `waitFor` is behavior, and it is not the engine's business:
 it may open a browser, message a channel, watch a file, or forward to another agent.
 
