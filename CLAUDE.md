@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **toolnexus** — a small, **vendor-neutral** library that gives *any* LLM the dynamic
 capabilities [opencode](https://github.com/anomalyco/opencode) has, ported **byte-identically
-across five languages** (`js/`, `python/`, `golang/`, `java/`, `csharp/`):
+across six languages** (`js/`, `python/`, `golang/`, `java/`, `csharp/`, `elixir/`):
 
 1. **Dynamic MCP servers** — read an `mcp.json`, connect to every server (local stdio +
    remote streamable-HTTP), expose each server tool as a uniform `Tool`.
@@ -37,20 +37,21 @@ below.
 | `golang/` | Go port — `github.com/muthuishere/toolnexus/golang`, Go 1.23. MCP SDK: `mark3labs/mcp-go`. Also ships the `toolnexus` CLI under `cmd/`. |
 | `java/` | Java port — `io.github.muthuishere:toolnexus`, Java 21. MCP SDK: official `io.modelcontextprotocol.sdk:mcp`. |
 | `csharp/` | C# port — `Toolnexus` (NuGet), .NET. MCP SDK: `ModelContextProtocol`. |
+| `elixir/` | Elixir port — `toolnexus` (Hex), Elixir ≥ 1.16/OTP 26. MCP client: **in-house** (`Toolnexus.Mcp.*` — no mature Elixir SDK exists); coverage gate ≥ 95%. |
 | `examples/` | **Shared cross-language fixtures** — `mcp.json` + `skills/hello-world/`. Every port runs against these; outputs must match. |
 | `openspec/` | **Spec-driven change workflow (OpenSpec).** `changes/` = active proposals (`proposal.md` + spec deltas + `tasks.md`), `specs/` = canonical capability specs, `changes/archive/` = shipped changes. Run the `openspec` CLI from the repo root. |
-| `.github/workflows/ci.yml` | Runs all five suites (JS/Python/Go/Java/C#), hermetically (no network, no live LLM). |
+| `.github/workflows/ci.yml` | Runs all six suites (JS/Python/Go/Java/C#/Elixir), hermetically (no network, no live LLM). |
 
-## The prime directive: spec-driven, five-language parity
+## The prime directive: spec-driven, six-language parity
 
-`SPEC.md` is the contract; the five ports are implementations of it. Two rules govern every change:
+`SPEC.md` is the contract; the six ports are implementations of it. Two rules govern every change:
 
 1. **Behavior is defined in the spec before it is written in code.** `SPEC.md §0` is the
    conformance contract — if a change alters observable behavior (tool naming, config parsing,
    the `skill` tool's byte-exact output, adapter mapping, the client loop), it changes `SPEC.md`
    *first*, then the code. Any change of real substance goes through an **OpenSpec change** first
    (below) — the proposal's spec deltas are where intended behavior is pinned before code.
-2. **A behavior change lands in all five ports, or it is not done.** Do not ship a capability
+2. **A behavior change lands in all six ports, or it is not done.** Do not ship a capability
    in `js/` and leave `python/`/`golang/`/`java/`/`csharp/` behind without explicitly saying so
    and tracking it in an in-progress spec. The ports are meant to be substitutable; silent drift
    is the one bug this repo exists to prevent.
@@ -119,14 +120,16 @@ Each port is self-contained and hermetic — `cd` into its directory first. CI r
 | `golang/` | `go build ./...` && `go vet ./...` | `go test -race ./...` |
 | `java/` | `./gradlew build --no-daemon` | `./gradlew test --no-daemon` |
 | `csharp/` | `dotnet build` | `dotnet test` |
+| `elixir/` | `mix deps.get && mix compile` | `mix test` · coverage gate: `mix coveralls` (min 95%) |
 
-All five ports are currently at version `0.5.0`. Publishing runs through the **`release.yml`**
+All ports are versioned together (see the per-port manifests for the current number). Publishing runs through the **`release.yml`**
 GitHub Actions workflow: cut a GitHub Release `vX.Y.Z` (or `workflow_dispatch`) and each port
 publishes if its repo variable `ENABLE_*` is `true`. npm / PyPI / NuGet use **OIDC Trusted
 Publishing** (no stored tokens); Go is a tag push (`golang/vX.Y.Z`); Maven Central (Java) uses the
-`prod` environment secrets (`CENTRAL_USERNAME` / `CENTRAL_PASSWORD` / `GPG_*`). A `preflight` job
-fails the run unless all four manifests (js/python/csharp/java) match the release version — so bump
-them together. Never bake registry tokens into code, config, or CI; they are use-only env vars.
+`prod` environment secrets (`CENTRAL_USERNAME` / `CENTRAL_PASSWORD` / `GPG_*`); Hex.pm (Elixir)
+uses the `prod` environment secret `HEX_API_KEY` (no OIDC support on Hex). A `preflight` job fails
+the run unless all five manifests (js/python/csharp/java/elixir) match the release version — so
+bump them together. Never bake registry tokens into code, config, or CI; they are use-only env vars.
 
 ## Coding conventions
 

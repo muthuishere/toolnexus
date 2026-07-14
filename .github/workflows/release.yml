@@ -5,7 +5,7 @@ name: Release
 # VARIABLE (Settings -> Secrets and variables -> Actions -> Variables) so a port
 # stays off until you flip it on — partial onboarding still produces a green run.
 #
-#   ENABLE_NPM  ENABLE_PYPI  ENABLE_GO  ENABLE_NUGET  ENABLE_JAVA   (=true to publish)
+#   ENABLE_NPM  ENABLE_PYPI  ENABLE_GO  ENABLE_NUGET  ENABLE_JAVA  ENABLE_ELIXIR   (=true to publish)
 #
 # npm / PyPI / NuGet use OIDC Trusted Publishing (no stored secrets); Go is a tag
 # push; Java (Maven Central) uses the prod-environment secrets CENTRAL_USERNAME /
@@ -45,12 +45,14 @@ jobs:
           PY=$(grep -E '^version' python/pyproject.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
           CS=$(grep -oE '<Version>[^<]+</Version>' csharp/src/Toolnexus/Toolnexus.csproj | head -1 | sed -E 's/<\/?Version>//g')
           JAVA=$(grep -E "^version" java/build.gradle | head -1 | sed -E "s/.*'([^']+)'.*/\1/")
-          echo "js=$JS python=$PY csharp=$CS java=$JAVA"
+          EX=$(grep -E '@version "' elixir/mix.exs | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "js=$JS python=$PY csharp=$CS java=$JAVA elixir=$EX"
           fail=0
           [ "$JS" = "$VERSION" ] || { echo "::error::js/package.json is $JS, expected $VERSION"; fail=1; }
           [ "$PY" = "$VERSION" ] || { echo "::error::python/pyproject.toml is $PY, expected $VERSION"; fail=1; }
           [ "$CS" = "$VERSION" ] || { echo "::error::csharp Toolnexus.csproj is $CS, expected $VERSION"; fail=1; }
           [ "$JAVA" = "$VERSION" ] || { echo "::error::java/build.gradle is $JAVA, expected $VERSION"; fail=1; }
+          [ "$EX" = "$VERSION" ] || { echo "::error::elixir/mix.exs is $EX, expected $VERSION"; fail=1; }
           exit $fail
 
   npm:
@@ -157,3 +159,22 @@ jobs:
           distribution: temurin
           java-version: "21"
       - run: ./gradlew publishAndReleaseToMavenCentral --no-daemon --no-configuration-cache
+
+  hex:
+    needs: preflight
+    if: ${{ vars.ENABLE_ELIXIR == 'true' }}
+    runs-on: ubuntu-latest
+    environment: prod          # HEX_API_KEY lives in this environment's secrets (Hex has no OIDC)
+    permissions: { contents: read }
+    defaults: { run: { working-directory: elixir } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.17"
+          otp-version: "27"
+      - run: mix deps.get
+      - run: mix hex.publish --yes
+        env:
+          # Use-only: consumed by mix hex.publish, never echoed or logged.
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
