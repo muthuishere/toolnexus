@@ -17,7 +17,7 @@ description: >-
 > a managed runtime, or the fullest MCP server, one of the others is the better tool, and we say so
 > below.
 >
-> Versions referenced: toolnexus **0.8.0** (all five ports; `js/package.json`, `python/pyproject.toml`,
+> Versions referenced: toolnexus **0.8.0** (all six ports; `js/package.json`, `python/pyproject.toml`,
 > `golang/go.mod`, `java/build.gradle`, `csharp/src/Toolnexus/Toolnexus.csproj`). Competitor facts
 > were checked in **July 2026**; frameworks move fast — re-verify before quoting.
 
@@ -46,7 +46,7 @@ only where tagged.
 | **Graph / state-machine orchestration** | ❌ (linear loop only) | 🟡 | ✅ **its whole point** | ✅ workflow agents |
 | **Managed runtime / deploy / eval** | ❌ (it's a library) | 🟡 Spring Boot ecosystem | 🟡 LangGraph Platform | ✅ **Vertex AI Agent Engine** |
 | **Vendor-neutral (base-URL, any provider)** | ✅ OpenAI + Anthropic styles, 3 schema adapters | ✅ 20+ providers | ✅ | 🟡 model-agnostic but Google-centric |
-| **Languages** | **5, byte-identical** (JS · Python · Go · Java · C#) [MEASURED] | JVM only | Python + JS/TS | Python · Go · Java · TS (parity/maturity vary) |
+| **Languages** | **5, byte-identical** (JS · Python · Go · Java · C# · Elixir) [MEASURED] | JVM only | Python + JS/TS | Python · Go · Java · TS (parity/maturity vary) |
 | **Direct runtime deps (minimal agent)** | **2–3 per port** [MEASURED] | Spring Boot + starters (heavy) [QUALITATIVE] | LangChain tree (heavy) [QUALITATIVE] | ADK + Google libs [QUALITATIVE] |
 | **Single-binary deploy** | ✅ Go port [MEASURED] | ❌ | ❌ | ❌ |
 
@@ -122,7 +122,7 @@ Covering the MCP client, MCP server (inbound), A2A inbound/outbound, and the sus
 
 **Honest takeaway:** on protocol *depth*, ranking is roughly **Spring AI ≈ ADK > toolnexus > LangGraph
 (OSS)** for MCP-server + A2A completeness. toolnexus is intentionally a lean, spec-pinned subset that
-is **identical in five languages** — that's the trade.
+is **identical in six languages** — that's the trade.
 
 ---
 
@@ -151,7 +151,7 @@ which none of the three competitors offer [MEASURED].
 
 ## Language coverage / parity — the genuine differentiator
 
-- **toolnexus: 5 languages, byte-identical.** JS · Python · Go · Java · C#, pinned by
+- **toolnexus: 6 languages, byte-identical.** JS · Python · Go · Java · C# · Elixir, pinned by
   a shared conformance contract — the `skill`-tool loader output and the `metrics()` Prometheus text are
   **byte-for-byte** across ports, enforced by hermetic conformance tests against shared
   `examples/` fixtures. [MEASURED / structural]
@@ -164,7 +164,7 @@ which none of the three competitors offer [MEASURED].
 
 **Fair framing:** ADK reaches a similar language *count*, and several other frameworks span multiple
 languages too — **we did not invent this category** (see the [next section](#who-else-already-spans-multiple-languages-the-real-field)).
-What no competitor offers is a **single contract that keeps five ports substitutable** — same config,
+What no competitor offers is a **single contract that keeps six ports substitutable** — same config,
 same tool naming, byte-identical skill-loader output and `metrics()` text, held by a shared
 conformance suite. If you ship the same agent behavior into a TS frontend service, a Python data
 pipeline, a Go binary, a Spring service, and a .NET app, that *tested* parity is the reason to pick
@@ -176,14 +176,14 @@ toolnexus.
 
 **We did not invent the multi-language agent framework.** Several mature projects already ship in more
 than one language. The honest, defensible toolnexus claim is narrower and testable: **byte-identical
-conformance across five languages, pinned by a shared spec and verified
+conformance across six languages, pinned by a shared spec and verified
 by a shared conformance suite** — not merely "an SDK exists in language X." Almost everyone else ships
 **separate idiomatic SDKs with best-effort, flagship-first parity and documented feature gaps.** Here
 is the field, positioned fairly. [FROM DOCS]
 
 | Framework | Languages | Cross-language promise | Byte-identical + shared conformance suite? |
 |---|---|---|---|
-| **toolnexus** | JS · Python · Go · Java · C# (**5**) | One shared contract; shared `examples/` fixtures | ✅ **Yes** — the explicit design goal [MEASURED / structural] |
+| **toolnexus** | JS · Python · Go · Java · C# · Elixir (**5**) | One shared contract; shared `examples/` fixtures | ✅ **Yes** — the explicit design goal [MEASURED / structural] |
 | **Microsoft Semantic Kernel** | C# · Python · Java (**3**) | Aims for parity; **not at complete parity** — per-language feature tables, Java lags, GA-parity only for C#+Python | 🟡 Separate idiomatic SDKs, documented gaps — **not byte-identical** |
 | **Google ADK** | Python · Go · Java · TS (**4**) | "Near-complete parity," shared runtime contract, Python-first | 🟡 Separate SDKs, maturity skew — no byte-exact conformance suite |
 | **LangChain / LangGraph** | Python · JS/TS (**2**) | Two ecosystems; JS trails Python | 🟡 Separate ports, partial parity |
@@ -210,7 +210,7 @@ industry posture: **separate idiomatic ports, best-effort parity, flagship langu
   block and the Prometheus `metrics()` text are pinned byte-for-byte), enforced by a conformance suite
   every port must pass. To our knowledge no listed competitor makes — or tests — a byte-identical
   cross-language guarantee; they promise "available in N languages," which is a weaker, untested claim.
-- The trade is **surface for strictness**: toolnexus is a small tool layer, so holding five ports
+- The trade is **surface for strictness**: toolnexus is a small tool layer, so holding six ports
   byte-identical is tractable. SK/ADK/LangChain cover vastly more (orchestration, memory subsystems,
   eval, managed runtime) across their languages — which is exactly *why* they can't promise byte
   identity. Bigger surface, looser parity vs. smaller surface, tested parity. Pick accordingly.
@@ -310,7 +310,7 @@ checkpointed graph.
   and lands best on Vertex AI. [QUALITATIVE / FROM DOCS]
 - **A library with no runtime dependency** — no managed platform to deploy into; runs anywhere,
   including a single Go binary. [MEASURED]
-- **Byte-identical parity** across five languages (ADK reaches four, without a parity guarantee).
+- **Byte-identical parity** across six languages (ADK reaches four, without a parity guarantee).
 
 **Where ADK wins**
 - **Managed runtime + lifecycle**: **Vertex AI Agent Engine** for deploy/scale, plus first-class
@@ -343,7 +343,7 @@ a byte-identical spec verified by a shared conformance suite.
 **Honest read:** ADK's four-language story is real and 1.0-GA — a genuine peer to us on reach, and
 *ahead* of us on managed runtime, eval, and A2A depth. Where we differ is the **parity guarantee**:
 ADK promises "available in four languages with near-parity, Python-first"; toolnexus promises
-"**byte-identical output across five languages, pinned by a shared contract and enforced by a
+"**byte-identical output across six languages, pinned by a shared contract and enforced by a
 shared conformance suite** against the same `examples/` fixtures." Those are different promises.
 ADK's is backed by Google's scale; ours is a narrower surface held to a stricter, testable bar.
 ([Google's ADK 1.0 / parity framing](https://fast.io/resources/google-adk-vs-openai-agents-sdk/))
@@ -361,7 +361,7 @@ ADK's is backed by Google's scale; ours is a narrower surface held to a stricter
 >   out-of-band, incl. OAuth consent → resume) both work. What's missing is a
 >   built-in **OAuth 2.0 token client** (no automatic handshake/refresh) — the host completes auth, we
 >   bridge the requirement. URL mode ships where the port's MCP SDK supports it; form mode in all five.
-> - **MCP elicitation is partial:** **form mode in all five ports; URL mode only where the port's MCP
+> - **MCP elicitation is partial:** **form mode in all six ports; URL mode only where the port's MCP
 >   SDK supports it** — genuinely uneven across ports.
 > - **MCP server is streamable-HTTP only.** No stdio; **no resources, prompts, sampling, or
 >   completion**. Spring AI and ADK expose more.
@@ -388,7 +388,7 @@ ADK's is backed by Google's scale; ours is a narrower surface held to a stricter
 toolnexus is **not** the deepest MCP/A2A implementation, **not** an orchestration engine, and **not**
 a managed platform — and it doesn't try to be. It is the only option here that unifies **every tool
 source** (MCP · skills · native · HTTP · built-ins · A2A, inbound and outbound) behind one `Tool`
-interface, **byte-identical across five languages**, vendor-neutral, in a **2–3-dependency** library
+interface, **byte-identical across six languages**, vendor-neutral, in a **2–3-dependency** library
 with a **single-binary** Go story. If you need graph workflows pick LangGraph; if you're all-in on
 Google Cloud pick ADK; if you're a Spring shop that wants the fullest JVM MCP/A2A pick Spring AI. If
 you want a small, portable, honest tool layer you can drop into any of five language stacks and fully

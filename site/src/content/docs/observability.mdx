@@ -1,6 +1,6 @@
 ---
 title: Observability — metrics & Prometheus
-description: One internal instrumentation, two opt-in outputs — a semantic on_metric event feed you can forward anywhere, and a zero-dependency client.metrics() that renders Prometheus text. No cost when unused, byte-identical across five languages.
+description: One internal instrumentation, two opt-in outputs — a semantic on_metric event feed you can forward anywhere, and a zero-dependency client.metrics() that renders Prometheus text. No cost when unused, byte-identical across six languages.
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -90,7 +90,7 @@ It exposes `toolnexus_llm_requests_total`, `toolnexus_llm_tokens_total`,
 `toolnexus_tool_duration_seconds` histograms.
 
 <Aside type="note">
-The rendered Prometheus text is **byte-identical across all five ports** — same metric names, labels,
+The rendered Prometheus text is **byte-identical across all six ports** — same metric names, labels,
 and bucket layout — so a dashboard built against one language works against any of them. OTLP push is
 a planned future companion.
 </Aside>

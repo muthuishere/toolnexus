@@ -1,6 +1,6 @@
 ---
 title: Suspension & the human loop
-description: Sometimes an agent hits a wall only a human can clear — approve a risky action, log in, answer a question. Suspension lets any tool pause the loop and resume once the answer arrives, whether that's in seconds or in days. The same primitive in all five ports.
+description: Sometimes an agent hits a wall only a human can clear — approve a risky action, log in, answer a question. Suspension lets any tool pause the loop and resume once the answer arrives, whether that's in seconds or in days. The same primitive in all six ports.
 ---
 
 import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
@@ -10,7 +10,7 @@ Your agent is halfway through a task and hits a wall only a person can clear: **
 loop do — crash? Block a thread for six hours? Guess?
 
 toolnexus gives you a fourth answer: **suspend**. Any tool can pause the loop, surface a `Request`,
-and resume once it's answered — the same way in all five ports.
+and resume once it's answered — the same way in all six ports.
 
 ## The one decision: can the human answer *now*, or *later*?
 
@@ -169,7 +169,7 @@ const client = createClient({
 
 <Aside type="note">
 `authRequired(url, prompt)` is a one-liner over the same primitive — it returns
-`pending({ kind: "authorization", url, prompt })`. The **same shape works in all five ports**;
+`pending({ kind: "authorization", url, prompt })`. The **same shape works in all six ports**;
 only the surface syntax differs. Nothing here is special-cased for auth.
 </Aside>
 

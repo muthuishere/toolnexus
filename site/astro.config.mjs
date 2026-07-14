@@ -14,14 +14,14 @@ export default defineConfig({
 			// Remove the right-hand "On this page" table of contents site-wide.
 			tableOfContents: false,
 			description:
-				'Your LLM, with MCP tools and agent skills built in — in 3 lines, in 5 languages. Vendor-neutral, byte-identical across JavaScript, Python, Go, Java and C#.',
+				'Your LLM, with MCP tools and agent skills built in — in 3 lines, in 6 languages. Vendor-neutral, byte-identical across JavaScript, Python, Go, Java, C# and Elixir.',
 			plugins: [
 				starlightLlmsTxt({
 					projectName: 'toolnexus',
 					description:
-						'A small, vendor-neutral library that gives any LLM dynamic tool-calling: an MCP host, agent skills, native + HTTP + built-in tools, remote A2A agents, a human-in-the-loop suspension layer, and a unified client loop — byte-identical across JavaScript, Python, Go, Java and C#.',
+						'A small, vendor-neutral library that gives any LLM dynamic tool-calling: an MCP host, agent skills, native + HTTP + built-in tools, remote A2A agents, a human-in-the-loop suspension layer, and a unified client loop — byte-identical across JavaScript, Python, Go, Java, C# and Elixir.',
 					details:
-						'toolnexus unifies every tool source (MCP servers, agent skills, your own functions via defineTool, HTTP/REST endpoints, built-in shell/file tools, and remote A2A agents) behind one Tool interface, emits schema in OpenAI/Anthropic/Gemini formats, and ships a client with a built-in tool-calling loop (skills injection, parallel + chained calls, hooks, streaming, retries, conversation memory, observability). The same examples/ fixtures produce identical behavior in all five ports.',
+						'toolnexus unifies every tool source (MCP servers, agent skills, your own functions via defineTool, HTTP/REST endpoints, built-in shell/file tools, and remote A2A agents) behind one Tool interface, emits schema in OpenAI/Anthropic/Gemini formats, and ships a client with a built-in tool-calling loop (skills injection, parallel + chained calls, hooks, streaming, retries, conversation memory, observability). The same examples/ fixtures produce identical behavior in all six ports.',
 				}),
 			],
 			customCss: ['@fontsource-variable/inter', './src/styles/deemwar.css'],
@@ -81,7 +81,7 @@ export default defineConfig({
 				{
 					label: 'Reference',
 					items: [
-						{ label: 'Install — all five languages', slug: 'install' },
+						{ label: 'Install — all six languages', slug: 'install' },
 						{ label: 'Ecosystem & references', slug: 'references' },
 					],
 				},
