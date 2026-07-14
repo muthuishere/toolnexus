@@ -51,7 +51,7 @@ defmodule Toolnexus.Context do
 
   `answer` is set only on the §10 re-execution after a `wait_for` resolved a suspension.
   """
-  defstruct [:session_id, :message_id, :agent, :call_id, :extra, :answer]
+  defstruct [:session_id, :message_id, :agent, :call_id, :extra, :answer, :timeout, :signal]
 
   @type t :: %__MODULE__{
           session_id: String.t() | nil,
@@ -59,7 +59,9 @@ defmodule Toolnexus.Context do
           agent: String.t() | nil,
           call_id: String.t() | nil,
           extra: map() | nil,
-          answer: Toolnexus.Answer.t() | nil
+          answer: Toolnexus.Answer.t() | nil,
+          timeout: non_neg_integer() | nil,
+          signal: reference() | pid() | nil
         }
 end
 
