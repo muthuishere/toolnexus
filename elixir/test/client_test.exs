@@ -218,8 +218,9 @@ defmodule Toolnexus.ClientTest do
   # ---- parallel multi-tool call: concurrent execution, original order preserved ----
 
   test "openai: parallel tool calls run concurrently, results fed back in call order" do
-    slow = tool("slow", fn _, _ -> Process.sleep(100); ToolResult.ok("slow-out") end)
-    fast = tool("fast", fn _, _ -> ToolResult.ok("fast-out") end)
+    # Both tools sleep 150ms so the concurrency check is real: serialized ⇒ ≥300ms, concurrent ⇒ ~150ms.
+    slow = tool("slow", fn _, _ -> Process.sleep(150); ToolResult.ok("slow-out") end)
+    fast = tool("fast", fn _, _ -> Process.sleep(150); ToolResult.ok("fast-out") end)
 
     {base, agent} =
       start_stub([
@@ -233,8 +234,9 @@ defmodule Toolnexus.ClientTest do
     elapsed = System.monotonic_time(:millisecond) - t0
 
     assert result.text == "done"
-    # concurrent: two 100ms-class tools must not serialize (slow=100ms, so well under 200ms)
-    assert elapsed < 180
+    # concurrent: two 150ms tools; serialized would be ≥300ms, so <280 proves they ran in parallel
+    # (generous headroom over the ~150ms parallel baseline keeps it stable on loaded CI runners).
+    assert elapsed < 280
 
     assert [%{name: "slow", output: "slow-out"}, %{name: "fast", output: "fast-out"}] = result.tool_calls
 
