@@ -2,107 +2,96 @@
 
 ## Context
 
-The client loop already retries transient LLM failures and fails the rest (`SPEC.md §8`
-Resilience). §10 suspension already lets a tool suspend and the host resume via `waitFor`,
-durably through the `ConversationStore`. This change connects the two: an LLM-call failure
-the host wants to recover from becomes a suspension, not a dead run. JS is the reference port.
+The client loop hardcodes retry-vs-fail (`SPEC.md §8` Resilience). This change makes that one
+decision host-configurable and nothing else. Suspension (§10) is untouched — it stays a
+user-action pause. JS is the reference port.
 
 ## Goals / Non-Goals
 
 **Goals**
-- One optional `onError` classifier → `retry | fail | suspend`, host-owned.
-- The `suspend` tier reuses §10 verbatim (same `Request`/`Answer`, same `status:"pending"`,
-  same streaming event) — no new suspension machinery.
+- One optional `onError` classifier → `retry | fail`, host-owned, replacing the hardcoded rule.
 - Byte-identical default when `onError` is absent.
 - A hermetic resilience matrix as the conformance test in every port.
+- One resilience mechanism in the repo — the pipeline's `retry` combinator delegates here.
 
 **Non-Goals**
-- MCP failures (already isolated → `failed`, §2) and tool-execution failures (already
-  `isError`, loop continues) — out of scope, unchanged.
-- No built-in credit/auth handling — the host decides what "recovered" means. toolnexus
-  bridges the *requirement* onto §10, it does not negotiate credentials (same stance as the
-  MCP authorization bridge).
-- No automatic circuit breaker or goal classifier — a classifier is a host concern.
+- No suspend tier, no LLM-originated suspension, no new `Request` kind — §10 unchanged
+  (owner decision 2026-07-15: "we don't need suspend unless for user action").
+- MCP failures (already isolated, §2) and tool-execution failures (already `isError`, §8) —
+  out of scope, unchanged.
+- No circuit breaker / goal classifier here — if wanted, it belongs to the pipeline's `retry`
+  combinator, which delegates to this seam (see D4).
 
 ## Decisions
 
-### D1 — The seam: `onError`, not a config zoo
+### D1 — The seam: `onError`, two tiers
 
-A single callback, idiomatic per port, keeps the surface minimal:
+A single callback, idiomatic per port:
 
 | Port | Signature (shape) |
 |------|-------------------|
-| JS | `onError?: (info: ErrorInfo) => "retry" \| "fail" \| "suspend"` |
-| Python | `on_error: Optional[Callable[[ErrorInfo], Literal["retry","fail","suspend"]]]` |
-| Go | `OnError func(ErrorInfo) Tier` (Tier = `TierRetry\|TierFail\|TierSuspend`) |
+| JS | `onError?: (info: ErrorInfo) => "retry" \| "fail"` |
+| Python | `on_error: Optional[Callable[[ErrorInfo], Literal["retry","fail"]]]` |
+| Go | `OnError func(ErrorInfo) Tier` (Tier = `TierRetry\|TierFail`) |
 | Java | `Options.onError(Function<ErrorInfo, Tier>)` |
 | C# | `Func<ErrorInfo, Tier>? OnError` |
-| Elixir | `on_error: (ErrorInfo.t() -> :retry \| :fail \| :suspend)` |
+| Elixir | `on_error: (ErrorInfo.t() -> :retry \| :fail)` |
 
-`ErrorInfo` carries `{ error, status?, attempt, retryable }`. No enum ceremony beyond the
-three tiers. Absent ⇒ the default classifier: `retryable && attempt < retries → retry`, else
-`fail`. This is exactly today's behavior expressed as a default `onError`, so the default path
-is provably byte-identical.
+`ErrorInfo` carries `{ error, status?, attempt, retryable }`. Absent ⇒ the default classifier:
+`retryable && attempt < retries → retry`, else `fail`. This is exactly today's behavior
+expressed as a default `onError`, so the default path is provably byte-identical.
 
 ### D2 — Where it hooks in
 
 Inside the existing HTTP-with-retry helper (JS `fetchWithRetry`, Go `postWithRetry`, Elixir
-`request/…`). On a failed attempt, instead of the current "retry-or-throw" branch, call the
-resolved classifier:
+`request/…`). On a failed attempt, replace the current hardcoded "retry-or-throw" branch with
+the resolved classifier's result:
 
-- `retry` → existing backoff path (bounded by `retries`; `Retry-After` honored).
+- `retry` → existing backoff path, still bounded by `retries`; `Retry-After` honored.
 - `fail` → throw/return the error now (skip remaining retries).
-- `suspend` → build the `Request` and hand control to the §10 path (D3).
 
-The default classifier makes the retry/fail branches identical to today; only `suspend` is new
-behavior, and only when the host asks for it.
+One branch changes. No new call sites, no new types beyond `ErrorInfo`.
 
-### D3 — The suspend path reuses §10 exactly
+### D3 — No suspend tier (the simplicity decision)
 
-Build `Request{ id, kind:"error", prompt:"LLM call failed: <status/err>", data:{status?, attempt, retryable} }`.
-Then:
+A failure is not a user action, so it does not get a suspension. `fail` surfaces through the
+existing error path exactly as today. This removes, versus the first draft: a new `Request`
+kind, an LLM-originated suspension semantics, an answer-to-retry protocol, and a
+streaming-resume rule. The whole §10 surface stays put. If a specific failure ever needs a
+human (e.g. `402` → top up → resume), that is a separate opt-in change for hosts already
+running §10, and it must forbid suspend-after-first-byte (a resumed stream would replay
+already-emitted tokens). Deferred, not designed here.
 
-- **`waitFor` present** — call it (same call site as tool suspension). `answer.ok == true` →
-  loop back and re-issue the LLM request (a "retry" the host authorized). `answer.ok == false`
-  → surface the *original* error (carry it, don't synthesize). A second suspension on the retry
-  is bounded the same way tool re-suspension is (feed back / return pending), no infinite loop.
-- **`waitFor` absent** — return `RunResult{ status:"pending", pending:request, messages:<transcript so far> }`.
-  Because the transcript up to the failed call is already in `messages`/the store, a later
-  `run(prompt, { history })` / `ask(id)` resumes and re-issues the call — identical to resuming
-  a tool suspension.
+### D4 — Resilience lives once; the pipeline delegates
 
-The resume action differs from a tool suspension (re-issue the LLM call vs re-execute the tool),
-but the wire contract (`Request`/`Answer`/`status`/streaming event) does not move. That is the
-one-line §10 extension: **a suspension's origin may be the LLM call.**
+`add-agent-pipeline` proposes a `retry` combinator with a circuit-breaker default. To keep one
+mechanism, that combinator SHALL call this `onError` seam for the retry/fail decision rather
+than classify failures itself; the circuit-breaker (loop-kill by `hash(tool+args)`) is a
+distinct concern (runaway *tool* loops, not HTTP failures) and stays in the pipeline. The two
+proposals must land this boundary explicitly. This change owns HTTP-failure classification; the
+pipeline owns loop-shape safety.
 
-### D4 — Answer semantics kept trivial
+### D5 — Naming
 
-`ok:true` = "I fixed it, try again"; `ok:false` = "give up, return the error". No `action`
-vocabulary in `answer.data` in v1 — the two outcomes cover top-up-credits, rotate-key, and
-wait-then-retry (the host simply resolves `ok:true` whenever it is ready, possibly much later
-via the durable path). If a richer action set is ever needed it is additive under `data`.
-
-### D5 — Streaming parity
-
-The streaming loops emit the existing `{ type:"pending", request }` for a `suspend`-classified
-failure with no `waitFor`, then end — the same event tool suspension already emits, so stream
-consumers need no new case. With `waitFor`, the stream continues after an authorized retry.
+`onError` returning a tier reads as a policy decision (not a side-effecting handler). It is
+distinct from the `before/after LLM` hooks (which intercept requests/responses, not failures)
+and from the `retries` count (which bounds the `retry` tier). Three concepts, but each with a
+single, non-overlapping job: `retries` = budget, `hooks` = interception, `onError` =
+retry/fail policy. Documented together so the boundary is clear.
 
 ## Risks / Trade-offs
 
-- **Re-issuing an LLM call after a long suspension** replays the same transcript — correct and
-  idempotent for chat-completions (no side effect on the provider beyond a new billable call).
-  Documented.
-- **Host classifier that always returns `retry`** could loop; bounded by `retries`, after which
-  the default fails. The classifier cannot exceed the budget silently — the budget still caps
-  `retry`.
+- **A third error-related option** (`retries`, `hooks`, `onError`). Mitigated by D5's explicit
+  separation of duties and by keeping `onError` to two tiers — the minimum that lets a host
+  override the hardcoded set.
 - **Six-port parity cost** — accepted; the resilience matrix is the shared conformance gate.
+  Small surface (one callback, two tiers) keeps it cheap.
 
 ## Migration
 
-None. Absent `onError` ⇒ byte-identical. Existing suspension/`waitFor`/store code is reused, not
-changed.
+None. Absent `onError` ⇒ byte-identical. §10, hooks, retries config all unchanged.
 
 ## Open Questions
 
-- None blocking. A richer `answer.data.action` set is deferred (D4) until a consumer needs it.
+- Confirm the `add-agent-pipeline` `retry` combinator delegates to `onError` (D4) — settle
+  before either change applies.

@@ -2,20 +2,26 @@
 
 ## ADDED Requirements
 
-### Requirement: Host-configurable LLM-failure classification
+### Requirement: Host-configurable retry-vs-fail classification
 
 The client SHALL accept an optional `onError` callback (idiomatic name per port) that
-classifies each LLM-call failure into one of three tiers: `retry`, `fail`, or `suspend`.
-The callback receives failure context: the error, the HTTP `status` when present, the
-zero-based `attempt` number, and whether the status is in the retryable set
-(`429`/`500`/`502`/`503`/`504` + network errors). When `onError` is absent, the client SHALL
-behave byte-identically to today: a retryable failure within the `retries` budget is retried
-with exponential backoff honoring `Retry-After`; every other failure fails.
+classifies each LLM-call failure into one of two tiers: `retry` or `fail`. The callback
+receives failure context: the error, the HTTP `status` when present, the zero-based `attempt`
+number, and whether the status is in the retryable set (`429`/`500`/`502`/`503`/`504` + network
+errors). When `onError` is absent, the client SHALL behave byte-identically to today: a
+retryable failure within the `retries` budget is retried with exponential backoff honoring
+`Retry-After`; every other failure fails. A `retry` result is always bounded by the existing
+`retries` budget — the classifier cannot loop unbounded.
 
 #### Scenario: Absent callback preserves today's behavior
 
 - **WHEN** no `onError` is configured and the LLM returns `429` twice then `200`
 - **THEN** the client retries with backoff and succeeds, identical to the pre-change behavior
+
+#### Scenario: Absent callback fails a non-retryable status
+
+- **WHEN** no `onError` is configured and the LLM returns `400`
+- **THEN** the client fails immediately without retrying, identical to today
 
 #### Scenario: Host forces fail on a normally-retryable status
 
@@ -24,58 +30,31 @@ with exponential backoff honoring `Retry-After`; every other failure fails.
 
 #### Scenario: Host forces retry on a normally-terminal status
 
-- **WHEN** `onError` returns `retry` for a `500`-class error the default would still retry, or
-  for a `400` it would not
+- **WHEN** `onError` returns `retry` for a `400`
 - **THEN** the client re-issues the call, bounded by the `retries` budget, before failing
 
-### Requirement: The suspend tier routes an LLM failure through §10 suspension
+### Requirement: The classifier does not introduce a suspend tier
 
-When `onError` returns `suspend` for a failure, the client SHALL emit a §10 `Request` with
-`kind: "error"`, a human-readable `prompt`, and `data` carrying `{ status?, attempt, retryable }`.
-With a `waitFor` host slot the client SHALL call `waitFor(request)`; on `answer.ok == true` it
-SHALL re-issue the failed LLM request and resume the loop, and on `answer.ok == false` it SHALL
-surface the original error. Without a `waitFor` slot, `run` SHALL NOT hang — it SHALL return
-`{ status: "pending", pending: request }`, making the failure durably resumable via the
-`ConversationStore` exactly as a tool suspension is.
+This capability SHALL NOT add a failure-originated suspension. Suspension (§10) remains a
+user-action pause (a tool or MCP elicitation asking a human) and its contract SHALL be
+unchanged by this capability — no new `Request` kind, no LLM-originated suspension, no
+streaming-event change. A failure classified `fail` surfaces as an error result/exception per
+the existing loop contract, never as a `Request`.
 
-#### Scenario: Out-of-credits suspends and resumes on retry
+#### Scenario: A failed classification surfaces an error, not a pending
 
-- **WHEN** the LLM returns `402`, `onError` returns `suspend`, and a `waitFor` returns
-  `Answer{ ok: true }` (credits topped up)
-- **THEN** the client re-issues the LLM request and the run completes normally
-
-#### Scenario: Suspend without waitFor returns pending, does not hang
-
-- **WHEN** the LLM returns `402`, `onError` returns `suspend`, and no `waitFor` is configured
-- **THEN** `run` returns `{ status: "pending", pending: <Request kind:"error"> }` promptly, and
-  the transcript in the store is sufficient to resume later
-
-#### Scenario: Declined suspension surfaces the original error
-
-- **WHEN** a suspended failure's `waitFor` returns `Answer{ ok: false }`
-- **THEN** the client surfaces the original LLM error (not a generic one), never a hang
-
-### Requirement: Suspension may originate from the LLM call
-
-The §10 suspension contract SHALL permit a suspension to originate from the LLM call itself,
-not only from a tool result. The resume action for an LLM-originated suspension SHALL be
-re-issuing the failed LLM request. `RunResult.status` values, the `Request`/`Answer` wire
-shapes, and the streaming `{ type: "pending", request }` event SHALL be unchanged; only the
-origin and resume action differ.
-
-#### Scenario: Streaming emits pending for an LLM-originated suspension
-
-- **WHEN** a streamed run hits a `suspend`-classified LLM failure with no `waitFor`
-- **THEN** the stream emits `{ type: "pending", request }` with `request.kind == "error"` and
-  ends, matching the tool-suspension streaming shape
+- **WHEN** `onError` returns `fail` for a `402`
+- **THEN** the client surfaces the LLM error through the existing error path, and `RunResult`
+  does not carry `status:"pending"` or a `Request`
 
 ### Requirement: Resilience conformance matrix
 
-Each port SHALL carry a resilience test matrix asserting the chosen tier fires for each failure
-class: `402`/`401` (suspend when the host opts in, else fail), `429` (retry within budget, then
-the host's tier), persistent `500` (retries exhausted, then the host's tier), and network-down
-(retry, then the host's tier), plus the absent-`onError` default-parity case. The tests SHALL be
-hermetic (local stubs, no live LLM) and SHALL assert bounded time (no hang) and no process crash.
+Each port SHALL carry a hermetic resilience test matrix asserting the chosen tier fires for
+each failure class: `402`/`401`/`400` (fail by default; retry when the host opts in), `429`
+(retry within budget by default; fail when the host opts in), persistent `500` (retries
+exhausted then fail), and network-down (retry then fail), plus the absent-`onError`
+default-parity case. Tests SHALL use local stubs (no live LLM), and SHALL assert bounded time
+(no hang) and no process crash.
 
 #### Scenario: Matrix runs hermetically per port
 
