@@ -25,7 +25,11 @@ import { httpTool } from "toolnexus"
 tk.register(httpTool({
   name: "get_post", description: "Fetch a placeholder blog post by id.",
   method: "GET", url: "https://jsonplaceholder.typicode.com/posts/{id}",
-  inputSchema: { type: "object", properties: { id: { type: "number" } }, required: ["id"] },
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "number" } },
+    required: ["id"],
+  },
 }))
 ```
 </TabItem>
@@ -36,7 +40,11 @@ from toolnexus import http_tool
 tk.register(http_tool(
     name="get_post", description="Fetch a placeholder blog post by id.",
     method="GET", url="https://jsonplaceholder.typicode.com/posts/{id}",
-    input_schema={"type": "object", "properties": {"id": {"type": "number"}}, "required": ["id"]},
+    input_schema={
+        "type": "object",
+        "properties": {"id": {"type": "number"}},
+        "required": ["id"],
+    },
 ))
 ```
 </TabItem>
@@ -74,7 +82,9 @@ tk.Register(HttpTool.Of(new HttpTool.Options {
     Method = "GET", Url = "https://jsonplaceholder.typicode.com/posts/{id}",
     InputSchema = new Dictionary<string, object?> {
         ["type"] = "object",
-        ["properties"] = new Dictionary<string, object?> { ["id"] = new Dictionary<string, object?> { ["type"] = "number" } },
+        ["properties"] = new Dictionary<string, object?> {
+            ["id"] = new Dictionary<string, object?> { ["type"] = "number" },
+        },
         ["required"] = new List<object?> { "id" },
     },
 }));

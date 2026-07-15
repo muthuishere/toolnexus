@@ -22,7 +22,11 @@ import { defineTool } from "toolnexus"
 
 tk.register(defineTool({
   name: "add", description: "Add two numbers and return the sum.",
-  inputSchema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] },
+  inputSchema: {
+    type: "object",
+    properties: { a: { type: "number" }, b: { type: "number" } },
+    required: ["a", "b"],
+  },
   run: ({ a, b }) => `${Number(a) + Number(b)}`,
 }))
 ```

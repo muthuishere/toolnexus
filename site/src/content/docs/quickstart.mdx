@@ -97,7 +97,9 @@ Three steps to a working agent. Pick your language once — the tabs stay in syn
    ```java
    Toolkit tk = Toolkit.create(new Toolkit.Options());
    LlmClient agent = LlmClient.create(new LlmClient.Options()
-           .baseUrl("https://openrouter.ai/api/v1").style("openai").model("openai/gpt-4o-mini"));
+           .baseUrl("https://openrouter.ai/api/v1")
+           .style("openai")
+           .model("openai/gpt-4o-mini"));
    ```
    </TabItem>
    <TabItem label="C#">

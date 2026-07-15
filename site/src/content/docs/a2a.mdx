@@ -94,12 +94,20 @@ const handle = await tk.serve("127.0.0.1:0", {
 from toolnexus import A2AConfig
 
 llm = create_client(base_url=base, style="openai", model=model)
-handle = await tk.serve("127.0.0.1:0", client=llm, a2a=A2AConfig(name="my-agent", store="memory"))
+handle = await tk.serve(
+    "127.0.0.1:0",
+    client=llm,
+    a2a=A2AConfig(name="my-agent", store="memory"),
+)
 ```
 </TabItem>
 <TabItem label="Go">
 ```go
-llm := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: baseURL, Style: toolnexus.StyleOpenAI, Model: model})
+llm := toolnexus.CreateClient(toolnexus.ClientOptions{
+    BaseURL: baseURL,
+    Style:   toolnexus.StyleOpenAI,
+    Model:   model,
+})
 handle, _ := tk.Serve("127.0.0.1:0", toolnexus.ServeOptions{
     Client: llm,
     A2A:    &toolnexus.A2AConfig{Name: "my-agent", Store: "memory"},
@@ -108,9 +116,14 @@ handle, _ := tk.Serve("127.0.0.1:0", toolnexus.ServeOptions{
 </TabItem>
 <TabItem label="Java">
 ```java
-LlmClient llm = LlmClient.create(new LlmClient.Options().baseUrl(base).style("openai").model(model));
+LlmClient llm = LlmClient.create(new LlmClient.Options()
+        .baseUrl(base)
+        .style("openai")
+        .model(model));
 A2AServer.ServeHandle handle = tk.serve("127.0.0.1:0",
-    new Toolkit.ServeOptions().client(llm).a2a(new A2AServer.A2AConfig().name("my-agent")));
+    new Toolkit.ServeOptions()
+        .client(llm)
+        .a2a(new A2AServer.A2AConfig().name("my-agent")));
 ```
 </TabItem>
 <TabItem label="C#">

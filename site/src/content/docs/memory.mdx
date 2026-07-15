@@ -33,7 +33,11 @@ await agent.ask("What is 21 + 21?",            tk)                 # no id → o
 </TabItem>
 <TabItem label="Go">
 ```go
-agent := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: baseURL, Style: toolnexus.StyleOpenAI, Model: model})
+agent := toolnexus.CreateClient(toolnexus.ClientOptions{
+    BaseURL: baseURL,
+    Style:   toolnexus.StyleOpenAI,
+    Model:   model,
+})
 
 agent.Ask(ctx, "Book me a flight to Berlin.", tk, "user-42")
 agent.Ask(ctx, "Actually, make it Munich.",   tk, "user-42")   // same thread — remembered
@@ -42,7 +46,10 @@ agent.Ask(ctx, "What is 21 + 21?",             tk, "")          // empty id → 
 </TabItem>
 <TabItem label="Java">
 ```java
-LlmClient agent = LlmClient.create(new LlmClient.Options().baseUrl(base).style("openai").model(model));
+LlmClient agent = LlmClient.create(new LlmClient.Options()
+        .baseUrl(base)
+        .style("openai")
+        .model(model));
 
 agent.ask("Book me a flight to Berlin.", tk, "user-42");
 agent.ask("Actually, make it Munich.",   tk, "user-42");   // same thread — remembered
@@ -51,7 +58,11 @@ agent.ask("What is 21 + 21?",            tk, null);         // null id → one-s
 </TabItem>
 <TabItem label="C#">
 ```csharp
-var agent = LlmClient.Create(new LlmClient.Options { BaseUrl = baseUrl, Style = "openai", Model = model });
+var agent = LlmClient.Create(new LlmClient.Options {
+    BaseUrl = baseUrl,
+    Style = "openai",
+    Model = model,
+});
 
 await agent.AskAsync("Book me a flight to Berlin.", tk, "user-42");
 await agent.AskAsync("Actually, make it Munich.",   tk, "user-42");   // same thread — remembered

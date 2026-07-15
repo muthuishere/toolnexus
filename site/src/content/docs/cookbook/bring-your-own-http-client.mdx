@@ -92,7 +92,9 @@ HttpClient proxied = HttpClient.newBuilder()
         .build();
 
 LlmClient agent = LlmClient.create(new LlmClient.Options()
-        .baseUrl("https://openrouter.ai/api/v1").style("openai").model("openai/gpt-4o-mini")
+        .baseUrl("https://openrouter.ai/api/v1")
+        .style("openai")
+        .model("openai/gpt-4o-mini")
         .httpClient(proxied)                          // ← toolnexus uses this client
         .headers(Map.of("X-Egress-Token", System.getenv("EGRESS_TOKEN"))));
 ```
@@ -107,9 +109,13 @@ var handler = new HttpClientHandler {
 };
 
 var agent = LlmClient.Create(new LlmClient.Options {
-    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai", Model = "openai/gpt-4o-mini",
+    BaseUrl = "https://openrouter.ai/api/v1",
+    Style = "openai",
+    Model = "openai/gpt-4o-mini",
     HttpHandler = handler,                            // or HttpClient = yourClient
-    Headers = new Dictionary<string, string> { ["X-Egress-Token"] = Environment.GetEnvironmentVariable("EGRESS_TOKEN") },
+    Headers = new Dictionary<string, string> {
+        ["X-Egress-Token"] = Environment.GetEnvironmentVariable("EGRESS_TOKEN"),
+    },
 });
 ```
 </TabItem>

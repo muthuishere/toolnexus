@@ -112,7 +112,9 @@ Toolkit tk = Toolkit.create(new Toolkit.Options()
         .mcpConfig("./mcp.json")     // every MCP server's tools
         .skillsDir("./skills"));     // every SKILL.md, loaded on demand
 LlmClient agent = LlmClient.create(new LlmClient.Options()
-        .baseUrl("https://openrouter.ai/api/v1").style("openai").model("openai/gpt-4o-mini"));
+        .baseUrl("https://openrouter.ai/api/v1")
+        .style("openai")
+        .model("openai/gpt-4o-mini"));
 System.out.println(agent.run("Use my tools to answer this.", tk).text);
 ```
 </TabItem>

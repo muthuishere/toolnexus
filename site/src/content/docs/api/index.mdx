@@ -59,7 +59,9 @@ tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{
     McpConfig:        "./mcp.json",
     SkillsDir:        []string{"./skills"},
     Skills:           []toolnexus.SkillDef{ /* … */ },
-    SkillProvider:    func(ctx context.Context) ([]toolnexus.SkillDef, error) { return nil, nil },
+    SkillProvider: func(ctx context.Context) ([]toolnexus.SkillDef, error) {
+        return nil, nil
+    },
     SkillsFilter:     map[string]bool{"deploy": true},
     SkillSampleLimit: 0,
     Builtins:         true,
@@ -278,19 +280,30 @@ res = await client.ask("…", tk)
 </TabItem>
 <TabItem label="Go">
 ```go
-client := toolnexus.CreateClient(toolnexus.ClientOptions{Model: "gpt-5", BaseURL: "…", APIKey: "…"})
+client := toolnexus.CreateClient(toolnexus.ClientOptions{
+    Model:   "gpt-5",
+    BaseURL: "…",
+    APIKey:  "…",
+})
 res, _ := client.Ask(ctx, "…", tk, "")
 ```
 </TabItem>
 <TabItem label="Java">
 ```java
-Client client = Client.create(new Client.Options().model("gpt-5").baseUrl("…").apiKey("…"));
+Client client = Client.create(new Client.Options()
+        .model("gpt-5")
+        .baseUrl("…")
+        .apiKey("…"));
 var res = client.ask("…", tk);
 ```
 </TabItem>
 <TabItem label="C#">
 ```csharp
-var client = Client.Create(new Client.Options { Model = "gpt-5", BaseUrl = "…", ApiKey = "…" });
+var client = Client.Create(new Client.Options {
+    Model = "gpt-5",
+    BaseUrl = "…",
+    ApiKey = "…",
+});
 var res = await client.AskAsync("…", tk);
 ```
 </TabItem>

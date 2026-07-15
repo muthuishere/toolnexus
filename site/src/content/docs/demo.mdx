@@ -43,7 +43,11 @@ const tk = await createToolkit({
 tk.register(defineTool({                                     // 1 — a plain function tool
   name: "add",
   description: "Add two numbers.",
-  inputSchema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] },
+  inputSchema: {
+    type: "object",
+    properties: { a: { type: "number" }, b: { type: "number" } },
+    required: ["a", "b"],
+  },
   run: ({ a, b }) => `${a + b}`,
 }))
 ```

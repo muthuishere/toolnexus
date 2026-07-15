@@ -60,7 +60,9 @@ fmt.Println(res.Text)
 ```java
 Toolkit tk = Toolkit.create(new Toolkit.Options());   // 10 built-ins, on by default
 LlmClient agent = LlmClient.create(new LlmClient.Options()
-        .baseUrl("https://openrouter.ai/api/v1").style("openai").model("openai/gpt-4o-mini"));
+        .baseUrl("https://openrouter.ai/api/v1")
+        .style("openai")
+        .model("openai/gpt-4o-mini"));
 System.out.println(agent.run("List the files here, then read the largest one.", tk).text);
 ```
 </TabItem>
