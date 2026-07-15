@@ -62,11 +62,18 @@ and 10 built-in shell/file tools built in**, something no other library hands yo
 
 **1. Add an MCP config file** — `mcp.json`:
 ```jsonc
-{ "mcpServers": {
-    "fs":   { "command": ["npx","-y","@modelcontextprotocol/server-filesystem","/data"] },
-    "acme": { "type": "remote", "url": "https://api.acme.com/mcp",
-              "headers": { "Authorization": "Bearer ${ACME_TOKEN}" } }
-} }
+{
+  "mcpServers": {
+    "fs": {
+      "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/data"]
+    },
+    "acme": {
+      "type": "remote",
+      "url": "https://api.acme.com/mcp",
+      "headers": { "Authorization": "Bearer ${ACME_TOKEN}" }
+    }
+  }
+}
 ```
 
 **2. Add a skills folder** — `skills/process-refund/SKILL.md`:
@@ -81,12 +88,17 @@ description: Use when a customer asks for a refund. Walks the policy + steps.
 
 **3. Call any LLM — MCP + skills + built-ins are already in it:**
 ```ts
-const tk    = await createToolkit({ mcpConfig: "./mcp.json", skillsDir: "./skills" })
-const agent = createClient({ baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" })
+const tk = await createToolkit({ mcpConfig: "./mcp.json", skillsDir: "./skills" })
+
+const agent = createClient({
+  baseUrl: "https://openrouter.ai/api/v1",
+  style: "openai",
+  model: "openai/gpt-4o-mini",
+})
 
 const { text } = await agent.run("Refund order 1234 for the customer.", { toolkit: tk })
-// the model already sees every MCP server tool, a `skill` tool, and the built-in toolset — and the
-// skills catalog is injected into its system prompt. It loads `process-refund` and calls tools itself.
+// The model sees every MCP server tool, a `skill` tool, and the built-in toolset — the skills
+// catalog is injected into its system prompt. It loads `process-refund` and calls tools itself.
 ```
 
 That's the whole thing. `createToolkit()` alone (no config) still gives you a working agent —
@@ -142,13 +154,29 @@ Registering your own native + HTTP tools is one call:
 
 ```ts
 const tk = await createToolkit({ mcpConfig: "./mcp.json", skillsDir: "./skills" })
+
 tk.register(
-  defineTool({ name: "add", description: "Add two numbers",
-    inputSchema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] },
-    run: ({ a, b }) => `${a + b}` }),
-  httpTool({ name: "get_post", description: "Fetch a post", method: "GET",
+  defineTool({
+    name: "add",
+    description: "Add two numbers",
+    inputSchema: {
+      type: "object",
+      properties: { a: { type: "number" }, b: { type: "number" } },
+      required: ["a", "b"],
+    },
+    run: ({ a, b }) => `${a + b}`,
+  }),
+  httpTool({
+    name: "get_post",
+    description: "Fetch a post",
+    method: "GET",
     url: "https://jsonplaceholder.typicode.com/posts/{id}",
-    inputSchema: { type: "object", properties: { id: { type: "number" } }, required: ["id"] } }),
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "number" } },
+      required: ["id"],
+    },
+  }),
 )
 ```
 
@@ -184,12 +212,21 @@ another tool source. The same toolkit can **serve itself** as an A2A agent, so o
 
 ```ts
 // outbound: a remote agent's skills become tools
-const tk = await createToolkit({ agents: [agent({ card: "https://peer.example.com/.well-known/agent-card.json" })] })
-await tk.addAgent("https://other.example.com/.well-known/agent-card.json")   // or at runtime
+const tk = await createToolkit({
+  agents: [agent({ card: "https://peer.example.com/.well-known/agent-card.json" })],
+})
+await tk.addAgent("https://other.example.com/.well-known/agent-card.json") // or at runtime
 
-// inbound: serve this toolkit as an agent — the card is built from your SKILL.md skills, never raw tools
-const llm = createClient({ baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" })
-const handle = await tk.serve("127.0.0.1:0", { client: llm, a2a: { name: "my-agent", store: "memory" } })
+// inbound: serve this toolkit as an agent — the card is built from your SKILL.md skills, not raw tools
+const llm = createClient({
+  baseUrl: "https://openrouter.ai/api/v1",
+  style: "openai",
+  model: "openai/gpt-4o-mini",
+})
+const handle = await tk.serve("127.0.0.1:0", {
+  client: llm,
+  a2a: { name: "my-agent", store: "memory" },
+})
 ```
 
 Both directions exist in all six ports (`agent(...)` / `Agent{...}`, an `agents` config block, and
