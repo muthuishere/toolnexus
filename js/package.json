@@ -1,6 +1,6 @@
 {
   "name": "toolnexus",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "description": "Dynamic MCP servers + agent skills as uniform tools for any LLM (opencode-style).",
   "type": "module",
   "main": "./dist/index.js",
