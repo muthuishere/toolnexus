@@ -1,0 +1,71 @@
+---
+// Makes every markdown table in the page sortable: click a column header to toggle
+// ascending / descending (▲/▼). Numeric columns sort numerically, text columns
+// alphabetically. Works inside Starlight <Tabs> (hidden panels are still in the DOM).
+---
+
+<script>
+  function makeSortable() {
+    const tables = document.querySelectorAll('.sl-markdown-content table');
+    tables.forEach((table) => {
+      const t = table as HTMLTableElement;
+      if (t.dataset.sortable) return;
+      t.dataset.sortable = 'true';
+      const headers = Array.from(t.querySelectorAll('thead th')) as HTMLTableCellElement[];
+      const tbody = t.querySelector('tbody');
+      if (!tbody || headers.length === 0) return;
+
+      const cellText = (row: Element, col: number) =>
+        (row.children[col]?.textContent || '').trim();
+      const toNum = (s: string) => {
+        const m = s.replace(/[^0-9.\-]/g, '');
+        return m === '' || m === '-' || m === '.' ? NaN : parseFloat(m);
+      };
+
+      headers.forEach((th, col) => {
+        th.style.cursor = 'pointer';
+        th.style.userSelect = 'none';
+        th.setAttribute('title', 'Click to sort');
+        th.addEventListener('click', () => {
+          const rows = Array.from(tbody.querySelectorAll('tr'));
+          const asc = th.dataset.sort !== 'asc';
+
+          headers.forEach((h) => {
+            delete h.dataset.sort;
+            h.querySelector('.sort-ind')?.remove();
+          });
+          th.dataset.sort = asc ? 'asc' : 'desc';
+          const ind = document.createElement('span');
+          ind.className = 'sort-ind';
+          ind.textContent = asc ? ' ▲' : ' ▼';
+          th.appendChild(ind);
+
+          const numeric =
+            rows.some((r) => !isNaN(toNum(cellText(r, col)))) &&
+            rows.every((r) => {
+              const v = cellText(r, col);
+              return v === '' || !isNaN(toNum(v));
+            });
+
+          rows.sort((a, b) => {
+            const av = cellText(a, col);
+            const bv = cellText(b, col);
+            let c: number;
+            if (numeric) {
+              const an = toNum(av);
+              const bn = toNum(bv);
+              c = (isNaN(an) ? Infinity : an) - (isNaN(bn) ? Infinity : bn);
+            } else {
+              c = av.localeCompare(bv);
+            }
+            return asc ? c : -c;
+          });
+          rows.forEach((r) => tbody.appendChild(r));
+        });
+      });
+    });
+  }
+
+  makeSortable();
+  document.addEventListener('astro:page-load', makeSortable);
+</script>
