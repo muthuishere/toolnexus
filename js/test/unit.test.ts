@@ -316,6 +316,56 @@ test("client: retries on 503 then succeeds (backoff)", async () => {
   server.close()
 })
 
+test("resilience: onError 'fail' surfaces a normally-retryable 429 without retrying", async () => {
+  let hits = 0
+  const server = http.createServer((req, res) => { hits++; res.writeHead(429); res.end("slow down") })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({ builtins: false })
+  const client = createClient({
+    baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "x", apiKey: "k",
+    retries: 5, retryBaseMs: 5, onError: () => "fail",
+  })
+  await assert.rejects(() => client.run("hi", { toolkit: tk }), /LLM 429/)
+  assert.equal(hits, 1, "onError:fail skipped all retries")
+  await tk.close(); server.close()
+})
+
+test("resilience: onError 'retry' retries a normally-terminal 400 within budget", async () => {
+  let hits = 0
+  const server = http.createServer((req, res) => { hits++; res.writeHead(400); res.end("bad") })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({ builtins: false })
+  const client = createClient({
+    baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "x", apiKey: "k",
+    retries: 2, retryBaseMs: 5, onError: () => "retry",
+  })
+  await assert.rejects(() => client.run("hi", { toolkit: tk }), /LLM 400/)
+  assert.equal(hits, 3, "onError:retry retried the 400 up to the budget (1 + 2 retries)")
+  await tk.close(); server.close()
+})
+
+test("resilience: default (no onError) is unchanged — 429 retried, 400 failed", async () => {
+  let a = 0
+  const s1 = http.createServer((req, res) => { a++; if (a < 2) { res.writeHead(429); res.end("x") } else { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })) } })
+  await new Promise<void>((r) => s1.listen(0, r))
+  const p1 = (s1.address() as any).port
+  const tk = await createToolkit({ builtins: false })
+  const c1 = createClient({ baseUrl: `http://127.0.0.1:${p1}`, style: "openai", model: "x", apiKey: "k", retries: 3, retryBaseMs: 5 })
+  assert.equal((await c1.run("hi", { toolkit: tk })).text, "ok")
+  assert.equal(a, 2, "429 retried by default")
+
+  let b = 0
+  const s2 = http.createServer((req, res) => { b++; res.writeHead(400); res.end("bad") })
+  await new Promise<void>((r) => s2.listen(0, r))
+  const p2 = (s2.address() as any).port
+  const c2 = createClient({ baseUrl: `http://127.0.0.1:${p2}`, style: "openai", model: "x", apiKey: "k", retries: 3, retryBaseMs: 5 })
+  await assert.rejects(() => c2.run("hi", { toolkit: tk }), /LLM 400/)
+  assert.equal(b, 1, "400 failed immediately by default")
+  await tk.close(); s1.close(); s2.close()
+})
+
 test("client: ask remembers by id via the conversation store", async () => {
   // mock LLM whose reply is the number of messages it received → proves history is loaded
   const server = http.createServer((req, res) => {
