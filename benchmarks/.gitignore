@@ -10,3 +10,14 @@ run_toolnexus_go/bench
 node_modules/
 .gradle/
 resilience/run_go/.bin_res_go
+# .NET / C#
+bin/
+obj/
+*.dll
+# Elixir
+_build/
+deps/
+*.beam
+# Go module binaries built into runner dirs (source: main.go/go.mod/go.sum kept)
+run_eino/run_eino
+run_langchaingo/run_langchaingo

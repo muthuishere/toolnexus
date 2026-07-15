@@ -23,6 +23,10 @@ Results and full methodology: [`../docs/performance-benchmarks.md`](../docs/perf
 | `run_toolnexus_go/` | toolnexus **Go** runner (composite `replace` → local module). |
 | `run_toolnexus_java/` | toolnexus **Java** runner (Gradle composite `includeBuild` → local port). |
 | `run_springai/` | Spring AI runner (Spring Boot + MCP-client starter). |
+| `run_langchain4j/` | LangChain4j runner (Gradle; `AiServices` + `langchain4j-mcp` StdioMcpTransport → shared MCP server). |
+| `run_toolnexus_csharp/` | toolnexus **C#** runner (`--config mcp` \| `full`; ProjectReference → local `csharp/` port; official MCP SDK). |
+| `run_semantic_kernel/` | Microsoft Semantic Kernel runner (OpenAI connector via custom `HttpClient`; **native** KernelFunctions). |
+| `run_ms_extensions_ai/` | Microsoft.Extensions.AI runner (official OpenAI .NET client + `UseFunctionInvocation`; **native** AIFunctions). |
 | `run_all.py` | Orchestrator: runs each runner under `/usr/bin/time -l` (peak RSS), aggregates mean / p50 / p95, writes `results.json`. |
 
 Each runner measures **cold init** (build toolkit / agent incl. MCP connect + tool
@@ -67,6 +71,12 @@ uv venv "$VENVS/adk" -p 3.11 && uv pip install --python "$VENVS/adk/bin/python" 
 ( cd "$REPO/benchmarks/run_toolnexus_java" && gradle --no-daemon installDist -q )
 # Spring AI (Spring Boot fat jar)
 ( cd "$REPO/benchmarks/run_springai" && gradle --no-daemon bootJar -q )
+# LangChain4j (composite dist)
+( cd "$REPO/benchmarks/run_langchain4j" && gradle --no-daemon installDist -q )
+# C# runners (toolnexus ProjectReference → local port; SK / MEAI competitors)
+( cd "$REPO/benchmarks/run_toolnexus_csharp" && dotnet build -c Release -v q )
+( cd "$REPO/benchmarks/run_semantic_kernel"  && dotnet build -c Release -v q )
+( cd "$REPO/benchmarks/run_ms_extensions_ai" && dotnet build -c Release -v q )
 ```
 
 ### 3. Start the mock LLM (any python)
@@ -86,6 +96,10 @@ export ADK_PY="$VENVS/adk/bin/python"
 export GO_BIN="$VENVS/bench_go"
 export JAVA_APP="$REPO/benchmarks/run_toolnexus_java/build/install/run-toolnexus-java/bin/run-toolnexus-java"
 export SPRING_JAR="$REPO/benchmarks/run_springai/build/libs/run_springai.jar"
+export LC4J_APP="$REPO/benchmarks/run_langchain4j/build/install/run-langchain4j/bin/run-langchain4j"
+export TN_CSHARP_DLL="$REPO/benchmarks/run_toolnexus_csharp/bin/Release/net10.0/run_toolnexus_csharp.dll"
+export SK_DLL="$REPO/benchmarks/run_semantic_kernel/bin/Release/net10.0/run_semantic_kernel.dll"
+export MEAI_DLL="$REPO/benchmarks/run_ms_extensions_ai/bin/Release/net10.0/run_ms_extensions_ai.dll"
 
 python3 "$REPO/benchmarks/run_all.py"
 ```
@@ -106,5 +120,13 @@ Only the frameworks whose env var is set are run, so you can benchmark a subset.
   MCP child is `SIGKILL`ed immediately after connect and `tools/list` hits a dead
   pipe. The Go number here therefore uses **native tools** (loop overhead only),
   clearly labelled. See the docs for detail — this is a real bug worth fixing.
+- **MCP vs native across runners.** `toolnexus-java`, `toolnexus-csharp`,
+  `langchain4j`, and `spring-ai` all discover their tools over the **shared stdio
+  MCP server** (identical wire). `semantic-kernel` and `ms-extensions-ai` are
+  driven with **native** in-process tools (same names/behavior — `get_weather` +
+  `add`), labelled `-native`: neither ships a first-class stdio-MCP tool path as
+  trivial as their native `KernelFunction` / `AIFunction` surface, so the native
+  form is the honest, framework-idiomatic comparison. `toolnexus-go` is native for
+  the SDK-bug reason above.
 - Nothing here is committed automatically and no registry token is used; the
   runners only *import/install* the libraries, they never modify a port's `src/`.

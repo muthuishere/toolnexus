@@ -1,0 +1,24 @@
+plugins {
+    id 'application'
+}
+
+java {
+    toolchain { languageVersion = JavaLanguageVersion.of(21) }
+}
+
+repositories { mavenCentral() }
+
+ext {
+    lc4jVersion = '1.0.1'
+    lc4jMcpVersion = '1.0.1-beta6'
+}
+
+dependencies {
+    implementation "dev.langchain4j:langchain4j:${lc4jVersion}"
+    implementation "dev.langchain4j:langchain4j-open-ai:${lc4jVersion}"
+    implementation "dev.langchain4j:langchain4j-mcp:${lc4jMcpVersion}"
+}
+
+application {
+    mainClass = 'bench.LangChain4jBench'
+}

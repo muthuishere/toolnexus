@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>run_toolnexus_csharp</AssemblyName>
+    <RootNamespace>BenchToolnexus</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Build against the local C# port source (no NuGet publish needed). -->
+    <ProjectReference Include="../../csharp/src/Toolnexus/Toolnexus.csproj" />
+  </ItemGroup>
+
+</Project>

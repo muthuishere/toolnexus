@@ -77,7 +77,10 @@ def _openai_body(model, want_tools, tools=None):
         "created": 0,
         "model": model or "mock-model",
         "choices": [{"index": 0, "message": message, "finish_reason": finish}],
-        "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+        # Both key spellings so every SDK validates: OpenAI Chat Completions uses
+        # prompt/completion_tokens; some newer provider schemas want input/output_tokens.
+        "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28,
+                  "input_tokens": 20, "output_tokens": 8},
     }
 
 

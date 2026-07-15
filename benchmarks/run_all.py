@@ -108,6 +108,18 @@ def targets():
         t.append(("google-adk",
                   [os.environ["ADK_PY"], f"{REPO}/benchmarks/run_adk.py",
                    "--runs", RUNS, "--warmup", WARMUP], None))
+    if os.environ.get("CREWAI_PY"):
+        t.append(("crewai",
+                  [os.environ["CREWAI_PY"], f"{REPO}/benchmarks/run_crewai.py",
+                   "--runs", RUNS, "--warmup", WARMUP], None))
+    if os.environ.get("PYDANTIC_PY"):
+        t.append(("pydantic-ai",
+                  [os.environ["PYDANTIC_PY"], f"{REPO}/benchmarks/run_pydantic_ai.py",
+                   "--runs", RUNS, "--warmup", WARMUP], None))
+    if os.environ.get("OPENAI_AGENTS_PY"):
+        t.append(("openai-agents",
+                  [os.environ["OPENAI_AGENTS_PY"], f"{REPO}/benchmarks/run_openai_agents.py",
+                   "--runs", RUNS, "--warmup", WARMUP], None))
     if os.environ.get("GO_BIN"):
         t.append(("toolnexus-go-native",
                   [os.environ["GO_BIN"], "-config", "native", "-runs", RUNS, "-warmup", WARMUP], None))
@@ -119,6 +131,22 @@ def targets():
         t.append(("spring-ai-java",
                   ["java", "-jar", os.environ["SPRING_JAR"]],
                   {"BENCH_RUNS": RUNS, "BENCH_WARMUP": WARMUP}))
+    if os.environ.get("LC4J_APP"):
+        t.append(("langchain4j-mcp",
+                  [os.environ["LC4J_APP"], "-config", "mcp", "-runs", RUNS, "-warmup", WARMUP], None))
+    if os.environ.get("TN_CSHARP_DLL"):
+        for cfg in ("mcp", "full"):
+            t.append((f"toolnexus-csharp-{cfg}",
+                      ["dotnet", os.environ["TN_CSHARP_DLL"], "-config", cfg,
+                       "-runs", RUNS, "-warmup", WARMUP], None))
+    if os.environ.get("SK_DLL"):
+        t.append(("semantic-kernel",
+                  ["dotnet", os.environ["SK_DLL"], "-config", "native",
+                   "-runs", RUNS, "-warmup", WARMUP], None))
+    if os.environ.get("MEAI_DLL"):
+        t.append(("ms-extensions-ai",
+                  ["dotnet", os.environ["MEAI_DLL"], "-config", "native",
+                   "-runs", RUNS, "-warmup", WARMUP], None))
     return t
 
 
