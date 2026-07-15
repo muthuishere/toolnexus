@@ -265,3 +265,67 @@ async def test_conversation_continues_history():
         assert "first" in contents and "second" in contents
     finally:
         await tk.close()
+
+
+# --------------------------------------------------------------------------- #
+# 7. on_error="fail" on a normally-retryable 429 surfaces immediately (§8)
+# --------------------------------------------------------------------------- #
+async def test_on_error_fail_short_circuits_retryable_status():
+    calls = {"n": 0}
+    seen = []
+
+    def handler(req):
+        calls["n"] += 1
+        _send_json(req, 429, b'{"error":"rate limited"}', headers={"Retry-After": "0"})
+
+    tk = await create_toolkit()
+    try:
+        with _Server(handler) as srv:
+            client = create_client(
+                base_url=srv.base_url,
+                style="openai",
+                model="test-model",
+                api_key="sk-test",
+                retries=3,
+                retry_base_ms=1,
+                on_error=lambda info: seen.append(info) or "fail",
+            )
+            with pytest.raises(Exception) as ei:
+                await client.run("hi", tk)
+        assert calls["n"] == 1, "on_error='fail' must surface a 429 with exactly one request"
+        assert "429" in str(ei.value)
+        assert seen and seen[0]["status"] == 429 and seen[0]["retryable"] is True
+        assert seen[0]["attempt"] == 0
+    finally:
+        await tk.close()
+
+
+# --------------------------------------------------------------------------- #
+# 8. on_error="retry" on a normally-non-retryable 400 retries to the budget (§8)
+# --------------------------------------------------------------------------- #
+async def test_on_error_retry_extends_nonretryable_status_to_budget():
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        _send_json(req, 400, b'{"error":"bad request"}')
+
+    tk = await create_toolkit()
+    try:
+        with _Server(handler) as srv:
+            client = create_client(
+                base_url=srv.base_url,
+                style="openai",
+                model="test-model",
+                api_key="sk-test",
+                retries=3,
+                retry_base_ms=1,
+                on_error=lambda info: "retry",
+            )
+            with pytest.raises(Exception) as ei:
+                await client.run("hi", tk)
+        # 1 initial + 3 retries; a "retry" is always bounded by the budget.
+        assert calls["n"] == 4, "on_error='retry' must retry a 400 up to the budget (1 + retries)"
+        assert "400" in str(ei.value)
+    finally:
+        await tk.close()
