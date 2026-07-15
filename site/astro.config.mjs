@@ -33,6 +33,7 @@ export default defineConfig({
 					label: 'Start here',
 					items: [
 						{ label: 'Quickstart', slug: 'quickstart' },
+						{ label: 'Cookbook — 6 languages', slug: 'cookbook' },
 						{ label: 'One demo, five sources', slug: 'demo' },
 					],
 				},
