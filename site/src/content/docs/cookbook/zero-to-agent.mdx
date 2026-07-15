@@ -1,0 +1,84 @@
+---
+title: Zero to agent
+description: A toolkit with the ten built-in tools, a client pointed at any OpenAI- or Anthropic-style endpoint, and one run — in all six languages.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+The three-liner: a toolkit with the ten built-in tools, a client pointed at any
+OpenAI- or Anthropic-style endpoint, and one `run`. API keys are read from the
+environment (`OPENROUTER_API_KEY`, then `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`)
+and never printed.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+import { createToolkit, createClient } from "toolnexus"
+
+const tk = await createToolkit()                       // 10 built-ins, on by default
+const agent = createClient({
+  baseUrl: "https://openrouter.ai/api/v1", style: "openai",
+  model: "openai/gpt-4o-mini", apiKey: process.env.OPENROUTER_API_KEY,
+})
+const res = await agent.run("List the files here, then read the largest one.", tk)
+console.log(res.text)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_toolkit, create_client
+
+tk = await create_toolkit()                            # 10 built-ins, on by default
+agent = create_client(
+    base_url="https://openrouter.ai/api/v1", style="openai",
+    model="openai/gpt-4o-mini",
+)
+res = await agent.run("List the files here, then read the largest one.", tk)
+print(res.text)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+ctx := context.Background()
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{})   // 10 built-ins
+agent := toolnexus.CreateClient(toolnexus.ClientOptions{
+    BaseURL: "https://openrouter.ai/api/v1", Style: toolnexus.StyleOpenAI,
+    Model: "openai/gpt-4o-mini", APIKey: os.Getenv("OPENROUTER_API_KEY"),
+})
+res, _ := agent.Run(ctx, "List the files here, then read the largest one.", tk)
+fmt.Println(res.Text)
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Toolkit tk = Toolkit.create(new Toolkit.Options());   // 10 built-ins, on by default
+LlmClient agent = LlmClient.create(new LlmClient.Options()
+        .baseUrl("https://openrouter.ai/api/v1").style("openai").model("openai/gpt-4o-mini"));
+System.out.println(agent.run("List the files here, then read the largest one.", tk).text);
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());   // 10 built-ins
+var agent = LlmClient.Create(new LlmClient.Options {
+    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai",
+    Model = "openai/gpt-4o-mini",
+});
+var res = await agent.RunAsync("List the files here, then read the largest one.", tk);
+Console.WriteLine(res.Text);
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+{:ok, tk} = Toolnexus.create_toolkit()                 # 10 built-ins, on by default
+client = Toolnexus.Client.create(
+  base_url: "https://openrouter.ai/api/v1", style: "openai",
+  model: "openai/gpt-4o-mini", api_key: System.get_env("OPENROUTER_API_KEY")
+)
+res = Toolnexus.Client.run(client, "List the files here, then read the largest one.", tk)
+IO.puts(res.text)
+```
+</TabItem>
+</Tabs>
+
+Next: [MCP servers + agent skills](/toolnexus/cookbook/mcp-and-skills/).

@@ -1,0 +1,65 @@
+---
+title: Multi-turn memory
+description: Keep a conversation across turns — a conversation object or ask-with-id, in all six languages.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Keep a conversation across turns. JavaScript / Python / Go use a `conversation`
+object whose `send` retains history; Java / C# / Elixir use `ask` with a stable id
+whose transcript lives in the client's conversation store. Both remember turn 1 at
+turn 2.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+const convo = agent.conversation({ toolkit: tk })
+await convo.send("My name is Muthu. Remember it.")
+const r = await convo.send("What's my name?")
+console.log(r.text)   // recalls "Muthu"
+```
+</TabItem>
+<TabItem label="Python">
+```python
+convo = agent.conversation(tk)
+await convo.send("My name is Muthu. Remember it.")
+r = await convo.send("What's my name?")
+print(r.text)   # recalls "Muthu"
+```
+</TabItem>
+<TabItem label="Go">
+```go
+convo := agent.Conversation(tk)
+convo.Send(ctx, "My name is Muthu. Remember it.")
+r, _ := convo.Send(ctx, "What's my name?")
+fmt.Println(r.Text)   // recalls "Muthu"
+```
+</TabItem>
+<TabItem label="Java">
+```java
+agent.ask("My name is Muthu. Remember it.", tk, "user-42");
+LlmClient.RunResult r = agent.ask("What's my name?", tk, "user-42");
+System.out.println(r.text);   // recalls "Muthu"
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+await agent.AskAsync("My name is Muthu. Remember it.", tk, "user-42");
+var r = await agent.AskAsync("What's my name?", tk, "user-42");
+Console.WriteLine(r.Text);   // recalls "Muthu"
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+Toolnexus.Client.ask(client, "My name is Muthu. Remember it.", tk, "user-42")
+r = Toolnexus.Client.ask(client, "What's my name?", tk, "user-42")
+IO.puts(r.text)   # recalls "Muthu"
+```
+</TabItem>
+</Tabs>
+
+The transcript store is pluggable (in-memory by default; bring your own to persist
+to Redis, Postgres, …). See [Memory & conversations](/toolnexus/memory/).
+
+More recipes coming — streaming, human-in-the-loop suspension, and A2A serve, each
+in all six languages. Runnable versions live in every port's `examples/` folder.

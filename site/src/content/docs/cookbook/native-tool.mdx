@@ -1,0 +1,89 @@
+---
+title: Native tools — your own functions
+description: Wrap a plain function as a tool that joins the toolkit, in all six languages.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+A native tool wraps a plain function: return a string (→ output) or throw (→ error
+result). It joins the toolkit like any other tool.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+import { defineTool } from "toolnexus"
+
+tk.register(defineTool({
+  name: "add", description: "Add two numbers and return the sum.",
+  inputSchema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] },
+  run: ({ a, b }) => `${Number(a) + Number(b)}`,
+}))
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import define_tool
+
+def add(a: float, b: float) -> str:
+    """Add two numbers and return the sum."""
+    return str(a + b)
+
+tk.register(define_tool(add, name="add"))
+```
+</TabItem>
+<TabItem label="Go">
+```go
+type addArgs struct { A float64 `json:"a"`; B float64 `json:"b"` }
+
+tk.Register(toolnexus.NativeToolReflect("add",
+    "Add two numbers and return the sum.",
+    func(_ context.Context, in addArgs) (string, error) {
+        return strconv.FormatFloat(in.A+in.B, 'f', -1, 64), nil
+    }))
+```
+</TabItem>
+<TabItem label="Java">
+```java
+import io.github.muthuishere.toolnexus.NativeTool;
+import java.util.Map;
+
+Map<String, Object> schema = Map.of("type", "object",
+        "properties", Map.of("a", Map.of("type", "number"), "b", Map.of("type", "number")),
+        "required", java.util.List.of("a", "b"));
+
+tk.register(NativeTool.of("add", "Add two numbers and return the sum.", schema,
+        args -> String.valueOf(((Number) args.get("a")).doubleValue()
+                             + ((Number) args.get("b")).doubleValue())));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+tk.Register(NativeTool.Of("add", "Add two numbers and return the sum.",
+    new Dictionary<string, object?> {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> {
+            ["a"] = new Dictionary<string, object?> { ["type"] = "number" },
+            ["b"] = new Dictionary<string, object?> { ["type"] = "number" } },
+        ["required"] = new List<object?> { "a", "b" },
+    },
+    args => (Convert.ToDouble(args["a"]) + Convert.ToDouble(args["b"])).ToString()));
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+add = Toolnexus.define_tool(
+  name: "add", description: "Add two numbers and return the sum.",
+  input_schema: %{"type" => "object",
+    "properties" => %{"a" => %{"type" => "number"}, "b" => %{"type" => "number"}},
+    "required" => ["a", "b"]},
+  execute: fn %{"a" => a, "b" => b}, _ctx -> to_string(a + b) end
+)
+tk = Toolnexus.Toolkit.register(tk, [add])
+```
+</TabItem>
+</Tabs>
+
+Java and C# also support annotation-driven tools (`@ToolMethod` / `[ToolMethod]` on a
+class). See [Native tools](/toolnexus/native/).
+
+Next: [HTTP / REST tools](/toolnexus/cookbook/http-tool/).

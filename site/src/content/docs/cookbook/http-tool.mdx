@@ -1,0 +1,91 @@
+---
+title: HTTP / REST tools
+description: Turn a REST endpoint into a tool with placeholder URLs and ${ENV} headers, in all six languages.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+`{placeholder}` in the URL is filled from the args; `${ENV}` in a header expands
+from the environment at call time and is never logged. Non-2xx becomes an
+`HTTP <status>: <body>` error result.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+import { httpTool } from "toolnexus"
+
+tk.register(httpTool({
+  name: "get_post", description: "Fetch a placeholder blog post by id.",
+  method: "GET", url: "https://jsonplaceholder.typicode.com/posts/{id}",
+  inputSchema: { type: "object", properties: { id: { type: "number" } }, required: ["id"] },
+}))
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import http_tool
+
+tk.register(http_tool(
+    name="get_post", description="Fetch a placeholder blog post by id.",
+    method="GET", url="https://jsonplaceholder.typicode.com/posts/{id}",
+    input_schema={"type": "object", "properties": {"id": {"type": "number"}}, "required": ["id"]},
+))
+```
+</TabItem>
+<TabItem label="Go">
+```go
+tk.Register(toolnexus.HTTPTool(toolnexus.HTTPToolOptions{
+    Name: "get_post", Description: "Fetch a placeholder blog post by id.",
+    Method: "GET", URL: "https://jsonplaceholder.typicode.com/posts/{id}",
+    InputSchema: toolnexus.JSONSchema{
+        "type": "object",
+        "properties": map[string]any{"id": map[string]any{"type": "number"}},
+        "required": []string{"id"}},
+}))
+```
+</TabItem>
+<TabItem label="Java">
+```java
+import io.github.muthuishere.toolnexus.HttpTool;
+
+HttpTool.Options o = new HttpTool.Options();
+o.name = "get_post";
+o.description = "Fetch a placeholder blog post by id.";
+o.method = "GET";
+o.url = "https://jsonplaceholder.typicode.com/posts/{id}";
+o.inputSchema = Map.of("type", "object",
+        "properties", Map.of("id", Map.of("type", "number")),
+        "required", java.util.List.of("id"));
+tk.register(HttpTool.of(o));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+tk.Register(HttpTool.Of(new HttpTool.Options {
+    Name = "get_post", Description = "Fetch a placeholder blog post by id.",
+    Method = "GET", Url = "https://jsonplaceholder.typicode.com/posts/{id}",
+    InputSchema = new Dictionary<string, object?> {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["id"] = new Dictionary<string, object?> { ["type"] = "number" } },
+        ["required"] = new List<object?> { "id" },
+    },
+}));
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+get_post = Toolnexus.Http.tool(
+  name: "get_post", description: "Fetch a placeholder blog post by id.",
+  method: "GET", url: "https://jsonplaceholder.typicode.com/posts/{id}",
+  input_schema: %{"type" => "object",
+    "properties" => %{"id" => %{"type" => "integer"}}, "required" => ["id"]}
+)
+tk = Toolnexus.Toolkit.register(tk, [get_post])
+```
+</TabItem>
+</Tabs>
+
+An authenticated endpoint uses `${ENV}` in a header — e.g. a POST with
+`"Authorization": "Bearer ${API_TOKEN}"`. See [HTTP / REST tools](/toolnexus/http/).
+
+Next: [Bring your own HTTP client](/toolnexus/cookbook/bring-your-own-http-client/).

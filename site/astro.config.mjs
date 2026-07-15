@@ -33,8 +33,18 @@ export default defineConfig({
 					label: 'Start here',
 					items: [
 						{ label: 'Quickstart', slug: 'quickstart' },
-						{ label: 'Cookbook — 6 languages', slug: 'cookbook' },
 						{ label: 'One demo, five sources', slug: 'demo' },
+					],
+				},
+				{
+					label: 'Cookbook',
+					items: [
+						{ label: 'Zero to agent', slug: 'cookbook/zero-to-agent' },
+						{ label: 'MCP servers + skills', slug: 'cookbook/mcp-and-skills' },
+						{ label: 'Native tools', slug: 'cookbook/native-tool' },
+						{ label: 'HTTP / REST tools', slug: 'cookbook/http-tool' },
+						{ label: 'Bring your own HTTP client', slug: 'cookbook/bring-your-own-http-client' },
+						{ label: 'Multi-turn memory', slug: 'cookbook/memory' },
 					],
 				},
 				{

@@ -1,0 +1,136 @@
+---
+title: Bring your own HTTP client (proxy, credentials, TLS)
+description: toolnexus never reconfigures your network stack — every port exposes the HTTP client it uses for LLM calls as an injection point. Build it your way, hand it in.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+**toolnexus does not invent proxy, credential, or TLS configuration.** Behind a
+corporate proxy, a mutual-TLS gateway, an SSO egress that wants a custom header —
+your platform already has one right way to configure an HTTP client. So every port
+exposes the exact HTTP client it uses for LLM calls as an **injection point**: you
+build the client however your stack does it, hand it in, and toolnexus uses it for
+**every** request, including its own retry/backoff loop. Nothing is wrapped or
+re-implemented.
+
+Two seams, side by side:
+
+- **The HTTP client** — a full client object you own (proxy, TLS, timeouts, custom
+  transport). This is the "use the system proxy / use my client" answer.
+- **`headers`** — extra headers merged onto every LLM request (a gateway token, a
+  tracing id). Values are use-only; read them from the environment, never bake them in.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+import { ProxyAgent } from "undici"
+
+// your fetch, your proxy — undici honors the corporate proxy + auth
+const dispatcher = new ProxyAgent(process.env.HTTPS_PROXY)
+const myFetch = (url, init) => fetch(url, { ...init, dispatcher })
+
+const agent = createClient({
+  baseUrl: "https://openrouter.ai/api/v1", style: "openai",
+  model: "openai/gpt-4o-mini", apiKey: process.env.OPENROUTER_API_KEY,
+  fetch: myFetch,                                   // ← toolnexus calls this for every request
+  headers: { "X-Egress-Token": process.env.EGRESS_TOKEN },
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+# The default transport (urllib) already honors HTTP_PROXY / HTTPS_PROXY / NO_PROXY.
+# For a fully custom client, implement the tiny HttpTransport seam and inject it:
+import urllib.request
+
+class ProxyTransport:
+    def __init__(self, proxy: str):
+        self._opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    def post(self, url, headers, payload, timeout):
+        import json
+        req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                     method="POST", headers=headers)
+        with self._opener.open(req, timeout=timeout) as r:
+            return json.loads(r.read())
+
+agent = create_client(
+    base_url="https://openrouter.ai/api/v1", style="openai", model="openai/gpt-4o-mini",
+    http_transport=ProxyTransport(os.environ["HTTPS_PROXY"]),   # ← your client
+    headers={"X-Egress-Token": os.environ["EGRESS_TOKEN"]},
+)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+// Go's default client already honors HTTP_PROXY / HTTPS_PROXY / NO_PROXY via
+// http.ProxyFromEnvironment. Hand in your own for full control (TLS, timeouts, auth):
+proxied := &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
+
+agent := toolnexus.CreateClient(toolnexus.ClientOptions{
+    BaseURL: "https://openrouter.ai/api/v1", Style: toolnexus.StyleOpenAI,
+    Model: "openai/gpt-4o-mini", APIKey: os.Getenv("OPENROUTER_API_KEY"),
+    HTTPClient: proxied,                              // ← toolnexus uses this client
+    Headers:    map[string]string{"X-Egress-Token": os.Getenv("EGRESS_TOKEN")},
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+// java.net.http.HttpClient — point it at the system proxy selector (honors
+// -Dhttp.proxyHost / -Dhttps.proxyHost), or ProxySelector.of(...) for an explicit one.
+HttpClient proxied = HttpClient.newBuilder()
+        .proxy(ProxySelector.getDefault())
+        .build();
+
+LlmClient agent = LlmClient.create(new LlmClient.Options()
+        .baseUrl("https://openrouter.ai/api/v1").style("openai").model("openai/gpt-4o-mini")
+        .httpClient(proxied)                          // ← toolnexus uses this client
+        .headers(Map.of("X-Egress-Token", System.getenv("EGRESS_TOKEN"))));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+// Build your own handler (proxy, client certs, TLS callbacks); toolnexus builds its
+// client from it. HttpClientHandler honors the system proxy by default.
+var handler = new HttpClientHandler {
+    UseProxy = true,
+    Proxy = new WebProxy(Environment.GetEnvironmentVariable("HTTPS_PROXY")),
+};
+
+var agent = LlmClient.Create(new LlmClient.Options {
+    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai", Model = "openai/gpt-4o-mini",
+    HttpHandler = handler,                            // or HttpClient = yourClient
+    Headers = new Dictionary<string, string> { ["X-Egress-Token"] = Environment.GetEnvironmentVariable("EGRESS_TOKEN") },
+});
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+# http_options passes straight through to Req (Finch/Mint) — proxy, TLS, pool, timeouts.
+client = Toolnexus.Client.create(
+  base_url: "https://openrouter.ai/api/v1", style: "openai",
+  model: "openai/gpt-4o-mini", api_key: System.get_env("OPENROUTER_API_KEY"),
+  http_options: [connect_options: [proxy: {:http, "proxy.corp", 8080, []}]],  # ← your transport
+  headers: %{"X-Egress-Token" => System.get_env("EGRESS_TOKEN")}
+)
+```
+</TabItem>
+</Tabs>
+
+The injection seam per port (all §8 Gap 2):
+
+| Port | HTTP client seam | Extra headers |
+|------|------------------|---------------|
+| JavaScript | `fetch` (any `fetch`-shaped fn) | `headers` |
+| Python | `http_transport` (tiny `post/open` protocol; default honors proxy env) | `headers` |
+| Go | `HTTPClient` (`*http.Client`; default honors proxy env) | `Headers` |
+| Java | `httpClient` (`java.net.http.HttpClient`) | `headers` |
+| C# | `HttpClient` or `HttpHandler` (default honors system proxy) | `Headers` |
+| Elixir | `http_options` (Req/Finch options) | `headers` |
+
+Scope is the **LLM path** only — MCP transports use their own SDK clients. Whatever
+your client does (mTLS, a recording double in tests, an observability transport,
+a corporate egress proxy), toolnexus just uses it.
+
+Next: [Multi-turn memory](/toolnexus/cookbook/memory/).
