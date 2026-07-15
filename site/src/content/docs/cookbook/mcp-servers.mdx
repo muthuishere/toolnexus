@@ -1,0 +1,86 @@
+---
+title: MCP servers
+description: Point the toolkit at an mcp.json and every server's tools appear, uniform and vendor-neutral — in all six languages.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+MCP is the emerging standard for tool servers — filesystem, GitHub, Postgres, Slack,
+your own internal services. Instead of hand-coding a client for each one, you point at
+an `mcp.json` and **every** server's tools show up as uniform tools your model can call.
+It is vendor-neutral: reuse the whole MCP ecosystem without writing integration glue,
+and swap or add servers by editing config, not code.
+</Aside>
+
+Point the toolkit at an `mcp.json` — local **stdio** servers (`command`) and remote
+**streamable-HTTP** servers (`url`) both work, and their tools join the same tool set.
+A failing server is isolated (status `failed`); it contributes no tools and never
+breaks the build.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+const tk = await createToolkit({
+  mcpConfig: "./mcp.json",        // path, raw JSON string, or a parsed object
+})
+console.log(tk.tools().map((t) => `${t.name} (${t.source})`))
+```
+</TabItem>
+<TabItem label="Python">
+```python
+tk = await create_toolkit(
+    mcp_config="./mcp.json",       # path, raw JSON string, or a parsed dict
+)
+print([f"{t.name} ({t.source})" for t in tk.tools()])
+```
+</TabItem>
+<TabItem label="Go">
+```go
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{
+    McpConfig: "./mcp.json",                      // path, raw JSON, or parsed map
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Toolkit tk = Toolkit.create(new Toolkit.Options()
+        .mcpConfig("mcp.json"));      // path, raw JSON string, or a parsed Map
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options()
+    .WithMcpConfig("./mcp.json"));   // path, raw JSON string, or a parsed dict
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+{:ok, tk} = Toolnexus.create_toolkit(
+  mcp_config: "./mcp.json"           # path, raw JSON string, or a parsed map
+)
+```
+</TabItem>
+</Tabs>
+
+An `mcp.json` — both server kinds shown:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    },
+    "remote-api": {
+      "url": "https://example.com/mcp",
+      "headers": { "Authorization": "Bearer ${MCP_TOKEN}" }
+    }
+  }
+}
+```
+
+`${MCP_TOKEN}` expands from the environment at call time and is never logged. The
+top-level key may be `mcpServers`, `servers`, or `mcp`. See [MCP servers](/toolnexus/mcp/)
+for the full config surface (per-server timeouts, tool allowlists, elicitation).
+
+Next: [Agent skills](/toolnexus/cookbook/agent-skills/).

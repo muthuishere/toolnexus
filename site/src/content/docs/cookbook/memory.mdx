@@ -3,7 +3,14 @@ title: Multi-turn memory
 description: Keep a conversation across turns — a conversation object or ask-with-id, in all six languages.
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+A single `run` is stateless — it forgets everything the moment it returns. Real assistants
+need continuity: remember who the user is, what was decided three turns ago, the context of
+an ongoing task. Memory gives you multi-turn conversations keyed by id, with a pluggable
+store so you can persist transcripts to Redis, Postgres, or anywhere your app already keeps state.
+</Aside>
 
 Keep a conversation across turns. JavaScript / Python / Go use a `conversation`
 object whose `send` retains history; Java / C# / Elixir use `ask` with a stable id

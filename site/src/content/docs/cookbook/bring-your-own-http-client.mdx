@@ -3,7 +3,15 @@ title: Bring your own HTTP client (proxy, credentials, TLS)
 description: toolnexus never reconfigures your network stack — every port exposes the HTTP client it uses for LLM calls as an injection point. Build it your way, hand it in.
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+Real deployments sit behind something — a corporate proxy, an mTLS gateway, an SSO egress
+that demands a header, a strict TLS policy. You already have one right way to configure an
+HTTP client for your platform, and toolnexus refuses to reinvent it or fight it. It hands
+you the seam instead: build the client your way, pass it in, and it is used for every LLM
+call. This is the difference between "works on my laptop" and "works inside the enterprise."
+</Aside>
 
 **toolnexus does not invent proxy, credential, or TLS configuration.** Behind a
 corporate proxy, a mutual-TLS gateway, an SSO egress that wants a custom header —

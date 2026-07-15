@@ -3,7 +3,14 @@ title: Native tools — your own functions
 description: Wrap a plain function as a tool that joins the toolkit, in all six languages.
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+Your own business logic is the highest-value tool an agent can have — a pricing rule, a
+database lookup, an internal function only you have. Native tools expose any function you
+already wrote with zero ceremony: no server to stand up, no protocol, no schema framework.
+Write the function, describe it, register it — the model can now call your code.
+</Aside>
 
 A native tool wraps a plain function: return a string (→ output) or throw (→ error
 result). It joins the toolkit like any other tool.

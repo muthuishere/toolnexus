@@ -1,0 +1,93 @@
+---
+title: Agent skills
+description: Drop a folder of SKILL.md files and the model loads them on demand — progressive disclosure, no token cost until used. In all six languages.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+Not every capability is code — a lot of it is *instructions*: how to handle a refund,
+your house style for a report, a runbook with reference files. Skills let you drop a
+folder of `SKILL.md` files and expose them through **one** `skill` tool. The model sees
+a short catalog and loads a skill's full instructions + resources **only when it needs
+them** (progressive disclosure) — so a hundred skills cost almost no tokens until one is
+actually used. Author capabilities as Markdown, not glue code, and version them with your repo.
+</Aside>
+
+Point the toolkit at one or more folders of `**/SKILL.md` skills. They are injected
+into the system prompt as a short catalog; the single `skill` tool loads a skill's body
++ sampled resource files on demand.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+const tk = await createToolkit({
+  skillsDir: "./skills",          // one or more skill roots
+})
+// the model calls skill({ name: "hello-world" }) to load it on demand
+const res = await tk.execute("skill", { name: "hello-world" })
+console.log(res.output)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+tk = await create_toolkit(
+    skills_dir="./skills",         # one or more skill roots
+)
+res = await tk.execute("skill", {"name": "hello-world"})
+print(res.output)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{
+    SkillsDir: []string{"./skills"},              // one or more skill roots
+})
+res, _ := tk.Execute(ctx, "skill", map[string]any{"name": "hello-world"}, nil)
+fmt.Println(res.Output)
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Toolkit tk = Toolkit.create(new Toolkit.Options()
+        .skillsDir("./skills"));      // one or more skill roots
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options()
+    .WithSkillsDir("./skills"));     // one or more skill roots
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+{:ok, tk} = Toolnexus.create_toolkit(
+  skills_dir: "./skills"             # one or more skill roots
+)
+res = Toolnexus.Toolkit.execute(tk, "skill", %{"name" => "hello-world"})
+IO.puts(res.output)
+```
+</TabItem>
+</Tabs>
+
+A skill is a folder with a `SKILL.md` — YAML frontmatter (a `name` and `description`)
+plus a Markdown body, alongside any resource files:
+
+```markdown
+---
+name: hello-world
+description: Greet a user by running the bundled script.
+---
+
+# Hello World Skill
+
+1. Read `scripts/greet.sh` in this skill's base directory.
+2. Run it with the user's name.
+3. Report the greeting back.
+```
+
+The catalog advertises `name` + `description`; the body and a sampled file list arrive
+only when the model calls `skill`. See [Agent skills](/toolnexus/skills/) for allowlists,
+data-sourced skills, and the byte-exact output format.
+
+Next: [Native tools — your own functions](/toolnexus/cookbook/native-tool/).

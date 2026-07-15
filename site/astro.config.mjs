@@ -40,7 +40,8 @@ export default defineConfig({
 					label: 'Cookbook',
 					items: [
 						{ label: 'Zero to agent', slug: 'cookbook/zero-to-agent' },
-						{ label: 'MCP servers + skills', slug: 'cookbook/mcp-and-skills' },
+						{ label: 'MCP servers', slug: 'cookbook/mcp-servers' },
+						{ label: 'Agent skills', slug: 'cookbook/agent-skills' },
 						{ label: 'Native tools', slug: 'cookbook/native-tool' },
 						{ label: 'HTTP / REST tools', slug: 'cookbook/http-tool' },
 						{ label: 'Bring your own HTTP client', slug: 'cookbook/bring-your-own-http-client' },
