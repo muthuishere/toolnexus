@@ -192,6 +192,14 @@ server.)
 - A `disabled`/`enabled:false` server is skipped.
 - Connect with `timeout` (default **30000 ms**). On failure, record status
   `failed` and continue — one bad server never breaks the toolkit.
+- **Per-server load bound.** Each *phase* — connect, `initialize`, `tools/list` —
+  is bounded by the server `timeout` (a fresh budget per phase, so a slow-but-working
+  server whose init *and* list are each slow still succeeds). A server that connects
+  but then stops responding is therefore given up within roughly **(waited phases) ×
+  `timeout`** in the worst case, not a single `timeout` — this is intentional (it
+  protects slow servers), always **bounded and isolated** (`failed`, never fatal, never
+  a hang), and a port MAY bound tighter (≤ per-phase) as long as it never exceeds it.
+  Set a smaller per-server `timeout` if a faster give-up on an unresponsive server matters.
 - After connect, **list tools** (paginate via `nextCursor`) and convert each.
 - Tool name = `sanitize(server) + "_" + sanitize(toolName)` where
   `sanitize(x) = x.replace(/[^a-zA-Z0-9_-]/g, "_")`.
