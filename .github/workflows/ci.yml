@@ -9,6 +9,17 @@ on:
 # Each language's suite is hermetic (no network, no LLM): local HTTP servers for
 # the HTTP/client tests, the shared examples/ fixtures for skills.
 jobs:
+  conformance:
+    name: Cross-port option parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      # Fails if a ClientOptions/ToolkitOptions field ships in some ports but not all six
+      # (the drift class that hid the JS disableTools/disableSkills gap). No deps.
+      - run: python3 conformance/check_options_parity.py
+
   js:
     name: JS (node)
     runs-on: ubuntu-latest
