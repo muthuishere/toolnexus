@@ -9,3 +9,4 @@ run_toolnexus_go/run_toolnexus_go
 run_toolnexus_go/bench
 node_modules/
 .gradle/
+resilience/run_go/.bin_res_go

@@ -55,6 +55,7 @@ export default defineConfig({
 					items: [
 						{ label: 'Comparison — Spring AI · LangGraph · ADK', slug: 'comparison' },
 						{ label: 'Performance benchmarks', slug: 'performance' },
+						{ label: 'Resilience benchmark', slug: 'resilience' },
 					],
 				},
 				{
