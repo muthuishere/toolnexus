@@ -1,0 +1,57 @@
+{
+  "_doc": "Cross-port option-parity contract. Every logical option below MUST exist in all six ports' options definitions (any listed alias, normalized = lowercased with non-alphanumerics stripped). This is the guard that would have caught the JS disableTools/disableSkills drift. Add an option => add a row here; the checker fails CI if any port lacks it. Aliases cover legitimate per-port idioms (JS fetch = Python http_transport = Go HTTPClient = the one logical 'http client' option).",
+  "clientOptions": {
+    "files": {
+      "js": "js/src/client.ts",
+      "python": "python/src/toolnexus/client.py",
+      "go": "golang/client.go",
+      "java": "java/src/main/java/io/github/muthuishere/toolnexus/LlmClient.java",
+      "csharp": "csharp/src/Toolnexus/LlmClient.cs",
+      "elixir": "elixir/lib/toolnexus/client.ex"
+    },
+    "options": [
+      { "name": "baseUrl", "aliases": ["baseurl"] },
+      { "name": "style", "aliases": ["style"] },
+      { "name": "model", "aliases": ["model"] },
+      { "name": "apiKey", "aliases": ["apikey"] },
+      { "name": "headers", "aliases": ["headers"] },
+      { "name": "systemPrompt", "aliases": ["systemprompt"] },
+      { "name": "maxTurns", "aliases": ["maxturns"] },
+      { "name": "hooks", "aliases": ["hooks"] },
+      { "name": "retries", "aliases": ["retries"] },
+      { "name": "retryBaseMs", "aliases": ["retrybasems"] },
+      { "name": "timeoutMs", "aliases": ["timeoutms"] },
+      { "name": "store", "aliases": ["store"] },
+      { "name": "onMetric", "aliases": ["onmetric"] },
+      { "name": "waitFor", "aliases": ["waitfor"] },
+      { "name": "requestParams", "aliases": ["requestparams"] },
+      { "name": "bodyTransform", "aliases": ["bodytransform"] },
+      { "name": "httpClient", "aliases": ["httpclient", "fetch", "httptransport", "httpoptions", "httphandler"] },
+      { "name": "onError", "aliases": ["onerror"] }
+    ]
+  },
+  "toolkitOptions": {
+    "files": {
+      "js": "js/src/toolkit.ts",
+      "python": "python/src/toolnexus/toolkit.py",
+      "go": "golang/toolkit.go",
+      "java": "java/src/main/java/io/github/muthuishere/toolnexus/Toolkit.java",
+      "csharp": "csharp/src/Toolnexus/Toolkit.cs",
+      "elixir": "elixir/lib/toolnexus/toolkit.ex"
+    },
+    "options": [
+      { "name": "mcpConfig", "aliases": ["mcpconfig"] },
+      { "name": "skillsDir", "aliases": ["skillsdir"] },
+      { "name": "skills", "aliases": ["skills"] },
+      { "name": "skillProvider", "aliases": ["skillprovider"] },
+      { "name": "skillsFilter", "aliases": ["skillsfilter"] },
+      { "name": "skillSampleLimit", "aliases": ["skillsamplelimit"] },
+      { "name": "extraTools", "aliases": ["extratools"] },
+      { "name": "builtins", "aliases": ["builtins"] },
+      { "name": "agents", "aliases": ["agents"] },
+      { "name": "waitFor", "aliases": ["waitfor"] },
+      { "name": "disableTools", "aliases": ["disabletools"] },
+      { "name": "disableSkills", "aliases": ["disableskills"] }
+    ]
+  }
+}
