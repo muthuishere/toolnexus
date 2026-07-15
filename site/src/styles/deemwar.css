@@ -9,6 +9,9 @@
 		'Segoe UI', Roboto, sans-serif;
 	--sl-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Consolas,
 		'Liberation Mono', Menlo, monospace;
+	/* Wider content column (the right-hand ToC is disabled site-wide, so there's room) —
+	   gives wide comparison/benchmark tables far more space before they need to scroll. */
+	--sl-content-width: 60rem;
 }
 
 /* ── Dark theme (default): charcoal, blue accent ── */
@@ -119,12 +122,17 @@ starlight-tabs [role='tab'][aria-selected='true'] {
 	max-width: 34ch;
 }
 
-/* ── Wide markdown tables — scroll instead of clipping at the edge ── */
+/* ── Wide markdown tables — fit more before scrolling, then scroll (never clip) ── */
 .sl-markdown-content table {
 	display: block;
 	width: max-content;
 	max-width: 100%;
 	overflow-x: auto;
+	font-size: 0.85rem; /* fit more columns (comparison/benchmark tables are wide) */
+}
+.sl-markdown-content table :is(th, td) {
+	padding-block: 0.4rem;
+	padding-inline: 0.6rem;
 }
 
 /* ── The launch explainer video ── */
