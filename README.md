@@ -24,7 +24,7 @@ pip install toolnexus                             # Python
 go get github.com/muthuishere/toolnexus/golang    # Go
 dotnet add package Toolnexus                       # C#
 {:toolnexus, "~> 0.9"}                             # Elixir (mix.exs deps)
-# Java (Maven): io.github.muthuishere:toolnexus:0.5.0
+# Java (Maven): io.github.muthuishere:toolnexus:0.9.5
 ```
 
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
@@ -190,7 +190,7 @@ const llm = createClient({ baseUrl: "https://openrouter.ai/api/v1", style: "open
 const handle = await tk.serve("127.0.0.1:0", { client: llm, a2a: { name: "my-agent", store: "memory" } })
 ```
 
-Both directions exist in all five ports (`agent(...)` / `Agent{...}`, an `agents` config block, and
+Both directions exist in all six ports (`agent(...)` / `Agent{...}`, an `agents` config block, and
 `serve` / `ServeAsync`). Served tasks persist through a pluggable **TaskStore** (in-memory default,
 `"file:<dir>"`, or your own). See each port's README for the full option set.
 
@@ -207,7 +207,7 @@ host, so each `tools/call` dispatches straight to `Tool.execute` — no client, 
 const srv = await tk.serve("127.0.0.1:0", { mcp: { name: "my-gateway" } })   // connect at srv.url + "/mcp"
 ```
 
-All five ports ship the streamable-HTTP MCP server (the `/mcp` endpoint on `serve`), built on each
+All six ports ship the streamable-HTTP MCP server (the `/mcp` endpoint on `serve`), built on each
 port's existing MCP SDK in server mode. `tools/list` advertises every tool (name verbatim,
 `inputSchema` = the tool's parameters). A stdio transport (for local clients like Claude Desktop) is a
 planned follow-up. See `SPEC.md §7C`.
@@ -239,7 +239,7 @@ await agent.ask("What is 21 + 21?",            { toolkit: tk })                 
   `stream(prompt, { toolkit, id })` to iterate events (`text` / `tool_call` / `tool_result` /
   `usage` / `done`); with an `id` the thread is loaded before and saved on the `done` event.
 
-Available in all five ports (a `ConversationStore` interface + in-memory default + `ask`).
+Available in all six ports (a `ConversationStore` interface + in-memory default + `ask`).
 
 ## Observability — metric events + built-in Prometheus
 
@@ -253,7 +253,7 @@ Zero-dependency, two outputs from one internal instrumentation — both opt-in, 
   renders the Prometheus text exposition format (no third-party dep). Mount it at `GET /metrics`:
   `toolnexus_llm_requests_total`, `toolnexus_llm_tokens_total`, `toolnexus_tool_calls_total`, plus
   the `toolnexus_llm_request_duration_seconds` / `toolnexus_tool_duration_seconds` histograms. The
-  rendered text is byte-identical across all five ports; OTLP push is a planned future companion.
+  rendered text is byte-identical across all six ports; OTLP push is a planned future companion.
 
 ## Go CLI — an instant agent from the terminal
 
@@ -267,7 +267,8 @@ cd golang && go build -o toolnexus ./cmd/toolnexus
 
 ## Per-language docs
 
-[`js/`](js/) · [`python/`](python/) · [`golang/`](golang/) · [`java/`](java/) · [`csharp/`](csharp/) — quickstarts and API.
+Full docs site (all six languages): **<https://muthuishere.github.io/toolnexus/>**.
+Per port: [`js/`](js/) · [`python/`](python/) · [`golang/`](golang/) · [`java/`](java/) · [`csharp/`](csharp/) · [`elixir/`](elixir/) — quickstarts and API.
 Embedding in a Go app? See [`golang/GUIDE.md`](golang/GUIDE.md).
 [`examples/`](examples/) holds the shared `mcp.json` + sample skill used by every
 implementation's examples and tests. The cross-language contract lives in [SPEC.md](SPEC.md).
@@ -278,15 +279,15 @@ implementation's examples and tests. The cross-language contract lives in [SPEC.
 - ✅ Agent skills (SKILL.md discovery + progressive-disclosure `skill` tool)
 - ✅ Native/decorator tools + HTTP/REST tools
 - ✅ Built-in tools (10 opencode tools; on by default, whole-source toggle + per-tool map)
-- ✅ A2A agents — outbound (call remote agents) + inbound (`serve` your toolkit as an agent); all five ports
-- ✅ MCP server (inbound) — expose the toolkit as a streamable-HTTP MCP server (`/mcp` on `serve`); all five ports
+- ✅ A2A agents — outbound (call remote agents) + inbound (`serve` your toolkit as an agent); all six ports
+- ✅ MCP server (inbound) — expose the toolkit as a streamable-HTTP MCP server (`/mcp` on `serve`); all six ports
 - ✅ Conversation memory (`ask` + pluggable `ConversationStore`; A2A serve remembers by `contextId`)
 - ✅ Streaming with memory (`stream`/`ask` take an `id`; `ask` gains an `on_text` delta callback)
 - ✅ Observability — `on_metric` event feed + zero-dep `client.metrics()` Prometheus text
 - ✅ Unified LLM client (OpenAI- and Anthropic-style endpoints) + Go CLI
 - ✅ OpenAI / Anthropic / Gemini schema adapters
 - ✅ Verified with live OpenRouter tool-calling round trips (every port)
-- ✅ Published on all five registries: **npm** · **PyPI** · **Go module** · **NuGet** · **Maven Central**
+- ✅ Published on all six registries: **npm** · **PyPI** · **Go module** · **NuGet** · **Maven Central** · **Hex**
 - ⏳ OpenAPI bulk import + MCP OAuth — follow-ups (pass a bearer token via `headers` for now)
 
 ## Tests
@@ -302,6 +303,7 @@ cd python && uv run pytest -q         # pytest
 cd golang && go test ./...            # go test
 cd java   && ./gradlew test           # JUnit 5
 cd csharp && dotnet test              # xUnit
+cd elixir && mix test                 # ExUnit
 ```
 
 The end-to-end agent loop (MCP + skills + native + HTTP through the host loop) is
