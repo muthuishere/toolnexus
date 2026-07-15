@@ -218,8 +218,9 @@ defmodule Toolnexus.ClientTest do
   # ---- parallel multi-tool call: concurrent execution, original order preserved ----
 
   test "openai: parallel tool calls run concurrently, results fed back in call order" do
-    slow = tool("slow", fn _, _ -> Process.sleep(100); ToolResult.ok("slow-out") end)
-    fast = tool("fast", fn _, _ -> ToolResult.ok("fast-out") end)
+    # Both tools sleep 150ms so the concurrency check is real: serialized ⇒ ≥300ms, concurrent ⇒ ~150ms.
+    slow = tool("slow", fn _, _ -> Process.sleep(150); ToolResult.ok("slow-out") end)
+    fast = tool("fast", fn _, _ -> Process.sleep(150); ToolResult.ok("fast-out") end)
 
     {base, agent} =
       start_stub([
@@ -233,8 +234,9 @@ defmodule Toolnexus.ClientTest do
     elapsed = System.monotonic_time(:millisecond) - t0
 
     assert result.text == "done"
-    # concurrent: two 100ms-class tools must not serialize (slow=100ms, so well under 200ms)
-    assert elapsed < 180
+    # concurrent: two 150ms tools; serialized would be ≥300ms, so <280 proves they ran in parallel
+    # (generous headroom over the ~150ms parallel baseline keeps it stable on loaded CI runners).
+    assert elapsed < 280
 
     assert [%{name: "slow", output: "slow-out"}, %{name: "fast", output: "fast-out"}] = result.tool_calls
 
@@ -343,6 +345,38 @@ defmodule Toolnexus.ClientTest do
     client = make_client(base)
 
     assert_raise RuntimeError, ~r/^LLM 400:/, fn -> Client.run(client, "hi", []) end
+  end
+
+  # ---- resilience: on_error classifier (§8) ----
+
+  test "resilience: on_error :fail surfaces a normally-retryable 429 without retrying" do
+    {base, agent} = start_stub([fn _ -> {:json, 429, %{"error" => "slow"}} end])
+    client = make_client(base, retries: 5, on_error: fn _ -> :fail end)
+
+    assert_raise RuntimeError, ~r/^LLM 429:/, fn -> Client.run(client, "hi", []) end
+    assert length(captured(agent)) == 1
+  end
+
+  test "resilience: on_error :retry retries a normally-terminal 400 within budget" do
+    handler = fn _ -> {:json, 400, %{"error" => "bad"}} end
+    {base, agent} = start_stub([handler, handler, handler])
+    client = make_client(base, retries: 2, on_error: fn _ -> :retry end)
+
+    assert_raise RuntimeError, ~r/^LLM 400:/, fn -> Client.run(client, "hi", []) end
+    # 1 initial + 2 retries, bounded by the budget
+    assert length(captured(agent)) == 3
+  end
+
+  test "resilience: default (no on_error) unchanged — 429 retried, 400 failed" do
+    {base, agent} =
+      start_stub([fn _ -> {:json, 429, %{"e" => 1}} end, fn _ -> openai_text("ok") end])
+
+    assert Client.run(make_client(base, retries: 3), "hi", []).text == "ok"
+    assert length(captured(agent)) == 2
+
+    {base2, agent2} = start_stub([fn _ -> {:json, 400, %{"e" => 1}} end])
+    assert_raise RuntimeError, ~r/^LLM 400:/, fn -> Client.run(make_client(base2, retries: 3), "hi", []) end
+    assert length(captured(agent2)) == 1
   end
 
   # ---- ask / ConversationStore ----

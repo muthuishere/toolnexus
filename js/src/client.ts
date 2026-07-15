@@ -47,6 +47,26 @@ export interface ClientOptions {
   /** §8 Gap 2. HTTP transport for LLM requests (retries included). Omit ⇒ global fetch. Scope is the
    * LLM path only; MCP transports use the SDK's own client. */
   fetch?: typeof fetch
+  /** §8 Resilience. Classify each LLM-call failure into "retry" or "fail". Omit ⇒ the default
+   * classifier (retryable status/network within budget ⇒ retry, else fail) — byte-identical to
+   * today. A "retry" is always bounded by `retries`; the classifier cannot loop unbounded.
+   * There is no "suspend" tier — suspension (§10) stays a user-action pause, not an error path. */
+  onError?: (info: ErrorInfo) => ErrorTier
+}
+
+/** §8 Resilience. What to do with a failed LLM call. */
+export type ErrorTier = "retry" | "fail"
+
+/** §8 Resilience. Context passed to `onError` for each failed LLM attempt. */
+export interface ErrorInfo {
+  /** The thrown network/transport error, when the failure was not an HTTP response. */
+  error?: unknown
+  /** The HTTP status, when the failure was a non-ok response. */
+  status?: number
+  /** Zero-based attempt index (0 = first try). */
+  attempt: number
+  /** Whether `status`/the error is in the default retryable set (429/5xx/network). */
+  retryable: boolean
 }
 
 /**
@@ -439,21 +459,29 @@ export class Client {
     return ctrl.signal
   }
 
-  /** fetch with retry + exponential backoff on 429/5xx/network, honoring Retry-After; aborts via signal. */
+  /** fetch with retry + exponential backoff on 429/5xx/network, honoring Retry-After; aborts via signal.
+   * The retry-vs-fail decision is the host's `onError` (default: retryable-within-budget ⇒ retry). */
   private async llmFetch(url: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
     const retries = this.opts.retries ?? 2
     const base = this.opts.retryBaseMs ?? 500
+    // Default classifier = today's behavior, expressed as an onError. A "retry" is always
+    // capped by the budget below (attempt === retries stops regardless of the classifier).
+    const classify = this.opts.onError ?? ((info: ErrorInfo): ErrorTier => (info.retryable ? "retry" : "fail"))
     let lastErr: unknown
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
         const res = await (this.opts.fetch ?? fetch)(url, { ...init, signal })
-        if (res.ok || !RETRYABLE.has(res.status) || attempt === retries) return res
+        if (res.ok) return res
+        const retryable = RETRYABLE.has(res.status)
+        const tier = classify({ status: res.status, attempt, retryable })
+        if (tier === "fail" || attempt === retries) return res // caller surfaces the non-ok status
         const ra = Number(res.headers.get("retry-after"))
         await delay(ra ? ra * 1000 : base * 2 ** attempt + Math.random() * 100, signal)
       } catch (e) {
         if (signal.aborted) throw e // abort/timeout: don't retry
         lastErr = e
-        if (attempt === retries) throw e
+        const tier = classify({ error: e, attempt, retryable: true })
+        if (tier === "fail" || attempt === retries) throw e
         await delay(base * 2 ** attempt + Math.random() * 100, signal)
       }
     }

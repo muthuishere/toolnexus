@@ -1,0 +1,131 @@
+---
+title: Enable / disable tools
+description: Scope exactly which tools and skills an agent sees — per-server MCP allowlists, built-in toggles, and drop-lists — in all six languages.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+The moment you run more than one agent — a USER tier vs an ADMIN tier, a customer-facing bot vs an
+internal one — "every tool, always on" is wrong and often unsafe. A support agent should not see
+`bash`; a read-only tier should get only the read tools of an MCP server. toolnexus gives you four
+composable controls to scope a toolkit down to exactly what a given agent may touch — by config or
+by code, same semantics in every port.
+</Aside>
+
+Four controls, smallest blast radius first:
+
+## 1. Allow only specific tools from an MCP server
+
+In `mcp.json`, a per-server `tools` map is an **allowlist** when it has any `true` entry (only those
+load), a **drop-list** when it has only `false` entries, and "all tools" when absent/empty. Keys are
+the server's original tool names. This is config, identical across all six ports:
+
+```json
+{
+  "mcpServers": {
+    "hr": {
+      "url": "https://hr.internal/mcp",
+      "tools": { "get_leave_balance": true, "get_profile": true }
+    },
+    "files": {
+      "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/data"],
+      "tools": { "delete_file": false }
+    }
+  }
+}
+```
+
+The `hr` server exposes **only** those two tools; `files` exposes everything **except**
+`delete_file`.
+
+## 2. Turn built-ins off, or pick specific ones
+
+The ten built-in tools are on by default. Turn the whole source off, or drop individual ones with a
+name→bool map (§4A). Shown as a config block (shared) and as a toolkit option:
+
+```json
+{ "builtins": { "tools": { "bash": false, "write": false } } }
+```
+
+## 3. Drop any tool or skill by name — the "just turn these off" list
+
+`disableTools` drops tools by their **final exposed name** across every source (MCP, builtins,
+native, HTTP, A2A); `disableSkills` removes skills from the `skill` catalog. The simplest control,
+and the one you reach for most:
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+const tk = await createToolkit({
+  mcpConfig: "./mcp.json",
+  builtins: { tools: { bash: false } },      // drop one builtin
+  disableTools: ["hr_get_profile", "write"], // drop by final name, any source
+  disableSkills: ["deploy-prod"],            // remove a skill from the catalog
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+tk = await create_toolkit(
+    mcp_config="./mcp.json",
+    builtins={"tools": {"bash": False}},
+    disable_tools=["hr_get_profile", "write"],
+    disable_skills=["deploy-prod"],
+)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{
+    McpConfig:     "./mcp.json",
+    Builtins:      map[string]any{"tools": map[string]any{"bash": false}},
+    DisableTools:  []string{"hr_get_profile", "write"},
+    DisableSkills: []string{"deploy-prod"},
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Toolkit tk = Toolkit.create(new Toolkit.Options()
+        .mcpConfig("mcp.json")
+        .builtins(java.util.Map.of("tools", java.util.Map.of("bash", false)))
+        .disableTools("hr_get_profile", "write")
+        .disableSkills("deploy-prod"));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options {
+    DisableTools  = new[] { "hr_get_profile", "write" },
+    DisableSkills = new[] { "deploy-prod" },
+    Builtins      = new Dictionary<string, object?> {
+        ["tools"] = new Dictionary<string, object?> { ["bash"] = false } },
+}.WithMcpConfig("./mcp.json"));
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+{:ok, tk} = Toolnexus.create_toolkit(
+  mcp_config: "./mcp.json",
+  builtins: %{"tools" => %{"bash" => false}},
+  disable_tools: ["hr_get_profile", "write"],
+  disable_skills: ["deploy-prod"]
+)
+```
+</TabItem>
+</Tabs>
+
+## 4. Allowlist skills per agent
+
+The skill analog of the MCP `tools` map: `skillsFilter` (`skills_filter` in Go/Elixir) is a
+name→bool allowlist. `{ "refunds": true }` exposes only that skill; only-`false` entries are a
+drop-list; absent ⇒ all. Use it to give each agent tier its own skill set from one folder.
+
+Together these compose: an MCP allowlist narrows a server, `builtins` scopes the shell/file tools,
+`disableTools`/`disableSkills` trims anything by name, and `skillsFilter` picks the skill set — so
+one codebase serves a locked-down USER agent and a full-power ADMIN agent from the same fixtures.
+See [Built-in tools](/toolnexus/builtins/), [MCP servers](/toolnexus/mcp/), and
+[Agent skills](/toolnexus/skills/).
+
+Next: [Bring your own HTTP client](/toolnexus/cookbook/bring-your-own-http-client/).

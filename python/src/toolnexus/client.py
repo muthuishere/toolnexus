@@ -31,7 +31,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Callable, Literal, Mapping, Optional, Protocol
+from typing import Any, AsyncGenerator, Callable, Literal, Mapping, Optional, Protocol, TypedDict
 
 from .toolkit import Toolkit
 from .types import Answer, Request, ToolContext, ToolResult, pending_of
@@ -41,6 +41,29 @@ from .types import Answer, Request, ToolContext, ToolResult, pending_of
 WaitFor = Callable[[Request], Any]
 
 ClientStyle = Literal["openai", "anthropic"]
+
+# §8 Resilience. What to do with a failed LLM call.
+ErrorTier = Literal["retry", "fail"]
+
+
+class ErrorInfo(TypedDict, total=False):
+    """§8 Resilience. Context passed to ``on_error`` for each failed LLM attempt.
+
+    ``status`` is present on a non-ok HTTP response; ``error`` on a transport/network
+    throw. ``attempt`` is the zero-based try index. ``retryable`` is whether the
+    status/error is in the default retryable set (429/5xx/network).
+    """
+
+    error: Any
+    status: int
+    attempt: int
+    retryable: bool
+
+
+# §8 Resilience. Classify each failed LLM attempt into "retry" or "fail". Omit ⇒ the
+# default classifier (retryable-within-budget ⇒ retry, else fail) — byte-identical to
+# today. A "retry" is always bounded by ``retries``; the classifier cannot loop unbounded.
+ErrorClassifier = Callable[[ErrorInfo], ErrorTier]
 
 # HTTP statuses worth retrying (transient).
 _RETRYABLE = frozenset({429, 500, 502, 503, 504})
@@ -431,6 +454,7 @@ class Client:
         request_params: Optional[dict[str, Any]] = None,
         body_transform: Optional[Callable[[dict[str, Any]], Optional[dict[str, Any]]]] = None,
         http_transport: Optional[HttpTransport] = None,
+        on_error: Optional[ErrorClassifier] = None,
     ) -> None:
         self.base_url = base_url
         self.style = style
@@ -449,6 +473,10 @@ class Client:
         self.body_transform = body_transform
         # Gap 2: injectable HTTP transport for the LLM path; None ⇒ default urllib.
         self._transport: HttpTransport = http_transport if http_transport is not None else UrllibTransport()
+        # §8 Resilience: host-classified retry-vs-fail for each failed LLM attempt.
+        # None ⇒ the default classifier (retryable ⇒ "retry", else "fail"), byte-identical
+        # to prior behavior. A "retry" is always capped by ``retries`` in _llm_fetch.
+        self.on_error: Optional[ErrorClassifier] = on_error
         # Conversation provider for ask() — from the `store` arg, else in-memory.
         self.store: ConversationStore = store if store is not None else InMemoryConversationStore()
         # §10 Suspension resolver — when a tool returns Pending, the client calls
@@ -699,6 +727,11 @@ class Client:
         a live response for streaming). Mirrors JS ``llmFetch``.
         """
         base = self.retry_base_ms / 1000.0
+        # Default classifier = today's behavior, expressed as an on_error. A "retry" is
+        # always capped by the budget below (attempt == retries stops regardless).
+        classify: ErrorClassifier = self.on_error or (
+            lambda info: "retry" if info.get("retryable") else "fail"
+        )
         last_err: Optional[Exception] = None
         for attempt in range(self.retries + 1):
             per_req = self._remaining(deadline, cancel)
@@ -706,7 +739,9 @@ class Client:
                 return await asyncio.to_thread(worker, url, headers, payload, per_req)
             except _HttpError as e:
                 last_err = e
-                if e.status not in _RETRYABLE or attempt == self.retries:
+                retryable = e.status in _RETRYABLE
+                tier = classify({"status": e.status, "attempt": attempt, "retryable": retryable})
+                if tier == "fail" or attempt == self.retries:
                     raise
                 wait = e.retry_after if e.retry_after else base * (2 ** attempt) + random.random() * 0.1
                 await self._sleep(wait, deadline, cancel)
@@ -719,7 +754,8 @@ class Client:
                     raise RunTimeout(f"run timeout after {self.timeout_ms}ms") from None
                 self._check_cancelled(cancel)
                 last_err = e
-                if attempt == self.retries:
+                tier = classify({"error": e, "attempt": attempt, "retryable": True})
+                if tier == "fail" or attempt == self.retries:
                     raise
                 await self._sleep(base * (2 ** attempt) + random.random() * 0.1, deadline, cancel)
         assert last_err is not None
@@ -1567,6 +1603,7 @@ def create_client(
     request_params: Optional[dict[str, Any]] = None,
     body_transform: Optional[Callable[[dict[str, Any]], Optional[dict[str, Any]]]] = None,
     http_transport: Optional[HttpTransport] = None,
+    on_error: Optional[ErrorClassifier] = None,
 ) -> Client:
     return Client(
         base_url=base_url,
@@ -1586,4 +1623,5 @@ def create_client(
         request_params=request_params,
         body_transform=body_transform,
         http_transport=http_transport,
+        on_error=on_error,
     )

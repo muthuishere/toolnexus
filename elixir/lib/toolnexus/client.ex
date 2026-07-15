@@ -244,6 +244,7 @@ defmodule Toolnexus.Client do
             request_params: nil,
             body_transform: nil,
             http_options: [],
+            on_error: nil,
             registry: nil,
             deadline: nil
 
@@ -256,6 +257,9 @@ defmodule Toolnexus.Client do
     `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`), `:headers`
   - `:system_prompt` — prepended to the toolkit's skills prompt (joined with `"\\n\\n"`)
   - `:max_turns` (default 10)
+  - `:on_error` — `(%{error?, status?, attempt, retryable} -> :retry | :fail)` classifies each
+    failed LLM attempt (§8 Resilience). Absent ⇒ default (`retryable ⇒ :retry, else :fail`),
+    byte-identical to today. A `:retry` is bounded by `:retries`. No `:suspend` tier.
   - `:hooks` — map with `:before_llm`, `:after_llm`, `:before_tool`, `:after_tool`
   - `:retries` (default 2), `:retry_base_ms` (default 500), `:timeout_ms` (whole-run deadline)
   - `:store` — a `Toolnexus.Client.ConversationStore` struct (default: in-memory)
@@ -665,8 +669,14 @@ defmodule Toolnexus.Client do
     opts = Keyword.merge(base_opts, client.http_options)
 
     case Req.request(opts) do
+      {:ok, %Req.Response{status: status} = resp} when status in 200..299 ->
+        {:ok, resp}
+
       {:ok, %Req.Response{status: status} = resp} ->
-        if status in 200..299 or status not in @retryable or attempt >= client.retries do
+        retryable = status in @retryable
+        tier = classify_error(client, %{status: status, attempt: attempt, retryable: retryable})
+
+        if tier == :fail or attempt >= client.retries do
           {:ok, resp}
         else
           retry_after =
@@ -685,7 +695,9 @@ defmodule Toolnexus.Client do
         end
 
       {:error, e} ->
-        if attempt >= client.retries do
+        tier = classify_error(client, %{error: e, attempt: attempt, retryable: true})
+
+        if tier == :fail or attempt >= client.retries do
           raise e
         else
           Process.sleep(client.retry_base_ms * Integer.pow(2, attempt) + :rand.uniform(100))
@@ -693,6 +705,12 @@ defmodule Toolnexus.Client do
         end
     end
   end
+
+  # §8 Resilience. Host-classified retry-vs-fail. Absent on_error ⇒ the default classifier
+  # (retryable ⇒ retry, else fail), byte-identical to the prior hardcoded rule. No :suspend tier —
+  # a failure never becomes a §10 Pending (suspension stays a user-action pause).
+  defp classify_error(%{on_error: nil}, %{retryable: retryable}), do: if(retryable, do: :retry, else: :fail)
+  defp classify_error(%{on_error: fun}, info) when is_function(fun, 1), do: fun.(info)
 
   defp parse_int(s) do
     case Integer.parse(to_string(s)) do

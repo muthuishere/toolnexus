@@ -768,6 +768,18 @@ with exponential backoff + jitter, honoring `Retry-After`. A run-level abort sig
 `timeoutMs` + an external cancel token (`run(prompt, { toolkit, signal })`) and threaded into the
 HTTP request, so a timeout or external cancel aborts the in-flight call. Aborts are not retried.
 
+**`onError` — host-classified retry-vs-fail (optional).** The retry-vs-fail decision for each
+failed LLM attempt is host-configurable via `onError(info) -> "retry" | "fail"` (idiomatic name +
+return per port). `info = { error?, status?, attempt, retryable }` — `status` on a non-ok HTTP
+response, `error` on a transport/network throw, `attempt` zero-based, `retryable` = whether the
+status/error is in the default set (`429`/`5xx`/network). A `"retry"` is always **bounded by
+`retries`** (the classifier cannot loop unbounded); `"fail"` surfaces the error immediately,
+skipping remaining retries. **Absent `onError` ⇒ the default classifier `retryable ? "retry" :
+"fail"`, i.e. byte-identical to the paragraph above.** There is **no `"suspend"` tier** — a failure
+is not a user action, so it never becomes a §10 `Pending`; suspension stays a user-action pause
+(§10). A `"fail"` result never carries `status:"pending"`. Aborts (timeout/cancel) bypass `onError`
+and are never retried.
+
 ### Conversation memory
 
 `run(prompt, { toolkit, history })` accepts a prior transcript and continues it; `RunResult.messages`

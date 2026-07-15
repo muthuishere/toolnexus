@@ -1,0 +1,97 @@
+---
+title: Fail fast, or retry
+description: Own the retry-vs-fail decision for every LLM-call failure with one onError callback — in all six languages.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+The model endpoint fails in the middle: `429` past its patience, a flaky `500`, a provider that
+returns `400` on a prompt you know is fine, a `402` when credits run out. By default toolnexus
+retries the transient set (`429`/`5xx`/network) with backoff and fails the rest — sensible, but it
+is *your* provider and *your* budget. `onError` hands you that one decision: **retry** (bounded by
+your `retries` budget) or **fail fast**. Absent, behavior is exactly today's.
+</Aside>
+
+`onError(info) -> retry | fail` runs on every failed LLM attempt. `info` carries `{ status?,
+error?, attempt, retryable }` — `status` on a non-ok response, `error` on a transport throw,
+`attempt` zero-based, `retryable` = whether it's in the default retryable set. A `retry` is always
+capped by `retries`; there is **no suspend tier** — a failure never becomes a human-in-the-loop
+pause (that stays [suspension](/toolnexus/suspension/), for genuine user actions).
+
+Example policy below: **fail fast on `402` (out of credits — retrying won't help), retry everything
+else that's retryable.**
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+const agent = createClient({
+  baseUrl, style: "openai", model, apiKey,
+  onError: (info) => (info.status === 402 ? "fail" : info.retryable ? "retry" : "fail"),
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+agent = create_client(
+    base_url=base_url, style="openai", model=model, api_key=api_key,
+    on_error=lambda info: "fail" if info.get("status") == 402
+             else ("retry" if info.get("retryable") else "fail"),
+)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+agent := toolnexus.CreateClient(toolnexus.ClientOptions{
+    BaseURL: baseURL, Style: toolnexus.StyleOpenAI, Model: model, APIKey: apiKey,
+    OnError: func(i toolnexus.ErrorInfo) toolnexus.Tier {
+        switch {
+        case i.Status == 402:
+            return toolnexus.TierFail
+        case i.Retryable:
+            return toolnexus.TierRetry
+        default:
+            return toolnexus.TierFail
+        }
+    },
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+LlmClient agent = LlmClient.create(new LlmClient.Options()
+        .baseUrl(baseUrl).style("openai").model(model)
+        .onError(info -> info.status() == 402 ? LlmClient.Tier.FAIL
+                        : info.retryable() ? LlmClient.Tier.RETRY : LlmClient.Tier.FAIL));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var agent = LlmClient.Create(new LlmClient.Options {
+    BaseUrl = baseUrl, Style = "openai", Model = model, ApiKey = apiKey,
+    OnError = info => info.Status == 402 ? LlmClient.Tier.Fail
+                     : info.Retryable ? LlmClient.Tier.Retry : LlmClient.Tier.Fail,
+});
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+client = Toolnexus.Client.create(
+  base_url: base_url, style: "openai", model: model, api_key: api_key,
+  on_error: fn info ->
+    cond do
+      info[:status] == 402 -> :fail
+      info[:retryable] -> :retry
+      true -> :fail
+    end
+  end
+)
+```
+</TabItem>
+</Tabs>
+
+Leave `onError` unset and you get today's behavior byte-for-byte: retry the transient set within
+budget, fail the rest. See [Resilience benchmark](/toolnexus/resilience/) for how each port behaves
+under MCP crashes, network drops, and LLM errors.
+
+Next: [Multi-turn memory](/toolnexus/cookbook/memory/).

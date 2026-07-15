@@ -33,6 +33,22 @@ public final class LlmClient {
     /** HTTP statuses that are retried (alongside IOExceptions). Mirrors JS {@code RETRYABLE}. */
     private static final Set<Integer> RETRYABLE = Set.of(429, 500, 502, 503, 504);
 
+    /** §8 Resilience. What to do with a failed LLM call. Mirrors JS {@code ErrorTier}. */
+    public enum Tier { RETRY, FAIL }
+
+    /**
+     * §8 Resilience. Context passed to {@link Options#onError} for each failed LLM attempt.
+     * Mirrors the JS {@code ErrorInfo}.
+     *
+     * @param error      the thrown network/transport error, or {@code null} when the failure was a
+     *                   non-ok HTTP response
+     * @param status     the HTTP status on a non-ok response, or {@code 0} on a transport throw
+     * @param attempt    zero-based attempt index (0 = first try)
+     * @param retryable  whether {@code status}/the error is in the default retryable set
+     *                   ({@code 429}/{@code 5xx}/network)
+     */
+    public record ErrorInfo(Throwable error, int status, int attempt, boolean retryable) {}
+
     public static final class Options {
         public String baseUrl;
         public String style; // "openai" | "anthropic"
@@ -78,6 +94,12 @@ public final class LlmClient {
          * Null ⇒ the shared default client. Scope is the LLM path only; MCP transports use their own
          * clients. */
         public HttpClient httpClient; // optional; null = default
+        /** §8 Resilience: classify each LLM-call failure into {@link Tier#RETRY} or {@link Tier#FAIL}.
+         * Null ⇒ the default classifier ({@code retryable ? RETRY : FAIL}) — byte-identical to today.
+         * A {@code RETRY} is always bounded by {@link #retries} (the classifier cannot loop unbounded);
+         * a {@code FAIL} surfaces the error immediately, skipping remaining retries. There is no
+         * "suspend" tier — a failure is never a §10 {@code Pending}. Aborts (timeout/cancel) bypass it. */
+        public Function<ErrorInfo, Tier> onError; // optional; null = default classifier
 
         public Options baseUrl(String v) { this.baseUrl = v; return this; }
         public Options style(String v) { this.style = v; return this; }
@@ -96,6 +118,7 @@ public final class LlmClient {
         public Options requestParams(Map<String, Object> v) { this.requestParams = v; return this; }
         public Options bodyTransform(Function<Map<String, Object>, Map<String, Object>> v) { this.bodyTransform = v; return this; }
         public Options httpClient(HttpClient v) { this.httpClient = v; return this; }
+        public Options onError(Function<ErrorInfo, Tier> v) { this.onError = v; return this; }
     }
 
     // ------------------------------------------------------------------
@@ -1506,6 +1529,12 @@ public final class LlmClient {
     private int retries() { return opts.retries != null ? opts.retries : 2; }
     private long retryBaseMs() { return opts.retryBaseMs != null ? opts.retryBaseMs : 500L; }
 
+    /** §8 Resilience: the host's {@code onError}, or the default classifier
+     * ({@code retryable ? RETRY : FAIL}) when unset — byte-identical to the pre-change behavior. */
+    private Tier classify(ErrorInfo info) {
+        return opts.onError != null ? opts.onError.apply(info) : (info.retryable() ? Tier.RETRY : Tier.FAIL);
+    }
+
     /** A run-scoped monotonic deadline. {@code null} timeoutMs => no deadline (deadlineNanos absent). */
     private static final class Deadline {
         final Long endNanos; // null = unbounded
@@ -1560,14 +1589,20 @@ public final class LlmClient {
                 HttpResponse<T> res = http.send(req, handler);
                 int status = res.statusCode();
                 if (status >= 200 && status < 300) return res;
-                if (!RETRYABLE.contains(status) || attempt == retries) return res; // caller handles non-2xx
+                // §8 Resilience: classify EVERY non-2xx (the host may retry a normally-terminal
+                // status, or fail a retryable one). A RETRY is still bounded by the budget below.
+                boolean retryable = RETRYABLE.contains(status);
+                Tier tier = classify(new ErrorInfo(null, status, attempt, retryable));
+                if (tier == Tier.FAIL || attempt == retries) return res; // caller handles non-2xx
                 long wait = retryAfterMs(res).orElse((long) (base * Math.pow(2, attempt) + Math.random() * 100));
                 sleep(wait, deadline);
             } catch (HttpTimeoutException e) {
                 throw new TimeoutException("run timeout after " + deadline.timeoutMs + "ms"); // not retried
             } catch (IOException e) {
                 lastErr = new RuntimeException("LLM request failed: " + e.getMessage(), e);
-                if (attempt == retries) throw lastErr;
+                // §8 Resilience: a network throw is retryable=true by default; the host may FAIL it.
+                Tier tier = classify(new ErrorInfo(e, 0, attempt, true));
+                if (tier == Tier.FAIL || attempt == retries) throw lastErr;
                 sleep((long) (base * Math.pow(2, attempt) + Math.random() * 100), deadline);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();

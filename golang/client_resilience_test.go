@@ -321,3 +321,129 @@ func TestConversationMemory(t *testing.T) {
 		t.Fatalf("after Reset, messages = %d, want 0", len(conv.Messages))
 	}
 }
+
+// TestOnErrorFailOn429 asserts a host OnError returning TierFail on a retryable
+// 429 surfaces immediately with a single request (no retry).
+func TestOnErrorFailOn429(t *testing.T) {
+	tk, err := CreateToolkit(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"slow down"}`))
+	}))
+	defer srv.Close()
+
+	var seen ErrorInfo
+	c := CreateClient(ClientOptions{
+		BaseURL: srv.URL, Style: StyleOpenAI, Model: "m", APIKey: "k", RetryBaseMs: 1,
+		OnError: func(info ErrorInfo) Tier { seen = info; return TierFail },
+	})
+	_, err = c.Run(context.Background(), "hi", tk)
+	if err == nil {
+		t.Fatal("expected error when OnError returns TierFail on 429")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("server calls = %d, want 1 (TierFail ⇒ no retry)", got)
+	}
+	if seen.Status != 429 || !seen.Retryable || seen.Attempt != 0 || seen.Err != nil {
+		t.Fatalf("ErrorInfo = %+v, want {Status:429 Retryable:true Attempt:0 Err:nil}", seen)
+	}
+}
+
+// TestOnErrorRetryOn400 asserts a host OnError returning TierRetry on a
+// normally-non-retryable 400 retries to the budget (1 try + Retries).
+func TestOnErrorRetryOn400(t *testing.T) {
+	tk, err := CreateToolkit(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"bad"}`))
+	}))
+	defer srv.Close()
+
+	var sawRetryable bool = true
+	c := CreateClient(ClientOptions{
+		BaseURL: srv.URL, Style: StyleOpenAI, Model: "m", APIKey: "k", Retries: 3, RetryBaseMs: 1,
+		OnError: func(info ErrorInfo) Tier {
+			if info.Status == 400 && info.Retryable {
+				sawRetryable = false // 400 must NOT be in the default retryable set
+			}
+			return TierRetry
+		},
+	})
+	_, err = c.Run(context.Background(), "hi", tk)
+	if err == nil {
+		t.Fatal("expected error after retry budget exhausted on 400")
+	}
+	if got := atomic.LoadInt32(&calls); got != 4 {
+		t.Fatalf("server calls = %d, want 4 (1 try + 3 retries)", got)
+	}
+	if !sawRetryable {
+		t.Fatal("400 was reported Retryable:true, want false (not in default set)")
+	}
+}
+
+// TestDefaultClassifierRetries429 asserts the default (nil OnError) behavior is
+// unchanged: a retryable 429 followed by 200 succeeds.
+func TestDefaultClassifierRetries429(t *testing.T) {
+	tk, err := CreateToolkit(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"retry"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hello"}}]}`))
+	}))
+	defer srv.Close()
+
+	c := CreateClient(ClientOptions{BaseURL: srv.URL, Style: StyleOpenAI, Model: "m", APIKey: "k", RetryBaseMs: 1})
+	res, err := c.Run(context.Background(), "hi", tk)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Text != "hello" {
+		t.Fatalf("text = %q, want hello", res.Text)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("server calls = %d, want 2 (1 retry)", got)
+	}
+}
+
+// TestDefaultClassifierFailsOn400 asserts the default (nil OnError) behavior is
+// unchanged: a non-retryable 400 fails immediately with a single request.
+func TestDefaultClassifierFailsOn400(t *testing.T) {
+	tk, err := CreateToolkit(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"bad"}`))
+	}))
+	defer srv.Close()
+
+	c := CreateClient(ClientOptions{BaseURL: srv.URL, Style: StyleOpenAI, Model: "m", APIKey: "k", Retries: 3, RetryBaseMs: 1})
+	_, err = c.Run(context.Background(), "hi", tk)
+	if err == nil {
+		t.Fatal("expected error on 400")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("server calls = %d, want 1 (400 not retryable)", got)
+	}
+}

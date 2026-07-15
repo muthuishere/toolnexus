@@ -88,6 +88,40 @@ type ClientOptions struct {
 	// included). Nil ⇒ http.DefaultClient. Scope is the LLM path only; MCP transports
 	// use the MCP SDK's own clients.
 	HTTPClient *http.Client
+	// OnError (§8 Resilience) classifies each failed LLM attempt into TierRetry or
+	// TierFail. Nil ⇒ the default classifier (retryable status/network ⇒ retry, else
+	// fail) — byte-identical to today. A TierRetry is always bounded by Retries; the
+	// classifier cannot loop unbounded. There is no "suspend" tier — suspension (§10)
+	// stays a user-action pause, not an error path. Mirrors js ClientOptions.onError.
+	OnError func(ErrorInfo) Tier
+}
+
+// Tier (§8 Resilience) is what to do with a failed LLM call: retry it (within the
+// budget) or fail now. The string values mirror the js ErrorTier wire vocabulary.
+type Tier string
+
+const (
+	// TierRetry backs off and retries the LLM call, bounded by Retries.
+	TierRetry Tier = "retry"
+	// TierFail surfaces the failure immediately (return the non-ok response or throw
+	// the transport error) without further retries.
+	TierFail Tier = "fail"
+)
+
+// ErrorInfo (§8 Resilience) is the context passed to ClientOptions.OnError for each
+// failed LLM attempt. Mirrors js ErrorInfo.
+type ErrorInfo struct {
+	// Err is the transport error, when the failure was not an HTTP response (nil on a
+	// non-ok status).
+	Err error
+	// Status is the HTTP status, when the failure was a non-ok response (0 on a
+	// transport error).
+	Status int
+	// Attempt is the zero-based attempt index (0 = first try).
+	Attempt int
+	// Retryable reports whether Status/Err is in the default retryable set
+	// (429/5xx/network).
+	Retryable bool
 }
 
 // MetricEvent is a semantic observability record fired as the loop runs (§8).
@@ -625,6 +659,17 @@ func (c *Client) backoff(attempt int, retryAfter string) time.Duration {
 // and is NOT retried. The caller owns resp.Body. Mirrors js Client.llmFetch.
 func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[string]string, raw []byte) (*http.Response, error) {
 	retries := c.retries()
+	// Default classifier = today's behavior, expressed as an OnError. A TierRetry is
+	// always capped by the budget below (attempt == retries stops regardless).
+	classify := c.opts.OnError
+	if classify == nil {
+		classify = func(info ErrorInfo) Tier {
+			if info.Retryable {
+				return TierRetry
+			}
+			return TierFail
+		}
+	}
 	var lastErr error
 	for attempt := 0; attempt <= retries; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
@@ -645,7 +690,8 @@ func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[stri
 				return nil, ctx.Err()
 			}
 			lastErr = err
-			if attempt == retries {
+			tier := classify(ErrorInfo{Err: err, Attempt: attempt, Retryable: true})
+			if tier == TierFail || attempt == retries {
 				return nil, err
 			}
 			if werr := sleep(ctx, c.backoff(attempt, "")); werr != nil {
@@ -653,8 +699,13 @@ func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[stri
 			}
 			continue
 		}
-		if resp.StatusCode < 300 || !retryableStatus[resp.StatusCode] || attempt == retries {
+		if resp.StatusCode < 300 {
 			return resp, nil
+		}
+		retryable := retryableStatus[resp.StatusCode]
+		tier := classify(ErrorInfo{Status: resp.StatusCode, Attempt: attempt, Retryable: retryable})
+		if tier == TierFail || attempt == retries {
+			return resp, nil // caller surfaces the non-ok status
 		}
 		ra := resp.Header.Get("Retry-After")
 		resp.Body.Close()

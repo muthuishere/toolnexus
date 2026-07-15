@@ -21,6 +21,13 @@ export interface ToolkitOptions {
   skillProvider?: () => SkillDef[] | Promise<SkillDef[]>
   /** Per-agent skill allowlist keyed on name; same semantics as the MCP tools filter (§3, S2). */
   skillsFilter?: Record<string, boolean>
+  /** Drop tools by their FINAL exposed name across every source (MCP `server_tool`, builtins,
+   * native, a2a, extras), applied after aggregation — the simple "just turn these off" list.
+   * Empty/undefined ⇒ nothing disabled. Composes with builtins/skillsFilter/server allowlists. */
+  disableTools?: string[]
+  /** Drop skills by name from the `skill` catalog — sugar over a drop-list in `skillsFilter`
+   * (each name folded in as `false`, without overriding an explicit filter entry). */
+  disableSkills?: string[]
   /** Sibling-file sample cap: 0 ⇒ default 10, n>0 ⇒ cap, -1 ⇒ omit <skill_files> (§3, S5). */
   skillSampleLimit?: number
   extraTools?: Tool[]
@@ -52,14 +59,18 @@ export class Toolkit {
     private readonly a2aConfig: A2AConfig | undefined,
     /** MCP serve profile read from a top-level `mcpServer` config block. */
     private readonly mcpServerConfig: MCPServeConfig | undefined,
+    /** Final-name drop-list (§4A) applied across every source after aggregation. */
+    disableTools: string[] = [],
   ) {
     // Builtins are the lowest-precedence source: a host extraTools entry with
     // the same name shadows a builtin (SPEC §4). Drop shadowed builtins up
     // front, then apply the normal first-wins dedupe for MCP/skill/agents/extras.
     const extraNames = new Set(extraTools.map((t) => t.name))
     const activeBuiltins = builtins.filter((b) => !extraNames.has(b.name))
+    const disabled = new Set(disableTools)
     const all = [...(mcp?.tools ?? []), ...(skill ? [skill.tool] : []), ...activeBuiltins, ...agents, ...extraTools]
     for (const t of all) {
+      if (disabled.has(t.name)) continue // §4A drop-list by final exposed name
       if (this.byName.has(t.name)) {
         console.warn(`[toolnexus] duplicate tool name "${t.name}" — keeping first`)
         continue
@@ -85,10 +96,16 @@ export class Toolkit {
         }
       }
       const dataDefs = [...(opts.skills ?? []), ...providerDefs]
+      // disableSkills is sugar over a skillsFilter drop-list: fold each name in as false
+      // WITHOUT overriding an explicit skillsFilter entry (explicit entries win).
+      const filter =
+        opts.disableSkills && opts.disableSkills.length > 0
+          ? { ...Object.fromEntries(opts.disableSkills.map((n) => [n, false])), ...opts.skillsFilter }
+          : opts.skillsFilter
       skill = loadSkills({
         dirs: opts.skillsDir,
         skills: dataDefs.length > 0 ? dataDefs : undefined,
-        filter: opts.skillsFilter,
+        filter,
         sampleLimit: opts.skillSampleLimit,
       })
     }
@@ -137,7 +154,7 @@ export class Toolkit {
       mcpServerConfig = (opts.mcpConfig as { mcpServer?: MCPServeConfig }).mcpServer
     }
 
-    return new Toolkit(mcp, skill, builtins, agentToolsFlat, opts.extraTools ?? [], a2aConfig, mcpServerConfig)
+    return new Toolkit(mcp, skill, builtins, agentToolsFlat, opts.extraTools ?? [], a2aConfig, mcpServerConfig, opts.disableTools ?? [])
   }
 
   tools(): Tool[] {

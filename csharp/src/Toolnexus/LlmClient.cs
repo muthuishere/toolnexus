@@ -202,6 +202,17 @@ public sealed class LlmClient
         /// </summary>
         public HttpMessageHandler? HttpHandler { get; set; }
 
+        /// <summary>
+        /// (§8 Resilience) Classify each failed LLM call into <see cref="Tier.Retry"/> or
+        /// <see cref="Tier.Fail"/>. Null ⇒ the default classifier (<c>Retryable ? Retry : Fail</c>) —
+        /// byte-identical to today. A <see cref="Tier.Retry"/> is always bounded by <see cref="Retries"/>
+        /// (the classifier cannot loop unbounded); a <see cref="Tier.Fail"/> surfaces the error
+        /// immediately, skipping remaining retries. There is no "suspend" tier — suspension (§10) stays a
+        /// user-action pause, not an error path. Aborts (timeout/cancel) bypass <c>OnError</c>.
+        /// </summary>
+        public Func<ErrorInfo, Tier>? OnError { get; set; }
+
+        public Options WithOnError(Func<ErrorInfo, Tier> v) { OnError = v; return this; }
         public Options WithWaitFor(Func<Request, Task<Answer>> v) { WaitFor = v; return this; }
         public Options WithRequestParams(IReadOnlyDictionary<string, object?> v) { RequestParams = v; return this; }
         public Options WithBodyTransform(Func<IDictionary<string, object?>, IDictionary<string, object?>?> v) { BodyTransform = v; return this; }
@@ -228,6 +239,23 @@ public sealed class LlmClient
     {
         public RunTimeoutException(string message) : base(message) { }
     }
+
+    // ---------------------------------------------------------------- resilience classifier (§8)
+
+    /// <summary>(§8 Resilience) What to do with a failed LLM call: retry it (within budget) or fail now.</summary>
+    public enum Tier
+    {
+        Retry,
+        Fail,
+    }
+
+    /// <summary>
+    /// (§8 Resilience) Context passed to <see cref="Options.OnError"/> for each failed LLM attempt.
+    /// <see cref="Status"/> is set on a non-ok HTTP response; <see cref="Error"/> on a transport/network
+    /// throw; <see cref="Attempt"/> is zero-based; <see cref="Retryable"/> = whether the status/error is in
+    /// the default retryable set (429/5xx/network).
+    /// </summary>
+    public sealed record ErrorInfo(Exception? Error, int? Status, int Attempt, bool Retryable);
 
     // ---------------------------------------------------------------- hooks
 
@@ -1177,6 +1205,9 @@ public sealed class LlmClient
         var baseMs = RetryBaseMs();
         var payload = Json.Stringify(body);
         Exception? lastErr = null;
+        // Default classifier = today's behavior, expressed as an OnError. A Retry is always capped by
+        // the budget below (attempt == retries stops regardless of the classifier).
+        var classify = _opts.OnError ?? (info => info.Retryable ? Tier.Retry : Tier.Fail);
 
         for (var attempt = 0; attempt <= retries; attempt++)
         {
@@ -1207,7 +1238,9 @@ public sealed class LlmClient
                 var res = await _http.SendAsync(req, completion, cts.Token).ConfigureAwait(false);
                 var status = (int)res.StatusCode;
                 if (status is >= 200 and < 300) return res;
-                if (!Retryable.Contains(status) || attempt == retries) return res; // caller handles non-2xx
+                var retryable = Retryable.Contains(status);
+                var tier = classify(new ErrorInfo(null, status, attempt, retryable));
+                if (tier == Tier.Fail || attempt == retries) return res; // caller handles non-2xx
                 var wait = RetryAfterMs(res) ?? (long)(baseMs * Math.Pow(2, attempt) + Random.Shared.Next(0, 100));
                 res.Dispose();
                 await SleepAsync(wait, deadline, external).ConfigureAwait(false);
@@ -1223,7 +1256,8 @@ public sealed class LlmClient
             catch (HttpRequestException e)
             {
                 lastErr = new InvalidOperationException("LLM request failed: " + e.Message, e);
-                if (attempt == retries) throw lastErr;
+                var tier = classify(new ErrorInfo(e, null, attempt, true)); // network errors are retryable by default
+                if (tier == Tier.Fail || attempt == retries) throw lastErr;
                 await SleepAsync((long)(baseMs * Math.Pow(2, attempt) + Random.Shared.Next(0, 100)), deadline, external).ConfigureAwait(false);
             }
         }

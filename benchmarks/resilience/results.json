@@ -1,0 +1,372 @@
+{
+  "benchmark": "resilience",
+  "generated_at": "2026-07-15T05:20:46Z",
+  "scenarios": {
+    "R1": "MCP server won't start (bad command)",
+    "R2": "MCP remote unreachable (closed port)",
+    "R3": "MCP server hangs (never responds)",
+    "R4": "Malformed mcp.json",
+    "R5": "LLM out-of-credits / auth (402)",
+    "R6": "LLM rate-limit then ok (429->200)",
+    "R7": "LLM persistent 500 (retries exhausted)",
+    "R8": "Native tool throws mid-run"
+  },
+  "langs": [
+    "python",
+    "js",
+    "go",
+    "elixir",
+    "java",
+    "csharp"
+  ],
+  "results": {
+    "python": {
+      "R1": {
+        "lang": "python",
+        "scenario": "R1",
+        "outcome": "graceful",
+        "detail": "status={'good': 'connected', 'bad': 'failed'} tools=['good_add', 'good_echo', 'good_get_weather']",
+        "elapsed_ms": 18.3
+      },
+      "R2": {
+        "lang": "python",
+        "scenario": "R2",
+        "outcome": "graceful",
+        "detail": "status={'good': 'connected', 'remote': 'failed'} tools=['good_add', 'good_echo', 'good_get_weather']",
+        "elapsed_ms": 28.7
+      },
+      "R3": {
+        "lang": "python",
+        "scenario": "R3",
+        "outcome": "graceful",
+        "detail": "status={'good': 'connected', 'hang': 'failed'} tools=['good_add', 'good_echo', 'good_get_weather']",
+        "elapsed_ms": 4019.2
+      },
+      "R4": {
+        "lang": "python",
+        "scenario": "R4",
+        "outcome": "graceful",
+        "detail": "raised JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 43 (char 42)",
+        "elapsed_ms": 1.1
+      },
+      "R5": {
+        "lang": "python",
+        "scenario": "R5",
+        "outcome": "graceful",
+        "detail": "surfaced _HttpError: LLM 402: {\"error\": {\"message\": \"insufficient credits\", \"type\": \"insufficient_quo",
+        "elapsed_ms": 3.2
+      },
+      "R6": {
+        "lang": "python",
+        "scenario": "R6",
+        "outcome": "graceful",
+        "detail": "retried then succeeded: text='RESILIENCE_OK'",
+        "elapsed_ms": 42.3
+      },
+      "R7": {
+        "lang": "python",
+        "scenario": "R7",
+        "outcome": "graceful",
+        "detail": "surfaced after retries _HttpError: LLM 500: {\"error\": {\"message\": \"internal server error\"}}",
+        "elapsed_ms": 89.2
+      },
+      "R8": {
+        "lang": "python",
+        "scenario": "R8",
+        "outcome": "graceful",
+        "detail": "tool error fed back, loop reached final: text='RESILIENCE_OK'",
+        "elapsed_ms": 1.1
+      }
+    },
+    "js": {
+      "R1": {
+        "lang": "js",
+        "scenario": "R1",
+        "outcome": "graceful",
+        "detail": "status={\"bad\":\"failed\",\"good\":\"connected\"} tools=good_add,good_echo,good_get_weather",
+        "elapsed_ms": 19
+      },
+      "R2": {
+        "lang": "js",
+        "scenario": "R2",
+        "outcome": "graceful",
+        "detail": "status={\"remote\":\"failed\",\"good\":\"connected\"} tools=good_add,good_echo,good_get_weather",
+        "elapsed_ms": 16
+      },
+      "R3": {
+        "lang": "js",
+        "scenario": "R3",
+        "outcome": "graceful",
+        "detail": "status={\"good\":\"connected\",\"hang\":\"failed\"} tools=good_add,good_echo,good_get_weather",
+        "elapsed_ms": 4009
+      },
+      "R4": {
+        "lang": "js",
+        "scenario": "R4",
+        "outcome": "graceful",
+        "detail": "raised SyntaxError: Expected double-quoted property name in JSON at position 42 (line 1 column 43)",
+        "elapsed_ms": 1
+      },
+      "R5": {
+        "lang": "js",
+        "scenario": "R5",
+        "outcome": "graceful",
+        "detail": "surfaced Error: LLM 402: {\"error\": {\"message\": \"insufficient credits\", \"type\": \"insufficient_quo",
+        "elapsed_ms": 8
+      },
+      "R6": {
+        "lang": "js",
+        "scenario": "R6",
+        "outcome": "graceful",
+        "detail": "retried then succeeded: text=\"RESILIENCE_OK\"",
+        "elapsed_ms": 15
+      },
+      "R7": {
+        "lang": "js",
+        "scenario": "R7",
+        "outcome": "graceful",
+        "detail": "surfaced after retries Error: LLM 500: {\"error\": {\"message\": \"internal server error\"}}",
+        "elapsed_ms": 132
+      },
+      "R8": {
+        "lang": "js",
+        "scenario": "R8",
+        "outcome": "graceful",
+        "detail": "tool error fed back, loop reached final: text=\"RESILIENCE_OK\"",
+        "elapsed_ms": 2
+      }
+    },
+    "go": {
+      "R1": {
+        "detail": "status=map[bad:failed good:connected] tools=[good_add good_echo good_get_weather]",
+        "elapsed_ms": 21.353,
+        "lang": "go",
+        "outcome": "graceful",
+        "scenario": "R1"
+      },
+      "R2": {
+        "detail": "status=map[good:connected remote:failed] tools=[good_add good_echo good_get_weather]",
+        "elapsed_ms": 18.137,
+        "lang": "go",
+        "outcome": "graceful",
+        "scenario": "R2"
+      },
+      "R3": {
+        "detail": "status=map[good:connected hang:failed] tools=[good_add good_echo good_get_weather]",
+        "elapsed_ms": 4005.908,
+        "lang": "go",
+        "outcome": "graceful",
+        "scenario": "R3"
+      },
+      "R4": {
+        "detail": "returned error: parse mcp config: unexpected end of JSON input",
+        "elapsed_ms": 0.509,
+        "lang": "go",
+        "outcome": "graceful",
+        "scenario": "R4"
+      },
+      "R5": {
+        "detail": "surfaced error: LLM 402: {\"error\": {\"message\": \"insufficient credits\", \"type\": \"insufficient_quo",
+        "elapsed_ms": 0.692,
+        "lang": "go",
+        "outcome": "graceful",
+        "scenario": "R5"
+      },
+      "R6": {
+        "detail": "retried then succeeded: text=RESILIENCE_OK",
+        "elapsed_ms": 0.594,
+        "lang": "go",
+        "outcome": "graceful",
+        "scenario": "R6"
+      },
+      "R7": {
+        "detail": "surfaced after retries: LLM 500: {\"error\": {\"message\": \"internal server error\"}}",
+        "elapsed_ms": 111.274,
+        "lang": "go",
+        "outcome": "graceful",
+        "scenario": "R7"
+      },
+      "R8": {
+        "detail": "tool error fed back, loop reached final: text=RESILIENCE_OK",
+        "elapsed_ms": 0.664,
+        "lang": "go",
+        "outcome": "graceful",
+        "scenario": "R8"
+      }
+    },
+    "elixir": {
+      "R1": {
+        "detail": "status=%{\"bad\" => \"failed\", \"good\" => \"connected\"} tools=[\"good_add\", \"good_echo\", \"good_get_weather\"]",
+        "elapsed_ms": 22.0,
+        "lang": "elixir",
+        "outcome": "graceful",
+        "scenario": "R1"
+      },
+      "R2": {
+        "detail": "status=%{\"good\" => \"connected\", \"remote\" => \"failed\"} tools=[\"good_add\", \"good_echo\", \"good_get_weather\"]",
+        "elapsed_ms": 23.0,
+        "lang": "elixir",
+        "outcome": "graceful",
+        "scenario": "R2"
+      },
+      "R3": {
+        "detail": "status=%{\"good\" => \"connected\", \"hang\" => \"failed\"} tools=[\"good_add\", \"good_echo\", \"good_get_weather\"]",
+        "elapsed_ms": 2578.0,
+        "lang": "elixir",
+        "outcome": "graceful",
+        "scenario": "R3"
+      },
+      "R4": {
+        "detail": "returned {:error, ...}: unexpected end of input at position 42",
+        "elapsed_ms": 1.0,
+        "lang": "elixir",
+        "outcome": "graceful",
+        "scenario": "R4"
+      },
+      "R5": {
+        "detail": "surfaced RuntimeError: LLM 402: {\"error\":{\"message\":\"insufficient credits\",\"type\":\"insufficient_quota\"}",
+        "elapsed_ms": 7.0,
+        "lang": "elixir",
+        "outcome": "graceful",
+        "scenario": "R5"
+      },
+      "R6": {
+        "detail": "retried then succeeded: text=\"RESILIENCE_OK\"",
+        "elapsed_ms": 72.0,
+        "lang": "elixir",
+        "outcome": "graceful",
+        "scenario": "R6"
+      },
+      "R7": {
+        "detail": "surfaced after retries RuntimeError: LLM 500: {\"error\":{\"message\":\"internal server error\"}}",
+        "elapsed_ms": 99.0,
+        "lang": "elixir",
+        "outcome": "graceful",
+        "scenario": "R7"
+      },
+      "R8": {
+        "detail": "tool error fed back, loop reached final: text=\"RESILIENCE_OK\"",
+        "elapsed_ms": 2.0,
+        "lang": "elixir",
+        "outcome": "graceful",
+        "scenario": "R8"
+      }
+    },
+    "java": {
+      "R1": {
+        "lang": "java",
+        "scenario": "R1",
+        "outcome": "pending",
+        "detail": "harness stubbed, run pending",
+        "elapsed_ms": null
+      },
+      "R2": {
+        "lang": "java",
+        "scenario": "R2",
+        "outcome": "pending",
+        "detail": "harness stubbed, run pending",
+        "elapsed_ms": null
+      },
+      "R3": {
+        "lang": "java",
+        "scenario": "R3",
+        "outcome": "pending",
+        "detail": "harness stubbed, run pending",
+        "elapsed_ms": null
+      },
+      "R4": {
+        "lang": "java",
+        "scenario": "R4",
+        "outcome": "pending",
+        "detail": "harness stubbed, run pending",
+        "elapsed_ms": null
+      },
+      "R5": {
+        "lang": "java",
+        "scenario": "R5",
+        "outcome": "pending",
+        "detail": "harness stubbed, run pending",
+        "elapsed_ms": null
+      },
+      "R6": {
+        "lang": "java",
+        "scenario": "R6",
+        "outcome": "pending",
+        "detail": "harness stubbed, run pending",
+        "elapsed_ms": null
+      },
+      "R7": {
+        "lang": "java",
+        "scenario": "R7",
+        "outcome": "pending",
+        "detail": "harness stubbed, run pending",
+        "elapsed_ms": null
+      },
+      "R8": {
+        "lang": "java",
+        "scenario": "R8",
+        "outcome": "pending",
+        "detail": "harness stubbed, run pending",
+        "elapsed_ms": null
+      }
+    },
+    "csharp": {
+      "R1": {
+        "lang": "csharp",
+        "scenario": "R1",
+        "outcome": "pending",
+        "detail": "harness stubbed, run pending",
+        "elapsed_ms": null
+      },
+      "R2": {
+        "lang": "csharp",
+        "scenario": "R2",
+        "outcome": "pending",
+        "detail": "harness stubbed, run pending",
+        "elapsed_ms": null
+      },
+      "R3": {
+        "lang": "csharp",
+        "scenario": "R3",
+        "outcome": "pending",
+        "detail": "harness stubbed, run pending",
+        "elapsed_ms": null
+      },
+      "R4": {
+        "lang": "csharp",
+        "scenario": "R4",
+        "outcome": "pending",
+        "detail": "harness stubbed, run pending",
+        "elapsed_ms": null
+      },
+      "R5": {
+        "lang": "csharp",
+        "scenario": "R5",
+        "outcome": "pending",
+        "detail": "harness stubbed, run pending",
+        "elapsed_ms": null
+      },
+      "R6": {
+        "lang": "csharp",
+        "scenario": "R6",
+        "outcome": "pending",
+        "detail": "harness stubbed, run pending",
+        "elapsed_ms": null
+      },
+      "R7": {
+        "lang": "csharp",
+        "scenario": "R7",
+        "outcome": "pending",
+        "detail": "harness stubbed, run pending",
+        "elapsed_ms": null
+      },
+      "R8": {
+        "lang": "csharp",
+        "scenario": "R8",
+        "outcome": "pending",
+        "detail": "harness stubbed, run pending",
+        "elapsed_ms": null
+      }
+    }
+  }
+}
