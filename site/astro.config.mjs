@@ -44,6 +44,7 @@ export default defineConfig({
 						{ label: 'Agent skills', slug: 'cookbook/agent-skills' },
 						{ label: 'Native tools', slug: 'cookbook/native-tool' },
 						{ label: 'HTTP / REST tools', slug: 'cookbook/http-tool' },
+						{ label: 'Enable / disable tools', slug: 'cookbook/enable-disable-tools' },
 						{ label: 'Bring your own HTTP client', slug: 'cookbook/bring-your-own-http-client' },
 						{ label: 'Fail fast, or retry', slug: 'cookbook/fail-fast-or-retry' },
 						{ label: 'Multi-turn memory', slug: 'cookbook/memory' },
