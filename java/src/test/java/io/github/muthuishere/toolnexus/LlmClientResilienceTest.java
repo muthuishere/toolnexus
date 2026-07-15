@@ -97,4 +97,115 @@ class LlmClientResilienceTest {
                 "expected timeout/abort message, got: " + ex.getMessage());
         tk.close();
     }
+
+    private static final String OK_BODY =
+            "{\"choices\":[{\"message\":{\"content\":\"ok\"}}],"
+                    + "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}";
+
+    // ---- §8 onError classifier (mirrors js/test/unit.test.ts "onError" cases) ----
+
+    /** onError -> FAIL on a normally-retryable 429 surfaces immediately: exactly one request. */
+    @Test
+    void onErrorFailOn429SurfacesWithoutRetry() throws IOException {
+        AtomicInteger hits = new AtomicInteger(0);
+        int port = start(ex -> {
+            hits.incrementAndGet();
+            respond(ex, 429, "rate limited");
+        });
+
+        Toolkit tk = Toolkit.create(new Toolkit.Options());
+        LlmClient client = LlmClient.create(new LlmClient.Options()
+                .baseUrl("http://127.0.0.1:" + port)
+                .style("openai")
+                .model("x")
+                .apiKey("k")
+                .retries(3)
+                .retryBaseMs(5)
+                .onError(info -> LlmClient.Tier.FAIL));
+
+        RuntimeException ex = assertThrows(RuntimeException.class, () -> client.run("hi", tk));
+        assertTrue(ex.getMessage() != null && ex.getMessage().contains("429"),
+                "expected surfaced 429, got: " + ex.getMessage());
+        assertEquals(1, hits.get(), "FAIL classifier skips all retries");
+        tk.close();
+    }
+
+    /** onError -> RETRY on a normally-terminal 400 retries to the full budget: 1 + retries requests. */
+    @Test
+    void onErrorRetryOn400RetriesToBudget() throws IOException {
+        AtomicInteger hits = new AtomicInteger(0);
+        int port = start(ex -> {
+            hits.incrementAndGet();
+            respond(ex, 400, "bad request");
+        });
+
+        Toolkit tk = Toolkit.create(new Toolkit.Options());
+        LlmClient client = LlmClient.create(new LlmClient.Options()
+                .baseUrl("http://127.0.0.1:" + port)
+                .style("openai")
+                .model("x")
+                .apiKey("k")
+                .retries(2)
+                .retryBaseMs(5)
+                .onError(info -> LlmClient.Tier.RETRY));
+
+        RuntimeException ex = assertThrows(RuntimeException.class, () -> client.run("hi", tk));
+        assertTrue(ex.getMessage() != null && ex.getMessage().contains("400"),
+                "expected surfaced 400 after budget exhausted, got: " + ex.getMessage());
+        assertEquals(3, hits.get(), "RETRY classifier retries a 400 to the full budget (1 + 2)");
+        tk.close();
+    }
+
+    /** Absent onError, the default classifier is byte-identical: 429 then 200 succeeds. */
+    @Test
+    void defaultClassifierRetries429ThenSucceeds() throws IOException {
+        AtomicInteger hits = new AtomicInteger(0);
+        int port = start(ex -> {
+            int n = hits.incrementAndGet();
+            if (n < 2) {
+                respond(ex, 429, "rate limited");
+                return;
+            }
+            respond(ex, 200, OK_BODY);
+        });
+
+        Toolkit tk = Toolkit.create(new Toolkit.Options());
+        LlmClient client = LlmClient.create(new LlmClient.Options()
+                .baseUrl("http://127.0.0.1:" + port)
+                .style("openai")
+                .model("x")
+                .apiKey("k")
+                .retries(2)
+                .retryBaseMs(5)); // no onError
+
+        LlmClient.RunResult res = client.run("hi", tk);
+        assertEquals("ok", res.text);
+        assertEquals(2, hits.get(), "default retries the 429, then succeeds");
+        tk.close();
+    }
+
+    /** Absent onError, the default classifier fails a non-retryable 400 immediately: one request. */
+    @Test
+    void defaultClassifierFailsOn400Immediately() throws IOException {
+        AtomicInteger hits = new AtomicInteger(0);
+        int port = start(ex -> {
+            hits.incrementAndGet();
+            respond(ex, 400, "bad request");
+        });
+
+        Toolkit tk = Toolkit.create(new Toolkit.Options());
+        LlmClient client = LlmClient.create(new LlmClient.Options()
+                .baseUrl("http://127.0.0.1:" + port)
+                .style("openai")
+                .model("x")
+                .apiKey("k")
+                .retries(2)
+                .retryBaseMs(5)); // no onError
+
+        RuntimeException ex = assertThrows(RuntimeException.class, () -> client.run("hi", tk));
+        assertTrue(ex.getMessage() != null && ex.getMessage().contains("400"),
+                "expected surfaced 400, got: " + ex.getMessage());
+        assertEquals(1, hits.get(), "default fails a non-retryable 400 without retry");
+        tk.close();
+    }
 }
