@@ -45,6 +45,7 @@ export default defineConfig({
 						{ label: 'Native tools', slug: 'cookbook/native-tool' },
 						{ label: 'HTTP / REST tools', slug: 'cookbook/http-tool' },
 						{ label: 'Bring your own HTTP client', slug: 'cookbook/bring-your-own-http-client' },
+						{ label: 'Fail fast, or retry', slug: 'cookbook/fail-fast-or-retry' },
 						{ label: 'Multi-turn memory', slug: 'cookbook/memory' },
 					],
 				},

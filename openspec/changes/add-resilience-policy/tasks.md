@@ -18,18 +18,18 @@ Scope: LLM-failure retry/fail classification only. No suspend tier (§10 untouch
       hermetic; assert bounded time + no crash; assert no `status:"pending"` on fail
 
 ## 3. Port parity — implement + matrix in each
-- [ ] 3.1 Python — `on_error`, retry-helper branch, matrix
-- [ ] 3.2 Go — `OnError`/`Tier`, retry-helper branch, matrix
-- [ ] 3.3 Java — `Options.onError`, retry-helper branch, matrix
-- [ ] 3.4 C# — `OnError`, retry-helper branch, matrix
+- [x] 3.1 Python — `on_error`, retry-helper branch, matrix
+- [x] 3.2 Go — `OnError`/`Tier`, retry-helper branch, matrix
+- [x] 3.3 Java — `Options.onError`, retry-helper branch, matrix
+- [x] 3.4 C# — `OnError`, retry-helper branch, matrix
 - [x] 3.5 Elixir — `on_error`, retry-helper branch, matrix
 
 ## 4. Cross-cutting
-- [ ] 4.1 Default-parity assertion per port: with no `onError`, retry/fail behavior is
+- [x] 4.1 Default-parity assertion per port: with no `onError`, retry/fail behavior is
       byte-identical to pre-change (429-then-200 retries; 400 fails)
-- [ ] 4.2 Docs: Cookbook recipe "Fail fast or retry" (six languages) + a line on the
+- [x] 4.2 Docs: Cookbook recipe "Fail fast or retry" (six languages) + a line on the
       Observability/Streaming pages; note suspend stays user-action only
-- [ ] 4.3 `openspec validate add-resilience-policy`
+- [x] 4.3 `openspec validate add-resilience-policy`
 
 ## Parity checklist
-- [x] js (reference) · [ ] python · [ ] golang · [ ] java · [ ] csharp · [x] elixir
+- [x] js (reference) · [x] python · [x] golang · [x] java · [x] csharp · [x] elixir
