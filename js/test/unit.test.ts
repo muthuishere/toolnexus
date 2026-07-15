@@ -316,6 +316,24 @@ test("client: retries on 503 then succeeds (backoff)", async () => {
   server.close()
 })
 
+test("host controls: disableTools drops a builtin by final name; disableSkills folds into the filter", async () => {
+  const tk = await createToolkit({
+    skills: [
+      { name: "alpha", description: "a", content: "A" },
+      { name: "beta", description: "b", content: "B" },
+    ],
+    disableTools: ["bash", "write"],
+    disableSkills: ["beta"],
+  })
+  const names = tk.tools().map((t) => t.name)
+  assert.ok(!names.includes("bash") && !names.includes("write"), "disableTools dropped bash + write")
+  assert.ok(names.includes("read"), "other builtins remain")
+  // the single skill tool still exists; its catalog excludes the disabled skill
+  const prompt = tk.skillsPrompt()
+  assert.ok(prompt.includes("alpha") && !prompt.includes("beta"), "disableSkills removed beta from the catalog")
+  await tk.close()
+})
+
 test("resilience: onError 'fail' surfaces a normally-retryable 429 without retrying", async () => {
   let hits = 0
   const server = http.createServer((req, res) => { hits++; res.writeHead(429); res.end("slow down") })
