@@ -1,5 +1,6 @@
 // Unit/integration tests (no network, no LLM). Mirrors js/test/unit.test.ts.
 // Run: go test ./...
+
 package toolnexus
 
 import (

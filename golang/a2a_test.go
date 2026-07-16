@@ -1,5 +1,6 @@
 // A2A (outbound) tests — an in-process httptest.Server plays a fake A2A agent,
 // no external network. Mirrors js/test/unit.test.ts. Run: go test -race .
+
 package toolnexus
 
 import (

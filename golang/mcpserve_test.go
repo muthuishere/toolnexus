@@ -3,6 +3,7 @@
 // against a built server; the streamable-HTTP path is exercised through a served
 // toolkit with the mcp-go streamable HTTP client. Mirrors the js "mcp inbound:"
 // tests. Run: go test -race .
+
 package toolnexus
 
 import (

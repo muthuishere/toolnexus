@@ -5,6 +5,7 @@
 // an MCP ElicitResult (ok→accept, reason:declined→decline, else→cancel).
 //
 // The generated `elc-...` Id is deliberately NOT asserted (matches JS).
+
 package toolnexus
 
 import (

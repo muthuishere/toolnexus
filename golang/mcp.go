@@ -1,6 +1,7 @@
 // Dynamic MCP source. Mirrors opencode's mcp/index.ts + mcp/catalog.ts, but
 // standalone: connect to every configured server, list tools, and convert each
 // into a uniform Tool. Built on github.com/mark3labs/mcp-go.
+
 package toolnexus
 
 import (

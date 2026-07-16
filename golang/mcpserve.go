@@ -10,6 +10,7 @@
 // Transport — streamable-HTTP, built on the same github.com/mark3labs/mcp-go the
 // client side already uses: mounted at POST /mcp on the Serve(addr, …) server,
 // alongside the A2A routes (see serve.go).
+
 package toolnexus
 
 import (

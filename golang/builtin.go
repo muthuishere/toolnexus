@@ -5,6 +5,7 @@
 // Every tool obeys the uniform Tool/ToolResult contract: a failure is a
 // ToolResult{IsError:true}, never a panic across the boundary. Paths resolve
 // relative to the process working directory unless absolute.
+
 package toolnexus
 
 import (

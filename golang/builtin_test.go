@@ -1,5 +1,6 @@
 // Built-in tool tests (no network beyond httptest, no LLM). Mirrors the builtin
 // section of js/test/unit.test.ts. Run: go test -race ./...
+
 package toolnexus
 
 import (

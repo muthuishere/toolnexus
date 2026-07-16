@@ -1,5 +1,6 @@
 // Toolkit — aggregates dynamic MCP tools + the skill tool + custom tools into a
 // single uniform list, with provider adapters and a single Execute() router.
+
 package toolnexus
 
 import (

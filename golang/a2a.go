@@ -10,6 +10,7 @@
 // endpoint), so a toolnexus agent interoperates with real A2A peers. See
 // ../SPEC.md §7A and openspec/changes/add-a2a-agents. Reuses the ${ENV} header
 // expansion from http.go; secrets live in the environment and are never logged.
+
 package toolnexus
 
 import (

@@ -2,6 +2,7 @@
 // DisableSkills ergonomic layer. Client-side gaps use an httptest LLM that
 // captures the request body; MCP-side gaps use a real streamable-HTTP MCP server
 // built from buildMcpServer (hermetic, no external network).
+
 package toolnexus
 
 import (

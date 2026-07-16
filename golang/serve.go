@@ -13,6 +13,7 @@
 // persistence is a pluggable TaskStore (in-memory default; file / custom
 // selectable via A2AConfig.Store). See ../SPEC.md §7B and
 // openspec/changes/add-a2a-agents.
+
 package toolnexus
 
 import (

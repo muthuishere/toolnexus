@@ -3,6 +3,7 @@
 // full A2A round-trip: an in-process toolkit is SERVED, then this port's OWN
 // outbound AgentTools calls it end-to-end. Mirrors js/test serve tests.
 // Run: go test -race .
+
 package toolnexus
 
 import (

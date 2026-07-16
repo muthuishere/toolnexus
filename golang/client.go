@@ -1,6 +1,7 @@
 // Unified LLM client — the host loop. Give it a base URL + a style
 // ("openai" | "anthropic"), and it runs the tool-calling agent loop against a
 // Toolkit. Mirrors js/src/client.ts and SPEC.md §8.
+
 package toolnexus
 
 import (

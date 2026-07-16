@@ -1,5 +1,6 @@
 // Native / annotation tools — turn a plain function into a uniform Tool.
 // Mirrors js/src/native.ts (defineTool) and SPEC.md §6.
+
 package toolnexus
 
 import (

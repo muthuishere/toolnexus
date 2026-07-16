@@ -2,6 +2,7 @@
 // (gopkg.in/yaml.v3), so folded (`>`)/literal (`|`) block scalars resolve and
 // scalar values are trimmed — keeping the ports byte-identical. Mirrors the
 // consensus matrix in js/test. See SPEC.md §3.
+
 package toolnexus
 
 import (
