@@ -1,5 +1,6 @@
 // HTTP / REST tools — declare a remote endpoint as a uniform Tool.
 // Mirrors js/src/http.ts and SPEC.md §7.
+
 package toolnexus
 
 import (

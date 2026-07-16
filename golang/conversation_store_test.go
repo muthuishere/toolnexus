@@ -3,6 +3,7 @@
 // whose reply is the number of messages it received, so a growing count proves
 // history is being loaded. Mirrors the js/test conversation-store tests.
 // Run: go test -race .
+
 package toolnexus
 
 import (

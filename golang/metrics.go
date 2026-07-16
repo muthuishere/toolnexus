@@ -4,6 +4,7 @@
 // format by hand (no third-party dependency — the format is plain text). The
 // rendered text is BYTE-IDENTICAL across all ports; mirrors the js
 // MetricsRegistry in src/client.ts.
+
 package toolnexus
 
 import (

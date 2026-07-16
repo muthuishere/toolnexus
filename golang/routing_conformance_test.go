@@ -10,6 +10,7 @@
 //  2. Route gate — a beforeLLM hook can gate an expensive-tier route (the
 //     brain-check seam): abort unless a reason is supplied, while a cheap-tier
 //     route runs unimpeded.
+
 package toolnexus
 
 import (

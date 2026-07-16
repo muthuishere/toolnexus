@@ -1,5 +1,6 @@
 // Resilience + streaming tests for the unified client. Hermetic (httptest, no
 // real LLM). Mirrors js/test resilience tests. Run with -race.
+
 package toolnexus
 
 import (

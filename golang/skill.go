@@ -7,6 +7,7 @@
 // (SkillDef) — SPEC.md §3. Directory-sourced skills keep the exact file:// base
 // + on-disk sibling sampling (byte-identical); data-sourced skills use a logical
 // skill://name/ base + a supplied resource list and never touch disk.
+
 package toolnexus
 
 import (

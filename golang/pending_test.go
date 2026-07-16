@@ -10,6 +10,7 @@
 //
 //	A) WaitFor provided → the engine resolves + retries transparently; the model gets the answer.
 //	B) no WaitFor       → Run halts with { Status:"pending", Pending:request } to resume later.
+
 package toolnexus
 
 import (

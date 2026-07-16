@@ -1,6 +1,7 @@
 // Provider adapters — turn the uniform tool list into each LLM's tool schema.
 // Execution is identical for every provider: read the tool name + args the model
 // returned, call Toolkit.Execute(name, args), feed output back.
+
 package toolnexus
 
 // OpenAITool is one entry in the OpenAI `tools` array.
