@@ -234,7 +234,9 @@ export class AgentRuntime {
     if (h.state === "running") {
       if (opts?.force) h.abort?.abort(new Error("closed"))
       else {
-        await Promise.race([this.wait(h, this.opts.shutdownMs ?? 200), null])
+        // graceful: let the running turn finish, bounded by shutdownMs
+        // (python port caught the original Promise.race([.., null]) resolving instantly)
+        await this.wait(h, this.opts.shutdownMs ?? 200)
       }
     }
     const reason = opts?.reason ?? (opts?.force ? "interrupted" : "closed")
