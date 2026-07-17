@@ -252,6 +252,67 @@ transition traces against shared `examples/` fixtures on the virtual clock (§0 
 - Structural anti-LangChain: no builders, no YAML pipelines, no graph DSL — everything
   compiles to the six verbs.
 
+## Spike 1 results — 6/6 ports, 276/276 checks (2026-07-18, branch spike-agent-runtime)
+
+All six ports implement substrate v2 + UX sugar and pass the same 46 acceptance checks
+(S1–S13) on hermetic mock LLMs: js (reference) · python (asyncio, injectable
+http_transport — zero network) · golang (race-detector clean, RoundTripper gate) ·
+java (virtual threads, Options.httpClient gate) · csharp (DelegatingHandler gate,
+shipped suite still green) · elixir (GenServer-native, shipped suite still green).
+Elixir verdict: "maps almost embarrassingly cleanly" — 4 of 5 amendments compile to
+monitors, deferred replies, and process kill.
+
+### Spec-extraction checklist (fold ALL of these into the OpenSpec change / SPEC.md)
+
+Concurrency rules JS single-threadedness hid (independently rediscovered by py/go/java/
+csharp/elixir — pin once):
+1. **Wake admission is atomic with the verb** — the admission check, slot take, and
+   state transition happen as one atomic step at the parent (elixir F2, go #1, java,
+   csharp #4, python #2). Dequeue transfers the slot, never decrement-then-increment.
+2. **wait resolves with the next result OR the last result** — a settled idle handle
+   answers immediately; registration-before-wake must not be required (elixir F5,
+   go #2, csharp #3).
+3. **Turn gate releases on acquirer DEATH** — monitor-based release, never reliant on
+   the acquirer's cleanup path (elixir; a hard-killed Run must not leak its slot; the
+   JS finally-block survives only by promise-unwind luck).
+4. **Handle→handle calls go strictly rootward**; parent→child interaction is
+   non-blocking (cast); downward traversal (close/list/resume) runs from outside the
+   tree (elixir F3 — otherwise naive concurrent ports deadlock).
+5. **Budget enforcement is eventually-consistent between turn boundaries** (elixir F4 —
+   already implied by Law 1; state it).
+
+Wire/shape decisions three ports made identically (adopt):
+6. **Handle path rides `Request.data.path`** (go/java/csharp/elixir all forced it;
+   JS's duck-typed spread is the outlier). Each level stamps its own path; parent
+   prefix property is what makes "path to the leaf" hold — pin that deliberately.
+7. **Interrupt needs a distinguishable abort signal per port**: js AbortController ✓,
+   go context ✓ (cause owned by runtime), python ✗ (cancel Event is between-attempts
+   only — no mid-request abort), java ✗ (no signal on ask/run; thread interrupt used),
+   csharp ~ (folds into RunTimeoutException), elixir ✓ structurally (kill the Run
+   process). SPEC ask: a first-class cancel token on ask/run in all ports, or a
+   documented per-port cancellation contract.
+8. **The client transport seam (§8 Gap 2) is validated as THE gate/mock seam** in
+   js/python/go/java/csharp — but the **shipped Elixir client lacks it** (only
+   http_options plug — works in-process, cannot wrap a real base_url). Elixir needs a
+   first-class transport seam in the real change.
+
+Honesty items (spike shortcuts the real change must fix):
+9. **Fresh-client-per-turn means the transcript does NOT actually survive turns** —
+   "resume at checkpoint" passes because mocks are stateless (go #2). Real runtime:
+   inject one runtime-wide ConversationStore (seam exists everywhere).
+10. **§10 transcript detail is inconsistent across shipped ports** — go appends the
+    halted tool's placeholder result (client.go:941-947), C#/JS reported appending too,
+    yet the resume mock saw toolMsgs=0 in JS. Verify definitively per port before the
+    change; reattach-by-task-key works either way but the spec must state one truth.
+11. Injectable clock is a runtime obligation the shipped ports don't offer (heartbeat
+    fixtures ran on real time everywhere) — needed for deterministic conformance.
+12. Elixir Client.create spawns unlinked store/metrics Agents — per-turn clients leak;
+    runtime-owned client lifecycle needed.
+13. Registry iteration order changes the task tool's description prose across
+    languages — sort by name before composing (byte-parity landmine).
+14. JS graceful-close Promise.race bug — FIXED in 215aa66 (caught by python, confirmed
+    by go/java/csharp/elixir).
+
 ## Parked distinctive ideas (own changes later, if ever)
 
 - Virtual-tool grouping 64/96/128 (copilot) or BM25 `tool_search` (codex) — for huge MCP piles.
