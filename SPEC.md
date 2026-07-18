@@ -766,6 +766,16 @@ key** (agent+prompt) — settled ⇒ its recorded result; suspended ⇒ its pend
 await — and never spawns a duplicate. Reattachment (not transcript inspection, not a
 completion cache) is the required idempotency mechanism.
 
+Three pins the first implementations forced: (1) **rewind-to-checkpoint** — on a durable
+pending the runtime restores the handle's PERSISTED transcript to its pre-turn snapshot
+(the §10 placeholder-append rule is scoped to bare-client runs; a persisted placeholder
+would make the resumed parent skip re-invoking `task`); (2) **two resume shapes** —
+inline resume traces `suspended→running` (the Run never ended); durable resume traces
+`suspended→idle` (Answer accepted, checkpoint restored) then `idle→running` (the replay
+wake); the Answer remains the only exit from `suspended` in both; (3) **result status
+vocabulary is closed**: `"done" | "pending" | "incomplete" | "interrupted" | "closed" |
+"timeout" | "error"` — identical strings in all six ports.
+
 ### Errors: one boundary rule
 
 Mechanical retry/backoff (§8) runs at the level where the failure occurred. A failed
@@ -1215,8 +1225,9 @@ When a tool call returns a suspension (`metadata.pending` = `request`):
 RunResult {
   ...                          // as §8
   status:   "done" | "pending" | "incomplete"
+  limit?:   string             // set ONLY when status="incomplete": which limit stopped it ("maxTurns", …)
                                // "pending" ⇒ a tool suspended and no waitFor was set
-                               // "incomplete" ⇒ a §7D limit stopped the run (loud, named in metadata)
+                               // "incomplete" ⇒ a §7D limit stopped the run (loud, named in `limit`)
   pending:  Request?           // present iff status == "pending"
 }
 ```
@@ -1254,12 +1265,14 @@ channel handler can push the link in real time:
 ### Agent escalation addendum (§7D)
 
 - **`Request.data.path`** — when a suspension propagates across an agent boundary, the
-  suspended handle's deterministic id path rides `data.path` (array of segments) — the
+  suspended handle's deterministic id path rides `data.path` (array of segments; each
+  relaying level stamps its own parent-prefixed path, so the value identifies the
+  suspended SUBTREE — Answer routing is defined as deepest-suspended within it) — the
   ONE portable location (closed Request shapes in Go/Java/C#/Elixir forbid grafted
   fields). Each relaying level stamps its own path; parent-prefixed ids make the deepest
   path identify the suspended leaf's subtree, which is how the runtime routes the Answer.
 - **Halted-tool transcript rule (verified in all six shipped clients, 2026-07-18)**: on a
-  durable halt every port APPENDS the first halted tool's placeholder result (`role:
+  durable halt every BARE-CLIENT run APPENDS the first halted tool's placeholder result (`role:
   "tool"`, content = the pending output) to the transcript, then returns `pending`; later
   concurrent suspensions' placeholders never enter (they re-suspend on resume, §10
   first-in-order). Resume therefore re-invokes the halted tool via retry-with-answer —

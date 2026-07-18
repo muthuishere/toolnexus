@@ -15,11 +15,36 @@ conformance is judged on transition traces against shared fixtures.
 - **WHEN** a suspended handle receives posts or wakes that are not the Answer to its
   pending Request
 - **THEN** the items buffer in the inbox, no transition occurs, and only the matching
-  Answer moves the handle to `running`
+  Answer moves the handle out of `suspended`
+
+#### Scenario: Two resume shapes, one authority rule
+- **WHEN** an inline interpreter (waitFor) answers a suspension
+- **THEN** the handle traces `suspended→running` (the Run never ended)
+- **WHEN** a durable pending is later resumed by an Answer routed to the runtime
+- **THEN** the handle transits `suspended→idle` (Answer accepted, checkpoint restored)
+  then `idle→running` (the replay wake) — the Answer remains the ONLY thing that moves
+  a handle out of `suspended` in both shapes
+
+#### Scenario: Answer routing is deepest-suspended
+- **WHEN** an Answer arrives for a durable pending whose `data.path` names a relaying
+  ancestor's subtree
+- **THEN** the runtime routes it to the deepest suspended handle within that subtree
+  (`data.path` identifies the suspended SUBTREE — each relaying level stamps its own
+  path, parent-prefixed — not necessarily the leaf itself)
 
 #### Scenario: Transition trace parity
 - **WHEN** the same fixture runs against any two ports on the virtual clock
-- **THEN** the sequence of state transitions per handle id is identical
+- **THEN** the sequence of state transitions per handle id is identical; fixture
+  transition entries may use the full `state→state` form or the `→state` suffix form —
+  conformance matches by suffix, and the two forms are equivalent
+
+#### Scenario: The §10 append rule is scoped to the bare client
+- **WHEN** a bare client run halts durably
+- **THEN** the halted tool's placeholder result is appended to its transcript (§10)
+- **WHEN** the SAME halt happens under an agent-runtime handle
+- **THEN** the runtime's rewind-to-checkpoint governs the PERSISTED transcript (the
+  placeholder never survives in the store) — the two rules compose, they do not
+  conflict
 
 ### Requirement: Six host verbs with deterministic ids
 The runtime SHALL expose exactly `spawn, post, wake, wait, interrupt, close` as the
@@ -116,7 +141,15 @@ through §10 as an approval Request.
 
 #### Scenario: maxTurns without answer
 - **WHEN** a run reaches its turn cap still emitting tool calls
-- **THEN** the result status is `"incomplete"`, not `"done"`
+- **THEN** the result status is `"incomplete"`, not `"done"`, and `RunResult` carries
+  the limit name in an optional `limit` field (e.g. `"maxTurns"`, `"maxTokens"`) — the
+  spec'd home for "which limit", since RunResult has no metadata map
+
+#### Scenario: Task-result status vocabulary is closed
+- **WHEN** a handle's run settles by any path
+- **THEN** its result status is exactly one of `"done" | "pending" | "incomplete" |
+  "interrupted" | "closed" | "timeout" | "error"` — the same seven strings in every
+  port (trace and fixture conformance depends on this vocabulary)
 
 ### Requirement: Three backpressure gates, always loud
 (1) The inbox SHALL be bounded; a post to a full inbox is rejected synchronously to
