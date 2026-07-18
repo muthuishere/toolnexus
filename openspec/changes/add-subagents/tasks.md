@@ -30,9 +30,10 @@ normal source tree — do not merge spike files as-is.
 - [x] 1.3 java: cancel token on ask/run (interruptible virtual-thread contract) +
       documented contract (`LlmClient.CancelToken` + `CancelledException`; classified
       by token state, never retried, bypasses onError)
-- [ ] 1.4 csharp: classify external cancellation distinctly from timeout on the
+- [x] 1.4 csharp: classify external cancellation distinctly from timeout on the
       interrupt path (token state, not exception type)
 - [ ] 1.5 all ports: `"incomplete"` RunStatus value (loud limit stops)
+      (csharp ✅ — all four loop paths return `"incomplete"` at MaxTurns)
       — java DONE (maxTurns-with-tool-calls ⇒ `status:"incomplete"` on all four
       run/stream paths); js/python/golang/csharp/elixir pending
 
@@ -76,10 +77,10 @@ normal source tree — do not merge spike files as-is.
 
 ## 6. csharp
 
-- [ ] 6.1 Runtime substrate (SemaphoreSlim gate in DelegatingHandler, atomic
+- [x] 6.1 Runtime substrate (SemaphoreSlim gate in DelegatingHandler, atomic
       StartTurn, wait next-or-last)
-- [ ] 6.2 task + team + reattachment; Agent()/AsTool()
-- [ ] 6.3 46 checks as xUnit against shared fixtures; full suite green
+- [x] 6.2 task + team + reattachment; Agent()/AsTool()
+- [x] 6.3 46 checks as xUnit against shared fixtures; full suite green
 
 ## 7. elixir
 
