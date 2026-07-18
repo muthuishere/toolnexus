@@ -32,7 +32,15 @@ defmodule Toolnexus.Client.InMemoryConversationStore do
 end
 
 defmodule Toolnexus.Client.RunResult do
-  @moduledoc "Full outcome + telemetry of one `run`/`ask` (SPEC §8, §10)."
+  @moduledoc """
+  Full outcome + telemetry of one `run`/`ask` (SPEC §8, §10).
+
+  `status` is `"done"` | `"pending"` | `"incomplete"`: `"pending"` ⇒ a tool suspended
+  and no `wait_for` was set (§10); `"incomplete"` ⇒ a limit stopped the run loudly
+  (`max_turns` reached with the model still emitting tool calls — SPEC §7D/§10 addendum),
+  never a silent `"done"`. `limit` names the limit ("maxTurns") and is set ONLY when
+  `status` is `"incomplete"`.
+  """
   defstruct text: "",
             messages: [],
             tool_calls: [],
@@ -41,6 +49,7 @@ defmodule Toolnexus.Client.RunResult do
             usage: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0},
             model: nil,
             status: "done",
+            limit: nil,
             pending: nil
 
   @type t :: %__MODULE__{
@@ -52,6 +61,7 @@ defmodule Toolnexus.Client.RunResult do
           usage: %{prompt_tokens: integer(), completion_tokens: integer(), total_tokens: integer()},
           model: String.t() | nil,
           status: String.t(),
+          limit: String.t() | nil,
           pending: Toolnexus.Request.t() | nil
         }
 end
@@ -65,8 +75,9 @@ defmodule Toolnexus.Client.MetricsRegistry do
   @duration_buckets [0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0]
   @bucket_labels ["0.05", "0.1", "0.25", "0.5", "1", "2.5", "5", "10", "30", "60"]
 
-  def new do
-    {:ok, pid} = Agent.start(fn -> initial() end)
+  def new(opts \\ []) do
+    starter = if opts[:link], do: &Agent.start_link/1, else: &Agent.start/1
+    {:ok, pid} = starter.(fn -> initial() end)
     pid
   end
 
@@ -244,6 +255,7 @@ defmodule Toolnexus.Client do
             request_params: nil,
             body_transform: nil,
             http_options: [],
+            transport: nil,
             on_error: nil,
             registry: nil,
             deadline: nil
@@ -268,7 +280,18 @@ defmodule Toolnexus.Client do
   - `:request_params` — map shallow-merged into every LLM body AFTER base keys (caller wins;
     `messages`/`tools`/`stream` forbidden) — §8 Gap 1
   - `:body_transform` — `(body -> body)` run LAST after the merge — §8 Gap 1
-  - `:http_options` — extra `Req` options for the LLM path (§8 Gap 2)
+  - `:http_options` — extra `Req` options for the LLM path (§8 Gap 2, in-process variant)
+  - `:transport` — §8 Gap 2, the first-class injectable HTTP transport for the LLM path:
+    a function `(request -> {:ok, response} | {:error, Exception.t()})` where `request` is
+    `%{method: :post, url: String.t(), headers: %{String.t() => String.t()}, body: map(),
+    receive_timeout: non_neg_integer() | nil}` (`body` is the un-marshalled JSON body) and
+    `response` is `%{status: integer(), headers: map() | list(), body: term()}` (`body`
+    decoded for JSON endpoints, raw binary for SSE). It replaces the wire call only —
+    retries, backoff, `Retry-After`, deadline, and error classification still run around
+    it, and it composes against a real `base_url` (unlike `:http_options` `:plug`, which
+    is in-process only). `nil` ⇒ the default `Req` transport, byte-identical behavior.
+  - `:registry` — inject a shared `MetricsRegistry` (e.g. one runtime-wide registry across
+    many clients); `nil` ⇒ a fresh private registry, byte-identical behavior
   """
   @spec create(keyword() | map()) :: t()
   def create(opts) do
@@ -286,7 +309,7 @@ defmodule Toolnexus.Client do
         retry_base_ms: client.retry_base_ms || 500,
         http_options: client.http_options || [],
         store: client.store || InMemoryConversationStore.new(),
-        registry: MetricsRegistry.new()
+        registry: client.registry || MetricsRegistry.new()
     }
   end
 
@@ -553,7 +576,7 @@ defmodule Toolnexus.Client do
     emit(client, if(req, do: Map.put(ev, :pending, true), else: ev))
   end
 
-  defp end_run(client, run_start, text, messages, tool_calls, turns, usage) do
+  defp end_run(client, run_start, text, messages, tool_calls, turns, usage, status \\ "done") do
     emit(client, %{
       event: "run",
       model: client.model,
@@ -571,7 +594,8 @@ defmodule Toolnexus.Client do
       turns: turns,
       usage: usage,
       model: client.model,
-      status: "done"
+      status: status,
+      limit: if(status == "incomplete", do: "maxTurns")
     }
   end
 
@@ -659,16 +683,9 @@ defmodule Toolnexus.Client do
   defp llm_request(client, url, headers, body, attempt) do
     check_deadline(client)
 
-    base_opts = [method: :post, url: url, headers: headers, json: body, retry: false]
+    receive_timeout = if client.deadline, do: max(client.deadline - now_ms(), 1)
 
-    base_opts =
-      if client.deadline,
-        do: Keyword.put(base_opts, :receive_timeout, max(client.deadline - now_ms(), 1)),
-        else: base_opts
-
-    opts = Keyword.merge(base_opts, client.http_options)
-
-    case Req.request(opts) do
+    case wire_call(client, url, headers, body, receive_timeout) do
       {:ok, %Req.Response{status: status} = resp} when status in 200..299 ->
         {:ok, resp}
 
@@ -704,6 +721,38 @@ defmodule Toolnexus.Client do
           llm_request(client, url, headers, body, attempt + 1)
         end
     end
+  end
+
+  # §8 Gap 2 — one wire call. With a `:transport` the host's function makes the call
+  # (LLM path only; retries/deadline/classification run around it here); without one,
+  # the default Req pipeline (plus `:http_options`) — byte-identical to before.
+  defp wire_call(%{transport: transport}, url, headers, body, receive_timeout)
+       when is_function(transport, 1) do
+    request = %{method: :post, url: url, headers: headers, body: body, receive_timeout: receive_timeout}
+
+    case transport.(request) do
+      {:ok, %{status: status} = resp} ->
+        {:ok,
+         Req.Response.new(
+           status: status,
+           headers: Map.get(resp, :headers) || %{},
+           body: Map.get(resp, :body)
+         )}
+
+      {:error, e} ->
+        {:error, e}
+    end
+  end
+
+  defp wire_call(client, url, headers, body, receive_timeout) do
+    base_opts = [method: :post, url: url, headers: headers, json: body, retry: false]
+
+    base_opts =
+      if receive_timeout,
+        do: Keyword.put(base_opts, :receive_timeout, receive_timeout),
+        else: base_opts
+
+    Req.request(Keyword.merge(base_opts, client.http_options))
   end
 
   # §8 Resilience. Host-classified retry-vs-fail. Absent on_error ⇒ the default classifier
@@ -973,8 +1022,10 @@ defmodule Toolnexus.Client do
     loop_openai(client, toolkit, key, run_start, st, 0)
   end
 
+  # §10 addendum / §7D: a maxTurns stop with the model still emitting tool calls is a
+  # LIMIT stop — status "incomplete", never a silent "done".
   defp loop_openai(client, _toolkit, _key, run_start, st, turn) when turn >= client.max_turns do
-    end_run(client, run_start, last_text(st.messages), st.messages, st.tool_calls, st.turns, st.usage)
+    end_run(client, run_start, last_text(st.messages), st.messages, st.tool_calls, st.turns, st.usage, "incomplete")
   end
 
   defp loop_openai(client, toolkit, key, run_start, st, turn) do
@@ -1049,7 +1100,7 @@ defmodule Toolnexus.Client do
   end
 
   defp loop_anthropic(client, _toolkit, _key, _sys, run_start, st, turn) when turn >= client.max_turns do
-    end_run(client, run_start, "", st.messages, st.tool_calls, st.turns, st.usage)
+    end_run(client, run_start, "", st.messages, st.tool_calls, st.turns, st.usage, "incomplete")
   end
 
   defp loop_anthropic(client, toolkit, key, sys, run_start, st, turn) do
@@ -1144,7 +1195,7 @@ defmodule Toolnexus.Client do
   end
 
   defp stream_loop_openai(client, _toolkit, _key, run_start, st, turn, emit) when turn >= client.max_turns do
-    emit.(%{type: "done", result: end_run(client, run_start, last_text(st.messages), st.messages, st.tool_calls, st.turns, st.usage)})
+    emit.(%{type: "done", result: end_run(client, run_start, last_text(st.messages), st.messages, st.tool_calls, st.turns, st.usage, "incomplete")})
   end
 
   defp stream_loop_openai(client, toolkit, key, run_start, st, turn, emit) do
@@ -1314,7 +1365,7 @@ defmodule Toolnexus.Client do
   end
 
   defp stream_loop_anthropic(client, _toolkit, _key, _sys, run_start, st, turn, emit) when turn >= client.max_turns do
-    emit.(%{type: "done", result: end_run(client, run_start, "", st.messages, st.tool_calls, st.turns, st.usage)})
+    emit.(%{type: "done", result: end_run(client, run_start, "", st.messages, st.tool_calls, st.turns, st.usage, "incomplete")})
   end
 
   defp stream_loop_anthropic(client, toolkit, key, sys, run_start, st, turn, emit) do

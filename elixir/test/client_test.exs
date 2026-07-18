@@ -318,7 +318,8 @@ defmodule Toolnexus.ClientTest do
     result = Client.run(client, "loop forever", [add_tool()])
 
     assert result.turns == 2
-    assert result.status == "done"
+    # SPEC §7D/§10 addendum: a maxTurns stop mid-tool-calls is LOUD — "incomplete", not "done"
+    assert result.status == "incomplete"
     assert result.text == ""
     assert result.tool_call_count == 2
     assert length(captured(agent)) == 2

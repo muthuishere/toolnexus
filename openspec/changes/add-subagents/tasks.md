@@ -24,7 +24,12 @@ normal source tree — do not merge spike files as-is.
 
 ## 1. Client seams (small, per port, before the runtime lands)
 
-- [ ] 1.1 elixir: first-class transport seam on the client (§8 Gap 2 equivalent)
+- [x] 1.1 elixir: first-class transport seam on the client (§8 Gap 2 equivalent) —
+      `Client :transport` option: `(request -> {:ok, %{status, headers, body}} |
+      {:error, e})`; retries/Retry-After/deadline/classification wrap it; composes
+      against a real base_url (unlike the in-process `http_options: :plug`); nil ⇒
+      byte-identical default; `:registry` injection added for the runtime-wide
+      MetricsRegistry
 - [x] 1.2 python: cooperative cancel seam (between-attempts minimum; transport abort
       where urllib/httpx allows) + documented contract
 - [x] 1.3 java: cancel token on ask/run (interruptible virtual-thread contract) +
@@ -32,12 +37,13 @@ normal source tree — do not merge spike files as-is.
       by token state, never retried, bypasses onError)
 - [x] 1.4 csharp: classify external cancellation distinctly from timeout on the
       interrupt path (token state, not exception type)
-- [ ] 1.5 all ports: `"incomplete"` RunStatus value (loud limit stops) — python ✅,
+- [x] 1.5 all ports: `"incomplete"` RunStatus value (loud limit stops) — python ✅,
       csharp ✅ (all four loop paths at MaxTurns), java ✅ (all four run/stream
       paths), js ✅ (all four run/stream paths; a maxTurns exit with no final text
       ⇒ `status:"incomplete"` + `limit:"maxTurns"`), golang ✅ (all four run/stream
-      paths, `RunResult.Limit` mirrors js `limit`, lastText on the openai exits);
-      remaining: elixir
+      paths, `RunResult.Limit` mirrors js `limit`, lastText on the openai exits),
+      elixir ✅ (all four run/stream paths at max_turns ⇒ `status: "incomplete"` +
+      `limit: "maxTurns"`)
 
 ## 2. js (reference port)
 
@@ -112,11 +118,34 @@ normal source tree — do not merge spike files as-is.
 
 ## 7. elixir
 
-- [ ] 7.1 Runtime substrate as OTP (Handle GenServer w/ inbox-as-state,
-      DynamicSupervisor, monitor-released turn gate, rootward-call discipline,
-      runtime-owned client lifecycle — no leaked store/metrics Agents)
-- [ ] 7.2 task + team + reattachment; agent/2, as_tool/2
-- [ ] 7.3 46 checks as ExUnit against shared fixtures; coverage gate ≥95% held
+- [x] 7.1 Runtime substrate as OTP (`Toolnexus.Agents.{Runtime,Handle,TurnGate,
+      Trace,Clock}`): Handle GenServer with inbox-as-state + transactional drain
+      (restored on interrupt AND forced close), DynamicSupervisor, monitor-released
+      turn gate around the LLM call only (via the new client `:transport` seam),
+      rootward-call discipline documented in the Handle moduledoc, atomic admission
+      (check + slot + drain + kill-target + state flip in one handle_call),
+      deferred-reply wait (next-or-last; settled/suspended answer immediately;
+      spawner-only capability), live-ancestor budgets incl. max_tool_calls /
+      max_wall_ms (settling `incomplete` + `limit`), closed 7-string status
+      vocabulary, durable resume suspended→idle→running with checkpoint rewind
+      (suspended turns never advance the store), Request data.path stamped per
+      relaying level, injectable clock, name-sorted registry composition,
+      runtime-owned client lifecycle: ONE linked ConversationStore + ONE linked
+      MetricsRegistry shared by per-handle clients (zero per-turn processes;
+      `shutdown/1` tears everything down; host-injected stores survive)
+- [x] 7.2 task + team + reattachment; agent/2, as_tool/2 — task tool only for defs
+      with a team (opt-in recursion), sorted team description, reattach-by-task-key
+      as the ONLY idempotency (no cache; closed children answer from queryable
+      final state); `Toolnexus.Agents.agent/2 + run/3 + as_tool/2` (`AgentDef`,
+      namespaced clear of A2A), as_tool relays §10 pending and resumes via
+      ctx.answer
+- [x] 7.3 46 checks as ExUnit against shared fixtures (test/agents/: fanout,
+      escalation, durable-resume, lifecycle, budgets, ux) + infra/edge suites
+      (transcript-survives, no-leak, virtual clock, wait capability, forced-close
+      escalation without resurrection, refusal-settles, error/crash-as-result);
+      `mix test` 328 passed, `mix coveralls` 96.9% (gate 95). NOTE: durable-resume
+      transition assertions follow the e54498a SPEC pin (suspended→idle hop); the
+      shared fixture predates the pin and omits it
 
 ## 8. Parity + docs
 
