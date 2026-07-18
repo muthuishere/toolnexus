@@ -155,10 +155,14 @@ export interface RunResult {
   usage: Usage
   /** The model used. */
   model: string
-  /** "done" normally; "pending" iff a tool suspended and no waitFor was configured (§10). */
-  status: "done" | "pending"
+  /** "done" normally; "pending" iff a tool suspended and no waitFor was configured (§10);
+   * "incomplete" iff a limit stopped the run loudly (§7D) — a maxTurns stop with no final
+   * text is never a silent "done". */
+  status: "done" | "pending" | "incomplete"
   /** The unresolved suspension — present iff status === "pending" (§10). */
   pending?: Request
+  /** The limit that stopped the run (e.g. "maxTurns") — present iff status === "incomplete". */
+  limit?: string
 }
 
 /** Events yielded by client.stream(). */
@@ -379,10 +383,11 @@ export class Client {
     this.opts.onMetric?.(ev)
   }
 
-  /** Emit the terminal `run` metric event and build the RunResult. */
-  private endRun(runStart: number, text: string, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage): RunResult {
+  /** Emit the terminal `run` metric event and build the RunResult. `exhausted` marks a
+   * maxTurns loop exit — with no final text that is a LOUD "incomplete", never "done" (§7D). */
+  private endRun(runStart: number, text: string, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage, exhausted = false): RunResult {
     this.emit({ event: "run", model: this.opts.model, turns, toolCalls: toolCalls.length, totalTokens: usage.totalTokens, ms: Date.now() - runStart })
-    return this.result(text, messages, toolCalls, turns, usage)
+    return this.result(text, messages, toolCalls, turns, usage, exhausted)
   }
 
   /** Emit a `run` error metric event (once, on a thrown run). */
@@ -596,15 +601,18 @@ export class Client {
           if (s.halted) return this.pendingRun(runStart, s.halted, messages, toolCalls, turns, usage)
         }
       }
-      return this.endRun(runStart, lastText(messages), messages, toolCalls, turns, usage)
+      return this.endRun(runStart, lastText(messages), messages, toolCalls, turns, usage, true)
     } catch (e) {
       this.emitRunError(runStart, toolCalls, turns, usage, e)
       throw e
     }
   }
 
-  private result(text: string, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage): RunResult {
-    return { text, messages, toolCalls, toolCallCount: toolCalls.length, turns, usage, model: this.opts.model, status: "done" }
+  private result(text: string, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage, exhausted = false): RunResult {
+    const incomplete = exhausted && text === ""
+    const r: RunResult = { text, messages, toolCalls, toolCallCount: toolCalls.length, turns, usage, model: this.opts.model, status: incomplete ? "incomplete" : "done" }
+    if (incomplete) r.limit = "maxTurns"
+    return r
   }
 
   /** §10: a run halted because a tool suspended and no `waitFor` was configured. */
@@ -702,7 +710,7 @@ export class Client {
         messages.push({ role: "user", content })
         if (halted) return this.pendingRun(runStart, halted, messages, toolCalls, turns, usage)
       }
-      return this.endRun(runStart, "", messages, toolCalls, turns, usage)
+      return this.endRun(runStart, "", messages, toolCalls, turns, usage, true)
     } catch (e) {
       this.emitRunError(runStart, toolCalls, turns, usage, e)
       throw e
@@ -798,7 +806,7 @@ export class Client {
           yield { type: "tool_result", id: c.id, name: c.name, output: result.output, isError: result.isError }
         }
       }
-      yield { type: "done", result: this.endRun(runStart, lastText(messages), messages, toolCalls, turns, usage) }
+      yield { type: "done", result: this.endRun(runStart, lastText(messages), messages, toolCalls, turns, usage, true) }
     } catch (e) {
       this.emitRunError(runStart, toolCalls, turns, usage, e)
       throw e
@@ -891,7 +899,7 @@ export class Client {
         }
         messages.push({ role: "user", content: results })
       }
-      yield { type: "done", result: this.endRun(runStart, "", messages, toolCalls, turns, usage) }
+      yield { type: "done", result: this.endRun(runStart, "", messages, toolCalls, turns, usage, true) }
     } catch (e) {
       this.emitRunError(runStart, toolCalls, turns, usage, e)
       throw e

@@ -32,20 +32,24 @@ normal source tree — do not merge spike files as-is.
       by token state, never retried, bypasses onError)
 - [x] 1.4 csharp: classify external cancellation distinctly from timeout on the
       interrupt path (token state, not exception type)
-- [ ] 1.5 all ports: `"incomplete"` RunStatus value (loud limit stops) — python ✅
-      (remaining: js, golang, java, csharp, elixir)
-      (csharp ✅ — all four loop paths return `"incomplete"` at MaxTurns)
-      — java DONE (maxTurns-with-tool-calls ⇒ `status:"incomplete"` on all four
-      run/stream paths); js/python/golang/csharp/elixir pending
+- [ ] 1.5 all ports: `"incomplete"` RunStatus value (loud limit stops) — python ✅,
+      csharp ✅ (all four loop paths at MaxTurns), java ✅ (all four run/stream
+      paths), js ✅ (all four run/stream paths; a maxTurns exit with no final text
+      ⇒ `status:"incomplete"` + `limit:"maxTurns"`); remaining: golang, elixir
 
 ## 2. js (reference port)
 
-- [ ] 2.1 Runtime substrate in `js/src/agents/` (state machine, six verbs, rails,
+- [x] 2.1 Runtime substrate in `js/src/agents/` (state machine, six verbs, rails,
       gates, budgets, lifecycle, runtime-wide store, injectable clock, deterministic
-      ids, provenance, transactional drain)
-- [ ] 2.2 task builtin + team scoping + reattachment; agent()/asTool() surface
-- [ ] 2.3 Port the 46 spike checks into `js/test/` as real tests (virtual clock);
-      run against shared fixtures; full suite green
+      ids, provenance, transactional drain; transcript REWIND on pending; exported
+      as the `agents` namespace per the cross-port collision rule)
+- [x] 2.2 task builtin + team scoping + reattachment; agent()/asTool() surface
+      (task tool only when the def declares a team; reattached settled children
+      close per the fixed durable-resume fixture)
+- [x] 2.3 Port the 46 spike checks into `js/test/agents.test.ts` as real tests
+      (virtual clock); driven by the shared fixtures incl. transition-trace parity;
+      + rewind/death-release/forced-close/escalation-of-close tests; full suite
+      green (111 pass)
 
 ## 3. python
 
