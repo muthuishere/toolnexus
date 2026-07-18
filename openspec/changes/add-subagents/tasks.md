@@ -35,7 +35,9 @@ normal source tree — do not merge spike files as-is.
 - [ ] 1.5 all ports: `"incomplete"` RunStatus value (loud limit stops) — python ✅,
       csharp ✅ (all four loop paths at MaxTurns), java ✅ (all four run/stream
       paths), js ✅ (all four run/stream paths; a maxTurns exit with no final text
-      ⇒ `status:"incomplete"` + `limit:"maxTurns"`); remaining: golang, elixir
+      ⇒ `status:"incomplete"` + `limit:"maxTurns"`), golang ✅ (all four run/stream
+      paths, `RunResult.Limit` mirrors js `limit`, lastText on the openai exits);
+      remaining: elixir
 
 ## 2. js (reference port)
 
@@ -63,10 +65,27 @@ normal source tree — do not merge spike files as-is.
 
 ## 4. golang
 
-- [ ] 4.1 Runtime substrate (mutex-atomic admission, slot-transfer dequeue,
-      RoundTripper turn gate w/ death release)
-- [ ] 4.2 task + team + reattachment; Agent()/AsTool()
-- [ ] 4.3 46 checks as go tests (-race) against shared fixtures; full suite green
+- [x] 4.1 Runtime substrate (mutex-atomic admission, slot-transfer dequeue,
+      RoundTripper turn gate w/ death release) — `golang/agents/` (subpackage:
+      `toolnexus.Agent` is already the A2A type, so the §7D surface is namespaced
+      `agents.Agent`/`agents.Runtime`, mirroring `js/src/agents/`). Admission is
+      fully atomic (checks + slot + DRAIN + cancel-context install + state flip
+      under one mutex hold); runtime-wide ConversationStore commits only completed
+      turns (= checkpoint rewind on durable pending); injectable Clock; live
+      ancestor budgets incl. MaxToolCalls/MaxWall; graceful close escalates to
+      interrupt after Shutdown and awaits the abort (drain restore, no
+      state resurrection); Request data.path stamped per relaying level
+- [x] 4.2 task + team + reattachment; Agent()/AsTool() — `agents.New/Run/AsTool`,
+      task tool only for defs declaring a Team (delegation opt-in), sorted team
+      description, reattach-by-task-key incl. closed-but-settled children (no
+      completion cache); persona/heartbeat kept USERLAND (agent-home is a later
+      change — exercised in tests over the six verbs, no library API)
+- [x] 4.3 46 checks as go tests (-race) against shared fixtures; full suite green —
+      `agents/runtime_test.go` (S1–S9, fixture-mapped, incl. transcript-rewind-on-
+      pending, forced-close drain restore, gate-release-on-acquirer-death, virtual-
+      clock wait timeout) + `agents/agent_test.go` (S10–S13 + durable Level-1) +
+      `golang/runstatus_incomplete_test.go` (client §8 addendum); 28 go tests /
+      60+ assertions, `go build ./... && go vet ./... && go test -race ./...` green
 
 ## 5. java
 
