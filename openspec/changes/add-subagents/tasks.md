@@ -25,14 +25,15 @@ normal source tree — do not merge spike files as-is.
 ## 1. Client seams (small, per port, before the runtime lands)
 
 - [ ] 1.1 elixir: first-class transport seam on the client (§8 Gap 2 equivalent)
-- [ ] 1.2 python: cooperative cancel seam (between-attempts minimum; transport abort
+- [x] 1.2 python: cooperative cancel seam (between-attempts minimum; transport abort
       where urllib/httpx allows) + documented contract
 - [x] 1.3 java: cancel token on ask/run (interruptible virtual-thread contract) +
       documented contract (`LlmClient.CancelToken` + `CancelledException`; classified
       by token state, never retried, bypasses onError)
 - [x] 1.4 csharp: classify external cancellation distinctly from timeout on the
       interrupt path (token state, not exception type)
-- [ ] 1.5 all ports: `"incomplete"` RunStatus value (loud limit stops)
+- [ ] 1.5 all ports: `"incomplete"` RunStatus value (loud limit stops) — python ✅
+      (remaining: js, golang, java, csharp, elixir)
       (csharp ✅ — all four loop paths return `"incomplete"` at MaxTurns)
       — java DONE (maxTurns-with-tool-calls ⇒ `status:"incomplete"` on all four
       run/stream paths); js/python/golang/csharp/elixir pending
@@ -48,9 +49,13 @@ normal source tree — do not merge spike files as-is.
 
 ## 3. python
 
-- [ ] 3.1 Runtime substrate (asyncio; synchronous wake admission per spec)
-- [ ] 3.2 task + team + reattachment; agent()/as_tool()
-- [ ] 3.3 46 checks as pytest against shared fixtures; full suite green
+- [x] 3.1 Runtime substrate (asyncio; synchronous wake admission per spec)
+- [x] 3.2 task + team + reattachment; agent()/as_tool()
+- [x] 3.3 46 checks as pytest against shared fixtures; full suite green
+      (`tests/test_agents_runtime.py` + `tests/test_agents_surface.py` +
+      `tests/test_client_cancel_incomplete.py`; note: the durable-resume fixture's
+      `phase2_expect.transitions` for `asker.1` omits the terminal `→closed` the
+      cascade's task performs — asserted as a prefix; fixture should gain it)
 
 ## 4. golang
 

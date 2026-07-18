@@ -125,8 +125,11 @@ class RunResult:
     usage: dict[str, int] = field(default_factory=_empty_usage)
     # The model used.
     model: str = ""
-    # "done" normally; "pending" iff a tool suspended and no wait_for was set (§10).
-    status: Literal["done", "pending"] = "done"
+    # "done" normally; "pending" iff a tool suspended and no wait_for was set (§10);
+    # "incomplete" iff a §7D limit stopped the run — here, ``max_turns`` exhausted
+    # while the model was still emitting tool calls with no final text (loud, never
+    # a silent "done").
+    status: Literal["done", "pending", "incomplete"] = "done"
     # The unresolved suspension — present iff status == "pending" (§10).
     pending: Optional[Request] = None
 
@@ -535,8 +538,14 @@ class Client:
         tool_calls: list[dict[str, Any]],
         turns: int,
         usage: dict[str, int],
+        at_limit: bool = False,
     ) -> RunResult:
-        """Emit the terminal ``run`` metric event and build the RunResult."""
+        """Emit the terminal ``run`` metric event and build the RunResult.
+
+        ``at_limit`` marks a run that ended by exhausting ``max_turns`` while the
+        model was still emitting tool calls; with no final assistant text that is a
+        loud ``status="incomplete"`` (§7D limit stop), never a silent ``"done"``.
+        """
         self._emit(
             {
                 "event": "run",
@@ -547,7 +556,7 @@ class Client:
                 "ms": _ms_since(run_start),
             }
         )
-        return self._result(text, messages, tool_calls, turns, usage)
+        return self._result(text, messages, tool_calls, turns, usage, at_limit=at_limit)
 
     def _emit_run_error(
         self,
@@ -581,6 +590,7 @@ class Client:
         tool_calls: list[dict[str, Any]],
         turns: int,
         usage: dict[str, int],
+        at_limit: bool = False,
     ) -> RunResult:
         return RunResult(
             text=text,
@@ -590,6 +600,7 @@ class Client:
             turns=turns,
             usage=usage,
             model=self.model,
+            status="incomplete" if at_limit and not text else "done",
         )
 
     # ----------------------------------------------------------------------- #
@@ -710,6 +721,38 @@ class Client:
                 return
             await asyncio.sleep(min(0.1, remaining))
 
+    @staticmethod
+    async def _fetch_once(
+        worker,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        per_req: float,
+        cancel: Optional[asyncio.Event],
+    ):
+        """One transport call in a worker thread, raced against the cancel token.
+
+        Cooperative-cancel contract (SPEC §7D, python row): urllib offers no way to
+        abort a blocked request, so when ``cancel`` fires mid-request the *run*
+        aborts immediately (:class:`RunCancelled`) while the worker thread finishes
+        in the background and its result is discarded. Observable outcome matches
+        the mid-request-abort ports; only the background thread's lifetime differs.
+        """
+        if cancel is None:
+            return await asyncio.to_thread(worker, url, headers, payload, per_req)
+        fetch = asyncio.ensure_future(asyncio.to_thread(worker, url, headers, payload, per_req))
+        watcher = asyncio.ensure_future(cancel.wait())
+        try:
+            done, _ = await asyncio.wait({fetch, watcher}, return_when=asyncio.FIRST_COMPLETED)
+            if fetch in done:
+                return fetch.result()
+            # Cancel fired first: abandon the in-flight request (see docstring).
+            # Retrieve any eventual exception so it is never logged as unhandled.
+            fetch.add_done_callback(lambda t: None if t.cancelled() else t.exception())
+            raise RunCancelled("run cancelled")
+        finally:
+            watcher.cancel()
+
     async def _llm_fetch(
         self,
         worker,
@@ -736,7 +779,7 @@ class Client:
         for attempt in range(self.retries + 1):
             per_req = self._remaining(deadline, cancel)
             try:
-                return await asyncio.to_thread(worker, url, headers, payload, per_req)
+                return await self._fetch_once(worker, url, headers, payload, per_req, cancel)
             except _HttpError as e:
                 last_err = e
                 retryable = e.status in _RETRYABLE
@@ -845,7 +888,20 @@ class Client:
         cancel: Optional[asyncio.Event] = None,
     ) -> RunResult:
         """Run the agent loop. ``history`` continues a prior transcript (the system
-        prompt is NOT re-added); ``cancel`` is an optional external abort token."""
+        prompt is NOT re-added); ``cancel`` is an optional external abort token.
+
+        Cancellation contract (SPEC §7D, python row — cooperative cancel):
+        ``cancel`` is an :class:`asyncio.Event`. Guaranteed observation points are
+        *between attempts*: before each LLM attempt, during retry backoff, and
+        between streamed SSE events. Additionally, transport-level abort where the
+        stack allows: the in-flight worker-thread request is raced against the
+        token (a fired cancel aborts the run immediately; the blocked ``urllib``
+        call itself cannot be interrupted, so its thread finishes in the background
+        and the result is discarded), and a live streaming response is closed. A
+        fired cancel raises :class:`RunCancelled` and is never retried. Only abort
+        *latency* differs from the mid-request-abort ports (JS/Go/C#/Elixir); the
+        observable outcome is identical.
+        """
         if self.style == "anthropic":
             return await self._run_anthropic(prompt, toolkit, history, cancel)
         return await self._run_openai(prompt, toolkit, history, cancel)
@@ -869,6 +925,10 @@ class Client:
         streaming loop runs and each assistant text delta is forwarded to it; ``ask``
         still returns the final :class:`RunResult`. Memory (id load/save) is handled by
         :meth:`stream`, so there is no duplication. Omit it ⇒ the non-streaming path.
+
+        ``cancel`` follows the cooperative-cancel contract documented on :meth:`run`
+        (SPEC §7D python row): between-attempts minimum, plus transport-level abort
+        where urllib allows; a fired cancel raises :class:`RunCancelled`.
         """
         if on_text is not None:
             result: Optional[RunResult] = None
@@ -1022,7 +1082,9 @@ class Client:
                     if halted is not None:
                         return self._pending_run(run_start, halted, messages, tool_calls, turns, usage)
 
-            return self._end_run(run_start, _last_text(messages), messages, tool_calls, turns, usage)
+            return self._end_run(
+                run_start, _last_text(messages), messages, tool_calls, turns, usage, at_limit=True
+            )
         except Exception as e:
             self._emit_run_error(run_start, tool_calls, turns, usage, e)
             raise
@@ -1138,7 +1200,7 @@ class Client:
                 if halted is not None:
                     return self._pending_run(run_start, halted, messages, tool_calls, turns, usage)
 
-            return self._end_run(run_start, "", messages, tool_calls, turns, usage)
+            return self._end_run(run_start, "", messages, tool_calls, turns, usage, at_limit=True)
         except Exception as e:
             self._emit_run_error(run_start, tool_calls, turns, usage, e)
             raise
@@ -1305,7 +1367,7 @@ class Client:
                         "is_error": result.is_error,
                     }
 
-            yield {"type": "done", "result": self._end_run(run_start, _last_text(messages), messages, tool_calls, turns, usage)}
+            yield {"type": "done", "result": self._end_run(run_start, _last_text(messages), messages, tool_calls, turns, usage, at_limit=True)}
         except Exception as e:
             self._emit_run_error(run_start, tool_calls, turns, usage, e)
             raise
@@ -1470,7 +1532,7 @@ class Client:
                         return
                 messages.append({"role": "user", "content": results})
 
-            yield {"type": "done", "result": self._end_run(run_start, "", messages, tool_calls, turns, usage)}
+            yield {"type": "done", "result": self._end_run(run_start, "", messages, tool_calls, turns, usage, at_limit=True)}
         except Exception as e:
             self._emit_run_error(run_start, tool_calls, turns, usage, e)
             raise
@@ -1497,6 +1559,21 @@ class Client:
         queue: asyncio.Queue = asyncio.Queue(maxsize=256)
         _SENTINEL = object()
         stop = threading.Event()
+
+        # Transport-level abort (SPEC §7D python row): once the response is live we DO
+        # hold something closeable, so an external cancel closes the streaming response
+        # — the reader thread unblocks and the loop below raises RunCancelled.
+        canceller: Optional[asyncio.Task] = None
+        if cancel is not None:
+
+            async def _abort_on_cancel() -> None:
+                await cancel.wait()
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+
+            canceller = asyncio.ensure_future(_abort_on_cancel())
 
         def reader() -> None:
             buf = b""
@@ -1541,6 +1618,8 @@ class Client:
                     raise item
                 yield item
         finally:
+            if canceller is not None:
+                canceller.cancel()
             stop.set()
             try:
                 resp.close()
