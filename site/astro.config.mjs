@@ -48,6 +48,7 @@ export default defineConfig({
 						{ label: 'Bring your own HTTP client', slug: 'cookbook/bring-your-own-http-client' },
 						{ label: 'Fail fast, or retry', slug: 'cookbook/fail-fast-or-retry' },
 						{ label: 'Multi-turn memory', slug: 'cookbook/memory' },
+						{ label: 'Sub-agents & teams', slug: 'cookbook/subagents' },
 					],
 				},
 				{
@@ -71,6 +72,7 @@ export default defineConfig({
 						{ label: 'HTTP / REST tools', slug: 'http' },
 						{ label: 'Built-in tools', slug: 'builtins' },
 						{ label: 'A2A — remote agents', slug: 'a2a' },
+						{ label: 'Sub-agents & teams', slug: 'subagents' },
 						{ label: 'Suspension & the human loop', slug: 'suspension' },
 					],
 				},

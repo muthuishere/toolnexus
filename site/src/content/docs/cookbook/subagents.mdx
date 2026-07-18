@@ -1,0 +1,186 @@
+---
+title: Sub-agents & teams
+description: Give your agent a team — delegate subtasks to scoped, isolated sub-agents with one task call, and get back one clean result with tokens rolled up. In all six languages.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+One agent doing everything ends up with a bloated context and every dangerous tool at once.
+The fix is the same one every serious coding agent ships: **delegate**. Define a small team of
+scoped agents; the parent's model calls the built-in `task` tool; each child runs on a fresh
+transcript with only *its* tools, and returns one final answer.
+
+## Why you need this
+
+- **Context isolation.** A research detour burns the child's context, not the parent's. The
+  parent sees one tool message per delegation — never the child's 40-turn transcript.
+- **Least privilege.** `uses` scopes what a child can touch. Give the explorer read-only tools
+  and keep the writer away from `bash` — scoping is the security model.
+- **Parallel fan-out.** Multiple `task` calls in one turn run concurrently, and the child's
+  tokens/turns roll up into the parent's usage, so one number still tells you what a run cost.
+- **Budgets that actually stop things.** `maxTokens`, `maxTurns`, `maxWallMs`… enforced live
+  across the whole tree; a limit stop is a loud `status: "incomplete"`, never a silent success.
+
+## The recipe
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { agents } from "toolnexus"
+
+const explore = agents.agent("explore", {
+  does: "read-only research",
+  uses: { tools: [lookup] },              // least privilege: only these tools
+})
+const coder = agents.agent("coder", {
+  does: "implements changes",
+  soulFile: "./AGENTS.md",
+  team: [explore],                        // team = who `task` can reach
+  budget: { maxTokens: 10_000 },
+})
+
+const r = await coder.run("fix the failing test", {
+  llm: {
+    baseUrl: "https://openrouter.ai/api/v1",
+    style: "openai",
+    model: "openai/gpt-4o-mini",
+  },
+})
+console.log(r.status, r.text, r.totalTokens)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus.agents import agent, Budget
+
+explore = agent("explore", does="read-only research", uses={"tools": [lookup]})
+coder = agent(
+    "coder",
+    does="implements changes",
+    soul_file="./AGENTS.md",
+    team=[explore],
+    budget=Budget(max_tokens=10_000),
+)
+
+r = await coder.run(
+    "fix the failing test",
+    llm={
+        "base_url": "https://openrouter.ai/api/v1",
+        "style": "openai",
+        "model": "openai/gpt-4o-mini",
+    },
+)
+print(r.status, r.text, r.total_tokens)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+import "github.com/muthuishere/toolnexus/golang/agents"
+
+explore := agents.New("explore", agents.Spec{
+    Does:  "read-only research",
+    Tools: []toolnexus.Tool{lookup},
+})
+coder := agents.New("coder", agents.Spec{
+    Does:     "implements changes",
+    SoulFile: "./AGENTS.md",
+    Team:     []*agents.Agent{explore},
+    Budget:   &agents.Budget{MaxTokens: 10_000},
+})
+
+r, _ := coder.Run(agents.Options{
+    LLM: &agents.LLMOptions{
+        BaseURL: "https://openrouter.ai/api/v1",
+        Style:   toolnexus.StyleOpenAI,
+        Model:   "openai/gpt-4o-mini",
+    },
+}, "fix the failing test")
+fmt.Println(r.Status, r.Text, r.TotalTokens)
+```
+</TabItem>
+<TabItem label="Java">
+```java
+import static io.github.muthuishere.toolnexus.agents.Agents.agent;
+import io.github.muthuishere.toolnexus.agents.*;
+
+Agents.Agent explore = agent("explore", new Agents.AgentSpec()
+    .does("read-only research")
+    .tools(lookup));
+Agents.Agent coder = agent("coder", new Agents.AgentSpec()
+    .does("implements changes")
+    .soulFile(Path.of("AGENTS.md"))
+    .team(explore)
+    .budget(new Budget().maxTokens(10_000)));
+
+TaskResult r = coder.run(new RuntimeOptions()
+    .baseUrl("https://openrouter.ai/api/v1")
+    .style("openai")
+    .defaultModel("openai/gpt-4o-mini"), "fix the failing test");
+System.out.println(r.status() + " " + r.text() + " " + r.totalTokens());
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+using Toolnexus.Agents;
+
+var explore = new Agent("explore", new AgentSpec
+{
+    Does = "read-only research",
+    Uses = new List<ITool> { lookup },
+});
+var coder = new Agent("coder", new AgentSpec
+{
+    Does = "implements changes",
+    SoulFile = "./AGENTS.md",
+    Team = new List<Agent> { explore },
+    Budget = new Budget { MaxTokens = 10_000 },
+});
+
+var r = await coder.RunAsync(new RuntimeOptions
+{
+    BaseUrl = "https://openrouter.ai/api/v1",
+    Style = "openai",
+    Model = "openai/gpt-4o-mini",
+}, "fix the failing test");
+Console.WriteLine($"{r.Status} {r.Text} {r.TotalTokens}");
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Agents
+
+explore = Agents.agent("explore", does: "read-only research", uses: %{tools: [lookup]})
+
+coder =
+  Agents.agent("coder",
+    does: "implements changes",
+    soul_file: "AGENTS.md",
+    team: [explore],
+    budget: %{max_tokens: 10_000}
+  )
+
+r =
+  Agents.run(
+    coder,
+    [llm: %{base_url: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini"}],
+    "fix the failing test"
+  )
+
+IO.puts("#{r.status} #{r.text} #{r.total_tokens}")
+```
+</TabItem>
+</Tabs>
+
+That's the whole wiring: **listing an agent in `team` is what makes it delegable.** The parent
+gains one built-in `task { agent, prompt }` tool whose description advertises only its team; an
+agent without a team gets no `task` tool at all (delegation — and recursion — are opt-in).
+
+<Aside type="tip" title="An Agent IS a Tool">
+`asTool()` / `as_tool()` / `AsTool()` turns any agent into a plain tool for the classic API's
+`extraTools` — so an existing `createClient` + `createToolkit` app can delegate without adopting
+any new loop. Note the namespace: this lives under `agents` in every port, separate from the
+remote **A2A** `Agent`.
+</Aside>
+
+Full detail — suspension escalation, durable resume, budgets, and the six host verbs — in
+[Sub-agents & teams](/toolnexus/subagents/).

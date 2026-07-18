@@ -152,8 +152,17 @@ normal source tree — do not merge spike files as-is.
 - [ ] 8.1 Cross-port conformance: identical transition traces for all shared fixtures
       on the virtual clock (§0 method); document any allowed divergence (abort
       latency only)
-- [ ] 8.2 Docs site: subagents page (Level-1 UX + task + teams recipes: orchestrate/
-      map as userland patterns); README example
-- [ ] 8.3 Release notes: `"incomplete"` status call-out (QG5)
-- [ ] 8.4 Remove `<port>/spike/` directories once each port's real implementation +
-      tests are green (the branch history preserves them)
+- [x] 8.2 Docs site: subagents page (Level-1 UX + task + teams recipes: orchestrate/
+      map as userland patterns); README example — `site/src/content/docs/subagents.mdx`
+      (+ sidebar) covering agent()/team/task, isolation/roll-up, suspension escalation
+      + durable resume, budgets incl. "incomplete", six host verbs (advanced),
+      orchestrate/map recipes, agents-namespace note; cookbook page
+      `cookbook/subagents.mdx`; README "Sub-agents — delegate in-process" section
+- [x] 8.3 Release notes: `"incomplete"` status call-out (QG5) — repo had no changelog;
+      added root `CHANGELOG.md` with an Unreleased section (agent runtime + subagents
+      headline; `RunResult.status` gains `"incomplete"`+`limit`, code matching
+      `status === "done"` after maxTurns must update)
+- [x] 8.4 Remove `<port>/spike/` directories once each port's real implementation +
+      tests are green (the branch history preserves them) — removed js/spike,
+      python/spike, golang/spike, elixir/test/{support/,}spike, java …/toolnexus/spike
+      (csharp already gone); all six suites green post-removal

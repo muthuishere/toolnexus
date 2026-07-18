@@ -233,6 +233,41 @@ Both directions exist in all six ports (`agent(...)` / `Agent{...}`, an `agents`
 `serve` / `ServeAsync`). Served tasks persist through a pluggable **TaskStore** (in-memory default,
 `"file:<dir>"`, or your own). See each port's README for the full option set.
 
+## Sub-agents — delegate in-process
+
+The same axiom, locally: **an Agent is a Tool**. Define agents declaratively — a routing
+description, a scoped toolkit view, an identity file, a **team** — and one agent delegates to
+another through a built-in `task` tool: the child runs on a fresh transcript with only its own
+tools, the parent gets back exactly one result, and the child's tokens roll up into the parent's
+usage. Parallel `task` calls in one turn run concurrently. (`SPEC.md §7D`.)
+
+```ts
+import { agents } from "toolnexus"   // its own namespace — distinct from the A2A agent()
+
+const explore = agents.agent("explore", {
+  does: "read-only research",
+  uses: { tools: [lookup] },          // least privilege: this child sees ONLY these tools
+})
+const coder = agents.agent("coder", {
+  does: "implements changes",
+  soulFile: "./AGENTS.md",            // identity → system prompt
+  team: [explore],                    // listing agents here IS the wiring; no team ⇒ no task tool
+  budget: { maxTokens: 10_000 },      // hierarchical, live-enforced across the whole tree
+})
+
+const r = await coder.run("fix the failing test", {
+  llm: { baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" },
+})
+r.status                              // "done" — a budget stop is a LOUD "incomplete", never silent
+coder.asTool()                        // …or drop any agent into the classic API's extraTools
+```
+
+A suspending child escalates like a suspending tool (the §10 human-in-the-loop layer, verbatim):
+no interpreter up the chain ⇒ the run returns `status: "pending"` with the tree parked at zero
+token burn, and `runtime.resume(answer)` continues from the checkpoint — re-run parents reattach
+to their existing children instead of spawning duplicates. Available in all six ports (an
+`agents` namespace per language). See the [sub-agents docs](https://muthuishere.github.io/toolnexus/subagents/).
+
 ## Serve as an MCP server — be a gateway
 
 The other inbound edge: expose your **whole toolkit as an MCP server**, so any MCP client (Claude
