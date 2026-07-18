@@ -201,6 +201,56 @@ public final class LlmClient {
         public TimeoutException(String message) { super(message); }
     }
 
+    /**
+     * §7D cancellation seam (Java row of the per-port contract table): a <b>cooperative cancel
+     * token</b> backed by virtual-thread interruption. Pass one to
+     * {@link #run(String, Toolkit, List, CancelToken)} / {@link #ask(String, Toolkit, String, CancelToken)}
+     * and call {@link #cancel()} from any thread to abort the run.
+     *
+     * <p>The documented contract (SPEC §7D "Cancellation contract"):
+     * <ul>
+     *   <li><b>Minimum guarantee</b> — the run aborts <i>between attempts</i>: the token is checked
+     *       before every LLM attempt and after every backoff sleep.</li>
+     *   <li><b>Typical latency</b> — mid-request: the token interrupts the run's (virtual) thread,
+     *       and the JDK {@link HttpClient#send} + backoff {@code Thread.sleep} are interruptible,
+     *       so an in-flight LLM request aborts promptly.</li>
+     *   <li><b>Observable outcome</b> — the run throws {@link CancelledException}. A cancellation is
+     *       never retried and bypasses {@link Options#onError} (an abort is not a failure to
+     *       classify). Cancellation is classified by <i>token state</i>, so a genuine stray
+     *       interrupt is still surfaced as an error, not a cancel.</li>
+     * </ul>
+     * Only abort <i>latency</i> differs from ports with transport-level abort (JS/Go/C#); the
+     * observable outcome is identical.
+     */
+    public static final class CancelToken {
+        private volatile boolean cancelled;
+        private volatile Thread runner;
+
+        /** Request cancellation: flips the token and interrupts the registered run thread. */
+        public void cancel() {
+            cancelled = true;
+            Thread t = runner;
+            if (t != null) t.interrupt();
+        }
+
+        public boolean isCancelled() { return cancelled; }
+
+        /** Bind the run's thread so {@link #cancel()} can interrupt it (already-cancelled tokens
+         * interrupt immediately, so a pre-cancelled token aborts at the first check). */
+        void register(Thread t) {
+            runner = t;
+            if (cancelled) t.interrupt();
+        }
+
+        void unregister() { runner = null; }
+    }
+
+    /** Thrown when a run is aborted through a {@link CancelToken}. Never retried; bypasses
+     * {@link Options#onError}. */
+    public static final class CancelledException extends RuntimeException {
+        public CancelledException(String message) { super(message); }
+    }
+
     // ------------------------------------------------------------------
     // Hooks (lifecycle middleware) — see SPEC.md §8 "Hooks". Mirrors the JS
     // `Hooks` interface (js/src/client.ts). Each callback is optional: a null
@@ -391,8 +441,10 @@ public final class LlmClient {
         public final Usage usage;
         /** The model used. */
         public final String model;
-        /** §10: {@code "done"} normally; {@code "pending"} iff a tool suspended and no
-         * {@code waitFor} was configured. */
+        /** §10/§7D: {@code "done"} normally; {@code "pending"} iff a tool suspended and no
+         * {@code waitFor} was configured; {@code "incomplete"} iff a limit stopped the run loudly
+         * (the turn cap was reached while the model was still emitting tool calls) — never a
+         * silent {@code "done"}. Partial work + the transcript are preserved either way. */
         public final String status;
         /** §10: the unresolved suspension — present (non-null) iff {@code status == "pending"}. */
         public final Request pending;
@@ -579,7 +631,7 @@ public final class LlmClient {
      * Mirrors the JS {@code ask(prompt, { toolkit, id })}.
      */
     public RunResult ask(String prompt, Toolkit toolkit, String id) {
-        return ask(prompt, toolkit, id, null);
+        return ask(prompt, toolkit, id, (Consumer<String>) null);
     }
 
     /**
@@ -614,6 +666,44 @@ public final class LlmClient {
         return "anthropic".equals(opts.style)
                 ? runAnthropic(prompt, toolkit, history, deadline)
                 : runOpenAI(prompt, toolkit, history, deadline);
+    }
+
+    /**
+     * §7D cancellation seam: {@link #run(String, Toolkit, List)} with an external
+     * {@link CancelToken}. {@code cancel.cancel()} aborts the run — between attempts at minimum,
+     * mid-request typically (interruptible send) — and the run throws {@link CancelledException}.
+     * See {@link CancelToken} for the full documented contract. A {@code null} token is identical
+     * to the plain overload.
+     */
+    public RunResult run(String prompt, Toolkit toolkit, List<Object> history, CancelToken cancel) {
+        if (cancel == null) return run(prompt, toolkit, history);
+        cancel.register(Thread.currentThread());
+        try {
+            Deadline deadline = newDeadline(cancel);
+            return "anthropic".equals(opts.style)
+                    ? runAnthropic(prompt, toolkit, history, deadline)
+                    : runOpenAI(prompt, toolkit, history, deadline);
+        } finally {
+            cancel.unregister();
+            // A cancel that landed after the run finished must not leak the interrupt flag.
+            if (cancel.isCancelled()) Thread.interrupted();
+        }
+    }
+
+    /**
+     * §7D cancellation seam: {@link #ask(String, Toolkit, String)} with an external
+     * {@link CancelToken}. On cancellation the run throws {@link CancelledException} and the
+     * conversation store is NOT updated (an aborted turn is never persisted — the transactional
+     * posture the agent runtime's {@code interrupt} relies on).
+     */
+    public RunResult ask(String prompt, Toolkit toolkit, String id, CancelToken cancel) {
+        if (cancel == null) return ask(prompt, toolkit, id);
+        if (id == null || id.isEmpty()) return run(prompt, toolkit, null, cancel);
+        List<Object> history = store.get(id);
+        if (history == null) history = new ArrayList<>();
+        RunResult result = run(prompt, toolkit, history, cancel);
+        store.save(id, result.messages);
+        return result;
     }
 
     /** A stateful multi-turn conversation that retains history across {@link Conversation#send} calls. */
@@ -708,6 +798,16 @@ public final class LlmClient {
         emit(new MetricEvent.Run(opts.model, turns, toolCalls.size(), usage.totalTokens,
                 System.currentTimeMillis() - runStart, null));
         return new RunResult(text, messages, toolCalls, turns, usage, opts.model);
+    }
+
+    /** §7D/§8 addendum: the run hit its turn cap while the model was still emitting tool calls —
+     * a loud limit stop ({@code status="incomplete"}), never a silent {@code "done"}. The partial
+     * transcript and tool calls are preserved. */
+    private RunResult incompleteRun(long runStart, String text, List<Object> messages,
+                                    List<ToolCall> toolCalls, int turns, Usage usage) {
+        emit(new MetricEvent.Run(opts.model, turns, toolCalls.size(), usage.totalTokens,
+                System.currentTimeMillis() - runStart, null));
+        return new RunResult(text, messages, toolCalls, turns, usage, opts.model, "incomplete", null);
     }
 
     /** §10: a run halted because a tool suspended and no {@code waitFor} was configured. Returns a
@@ -831,7 +931,7 @@ public final class LlmClient {
                     }
                 }
             }
-            return endRun(runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
+            return incompleteRun(runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
         } catch (RuntimeException e) {
             emitRunError(runStart, toolCalls, turns, usage, e);
             throw e;
@@ -962,7 +1062,7 @@ public final class LlmClient {
                     return pendingRun(runStart, halted, messages, toolCalls, turns, usage);
                 }
             }
-            return endRun(runStart, "", messages, toolCalls, turns, usage);
+            return incompleteRun(runStart, "", messages, toolCalls, turns, usage);
         } catch (RuntimeException e) {
             emitRunError(runStart, toolCalls, turns, usage, e);
             throw e;
@@ -1150,7 +1250,7 @@ public final class LlmClient {
                     return done;
                 }
             }
-            RunResult done = endRun(runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
+            RunResult done = incompleteRun(runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
             onEvent.accept(StreamEvent.done(done));
             return done;
         } catch (RuntimeException e) {
@@ -1363,7 +1463,7 @@ public final class LlmClient {
                     return done;
                 }
             }
-            RunResult done = endRun(runStart, "", messages, toolCalls, turns, usage);
+            RunResult done = incompleteRun(runStart, "", messages, toolCalls, turns, usage);
             onEvent.accept(StreamEvent.done(done));
             return done;
         } catch (RuntimeException e) {
@@ -1535,26 +1635,36 @@ public final class LlmClient {
         return opts.onError != null ? opts.onError.apply(info) : (info.retryable() ? Tier.RETRY : Tier.FAIL);
     }
 
-    /** A run-scoped monotonic deadline. {@code null} timeoutMs => no deadline (deadlineNanos absent). */
+    /** A run-scoped monotonic deadline (+ optional cancel token). {@code null} timeoutMs => no
+     * deadline (deadlineNanos absent); {@code null} cancel => not externally cancellable. */
     private static final class Deadline {
         final Long endNanos; // null = unbounded
         final long timeoutMs;
-        Deadline(Long endNanos, long timeoutMs) { this.endNanos = endNanos; this.timeoutMs = timeoutMs; }
+        final CancelToken cancel; // null = no external cancel
+        Deadline(Long endNanos, long timeoutMs, CancelToken cancel) {
+            this.endNanos = endNanos;
+            this.timeoutMs = timeoutMs;
+            this.cancel = cancel;
+        }
         boolean bounded() { return endNanos != null; }
+        boolean cancelled() { return cancel != null && cancel.isCancelled(); }
         long remainingMs() {
             if (endNanos == null) return Long.MAX_VALUE;
             return (endNanos - System.nanoTime()) / 1_000_000L;
         }
         void check() {
+            if (cancelled()) throw new CancelledException("run cancelled");
             if (endNanos != null && System.nanoTime() >= endNanos) {
                 throw new TimeoutException("run timeout after " + timeoutMs + "ms");
             }
         }
     }
 
-    private Deadline newDeadline() {
-        if (opts.timeoutMs == null) return new Deadline(null, 0);
-        return new Deadline(System.nanoTime() + opts.timeoutMs * 1_000_000L, opts.timeoutMs);
+    private Deadline newDeadline() { return newDeadline(null); }
+
+    private Deadline newDeadline(CancelToken cancel) {
+        if (opts.timeoutMs == null) return new Deadline(null, 0, cancel);
+        return new Deadline(System.nanoTime() + opts.timeoutMs * 1_000_000L, opts.timeoutMs, cancel);
     }
 
     private HttpRequest buildRequest(String url, Map<String, String> headers,
@@ -1606,6 +1716,9 @@ public final class LlmClient {
                 sleep((long) (base * Math.pow(2, attempt) + Math.random() * 100), deadline);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+                // §7D: classify by TOKEN STATE, not by the interrupt itself — an external cancel is
+                // a CancelledException (never retried, bypasses onError); a stray interrupt stays an error.
+                if (deadline.cancelled()) throw new CancelledException("run cancelled");
                 throw new RuntimeException("LLM request interrupted", e);
             }
         }
@@ -1628,6 +1741,7 @@ public final class LlmClient {
             Thread.sleep(Math.max(0, capped));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            if (deadline.cancelled()) throw new CancelledException("run cancelled");
             throw new RuntimeException("interrupted during backoff", e);
         }
         deadline.check();

@@ -29,8 +29,11 @@ public final class Json {
         }
     }
 
+    /** Parse a JSON object strictly (throws on invalid JSON). Public because the {@code agents}
+     * subpackage (and consumers writing mock/test harnesses) need a strict object parse — Java
+     * subpackages do not share package-private access. */
     @SuppressWarnings("unchecked")
-    static Map<String, Object> toMap(String json) {
+    public static Map<String, Object> toMap(String json) {
         try {
             return MAPPER.readValue(json, new TypeReference<Map<String, Object>>() {});
         } catch (Exception e) {

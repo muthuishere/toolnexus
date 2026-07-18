@@ -27,11 +27,14 @@ normal source tree — do not merge spike files as-is.
 - [ ] 1.1 elixir: first-class transport seam on the client (§8 Gap 2 equivalent)
 - [ ] 1.2 python: cooperative cancel seam (between-attempts minimum; transport abort
       where urllib/httpx allows) + documented contract
-- [ ] 1.3 java: cancel token on ask/run (interruptible virtual-thread contract) +
-      documented contract
+- [x] 1.3 java: cancel token on ask/run (interruptible virtual-thread contract) +
+      documented contract (`LlmClient.CancelToken` + `CancelledException`; classified
+      by token state, never retried, bypasses onError)
 - [ ] 1.4 csharp: classify external cancellation distinctly from timeout on the
       interrupt path (token state, not exception type)
 - [ ] 1.5 all ports: `"incomplete"` RunStatus value (loud limit stops)
+      — java DONE (maxTurns-with-tool-calls ⇒ `status:"incomplete"` on all four
+      run/stream paths); js/python/golang/csharp/elixir pending
 
 ## 2. js (reference port)
 
@@ -57,9 +60,19 @@ normal source tree — do not merge spike files as-is.
 
 ## 5. java
 
-- [ ] 5.1 Runtime substrate (virtual threads; waitOn; locked admission)
-- [ ] 5.2 task + team + reattachment; agent()/asTool()
-- [ ] 5.3 46 checks as JUnit against shared fixtures; full suite green
+- [x] 5.1 Runtime substrate (virtual threads; waitOn; locked admission) —
+      `java/src/main/java/io/github/muthuishere/toolnexus/agents/` (runtime-wide
+      ConversationStore w/ checkpoint rewind on durable pending, injectable
+      RuntimeClock, CancelToken interrupts, transactional drain, three gates incl.
+      gate-release-on-death, live-ancestor budgets incl. maxToolCalls/maxWallMs,
+      name-sorted registry prose, Request data.path)
+- [x] 5.2 task + team + reattachment; agent()/asTool() — `Agents.agent()/asTool()/
+      agentFromDir/startAgent`; registry = transitive team closure; recursion opt-in
+- [x] 5.3 46 checks as JUnit against shared fixtures; full suite green —
+      `agents/AgentRuntimeTest` (S1–S9, 36 checks, fixture-mapped) +
+      `agents/AgentsSurfaceTest` (S10–S13, 10 checks) + runtime-obligation extras
+      (store survival, gate-slot death, sorted prose) + `ClientCancelTest`;
+      `./gradlew test` = 135 tests, 0 failures
 
 ## 6. csharp
 
