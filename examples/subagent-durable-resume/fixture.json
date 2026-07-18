@@ -54,12 +54,14 @@
       "root/approverParent.1": [
         "idle→running",
         "running→suspended",
+        "suspended→idle",
         "idle→running",
         "running→idle"
       ],
       "root/approverParent.1/asker.1": [
         "idle→running",
         "running→suspended",
+        "suspended→idle",
         "idle→running",
         "running→idle",
         "idle→closed"
