@@ -183,6 +183,14 @@ are composed from the registry, iteration SHALL be sorted by agent name.
 - **WHEN** a handle runs two turns and is then inspected via its conversation id
 - **THEN** the stored transcript contains both turns' messages
 
+#### Scenario: Durable pending rewinds the stored transcript to the pre-turn checkpoint
+- **WHEN** a Run returns status pending (the shipped clients append the halted tool's
+  placeholder result to the persisted transcript per §10)
+- **THEN** the runtime restores that handle's stored transcript to its pre-turn
+  snapshot, so the resumed replay re-invokes the delegating tool and idempotency comes
+  from task-key reattachment — a resumed parent that reads the placeholder as a
+  resolved result and skips re-invocation is non-conformant
+
 #### Scenario: Virtual-clock determinism
 - **WHEN** a timing fixture (heartbeat, wait timeout, shutdownMs) runs on the virtual
   clock in two ports
