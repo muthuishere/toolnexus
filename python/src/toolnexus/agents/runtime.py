@@ -173,7 +173,9 @@ class TaskResult:
 
     text: str
     is_error: bool
-    status: str  # "done" | "pending" | "incomplete" | "interrupted" | "closed"
+    # The CLOSED seven-string vocabulary (SPEC §7D) — identical in every port; a
+    # failed run is "error", never "done" + is_error.
+    status: str  # "done" | "pending" | "incomplete" | "interrupted" | "closed" | "timeout" | "error"
     pending: Optional[Request] = None
     turns: int = 0
     total_tokens: int = 0
@@ -463,7 +465,7 @@ class AgentRuntime:
                     TaskResult(
                         text=f"wait timeout after {timeout_ms}ms (child still {h.state})",
                         is_error=True,
-                        status="done" if h.state == "running" else h.state,
+                        status="timeout",
                         turns=h.turns_total,
                         total_tokens=h.usage_total,
                     )
@@ -478,7 +480,9 @@ class AgentRuntime:
     def _settled_result(self, h: Handle) -> Optional[TaskResult]:
         """The 'last result' branch of wait: a settled handle answers immediately."""
         if h.state == "closed":
-            return h.last_result if h.last_result is not None and h.last_result.status == "closed" else TaskResult(
+            # Closed-but-settled: close ≠ loss — the recorded result stays queryable
+            # (reattachment by task key relies on it; no completion cache).
+            return h.last_result if h.last_result is not None else TaskResult(
                 text="closed", is_error=True, status="closed", turns=h.turns_total, total_tokens=h.usage_total
             )
         if h.state == "suspended" and h.pending_req is not None:
@@ -545,13 +549,15 @@ class AgentRuntime:
         reason_final = reason or ("interrupted" if force else "closed")
         if h.defn.on_close is not None:
             await _maybe_await(h.defn.on_close(h, reason_final))
+        prior = h.state
         h.state = "closed"
         final = TaskResult(
             text="closed", is_error=True, status="closed", turns=h.turns_total, total_tokens=h.usage_total
         )
-        h.last_result = final
+        if h.last_result is None:
+            h.last_result = final  # a settled result stays queryable (closed-but-settled reattachment)
         self._flush_waiters(h, final)
-        self._t(f"{h.id}: →closed ({reason_final})")
+        self._t(f"{h.id}: {prior}→closed ({reason_final})")
 
     # ---- read-only views ----------------------------------------------------- #
     def list(self, h: Optional[Handle] = None, acc: Optional[list[HandleView]] = None) -> list[HandleView]:
@@ -583,6 +589,9 @@ class AgentRuntime:
         )
         leaf.pending_req = None
         leaf.state = "idle"
+        # Durable resume shape (SPEC §7D): suspended→idle (Answer accepted, checkpoint
+        # restored) then idle→running (the replay wake) — never a direct suspended→running.
+        self._t(f"{leaf.id}: suspended→idle (Answer accepted, checkpoint restored)")
 
         async def one_shot(_req: Request) -> Answer:
             return answer
@@ -591,9 +600,10 @@ class AgentRuntime:
         # Cascade: each suspended ancestor re-runs; its retried task call REATTACHES.
         p = leaf.parent
         while p is not None and p is not self.root and p.state == "suspended":
-            self._t(f"{p.id}: cascade resume (child result cached)")
             p.pending_req = None
             p.state = "idle"
+            self._t(f"{p.id}: suspended→idle (Answer accepted, checkpoint restored)")
+            self._t(f"{p.id}: cascade resume (replay reattaches by task key)")
             await self.run_turn(p, self._take_pending_input(p))
             p = p.parent
 
@@ -763,6 +773,11 @@ class AgentRuntime:
             snapshot = await self._store.get(h.conv_id)
             ask_task = asyncio.ensure_future(client.ask(input_text, toolkit, id=h.conv_id))
             h._ask_task = ask_task
+            if h._abort_reason is not None:
+                # The abort verb ran between admission and the ask install — the
+                # admission's cancel seam must still abort this turn (SPEC §7D
+                # "Admission's atomic step is complete": no missing abort seam).
+                ask_task.cancel()
             r = await ask_task
             h.turns_total += r.turns
             self._rollup(h, r.usage["total_tokens"], r.tool_call_count)
@@ -784,8 +799,9 @@ class AgentRuntime:
             elif r.status == "incomplete":
                 h.state = "idle"
                 h.drained = []  # the turn ran to its cap; drained items are consumed
+                limit_name = getattr(r, "limit", None) or "maxTurns"
                 result = TaskResult(
-                    text="hit maxTurns without a final answer",
+                    text=f"hit {limit_name} without a final answer",
                     is_error=True,
                     status="incomplete",
                     turns=r.turns,
@@ -813,7 +829,7 @@ class AgentRuntime:
             result = TaskResult(
                 text=msg,
                 is_error=True,
-                status="interrupted" if msg == "interrupted" else "done",
+                status=msg if msg in ("interrupted", "closed") else "interrupted",
                 turns=h.turns_total,
                 total_tokens=h.usage_total,
             )
@@ -822,7 +838,8 @@ class AgentRuntime:
             if h.state != "closed":  # never resurrect a just-closed handle
                 h.state = "idle"
             self._t(f"{h.id}: running→idle (error: {msg})")
-            result = TaskResult(text=msg, is_error=True, status="done", turns=h.turns_total, total_tokens=h.usage_total)
+            # Closed vocabulary: a failed run is "error" — never "done" + is_error.
+            result = TaskResult(text=msg, is_error=True, status="error", turns=h.turns_total, total_tokens=h.usage_total)
         finally:
             h._ask_task = None
             if h.parent is not None:
@@ -881,7 +898,7 @@ class AgentRuntime:
             # truth for delegated work — the retried task call must reattach to the
             # existing child by task key: settled ⇒ its recorded result; suspended ⇒
             # its pending; running ⇒ await it. Never a duplicate spawn.
-            existing = next((c for c in parent.children if c.task_key == key and c.state != "closed"), None)
+            existing = next((c for c in parent.children if c.task_key == key), None)
             if existing is not None:
                 rt._t(f"{parent.id}: task replay → REATTACH to {existing.id} (state {existing.state})")
                 child = existing

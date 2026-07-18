@@ -24,7 +24,16 @@ from toolnexus.agents import AgentDef, Budget
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 
 # The §7D transition vocabulary used by fixture ``transitions`` expectations.
-_ARROWS = ("idle→running", "running→suspended", "suspended→running", "running→idle", "suspended→idle")
+_ARROWS = (
+    "idle→running",
+    "running→suspended",
+    "suspended→running",
+    "running→idle",
+    "suspended→idle",
+    "idle→closed",
+    "running→closed",
+    "suspended→closed",
+)
 
 
 def load_fixture(name: str) -> dict[str, Any]:
@@ -48,6 +57,24 @@ def transitions(trace: list[str], handle_id: str) -> list[str]:
             if rest.startswith("→closed"):
                 out.append("→closed")
     return out
+
+
+def _arrow_eq(got: str, expected: str) -> bool:
+    """SPEC §7D trace parity: entries may use the full ``state→state`` form or the
+    ``→state`` suffix form — conformance matches by suffix; the forms are equivalent."""
+    return (
+        got == expected
+        or (expected.startswith("→") and got.endswith(expected))
+        or (got.startswith("→") and expected.endswith(got))
+    )
+
+
+def transitions_match(trace: list[str], handle_id: str, expected: list[str]) -> tuple[bool, list[str]]:
+    """Compare a handle's extracted transitions against a fixture's expected list
+    with suffix-form equivalence. Returns (matched, got) for assert messages."""
+    got = transitions(trace, handle_id)
+    ok = len(got) == len(expected) and all(_arrow_eq(g, e) for g, e in zip(got, expected))
+    return ok, got
 
 
 def openai_body(message: dict[str, Any], tokens: Optional[dict[str, int]] = None) -> dict[str, Any]:

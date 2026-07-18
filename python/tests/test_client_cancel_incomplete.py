@@ -111,6 +111,7 @@ async def test_max_turns_stop_without_final_text_is_incomplete():
     client = _client(_LoopingTransport(), max_turns=3)
     r = await client.run("loop forever", toolkit)
     assert r.status == "incomplete"
+    assert r.limit == "maxTurns"  # RunResult.limit names the limit iff status=incomplete
     assert r.turns == 3 and r.text == ""
 
 

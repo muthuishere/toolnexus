@@ -130,6 +130,9 @@ class RunResult:
     # while the model was still emitting tool calls with no final text (loud, never
     # a silent "done").
     status: Literal["done", "pending", "incomplete"] = "done"
+    # §7D: which limit stopped the run (e.g. "maxTurns") — set ONLY when
+    # status == "incomplete"; None otherwise.
+    limit: Optional[str] = None
     # The unresolved suspension — present iff status == "pending" (§10).
     pending: Optional[Request] = None
 
@@ -601,6 +604,7 @@ class Client:
             usage=usage,
             model=self.model,
             status="incomplete" if at_limit and not text else "done",
+            limit="maxTurns" if at_limit and not text else None,
         )
 
     # ----------------------------------------------------------------------- #

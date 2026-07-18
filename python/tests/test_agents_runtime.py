@@ -13,7 +13,7 @@ import threading
 from toolnexus import Answer
 from toolnexus.agents import AgentRuntime, Budget, Handle, InboxItem, SpawnError
 
-from _agent_mocks import MockTransport, load_fixture, registry, transitions
+from _agent_mocks import MockTransport, load_fixture, registry, transitions, transitions_match
 
 
 def _spawn(rt: AgentRuntime, name: str, budget: Budget | None = None, parent: Handle | None = None) -> Handle:
@@ -42,7 +42,8 @@ async def test_fanout_isolation_parallelism_rollup():
     assert r.turns == fx["parentTurns"]
     # 4. two children spawned with deterministic parent-scoped ids
     for cid, expected in fx["transitions"].items():
-        assert transitions(rt.trace, cid) == expected, (cid, transitions(rt.trace, cid))
+        ok, got = transitions_match(rt.trace, cid, expected)
+        assert ok, (cid, got)
     assert [c.id for c in coord.children] == fx["childIds"]
     # 5. children ran CONCURRENTLY (≥2 LLM turns observed in flight)
     assert rt.max_observed_concurrent_turns >= fx["concurrentTurnsObservedAtLeast"]
@@ -79,8 +80,10 @@ async def test_escalation_nearest_interpreter():
     child_tr = transitions(rt.trace, child_id)
     for arrow in fx["escalation"]["childTrace"]:
         assert arrow in child_tr, child_tr
-    assert child_tr == fx["transitions"][child_id]
-    assert transitions(rt.trace, "root/approverParent.1") == fx["transitions"]["root/approverParent.1"]
+    ok, got = transitions_match(rt.trace, child_id, fx["transitions"][child_id])
+    assert ok, got
+    ok, got = transitions_match(rt.trace, "root/approverParent.1", fx["transitions"]["root/approverParent.1"])
+    assert ok, got
     # 4. escalation chose an ANCESTOR (not self)
     answered_by = fx["escalation"]["answeredBy"]
     assert any(f"escalate → {answered_by} answers" in l for l in rt.trace)
@@ -119,10 +122,11 @@ async def test_durable_pending_and_resume_cascade():
     # 6. parent reached done after the cascade; transitions match the fixture
     assert p.state == fx["phase2_expect"]["finalParentState"], p.state
     for hid, expected in fx["phase2_expect"]["transitions"].items():
-        got = transitions(rt.trace, hid)
-        # NOTE: the fixture omits the reattached child's terminal →closed (the
-        # cascade's task closes it) — asserted as a prefix; see the change notes.
-        assert got[: len(expected)] == expected, (hid, got)
+        # Late fixture pin (82778d6 + 62d285e): the durable-resume trace shape is
+        # suspended→idle then idle→running, and asker.1 ends with a terminal
+        # idle→closed — matched IN FULL (suffix-form equivalent).
+        ok, got = transitions_match(rt.trace, hid, expected)
+        assert ok, (hid, got)
     # no duplicate child ids (reattachment, not respawn)
     assert fx["phase2_expect"]["noDuplicateChildIds"]
     assert [c.id for c in p.children] == ["root/approverParent.1/asker.1"]

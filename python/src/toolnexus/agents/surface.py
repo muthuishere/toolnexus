@@ -146,7 +146,7 @@ class Agent:
         rt = self._runtime(**rt_opts)
         h = rt.spawn(rt.root, self.name)
         if not isinstance(h, Handle):
-            return TaskResult(text=h.error, is_error=True, status="done", runtime=rt)
+            return TaskResult(text=h.error, is_error=True, status="error", runtime=rt)
         rt.wake(h, prompt)
         r = await rt.wait(h)
         if r.status != "pending":
