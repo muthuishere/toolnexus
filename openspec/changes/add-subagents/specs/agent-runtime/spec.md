@@ -160,6 +160,19 @@ firing FIFO. (3) A global turn gate (`maxConcurrentTurns`) SHALL wrap ONLY the L
 HTTP call — never the whole Run — and SHALL release when the acquirer dies, not only
 via the acquirer's cleanup path.
 
+#### Scenario: Admission's atomic step is complete
+- **WHEN** a wake admits a turn
+- **THEN** the admission check, slot take, inbox DRAIN, cancellation-context install,
+  and state transition all happen in one atomic step with the verb (draining in the
+  spawned execution leaks racing posts into an admitted turn; a late cancel install
+  lets forced close observe a missing abort seam)
+
+#### Scenario: Budget refusal settles the handle
+- **WHEN** a wake is refused because an ancestor pool is exhausted
+- **THEN** the refusal is delivered as a settled `"incomplete"` result observable via
+  wait — never a pre-rejection that leaves waiters hanging (enforcement lives in
+  admission, not in a wake fast-path)
+
 #### Scenario: Full inbox rejects loudly
 - **WHEN** a post arrives at an inbox at capacity
 - **THEN** the sender receives an explicit inbox-full error and the inbox is unchanged
