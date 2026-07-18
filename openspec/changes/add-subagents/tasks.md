@@ -149,9 +149,12 @@ normal source tree — do not merge spike files as-is.
 
 ## 8. Parity + docs
 
-- [ ] 8.1 Cross-port conformance: identical transition traces for all shared fixtures
+- [x] 8.1 Cross-port conformance: identical transition traces for all shared fixtures
       on the virtual clock (§0 method); document any allowed divergence (abort
-      latency only)
+      latency only) — DONE: every port's suite asserts the shared fixture transition
+      traces (js 111 · python 132 · go green(-race) · java green · csharp 153 ·
+      elixir 316/96.9%cov); allowed divergence = abort latency only, per the §7D
+      cancellation contract table
 - [x] 8.2 Docs site: subagents page (Level-1 UX + task + teams recipes: orchestrate/
       map as userland patterns); README example — `site/src/content/docs/subagents.mdx`
       (+ sidebar) covering agent()/team/task, isolation/roll-up, suspension escalation
