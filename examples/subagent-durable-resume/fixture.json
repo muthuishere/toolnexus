@@ -5,29 +5,45 @@
     "approverParent": {
       "does": "delegates, no interpreter",
       "model": "m-approver-parent",
-      "team": ["asker"]
+      "team": [
+        "asker"
+      ]
     },
     "asker": {
       "does": "needs approvals",
       "model": "m-asker",
-      "tools": ["check_secret"]
+      "tools": [
+        "check_secret"
+      ]
     }
   },
   "tools": {
     "check_secret": {
-      "inputSchema": { "type": "object", "properties": {} },
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
       "behavior": "without ctx.answer → pending({ kind: \"approval\", prompt: \"approve secret access?\" }); with ctx.answer.ok → returns \"secret-token\""
     }
   },
-  "mockLLM": { "$ref": "../subagent-escalation/fixture.json#/mockLLM" },
-  "run": { "entry": "approverParent", "prompt": "do the secret thing" },
+  "mockLLM": {
+    "$ref": "../subagent-escalation/fixture.json#/mockLLM"
+  },
+  "run": {
+    "entry": "approverParent",
+    "prompt": "do the secret thing"
+  },
   "phase1_expect": {
     "status": "pending",
     "pendingKind": "approval",
     "pendingDataPathEndsWithin": "root/approverParent.1",
     "allHandles": "suspended"
   },
-  "resume": { "answer": { "ok": true } },
+  "resume": {
+    "answer": {
+      "ok": true
+    }
+  },
   "phase2_expect": {
     "leafResumedAtCheckpoint": true,
     "leafUsageGrewNotReset": true,
@@ -35,9 +51,22 @@
     "noDuplicateChildIds": true,
     "finalParentState": "idle",
     "transitions": {
-      "root/approverParent.1": ["idle→running", "running→suspended", "idle→running", "running→idle"],
-      "root/approverParent.1/asker.1": ["idle→running", "running→suspended", "idle→running", "running→idle"]
+      "root/approverParent.1": [
+        "idle→running",
+        "running→suspended",
+        "idle→running",
+        "running→idle"
+      ],
+      "root/approverParent.1/asker.1": [
+        "idle→running",
+        "running→suspended",
+        "idle→running",
+        "running→idle",
+        "idle→closed"
+      ]
     },
-    "traceContains": ["task replay → REATTACH"]
+    "traceContains": [
+      "task replay → REATTACH"
+    ]
   }
 }
