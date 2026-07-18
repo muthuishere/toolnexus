@@ -448,14 +448,23 @@ public final class LlmClient {
         public final String status;
         /** §10: the unresolved suspension — present (non-null) iff {@code status == "pending"}. */
         public final Request pending;
+        /** §7D: which limit stopped the run (e.g. {@code "maxTurns"}) — set ONLY when
+         * {@code status == "incomplete"}; {@code null} otherwise. */
+        public final String limit;
 
         RunResult(String text, List<Object> messages, List<ToolCall> toolCalls,
                   int turns, Usage usage, String model) {
-            this(text, messages, toolCalls, turns, usage, model, "done", null);
+            this(text, messages, toolCalls, turns, usage, model, "done", null, null);
         }
 
         RunResult(String text, List<Object> messages, List<ToolCall> toolCalls,
                   int turns, Usage usage, String model, String status, Request pending) {
+            this(text, messages, toolCalls, turns, usage, model, status, pending, null);
+        }
+
+        RunResult(String text, List<Object> messages, List<ToolCall> toolCalls,
+                  int turns, Usage usage, String model, String status, Request pending,
+                  String limit) {
             this.text = text;
             this.messages = messages;
             this.toolCalls = toolCalls;
@@ -465,6 +474,7 @@ public final class LlmClient {
             this.model = model;
             this.status = status;
             this.pending = pending;
+            this.limit = limit;
         }
     }
 
@@ -807,7 +817,8 @@ public final class LlmClient {
                                     List<ToolCall> toolCalls, int turns, Usage usage) {
         emit(new MetricEvent.Run(opts.model, turns, toolCalls.size(), usage.totalTokens,
                 System.currentTimeMillis() - runStart, null));
-        return new RunResult(text, messages, toolCalls, turns, usage, opts.model, "incomplete", null);
+        return new RunResult(text, messages, toolCalls, turns, usage, opts.model, "incomplete", null,
+                "maxTurns");
     }
 
     /** §10: a run halted because a tool suspended and no {@code waitFor} was configured. Returns a

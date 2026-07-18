@@ -130,7 +130,7 @@ public final class Agents {
         public TaskResult run(RuntimeOptions rtOpts, String prompt) {
             AgentRuntime rt = new AgentRuntime(rtOpts.copyWithRegistry(registry()));
             AgentRuntime.Spawn sp = rt.spawn(rt.root, name);
-            if (sp.error() != null) return new TaskResult(sp.error(), true, "done", null, null, 0, 0);
+            if (sp.error() != null) return new TaskResult(sp.error(), true, "error", null, null, 0, 0);
             var fut = rt.futureResult(sp.handle());
             rt.wake(sp.handle(), prompt);
             TaskResult r = fut.join();

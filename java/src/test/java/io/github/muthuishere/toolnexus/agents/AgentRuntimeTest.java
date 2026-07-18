@@ -93,9 +93,11 @@ class AgentRuntimeTest {
     private static Map<String, AgentDef> registry() {
         Tool lookup = lookupTool();
         Map<String, AgentDef> reg = new LinkedHashMap<>();
-        reg.put("coordinator", new AgentDef("coordinator", "splits and delegates", "coordinate", "m-coordinator"));
+        reg.put("coordinator", new AgentDef("coordinator", "splits and delegates", "coordinate", "m-coordinator")
+                .team(List.of("explore")));
         reg.put("explore", new AgentDef("explore", "read-only research", "explore", "m-explore").tools(List.of(lookup)));
-        reg.put("approverParent", new AgentDef("approverParent", "delegates, holds approval authority", "", "m-approver-parent"));
+        reg.put("approverParent", new AgentDef("approverParent", "delegates, holds approval authority", "", "m-approver-parent")
+                .team(List.of("asker")));
         reg.put("asker", new AgentDef("asker", "needs approvals", "", "m-asker").tools(List.of(checkSecretTool())));
         reg.put("peer", new AgentDef("peer", "team member", "", "m-peer"));
         reg.put("looper", new AgentDef("looper", "never finishes", "", "m-loop").tools(List.of(lookup)));
@@ -363,6 +365,142 @@ class AgentRuntimeTest {
             if (mock.slowGate.get() != null) mock.slowGate.get().countDown();
             mock.slowGate.set(null);
         }
+    }
+
+    // ---------- late add-subagents pins (SPEC §7D "Suspension escalation & durable resume") ----
+
+    // Pin: durable-resume trace shape — suspended→idle (Answer accepted) then idle→running (the
+    // replay wake); asker.1 ends with a terminal idle→closed. Fixture-driven, suffix-equivalent.
+    @Test
+    @SuppressWarnings("unchecked")
+    void s4b_durableResume_fixtureTransitionTraces() {
+        Map<String, Object> fx = fixture("subagent-durable-resume");
+        Map<String, Object> p2 = (Map<String, Object>) fx.get("phase2_expect");
+        Map<String, Object> transitions = (Map<String, Object>) p2.get("transitions");
+        AgentRuntime rt = new AgentRuntime(opts());
+        Handle p = rt.spawn(rt.root, "approverParent").handle();
+        var fut = rt.futureResult(p);
+        rt.wake(p, "do the secret thing");
+        TaskResult r1 = fut.join();
+        check("phase1 pending", "pending".equals(r1.status()), r1.status());
+        rt.resume(new Answer(r1.pending().id(), true));
+        awaitUntil(() -> p.state == Handle.State.IDLE, 2000);
+        for (Map.Entry<String, Object> e : transitions.entrySet()) {
+            String id = e.getKey();
+            List<String> expected = (List<String>) e.getValue();
+            List<String> lines = rt.trace().stream().filter(l -> l.startsWith(id + ":")).toList();
+            int cursor = 0;
+            for (String tr : expected) {
+                String suffix = tr.substring(tr.indexOf('→')); // "→state" — suffix form equivalent
+                boolean found = false;
+                while (cursor < lines.size()) {
+                    String l = lines.get(cursor++);
+                    if (l.contains(tr) || l.contains(suffix)) { found = true; break; }
+                }
+                check("trace[" + id + "] has \"" + tr + "\" in order", found, String.join(" | ", lines));
+            }
+        }
+        for (Object frag : (List<Object>) p2.get("traceContains")) {
+            check("trace contains \"" + frag + "\"", rt.traceHas(String.valueOf(frag)));
+        }
+    }
+
+    // Pin: rewind-to-checkpoint — on a durable pending the PERSISTED transcript is restored to
+    // its pre-turn snapshot (the §10 placeholder never survives in the store).
+    @Test
+    void durablePending_rewindsStoredTranscriptToCheckpoint() {
+        AgentRuntime rt = new AgentRuntime(opts());
+        Handle p = rt.spawn(rt.root, "approverParent").handle();
+        var fut = rt.futureResult(p);
+        rt.wake(p, "do the secret thing");
+        TaskResult r1 = fut.join();
+        check("phase1 pending", "pending".equals(r1.status()), r1.status());
+        for (String id : List.of(p.id, p.id + "/asker.1")) {
+            List<Object> transcript = rt.conversationStore().get(id);
+            check("stored transcript rewound to pre-turn checkpoint for " + id,
+                    transcript == null || transcript.isEmpty(),
+                    id + " kept " + (transcript == null ? 0 : transcript.size()) + " messages");
+        }
+    }
+
+    // Pin: a budget refusal SETTLES the handle with an "incomplete" result observable via wait —
+    // never a hanging pre-reject (enforcement lives in admission, not a wake fast-path).
+    @Test
+    void budgetRefusal_settlesHandleObservableViaWait() {
+        AgentRuntime rt = new AgentRuntime(opts());
+        Handle c = rt.spawn(rt.root, "coordinator", new Budget().maxTokens(50)).handle();
+        Handle kid = rt.spawn(c, "explore").handle();
+        var f1 = rt.futureResult(kid);
+        rt.wake(kid, "go");
+        f1.join(); // burns 80 tokens (2 turns x 40) — the 50-token pool is now exhausted
+        var f2 = rt.futureResult(kid);
+        rt.wake(kid, "again");
+        TaskResult r = f2.join(); // must NOT hang: the refusal is a settled result
+        check("refused wake settled as incomplete", "incomplete".equals(r.status()), r.status());
+        check("refusal names the limit", r.text().contains("budget exhausted"), r.text());
+        TaskResult again = rt.waitOn(kid, 500L);
+        check("settled result stays observable via wait", "incomplete".equals(again.status()), again.status());
+    }
+
+    // Pin: forced close — drained items restored + no closed-handle resurrection.
+    @Test
+    void forcedClose_restoresDrainedItems_noResurrection() {
+        mock.slowGate.set(new CountDownLatch(1));
+        try {
+            AgentRuntime rt = new AgentRuntime(opts());
+            Handle s = rt.spawn(rt.root, "slow").handle();
+            rt.post(s, new InboxItem("root", "peer", "keep me"));
+            rt.wake(s, "work slowly");
+            awaitUntil(() -> s.state == Handle.State.RUNNING, 2000);
+            check("mid-turn before close", s.state == Handle.State.RUNNING);
+            rt.close(s, true, null); // forced
+            awaitUntil(() -> s.inbox.size() == 1, 2000);
+            check("forced close restored the drained inbox item", s.inbox.size() == 1,
+                    "inbox=" + s.inbox.size());
+            awaitUntil(() -> s.state == Handle.State.CLOSED, 2000);
+            check("closed handle stays closed (no resurrection by the aborted Run)",
+                    s.state == Handle.State.CLOSED, s.state.label());
+            AgentRuntime.Ack late = rt.post(s, new InboxItem("root", "peer", "late"));
+            check("post after forced close rejected", !late.ok());
+        } finally {
+            mock.slowGate.get().countDown();
+            mock.slowGate.set(null);
+        }
+    }
+
+    // Pin: graceful close escalates to interrupt once shutdownMs elapses.
+    @Test
+    void gracefulClose_escalatesToInterruptAfterShutdownMs() {
+        mock.slowGate.set(new CountDownLatch(1));
+        try {
+            AgentRuntime rt = new AgentRuntime(opts().shutdownMs(50L));
+            Handle s = rt.spawn(rt.root, "slow").handle();
+            rt.wake(s, "work slowly");
+            awaitUntil(() -> s.state == Handle.State.RUNNING, 2000);
+            rt.close(s); // graceful; the gate is held, so shutdownMs elapses
+            check("close escalated to interrupt after shutdownMs",
+                    rt.traceHas("escalate to interrupt"));
+            awaitUntil(() -> s.state == Handle.State.CLOSED, 2000);
+            check("handle ended closed", s.state == Handle.State.CLOSED, s.state.label());
+        } finally {
+            mock.slowGate.get().countDown();
+            mock.slowGate.set(null);
+        }
+    }
+
+    // Pin: the task tool is registered ONLY when the def declares a team.
+    @Test
+    void taskTool_registeredOnlyWhenTeamDeclared() {
+        Map<String, AgentDef> reg = registry();
+        reg.put("teamless", new AgentDef("teamless", "delegates without a team", "", "m-coordinator"));
+        AgentRuntime rt = new AgentRuntime(opts().registry(reg));
+        Handle h = rt.spawn(rt.root, "teamless").handle();
+        var fut = rt.futureResult(h);
+        rt.wake(h, "go");
+        TaskResult r = fut.join();
+        check("no children spawned — the task tool was absent", h.children.isEmpty(),
+                "children=" + h.children.size());
+        check("run settled without delegation", !"pending".equals(r.status()), r.status());
     }
 
     // Name-sorted registry iteration wherever prose is composed (spawn error / task description).

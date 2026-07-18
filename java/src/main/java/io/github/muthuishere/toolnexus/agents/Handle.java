@@ -6,10 +6,8 @@ import io.github.muthuishere.toolnexus.Request;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -60,8 +58,6 @@ public final class Handle {
     /** {@code "interrupted" | "closed"} — set BEFORE the token is cancelled, so the abort is
      * classified by state, never by exception type. */
     String abortReason;
-    /** Settled task results by task key — replayed idempotently on resume (reattachment). */
-    final Map<String, TaskResult> taskCache = new HashMap<>();
     final List<CompletableFuture<TaskResult>> waiters = new ArrayList<>();
     /** Queued wake prompts (per-parent concurrency gate; FIFO slot transfer). */
     final Deque<String> wakeQueue = new ArrayDeque<>();

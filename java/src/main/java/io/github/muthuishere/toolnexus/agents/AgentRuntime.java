@@ -189,15 +189,17 @@ public final class AgentRuntime {
     public Ack wake(Handle h) { return wake(h, null); }
 
     /** {@code idle→running}; the turn input = drain(inbox). Admission is ATOMIC with the verb:
-     * the check, the parent slot take, and the launch decision happen as one locked step. Over
-     * {@code maxConcurrent} per parent ⇒ the wake queues FIFO and a completed sibling transfers
-     * its slot. */
+     * the check, the parent slot take, the inbox DRAIN, the cancellation-token install, and the
+     * state flip happen as ONE locked step (draining in the spawned execution would leak racing
+     * posts into an admitted turn; a late cancel install would let forced close observe a missing
+     * abort seam). Over {@code maxConcurrent} per parent ⇒ the wake queues FIFO and a completed
+     * sibling transfers its slot. A budget refusal SETTLES the handle with an {@code incomplete}
+     * result observable via wait — never a hanging pre-reject. */
     public Ack wake(Handle h, String prompt) {
+        Admission adm;
         synchronized (lock) {
             if (h.state == Handle.State.CLOSED) return new Ack(false, "closed");
             if (h.state == Handle.State.SUSPENDED) return new Ack(true, null); // only the Answer wakes
-            String exhausted = exhaustedLimitLocked(h);
-            if (exhausted != null) return new Ack(false, "budget exhausted (" + exhausted + "); incomplete");
             if (h.state == Handle.State.RUNNING) return new Ack(true, null); // inbox drains next turn
             Handle parent = h.parent;
             if (parent != null && parent.runningChildren >= parent.effMaxConcurrent) {
@@ -206,8 +208,13 @@ public final class AgentRuntime {
                 return new Ack(true, null);
             }
             if (parent != null) parent.runningChildren++; // reserve the slot atomically with the check
+            adm = admitLocked(h, prompt, true);
         }
-        Thread.startVirtualThread(() -> runTurn(h, prompt, null, true));
+        if (adm.early != null) {
+            // Budget refusal already SETTLED the handle (incomplete result flushed to waiters).
+            return new Ack(true, null);
+        }
+        Thread.startVirtualThread(() -> executeTurn(h, adm, null));
         return new Ack(true, null);
     }
 
@@ -232,8 +239,15 @@ public final class AgentRuntime {
         CompletableFuture<TaskResult> f;
         synchronized (lock) {
             if (h.state == Handle.State.IDLE && h.lastResult != null) return h.lastResult;
+            if (h.state == Handle.State.SUSPENDED && h.pendingReq != null) {
+                // A suspended handle is settled-with-a-pending: wait answers immediately.
+                return new TaskResult(h.pendingReq.prompt(), false, "pending",
+                        withPath(h.pendingReq, pathOf(h)), pathOf(h), h.turnsTotal, h.usageTotal);
+            }
             if (h.state == Handle.State.CLOSED) {
-                return new TaskResult("closed", true, "closed", null, null, h.turnsTotal, h.usageTotal);
+                // Closed-but-settled: close ≠ loss — the recorded result stays queryable.
+                return h.lastResult != null ? h.lastResult
+                        : new TaskResult("closed", true, "closed", null, null, h.turnsTotal, h.usageTotal);
             }
             f = new CompletableFuture<>();
             h.waiters.add(f);
@@ -243,13 +257,12 @@ public final class AgentRuntime {
         } catch (java.util.concurrent.TimeoutException e) {
             // The child keeps running on a wait timeout (unless the waiter then interrupts it).
             return new TaskResult("wait timeout after " + timeoutMs + "ms (child still " + h.state.label() + ")",
-                    true, h.state == Handle.State.RUNNING ? "done" : h.state.label(),
-                    null, null, h.turnsTotal, h.usageTotal);
+                    true, "timeout", null, null, h.turnsTotal, h.usageTotal);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return new TaskResult("wait interrupted", true, "done", null, null, h.turnsTotal, h.usageTotal);
+            return new TaskResult("wait interrupted", true, "interrupted", null, null, h.turnsTotal, h.usageTotal);
         } catch (ExecutionException e) {
-            return new TaskResult(String.valueOf(e.getCause()), true, "done", null, null, h.turnsTotal, h.usageTotal);
+            return new TaskResult(String.valueOf(e.getCause()), true, "error", null, null, h.turnsTotal, h.usageTotal);
         }
     }
 
@@ -301,7 +314,19 @@ public final class AgentRuntime {
             }
         }
         if (cancel != null) cancel.cancel();
-        else if (running) waitOn(h, opts.shutdownMs != null ? opts.shutdownMs : 200L); // bounded drain
+        else if (running) {
+            // Graceful: the running turn may finish, bounded by shutdownMs — then ESCALATE to
+            // an interrupt (abort the run) rather than abandoning it.
+            waitOn(h, opts.shutdownMs != null ? opts.shutdownMs : 200L); // bounded drain
+            synchronized (lock) {
+                if (h.state == Handle.State.RUNNING) {
+                    h.abortReason = "closed";
+                    cancel = h.runCancel;
+                    t(h.id + ": shutdownMs elapsed → escalate to interrupt");
+                }
+            }
+            if (cancel != null) cancel.cancel();
+        }
         String rsn = reason != null ? reason : (force ? "interrupted" : "closed");
         if (h.def.onClose != null) h.def.onClose.accept(h, rsn); // pre-final-checkpoint
         synchronized (lock) {
@@ -337,15 +362,19 @@ public final class AgentRuntime {
         synchronized (lock) {
             leaf.pendingReq = null;
             leaf.state = Handle.State.IDLE;
+            // Durable resume shape: suspended→idle (Answer accepted, checkpoint restored), then
+            // idle→running (the replay wake) — never a direct suspended→running.
+            t(leaf.id + ": suspended→idle (Answer accepted, checkpoint restored)");
         }
         runTurn(leaf, "continue", req -> answer, false);
         Handle p = leaf.parent;
         while (p != null && p != root && p.state == Handle.State.SUSPENDED) {
-            t(p.id + ": cascade resume (child result cached)");
             synchronized (lock) {
                 p.pendingReq = null;
                 p.state = Handle.State.IDLE;
+                t(p.id + ": suspended→idle (Answer accepted, checkpoint restored)");
             }
+            t(p.id + ": cascade resume (replay reattaches by task key)");
             runTurn(p, "continue", null, false);
             p = p.parent;
         }
@@ -430,43 +459,74 @@ public final class AgentRuntime {
 
     public TaskResult runTurn(Handle h, String prompt) { return runTurn(h, prompt, null, false); }
 
-    TaskResult runTurn(Handle h, String prompt, Function<Request, Answer> oneShotWaitFor, boolean preAdmitted) {
+    /** The verb-atomic admission outcome: either an {@code early} settled/refused result, or an
+     * admitted turn ({@code input} drained + {@code cancel} installed + state flipped). */
+    private static final class Admission {
+        TaskResult early;
         String input;
         LlmClient.CancelToken cancel;
-        synchronized (lock) {
-            if (h.state == Handle.State.CLOSED) {
-                if (preAdmitted && h.parent != null) h.parent.runningChildren--;
-                return new TaskResult("closed", true, "closed", null, null, 0, 0);
-            }
-            if (h.state == Handle.State.RUNNING || h.state == Handle.State.SUSPENDED) {
-                // Busy-guard: check-then-run must be atomic under the lock (heartbeats race wakes).
-                if (preAdmitted && h.parent != null) h.parent.runningChildren--;
-                return new TaskResult("busy (" + h.state.label() + ")", true, "done", null, null,
-                        h.turnsTotal, h.usageTotal);
-            }
-            String exhausted = exhaustedLimitLocked(h);
-            if (exhausted != null) {
-                if (preAdmitted && h.parent != null) h.parent.runningChildren--;
-                TaskResult r = new TaskResult("budget exhausted (" + exhausted + "); partial work preserved",
-                        true, "incomplete", null, null, h.turnsTotal, h.usageTotal);
-                h.lastResult = r;
-                flushWaitersLocked(h, r);
-                return r;
-            }
-            input = (prompt == null ? "" : prompt) + drainLocked(h);
-            h.state = Handle.State.RUNNING;
-            if (h.wallStartMs == 0) h.wallStartMs = clock.millis();
-            cancel = new LlmClient.CancelToken();
-            h.runCancel = cancel;
-            h.abortReason = null;
-            if (h.parent != null && !preAdmitted) h.parent.runningChildren++;
-            t(h.id + ": idle→running (wake)");
-        }
+    }
 
+    /** SPEC §7D "Admission's atomic step is complete": the admission check, the slot take, the
+     * inbox DRAIN, the cancellation-context install, and the state transition ALL happen in one
+     * atomic step with the verb — never in the spawned execution. A budget refusal SETTLES the
+     * handle with an {@code incomplete} result (flushed to waiters), never a hanging pre-reject.
+     * Caller must hold {@code lock}; {@code slotHeld} = the parent slot was already reserved. */
+    private Admission admitLocked(Handle h, String prompt, boolean slotHeld) {
+        Admission adm = new Admission();
+        if (h.state == Handle.State.CLOSED) {
+            if (slotHeld && h.parent != null) h.parent.runningChildren--;
+            adm.early = new TaskResult("closed", true, "closed", null, null, h.turnsTotal, h.usageTotal);
+            return adm;
+        }
+        if (h.state == Handle.State.RUNNING || h.state == Handle.State.SUSPENDED) {
+            // Busy-guard: check-then-run must be atomic under the lock (heartbeats race wakes).
+            if (slotHeld && h.parent != null) h.parent.runningChildren--;
+            adm.early = new TaskResult("busy (" + h.state.label() + ")", true, "error", null, null,
+                    h.turnsTotal, h.usageTotal);
+            return adm;
+        }
+        String exhausted = exhaustedLimitLocked(h);
+        if (exhausted != null) {
+            if (slotHeld && h.parent != null) h.parent.runningChildren--;
+            TaskResult r = new TaskResult("budget exhausted (" + exhausted + "); partial work preserved",
+                    true, "incomplete", null, null, h.turnsTotal, h.usageTotal);
+            h.lastResult = r;
+            flushWaitersLocked(h, r);
+            t(h.id + ": wake refused SETTLED incomplete (budget " + exhausted + ")");
+            adm.early = r;
+            return adm;
+        }
+        if (!slotHeld && h.parent != null) h.parent.runningChildren++;
+        adm.input = (prompt == null ? "" : prompt) + drainLocked(h);
+        h.state = Handle.State.RUNNING;
+        if (h.wallStartMs == 0) h.wallStartMs = clock.millis();
+        adm.cancel = new LlmClient.CancelToken();
+        h.runCancel = adm.cancel;
+        h.abortReason = null;
+        t(h.id + ": idle→running (wake)");
+        return adm;
+    }
+
+    TaskResult runTurn(Handle h, String prompt, Function<Request, Answer> oneShotWaitFor, boolean preAdmitted) {
+        Admission adm;
+        synchronized (lock) {
+            adm = admitLocked(h, prompt, preAdmitted);
+        }
+        if (adm.early != null) return adm.early;
+        return executeTurn(h, adm, oneShotWaitFor);
+    }
+
+    /** The admitted turn's execution — everything AFTER the verb's atomic admission step. */
+    private TaskResult executeTurn(Handle h, Admission adm, Function<Request, Answer> oneShotWaitFor) {
+        String input = adm.input;
+        LlmClient.CancelToken cancel = adm.cancel;
         TaskResult result;
         try {
             List<Tool> tools = new ArrayList<>(h.def.tools != null ? h.def.tools : List.of());
-            tools.add(taskTool(h));
+            // The `task` tool is registered ONLY when the def declares a team (recursion and
+            // delegation are opt-in, never default — SPEC §7D "team tools opt-in, default OFF").
+            if (h.def.team != null && !h.def.team.isEmpty()) tools.add(taskTool(h));
             try (Toolkit toolkit = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(tools))) {
                 String model = "inherit".equals(h.def.model)
                         ? (opts.defaultModel != null ? opts.defaultModel : "inherit") : h.def.model;
@@ -508,9 +568,10 @@ public final class AgentRuntime {
                                 r.turns, r.usage.totalTokens);
                     } else if ("incomplete".equals(r.status)) {
                         if (h.state != Handle.State.CLOSED) h.state = Handle.State.IDLE;
-                        result = new TaskResult("hit maxTurns without a final answer", true, "incomplete",
+                        String limit = r.limit != null ? r.limit : "maxTurns";
+                        result = new TaskResult("hit " + limit + " without a final answer", true, "incomplete",
                                 null, null, r.turns, r.usage.totalTokens);
-                        t(h.id + ": running→idle (INCOMPLETE at maxTurns " + h.effMaxTurns + ")");
+                        t(h.id + ": running→idle (INCOMPLETE at " + limit + " " + h.effMaxTurns + ")");
                     } else {
                         if (h.state != Handle.State.CLOSED) h.state = Handle.State.IDLE;
                         t(h.id + ": running→idle (done, turns=" + r.turns + ", tokens=" + r.usage.totalTokens + ")");
@@ -534,26 +595,40 @@ public final class AgentRuntime {
                 }
                 if (h.state != Handle.State.CLOSED) h.state = Handle.State.IDLE;
                 t(h.id + ": running→idle (" + (abort != null ? abort + "; inbox intact" : "error: " + msg) + ")");
+                // Closed status vocabulary: a failed run is "error" — never "done" + isError.
                 result = new TaskResult(abort != null ? abort : msg, true,
-                        abort != null ? abort : "done", null, null, h.turnsTotal, h.usageTotal);
+                        abort != null ? abort : "error", null, null, h.turnsTotal, h.usageTotal);
             }
         } finally {
             Thread.interrupted(); // clear any leftover cancel interrupt before post-processing
+            Handle dequeued = null;
+            Admission dequeuedAdm = null;
             synchronized (lock) {
                 h.runCancel = null;
                 if (h.parent != null) {
                     h.parent.runningChildren--;
                     // Concurrency gate: the freed slot TRANSFERS to one queued sibling wake (FIFO).
+                    // The dequeued wake's admission (drain + cancel install + state flip) happens
+                    // HERE, atomically with the slot transfer — never in the spawned execution.
                     for (Handle sib : h.parent.children) {
                         if (!sib.wakeQueue.isEmpty() && h.parent.runningChildren < h.parent.effMaxConcurrent) {
                             String qp = sib.wakeQueue.poll();
                             t(sib.id + ": DEQUEUED wake (slot freed)");
                             h.parent.runningChildren++;
-                            Thread.startVirtualThread(() -> runTurn(sib, qp, null, true));
+                            Admission a = admitLocked(sib, qp, true);
+                            if (a.early == null) {
+                                dequeued = sib;
+                                dequeuedAdm = a;
+                            }
                             break;
                         }
                     }
                 }
+            }
+            if (dequeued != null) {
+                Handle sib = dequeued;
+                Admission a = dequeuedAdm;
+                Thread.startVirtualThread(() -> executeTurn(sib, a, null));
             }
         }
         synchronized (lock) {
@@ -633,20 +708,22 @@ public final class AgentRuntime {
                 Handle child = null;
                 TaskResult r = null;
                 synchronized (lock) {
-                    TaskResult cached = parent.taskCache.get(key);
-                    if (cached != null) {
-                        t(parent.id + ": task replay → cached result (idempotent resume)");
-                        return new ToolResult(cached.text(), cached.isError(), null);
-                    }
+                    // Reattachment by task key is the ONLY idempotency mechanism — including
+                    // closed-but-settled children (no completion cache, SPEC §7D durable resume).
                     for (Handle c : parent.children) {
-                        if (key.equals(c.taskKey) && c.state != Handle.State.CLOSED) { child = c; break; }
+                        if (key.equals(c.taskKey)) { child = c; break; }
                     }
                     if (child != null) {
-                        // Durable resume REATTACHES by task key — settled ⇒ recorded result,
-                        // suspended ⇒ its pending, running ⇒ await below. Never a duplicate child.
+                        // Durable resume REATTACHES by task key — settled (idle OR closed) ⇒ its
+                        // recorded result, suspended ⇒ its pending, running ⇒ await below.
+                        // Never a duplicate child.
                         t(parent.id + ": task replay → REATTACH to " + child.id + " (state " + child.state.label() + ")");
-                        if (child.state == Handle.State.IDLE && child.lastResult != null) {
+                        if (child.lastResult != null
+                                && (child.state == Handle.State.IDLE || child.state == Handle.State.CLOSED)) {
                             r = child.lastResult;
+                        } else if (child.state == Handle.State.CLOSED) {
+                            r = new TaskResult("closed", true, "closed", null, null,
+                                    child.turnsTotal, child.usageTotal);
                         } else if (child.state == Handle.State.SUSPENDED) {
                             r = new TaskResult(child.pendingReq.prompt(), false, "pending",
                                     withPath(child.pendingReq, pathOf(child)), pathOf(child),
@@ -677,8 +754,7 @@ public final class AgentRuntime {
                     // A suspending agent IS a suspending tool — §10 unchanged, path attached.
                     return new ToolResult(r.pending().prompt(), true, Map.of("pending", r.pending()));
                 }
-                synchronized (lock) { parent.taskCache.put(key, r); }
-                self.close(child);
+                self.close(child); // closed-but-settled: lastResult stays queryable for reattachment
                 Map<String, Object> md = new LinkedHashMap<>();
                 md.put("agent", agentName);
                 md.put("turns", r.turns());

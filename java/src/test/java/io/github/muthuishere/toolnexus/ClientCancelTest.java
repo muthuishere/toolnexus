@@ -171,6 +171,7 @@ class ClientCancelTest {
                     .retries(0).maxTurns(3));
             LlmClient.RunResult r = c.run("loop", tk);
             assertEquals("incomplete", r.status, "a §7D limit stop is loud, never a silent done");
+            assertEquals("maxTurns", r.limit, "RunResult.limit names the limit iff status=incomplete");
             assertEquals(3, r.turns);
         }
     }
