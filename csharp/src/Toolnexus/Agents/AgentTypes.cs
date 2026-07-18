@@ -75,7 +75,9 @@ public sealed class AgentDef
 /// <summary>
 /// The uniform outcome of one agent turn as seen by waiters (SPEC §7D). Failures cross the handle
 /// boundary as <c>IsError</c> results — never exceptions; only the root may throw to the host.
-/// <see cref="Status"/> is one of <c>done | pending | incomplete | interrupted | closed | timeout</c>.
+/// <see cref="Status"/> is the CLOSED seven-string vocabulary (SPEC §7D):
+/// <c>done | pending | incomplete | interrupted | closed | timeout | error</c> — identical strings
+/// in every port; a failed run is <c>error</c>, never <c>done</c> + <c>IsError</c>.
 /// </summary>
 public sealed record AgentResult(
     string Text, bool IsError, string Status, int Turns, long TotalTokens,

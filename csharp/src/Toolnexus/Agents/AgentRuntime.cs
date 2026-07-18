@@ -314,6 +314,9 @@ public sealed class AgentRuntime
             leaf.PendingRequest = null;
             leaf.PendingInput = null;
             leaf.State = "idle";
+            // Durable resume shape (SPEC §7D): suspended→idle (Answer accepted, checkpoint
+            // restored) then idle→running (the replay wake) — never a direct suspended→running.
+            T($"{leaf.Id}: suspended→idle (Answer accepted, checkpoint restored)");
         }
         await RunTurnAsync(leaf, input, _ => Task.FromResult(answer)).ConfigureAwait(false);
         // Cascade: each suspended ancestor re-runs its halted turn; the re-invoked task reattaches.
@@ -323,11 +326,12 @@ public sealed class AgentRuntime
             string pin;
             lock (_sync)
             {
-                T($"{p.Id}: cascade resume (child result cached)");
                 pin = p.PendingInput ?? "";
                 p.PendingRequest = null;
                 p.PendingInput = null;
                 p.State = "idle";
+                T($"{p.Id}: suspended→idle (Answer accepted, checkpoint restored)");
+                T($"{p.Id}: cascade resume (replay reattaches by task key)");
             }
             await RunTurnAsync(p, pin).ConfigureAwait(false);
             p = p.Parent;
@@ -655,19 +659,12 @@ public sealed class AgentRuntime
                 return ToolResult.Error(
                     $"agent \"{agentName}\" not in this agent's team ({(team.Count == 0 ? "none" : string.Join(", ", team))})");
             var key = $"{agentName}:{prompt}";
-            lock (_sync)
-            {
-                if (parent.TaskCache.TryGetValue(key, out var cached))
-                {
-                    T($"{parent.Id}: task replay → cached result (idempotent resume)");
-                    return new ToolResult(cached.Text, cached.IsError);
-                }
-            }
+            // Reattachment by task key is the ONLY idempotency mechanism — including
+            // closed-but-settled children (no completion cache, SPEC §7D durable resume).
             Handle? existing;
-            lock (_sync) existing = parent.ChildList.FirstOrDefault(c => c.TaskKey == key && c.State != "closed");
+            lock (_sync) existing = parent.ChildList.FirstOrDefault(c => c.TaskKey == key);
             AgentResult r;
             Handle child;
-            var reattached = existing != null;
             if (existing != null)
             {
                 lock (_sync) T($"{parent.Id}: task replay → REATTACH to {existing.Id} (state {existing.State})");
@@ -690,8 +687,10 @@ public sealed class AgentRuntime
                 // (already stamped with its data.path) rides the task result's pending metadata.
                 return ToolResult.Pending(r.Pending!);
             }
-            lock (_sync) parent.TaskCache[key] = r;
-            if (!reattached) await CloseAsync(child).ConfigureAwait(false);
+            // task = spawn→wake→wait→CLOSE fused: the settled child is closed on the fresh path
+            // AND on the cascade replay (the fixture pins asker.1's terminal idle→closed).
+            // Closed-but-settled children stay reattachable via LastResult.
+            await CloseAsync(child).ConfigureAwait(false);
             return new ToolResult(
                 r.Status == "done" ? r.Text : $"[{r.Status}] {r.Text}",
                 r.IsError,

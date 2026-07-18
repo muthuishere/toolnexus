@@ -106,6 +106,19 @@ public class AgentRuntimeTests
             "leaf resumed AT checkpoint (prior turns preserved)");
         Assert.True(trace.Contains("task replay → REATTACH"),
             "parent cascade REATTACHED to the finished child (no re-execution)");
+        // Late pin (fixtures 82778d6 + 62d285e): durable resume traces suspended→idle (Answer
+        // accepted) then idle→running (the replay wake) — for the leaf AND the relaying parent —
+        // and asker.1 ends with a terminal idle→closed.
+        foreach (var id in new[] { "root/approverParent.1", "root/approverParent.1/asker.1" })
+        {
+            var mine = rt.TraceLines().Where(l => l.StartsWith(id + ":")).ToList();
+            var si = mine.FindIndex(l => l.Contains("suspended→idle"));
+            Assert.True(si >= 0, $"{id}: durable resume traces suspended→idle");
+            Assert.True(mine.Skip(si + 1).Any(l => l.Contains("idle→running")),
+                $"{id}: the replay wake traces idle→running AFTER suspended→idle");
+        }
+        Assert.True(rt.TraceLines().Any(l => l.StartsWith("root/approverParent.1/asker.1:") && l.Contains("→closed")),
+            "asker.1 ends with a terminal →closed (task close applies on the cascade replay too)");
         Assert.True(p.State == "idle", $"parent reached done after cascade: {p.State}");
         Assert.True(rt.List().First(h => h.Id.Contains("asker")).Tokens > before,
             "child did not restart from scratch (usage grew, not reset)");

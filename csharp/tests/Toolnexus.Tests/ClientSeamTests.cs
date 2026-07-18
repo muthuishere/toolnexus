@@ -27,6 +27,7 @@ public class ClientSeamTests
         });
         var r = await client.RunAsync("loop forever", toolkit);
         Assert.Equal("incomplete", r.Status);
+        Assert.Equal("maxTurns", r.Limit); // RunResult.Limit names the limit iff status=incomplete
         Assert.Equal(3, r.Turns);
         Assert.True(r.ToolCallCount == 3, $"partial work preserved: {r.ToolCallCount} tool calls");
     }

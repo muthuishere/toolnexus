@@ -57,7 +57,6 @@ public sealed class Handle
     internal readonly List<TaskCompletionSource<AgentResult>> Waiters = new();
     internal readonly List<string> WakeQueue = new();    // queued wake prompts (concurrency gate)
     internal List<InboxItem> Drained = new();            // consumed by the in-flight turn; restored on abort
-    internal readonly Dictionary<string, AgentResult> TaskCache = new();
     internal CancellationTokenSource? Cts;
     internal string? TaskKey;                            // set when spawned via `task` (reattachment)
     internal string? PendingInput;                       // the halted turn's full input (checkpoint)

@@ -133,7 +133,8 @@ public sealed class LlmClient
     private RunResult EndRun(long runStart, string text, List<object?> messages, List<ToolCall> toolCalls, int turns, Usage usage, string status = "done")
     {
         Emit(MetricEvent.Run(_opts.Model, turns, toolCalls.Count, usage.TotalTokens, NowMs() - runStart));
-        return new RunResult(text, messages, toolCalls, turns, usage, _opts.Model, status);
+        return new RunResult(text, messages, toolCalls, turns, usage, _opts.Model, status,
+            limit: status == "incomplete" ? "maxTurns" : null);
     }
 
     /// <summary>Emit a <c>run</c> error metric event (once, on a thrown run).</summary>
@@ -398,8 +399,12 @@ public sealed class LlmClient
         /// <summary>§10: the unresolved suspension — present iff <see cref="Status"/> == "pending".</summary>
         public Request? Pending { get; }
 
+        /// <summary>§7D: which limit stopped the run (e.g. <c>"maxTurns"</c>) — set ONLY when
+        /// <see cref="Status"/> == "incomplete"; null otherwise.</summary>
+        public string? Limit { get; }
+
         public RunResult(string text, List<object?> messages, List<ToolCall> toolCalls, int turns, Usage usage,
-            string model, string status = "done", Request? pending = null)
+            string model, string status = "done", Request? pending = null, string? limit = null)
         {
             Text = text;
             Messages = messages;
@@ -409,6 +414,7 @@ public sealed class LlmClient
             Model = model;
             Status = status;
             Pending = pending;
+            Limit = limit;
         }
     }
 
