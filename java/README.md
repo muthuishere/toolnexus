@@ -430,6 +430,35 @@ toolkit are useful even with zero of the client loop.
 
 ---
 
+## Sub-agents & teams
+
+An **Agent is a Tool**: a system prompt × a scoped toolkit view × the client loop. One agent
+delegates to another **in-process** via one `task` tool — isolated context, one result back,
+tokens rolled up, hierarchical budgets, durable suspension (`SPEC.md §7D`). Lives in the
+`io.github.muthuishere.toolnexus.agents` package (never the A2A `Agent`):
+
+```java
+import static io.github.muthuishere.toolnexus.agents.Agents.agent;
+import io.github.muthuishere.toolnexus.agents.*;
+
+Agents.Agent explore = agent("explore", new Agents.AgentSpec()
+    .does("read-only research")
+    .tools(lookup));
+Agents.Agent coder = agent("coder", new Agents.AgentSpec()
+    .does("implements changes")
+    .soulFile(Path.of("AGENTS.md"))
+    .team(explore)                       // team = the task tool's only targets; no team ⇒ no task tool
+    .budget(new Budget().maxTokens(10_000)));
+
+TaskResult r = coder.run(new RuntimeOptions()
+    .baseUrl("https://openrouter.ai/api/v1")
+    .style("openai")
+    .defaultModel("openai/gpt-4o-mini"), "fix the failing test");
+System.out.println(r.status() + " " + r.text() + " " + r.totalTokens());
+```
+
+Full guide: [Sub-agents & teams](https://muthuishere.github.io/toolnexus/subagents/).
+
 ## API at a glance
 
 | Call | What it does |

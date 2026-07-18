@@ -318,6 +318,34 @@ res = await tk.execute(name, arguments)   # -> ToolResult(output, is_error, meta
 
 All four appear as one uniform `Tool` in `tk.tools()`, with `source` in `"mcp" | "skill" | "custom"`.
 
+## Sub-agents & teams
+
+An **Agent is a Tool**: a system prompt × a scoped toolkit view × the client loop. One agent
+delegates to another **in-process** via one `task` tool — isolated context, one result back,
+tokens rolled up, hierarchical budgets, durable suspension (`SPEC.md §7D`). Lives in the
+`toolnexus.agents` namespace (never the A2A `agent` above):
+
+```python
+from toolnexus.agents import agent, Budget
+
+explore = agent("explore", does="read-only research", uses={"tools": [lookup]})
+coder = agent(
+    "coder",
+    does="implements changes",
+    soul_file="./AGENTS.md",
+    team=[explore],                      # team = the task tool's only targets; no team ⇒ no task tool
+    budget=Budget(max_tokens=10_000),
+)
+
+r = await coder.run(
+    "fix the failing test",
+    llm={"base_url": "https://openrouter.ai/api/v1", "style": "openai", "model": "openai/gpt-4o-mini"},
+)
+print(r.status, r.text, r.total_tokens)   # "done" | "incomplete" | "pending", final text, tree-wide tokens
+```
+
+Full guide: [Sub-agents & teams](https://muthuishere.github.io/toolnexus/subagents/).
+
 ## API
 
 | Python | Description |

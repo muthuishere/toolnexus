@@ -347,7 +347,37 @@ const res = await tk.execute(name, args)   // → { output, isError, metadata }
 | **HTTP / REST** | `httpTool({...})` — an endpoint becomes a tool, `${ENV}` headers |
 
 All appear as one uniform `Tool` in `tk.tools()`. Built-ins are a fifth source; remote A2A agents
-a sixth.
+a sixth; in-process **sub-agents** a seventh (below).
+
+## Sub-agents & teams
+
+An **Agent is a Tool**: a system prompt × a scoped toolkit view × the client loop. One agent
+delegates to another **in-process** via one `task` tool — isolated context, one result back,
+tokens rolled up, hierarchical budgets, durable suspension (`SPEC.md §7D`). The surface lives in
+the **`agents`** namespace (never the A2A `agent` above):
+
+```ts
+import { agents } from "toolnexus"
+
+const explore = agents.agent("explore", {
+  does: "read-only research",
+  uses: { tools: [lookup] },              // this child sees ONLY these tools
+})
+const coder = agents.agent("coder", {
+  does: "implements changes",
+  soulFile: "./AGENTS.md",                // identity file → system prompt
+  team: [explore],                        // team = the task tool's only targets; no team ⇒ no task tool
+  budget: { maxTokens: 10_000 },
+})
+
+const r = await coder.run("fix the failing test", {
+  llm: { baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" },
+})
+console.log(r.status, r.text, r.totalTokens)   // "done" | "incomplete" | "pending", final text, tree-wide tokens
+```
+
+`agents.asTool(...)` drops an agent back into `extraTools` for the classic API. Full guide:
+[Sub-agents & teams](https://muthuishere.github.io/toolnexus/subagents/).
 
 ## API
 
