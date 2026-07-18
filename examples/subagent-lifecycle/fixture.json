@@ -1,0 +1,66 @@
+{
+  "$schema": "toolnexus-subagent-fixture/v1",
+  "description": "S5/S6/S8/S9 — unsolicited rail (coalesced drain, provenance, timer-tick dedupe), backpressure gates (inbox loud-reject, per-parent concurrency queue, global turn gate), interrupt = turn-abort with transactional drain restore, and the leaf-first close cascade (SPEC §7D rails, gates, lifecycle).",
+  "registry": {
+    "coordinator": { "does": "splits and delegates", "model": "m-coordinator", "team": ["explore"] },
+    "explore": { "does": "read-only research", "model": "m-explore", "tools": ["lookup"] },
+    "peer": { "does": "team member", "model": "m-peer" },
+    "slow": { "does": "slow worker", "model": "m-slow" }
+  },
+  "tools": { "lookup": { "inputSchema": { "type": "object", "properties": { "q": { "type": "string" } } }, "behavior": "returns \"data(<q>)\"" } },
+  "mockLLM": {
+    "style": "openai",
+    "usagePerCall": { "prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40 },
+    "scripts": {
+      "m-coordinator": { "$ref": "../subagent-fanout/fixture.json#/mockLLM/scripts/m-coordinator" },
+      "m-explore": { "$ref": "../subagent-fanout/fixture.json#/mockLLM/scripts/m-explore" },
+      "m-peer": [ { "always": true, "text": "processed <count of numbered inbox items in last user msg> items" } ],
+      "m-slow": [ { "always": true, "text": "slow-done", "blocksUntil": "released-or-aborted" } ]
+    }
+  },
+  "scenarios": {
+    "coalescedDrain": {
+      "steps": [
+        { "post": { "handle": "peer", "from": "root/coordinator.1", "channel": "peer", "text": "update 1" } },
+        { "post": { "handle": "peer", "from": "external", "channel": "external", "text": "webhook payload" } },
+        { "post": { "handle": "peer", "from": "clock", "channel": "timer", "text": "tick" } },
+        { "post": { "handle": "peer", "from": "clock", "channel": "timer", "text": "tick" } },
+        { "post": { "handle": "peer", "from": "clock", "channel": "timer", "text": "tick" } },
+        { "wakeWait": { "handle": "peer" } }
+      ],
+      "expect": { "turns": 1, "text": "processed 3 items", "note": "2 messages + 3 ticks coalesced to 3 items; provenance rendered; external marked untrusted" }
+    },
+    "inboxGate": {
+      "runtime": { "inboxCap": 2 },
+      "steps": [
+        { "post": { "handle": "peer", "text": "1" } },
+        { "post": { "handle": "peer", "text": "2" } },
+        { "post": { "handle": "peer", "text": "3" }, "expect": { "rejected": true, "errorContains": "inbox full" } }
+      ]
+    },
+    "concurrencyGate": {
+      "registryOverride": { "coordinator": { "budget": { "maxConcurrent": 1 } } },
+      "run": { "entry": "coordinator", "prompt": "go" },
+      "expect": { "status": "done", "traceContains": ["wake QUEUED", "DEQUEUED wake"], "note": "2nd child queued then dequeued via slot transfer; still completes" }
+    },
+    "turnGate": {
+      "runtime": { "maxConcurrentTurns": 1 },
+      "run": { "entry": "coordinator", "prompt": "go" },
+      "expect": { "status": "done", "maxObservedConcurrentTurns": 1, "note": "gate wraps only the LLM HTTP call — parent delegating to children cannot deadlock" }
+    },
+    "interrupt": {
+      "steps": [
+        { "post": { "handle": "slow", "text": "for later" } },
+        { "wake": { "handle": "slow", "prompt": "work slowly" } },
+        { "awaitState": { "handle": "slow", "state": "running" } },
+        { "interrupt": { "handle": "slow" } }
+      ],
+      "expect": { "waiterStatus": "interrupted", "finalState": "idle", "inboxLen": 1, "note": "turn-abort NOT kill; transactional drain restored the item" }
+    },
+    "closeCascade": {
+      "tree": ["coordinator", "coordinator/peer", "coordinator/peer/peer"],
+      "steps": [ { "closeRoot": true }, { "post": { "handle": "coordinator/peer", "text": "late" }, "expect": { "rejected": true, "errorContains": "closed" } } ],
+      "expect": { "onCloseOrder": "grandchild, child, parent (leaf-first)", "allStates": "closed" }
+    }
+  }
+}

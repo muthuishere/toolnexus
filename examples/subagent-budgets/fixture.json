@@ -1,0 +1,41 @@
+{
+  "$schema": "toolnexus-subagent-fixture/v1",
+  "description": "S7 — hierarchical budgets: carve = min(own, parent remaining); LIVE ancestor-chain enforcement (sibling spend drains the shared pool after carve); maxChildren at spawn; exhaustion and maxTurns caps are LOUD (status incomplete), never a crash (SPEC §7D budgets).",
+  "registry": {
+    "coordinator": { "does": "splits and delegates", "model": "m-coordinator", "team": ["explore"] },
+    "explore": { "does": "read-only research", "model": "m-explore", "tools": ["lookup"] },
+    "looper": { "does": "never finishes", "model": "m-loop", "tools": ["lookup"] }
+  },
+  "tools": { "lookup": { "inputSchema": { "type": "object", "properties": { "q": { "type": "string" } } }, "behavior": "returns \"data(<q>)\"" } },
+  "mockLLM": {
+    "style": "openai",
+    "usagePerCall": { "prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40 },
+    "scripts": {
+      "m-explore": [
+        { "whenToolMsgs": 0, "toolCalls": [ { "name": "lookup", "args": { "q": "x" } } ] },
+        { "whenToolMsgs": ">=1", "text": "found:<first tool msg content>" }
+      ],
+      "m-loop": [
+        { "always": true, "toolCalls": [ { "name": "lookup", "args": { "q": "again" } } ] }
+      ]
+    }
+  },
+  "steps": [
+    { "spawn": { "parent": "root", "def": "coordinator", "budget": { "maxTokens": 100, "maxChildren": 2 } } },
+    { "spawn": { "parent": "coordinator", "def": "explore", "budget": { "maxTokens": 500 } },
+      "expect": { "effectiveTokens": 100, "note": "carve: min(500, parent 100)" } },
+    { "spawn": { "parent": "coordinator", "def": "explore" } },
+    { "spawn": { "parent": "coordinator", "def": "explore" },
+      "expect": { "isError": "maxChildren" } },
+    { "wakeWait": { "handle": "root/coordinator.1/explore.1", "prompt": "go" },
+      "expect": { "status": "done", "parentPoolAfter": 20, "note": "2 turns x 40 rolled up" } },
+    { "wakeWait": { "handle": "root/coordinator.1/explore.2", "prompt": "go" },
+      "expect": { "status": "done", "note": "pool 20 > 0 at admission; live walk allows" } },
+    { "wakeWait": { "handle": "root/coordinator.1/explore.2", "prompt": "again" },
+      "expect": { "status": "incomplete", "errorContains": "budget exhausted",
+                  "note": "ancestor pool now negative — LIVE chain walk refuses; no crash" } },
+    { "spawn": { "parent": "root", "def": "looper", "budget": { "maxTurns": 3 } } },
+    { "wakeWait": { "handle": "root/looper.1", "prompt": "loop forever" },
+      "expect": { "status": "incomplete", "note": "maxTurns cap is loud, not a silent done" } }
+  ]
+}

@@ -126,11 +126,15 @@ public sealed class LlmClient
             : (AsLong(raw.Get("prompt_tokens")), AsLong(raw.Get("completion_tokens")));
     }
 
-    /// <summary>Emit the terminal <c>run</c> metric event and build the <see cref="RunResult"/>.</summary>
-    private RunResult EndRun(long runStart, string text, List<object?> messages, List<ToolCall> toolCalls, int turns, Usage usage)
+    /// <summary>Emit the terminal <c>run</c> metric event and build the <see cref="RunResult"/>.
+    /// <paramref name="status"/> is <c>"done"</c> for a final answer, <c>"incomplete"</c> when the
+    /// loop stopped at <c>MaxTurns</c> still emitting tool calls (SPEC §8 addendum — loud, never a
+    /// silent done).</summary>
+    private RunResult EndRun(long runStart, string text, List<object?> messages, List<ToolCall> toolCalls, int turns, Usage usage, string status = "done")
     {
         Emit(MetricEvent.Run(_opts.Model, turns, toolCalls.Count, usage.TotalTokens, NowMs() - runStart));
-        return new RunResult(text, messages, toolCalls, turns, usage, _opts.Model);
+        return new RunResult(text, messages, toolCalls, turns, usage, _opts.Model, status,
+            limit: status == "incomplete" ? "maxTurns" : null);
     }
 
     /// <summary>Emit a <c>run</c> error metric event (once, on a thrown run).</summary>
@@ -234,7 +238,13 @@ public sealed class LlmClient
         public Options WithOnMetric(Action<MetricEvent> v) { OnMetric = v; return this; }
     }
 
-    /// <summary>Thrown when a run exceeds <see cref="Options.TimeoutMs"/> (or its in-flight request times out).</summary>
+    /// <summary>
+    /// Thrown when a run exceeds <see cref="Options.TimeoutMs"/> (or its in-flight request times
+    /// out). An EXTERNAL cancellation (the <c>CancellationToken</c> passed to run/ask/stream) is
+    /// NOT wrapped in this type — it surfaces as <see cref="OperationCanceledException"/> and is
+    /// classified by token state (SPEC §7D per-port cancellation contract), so an interrupt is
+    /// always distinguishable from a timeout without inspecting exception types.
+    /// </summary>
     public sealed class RunTimeoutException : Exception
     {
         public RunTimeoutException(string message) : base(message) { }
@@ -378,14 +388,23 @@ public sealed class LlmClient
         public Usage Usage { get; }
         public string Model { get; }
 
-        /// <summary>§10: "done" normally; "pending" iff a tool suspended and no <c>WaitFor</c> was configured.</summary>
+        /// <summary>
+        /// <c>"done"</c> — a final answer; <c>"pending"</c> (§10) — a tool suspended and no
+        /// <c>WaitFor</c> was configured; <c>"incomplete"</c> (SPEC §8 addendum / §7D) — the loop
+        /// stopped at <c>MaxTurns</c> while the model was still emitting tool calls. A limit stop is
+        /// loud, never a silent done.
+        /// </summary>
         public string Status { get; }
 
         /// <summary>§10: the unresolved suspension — present iff <see cref="Status"/> == "pending".</summary>
         public Request? Pending { get; }
 
+        /// <summary>§7D: which limit stopped the run (e.g. <c>"maxTurns"</c>) — set ONLY when
+        /// <see cref="Status"/> == "incomplete"; null otherwise.</summary>
+        public string? Limit { get; }
+
         public RunResult(string text, List<object?> messages, List<ToolCall> toolCalls, int turns, Usage usage,
-            string model, string status = "done", Request? pending = null)
+            string model, string status = "done", Request? pending = null, string? limit = null)
         {
             Text = text;
             Messages = messages;
@@ -395,6 +414,7 @@ public sealed class LlmClient
             Model = model;
             Status = status;
             Pending = pending;
+            Limit = limit;
         }
     }
 
@@ -666,7 +686,8 @@ public sealed class LlmClient
                     if (halted != null) return PendingRun(runStart, halted, messages, toolCalls, turns, usage);
                 }
             }
-            return EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage);
+            // MaxTurns exhausted while the model was still emitting tool calls (§8 addendum).
+            return EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage, "incomplete");
         }
         catch (Exception e)
         {
@@ -773,7 +794,8 @@ public sealed class LlmClient
                 }
                 messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = resultBlocks });
             }
-            return EndRun(runStart, "", messages, toolCalls, turns, usage);
+            // MaxTurns exhausted while the model was still emitting tool calls (§8 addendum).
+            return EndRun(runStart, "", messages, toolCalls, turns, usage, "incomplete");
         }
         catch (Exception e)
         {
@@ -958,7 +980,8 @@ public sealed class LlmClient
                     onEvent(StreamEvent.ToolResultEvent(slot[0], slot[1], rr.Result.Output, rr.Result.IsError));
                 }
             }
-            var done = EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage);
+            // MaxTurns exhausted while the model was still emitting tool calls (§8 addendum).
+            var done = EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage, "incomplete");
             onEvent(StreamEvent.DoneEvent(done));
             return done;
         }
@@ -1159,7 +1182,8 @@ public sealed class LlmClient
                 }
                 messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = results });
             }
-            var done = EndRun(runStart, "", messages, toolCalls, turns, usage);
+            // MaxTurns exhausted while the model was still emitting tool calls (§8 addendum).
+            var done = EndRun(runStart, "", messages, toolCalls, turns, usage, "incomplete");
             onEvent(StreamEvent.DoneEvent(done));
             return done;
         }
@@ -1245,11 +1269,11 @@ public sealed class LlmClient
                 res.Dispose();
                 await SleepAsync(wait, deadline, external).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (external.IsCancellationRequested)
-            {
-                throw new RunTimeoutException("run aborted");
-            }
-            catch (OperationCanceledException)
+            // Cancellation classification (SPEC §7D cancellation contract): an EXTERNAL cancel is
+            // classified by TOKEN STATE — it propagates as OperationCanceledException so callers
+            // (e.g. the agent runtime's `interrupt`) branch on their token, never on exception
+            // type. Only the run-deadline expiry becomes RunTimeoutException. Neither is retried.
+            catch (OperationCanceledException) when (!external.IsCancellationRequested)
             {
                 throw new RunTimeoutException($"run timeout after {deadline.TimeoutMs}ms"); // not retried
             }

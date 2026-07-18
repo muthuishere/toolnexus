@@ -1,0 +1,50 @@
+{
+  "$schema": "toolnexus-subagent-fixture/v1",
+  "description": "S3 — nearest-interpreter escalation: the child's approval suspension is answered inline by the PARENT's waitFor authority (SPEC §7D escalation, §10 unchanged).",
+  "registry": {
+    "approverParent": {
+      "does": "delegates, holds approval authority",
+      "model": "m-approver-parent",
+      "team": ["asker"],
+      "waitFor": { "behavior": "auto-approve: returns { id: request.id, ok: true }" }
+    },
+    "asker": {
+      "does": "needs approvals",
+      "model": "m-asker",
+      "tools": ["check_secret"]
+    }
+  },
+  "tools": {
+    "check_secret": {
+      "inputSchema": { "type": "object", "properties": {} },
+      "behavior": "without ctx.answer → pending({ kind: \"approval\", prompt: \"approve secret access?\" }); with ctx.answer.ok → returns \"secret-token\""
+    }
+  },
+  "mockLLM": {
+    "style": "openai",
+    "usagePerCall": { "prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40 },
+    "scripts": {
+      "m-approver-parent": [
+        { "whenToolMsgs": 0, "toolCalls": [ { "name": "task", "args": { "agent": "asker", "prompt": "get the secret" } } ] },
+        { "whenToolMsgs": ">=1", "text": "parent-final: <last tool msg content>" }
+      ],
+      "m-asker": [
+        { "whenNoToolMsgContains": "secret-token", "toolCalls": [ { "name": "check_secret", "args": {} } ] },
+        { "whenToolMsgContains": "secret-token", "text": "asker-done: secret-token" }
+      ]
+    }
+  },
+  "run": { "entry": "approverParent", "prompt": "do the secret thing" },
+  "expect": {
+    "status": "done",
+    "textContains": ["asker-done: secret-token"],
+    "escalation": {
+      "answeredBy": "root/approverParent.1",
+      "childTrace": ["running→suspended", "suspended→running"]
+    },
+    "transitions": {
+      "root/approverParent.1": ["idle→running", "running→idle"],
+      "root/approverParent.1/asker.1": ["idle→running", "running→suspended", "suspended→running", "running→idle", "→closed"]
+    }
+  }
+}

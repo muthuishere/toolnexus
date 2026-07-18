@@ -1,0 +1,357 @@
+---
+title: Sub-agents & teams
+description: Delegate work to in-process sub-agents — agent() + team + the task tool, with context isolation, usage roll-up, hierarchical budgets, and durable suspension — in all six languages.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+toolnexus already treats every tool *source* as the same thing to an LLM. Sub-agents complete
+that axiom **locally**: **an Agent is a Tool** — a system prompt × a filtered toolkit view × the
+shipped client loop, invocable as a named, described, schema'd callable. One agent can delegate
+to another **in-process**: isolated context, one result back, tokens rolled up. (`SPEC.md §7D`.)
+
+<Aside type="note" title="Namespacing — this is not the A2A Agent">
+Every port ships this surface in an **`agents` namespace** that never collides with the existing
+**A2A** `Agent` (the remote Agent-Card descriptor): `import { agents } from "toolnexus"` (JS),
+`from toolnexus.agents import agent` (Python), package `agents` (Go — `agents.Agent`, since
+`toolnexus.Agent` is the A2A type), `io.github.muthuishere.toolnexus.agents.Agents` (Java),
+`Toolnexus.Agents` (C# and Elixir).
+</Aside>
+
+## Level 1 — `agent()`, a team, `run()`
+
+Define agents declaratively. `does` is the routing description a delegating model sees; `uses`
+scopes the child's toolkit view (scoping is the security model); `soul`/`soulFile` is its
+identity (the system prompt); **listing agents in `team` IS the sub-agent wiring** — they become
+the only targets of the child-facing `task` tool. No team ⇒ no `task` tool (delegation, and
+recursion, are opt-in per definition).
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { agents } from "toolnexus"
+
+const explore = agents.agent("explore", {
+  does: "read-only research",
+  uses: { tools: [lookup] },              // this child sees ONLY these tools
+})
+const coder = agents.agent("coder", {
+  does: "implements changes",
+  soulFile: "./AGENTS.md",                // identity file → system prompt
+  team: [explore],                        // team = the task tool's only targets
+  budget: { maxTokens: 10_000 },
+})
+
+const r = await coder.run("fix the failing test", {
+  llm: {
+    baseUrl: "https://openrouter.ai/api/v1",
+    style: "openai",
+    model: "openai/gpt-4o-mini",
+  },
+})
+console.log(r.status, r.text, r.totalTokens)   // "done", final text, tree-wide tokens
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus.agents import agent, Budget
+
+explore = agent("explore", does="read-only research", uses={"tools": [lookup]})
+coder = agent(
+    "coder",
+    does="implements changes",
+    soul_file="./AGENTS.md",
+    team=[explore],
+    budget=Budget(max_tokens=10_000),
+)
+
+r = await coder.run(
+    "fix the failing test",
+    llm={
+        "base_url": "https://openrouter.ai/api/v1",
+        "style": "openai",
+        "model": "openai/gpt-4o-mini",
+    },
+)
+print(r.status, r.text, r.total_tokens)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+import "github.com/muthuishere/toolnexus/golang/agents"
+
+explore := agents.New("explore", agents.Spec{
+    Does:  "read-only research",
+    Tools: []toolnexus.Tool{lookup},
+})
+coder := agents.New("coder", agents.Spec{
+    Does:     "implements changes",
+    SoulFile: "./AGENTS.md",
+    Team:     []*agents.Agent{explore},
+    Budget:   &agents.Budget{MaxTokens: 10_000},
+})
+
+r, _ := coder.Run(agents.Options{
+    LLM: &agents.LLMOptions{
+        BaseURL: "https://openrouter.ai/api/v1",
+        Style:   toolnexus.StyleOpenAI,
+        Model:   "openai/gpt-4o-mini",
+    },
+}, "fix the failing test")
+fmt.Println(r.Status, r.Text, r.TotalTokens)
+```
+</TabItem>
+<TabItem label="Java">
+```java
+import static io.github.muthuishere.toolnexus.agents.Agents.agent;
+import io.github.muthuishere.toolnexus.agents.*;
+
+Agents.Agent explore = agent("explore", new Agents.AgentSpec()
+    .does("read-only research")
+    .tools(lookup));
+Agents.Agent coder = agent("coder", new Agents.AgentSpec()
+    .does("implements changes")
+    .soulFile(Path.of("AGENTS.md"))
+    .team(explore)
+    .budget(new Budget().maxTokens(10_000)));
+
+TaskResult r = coder.run(new RuntimeOptions()
+    .baseUrl("https://openrouter.ai/api/v1")
+    .style("openai")
+    .defaultModel("openai/gpt-4o-mini"), "fix the failing test");
+System.out.println(r.status() + " " + r.text() + " " + r.totalTokens());
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+using Toolnexus.Agents;
+
+var explore = new Agent("explore", new AgentSpec
+{
+    Does = "read-only research",
+    Uses = new List<ITool> { lookup },
+});
+var coder = new Agent("coder", new AgentSpec
+{
+    Does = "implements changes",
+    SoulFile = "./AGENTS.md",
+    Team = new List<Agent> { explore },
+    Budget = new Budget { MaxTokens = 10_000 },
+});
+
+var r = await coder.RunAsync(new RuntimeOptions
+{
+    BaseUrl = "https://openrouter.ai/api/v1",
+    Style = "openai",
+    Model = "openai/gpt-4o-mini",
+}, "fix the failing test");
+Console.WriteLine($"{r.Status} {r.Text} {r.TotalTokens}");
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Agents
+
+explore = Agents.agent("explore", does: "read-only research", uses: %{tools: [lookup]})
+
+coder =
+  Agents.agent("coder",
+    does: "implements changes",
+    soul_file: "AGENTS.md",
+    team: [explore],
+    budget: %{max_tokens: 10_000}
+  )
+
+r =
+  Agents.run(
+    coder,
+    [llm: %{base_url: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini"}],
+    "fix the failing test"
+  )
+
+IO.puts("#{r.status} #{r.text} #{r.total_tokens}")
+```
+</TabItem>
+</Tabs>
+
+The registry an agent runs against is the **transitive closure of its team graph** — agents you
+didn't wire in are simply not reachable. A `task` call naming an out-of-team agent is refused
+with the team's names listed.
+
+## The other direction — `asTool()`
+
+The bridge back into the classic API: an Agent **is** a `Tool`, so drop it into `extraTools`
+and any toolkit/client run can delegate to it. The agent's own loop runs in isolation; the
+outer run receives exactly one tool result carrying only the final text plus metadata
+`{agent, turns, totalTokens}`.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const tk = await createToolkit({ extraTools: [explore.asTool({ llm })] })
+```
+</TabItem>
+<TabItem label="Python">
+```python
+tk = await create_toolkit(extra_tools=[explore.as_tool(llm=llm)])
+```
+</TabItem>
+<TabItem label="Go">
+```go
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{
+    ExtraTools: []toolnexus.Tool{explore.AsTool(agents.Options{LLM: llm})},
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Toolkit tk = Toolkit.create(new Toolkit.Options().extraTools(explore.asTool(rtOpts)));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+toolkit.Register(explore.AsTool(rtOpts));
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+tools = [Agents.as_tool(explore, rt_opts)]
+```
+</TabItem>
+</Tabs>
+
+## Isolation & roll-up — what `task` guarantees
+
+Under the hood delegation is one built-in tool, `task { agent, prompt }` — spawn → wake →
+wait → close, fused. Its guarantees:
+
+- **Fresh transcript.** The child runs on its own conversation; none of the parent's context
+  leaks down, and none of the child's reasoning floods back up.
+- **One tool message back.** The parent gains exactly one result per `task` call: the child's
+  final text. Parallel `task` calls in one turn run concurrently (the standard parallel
+  tool-call path).
+- **Usage roll-up.** The child's tokens/turns/tool calls roll up into the parent's usage —
+  `totalTokens` on the root result is the whole tree's ledger.
+- **Errors are results, never exceptions.** A failed child Run crosses the boundary as a
+  uniform `isError` tool result for the parent's model to judge (reprompt / respawn / reroute /
+  abandon). Only the root throws to the host.
+- **Team-scoped advertisement.** The `task` tool's description lists only the caller's team
+  (sorted by name, composed from each agent's `does`) — the same progressive-disclosure pattern
+  as the `skill` tool.
+
+## Suspension escalation & durable resume
+
+A suspending child agent presents to its parent **exactly as a suspending tool** —
+[the §10 suspension layer](/toolnexus/suspension/), verbatim, no new pending type. The nearest
+`waitFor` interpreter wins, one hop at a time: child's `waitFor` → else the child's Request
+(plus its handle path in `data.path`) rides up through the parent's `task` result → parent's
+`waitFor` → … → the root returns `status: "pending"`. Parked levels burn zero tokens.
+
+A durable pending leaves the tree parked — the result carries the live runtime for resume:
+
+```ts
+const r = await coder.run("refund order 812", { llm })
+if (r.status === "pending") {
+  // ... later, possibly after human approval:
+  const resumed = await r.runtime.resume(answer)   // routes to the DEEPEST suspended handle
+}
+```
+
+(Python: `await r.runtime.resume(answer)` · Go: `Run` returns `(TaskResult, *Runtime)`, call
+`rt.Resume(answer)` · Java: `AgentRuntime.resume(answer)` · C#: `AgentRuntime.ResumeAsync(answer)`
+— in both, drive the runtime directly for durable one-shots · Elixir: `Runtime.resume/2` with the
+runtime under `r.runtime`.)
+
+On resume the deepest handle continues from its checkpoint (turns and usage grow, never reset),
+and each re-run parent's `task` call **reattaches to the existing child by task key**
+(agent + prompt): settled ⇒ its recorded result, suspended ⇒ its pending, running ⇒ await.
+Never a duplicate spawn.
+
+## Budgets — and the `"incomplete"` status
+
+`Budget { maxTurns, maxTokens, maxToolCalls, maxWallMs, maxChildren, maxConcurrent, maxDepth }`
+(idiomatic casing per port). Budgets are **hierarchical and live**: carved at spawn as
+`min(own, parent remaining)`, then enforced against the whole ancestor chain before every turn
+and spawn — a sibling's spend counts.
+
+Any limit stop is **loud**: the result is `status: "incomplete"` with the limit named — never a
+silent `"done"`, never a crash. Partial work and the transcript are preserved. The full result
+status vocabulary is closed and byte-identical in all six ports:
+
+```
+"done" | "pending" | "incomplete" | "interrupted" | "closed" | "timeout" | "error"
+```
+
+<Aside type="caution" title="This also touches the plain client loop">
+`RunResult.status` on the ordinary `client.run(...)` gains `"incomplete"` too: a `maxTurns`
+exit that still had tool calls in flight is now `status: "incomplete"` + `limit: "maxTurns"`
+instead of `"done"`. Code that matched `status === "done"` after a maxTurns stop must update.
+</Aside>
+
+An optional `onBudget(info) → "stop" | "extend" | "suspend"` hook lets the host convert a limit
+into an approval — `"suspend"` routes it through §10 like any other human-in-the-loop request.
+
+## Advanced — the six host verbs
+
+`agent().run()` and the `task` tool compile down to a small runtime you can drive directly
+(`agents.AgentRuntime` / `agents.Runtime` per port) — a `Handle` state machine
+(`idle → running → idle | suspended | closed`) plus six verbs:
+
+| verb | what it does |
+|---|---|
+| `spawn(parent, def, budget?)` | new child handle; deterministic parent-scoped id (`root/coordinator.1/explore.2`); budget carve; the handle is a **capability** — only its holder may post/wake it |
+| `post(h, item)` | append to the child's inbox (agent state, not a mailbox); bounded — a full inbox rejects loudly to the sender |
+| `wake(h, prompt?)` | `idle → running`; the turn's input = the whole drained inbox as one coalesced block, every item labeled with provenance |
+| `wait(h, timeout?)` | next result or last result (a settled handle answers immediately); timeout errors, the child keeps running |
+| `interrupt(h)` | abort the in-flight turn → `idle`; drained inbox items are restored (drain is transactional). Never a kill |
+| `close(h, {force?})` | graceful cascade, leaf-first; a running turn gets `shutdownMs` before escalating; final state stays queryable — a successor can spawn from the checkpoint |
+
+Three always-loud backpressure gates protect a tree: the bounded inbox, a per-parent
+`maxConcurrent` admission gate (atomic with `wake`; queued wakes are FIFO), and a global
+`maxConcurrentTurns` gate that wraps **only** the LLM HTTP call — never a whole run — so a
+parent can never deadlock against its own children.
+
+## Recipes — orchestrate & map are userland patterns
+
+There is deliberately no `orchestrate()` or `map()` API. Both are prompts + teams over the one
+`task` primitive (parallel `task` calls in one turn already run concurrently):
+
+**Orchestrate** — a coordinator whose team is the workers; the model decides the fan-out:
+
+```ts
+const researcher = agents.agent("researcher", { does: "web + code research", uses: { tools } })
+const writer     = agents.agent("writer",     { does: "drafts prose from notes" })
+const checker    = agents.agent("checker",    { does: "adversarial fact-check" })
+
+const lead = agents.agent("lead", {
+  does: "coordinates research reports",
+  soul: "Plan the report, delegate research and drafting to your team IN PARALLEL " +
+        "where independent, then have the checker verify before you answer.",
+  team: [researcher, writer, checker],
+  budget: { maxTokens: 200_000, maxConcurrent: 3 },
+})
+const r = await lead.run("Report on the EU AI Act's impact on medical devices", { llm })
+```
+
+**Map** — same worker, one `task` call per item; the budget caps the whole fan-out:
+
+```ts
+const summarizer = agents.agent("summarizer", { does: "summarizes one document" })
+
+const mapper = agents.agent("mapper", {
+  does: "maps a summarizer over documents",
+  soul: "For EACH document in the prompt, issue one task call to summarizer " +
+        "(all in the same turn so they run in parallel), then merge the results.",
+  team: [summarizer],
+  budget: { maxConcurrent: 8 },
+})
+const r = await mapper.run(`Summarize each of: ${docPaths.join(", ")}`, { llm })
+```
+
+The same shapes work in every port — only the `agent()` spelling changes (tabs above).
+
+## See also
+
+- [Suspension & the human loop](/toolnexus/suspension/) — the §10 machinery escalation rides on.
+- [A2A — remote agents](/toolnexus/a2a/) — the same axiom across the network; `serve(agent)` is unchanged.
+- `SPEC.md §7D` — the full cross-language contract (state machine, gates, cancellation table).

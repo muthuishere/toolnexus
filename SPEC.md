@@ -680,6 +680,141 @@ in core, and the Go CLI `serve --mcp` subcommand.
 
 ---
 
+## 7D. Sub-agents & agent runtime (source: "agent")
+
+One axiom completes §7A/§7B's symmetry **locally**: **an Agent is a Tool** — (system
+prompt × a filtered toolkit view × the §8 loop), invocable as `{ name, description:
+does, inputSchema:{prompt}, execute: run its loop, return ONLY its final text +
+metadata {agent, turns, totalTokens} }`. The classic API is untouched; everything here
+is additive. Reference evidence: six-port spike, 276/276 transition-trace checks
+(`docs/references/agent-fundamentals-audit-2026-07-17.md`).
+
+### Handle state machine (SPEC pins transitions, never scheduling)
+
+```
+states:  idle → running → (idle | suspended | closed)
+         suspended → running  ONLY via the Answer to its pending Request
+Handle = { id, def, state, inbox, budget, children }   // inbox = AGENT STATE, never a runtime/language mailbox
+```
+Ids are deterministic and parent-scoped (`root/coordinator.1/explore.2`) — never random.
+Scheduling, thread placement, and concurrency level are unobservable; conformance =
+identical per-handle transition traces against the shared `examples/subagent-*` fixtures
+on a **virtual clock**.
+
+### Six host verbs (+ read-only `list`/`inspect` views)
+
+| verb | contract |
+|---|---|
+| `spawn(parent, def, budget?)` | new child handle; deterministic id; budget carve `min(own, parent remaining)`; caps (`maxChildren`/`maxDepth`) checked here; handle returned to the spawner ALONE (handles are capabilities: post/wake what you hold, wait only what you spawned) |
+| `post(h, item)` | append to inbox; NO transition; bounded inbox — at cap, reject synchronously to the sender (loud, never silent); after close ⇒ error result |
+| `wake(h, prompt?)` | `idle→running`; turn input = drain(inbox); **admission is atomic with the verb** (check + slot take + state flip as one step); over `maxConcurrent` per parent ⇒ wake queues FIFO, a completed sibling **transfers** its slot |
+| `wait(h, timeout?)` | resolves with the **next result or the last result** (a settled handle answers immediately; registration order is unobservable); timeout ⇒ explicit timeout error, child keeps running |
+| `interrupt(h)` | abort the in-flight Run (per-port cancellation contract, table below) → `idle`, **drained inbox items restored** (drain is transactional — consumed only by a completed turn); on a `suspended` handle ⇒ cancel the pending Request → `idle`. Never a kill |
+| `close(h, {force?})` | graceful: stop accepting → close children **leaf-first** → running turn may finish bounded by `shutdownMs` (then escalate to interrupt) → `onClose(reason)` → final state kept queryable (close ≠ loss; a successor may spawn from the checkpoint). Stop-all = `close(root)` |
+
+**Call discipline** (or truly-concurrent ports deadlock): handle→handle *blocking* calls
+flow strictly **rootward**; parent→child interaction is non-blocking; downward traversal
+(close cascade, list, resume) runs from outside the tree.
+
+### Two delivery rails
+
+- **Solicited** — a tool call's own result returns into the live turn (sync `task` rides this).
+- **Unsolicited** — posts, timer ticks, background results, inbound events land in the
+  inbox and enter ONLY as a fresh turn at idle. One wake drains the WHOLE inbox as one
+  coalesced context block (timer ticks dedupe to one counted entry); every item renders
+  with provenance `{from: handle-path|"external", channel}`, and non-ancestor/external
+  senders render inside an explicitly untrusted block.
+
+### Backpressure — three gates, always loud
+
+1. **Inbox gate**: bounded; full ⇒ synchronous reject to the sender.
+2. **Concurrency gate**: `maxConcurrent` running children per parent; atomic admission; queued wakes FIFO via slot transfer.
+3. **Turn gate**: global `maxConcurrentTurns` wraps **ONLY the LLM HTTP call** — never a
+   whole Run (holding it across a Run deadlocks parent against child) — and **releases on
+   acquirer death**, never only via the acquirer's cleanup path.
+
+### Budgets (hierarchical, live-enforced)
+
+`Budget { maxTurns, maxTokens, maxToolCalls, maxWallMs, maxChildren, maxConcurrent, maxDepth }`.
+Carve at spawn + **live ancestor-chain walk before each turn and spawn** (carve alone
+misses sibling spend). Usage roll-up (§7D task, below) is the ledger; between turn
+boundaries budget reads are eventually consistent. Money is excluded (vendor data; hosts
+convert in `onBudget`). Any limit stop ⇒ `status:"incomplete"` with the limit named —
+never silent `"done"`, never a crash; partial work + transcript preserved. Optional
+`onBudget(info) → "stop"|"extend"|"suspend"` ("suspend" routes §10 as an approval).
+
+### Model surface: the `task` tool (team tools opt-in, default OFF)
+
+`task { agent:string, prompt:string }` = spawn→wake→wait→close fused. Child runs on a
+fresh transcript; parent gains EXACTLY one tool message per call; child usage rolls up
+into parent usage. Parallel task calls in one turn run concurrently (§8). The tool's
+description advertises ONLY the caller's **team** (sorted by name, composed from each
+agent's `does` — the §3 skillsPrompt pattern); out-of-team targets ⇒ error listing team
+names. Children get no `task` unless their own def declares a team (recursion opt-in).
+The registry = transitive closure of the entry agent's team graph.
+
+### Suspension escalation & durable resume
+
+A suspending child agent presents to its parent EXACTLY as a suspending tool — §10
+verbatim, no new pending type. Nearest interpreter wins, strict one-hop: child's
+`waitFor` → else child suspends and the parent's task result carries the child's Request
+(+ `data.path`, §10) → parent's `waitFor` → … → root returns `status:"pending"`. Parked
+levels burn zero tokens. Resume: the Answer routes to the **deepest** suspended handle,
+which resumes at its checkpoint (turns/usage grow, never reset); the upward cascade
+re-runs each parent, and a re-invoked `task` **REATTACHES to the existing child by task
+key** (agent+prompt) — settled ⇒ its recorded result; suspended ⇒ its pending; running ⇒
+await — and never spawns a duplicate. Reattachment (not transcript inspection, not a
+completion cache) is the required idempotency mechanism.
+
+Three pins the first implementations forced: (1) **rewind-to-checkpoint** — on a durable
+pending the runtime restores the handle's PERSISTED transcript to its pre-turn snapshot
+(the §10 placeholder-append rule is scoped to bare-client runs; a persisted placeholder
+would make the resumed parent skip re-invoking `task`); (2) **two resume shapes** —
+inline resume traces `suspended→running` (the Run never ended); durable resume traces
+`suspended→idle` (Answer accepted, checkpoint restored) then `idle→running` (the replay
+wake); the Answer remains the only exit from `suspended` in both; (3) **result status
+vocabulary is closed**: `"done" | "pending" | "incomplete" | "interrupted" | "closed" |
+"timeout" | "error"` — identical strings in all six ports.
+
+### Errors: one boundary rule
+
+Mechanical retry/backoff (§8) runs at the level where the failure occurred. A failed
+child Run crosses the handle boundary as a uniform `isError` result — **never an
+exception** — for the parent's model to judge (reprompt / respawn / reroute / abandon).
+Only the root may throw to the host.
+
+### Lifecycle & runtime obligations
+
+`AgentDef` may declare `onSpawn(h)` (once, pre-first-turn — the session-start injection
+point) and `onClose(h, reason: closed|interrupted|budget|error)` (pre-final-checkpoint).
+The runtime owns: **one ConversationStore for all handles** (conversation id = handle id
+— transcripts genuinely survive turns; resume reads real history), an **injectable
+clock** (all timers/timeouts/deadlines; fixtures run virtual), the **handle table**
+(rebuildable tree), and **name-sorted registry iteration** wherever prose or traces are
+composed.
+
+### Cancellation contract (per port)
+
+| port | seam | guarantee |
+|---|---|---|
+| js | `AbortSignal` on `run/ask` | mid-request abort |
+| golang | `context` cancellation (cause owned by the runtime) | mid-request abort |
+| csharp | `CancellationToken` (interrupt classified by token state, not exception type) | mid-request abort |
+| elixir | Run-process termination (structural; turn-gate slot released by monitor) | mid-request abort |
+| python | cooperative cancel | between attempts (transport abort where the stack allows) |
+| java | cooperative cancel (interruptible virtual thread) | between attempts / interruptible send |
+
+Only abort **latency** may differ; the observable outcome is identical everywhere:
+`idle` + restored inbox + an interrupted error result to waiters.
+
+### Level-1 surface
+
+`agent(name, { does, uses?, soul?|soulFile?, team?, budget?, model? ("inherit"),
+waitFor?, onSpawn?, onClose? })` → `.run(prompt)` (one-shot) and `.asTool()` (the bridge
+into `extraTools` — the axiom's other direction). `serve(agent)` = §7B unchanged.
+
+---
+
 ## 8. Unified LLM client (the host loop)
 
 The payoff: give it a plain base URL + a "style", and it runs the whole tool-calling
@@ -787,6 +922,10 @@ skipping remaining retries. **Absent `onError` ⇒ the default classifier `retry
 is not a user action, so it never becomes a §10 `Pending`; suspension stays a user-action pause
 (§10). A `"fail"` result never carries `status:"pending"`. Aborts (timeout/cancel) bypass `onError`
 and are never retried.
+
+**Cancellation** beyond `timeoutMs`/abort: the per-port cancellation contract used by the
+agent runtime's `interrupt` is tabled in §7D — ports differ only in abort latency, never in
+observable outcome.
 
 ### Conversation memory
 
@@ -1085,7 +1224,10 @@ When a tool call returns a suspension (`metadata.pending` = `request`):
 ```
 RunResult {
   ...                          // as §8
-  status:   "done" | "pending" // "pending" ⇒ a tool suspended and no waitFor was set
+  status:   "done" | "pending" | "incomplete"
+  limit?:   string             // set ONLY when status="incomplete": which limit stopped it ("maxTurns", …)
+                               // "pending" ⇒ a tool suspended and no waitFor was set
+                               // "incomplete" ⇒ a §7D limit stopped the run (loud, named in `limit`)
   pending:  Request?           // present iff status == "pending"
 }
 ```
@@ -1119,3 +1261,23 @@ channel handler can push the link in real time:
   `run` again once the world has changed. Rule 2. Because `request`/`answer` are plain
   serializable data, this survives restarts and lets a *different* process/agent resolve
   it. No extra core machinery.
+
+### Agent escalation addendum (§7D)
+
+- **`Request.data.path`** — when a suspension propagates across an agent boundary, the
+  suspended handle's deterministic id path rides `data.path` (array of segments; each
+  relaying level stamps its own parent-prefixed path, so the value identifies the
+  suspended SUBTREE — Answer routing is defined as deepest-suspended within it) — the
+  ONE portable location (closed Request shapes in Go/Java/C#/Elixir forbid grafted
+  fields). Each relaying level stamps its own path; parent-prefixed ids make the deepest
+  path identify the suspended leaf's subtree, which is how the runtime routes the Answer.
+- **Halted-tool transcript rule (verified in all six shipped clients, 2026-07-18)**: on a
+  durable halt every BARE-CLIENT run APPENDS the first halted tool's placeholder result (`role:
+  "tool"`, content = the pending output) to the transcript, then returns `pending`; later
+  concurrent suspensions' placeholders never enter (they re-suspend on resume, §10
+  first-in-order). Resume therefore re-invokes the halted tool via retry-with-answer —
+  which is why §7D's task REATTACHMENT (not transcript inspection) is the idempotency
+  mechanism for delegated work.
+- The elicitation bridge (§2) and agent escalation produce byte-identical Request wire
+  shapes (modulo `data.path` presence) and resolve through the same single `waitFor` slot
+  — there is no second suspension mechanism.

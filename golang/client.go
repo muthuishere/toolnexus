@@ -269,8 +269,15 @@ type RunResult struct {
 	// Model is the model used.
 	Model string `json:"model"`
 	// Status is "done" normally; "pending" iff a tool suspended and no WaitFor
-	// was configured (§10).
+	// was configured (§10); "incomplete" iff a limit stopped the run loudly —
+	// the turn cap (MaxTurns) was reached while the model was still emitting
+	// tool calls, so there is no final answer (§7D / §8 addendum). Partial work
+	// (Messages, ToolCalls, Usage) is preserved either way — never a silent
+	// "done", never an error.
 	Status string `json:"status"`
+	// Limit names the limit that stopped the run (e.g. "maxTurns") — present iff
+	// Status == "incomplete". Mirrors js RunResult.limit.
+	Limit string `json:"limit,omitempty"`
 	// Pending is the unresolved suspension — present iff Status == "pending" (§10).
 	Pending *Request `json:"pending,omitempty"`
 }
@@ -389,6 +396,20 @@ func (c *Client) emitLLM(status string, start time.Time, prompt, completion int)
 func (c *Client) endRun(start time.Time, text string, messages []any, toolCalls []ToolCall, turns int, usage Usage) RunResult {
 	c.emit(MetricEvent{Event: "run", Model: c.opts.Model, Turns: turns, ToolCalls: len(toolCalls), TotalTokens: usage.TotalTokens, Ms: msSince(start)})
 	return c.result(text, messages, toolCalls, turns, usage)
+}
+
+// endRunExhausted is endRun for the maxTurns loop exit (§8 addendum): the turn
+// cap was exhausted while the model was still emitting tool calls. With no
+// final text that is a LOUD "incomplete" naming the limit — never a silent
+// "done"; a capped turn that still produced text stays "done" with that text
+// (mirrors js: `exhausted && text === ""`).
+func (c *Client) endRunExhausted(start time.Time, text string, messages []any, toolCalls []ToolCall, turns int, usage Usage) RunResult {
+	res := c.endRun(start, text, messages, toolCalls, turns, usage)
+	if text == "" {
+		res.Status = "incomplete"
+		res.Limit = "maxTurns"
+	}
+	return res
 }
 
 // emitRunError emits the terminal "run" metric event for a failed run (once).
@@ -947,7 +968,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 			}
 		}
 	}
-	return c.endRun(runStart, "", messages, toolCalls, turns, usage), nil
+	return c.endRunExhausted(runStart, lastText(messages), messages, toolCalls, turns, usage), nil
 }
 
 // result assembles a RunResult, filling in the derived telemetry fields.
@@ -1224,7 +1245,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 			return c.pendingRun(runStart, *haltReq, messages, toolCalls, turns, usage), nil
 		}
 	}
-	return c.endRun(runStart, "", messages, toolCalls, turns, usage), nil
+	return c.endRunExhausted(runStart, "", messages, toolCalls, turns, usage), nil
 }
 
 // decodeResponse decodes a raw provider response body into a map for AfterLLM.
@@ -1551,10 +1572,24 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, h
 			ch <- events[i]
 		}
 	}
-	res := c.endRun(runStart, lastText(messages), messages, toolCalls, turns, usage)
+	res := c.endRunExhausted(runStart, lastText(messages), messages, toolCalls, turns, usage)
 	u := usage
 	ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 	return nil
+}
+
+// lastText returns the last assistant message's string content, or "".
+func lastText(messages []any) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		m, ok := messages[i].(map[string]any)
+		if !ok || m["role"] != "assistant" {
+			continue
+		}
+		if s, ok := m["content"].(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // ---- Streaming: Anthropic-style ----
@@ -1797,7 +1832,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 		}
 		messages = append(messages, map[string]any{"role": "user", "content": resultBlocks})
 	}
-	res := c.endRun(runStart, "", messages, toolCalls, turns, usage)
+	res := c.endRunExhausted(runStart, "", messages, toolCalls, turns, usage)
 	u := usage
 	ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 	return nil
@@ -1869,20 +1904,6 @@ func intField(j map[string]any, k string) int {
 		return int(f)
 	}
 	return 0
-}
-
-// lastText returns the last assistant message's string content, or "".
-func lastText(messages []any) string {
-	for i := len(messages) - 1; i >= 0; i-- {
-		m, ok := messages[i].(map[string]any)
-		if !ok || m["role"] != "assistant" {
-			continue
-		}
-		if s, ok := m["content"].(string); ok {
-			return s
-		}
-	}
-	return ""
 }
 
 // ---- Conversation memory ----
