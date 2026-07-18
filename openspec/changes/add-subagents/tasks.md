@@ -6,20 +6,20 @@ normal source tree — do not merge spike files as-is.
 
 ## 0. Pre-work (verify before any port lands)
 
-- [ ] 0.1 Verify per-port §10 halted-tool transcript behavior (does the pending tool's
+- [x] 0.1 Verify per-port §10 halted-tool transcript behavior (does the pending tool's
       placeholder result get appended before halting?) across all six shipped clients;
       pin the answer in SPEC §10 (reattachment works either way, but the spec must
       state one truth)
-- [ ] 0.2 SPEC.md: add §7D (agent runtime + subagents: state machine, six verbs, two
+- [x] 0.2 SPEC.md: add §7D (agent runtime + subagents: state machine, six verbs, two
       rails, gates incl. gate-release-on-death + admission atomicity + wait
       next-or-last + rootward-call discipline, budgets + incomplete, lifecycle,
       data.path, reattachment, cancellation contract table, registry sort)
-- [ ] 0.3 SPEC.md §8 addendum: `RunResult.status` gains `"incomplete"` (QG5 note);
+- [x] 0.3 SPEC.md §8 addendum: `RunResult.status` gains `"incomplete"` (QG5 note);
       per-port cancellation contract table
-- [ ] 0.4 Shared fixtures under `examples/`: subagent-fanout, subagent-escalation,
+- [x] 0.4 Shared fixtures under `examples/`: subagent-fanout, subagent-escalation,
       subagent-durable-resume, subagent-budgets, subagent-lifecycle (transition-trace
       expectations, virtual clock)
-- [ ] 0.5 Mark ADR-0005 superseded-by this change; close the `propose-agent-pipeline`
+- [x] 0.5 Mark ADR-0005 superseded-by this change; close the `propose-agent-pipeline`
       branch with a pointer note
 
 ## 1. Client seams (small, per port, before the runtime lands)

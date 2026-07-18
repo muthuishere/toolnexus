@@ -1,0 +1,43 @@
+{
+  "$schema": "toolnexus-subagent-fixture/v1",
+  "description": "S4 — no interpreter anywhere: durable pending at the root carrying data.path to the leaf; resume(Answer) routes to the deepest suspended handle, resumes at its checkpoint, and the parent cascade REATTACHES to the finished child by task key — no re-execution, no duplicate child (SPEC §7D durable resume, §10 addendum).",
+  "registry": {
+    "approverParent": {
+      "does": "delegates, no interpreter",
+      "model": "m-approver-parent",
+      "team": ["asker"]
+    },
+    "asker": {
+      "does": "needs approvals",
+      "model": "m-asker",
+      "tools": ["check_secret"]
+    }
+  },
+  "tools": {
+    "check_secret": {
+      "inputSchema": { "type": "object", "properties": {} },
+      "behavior": "without ctx.answer → pending({ kind: \"approval\", prompt: \"approve secret access?\" }); with ctx.answer.ok → returns \"secret-token\""
+    }
+  },
+  "mockLLM": { "$ref": "../subagent-escalation/fixture.json#/mockLLM" },
+  "run": { "entry": "approverParent", "prompt": "do the secret thing" },
+  "phase1_expect": {
+    "status": "pending",
+    "pendingKind": "approval",
+    "pendingDataPathEndsWithin": "root/approverParent.1",
+    "allHandles": "suspended"
+  },
+  "resume": { "answer": { "ok": true } },
+  "phase2_expect": {
+    "leafResumedAtCheckpoint": true,
+    "leafUsageGrewNotReset": true,
+    "parentCascadeReattached": true,
+    "noDuplicateChildIds": true,
+    "finalParentState": "idle",
+    "transitions": {
+      "root/approverParent.1": ["idle→running", "running→suspended", "idle→running", "running→idle"],
+      "root/approverParent.1/asker.1": ["idle→running", "running→suspended", "idle→running", "running→idle"]
+    },
+    "traceContains": ["task replay → REATTACH"]
+  }
+}

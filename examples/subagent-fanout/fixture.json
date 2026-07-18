@@ -1,0 +1,52 @@
+{
+  "$schema": "toolnexus-subagent-fixture/v1",
+  "description": "S1/S2 — parallel task fan-out with context isolation and usage roll-up. Parent emits two task calls in one turn; both children run concurrently; parent transcript gains exactly two tool messages; child usage rolls up (SPEC §7D).",
+  "registry": {
+    "coordinator": {
+      "does": "splits and delegates",
+      "model": "m-coordinator",
+      "team": ["explore"]
+    },
+    "explore": {
+      "does": "read-only research",
+      "model": "m-explore",
+      "tools": ["lookup"]
+    }
+  },
+  "tools": {
+    "lookup": {
+      "inputSchema": { "type": "object", "properties": { "q": { "type": "string" } } },
+      "behavior": "returns \"data(<q>)\""
+    }
+  },
+  "mockLLM": {
+    "style": "openai",
+    "usagePerCall": { "prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40 },
+    "scripts": {
+      "m-coordinator": [
+        { "whenToolMsgs": 0, "toolCalls": [ { "name": "task", "args": { "agent": "explore", "prompt": "find A" } }, { "name": "task", "args": { "agent": "explore", "prompt": "find B" } } ] },
+        { "whenToolMsgs": ">=1", "text": "synthesis: <join all tool msg contents with ' + '>" }
+      ],
+      "m-explore": [
+        { "whenToolMsgs": 0, "toolCalls": [ { "name": "lookup", "args": { "q": "x" } } ] },
+        { "whenToolMsgs": ">=1", "text": "found:<first tool msg content>" }
+      ]
+    }
+  },
+  "run": { "entry": "coordinator", "prompt": "answer using two lookups" },
+  "expect": {
+    "status": "done",
+    "textContains": ["found:data(x)"],
+    "textOccurrences": { "found:": 2 },
+    "parentTurns": 2,
+    "childIds": ["root/coordinator.1/explore.1", "root/coordinator.1/explore.2"],
+    "concurrentTurnsObservedAtLeast": 2,
+    "parentUsageTotal": 240,
+    "childrenClosedAfterTask": true,
+    "transitions": {
+      "root/coordinator.1": ["idle→running", "running→idle"],
+      "root/coordinator.1/explore.1": ["idle→running", "running→idle", "→closed"],
+      "root/coordinator.1/explore.2": ["idle→running", "running→idle", "→closed"]
+    }
+  }
+}
