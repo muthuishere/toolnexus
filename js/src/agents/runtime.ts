@@ -546,6 +546,7 @@ export class AgentRuntime {
       this.t(`${h.id}: suspended→running (Answer ok=${answer?.ok ?? true})`)
     } else {
       h.state = "idle"
+      this.t(`${h.id}: suspended→idle (Answer accepted, checkpoint restored)`)
       this.admit(h) // traces idle→running, per the durable-resume fixture
     }
     // One-shot interpreter: the first re-suspension in the replay resolves with the

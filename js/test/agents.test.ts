@@ -210,8 +210,8 @@ function rt(opts?: Partial<agents.RuntimeOptions>): agents.AgentRuntime {
 
 /** Extract the §7D transition trace for one handle id (the fixture parity view). */
 const TRANSITIONS = [
-  "idle→running", "running→suspended", "suspended→running", "running→idle",
-  "idle→closed", "suspended→closed", "running→closed",
+  "idle→running", "running→suspended", "suspended→running", "suspended→idle",
+  "running→idle", "idle→closed", "suspended→closed", "running→closed",
 ]
 function transitionsOf(trace: readonly string[], id: string): string[] {
   const out: string[] = []
