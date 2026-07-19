@@ -19,8 +19,8 @@ Reference: branch `spike-compaction` (`js/spike/compaction.ts` + `compaction-dem
 - [x] 1.2 Port C1–C6 (11 checks) into `js/test/` against `examples/compaction/`; npm test green.
 
 ## 2. python
-- [ ] 2.1 `toolnexus/…/compaction.py`: compactor/estimate_tokens per §7F.
-- [ ] 2.2 11 checks as pytest against the fixture; full suite green.
+- [x] 2.1 `toolnexus/…/compaction.py`: compactor/estimate_tokens per §7F.
+- [x] 2.2 11 checks as pytest against the fixture; full suite green.
 
 ## 3. golang
 - [x] 3.1 `golang/agents/compaction.go`: Compactor/EstimateTokens per §7F.
