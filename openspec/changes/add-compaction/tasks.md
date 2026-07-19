@@ -40,9 +40,9 @@ Reference: branch `spike-compaction` (`js/spike/compaction.ts` + `compaction-dem
 
 ## 7. Docs + close
 
-- [ ] 7.1 Docs: a compaction section on persona-agents (or its own page) + a "keep a persona
+- [x] 7.1 Docs: a compaction section on persona-agents (or its own page) + a "keep a persona
       alive for weeks" recipe wiring compactor + flushToMemory + the memory builtin; 6-lang tabs.
-- [ ] 7.2 Cross-port conformance: identical compacted output for the shared fixture; six
+- [x] 7.2 Cross-port conformance: identical compacted output for the shared fixture; six
       suites green together at HEAD.
-- [ ] 7.3 CHANGELOG: context compaction (opt-in beforeLLM helper), additive.
-- [ ] 7.4 Remove `js/spike/` once js src + tests green.
+- [x] 7.3 CHANGELOG: context compaction (opt-in beforeLLM helper), additive.
+- [x] 7.4 Remove `js/spike/` once js src + tests green.

@@ -261,6 +261,294 @@ send. The library is deliberately not a scheduler or a gateway — that is the
 [`messenger`](https://github.com/muthuishere) product, not this. See the channel recipe below.
 </Aside>
 
+## Staying under the context window — compaction
+
+A heartbeat and durable memory keep a persona *running* — but every turn it also *grows* its
+transcript, and eventually that transcript overflows the model's window and the provider
+errors. That is the classic persona killer: an assistant that "dies within days." Compaction
+is the fix. `compactor(opts)` returns a **`beforeLLM` hook** (`SPEC.md §7F`): once the
+transcript estimate crosses `maxTokens`, it summarizes the older body into one system message
+and keeps a recent tail verbatim. It rides the **existing** `beforeLLM` seam — the loop applies
+a `beforeLLM` rewrite by *replacing* the working transcript — so it is a pure `messages →
+messages` helper and adds **no** loop behavior. Compaction is composition over a shipped seam,
+not a new subsystem.
+
+<Aside type="tip" title="When to reach for it">
+Reach for compaction when a **long-lived** agent (a persona on a heartbeat, running for weeks)
+or a **high-tool-volume** one (a coding sub-agent that reads dozens of files per task) would
+otherwise overflow the window. A short, bounded one-shot never needs it — and absent a
+`compactor`, a run is **byte-identical** to today. It is entirely opt-in.
+</Aside>
+
+| option | meaning |
+|--------|---------|
+| `maxTokens` | compact only when the estimate exceeds this; at/below ⇒ **no-op, byte-identical** to no compactor |
+| `keepTail` | keep at least this many tokens of the most recent tail verbatim (default `maxTokens/2`) |
+| `summarize(older) → string` | produces the summary; **MAY call an LLM** (e.g. a cheap model) — the library never makes a model call on your behalf |
+| `countTokens(messages) → number` | token estimate; default `ceil(chars/4)` summed over messages (an **estimator**, not a tokenizer — override for exactness) |
+| `flushToMemory` | inject a pre-compact reminder to persist durable facts via the §7E `memory` tool **before** the head is summarized (off by default) |
+
+### Wire it as a `beforeLLM` hook
+
+Build a compactor and hand it to the client's `beforeLLM` hook. Nothing else in your loop
+changes.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createClient, agents } from "toolnexus"
+
+const compact = agents.compactor({
+  maxTokens: 120_000,                                  // compact once the estimate crosses this
+  keepTail: 40_000,                                    // always keep this much recent context verbatim
+  summarize: async (older) => summariseWithCheapModel(older),   // MAY call a small model
+})
+
+const agent = createClient({
+  baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini",
+  hooks: { beforeLLM: compact },                       // the one seam compaction rides
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_client, compactor
+
+compact = compactor(
+    max_tokens=120_000, keep_tail=40_000,
+    summarize=lambda older: summarise_with_cheap_model(older),   # MAY call a small model
+)
+
+agent = create_client(
+    base_url="https://openrouter.ai/api/v1", style="openai", model="openai/gpt-4o-mini",
+    hooks={"before_llm": compact},                     # the one seam compaction rides
+)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+compact := agents.Compactor(agents.CompactorOptions{
+    MaxTokens: 120_000, KeepTail: 40_000,
+    Summarize: func(older []any) (string, error) { return summariseWithCheapModel(older) },
+})
+
+agent := toolnexus.CreateClient(toolnexus.ClientOptions{
+    BaseURL: "https://openrouter.ai/api/v1", Style: toolnexus.StyleOpenAI, Model: "openai/gpt-4o-mini",
+    Hooks: &toolnexus.Hooks{BeforeLLM: compact},        // the one seam compaction rides
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+import io.github.muthuishere.toolnexus.Compaction;
+
+LlmClient.Hooks hooks = new LlmClient.Hooks();
+hooks.beforeLLM = Compaction.compactor(new Compaction.Options()
+        .maxTokens(120_000).keepTail(40_000)
+        .summarize(older -> summariseWithCheapModel(older)));   // MAY call a small model
+
+LlmClient agent = LlmClient.create(new LlmClient.Options()
+        .baseUrl("https://openrouter.ai/api/v1").style("openai").model("openai/gpt-4o-mini")
+        .hooks(hooks));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+using Toolnexus.Agents;
+
+var hooks = new LlmClient.Hooks {
+    BeforeLLM = Compaction.Compactor(new Compaction.Options {
+        MaxTokens = 120_000, KeepTail = 40_000,
+        Summarize = older => SummariseWithCheapModel(older),   // MAY call a small model
+    }),
+};
+
+var agent = LlmClient.Create(new LlmClient.Options {
+    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai", Model = "openai/gpt-4o-mini",
+    Hooks = hooks,
+});
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+compact = Toolnexus.Agents.Compaction.compactor(
+  max_tokens: 120_000, keep_tail: 40_000,
+  summarize: fn older -> summarise_with_cheap_model(older) end)   # MAY call a small model
+
+client = Toolnexus.Client.create(
+  base_url: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini",
+  hooks: %{before_llm: compact})
+```
+</TabItem>
+</Tabs>
+
+<Aside type="note" title="Two invariants the ports never break">
+**No-op below budget.** At or under `maxTokens` the hook returns nothing and the run is
+byte-identical to one with no compactor — you pay for compaction only once you actually need
+it. **Tool-pair safety.** The retained tail always begins at a **`user`** turn, so a `tool`
+result is never orphaned from the `assistant` that carried its `tool_call_id` — the split is
+the largest user-boundary tail that fits `keepTail` (falling back to the most recent user turn:
+safety over size). A leading `system` prompt (identity / soul / skills) is preserved verbatim;
+only the body between it and the tail is summarized.
+</Aside>
+
+### Recipe: keep a persona alive for weeks
+
+This is the headline — the three persona features composing into one durable agent. A summary
+loses detail, so on its own compaction slowly forgets. The fix is to pair it with **memory**:
+`flushToMemory` nudges the model to persist anything worth keeping to `MEMORY.md` *before* the
+older turns are summarized away, and that note reloads into the soul at the start of the next
+session. So the agent stays **under budget** (compactor) while its **durable facts survive**
+(the §7E memory builtin) — a persona that runs for weeks without either overflowing or amnesia.
+
+Because compaction lives on the client loop's `beforeLLM` seam, the persona here runs through
+that loop directly: its identity is just the composed soul (`composeSoul`), and its memory is
+just the `memory` tool (`memoryTool`) over the same directory — both already public from the
+sections above. No new API; you are wiring three shipped pieces together.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createToolkit, createClient, agents } from "toolnexus"
+
+const dir = "./personas/ava"
+const { soul } = agents.composeSoul(dir)               // identity + durable MEMORY.md, frozen for the session
+const tk = await createToolkit()                       // shell/file built-ins …
+tk.register(agents.memoryTool(dir))                    // … plus the §7E memory builtin
+
+const ava = createClient({
+  baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini",
+  systemPrompt: soul,
+  hooks: {
+    beforeLLM: agents.compactor({
+      maxTokens: 120_000, keepTail: 40_000,
+      flushToMemory: true,                             // save durable facts to MEMORY.md BEFORE summarizing
+      summarize: async (older) => summariseWithCheapModel(older),
+    }),
+  },
+})
+
+// Weeks of turns keyed by one stable id: the transcript self-compacts, MEMORY.md keeps growing.
+await ava.ask(userText, { toolkit: tk, id: "ava" })
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_toolkit, create_client, compactor, compose_soul, memory_tool
+
+dir = "./personas/ava"
+soul, _found = compose_soul(dir)                       # identity + durable MEMORY.md, frozen for the session
+tk = await create_toolkit()                            # shell/file built-ins …
+tk.register(memory_tool(dir))                          # … plus the §7E memory builtin
+
+ava = create_client(
+    base_url="https://openrouter.ai/api/v1", style="openai", model="openai/gpt-4o-mini",
+    system_prompt=soul,
+    hooks={"before_llm": compactor(
+        max_tokens=120_000, keep_tail=40_000,
+        flush_to_memory=True,                          # save durable facts to MEMORY.md BEFORE summarizing
+        summarize=lambda older: summarise_with_cheap_model(older),
+    )},
+)
+
+await ava.ask(user_text, tk, "ava")                    # weeks of turns; transcript self-compacts
+```
+</TabItem>
+<TabItem label="Go">
+```go
+dir := "./personas/ava"
+soul, _ := agents.ComposeSoul(dir)                     // identity + durable MEMORY.md, frozen for the session
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{})   // shell/file built-ins …
+tk.Register(agents.MemoryTool(dir))                    // … plus the §7E memory builtin
+
+ava := toolnexus.CreateClient(toolnexus.ClientOptions{
+    BaseURL: "https://openrouter.ai/api/v1", Style: toolnexus.StyleOpenAI, Model: "openai/gpt-4o-mini",
+    SystemPrompt: soul,
+    Hooks: &toolnexus.Hooks{BeforeLLM: agents.Compactor(agents.CompactorOptions{
+        MaxTokens: 120_000, KeepTail: 40_000,
+        FlushToMemory: true,                           // save durable facts to MEMORY.md BEFORE summarizing
+        Summarize: func(older []any) (string, error) { return summariseWithCheapModel(older) },
+    })},
+})
+
+ava.Ask(ctx, userText, tk, "ava")                      // weeks of turns; transcript self-compacts
+```
+</TabItem>
+<TabItem label="Java">
+```java
+import io.github.muthuishere.toolnexus.Compaction;
+import io.github.muthuishere.toolnexus.agents.Agents;
+
+Path dir = Path.of("personas/ava");
+String soul = Agents.composeSoul(dir).soul();          // identity + durable MEMORY.md, frozen for the session
+Toolkit tk = Toolkit.create(new Toolkit.Options());    // shell/file built-ins …
+tk.register(Agents.memoryTool(dir));                   // … plus the §7E memory builtin
+
+LlmClient.Hooks hooks = new LlmClient.Hooks();
+hooks.beforeLLM = Compaction.compactor(new Compaction.Options()
+        .maxTokens(120_000).keepTail(40_000)
+        .flushToMemory(true)                           // save durable facts to MEMORY.md BEFORE summarizing
+        .summarize(older -> summariseWithCheapModel(older)));
+
+LlmClient ava = LlmClient.create(new LlmClient.Options()
+        .baseUrl("https://openrouter.ai/api/v1").style("openai").model("openai/gpt-4o-mini")
+        .systemPrompt(soul).hooks(hooks));
+
+ava.ask(userText, tk, "ava");                          // weeks of turns; transcript self-compacts
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+using Toolnexus.Agents;
+
+var dir = "./personas/ava";
+var (soul, _) = Home.ComposeSoul(dir);                 // identity + durable MEMORY.md, frozen for the session
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());   // shell/file built-ins …
+tk.Register(Home.MemoryTool(dir));                     // … plus the §7E memory builtin
+
+var ava = LlmClient.Create(new LlmClient.Options {
+    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai", Model = "openai/gpt-4o-mini",
+    SystemPrompt = soul,
+    Hooks = new LlmClient.Hooks {
+        BeforeLLM = Compaction.Compactor(new Compaction.Options {
+            MaxTokens = 120_000, KeepTail = 40_000,
+            FlushToMemory = true,                      // save durable facts to MEMORY.md BEFORE summarizing
+            Summarize = older => SummariseWithCheapModel(older),
+        }),
+    },
+});
+
+await ava.AskAsync(userText, tk, "ava");               // weeks of turns; transcript self-compacts
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+dir = "./personas/ava"
+{soul, _found} = Toolnexus.Agents.Home.compose_soul(dir)   # identity + durable MEMORY.md, frozen for the session
+{:ok, tk} = Toolnexus.create_toolkit()                     # shell/file built-ins …
+tk = Toolnexus.Toolkit.register(tk, [Toolnexus.Agents.Home.memory_tool(dir)])  # … plus the §7E memory builtin
+
+ava = Toolnexus.Client.create(
+  base_url: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini",
+  system_prompt: soul,
+  hooks: %{before_llm: Toolnexus.Agents.Compaction.compactor(
+    max_tokens: 120_000, keep_tail: 40_000,
+    flush_to_memory: true,                                 # save durable facts to MEMORY.md BEFORE summarizing
+    summarize: fn older -> summarise_with_cheap_model(older) end)})
+
+Toolnexus.Client.ask(ava, user_text, tk, "ava")            # weeks of turns; transcript self-compacts
+```
+</TabItem>
+</Tabs>
+
+<Aside type="note" title="Why this composes instead of stacking machinery">
+Three shipped pieces, no new noun: the **soul** is a frozen system prompt, the **memory** tool
+is a plain `Tool`, and the **compactor** is a `beforeLLM` hook. `flushToMemory` is the hinge —
+it turns "summarize the old turns" (lossy) into "persist what matters, *then* summarize the
+rest" (durable). The library ships the seams; the persona's survival policy — what to keep, how
+aggressively to summarize — lives in your prose and your `maxTokens`/`keepTail` budget.
+</Aside>
+
 ## Recipes — composition, not new API
 
 Both patterns below are **plain `if`/`loop` over the primitives above**. There is no
@@ -352,3 +640,4 @@ The key is read from the environment by name and never printed.
 - [Sub-agents & teams](/toolnexus/subagents/) — the worker archetype and the six host verbs the heartbeat rides on.
 - [Suspension & the human loop](/toolnexus/suspension/) — how a persona parks on a human-in-the-loop request.
 - `SPEC.md §7E` — the full cross-language contract (bootstrap order, memory semantics, heartbeat).
+- `SPEC.md §7F` — context compaction: the `beforeLLM` contract, tool-pair rule, and no-op-below-budget guarantee.
