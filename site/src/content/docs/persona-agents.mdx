@@ -1,0 +1,354 @@
+---
+title: Persona agents
+description: Build a long-lived assistant whose identity lives in files, whose memory it can edit, and which acts on a heartbeat — fromDir + the memory builtin + startAgent, in all six languages (SPEC §7E).
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+[Sub-agents](/toolnexus/subagents/) covered the **worker** archetype: a one-shot you spawn,
+delegate to, and tear down. A **persona** is the other archetype — a long-lived assistant
+(a personal aide, a support agent, an on-call operator) that has to *persist*: an identity
+that survives restarts, a memory it updates over weeks, and the ability to act **without being
+prompted**. `fromDir` + the `memory` builtin + `startAgent` add exactly those three things —
+and nothing else. They ride the same shipped seams sub-agents do (the composed soul is just a
+system prompt, memory is a plain `Tool`, the heartbeat is `post`+`wake` on the runtime clock),
+so there is **no new runtime**. (`SPEC.md §7E`.)
+
+## When to use which surface
+
+Three surfaces, one runtime. Pick by lifetime and who drives the loop.
+
+| Your situation | Surface | Why |
+|---|---|---|
+| *"Summarize these 40 PRs."* A bounded job that starts, produces a result, and ends. A **coding sub-agent**, a research fan-out. | [`agent()`](/toolnexus/subagents/) | A one-shot worker. No identity to persist, no clock — spawn, delegate, roll up tokens, done. |
+| *"Ava, my assistant — remembers my preferences, reminds me about the 3pm sync, runs for months."* A **personal assistant / support persona** defined by a folder you can `ls` and `git`. | **`fromDir`** *(this page)* | The directory IS the agent: bootstrap files compose the identity, a `memory` tool edits it, `startAgent` gives it a heartbeat. |
+| *"A service with my own inbound queue, my own scheduler, my own supervision tree."* You already own the loop and just want the trigger→turn seam. | [raw six verbs](/toolnexus/subagents/#advanced--the-six-host-verbs) | `spawn`/`post`/`wake`/`wait`/`interrupt`/`close` — drive the runtime directly; `fromDir` and `startAgent` are thin sugar over exactly these. |
+
+<Aside type="note" title="Same namespace as sub-agents">
+The persona surface ships in the same **`agents`** namespace as `agent()` — `agents.fromDir`
+(JS/C#/Elixir `FromDir`/`from_dir`), `agent_from_dir` (Python), `Agents.agentFromDir` (Java).
+Nothing here collides with the A2A `Agent` (the remote Agent-Card type).
+</Aside>
+
+## The directory is the agent — `fromDir`
+
+Point `fromDir` at a folder. These files, **in this order**, are each injected (when present)
+into the agent's `soul` (system prompt) as a `## <filename>` section — identity first, durable
+memory last:
+
+| # | file | role |
+|---|------|------|
+| 1 | `AGENTS.md` | operating instructions |
+| 2 | `SOUL.md` | identity / voice |
+| 3 | `IDENTITY.md` | who the agent is |
+| 4 | `USER.md` | model of the user |
+| 5 | `TOOLS.md` | tool guidance |
+| 6 | `HEARTBEAT.md` | what to do on a heartbeat |
+| 7 | `MEMORY.md` | durable long-term notes |
+
+Absent files are skipped. Each is read with a **2 MB cap** (measured in bytes — `2097152`);
+larger files are injected truncated with a notice, the on-disk file untouched. Composition
+happens **once, at session start** — the soul is a **frozen snapshot** for the run, which is
+exactly the cache-stability rule, for free.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { agents } from "toolnexus"
+
+const ava = agents.fromDir("./personas/ava")   // reads SOUL/USER/HEARTBEAT/MEMORY.md, wires `memory`
+const r = await ava.run("What's on my plate today?", {
+  llm: { baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" },
+})
+console.log(r.status, r.text)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus.agents import agent_from_dir
+
+ava = agent_from_dir("./personas/ava")
+r = await ava.run(
+    "What's on my plate today?",
+    llm={"base_url": "https://openrouter.ai/api/v1", "style": "openai", "model": "openai/gpt-4o-mini"},
+)
+print(r.status, r.text)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+import "github.com/muthuishere/toolnexus/golang/agents"
+
+ava := agents.FromDir("./personas/ava", agents.FromDirOptions{})
+r, _ := ava.Run(agents.Options{LLM: &agents.LLMOptions{
+    BaseURL: "https://openrouter.ai/api/v1", Style: toolnexus.StyleOpenAI, Model: "openai/gpt-4o-mini",
+}}, "What's on my plate today?")
+fmt.Println(r.Status, r.Text)
+```
+</TabItem>
+<TabItem label="Java">
+```java
+import io.github.muthuishere.toolnexus.agents.Agents;
+
+Agents.Agent ava = Agents.agentFromDir(Path.of("personas/ava"), new Agents.AgentSpec());
+TaskResult r = ava.run(new RuntimeOptions()
+    .baseUrl("https://openrouter.ai/api/v1").style("openai").defaultModel("openai/gpt-4o-mini"),
+    "What's on my plate today?");
+System.out.println(r.status() + " " + r.text());
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+using Toolnexus.Agents;
+
+var ava = Home.FromDir("./personas/ava");
+var r = await ava.RunAsync(new RuntimeOptions
+{
+    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai", Model = "openai/gpt-4o-mini",
+}, "What's on my plate today?");
+Console.WriteLine($"{r.Status} {r.Text}");
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Agents.Home
+
+ava = Home.from_dir("./personas/ava")
+r = Toolnexus.Agents.run(ava,
+  [llm: %{base_url: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini"}],
+  "What's on my plate today?")
+IO.puts("#{r.status} #{r.text}")
+```
+</TabItem>
+</Tabs>
+
+## Durable memory — the `memory` builtin
+
+`fromDir` also wires a `memory` tool over the same directory (opt out with `memory: false` for a
+read-only persona). One tool, three actions, two targets:
+
+| action | effect |
+|--------|--------|
+| `add` | append an entry |
+| `replace` | swap an existing substring (`with`) |
+| `remove` | delete an existing substring |
+
+`target` = `self` (`MEMORY.md`, default) or `user` (`USER.md`). **Every action writes to disk.**
+A `replace`/`remove` whose substring is absent is a **loud `isError`**, never a silent no-op.
+
+<Aside type="tip" title="Why a write does NOT change the live prompt — cache economics">
+The memory tool writes to **disk only**. It deliberately does **not** mutate the current
+session's system prompt — the persisted note loads at the **start of the next session**. That is
+the whole trick that keeps a long-lived persona cheap: the soul is a **frozen snapshot**, so the
+provider's **prompt cache** stays warm across every turn of a session. Live-injecting each memory
+write would bust the cache on every edit — the exact cost failure that assistants engineer
+around. The tool's own description states this to the model ("loads at the START of your next
+session"), so it never expects its write to be visible mid-turn.
+</Aside>
+
+You rarely construct `memoryTool` directly (that's what `fromDir` does), but it is public — add
+it to any agent's `uses.tools` to give a non-persona agent a scratchpad:
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const notes = agents.memoryTool("./personas/ava")   // add | replace | remove over MEMORY.md / USER.md
+```
+</TabItem>
+<TabItem label="Python">
+```python
+notes = memory_tool("./personas/ava")
+```
+</TabItem>
+<TabItem label="Go">
+```go
+notes := agents.MemoryTool("./personas/ava")
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Tool notes = Agents.memoryTool(Path.of("personas/ava"));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var notes = Home.MemoryTool("./personas/ava");
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+notes = Home.memory_tool("./personas/ava")
+```
+</TabItem>
+</Tabs>
+
+## The heartbeat — `startAgent`
+
+A worker acts when *you* call it. A persona needs to act when *nothing* calls it — to notice the
+3pm sync is due, to run a nightly cleanup. `startAgent` gives it its own clock: every `everyMs` it
+`post`s a tick to the agent's **own inbox** (the unsolicited rail — ticks **coalesce**, so a slow
+beat can't pile up) and, when idle, `wake`s it with a prompt to read `HEARTBEAT.md` and act, else
+reply `HEARTBEAT_OK`. **A `HEARTBEAT_OK` reply is silent** — no-op beats never message anyone; only
+a substantive reply reaches your `onBeat` callback. All timing runs on the runtime's injectable
+clock (so fixtures run deterministically on a virtual clock).
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const started = agents.startAgent(ava,
+  { llm: { baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" } },
+  { everyMs: 60_000, onBeat: (text) => sendToTelegram(text) },   // only NON-silent beats arrive here
+)
+// ... later:
+await started.stop()
+```
+</TabItem>
+<TabItem label="Python">
+```python
+started = start_agent(
+    ava,
+    llm={"base_url": "https://openrouter.ai/api/v1", "style": "openai", "model": "openai/gpt-4o-mini"},
+    every_ms=60_000,
+    on_report=lambda text: send_to_telegram(text),   # only NON-silent beats arrive here
+)
+# ... later:
+await started.stop()
+```
+</TabItem>
+<TabItem label="Go">
+```go
+started, _ := agents.StartAgent(ava, agents.StartOptions{
+    Options: agents.Options{LLM: llm},
+    EveryMs: 60_000,
+    OnBeat:  func(text string) { sendToTelegram(text) },   // only NON-silent beats arrive here
+})
+// ... later:
+started.Stop()
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Agents.StartedAgent started = Agents.startAgent(ava, rtOpts, 60_000L,
+    text -> sendToTelegram(text));   // only NON-silent beats arrive here
+// ... later:
+started.stop();
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var started = Home.StartAgent(ava, rtOpts, everyMs: 60_000,
+    onBeat: text => SendToTelegram(text));   // only NON-silent beats arrive here
+// ... later:
+await started.StopAsync();
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+started = Home.start_agent(ava, rt_opts,
+  every_ms: 60_000,
+  on_beat: fn text -> send_to_telegram(text) end)   # only NON-silent beats arrive here
+# ... later:
+Home.stop(started)
+```
+</TabItem>
+</Tabs>
+
+<Aside type="caution" title="Channels are the host's job">
+`startAgent` owns the **trigger → turn** seam and nothing else. Delivering a Telegram/WhatsApp/
+Slack message *into* the persona, or a heartbeat reply *out* to a channel, is the host's job:
+wire your inbound handler to `started.runtime.post` / `wake`, and your `onBeat` to your outbound
+send. The library is deliberately not a scheduler or a gateway — that is the
+[`messenger`](https://github.com/muthuishere) product, not this. See the channel recipe below.
+</Aside>
+
+## Recipes — composition, not new API
+
+Both patterns below are **plain `if`/`loop` over the primitives above**. There is no
+`consolidate()` or `onMessage()` API to learn — that is the design: composability is userland,
+the library ships the seams.
+
+### 1. Dream / consolidation — a persona that tidies its own memory
+
+Give the persona a `HEARTBEAT.md` that tells it to fold duplicate notes into `MEMORY.md`, then
+run it on a slow heartbeat (nightly). Each beat, it reads its own memory through the frozen
+snapshot and rewrites it with the `memory` tool — the write lands on disk and the *next* beat
+sees the tidied version. This is the whole "dream" loop: no scheduler, no new surface.
+
+```md title="personas/ava/HEARTBEAT.md"
+On a heartbeat, review your MEMORY.md section:
+- If two entries say the same thing, use the memory tool (action=replace) to merge them
+  into one clear entry.
+- If an entry is stale or contradicted by a newer one, remove it.
+- If nothing needs tidying, reply exactly HEARTBEAT_OK so this beat stays silent.
+```
+
+```ts title="nightly-consolidation.ts"
+import { agents } from "toolnexus"
+
+const ava = agents.fromDir("./personas/ava")
+// One tick every 24h. A tidy-up beat returns a short summary; a quiet night returns
+// HEARTBEAT_OK and surfaces nothing.
+const started = agents.startAgent(ava,
+  { llm: { baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" } },
+  { everyMs: 24 * 60 * 60_000, onBeat: (summary) => console.log("consolidated:", summary) },
+)
+```
+
+<Aside type="note" title="The library ships the seam, not the policy">
+Consolidation *policy* (what counts as a duplicate, how aggressive to be) lives entirely in your
+`HEARTBEAT.md` prose — the library only guarantees the beat fires, the memory write persists, and
+the next snapshot reflects it.
+</Aside>
+
+### 2. Channel-driven assistant — inbound message → the persona acts
+
+The persona should also act when a real message arrives. Your channel host (a Telegram webhook,
+a WhatsApp handler — `messenger`'s job) turns each inbound message into a `post` + `wake` on the
+running persona's handle, and routes the reply back out. The library owns the trigger seam; you
+own the transport.
+
+```ts title="channel-assistant.ts"
+const started = agents.startAgent(ava,
+  { llm: { baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" } },
+  { everyMs: 5 * 60_000 },        // heartbeat still runs alongside inbound traffic
+)
+const handle = started.runtime.spawn(started.runtime.root, ava.name)
+
+// Your inbound webhook (Telegram/WhatsApp/Slack — the host's transport, not the library's):
+async function onInboundMessage(from: string, text: string) {
+  started.runtime.post(handle, { from, channel: "telegram", text })   // land it in the inbox
+  const woke = started.runtime.wake(handle, "You have a new message — read it and respond.")
+  if (woke.ok) {
+    const r = await started.runtime.wait(handle)
+    await sendToTelegram(from, r.text)                                 // route the reply back out
+  }
+}
+```
+
+The same shapes hold in every port (the verbs are `post`/`wake`/`wait` on `started.runtime`); only
+the `agent()` spelling changes, as in the tabs above.
+
+## Try it — the runnable example
+
+A real "Ava" assistant lives at [`examples/persona-agent/ava/`](https://github.com/muthuishere/toolnexus/tree/main/examples/persona-agent)
+(a soul, a user model, a heartbeat rule, a seed memory). The JS / Python / Go entrypoints copy it
+to a writable temp dir, then prove the persona loop end-to-end against OpenRouter: session 1 saves
+a preference with the `memory` tool (it lands on disk), session 2's fresh `fromDir` recalls it from
+the reloaded snapshot.
+
+```bash
+# JS
+OPENROUTER_API_KEY=... node --experimental-strip-types js/examples/persona.ts
+# Python
+OPENROUTER_API_KEY=... python python/examples/persona.py
+# Go
+OPENROUTER_API_KEY=... go run ./golang/examples/persona
+```
+
+The key is read from the environment by name and never printed.
+
+## See also
+
+- [Sub-agents & teams](/toolnexus/subagents/) — the worker archetype and the six host verbs the heartbeat rides on.
+- [Suspension & the human loop](/toolnexus/suspension/) — how a persona parks on a human-in-the-loop request.
+- `SPEC.md §7E` — the full cross-language contract (bootstrap order, memory semantics, heartbeat).

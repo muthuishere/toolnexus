@@ -446,7 +446,9 @@ here has `source:"builtin"` and obeys the uniform `Tool`/`ToolResult` contract (
 resolved relative to the process working directory unless absolute. Implementations are **native per
 runtime** (child-process / fs / HTTP of each language) — same behavior, idiomatic shape.
 
-The ten tools (`skill` is its own source, §3, and is not part of this set):
+The ten tools (`skill` is its own source, §3, and is not part of this set; the file-backed
+`memory` tool is **opt-in** — a persona surface wired only when an agent home dir is present,
+§7E — never one of these default, process-stateless builtins):
 
 | name | inputSchema (required unless `?`) | behavior |
 |------|-----------------------------------|----------|
@@ -812,6 +814,71 @@ Only abort **latency** may differ; the observable outcome is identical everywher
 `agent(name, { does, uses?, soul?|soulFile?, team?, budget?, model? ("inherit"),
 waitFor?, onSpawn?, onClose? })` → `.run(prompt)` (one-shot) and `.asTool()` (the bridge
 into `extraTools` — the axiom's other direction). `serve(agent)` = §7B unchanged.
+
+---
+
+## 7E. Agent home — personas (source: "agent", persona surface)
+
+The persona archetype over the §7D runtime: an identity that lives in **files**, durable
+**memory** the agent can edit, and a **heartbeat** so it can act unprompted. All three ride
+shipped seams — `onSpawn` injection, the six verbs, the runtime-wide store — and add no
+runtime behavior.
+
+### The directory is the agent
+
+`fromDir(dir)` builds a persona from a folder. These files, in this order, are each injected
+(when present) into the agent's `soul` (system prompt) as a `## <filename>` section:
+
+| # | file | role |
+|---|------|------|
+| 1 | `AGENTS.md` | operating instructions |
+| 2 | `SOUL.md` | identity / voice |
+| 3 | `IDENTITY.md` | who the agent is |
+| 4 | `USER.md` | model of the user |
+| 5 | `TOOLS.md` | tool guidance |
+| 6 | `HEARTBEAT.md` | what to do on a heartbeat |
+| 7 | `MEMORY.md` | durable long-term notes |
+
+Absent files are skipped. Each is read with a **2 MB cap** — measured in **bytes**
+(`2097152`), not characters; truncation is byte-based and may split a multibyte character —
+larger ⇒ truncated with a notice, on-disk file untouched. The `memory` tool returns a plain
+success string (a full `{output, isError:true}` only on a miss). Composition happens **at
+session start**; the soul is fixed for the run (frozen snapshot — the cache-stability rule,
+for free).
+
+### The `memory` builtin (file-backed, opt-in)
+
+A `memory` tool — **not** one of the default §4A builtins — exists only when a home dir is
+wired (`fromDir`, or `memoryTool(dir)` added to `uses.tools`). One tool, three actions:
+
+| action | effect |
+|--------|--------|
+| `add` | append an entry |
+| `replace` | swap an existing substring (`with`) |
+| `remove` | delete an existing substring |
+
+`target` = `self` (`MEMORY.md`, default) or `user` (`USER.md`). **All actions write to disk.**
+A `replace`/`remove` whose substring is absent ⇒ loud `isError`. The tool **does not** mutate
+the current session's prompt — persisted memory loads at the **start of the next session**
+(the frozen-snapshot rule that keeps a long-lived persona cache-stable; the tool description
+states this to the model). Omittable per persona (read-only agents).
+
+### Heartbeat
+
+`startAgent(agent, …, { everyMs })` gives a persona its own clock. Each interval it `post`s a
+tick to the agent's **own inbox** (the unsolicited rail — ticks **coalesce**, so a slow beat
+can't pile up) and, when idle, `wake`s it with a prompt to read `HEARTBEAT.md` and act, else
+reply `HEARTBEAT_OK`. A `HEARTBEAT_OK` reply is **silent** (no report) — silence is the
+default, only a substantive reply surfaces to the host's `onBeat`. All timing goes through the
+runtime's **injectable clock** (fixtures run on a virtual clock). Inbound **channels are the
+host's job**: deliver external events by calling `post`/`wake` — the library owns the
+trigger→turn seam, not a scheduler or gateway.
+
+### Composition, not API
+
+Higher patterns are recipes over the above, no new surface: **dream / consolidation** = a
+`startAgent` whose `HEARTBEAT.md` says "fold notes into `MEMORY.md` via the memory tool"; a
+**channel assistant** = the host's inbound handler calling `post`/`wake`.
 
 ---
 

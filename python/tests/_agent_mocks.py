@@ -151,15 +151,6 @@ class MockTransport:
                 return openai_body(tool_call("task", {"agent": "explore", "prompt": "find the bug"}, "t1"))
             soul = "loaded" if "You are the CODER" in sys_prompt else "missing"
             return openai_body({"content": f'fixed using: {tool_msgs[0]["content"]} [soul:{soul}]'})
-        if model == "m-mia":
-            last = str(msgs[-1].get("content") or "") if msgs else ""
-            if "Heartbeat" in last:
-                has_ticks = "channel=timer" in last
-                if "water the plants" in sys_prompt and has_ticks:
-                    return openai_body({"content": "Reminder: water the plants!"})
-                return openai_body({"content": "HEARTBEAT_OK"})
-            found = [f for f in ("SOUL.md", "USER.md", "MEMORY.md") if f"## {f}" in sys_prompt]
-            return openai_body({"content": f'soul-sections:[{",".join(found)}]'})
         if model == "m-tool-lister":  # reports the tool schema it was offered
             names = ",".join(t["function"]["name"] for t in (payload.get("tools") or []))
             return openai_body({"content": f"tools:[{names}]"})

@@ -144,4 +144,44 @@ defmodule Toolnexus.TestAgentMock do
         openai_response(%{"content" => "ok"})
     end
   end
+
+  # ---- agent-home scripts (H1–H7) — mirrors examples/persona-agent/fixture.json ----
+  @home_order ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md", "HEARTBEAT.md", "MEMORY.md"]
+  @heartbeat_ok_text "HEARTBEAT_OK"
+
+  def home(body) do
+    msgs = body["messages"] || []
+    tool_msgs = Enum.filter(msgs, &(&1["role"] == "tool"))
+
+    sys =
+      Enum.find_value(msgs, "", fn m -> if m["role"] == "system", do: to_string(m["content"]) end)
+
+    last = to_string(List.last(msgs)["content"] || "")
+
+    case body["model"] do
+      "m-echo-soul" ->
+        found = @home_order |> Enum.filter(&String.contains?(sys, "## " <> &1)) |> Enum.join(",")
+        openai_response(%{"content" => "sections:[#{found}]"})
+
+      "m-remember" ->
+        if tool_msgs == [],
+          do:
+            openai_response(
+              tool_call("memory", %{"action" => "add", "target" => "user", "text" => "Prefers dark roast"}, "w1")
+            ),
+          else: openai_response(%{"content" => "saved: #{hd(tool_msgs)["content"]}"})
+
+      "m-recall" ->
+        openai_response(%{
+          "content" => if(String.contains?(sys, "Prefers dark roast"), do: "I recall: dark roast", else: "no memory")
+        })
+
+      "m-heartbeat" ->
+        speak = String.contains?(sys, "remind about the 3pm sync") and String.contains?(last, "Heartbeat")
+        openai_response(%{"content" => if(speak, do: "Reminder: 3pm sync 🔔", else: @heartbeat_ok_text)})
+
+      _ ->
+        openai_response(%{"content" => "ok"})
+    end
+  end
 end
