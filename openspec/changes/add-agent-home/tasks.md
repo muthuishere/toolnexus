@@ -17,9 +17,9 @@ per port; reconcile the `add-subagents` fromDir/heartbeat drift.
 
 ## 1. js (reference)
 
-- [ ] 1.1 `js/src/agents/home.ts`: `fromDir`, `memoryTool`, `startAgent`, `HEARTBEAT_OK`,
+- [x] 1.1 `js/src/agents/home.ts`: `fromDir`, `memoryTool`, `startAgent`, `HEARTBEAT_OK`,
       `BOOTSTRAP_ORDER`, `composeSoul`; export under the `agents` namespace.
-- [ ] 1.2 Port the 15 spike checks (H1–H7) into `js/test/` against `examples/persona-agent/`;
+- [x] 1.2 Port the 15 spike checks (H1–H7) into `js/test/` against `examples/persona-agent/`;
       `npm test` green.
 
 ## 2. python  (reconcile: agent_from_dir already shipped in surface.py — align to §7E)
