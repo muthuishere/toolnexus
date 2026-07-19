@@ -29,7 +29,7 @@ official **MCP Java SDK** (`io.modelcontextprotocol.sdk:mcp`).
 
 ## Install
 
-Maven Central coordinate: **`io.github.muthuishere:toolnexus:0.5.0`**. Requires **Java 21+**.
+Maven Central coordinate: **`io.github.muthuishere:toolnexus:0.10.0`**. Requires **Java 21+**.
 
 **Gradle** (`build.gradle`):
 
@@ -37,7 +37,7 @@ Maven Central coordinate: **`io.github.muthuishere:toolnexus:0.5.0`**. Requires 
 repositories { mavenCentral() }
 
 dependencies {
-    implementation 'io.github.muthuishere:toolnexus:0.5.0'
+    implementation 'io.github.muthuishere:toolnexus:0.10.0'
 }
 ```
 
@@ -47,7 +47,7 @@ dependencies {
 <dependency>
   <groupId>io.github.muthuishere</groupId>
   <artifactId>toolnexus</artifactId>
-  <version>0.5.0</version>
+  <version>0.10.0</version>
 </dependency>
 ```
 
