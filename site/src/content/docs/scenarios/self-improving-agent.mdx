@@ -1,0 +1,589 @@
+---
+title: An agent that learns from its own runs
+description: The hermes/openclaw learning loop as pure composition — a cheap scoped reviewer writes durable lessons to MEMORY.md after each run, and a heartbeat-driven consolidator merges them. No new API.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+**The scenario.** Your assistant keeps making the same mistake. It re-runs a build command
+that has failed the same way three times. It keeps asking you which staging database to use.
+It formats reports the way you corrected it on Monday. Every individual run is fine; the
+*sequence* of runs never gets better, because each run starts from the same fixed prompt and
+throws away everything it discovered.
+
+The fix is a loop with two moving parts:
+
+1. **After a run**, a cheap, tightly-scoped **reviewer** agent reads what happened and writes
+   a small number of durable lessons into `MEMORY.md`.
+2. **On a slow heartbeat**, a **consolidator** persona re-reads that memory and merges
+   duplicates, drops stale entries, and keeps it tight.
+
+Lessons written today are part of the agent's identity tomorrow, because
+[`fromDir`](/toolnexus/persona-agents/) composes `MEMORY.md` into the soul at the start of every
+session (`SPEC.md §7E`).
+
+<Aside type="note" title="The point of this page: there is no new API">
+Nothing below is a new surface. This is `agent()` (§7D) + the `memory` builtin (§7E) +
+`startAgent`'s heartbeat (§7E) + the client's `RunResult` (§8), composed. The library ships
+**primitives, not a learning policy** — deliberately. Everything that makes this *your* learning
+loop is prose in a soul file and a budget you choose.
+</Aside>
+
+## When to reach for this
+
+| Reach for it when | Skip it when |
+|---|---|
+| The agent runs the **same class of task repeatedly** (deploys, triage, reports) and its mistakes are repeatable | Every run is a one-off — there is no pattern to learn |
+| Corrections currently live **in your head** and you re-type them | The knowledge is stable and small enough to just write into `SOUL.md` once |
+| The agent has a **home directory** already (a persona, `fromDir`) | The agent is stateless by design and you want it to stay auditable-by-prompt |
+| Runs are expensive enough that repeating a known-bad path costs real money or time | Runs are cheap and the failure mode is harmless |
+
+<Aside type="caution" title="Honest framing">
+This is a **pattern you tune**, not a feature you enable. It will produce a memory full of
+vague truisms ("be careful with production") unless your reviewer prompt forces specificity, and
+it will grow without bound unless you run the consolidator. Treat the first two weeks as tuning
+the reviewer's prose, not as debugging the library.
+</Aside>
+
+## Why a separate reviewer beats self-reflection
+
+The obvious version is to append "now reflect on how that went" to the end of the same
+conversation. It is worse on three axes, and understanding why is what makes the design hold up:
+
+| | Self-reflection (same context) | Scoped reviewer sub-agent |
+|---|---|---|
+| **Bias** | The model grades its own transcript while *inside* it — it has already committed to its reasoning, so it rationalizes rather than critiques | A fresh context sees a digest, not the reasoning that produced it. It has nothing to defend. |
+| **Cost** | The reflection turn re-sends the **entire** transcript at your main model's price — often the single most expensive turn of the run | The reviewer sees a short digest, on a cheap model, under a hard token budget |
+| **Contamination** | Reflection output stays in the transcript and steers subsequent turns; a bad review poisons the rest of the session | The child's reasoning never flows back up — [`task` returns exactly one result](/toolnexus/subagents/#isolation--roll-up--what-task-guarantees) |
+| **Blast radius** | The reflector inherits every tool the main agent had — including the destructive ones | `uses` scopes the child to exactly one tool: `memory` |
+
+That last row is the security argument, and it is the one people skip. A reviewer's job is to
+*write a note*. Giving it shell access because it happened to be spawned by an agent that had
+shell access is how a "reflection step" becomes an incident. In toolnexus, **scoping is the
+security model** — the child sees only the tools you list in `uses`.
+
+## Part 1 — the reviewer
+
+Define it once, next to the agent it reviews. Three things matter: a **soul that demands
+specificity**, a `uses` list containing **only** `memoryTool(dir)`, and a **hard budget**.
+
+```md title="the reviewer's soul (inline below, or reviewer/SOUL.md)"
+You review a single completed agent run and record what should be remembered.
+
+Write a lesson ONLY when it will change behaviour on a future run. A lesson is:
+- specific (names the tool, the command, the argument, the file — not "be careful"),
+- durable (true next week, not a fact about this one request),
+- actionable (states what to do, not what went wrong).
+
+At most TWO lessons per run. If the run went as expected, record nothing and reply
+exactly: NOTHING_LEARNED.
+
+Never record secrets, credentials, tokens, personal data, or anything the user asked
+you to forget. Use the memory tool with action=add, target=self.
+```
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { agents } from "toolnexus"
+
+const dir = "./personas/ava"
+
+const reviewer = agents.agent("reviewer", {
+  does: "reads a finished run and records durable lessons",
+  soulFile: "./personas/reviewer/SOUL.md",
+  uses: { tools: [agents.memoryTool(dir)] },     // the ONLY tool it can touch
+  model: "openai/gpt-4o-mini",                   // cheap: it reads a digest, not a codebase
+  budget: { maxTokens: 4_000, maxTurns: 3 },     // a review that runs long is a broken review
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus.agents import agent, Budget, memory_tool
+
+dir = "./personas/ava"
+
+reviewer = agent(
+    "reviewer",
+    does="reads a finished run and records durable lessons",
+    soul_file="./personas/reviewer/SOUL.md",
+    uses={"tools": [memory_tool(dir)]},          # the ONLY tool it can touch
+    model="openai/gpt-4o-mini",                  # cheap: it reads a digest, not a codebase
+    budget=Budget(max_tokens=4_000, max_turns=3),
+)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+import "github.com/muthuishere/toolnexus/golang/agents"
+
+dir := "./personas/ava"
+
+reviewer := agents.New("reviewer", agents.Spec{
+    Does:     "reads a finished run and records durable lessons",
+    SoulFile: "./personas/reviewer/SOUL.md",
+    Tools:    []toolnexus.Tool{agents.MemoryTool(dir)},   // the ONLY tool it can touch
+    Model:    "openai/gpt-4o-mini",                       // cheap: it reads a digest
+    Budget:   &agents.Budget{MaxTokens: 4_000, MaxTurns: 3},
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+import static io.github.muthuishere.toolnexus.agents.Agents.agent;
+import io.github.muthuishere.toolnexus.agents.*;
+
+Path dir = Path.of("personas/ava");
+
+Agents.Agent reviewer = agent("reviewer", new Agents.AgentSpec()
+    .does("reads a finished run and records durable lessons")
+    .soulFile(Path.of("personas/reviewer/SOUL.md"))
+    .tools(Agents.memoryTool(dir))                        // the ONLY tool it can touch
+    .model("openai/gpt-4o-mini")                          // cheap: it reads a digest
+    .budget(new Budget().maxTokens(4_000).maxTurns(3)));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+using Toolnexus.Agents;
+
+var dir = "./personas/ava";
+
+var reviewer = new Agent("reviewer", new AgentSpec
+{
+    Does = "reads a finished run and records durable lessons",
+    SoulFile = "./personas/reviewer/SOUL.md",
+    Uses = new List<ITool> { Home.MemoryTool(dir) },      // the ONLY tool it can touch
+    Model = "openai/gpt-4o-mini",                         // cheap: it reads a digest
+    Budget = new Budget { MaxTokens = 4_000, MaxTurns = 3 },
+});
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Agents
+alias Toolnexus.Agents.Home
+
+dir = "./personas/ava"
+
+reviewer =
+  Agents.agent("reviewer",
+    does: "reads a finished run and records durable lessons",
+    soul_file: "personas/reviewer/SOUL.md",
+    uses: %{tools: [Home.memory_tool(dir)]},              # the ONLY tool it can touch
+    model: "openai/gpt-4o-mini",                          # cheap: it reads a digest
+    budget: %{max_tokens: 4_000, max_turns: 3}
+  )
+```
+</TabItem>
+</Tabs>
+
+<Aside type="tip" title="Budget the reviewer tightly — it is a tax on every run">
+The reviewer runs after **every** run, so its cost multiplies by your traffic. Three levers, in
+order of impact: (1) a **cheap model** — reviewing a digest is not a frontier-model task;
+(2) a **small `maxTokens`** — 4k is generous for "read 20 lines, write one"; and (3) **feed it a
+digest, not the transcript** (next section). A reviewer that costs more than 2–3% of the run it
+reviews is misconfigured. `maxTurns` matters too: a reviewer that needs six turns is looping,
+and the budget stop is loud (`status: "incomplete"`), so you will see it.
+</Aside>
+
+## Part 2 — the digest: what the reviewer actually sees
+
+Do **not** hand the reviewer the transcript. `RunResult` (§8) already carries a structured
+summary of the run — the final text, every tool call with its error flag, the turn count, and
+the token usage. That is enough to spot "this tool failed twice with the same args", and it is
+two orders of magnitude smaller than the messages array.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+function digest(r: RunResult, prompt: string): string {
+  const calls = r.toolCalls
+    .map((c) => `- ${c.name}(${JSON.stringify(c.args)}) → ${c.isError ? "ERROR: " : ""}${c.output.slice(0, 200)}`)
+    .join("\n")
+  return [
+    `TASK: ${prompt}`,
+    `OUTCOME (${r.turns} turns, ${r.usage.totalTokens} tokens): ${r.text}`,
+    `TOOL CALLS:\n${calls || "(none)"}`,
+  ].join("\n\n")
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python
+import json
+
+def digest(r, prompt: str) -> str:
+    calls = "\n".join(
+        f"- {c['name']}({json.dumps(c['args'])}) → "
+        f"{'ERROR: ' if c['is_error'] else ''}{c['output'][:200]}"
+        for c in r.tool_calls
+    )
+    return "\n\n".join([
+        f"TASK: {prompt}",
+        f"OUTCOME ({r.turns} turns, {r.usage['total_tokens']} tokens): {r.text}",
+        f"TOOL CALLS:\n{calls or '(none)'}",
+    ])
+```
+</TabItem>
+<TabItem label="Go">
+```go
+func digest(r toolnexus.RunResult, prompt string) string {
+    var b strings.Builder
+    fmt.Fprintf(&b, "TASK: %s\n\n", prompt)
+    fmt.Fprintf(&b, "OUTCOME (%d turns, %d tokens): %s\n\nTOOL CALLS:\n", r.Turns, r.Usage.TotalTokens, r.Text)
+    if len(r.ToolCalls) == 0 {
+        b.WriteString("(none)")
+    }
+    for _, c := range r.ToolCalls {
+        args, _ := json.Marshal(c.Args)
+        status := ""
+        if c.IsError {
+            status = "ERROR: "
+        }
+        fmt.Fprintf(&b, "- %s(%s) → %s%.200s\n", c.Name, args, status, c.Output)
+    }
+    return b.String()
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java
+String digest(LlmClient.RunResult r, String prompt) {
+    StringBuilder calls = new StringBuilder();
+    for (LlmClient.ToolCall c : r.toolCalls) {
+        calls.append("- ").append(c.name).append(c.args)
+             .append(" → ").append(c.isError ? "ERROR: " : "")
+             .append(c.output.substring(0, Math.min(200, c.output.length()))).append('\n');
+    }
+    return "TASK: " + prompt
+         + "\n\nOUTCOME (" + r.turns + " turns, " + r.usage.totalTokens + " tokens): " + r.text
+         + "\n\nTOOL CALLS:\n" + (calls.length() == 0 ? "(none)" : calls);
+}
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+string Digest(LlmClient.RunResult r, string prompt)
+{
+    var calls = string.Join("\n", r.ToolCalls.Select(c =>
+        $"- {c.Name}({JsonSerializer.Serialize(c.Args)}) → " +
+        $"{(c.IsError ? "ERROR: " : "")}{c.Output[..Math.Min(200, c.Output.Length)]}"));
+    return $"TASK: {prompt}\n\n" +
+           $"OUTCOME ({r.Turns} turns, {r.Usage.TotalTokens} tokens): {r.Text}\n\n" +
+           $"TOOL CALLS:\n{(calls.Length == 0 ? "(none)" : calls)}";
+}
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+def digest(r, prompt) do
+  calls =
+    Enum.map_join(r.tool_calls, "\n", fn c ->
+      status = if c.is_error, do: "ERROR: ", else: ""
+      "- #{c.name}(#{Jason.encode!(c.args)}) → #{status}#{String.slice(c.output, 0, 200)}"
+    end)
+
+  """
+  TASK: #{prompt}
+
+  OUTCOME (#{r.turns} turns, #{r.usage.total_tokens} tokens): #{r.text}
+
+  TOOL CALLS:
+  #{if calls == "", do: "(none)", else: calls}
+  """
+end
+```
+</TabItem>
+</Tabs>
+
+<Aside type="note" title="Redact at the digest, not at the reviewer">
+The digest is the right place to strip anything the reviewer must never see — tool outputs from
+a credentials tool, PII in a customer record, a raw API response with a token in it. The
+reviewer's prose also says "never record secrets", but prose is a request and the digest is a
+guarantee. If a tool's output is sensitive, drop it here (`c.name === "vault_read" ? "(redacted)"`)
+rather than trusting the model to ignore it. Note that whatever the reviewer *does* write lands
+in `MEMORY.md`, which is injected into the soul on every future session — a leak there is
+persistent, not transient.
+</Aside>
+
+## Part 3 — the loop: run, then review
+
+The whole learning step is one extra call after the run you were already making. It is
+fire-and-forget: the review must never block the user's answer, and a failed review must never
+fail the run.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const llm = { baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" }
+
+export async function handle(prompt: string) {
+  const r = await ava.ask(prompt, { toolkit: tk, id: "ava" })
+
+  // Fire-and-forget: the user already has their answer.
+  void reviewer.run(digest(r, prompt), { llm }).catch((e) => log.warn("review failed", e))
+
+  return r.text
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python
+import asyncio
+
+llm = {"base_url": "https://openrouter.ai/api/v1", "style": "openai", "model": "openai/gpt-4o-mini"}
+
+async def handle(prompt: str) -> str:
+    r = await ava.ask(prompt, tk, "ava")
+
+    async def review() -> None:
+        try:
+            await reviewer.run(digest(r, prompt), llm=llm)
+        except Exception as e:            # a failed review must never fail the run
+            log.warning("review failed: %s", e)
+
+    asyncio.ensure_future(review())       # fire-and-forget
+    return r.text
+```
+</TabItem>
+<TabItem label="Go">
+```go
+llm := &agents.LLMOptions{
+    BaseURL: "https://openrouter.ai/api/v1", Style: toolnexus.StyleOpenAI, Model: "openai/gpt-4o-mini",
+}
+
+func handle(ctx context.Context, prompt string) (string, error) {
+    r, err := ava.Ask(ctx, prompt, tk, "ava")
+    if err != nil {
+        return "", err
+    }
+
+    go func() { // fire-and-forget: a failed review must never fail the run
+        if _, err := reviewer.Run(agents.Options{LLM: llm}, digest(r, prompt)); err != nil {
+            log.Printf("review failed: %v", err)
+        }
+    }()
+
+    return r.Text, nil
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java
+RuntimeOptions rtOpts = new RuntimeOptions()
+    .baseUrl("https://openrouter.ai/api/v1").style("openai").defaultModel("openai/gpt-4o-mini");
+
+String handle(String prompt) {
+    LlmClient.RunResult r = ava.ask(prompt, tk, "ava");
+
+    // Fire-and-forget on a virtual thread: a failed review must never fail the run.
+    Thread.startVirtualThread(() -> {
+        try {
+            reviewer.run(rtOpts, digest(r, prompt));
+        } catch (Exception e) {
+            log.warn("review failed", e);
+        }
+    });
+
+    return r.text;
+}
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var rtOpts = new RuntimeOptions {
+    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai", Model = "openai/gpt-4o-mini",
+};
+
+async Task<string> HandleAsync(string prompt)
+{
+    var r = await ava.AskAsync(prompt, tk, "ava");
+
+    // Fire-and-forget: a failed review must never fail the run.
+    _ = Task.Run(async () => {
+        try { await reviewer.RunAsync(rtOpts, Digest(r, prompt)); }
+        catch (Exception e) { Log.Warn("review failed", e); }
+    });
+
+    return r.Text;
+}
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+rt_opts = [llm: %{base_url: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini"}]
+
+def handle(ava, tk, reviewer, rt_opts, prompt) do
+  r = Toolnexus.Client.ask(ava, prompt, tk, "ava")
+
+  # Fire-and-forget: a failed review must never fail the run.
+  Task.start(fn -> Agents.run(reviewer, rt_opts, digest(r, prompt)) end)
+
+  r.text
+end
+```
+</TabItem>
+</Tabs>
+
+The reviewer's `memory add` lands in `MEMORY.md` on disk immediately. It becomes part of Ava's
+soul at the **start of her next session** — the frozen-snapshot rule (`§7E`), which is what keeps
+a long-lived persona's prompt cache warm. See
+[the persona build](/toolnexus/scenarios/persona-assistant/#the-frozen-snapshot-rule-read-this-before-you-design-around-it)
+for how to design session boundaries around it.
+
+<Aside type="tip" title="Prefer asTool() when the main agent should decide">
+The wiring above reviews **every** run, unconditionally — the right default. If instead you want
+the *model* to decide when a run was worth learning from, drop the reviewer into the main
+agent's toolkit with `reviewer.asTool({ llm })` and let it call it. You trade guaranteed
+coverage for judgement; start with unconditional and switch only if the review cost shows up in
+your bill.
+</Aside>
+
+## Part 4 — the consolidator (the "dream" pattern)
+
+A reviewer that only appends produces the classic failure: after three weeks `MEMORY.md` has
+forty entries, eight of which say the same thing in different words, three of which contradict
+each other, and all of which are in the prompt prefix of every session. Append-only memory is a
+slow-motion cost and quality regression.
+
+The fix needs no new API either: a persona whose `HEARTBEAT.md` tells it to tidy its own memory,
+started on a slow beat. It reads `MEMORY.md` through the frozen snapshot, rewrites it with the
+`memory` tool, and the *next* session sees the tidied version.
+
+```md title="personas/ava/HEARTBEAT.md — the consolidation rule"
+On a heartbeat, review your MEMORY.md section:
+
+- If two entries say the same thing, merge them into one clear entry
+  (memory tool, action=replace).
+- If an entry is contradicted by a newer one, remove the older (action=remove).
+- If an entry is vague ("be careful with X"), either sharpen it into something
+  actionable or remove it. Vague lessons are worse than none.
+- Keep at most 30 entries. If there are more, remove the least useful.
+
+If nothing needs tidying, reply exactly HEARTBEAT_OK so this beat stays silent.
+```
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const ava = agents.fromDir("./personas/ava")   // memory tool wired automatically
+
+const nightly = agents.startAgent(ava, { llm }, {
+  everyMs: 24 * 60 * 60_000,                                    // once a day
+  onBeat: (summary) => log.info("memory consolidated:", summary), // quiet nights surface nothing
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+ava = agent_from_dir("./personas/ava")         # memory tool wired automatically
+
+nightly = start_agent(
+    ava, llm=llm,
+    every_ms=24 * 60 * 60_000,                                   # once a day
+    on_report=lambda summary: log.info("memory consolidated: %s", summary),
+)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+ava := agents.FromDir("./personas/ava", agents.FromDirOptions{})   // memory tool wired automatically
+
+nightly, _ := agents.StartAgent(ava, agents.StartOptions{
+    Options: agents.Options{LLM: llm},
+    EveryMs: 24 * 60 * 60_000,                                    // once a day
+    OnBeat:  func(s string) { log.Printf("memory consolidated: %s", s) },
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Agents.Agent ava = Agents.agentFromDir(Path.of("personas/ava"), new Agents.AgentSpec());
+
+Agents.StartedAgent nightly = Agents.startAgent(ava, rtOpts, 24 * 60 * 60_000L,
+    summary -> log.info("memory consolidated: {}", summary));   // quiet nights surface nothing
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var ava = Home.FromDir("./personas/ava");      // memory tool wired automatically
+
+var nightly = Home.StartAgent(ava, rtOpts, everyMs: 24 * 60 * 60_000,
+    onBeat: summary => Log.Info($"memory consolidated: {summary}"));
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+ava = Home.from_dir("./personas/ava")          # memory tool wired automatically
+
+nightly = Home.start_agent(ava, rt_opts,
+  every_ms: 24 * 60 * 60_000,                                    # once a day
+  on_beat: fn summary -> Logger.info("memory consolidated: #{summary}") end)
+```
+</TabItem>
+</Tabs>
+
+<Aside type="note" title="Why the beat is silent by default">
+A consolidation beat that found nothing to merge replies `HEARTBEAT_OK`, and that reply **never
+reaches `onBeat`** (`§7E`). So a nightly tidy-up produces log lines only on nights it actually
+changed something — the loop is observable when it acts and invisible when it doesn't. That is
+also why you can run it daily without building a notification-suppression layer.
+</Aside>
+
+## The whole loop, in one picture
+
+```
+  user request
+       │
+       ▼
+  ┌─────────┐   RunResult (§8)   ┌────────────┐   memory.add    ┌───────────┐
+  │  Ava    │ ─────digest──────▶ │  reviewer  │ ──────────────▶ │ MEMORY.md │
+  │  (run)  │                    │  (cheap,   │                 │  (disk)   │
+  └─────────┘                    │  memory-   │                 └─────┬─────┘
+       ▲                         │  only)     │                       │
+       │                         └────────────┘                       │
+       │                                                              │
+       │  composeSoul at session start (§7E frozen snapshot)          │
+       └──────────────────────────────────────────────────────────────┘
+                                                                      │
+                    ┌────────────────┐   memory.replace / remove      │
+                    │  consolidator  │ ◀──────────────────────────────┘
+                    │  (heartbeat,   │        reads + rewrites
+                    │   daily)       │
+                    └────────────────┘
+```
+
+Three shipped primitives, one direction of flow, no new noun: a **run** produces a
+`RunResult`; a **scoped agent** turns it into a durable note; the **soul composition** feeds it
+back on the next session; a **heartbeat** keeps the notes clean.
+
+## Tuning it — the parts that are yours
+
+| Knob | Where it lives | What goes wrong if you ignore it |
+|---|---|---|
+| **What counts as a lesson** | the reviewer's soul | Truisms. "Be careful with production" is not actionable and never changes a future run. |
+| **How many lessons per run** | the reviewer's soul (cap it — two is a good start) | Unbounded growth; the consolidator can't keep up with the reviewer. |
+| **Reviewer model + budget** | `model`, `budget` on the agent | A learning tax bigger than the work. Cheap model, ≤ 4k tokens, ≤ 3 turns. |
+| **What the reviewer can see** | your `digest` function | Secrets and PII persisted into a prompt prefix, forever. Redact here. |
+| **Consolidation cadence + entry cap** | `everyMs`, `HEARTBEAT.md` | A `MEMORY.md` that grows until it dominates your per-session token cost. |
+| **When memory takes effect** | your session boundaries (§7E frozen snapshot) | "It didn't learn!" — it did; the write lands next session, not this turn. |
+| **Bad lessons** | `git` on the home directory | No way to undo a wrong lesson. Commit `personas/ava/`; a bad entry becomes a revert. |
+
+<Aside type="caution" title="What the library does not promise">
+There is no learning **policy** in toolnexus, and that is on purpose. It does not score runs, it
+does not decide what a lesson is, it does not deduplicate for you, and it does not stop a
+reviewer from writing something wrong. It guarantees the mechanics: the child runs in an
+isolated context with only the tools you scoped, its tokens roll up into the parent's ledger,
+the memory write lands on disk or errors loudly, and the next session's soul contains what is on
+disk. Everything above that line is your prose and your budget — which is why two teams can
+build very different learning loops on the same primitives.
+</Aside>
+
+## See also
+
+- [Build an openclaw-style personal assistant](/toolnexus/scenarios/persona-assistant/) — the home directory, memory, heartbeat and channel wiring this loop sits on.
+- [Sub-agents & teams](/toolnexus/subagents/) — context isolation, `uses` scoping, budgets, and usage roll-up.
+- [Persona agents](/toolnexus/persona-agents/) — `fromDir`, the `memory` builtin, `startAgent`, `compactor` reference.
+- `SPEC.md §7D` (agent runtime, budgets, isolation) · `§7E` (agent home: bootstrap, memory, heartbeat) · `§8` (`RunResult`).
