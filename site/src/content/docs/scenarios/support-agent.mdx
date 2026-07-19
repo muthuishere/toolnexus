@@ -1,0 +1,1002 @@
+---
+title: A customer-support agent
+description: Answer customer questions from your real systems (orders, CRM) over MCP, keep policy in agent skills, gate refunds behind a human, serve the whole thing to your web app as an A2A endpoint, and cap what a chatty customer can spend — in all six languages.
+---
+
+import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
+
+A customer writes in: *"Order #4021 arrived damaged — I want my money back."*
+
+A useful support agent has to do four things that a chatbot does not: **look the order up in the
+system of record**, **apply your actual refund policy**, **stop and get a human** when the amount
+crosses a line, and **be callable from the web app that already owns the conversation**. Each of
+those is one shipped toolnexus primitive, and they compose without glue.
+
+## When to reach for this
+
+| Reach for this shape when… | Look elsewhere when… |
+|---|---|
+| The agent must read **real systems** (order DB, CRM, billing) — not a vector index of last month's export | You only need retrieval over documents; a skill or an HTTP tool is enough on its own |
+| Some actions are **irreversible** (refunds, cancellations, credits) and need approval above a threshold | Everything the agent can do is read-only — skip the suspension layer entirely |
+| Another system (a web app, a helpdesk, another agent) **calls the agent**, rather than a human sitting at a terminal | A human drives a CLI — you don't need `serve` |
+| Volume is untrusted: anyone can open a ticket, so cost must be **bounded per conversation** | Internal, rate-limited, trusted callers |
+
+## The wiring at a glance
+
+| Layer | What it is here | Primitive | SPEC |
+|---|---|---|---|
+| Systems of record | Orders service (stdio MCP), CRM (remote MCP with a bearer token) | `mcpConfig` + per-server `tools` allowlist | [§2](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md) |
+| Knowledge & policy | `refund-policy/SKILL.md`, `shipping-claims/SKILL.md` — loaded only when relevant | `skillsDir` + the `skill` tool | §3 |
+| The irreversible action | An `issue_refund` tool that **suspends** above a threshold | `pending(Request)` → `waitFor` / durable `status:"pending"` | §10 |
+| The front door | The web app POSTs a task; the agent answers | `toolkit.serve(addr, { client, a2a })` | §7B |
+| Cost control | Turn cap per run; token/turn budget when run as an agent | `maxTurns`, `Budget` | §8, §7D |
+
+---
+
+## 1. The real systems — `mcp.json`
+
+The orders service runs locally over stdio; the CRM is a hosted MCP endpoint behind a bearer token.
+Both live in one file, and neither needs a line of integration code.
+
+```json
+{
+  "mcpServers": {
+    "orders": {
+      "type": "local",
+      "command": ["node", "./mcp-servers/orders/index.js"],
+      "timeout": 15000,
+      "tools": {
+        "get_order": true,
+        "list_shipments": true,
+        "get_return_label": true
+      }
+    },
+    "crm": {
+      "type": "remote",
+      "url": "https://crm.internal.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${CRM_TOKEN}" },
+      "timeout": 15000,
+      "tools": {
+        "find_customer": true,
+        "get_tickets": true
+      }
+    }
+  }
+}
+```
+
+### It can read, but it cannot refund
+
+That `tools` map is the load-bearing part. It is the **per-server allowlist** (SPEC §2, Gap 7),
+keyed on the server's *original* tool name and applied before the `<server>_<tool>` prefix is added:
+
+| Filter shape | Meaning |
+|---|---|
+| absent / empty | expose **all** of that server's tools |
+| **≥ 1 entry `true`** | **allowlist** — only the `true` names are exposed |
+| entries only `false` | drop-list over the all-on baseline |
+| unknown name | ignored (with a warning) — never an error |
+
+So even if the orders server also ships `issue_refund` and `cancel_order`, the model never sees
+them: they are not in the allowlist, so they are not in the toolkit, so they cannot be called. The
+refund path goes through *your* gated tool instead (step 3).
+
+<Aside type="caution" title="Secrets are use-only">
+`headers` values expand `${ENV_VAR}` from the environment **at call time** and are never logged
+(SPEC §2). Never write a real token into `mcp.json`, a commit, or an example — reference it by
+name and let it expand at the edge.
+</Aside>
+
+<Aside type="note" title="A dead server is not a dead agent">
+Each server gets its own connect/initialize/list budget bounded by its `timeout`. If the CRM is
+down, that server is marked `failed`, its tools are absent, and the rest of the toolkit still
+loads. Check `mcpStatus()` and tell the customer you can see orders but not their account history —
+rather than 500-ing the ticket.
+</Aside>
+
+---
+
+## 2. Policy as a skill, not as a prompt
+
+Refund rules change. Prompt strings that encode them rot, and stuffing all of them into every
+request burns tokens on the 95% of tickets that are "where is my package".
+
+Agent skills give you **progressive disclosure** (SPEC §3): only the one-line `description` of each
+skill sits in the system prompt; the full body loads on demand when the model calls the `skill`
+tool.
+
+```
+support-skills/
+  refund-policy/
+    SKILL.md          # thresholds, exclusions, who approves what
+    matrix.md         # sampled as a sibling file, referenced by the body
+  shipping-claims/
+    SKILL.md
+  tone-of-voice/
+    SKILL.md
+```
+
+```markdown
+---
+name: refund-policy
+description: Rules for issuing, splitting, or refusing a refund, including approval thresholds.
+---
+
+Refunds under 50 USD on a damaged-on-arrival claim may be issued directly.
+
+At or above 50 USD, call `issue_refund` anyway — it will pause for a human
+approver. Never promise the customer a refund before the tool returns.
+
+Exclusions and the per-category matrix: see `matrix.md` in this directory.
+```
+
+The catalog injected into the system prompt is just:
+
+```
+Skills provide specialized instructions and workflows for specific tasks.
+Use the skill tool to load a skill when a task matches its description.
+
+## Available Skills
+- **refund-policy**: Rules for issuing, splitting, or refusing a refund, including approval thresholds.
+- **shipping-claims**: ...
+- **tone-of-voice**: ...
+```
+
+<Aside type="tip">
+`SKILL.md` is an open, portable format — the same folder works in Claude Code, in opencode, and in
+this agent. Policy lives in your repo, gets reviewed in a PR, and is not duplicated per host. See
+[Agent skills](/toolnexus/skills/).
+</Aside>
+
+---
+
+## 3. The refund gate — one tool that suspends
+
+This is the only bespoke code in the whole scenario. A native tool (SPEC §6) that decides,
+mid-execution, that it cannot finish alone — and returns `pending(...)` instead of a result
+(SPEC §10).
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { defineTool, pending } from "toolnexus"
+
+const THRESHOLD = 50
+
+const issueRefund = defineTool({
+  name: "issue_refund",
+  description: "Refund an order. Amounts at or above the approval threshold require a human.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      orderId: { type: "string" },
+      amount: { type: "number" },
+      reason: { type: "string" },
+    },
+    required: ["orderId", "amount", "reason"],
+  },
+  run: async ({ orderId, amount, reason }, ctx) => {
+    // First pass: over threshold and not yet approved → suspend.
+    if (amount >= THRESHOLD && !ctx?.answer) {
+      return pending({
+        kind: "approval",
+        prompt: `Approve ${amount} USD refund on order ${orderId}? Reason: ${reason}`,
+        data: { orderId, amount, reason },
+      })
+    }
+    // Retry pass: ctx.answer is present and ok — the approver said yes.
+    return await billing.refund(orderId, amount)   // your own billing call
+  },
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import define_tool, pending
+
+THRESHOLD = 50
+
+
+@define_tool
+async def issue_refund(order_id: str, amount: float, reason: str, ctx=None) -> str:
+    """Refund an order. Amounts at or above the approval threshold require a human."""
+    if amount >= THRESHOLD and (ctx is None or ctx.answer is None):
+        return pending(
+            kind="approval",
+            prompt=f"Approve {amount} USD refund on order {order_id}? Reason: {reason}",
+            data={"orderId": order_id, "amount": amount, "reason": reason},
+        )
+    return await billing.refund(order_id, amount)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+const threshold = 50.0
+
+// A suspending tool needs the ToolContext (for ctx.Answer), so build the Tool
+// directly rather than through the NativeTool/NativeToolReflect sugar.
+issueRefund := toolnexus.Tool{
+    Name:        "issue_refund",
+    Description: "Refund an order. Amounts at or above the approval threshold require a human.",
+    Source:      toolnexus.SourceNative,
+    InputSchema: toolnexus.JSONSchema{
+        "type": "object",
+        "properties": map[string]any{
+            "orderId": map[string]any{"type": "string"},
+            "amount":  map[string]any{"type": "number"},
+            "reason":  map[string]any{"type": "string"},
+        },
+        "required": []string{"orderId", "amount", "reason"},
+    },
+    Execute: func(args map[string]any, tctx *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+        orderID, _ := args["orderId"].(string)
+        amount, _ := args["amount"].(float64)
+        reason, _ := args["reason"].(string)
+
+        if amount >= threshold && (tctx == nil || tctx.Answer == nil) {
+            return toolnexus.Pending(toolnexus.Request{
+                Kind: "approval",
+                Prompt: fmt.Sprintf("Approve %.2f USD refund on order %s? Reason: %s",
+                    amount, orderID, reason),
+                Data: map[string]any{"orderId": orderID, "amount": amount},
+            }), nil
+        }
+        return billing.Refund(orderID, amount)
+    },
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java
+final double THRESHOLD = 50.0;
+
+NativeTool issueRefund = NativeTool.of("issue_refund",
+    "Refund an order. Amounts at or above the approval threshold require a human.",
+    Map.of("type", "object",
+           "properties", Map.of("orderId", Map.of("type", "string"),
+                                "amount",  Map.of("type", "number"),
+                                "reason",  Map.of("type", "string")),
+           "required", List.of("orderId", "amount", "reason")),
+    (args, ctx) -> {
+        double amount = ((Number) args.get("amount")).doubleValue();
+        String orderId = (String) args.get("orderId");
+        if (amount >= THRESHOLD && ctx.answer() == null) {
+            // id null ⇒ ToolResult.pending generates one
+            return ToolResult.pending(new Request(
+                null, "approval",
+                "Approve " + amount + " USD refund on order " + orderId + "?",
+                null, Map.of("orderId", orderId, "amount", amount), null));
+        }
+        return billing.refund(orderId, amount);
+    });
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+const double Threshold = 50.0;
+
+var issueRefund = NativeTool.Of("issue_refund",
+    "Refund an order. Amounts at or above the approval threshold require a human.",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?>
+        {
+            ["orderId"] = new Dictionary<string, object?> { ["type"] = "string" },
+            ["amount"]  = new Dictionary<string, object?> { ["type"] = "number" },
+            ["reason"]  = new Dictionary<string, object?> { ["type"] = "string" },
+        },
+        ["required"] = new[] { "orderId", "amount", "reason" },
+    },
+    (args, ctx) =>
+    {
+        var amount = Convert.ToDouble(args["amount"]);
+        var orderId = (string)args["orderId"]!;
+        if (amount >= Threshold && ctx.Answer is null)
+        {
+            return ToolResult.Pending(new Request
+            {
+                Kind = "approval",
+                Prompt = $"Approve {amount} USD refund on order {orderId}?",
+                Data = new Dictionary<string, object?> { ["orderId"] = orderId, ["amount"] = amount },
+            });
+        }
+        return billing.Refund(orderId, amount);
+    });
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.{Native, Request, ToolResult}
+
+@threshold 50.0
+
+issue_refund =
+  Native.define_tool(
+    name: "issue_refund",
+    description: "Refund an order. Amounts at or above the approval threshold require a human.",
+    input_schema: %{
+      "type" => "object",
+      "properties" => %{
+        "orderId" => %{"type" => "string"},
+        "amount" => %{"type" => "number"},
+        "reason" => %{"type" => "string"}
+      },
+      "required" => ["orderId", "amount", "reason"]
+    },
+    execute: fn %{"orderId" => id, "amount" => amount, "reason" => reason}, ctx ->
+      if amount >= @threshold and is_nil(ctx.answer) do
+        %ToolResult{
+          output: "Approval required for #{amount} USD on order #{id}",
+          is_error: true,
+          metadata: %{
+            pending: %Request{
+              id: "pnd-" <> Base.encode16(:crypto.strong_rand_bytes(6), case: :lower),
+              kind: "approval",
+              prompt: "Approve #{amount} USD refund on order #{id}? Reason: #{reason}",
+              data: %{"orderId" => id, "amount" => amount}
+            }
+          }
+        }
+      else
+        Billing.refund(id, amount)
+      end
+    end
+  )
+```
+</TabItem>
+</Tabs>
+
+Three properties of this gate matter in production:
+
+- **The threshold is enforced in code, not in the prompt.** The model cannot talk its way past it.
+- **A suspension is not a tool error** (SPEC §10). The `tool` observability event carries
+  `isError: false` with a `pending: true` marker, so your error-rate dashboards and circuit
+  breakers do not light up every time a human is asked something.
+- **The retry is bounded.** On `ok: true` the loop re-executes the *same tool with the same args
+  exactly once*, with the `Answer` in `ctx.answer`. If it suspends again, the loop feeds back
+  `"unresolved: <prompt>"` — it never spins.
+
+---
+
+## 4. Two approval postures — pick by *when the human answers*
+
+This is the one design decision on the page, and it is not about what you're asking. It is about
+whether an approver is available **inside this request** or **hours later**.
+
+| The approver answers… | Give the client… | What `run()`/`ask()` does |
+|---|---|---|
+| **Now** — an on-shift agent in a console you can await (seconds) | a **`waitFor`** | Blocks on `waitFor`, feeds the answer back, runs on to `status: "done"`. The pause is invisible to the caller. |
+| **Later** — a supervisor approves in a web queue, maybe tomorrow, maybe in another process | **no `waitFor`** | Returns `status: "pending"` with the `Request`. You persist it, render it, resume when it's answered. |
+
+### Posture A — inline (`waitFor`)
+
+The approver is on shift. The `waitFor` hits your approvals service and blocks the run until it
+answers.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const client = createClient({
+  baseUrl, style: "openai", model,
+  maxTurns: 8,
+  waitFor: async (req) => {
+    const decision = await approvals.askOnShift(req.prompt, req.data)   // your service
+    return { id: req.id, ok: decision.approved, reason: decision.approved ? undefined : "declined" }
+  },
+})
+const result = await client.run(ticketText, { toolkit })
+// result.status === "done" — the refund ran only after an approver said yes
+```
+</TabItem>
+<TabItem label="Python">
+```python
+async def wait_for(req):
+    decision = await approvals.ask_on_shift(req.prompt, req.data)
+    return Answer(id=req.id, ok=decision.approved,
+                  reason=None if decision.approved else "declined")
+
+client = create_client(base_url=base, style="openai", model=model,
+                       max_turns=8, wait_for=wait_for)
+result = await client.run(ticket_text, toolkit)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+c := toolnexus.CreateClient(toolnexus.ClientOptions{
+    BaseURL: baseURL, Style: toolnexus.StyleOpenAI, Model: model, MaxTurns: 8,
+    WaitFor: func(req toolnexus.Request) (toolnexus.Answer, error) {
+        d, err := approvals.AskOnShift(req.Prompt, req.Data)
+        if err != nil {
+            return toolnexus.Answer{}, err
+        }
+        return toolnexus.Answer{ID: req.ID, Ok: d.Approved}, nil
+    },
+})
+res, _ := c.Run(ctx, ticketText, tk)
+```
+</TabItem>
+<TabItem label="Java">
+```java
+LlmClient client = LlmClient.create(new LlmClient.Options()
+        .baseUrl(base).style("openai").model(model).maxTurns(8)
+        .waitFor(req -> {
+            var d = approvals.askOnShift(req.prompt(), req.data());
+            return new Answer(req.id(), d.approved());
+        }));
+LlmClient.RunResult result = client.run(ticketText, tk);
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = baseUrl, Style = "openai", Model = model, MaxTurns = 8,
+    WaitFor = async req =>
+    {
+        var d = await approvals.AskOnShiftAsync(req.Prompt, req.Data);
+        return new Answer { Id = req.Id, Ok = d.Approved };
+    },
+});
+var result = await client.RunAsync(ticketText, tk);
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+client =
+  Toolnexus.Client.new(
+    base_url: base_url,
+    style: "openai",
+    model: model,
+    max_turns: 8,
+    wait_for: fn req ->
+      d = Approvals.ask_on_shift(req.prompt, req.data)
+      %Toolnexus.Answer{id: req.id, ok: d.approved}
+    end
+  )
+
+result = Toolnexus.Client.run(client, ticket_text, tk)
+```
+</TabItem>
+</Tabs>
+
+`ok: false` is not an error either — the loop feeds `"declined: <prompt>"` back to the model, which
+then explains the refusal to the customer in its own words. The optional `reason`
+(`"declined" | "cancelled" | "expired"`) is advisory; **the loop branches only on `ok`**.
+
+### Posture B — durable (a web approval queue)
+
+The HTTP request that started the run has to return *now*, and a supervisor will approve later —
+possibly in a different process, after a deploy. Configure **no `waitFor`** and use `ask` with a
+conversation id so the transcript is stored and replayable.
+
+**Phase 1 — halt and hand back the request.**
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const result = await client.ask(ticketText, { toolkit, id: ticketId })   // no waitFor configured
+if (result.status === "pending") {
+  const req = result.pending!                      // { id, kind, prompt, url?, data? } — plain data
+  await approvalQueue.insert({ ticketId, request: req })
+  return reply(200, "Escalated to a supervisor for approval.")   // nothing is blocked
+}
+return reply(200, result.text)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+result = await client.ask(ticket_text, toolkit, id=ticket_id)
+if result.status == "pending":
+    req = result.pending                            # Request(id, kind, prompt, url, data)
+    await approval_queue.insert(ticket_id=ticket_id, request=req)
+    return reply(200, "Escalated to a supervisor for approval.")
+return reply(200, result.text)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+res, _ := c.Ask(ctx, ticketText, tk, ticketID)
+if res.Status == "pending" {
+    approvalQueue.Insert(ticketID, res.Pending)     // *toolnexus.Request — serializable
+    return reply(200, "Escalated to a supervisor for approval.")
+}
+return reply(200, res.Text)
+```
+</TabItem>
+<TabItem label="Java">
+```java
+LlmClient.RunResult res = client.ask(ticketText, tk, ticketId);
+if ("pending".equals(res.status)) {
+    approvalQueue.insert(ticketId, res.pending);
+    return reply(200, "Escalated to a supervisor for approval.");
+}
+return reply(200, res.text);
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var res = await client.AskAsync(ticketText, tk, ticketId);
+if (res.Status == "pending")
+{
+    await approvalQueue.InsertAsync(ticketId, res.Pending!);
+    return Reply(200, "Escalated to a supervisor for approval.");
+}
+return Reply(200, res.Text);
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+res = Toolnexus.Client.ask(client, ticket_text, tk, ticket_id)
+
+case res.status do
+  "pending" ->
+    ApprovalQueue.insert(ticket_id, res.pending)
+    reply(200, "Escalated to a supervisor for approval.")
+
+  _ ->
+    reply(200, res.text)
+end
+```
+</TabItem>
+</Tabs>
+
+**Phase 2 — the supervisor clicks Approve; resume the same conversation.** Same `id`, a client
+whose `waitFor` returns the decision you now hold.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const resume = createClient({
+  baseUrl, style: "openai", model, maxTurns: 8,
+  waitFor: async (req) => ({ id: req.id, ok: decision.approved }),
+})
+const done = await resume.ask(ticketText, { toolkit, id: ticketId })
+// done.status === "done" — the transcript replayed, issue_refund re-ran with ctx.answer set
+```
+</TabItem>
+<TabItem label="Python">
+```python
+resume = create_client(base_url=base, style="openai", model=model, max_turns=8,
+                       wait_for=lambda req: Answer(id=req.id, ok=decision.approved))
+done = await resume.ask(ticket_text, toolkit, id=ticket_id)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+resume := toolnexus.CreateClient(toolnexus.ClientOptions{
+    BaseURL: baseURL, Style: toolnexus.StyleOpenAI, Model: model, MaxTurns: 8,
+    WaitFor: func(req toolnexus.Request) (toolnexus.Answer, error) {
+        return toolnexus.Answer{ID: req.ID, Ok: decision.Approved}, nil
+    },
+})
+done, _ := resume.Ask(ctx, ticketText, tk, ticketID)
+```
+</TabItem>
+<TabItem label="Java">
+```java
+LlmClient resume = LlmClient.create(new LlmClient.Options()
+        .baseUrl(base).style("openai").model(model).maxTurns(8)
+        .waitFor(req -> new Answer(req.id(), decision.approved())));
+LlmClient.RunResult done = resume.ask(ticketText, tk, ticketId);
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var resume = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = baseUrl, Style = "openai", Model = model, MaxTurns = 8,
+    WaitFor = req => Task.FromResult(new Answer { Id = req.Id, Ok = decision.Approved }),
+});
+var done = await resume.AskAsync(ticketText, tk, ticketId);
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+resume =
+  Toolnexus.Client.new(
+    base_url: base_url, style: "openai", model: model, max_turns: 8,
+    wait_for: fn req -> %Toolnexus.Answer{id: req.id, ok: decision.approved} end
+  )
+
+done = Toolnexus.Client.ask(resume, ticket_text, tk, ticket_id)
+```
+</TabItem>
+</Tabs>
+
+<Aside type="note" title="Why this survives a restart">
+`Request` and `Answer` are **fixed-key, plain serializable data** across all six ports (SPEC §10) —
+not objects holding a live connection. That is the entire reason the durable posture works: the
+pending approval can sit in Postgres over a deploy, be rendered by a React queue written by another
+team, and be resolved by a different process in a different language.
+</Aside>
+
+---
+
+## 5. Serving it to your web app (A2A)
+
+The support agent should not be a script you run. Your helpdesk backend needs to POST a ticket and
+get an answer. `toolkit.serve` mounts an **A2A** endpoint (SPEC §7B): an Agent Card at
+`/.well-known/agent-card.json` built from your **skills**, and JSON-RPC `SendMessage` / `GetTask`
+at `POST /`.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const handle = await tk.serve("127.0.0.1:8080", {
+  client,                                   // the client that fulfils each inbound task
+  a2a: {
+    name: "support-agent",
+    description: "Answers order and refund questions from the systems of record.",
+    skills: ["refund-policy", "shipping-claims"],   // what the card advertises
+    store: "file:./tasks",                          // survives a restart
+  },
+  onTask: ({ id, state, result }) => metrics.record(id, state, result?.usage),
+})
+console.log(handle.url)   // stop with handle.stop()
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import A2AConfig
+
+handle = await tk.serve(
+    "127.0.0.1:8080",
+    client=client,
+    a2a=A2AConfig(name="support-agent", skills=["refund-policy", "shipping-claims"],
+                  store="file:./tasks"),
+)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+handle, _ := tk.Serve("127.0.0.1:8080", toolnexus.ServeOptions{
+    Client: c,
+    A2A: &toolnexus.A2AConfig{
+        Name:   "support-agent",
+        Skills: []string{"refund-policy", "shipping-claims"},
+        Store:  "file:./tasks",
+    },
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+A2AServer.ServeHandle handle = tk.serve("127.0.0.1:8080",
+    new Toolkit.ServeOptions()
+        .client(client)
+        .a2a(new A2AServer.A2AConfig().name("support-agent")));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var handle = await tk.ServeAsync("127.0.0.1:8080", new Toolkit.ServeOptions
+{
+    Client = client,
+    A2A = new A2AConfig { Name = "support-agent", Store = "file:./tasks" },
+});
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+handle =
+  Toolnexus.Toolkit.serve(tk, "127.0.0.1:8080",
+    client: client,
+    a2a: %{name: "support-agent", store: "file:./tasks"}
+  )
+```
+</TabItem>
+</Tabs>
+
+Two behaviors make this usable as a real backend:
+
+- **Conversation continuity for free.** When an inbound message carries an A2A `contextId`, the
+  server fulfils it via `ask(text, { toolkit, id: contextId })` — so a customer's follow-up turns
+  continue the same transcript through the client's `ConversationStore` (SPEC §8).
+- **Suspension crosses the wire.** If a run halts pending approval and no `waitFor` is set, the A2A
+  layer reports the task as **`input-required`** with the prompt in the status message — never a
+  bogus `completed`. Your web app sees "waiting on approval", not a fabricated answer (SPEC §10).
+
+<Aside type="caution" title="serve() has no auth in core">
+The A2A profile ships **no authentication** (SPEC §7B). Bind it to loopback or a private network and
+put your own gateway, mTLS, or reverse proxy in front. Do not expose `serve()` to the internet.
+</Aside>
+
+---
+
+## 6. Budgets — a chatty customer cannot cost unbounded
+
+Anyone can open a ticket, so the blast radius of one conversation must be capped in code.
+
+| Control | Where | What it stops |
+|---|---|---|
+| `maxTurns` (default 10) | client option, §8 | An unbounded tool-calling loop. Exhausting it returns `status: "incomplete"` with `limit: "maxTurns"` — **loud, never a silent `"done"`**, and the partial transcript is preserved. |
+| `Budget { maxTurns, maxTokens, maxToolCalls, maxWallMs, maxChildren, maxConcurrent, maxDepth }` | agent runtime, §7D | Token/wall/tool-call spend across a whole agent tree. Enforced by a live ancestor-chain walk before every turn and spawn, so sibling spend counts. |
+| `onBudget(info) → "stop" \| "extend" \| "suspend"` | agent runtime, §7D | Lets you escalate instead of dying — `"suspend"` routes the overrun through §10 as an approval ("this ticket wants another 20k tokens, OK?"). |
+| `timeoutMs` + `retries` | client options, §8 | A wedged provider. Whole-run deadline; retries on `429`/`5xx` with backoff and `Retry-After`. |
+
+Run the support agent as an **agent** rather than a bare client when you want the token budget:
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { agents } from "toolnexus"
+
+const support = agents.agent("support", {
+  does: "answers order and refund questions",
+  uses: { tools: tk.tools() },            // the agent's toolkit VIEW — scoping is the security model
+  soulFile: "./support/AGENTS.md",
+  budget: { maxTurns: 8, maxTokens: 40_000, maxToolCalls: 20, maxWallMs: 60_000 },
+})
+const r = await support.run(ticketText, { llm: { baseUrl, style: "openai", model } })
+if (r.status === "incomplete") escalateToHuman(r)   // the limit is named on the result
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus.agents import agent, Budget
+
+support = agent("support", does="answers order and refund questions",
+                uses={"tools": tk.tools()}, soul_file="./support/AGENTS.md",
+                budget=Budget(max_turns=8, max_tokens=40_000, max_tool_calls=20))
+r = await support.run(ticket_text, llm={"base_url": base, "style": "openai", "model": model})
+```
+</TabItem>
+<TabItem label="Go">
+```go
+support := agents.New("support", agents.Spec{
+    Does:     "answers order and refund questions",
+    Tools:    tk.Tools(),
+    SoulFile: "./support/AGENTS.md",
+    Budget:   &agents.Budget{MaxTurns: 8, MaxTokens: 40_000, MaxToolCalls: 20},
+})
+r, _ := support.Run(agents.Options{LLM: llm}, ticketText)
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Agents.Agent support = agent("support", new Agents.AgentSpec()
+    .does("answers order and refund questions")
+    .tools(tk.tools())
+    .soulFile(Path.of("support/AGENTS.md"))
+    .budget(new Budget().maxTurns(8).maxTokens(40_000).maxToolCalls(20)));
+TaskResult r = support.run(rtOpts, ticketText);
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var support = new Agent("support", new AgentSpec
+{
+    Does = "answers order and refund questions",
+    Uses = tk.Tools().ToList(),
+    SoulFile = "./support/AGENTS.md",
+    Budget = new Budget { MaxTurns = 8, MaxTokens = 40_000, MaxToolCalls = 20 },
+});
+var r = await support.RunAsync(rtOpts, ticketText);
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+support =
+  Toolnexus.Agents.agent("support",
+    does: "answers order and refund questions",
+    uses: %{tools: Toolnexus.Toolkit.tools(tk)},
+    soul_file: "support/AGENTS.md",
+    budget: %{max_turns: 8, max_tokens: 40_000, max_tool_calls: 20}
+  )
+
+r = Toolnexus.Agents.run(support, [llm: llm], ticket_text)
+```
+</TabItem>
+</Tabs>
+
+<Aside type="note" title="Budgets never lie about why they stopped">
+Any limit stop yields `status: "incomplete"` with the limit **named** — never a silent `"done"` and
+never a crash. Partial work and the transcript are preserved, so you can hand the half-finished
+ticket to a person with context intact (SPEC §7D).
+</Aside>
+
+---
+
+## 7. Putting it together
+
+The whole agent, end to end: systems over MCP, policy as skills, the gated refund tool, an inline
+approver, and an A2A front door.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createToolkit, createClient } from "toolnexus"
+
+const tk = await createToolkit({
+  mcpConfig: "./mcp.json",              // orders (stdio) + crm (remote), each allowlisted
+  skillsDir: "./support-skills",        // refund-policy, shipping-claims, tone-of-voice
+  extraTools: [issueRefund],            // the gated action
+  disableTools: ["bash", "write"],      // no shell, no writes on a customer-facing agent
+})
+
+const client = createClient({
+  baseUrl: "https://openrouter.ai/api/v1",
+  style: "openai",
+  model: "openai/gpt-4o-mini",
+  systemPrompt: "You are the support agent for Acme. Never promise a refund before the tool returns.",
+  maxTurns: 8,
+  timeoutMs: 60_000,
+  waitFor: async (req) => ({ id: req.id, ok: await approvals.askOnShift(req.prompt) }),
+})
+
+const handle = await tk.serve("127.0.0.1:8080", {
+  client,
+  a2a: { name: "support-agent", store: "file:./tasks" },
+})
+console.log("serving on", handle.url, "mcp:", tk.mcpStatus())
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_toolkit, create_client, A2AConfig, Answer
+
+tk = await create_toolkit(
+    mcp_config="./mcp.json",
+    skills_dir="./support-skills",
+    extra_tools=[issue_refund],
+    disable_tools=["bash", "write"],
+)
+
+client = create_client(
+    base_url="https://openrouter.ai/api/v1",
+    style="openai",
+    model="openai/gpt-4o-mini",
+    system_prompt="You are the support agent for Acme. Never promise a refund before the tool returns.",
+    max_turns=8,
+    timeout_ms=60_000,
+    wait_for=wait_for,
+)
+
+handle = await tk.serve("127.0.0.1:8080", client=client,
+                        a2a=A2AConfig(name="support-agent", store="file:./tasks"))
+print("serving on", handle.url, "mcp:", tk.mcp_status())
+```
+</TabItem>
+<TabItem label="Go">
+```go
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{
+    McpConfig:    "./mcp.json",
+    SkillsDir:    []string{"./support-skills"},
+    ExtraTools:   []toolnexus.Tool{issueRefund},
+    DisableTools: []string{"bash", "write"},
+})
+
+c := toolnexus.CreateClient(toolnexus.ClientOptions{
+    BaseURL:      "https://openrouter.ai/api/v1",
+    Style:        toolnexus.StyleOpenAI,
+    Model:        "openai/gpt-4o-mini",
+    SystemPrompt: "You are the support agent for Acme.",
+    MaxTurns:     8,
+    WaitFor:      waitFor,
+})
+
+handle, _ := tk.Serve("127.0.0.1:8080", toolnexus.ServeOptions{
+    Client: c,
+    A2A:    &toolnexus.A2AConfig{Name: "support-agent", Store: "file:./tasks"},
+})
+fmt.Println("serving on", handle.URL, "mcp:", tk.McpStatus())
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Toolkit tk = Toolkit.create(new Toolkit.Options()
+    .mcpConfig("./mcp.json")
+    .skillsDir("./support-skills")
+    .extraTools(issueRefund)
+    .disableTools("bash", "write"));
+
+LlmClient client = LlmClient.create(new LlmClient.Options()
+    .baseUrl("https://openrouter.ai/api/v1")
+    .style("openai")
+    .model("openai/gpt-4o-mini")
+    .systemPrompt("You are the support agent for Acme.")
+    .maxTurns(8)
+    .waitFor(waitFor));
+
+A2AServer.ServeHandle handle = tk.serve("127.0.0.1:8080",
+    new Toolkit.ServeOptions()
+        .client(client)
+        .a2a(new A2AServer.A2AConfig().name("support-agent")));
+System.out.println("serving on " + handle.url() + " mcp: " + tk.mcpStatus());
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    McpConfig = "./mcp.json",
+    SkillsDir = new List<string> { "./support-skills" },
+    ExtraTools = new List<ITool> { issueRefund },
+    DisableTools = new[] { "bash", "write" },
+});
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = "https://openrouter.ai/api/v1",
+    Style = "openai",
+    Model = "openai/gpt-4o-mini",
+    SystemPrompt = "You are the support agent for Acme.",
+    MaxTurns = 8,
+    WaitFor = waitFor,
+});
+
+var handle = await tk.ServeAsync("127.0.0.1:8080", new Toolkit.ServeOptions
+{
+    Client = client,
+    A2A = new A2AConfig { Name = "support-agent", Store = "file:./tasks" },
+});
+Console.WriteLine($"serving on {handle.Url}");
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+{:ok, tk} =
+  Toolnexus.create_toolkit(
+    mcp_config: "./mcp.json",
+    skills_dir: "./support-skills",
+    extra_tools: [issue_refund],
+    disable_tools: ["bash", "write"]
+  )
+
+client =
+  Toolnexus.Client.new(
+    base_url: "https://openrouter.ai/api/v1",
+    style: "openai",
+    model: "openai/gpt-4o-mini",
+    system_prompt: "You are the support agent for Acme.",
+    max_turns: 8,
+    wait_for: wait_for
+  )
+
+handle =
+  Toolnexus.Toolkit.serve(tk, "127.0.0.1:8080",
+    client: client,
+    a2a: %{name: "support-agent", store: "file:./tasks"}
+  )
+
+IO.inspect(Toolnexus.Toolkit.mcp_status(tk), label: "mcp")
+```
+</TabItem>
+</Tabs>
+
+<Aside type="tip" title="Turn the built-ins off deliberately">
+Built-in tools (shell, file read/write, …) are **on by default** (SPEC §4A). A customer-facing agent
+that reads untrusted text should not have a shell. Either drop them per name with `disableTools`, or
+turn the whole source off with `builtins: false` and add back only what you need.
+</Aside>
+
+---
+
+## Honest limits
+
+What this scenario does **not** give you. These are host concerns by design — the library is the
+tool/loop layer, not your product.
+
+| Not included | Why, and what you do instead |
+|---|---|
+| **A ticketing UI** | No inbox, no queue view, no agent console. `serve()` is a JSON-RPC endpoint; the front end is yours (or your existing helpdesk calling it). |
+| **End-user authentication** | The library never learns *which customer* is asking. Authenticate at your gateway and pass the verified identity into the prompt or tool args — never let the model assert who it is talking to. |
+| **Authorization on the approval** | `waitFor` returns an `Answer`; the library does not check that the approver was entitled to approve. Enforce that inside your approvals service. |
+| **Auth on `serve()`** | No authentication in the A2A or MCP serve profiles (SPEC §7B/§7C). Loopback or private network + your own gateway. |
+| **OAuth for MCP servers** | Out of scope for v1 — pass a bearer token via `headers` with `${ENV}` expansion. Interactive login is expressible as a §10 `kind:"authorization"` suspension, but the token dance lives in your `waitFor`. |
+| **PII redaction** | Nothing scrubs customer data before it reaches the model. Use the `beforeTool` / `afterTool` hooks (SPEC §8) to redact arguments and outputs at the boundary. |
+| **Anything the model says** | The gate is the tool, not the sentence. The threshold check runs in code precisely because the model's promise ("you'll get a refund!") is not enforceable. Set expectations in the skill body. |
+| **Approval expiry** | `Request.expiresAt` is carried but the library does not sweep stale requests. Your queue decides when a pending approval times out, and resolves it `ok: false, reason: "expired"`. |
+
+---
+
+## Where this goes next
+
+- Split the work: a triage agent that routes and a specialist that refunds — see
+  [Sub-agents & teams](/toolnexus/subagents/).
+- Keep a long conversation under the window with [context compaction](/toolnexus/memory/) (SPEC §7F).
+- Let a **server** ask the customer a question mid-call via the
+  [MCP elicitation bridge](/toolnexus/mcp/) — it lands on this same `waitFor`.
+
+<LinkButton href="/toolnexus/scenarios/" variant="secondary" icon="right-arrow">Back to all scenarios</LinkButton>
