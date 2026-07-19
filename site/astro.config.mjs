@@ -73,6 +73,7 @@ export default defineConfig({
 						{ label: 'Built-in tools', slug: 'builtins' },
 						{ label: 'A2A — remote agents', slug: 'a2a' },
 						{ label: 'Sub-agents & teams', slug: 'subagents' },
+						{ label: 'Persona agents', slug: 'persona-agents' },
 						{ label: 'Suspension & the human loop', slug: 'suspension' },
 					],
 				},

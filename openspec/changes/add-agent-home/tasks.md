@@ -50,15 +50,17 @@ per port; reconcile the `add-subagents` fromDir/heartbeat drift.
 
 ## 7. Real deliverables (owner steer: production, not college projects)
 
-- [ ] 7.1 Docs page `site/.../persona-agents.mdx`: fromDir + memory + heartbeat, 6-language
-      tabs from the shipped code; a **"when to use which surface"** table (`agent()` for a
-      one-shot worker · `fromDir` for a filesystem persona · raw verbs for a custom host loop).
-- [ ] 7.2 Recipes (docs, zero new API): **dream/consolidation** (a scheduled agent whose
-      HEARTBEAT.md folds notes into MEMORY.md) and **channel-driven assistant** (host inbound
-      → `post`/`wake`). Each with a runnable snippet.
-- [ ] 7.3 Runnable `examples/persona-agent/` wired to a real example entrypoint per port
-      (mirrors the existing per-port `examples/` runnables); README mention.
-- [ ] 7.4 Cross-port conformance: identical behavior against the shared fixture; note allowed
-      divergences (filesystem paths only).
-- [ ] 7.5 CHANGELOG: agent-home (fromDir + memory builtin + heartbeat), additive.
-- [ ] 7.6 Remove `js/spike/` once js src + tests are green (branch history preserves it).
+- [x] 7.1 Docs page `site/src/content/docs/persona-agents.mdx` (wired into the sidebar next to
+      Sub-agents): fromDir + memory (frozen-snapshot rationale) + heartbeat, 6-language tabs from
+      the shipped code; a **"when to use which surface"** table (`agent()` for a one-shot worker ·
+      `fromDir` for a filesystem persona · raw verbs for a custom host loop), each with a scenario.
+- [x] 7.2 Recipes (docs, zero new API): **dream/consolidation** (a startAgent whose HEARTBEAT.md
+      folds notes into MEMORY.md via the memory tool) and **channel-driven assistant** (host
+      inbound → `post`/`wake`). Each a runnable snippet, marked "composition, no new API".
+- [x] 7.3 Runnable `examples/persona-agent/ava/` bootstrap dir + entrypoints for JS
+      (`js/examples/persona.ts`), Python (`python/examples/persona.py`), and Go
+      (`golang/examples/persona`) — all verified live against OpenRouter; README + docs mention.
+- [x] 7.4 Cross-port conformance: all six suites green at branch HEAD (matrix in report). Fixed a
+      shared-branch gap: `js/test/home.test.ts` (H1–H7) was not wired into `npm test` — added it.
+- [x] 7.5 CHANGELOG: agent-home (fromDir + memory builtin + heartbeat), additive/opt-in.
+- [x] 7.6 Remove `js/spike/` (js src + tests green after removal; branch history preserves it).

@@ -273,6 +273,31 @@ token burn, and `runtime.resume(answer)` continues from the checkpoint — re-ru
 to their existing children instead of spawning duplicates. Available in all six ports (an
 `agents` namespace per language). See the [sub-agents docs](https://muthuishere.github.io/toolnexus/subagents/).
 
+## Persona agents — a long-lived assistant
+
+Sub-agents are **workers** (spawn, delegate, done). A **persona** is the other archetype — a
+long-lived assistant whose identity lives in **files**, whose **memory** it can edit, and which
+acts on a **heartbeat** without being prompted. All three ride the same runtime: `fromDir(dir)`
+composes bootstrap files (`SOUL/USER/HEARTBEAT/MEMORY.md`) into a frozen soul and wires a
+file-backed `memory` tool; `startAgent` gives it a clock. (`SPEC.md §7E`.)
+
+```ts
+import { agents } from "toolnexus"
+
+const ava = agents.fromDir("./personas/ava")   // the directory IS the agent
+const r = await ava.run("What's on my plate today?", { llm })
+// memory writes land on disk and load at the START of the next session — a frozen snapshot,
+// so the prompt cache stays warm (the write does NOT mutate the live prompt).
+
+const started = agents.startAgent(ava, { llm },
+  { everyMs: 60_000, onBeat: (text) => notifyMe(text) })  // HEARTBEAT_OK beats stay silent
+```
+
+Runnable JS/Python/Go entrypoints (`examples/persona.*`) drive a real "Ava" against OpenRouter.
+See the [persona-agents docs](https://muthuishere.github.io/toolnexus/persona-agents/) — including
+a **"when to use which surface"** guide (`agent()` vs `fromDir` vs the raw verbs) and the
+dream/consolidation + channel-assistant recipes.
+
 ## Serve as an MCP server — be a gateway
 
 The other inbound edge: expose your **whole toolkit as an MCP server**, so any MCP client (Claude

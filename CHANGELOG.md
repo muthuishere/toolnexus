@@ -8,6 +8,21 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ### Added
 
+- **Persona agents (agent home) in all six ports** (`SPEC.md §7E`, OpenSpec change
+  `add-agent-home`). The persona archetype over the §7D runtime — additive and opt-in, no
+  runtime change. In the `agents` namespace: `fromDir(dir)` (Python `agent_from_dir`, Java
+  `agentFromDir`) composes the bootstrap files
+  `AGENTS/SOUL/IDENTITY/USER/TOOLS/HEARTBEAT/MEMORY.md` (in that order, 2 MB/file cap) into a
+  frozen soul snapshot at session start; a file-backed `memory` builtin (`memoryTool(dir)`,
+  actions `add`/`replace`/`remove` over `MEMORY.md`/`USER.md`) that writes to **disk** and loads
+  at the START of the next session — never mutating the live prompt, keeping a long-lived persona
+  cache-stable (a missing substring is a loud `isError`; opt out with `memory: false`); and
+  `startAgent(agent, …, { everyMs })` — a heartbeat that posts a coalescing tick to the agent's
+  own inbox and wakes it to read `HEARTBEAT.md`, where a `HEARTBEAT_OK` reply stays silent.
+  Channels stay the host's job (wire inbound to `post`/`wake`). Ships with a runnable
+  `examples/persona-agent/` ("Ava") + JS/Python/Go entrypoints, a "when to use which surface"
+  guide, and dream/consolidation + channel-assistant recipes (composition, no new API).
+
 - **Agent runtime + sub-agents in all six ports** (`SPEC.md §7D`, OpenSpec change
   `add-subagents`). A new `agents` namespace per port (never colliding with the A2A
   `Agent`): `agent(name, { does, uses, soul/soulFile, team, budget, model, waitFor,

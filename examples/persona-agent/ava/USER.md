@@ -1,0 +1,4 @@
+- Name: Muthu
+- Timezone: IST (Asia/Kolkata)
+- Prefers concise, direct answers
+- Has a recurring 3pm daily sync
