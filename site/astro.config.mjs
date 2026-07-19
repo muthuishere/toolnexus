@@ -37,6 +37,17 @@ export default defineConfig({
 					],
 				},
 				{
+					label: 'Scenarios — full builds',
+					items: [
+						{ label: 'Which scenario?', slug: 'scenarios' },
+						{ label: 'A coding agent', slug: 'scenarios/coding-agent' },
+						{ label: 'A persona assistant', slug: 'scenarios/persona-assistant' },
+						{ label: 'A research orchestrator', slug: 'scenarios/research-orchestrator' },
+						{ label: 'A support agent', slug: 'scenarios/support-agent' },
+						{ label: 'A self-improving agent', slug: 'scenarios/self-improving-agent' },
+					],
+				},
+				{
 					label: 'Cookbook',
 					items: [
 						{ label: 'Zero to agent', slug: 'cookbook/zero-to-agent' },

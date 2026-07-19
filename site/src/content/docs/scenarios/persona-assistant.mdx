@@ -1,0 +1,756 @@
+---
+title: Build an openclaw-style personal assistant
+description: A complete build — a long-lived assistant whose identity is a git-able folder, whose memory it edits itself, which wakes on its own clock and reaches you on your channels. fromDir + memory + heartbeat + compaction, in all six languages.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+**The scenario.** You want the thing people mean when they say "a personal AI": an
+assistant called **Ava** that already knows who you are when you say "hi", remembers that
+you take your 1:1s on Tuesdays without being told twice, notices at 2:55pm that your 3pm
+sync is due and pings you on Telegram *before you ask*, and is still the same assistant six
+weeks later — not a chat window that forgot you on refresh.
+
+That is three capabilities a plain chat loop does not have:
+
+| Capability | What it means concretely | What ships it |
+|---|---|---|
+| **Identity that survives restarts** | Ava's personality, your profile, and her operating rules live in files you can `ls`, `git diff`, and code-review — not in a prompt string in `main.ts`. | `fromDir` (`SPEC.md §7E`) |
+| **Memory she writes herself** | She learns "Muthu prefers dark roast" during a conversation and *still knows it* next Tuesday. | the `memory` builtin (`§7E`) |
+| **Acting unprompted** | A clock beat wakes her; she decides whether there is anything worth saying, and stays silent if not. | `startAgent` heartbeat (`§7E`) |
+
+Plus one that decides whether she survives past week one: **compaction** (`§7F`), so a
+months-long transcript never blows the context window.
+
+<Aside type="note" title="When to reach for this page">
+Reach here when the agent's **lifetime is longer than one task** — a personal aide, a support
+persona, an on-call operator, a desk that runs for months. For a bounded job that starts,
+produces a result and ends, you want a [sub-agent](/toolnexus/subagents/) instead: no identity
+to persist, no clock. This page is the assembled build; [Persona agents](/toolnexus/persona-agents/)
+is the per-feature reference.
+</Aside>
+
+## Step 1 — the home directory *is* the agent
+
+Ava is a folder. Everything below is real content from
+[`examples/persona-agent/ava/`](https://github.com/muthuishere/toolnexus/tree/main/examples/persona-agent),
+the fixture every port runs against — not placeholders.
+
+```
+personas/ava/
+├── SOUL.md        # who she is, how she speaks
+├── USER.md        # who YOU are (she edits this)
+├── HEARTBEAT.md   # what to do when nothing asked her anything
+└── MEMORY.md      # what she has learned (she edits this)
+```
+
+`fromDir` injects each **present** file into the system prompt as a `## <filename>` section,
+in this fixed order — identity first, durable memory last:
+
+| # | file | role | who writes it |
+|---|------|------|---------------|
+| 1 | `AGENTS.md` | operating instructions | you |
+| 2 | `SOUL.md` | identity / voice | you |
+| 3 | `IDENTITY.md` | who the agent is | you |
+| 4 | `USER.md` | model of the user | you, then **the agent** (`target: "user"`) |
+| 5 | `TOOLS.md` | tool guidance | you |
+| 6 | `HEARTBEAT.md` | what to do on a beat | you |
+| 7 | `MEMORY.md` | durable long-term notes | **the agent** (`target: "self"`) |
+
+Absent files are skipped. Each is read with a **2 MB cap** (bytes — `2097152`); larger files
+are injected truncated with a notice and the file on disk is untouched.
+
+### `SOUL.md` — identity and voice
+
+This is the one file that decides whether the assistant feels like *an assistant* or like a
+chatbot. Be specific about voice, and — critically — **state the memory policy here**, because
+the model decides when to call the `memory` tool and it needs a rule.
+
+```md title="personas/ava/SOUL.md"
+You are **Ava**, a calm, precise personal assistant.
+
+Voice: warm but economical — a sentence or two, never a wall of text. You never
+invent facts about the user; when you are unsure you say so and ask one specific
+question. You prefer doing the small thing now over promising the big thing later.
+
+You have a durable memory. When you learn a *stable* fact about the user (a
+preference, a recurring commitment, a name), record it with the `memory` tool so
+your next session starts already knowing it. You do **not** record one-off chatter.
+```
+
+### `USER.md` — the model of you
+
+Seed it by hand with what you already know. Ava extends it herself via the memory tool with
+`target: "user"`.
+
+```md title="personas/ava/USER.md"
+- Name: Muthu
+- Timezone: IST (Asia/Kolkata)
+- Prefers concise, direct answers
+- Has a recurring 3pm daily sync
+```
+
+### `HEARTBEAT.md` — what to do when nobody asked
+
+The most under-written file in most builds, and the one that decides whether your assistant is
+useful or a notification spammer. Write it as a **decision procedure ending in silence**.
+
+```md title="personas/ava/HEARTBEAT.md"
+On a heartbeat, check whether anything is due for the user right now.
+
+- If it is within a few minutes of 3pm IST, surface a short reminder about the 3pm
+  daily sync.
+- Otherwise, there is nothing to do — reply with exactly `HEARTBEAT_OK` and nothing
+  else, so the beat stays silent.
+
+Never chat on a heartbeat. Only speak when there is something the user needs.
+```
+
+### `MEMORY.md` — the durable notebook
+
+Seed it with a single line and let it grow. It is a normal markdown file; you can edit it, and
+so can she.
+
+```md title="personas/ava/MEMORY.md"
+# Ava's long-term memory
+
+- Onboarded Muthu in 2026-07.
+```
+
+<Aside type="tip" title="Treat the home dir as source">
+Commit `personas/ava/` to git. Then a bad personality change is a revert, an identity drift is a
+`git diff`, and `MEMORY.md` growth over months is a readable history of what the assistant
+actually learned. This is the practical payoff of "the directory is the agent" over a prompt
+buried in code.
+</Aside>
+
+## Step 2 — wire it: `fromDir`
+
+One call reads the folder, composes the soul, and wires the `memory` tool over the same
+directory. What you get back is a **plain agent** — `run`, `asTool`, `startAgent` all apply.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { agents } from "toolnexus"
+
+const ava = agents.fromDir("./personas/ava")
+const r = await ava.run("What's on my plate today?", {
+  llm: { baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" },
+})
+console.log(r.status, r.text)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus.agents import agent_from_dir
+
+ava = agent_from_dir("./personas/ava")
+r = await ava.run(
+    "What's on my plate today?",
+    llm={"base_url": "https://openrouter.ai/api/v1", "style": "openai", "model": "openai/gpt-4o-mini"},
+)
+print(r.status, r.text)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+import "github.com/muthuishere/toolnexus/golang/agents"
+
+ava := agents.FromDir("./personas/ava", agents.FromDirOptions{})
+r, _ := ava.Run(agents.Options{LLM: &agents.LLMOptions{
+    BaseURL: "https://openrouter.ai/api/v1", Style: toolnexus.StyleOpenAI, Model: "openai/gpt-4o-mini",
+}}, "What's on my plate today?")
+fmt.Println(r.Status, r.Text)
+```
+</TabItem>
+<TabItem label="Java">
+```java
+import io.github.muthuishere.toolnexus.agents.Agents;
+
+Agents.Agent ava = Agents.agentFromDir(Path.of("personas/ava"), new Agents.AgentSpec());
+TaskResult r = ava.run(new RuntimeOptions()
+    .baseUrl("https://openrouter.ai/api/v1").style("openai").defaultModel("openai/gpt-4o-mini"),
+    "What's on my plate today?");
+System.out.println(r.status() + " " + r.text());
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+using Toolnexus.Agents;
+
+var ava = Home.FromDir("./personas/ava");
+var r = await ava.RunAsync(new RuntimeOptions
+{
+    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai", Model = "openai/gpt-4o-mini",
+}, "What's on my plate today?");
+Console.WriteLine($"{r.Status} {r.Text}");
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Agents.Home
+
+ava = Home.from_dir("./personas/ava")
+r = Toolnexus.Agents.run(ava,
+  [llm: %{base_url: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini"}],
+  "What's on my plate today?")
+IO.puts("#{r.status} #{r.text}")
+```
+</TabItem>
+</Tabs>
+
+Options worth knowing on `fromDir`: `name` (defaults to the directory basename), `does` (the
+routing description if another agent delegates to her), `model` (defaults to `"inherit"`),
+`tools` (anything beyond the memory builtin — your calendar MCP server, your shell tools), and
+`memory: false` for a deliberately read-only persona.
+
+## Step 3 — how she learns: the `memory` builtin
+
+`fromDir` wires one tool, `memory`, with three actions and two targets:
+
+| action | effect |
+|--------|--------|
+| `add` | append an entry |
+| `replace` | swap an existing substring (`with`) |
+| `remove` | delete an existing substring |
+
+`target` = `self` (`MEMORY.md`, the default) or `user` (`USER.md`). **Every action writes to
+disk immediately.** A `replace`/`remove` whose substring is absent is a **loud `isError`** —
+never a silent no-op, so a drifting memory edit surfaces instead of vanishing.
+
+### The frozen-snapshot rule (read this before you design around it)
+
+The soul is composed **once, at session start**, and does not change for the rest of the run.
+So when Ava calls `memory add` mid-conversation:
+
+1. the entry lands in `MEMORY.md` **on disk**, right away;
+2. the **live system prompt is not modified**;
+3. the entry becomes part of her identity at the **start of the next session**.
+
+<Aside type="tip" title="Why — prompt-cache economics, not laziness">
+Providers cache the **prefix** of your prompt. A long-lived persona's soul (identity + user
+model + accumulated memory) is exactly that prefix, and it is the expensive part. If a memory
+write mutated the live system prompt, every single write would invalidate the cache for the
+whole remainder of the session — you would pay full uncached input price on every turn after
+the first thing she learned. Freezing the snapshot keeps the cache warm across the entire
+session, which is the difference between an assistant that is cheap to run for months and one
+you switch off after the first invoice. The tool's own description tells the model this
+("loads at the START of your next session"), so it never expects its write to be visible
+mid-turn.
+</Aside>
+
+**How to design around it**, three practical rules:
+
+- **Don't ask her to write-then-read in one turn.** If the model needs a fact *now*, it is in
+  the conversation already — that is what the transcript is for. Memory is for *next time*.
+- **Make sessions the natural unit.** One session per conversation / per channel thread / per
+  day is the sweet spot. A short-session host gets memory that feels near-instant; a
+  never-ending single session gets memory that feels a day late.
+- **Force a refresh when it matters.** Nothing stops you from calling `fromDir` again to build
+  a fresh persona instance — the new snapshot picks up every write since. That is a cheap,
+  explicit "reload identity", and it is exactly what the runnable example does to prove memory
+  persisted (session 1 writes, session 2's fresh `fromDir` recalls).
+
+## Step 4 — acting unprompted: the heartbeat
+
+`startAgent` gives Ava her own clock. Each `everyMs` it `post`s a tick to her **own inbox**
+(the unsolicited rail — ticks **coalesce**, so a slow beat can never pile up into a backlog of
+turns) and, **only when idle**, `wake`s her with a prompt to read `HEARTBEAT.md` and act, else
+reply `HEARTBEAT_OK`.
+
+**A `HEARTBEAT_OK` reply is silent.** It never reaches your callback, never reaches a channel,
+never becomes a notification. That single rule is what separates a useful ambient assistant
+from one you mute in a week: the default is silence, and speaking is the exception the model
+has to justify.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const llm = { baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" }
+
+const started = agents.startAgent(ava, { llm }, {
+  everyMs: 5 * 60_000,                        // check in every 5 minutes
+  onBeat: (text) => sendToTelegram(text),     // ONLY non-silent beats arrive here
+})
+// ... on shutdown:
+await started.stop()
+```
+</TabItem>
+<TabItem label="Python">
+```python
+llm = {"base_url": "https://openrouter.ai/api/v1", "style": "openai", "model": "openai/gpt-4o-mini"}
+
+started = start_agent(
+    ava,
+    llm=llm,
+    every_ms=5 * 60_000,                       # check in every 5 minutes
+    on_report=lambda text: send_to_telegram(text),   # ONLY non-silent beats arrive here
+)
+# ... on shutdown:
+await started.stop()
+```
+</TabItem>
+<TabItem label="Go">
+```go
+llm := &agents.LLMOptions{
+    BaseURL: "https://openrouter.ai/api/v1", Style: toolnexus.StyleOpenAI, Model: "openai/gpt-4o-mini",
+}
+
+started, _ := agents.StartAgent(ava, agents.StartOptions{
+    Options: agents.Options{LLM: llm},
+    EveryMs: 5 * 60_000,                                    // check in every 5 minutes
+    OnBeat:  func(text string) { sendToTelegram(text) },    // ONLY non-silent beats arrive here
+})
+// ... on shutdown:
+started.Stop()
+```
+</TabItem>
+<TabItem label="Java">
+```java
+RuntimeOptions rtOpts = new RuntimeOptions()
+    .baseUrl("https://openrouter.ai/api/v1").style("openai").defaultModel("openai/gpt-4o-mini");
+
+Agents.StartedAgent started = Agents.startAgent(ava, rtOpts, 5 * 60_000L,
+    text -> sendToTelegram(text));            // ONLY non-silent beats arrive here
+// ... on shutdown:
+started.stop();
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var rtOpts = new RuntimeOptions {
+    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai", Model = "openai/gpt-4o-mini",
+};
+
+var started = Home.StartAgent(ava, rtOpts, everyMs: 5 * 60_000,
+    onBeat: text => SendToTelegram(text));    // ONLY non-silent beats arrive here
+// ... on shutdown:
+await started.StopAsync();
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+rt_opts = [llm: %{base_url: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini"}]
+
+started = Home.start_agent(ava, rt_opts,
+  every_ms: 5 * 60_000,                              # check in every 5 minutes
+  on_beat: fn text -> send_to_telegram(text) end)    # ONLY non-silent beats arrive here
+# ... on shutdown:
+Home.stop(started)
+```
+</TabItem>
+</Tabs>
+
+<Aside type="caution" title="Pick the interval against your HEARTBEAT.md, not against your nerves">
+The beat is not free: every non-silent-*eligible* tick is a real LLM turn against the full soul.
+A 5-minute beat is ~288 turns/day. Two things keep that sane: a `HEARTBEAT.md` that fails fast
+to `HEARTBEAT_OK`, and a cheap model for the persona (the reminder-check does not need your
+best model). If you need minute-level precision for one specific event, that event belongs in
+your host's scheduler pushing a `post`+`wake` — not in a faster global beat.
+</Aside>
+
+## Step 5 — channels: where the library stops and your host starts
+
+This is the honest boundary, and it is deliberate. `startAgent` owns exactly one seam:
+**trigger → turn**. It is not a scheduler daemon, not a gateway, and ships **no channel
+adapters** — no Telegram, no WhatsApp, no Slack, no email. Your host owns transport.
+
+The contract you implement is small: on an inbound message, `post` it into the running
+persona's inbox, `wake` her, `wait` for the result, and send the reply back out on your
+transport.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+// startAgent exposes the live runtime; spawn the handle your channel talks to.
+const rt = started.runtime
+const handle = rt.spawn(rt.root, ava.name)
+
+// Your webhook / socket handler — Telegram, WhatsApp, Slack, SMS, email: your transport.
+export async function onInboundMessage(from: string, channel: string, text: string) {
+  rt.post(handle, { from, channel, text })                    // land it on the unsolicited rail
+  const woke = rt.wake(handle, "You have a new message — read it and respond.")
+  if (!woke.ok) return                                        // busy: the inbox keeps it, next wake drains it
+  const r = await rt.wait(handle)
+  if (!r.isError) await sendToChannel(channel, from, r.text)  // route the reply back out
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus.agents import InboxItem
+
+rt, handle = started.rt, started.handle
+
+async def on_inbound_message(from_: str, channel: str, text: str) -> None:
+    rt.post(handle, InboxItem(from_=from_, channel=channel, text=text))
+    woke = rt.wake(handle, "You have a new message — read it and respond.")
+    if not woke.ok:
+        return                                    # busy: the inbox keeps it for the next wake
+    r = await rt.wait(handle)
+    if not r.is_error:
+        await send_to_channel(channel, from_, r.text)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+rt, handle := started.Runtime(), started.Handle()
+
+func onInboundMessage(from, channel, text string) {
+    rt.Post(handle, agents.InboxItem{From: from, Channel: channel, Text: text})
+    if woke := rt.Wake(handle, "You have a new message — read it and respond."); !woke.OK {
+        return // busy: the inbox keeps it for the next wake
+    }
+    r := rt.Wait(handle, 0)
+    if !r.IsError {
+        sendToChannel(channel, from, r.Text)
+    }
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java
+AgentRuntime rt = started.rt;
+Handle handle = started.handle;
+
+void onInboundMessage(String from, String channel, String text) {
+    rt.post(handle, new InboxItem(from, channel, text));
+    if (!rt.wake(handle, "You have a new message — read it and respond.").ok()) {
+        return; // busy: the inbox keeps it for the next wake
+    }
+    TaskResult r = rt.waitOn(handle);
+    if (!r.isError()) sendToChannel(channel, from, r.text());
+}
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var rt = started.Runtime;
+var handle = started.Handle;
+
+async Task OnInboundMessageAsync(string from, string channel, string text)
+{
+    rt.Post(handle, new InboxItem(from, channel, text));
+    if (!rt.Wake(handle, "You have a new message — read it and respond.").Ok)
+        return; // busy: the inbox keeps it for the next wake
+    var r = await rt.WaitAsync(handle);
+    if (!r.IsError) await SendToChannelAsync(channel, from, r.Text);
+}
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+%{runtime: rt, handle: handle} = started
+
+def on_inbound_message(rt, handle, from, channel, text) do
+  Runtime.post(rt, handle, %{from: from, channel: channel, text: text})
+
+  case Runtime.wake(rt, handle, "You have a new message — read it and respond.") do
+    %{ok: true} ->
+      r = Runtime.wait(rt, handle)
+      unless r.is_error, do: send_to_channel(channel, from, r.text)
+
+    _ ->
+      :ok   # busy: the inbox keeps it for the next wake
+  end
+end
+```
+</TabItem>
+</Tabs>
+
+<Aside type="note" title="Why `post` then `wake`, and why a failed wake is fine">
+`post` is the **unsolicited rail**: it always accepts, even mid-turn. `wake` only succeeds when
+the handle is idle — so a message arriving while Ava is thinking is not dropped and not
+racing; it sits in the inbox, and the next `wake` (yours, or the next heartbeat tick) drains
+the whole backlog as **one coalesced turn**. That is the property that makes a chatty channel
+safe: ten messages in ten seconds become one turn with ten messages, not ten concurrent turns
+fighting over the same persona.
+</Aside>
+
+## Step 6 — surviving week two: compaction + `flushToMemory`
+
+Everything above gets you an assistant that works on day one. What kills it on day twenty is
+the transcript: every turn appends, and eventually the provider rejects the request. Compaction
+(`SPEC.md §7F`) is the fix, and it is a **pure `messages → messages` helper** riding the
+existing `beforeLLM` hook — no new loop behavior.
+
+| option | meaning |
+|--------|---------|
+| `maxTokens` | compact only when the estimate exceeds this; at/below ⇒ **no-op, byte-identical** to no compactor |
+| `keepTail` | keep at least this many tokens of the most recent tail verbatim (default `maxTokens/2`) |
+| `summarize(older) → string` | produces the summary; **MAY call an LLM** (use a cheap model) — the library never calls a model on your behalf |
+| `countTokens(messages) → number` | estimate; default `ceil(chars/4)` — an **estimator, not a tokenizer** |
+| `flushToMemory` | inject a pre-compact reminder to persist durable facts via the `memory` tool **before** the head is summarized |
+
+`flushToMemory` is the hinge for a persona. Summarizing is lossy — on its own, compaction
+means slow forgetting. With `flushToMemory`, the model is nudged to write anything durable to
+`MEMORY.md` *first*, and that note reloads into the soul next session. Under budget **and**
+durable.
+
+Two invariants the ports never break: the retained tail always begins at a **`user`** turn (so
+a `tool` message is never orphaned from the `assistant` carrying its `tool_call_id`), and a
+leading `system` message (the soul) is preserved **verbatim** — only the body between it and
+the tail is summarized. That second one is also what keeps the prompt cache valid.
+
+## The assembled build
+
+Everything above, wired as one long-lived assistant. Because compaction lives on the **client
+loop's** `beforeLLM` seam, this build runs the persona through the client directly: her identity
+is the composed soul (`composeSoul`), her memory is the `memory` tool (`memoryTool`) over the
+same directory, and a stable conversation `id` carries the transcript across turns.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createToolkit, createClient, agents } from "toolnexus"
+
+const dir = "./personas/ava"
+
+// 1. Identity — a frozen snapshot of the bootstrap files, composed once per session.
+const { soul } = agents.composeSoul(dir)
+
+// 2. Tools — the built-ins, her memory, and whatever else she needs (MCP, your own).
+const tk = await createToolkit({ mcpConfig: "./mcp.json" })   // calendar, email, …
+tk.register(agents.memoryTool(dir))
+
+// 3. The loop — soul as system prompt, compaction with a memory flush on the beforeLLM seam.
+const ava = createClient({
+  baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini",
+  systemPrompt: soul,
+  hooks: {
+    beforeLLM: agents.compactor({
+      maxTokens: 120_000,
+      keepTail: 40_000,
+      flushToMemory: true,                                   // persist durable facts BEFORE summarizing
+      summarize: async (older) => summariseWithCheapModel(older),
+    }),
+  },
+})
+
+// 4. Inbound — your transport calls this; one stable id = one continuous assistant.
+export async function onInboundMessage(from: string, text: string) {
+  const r = await ava.ask(text, { toolkit: tk, id: `ava:${from}` })
+  await sendToTelegram(from, r.text)
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_toolkit, create_client, compactor, compose_soul, memory_tool
+
+dir = "./personas/ava"
+
+# 1. Identity — frozen snapshot of the bootstrap files.
+soul, _found = compose_soul(dir)
+
+# 2. Tools — built-ins + MCP + her memory.
+tk = await create_toolkit(mcp_config="./mcp.json")
+tk.register(memory_tool(dir))
+
+# 3. The loop — compaction with a memory flush on the before_llm seam.
+ava = create_client(
+    base_url="https://openrouter.ai/api/v1", style="openai", model="openai/gpt-4o-mini",
+    system_prompt=soul,
+    hooks={"before_llm": compactor(
+        max_tokens=120_000, keep_tail=40_000,
+        flush_to_memory=True,                       # persist durable facts BEFORE summarizing
+        summarize=lambda older: summarise_with_cheap_model(older),
+    )},
+)
+
+# 4. Inbound — one stable id = one continuous assistant.
+async def on_inbound_message(from_: str, text: str) -> None:
+    r = await ava.ask(text, tk, f"ava:{from_}")
+    await send_to_telegram(from_, r.text)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+dir := "./personas/ava"
+
+// 1. Identity — frozen snapshot of the bootstrap files.
+soul, _ := agents.ComposeSoul(dir)
+
+// 2. Tools — built-ins + MCP + her memory.
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{MCPConfig: "./mcp.json"})
+tk.Register(agents.MemoryTool(dir))
+
+// 3. The loop — compaction with a memory flush on the BeforeLLM seam.
+ava := toolnexus.CreateClient(toolnexus.ClientOptions{
+    BaseURL: "https://openrouter.ai/api/v1", Style: toolnexus.StyleOpenAI, Model: "openai/gpt-4o-mini",
+    SystemPrompt: soul,
+    Hooks: &toolnexus.Hooks{BeforeLLM: agents.Compactor(agents.CompactorOptions{
+        MaxTokens: 120_000, KeepTail: 40_000,
+        FlushToMemory: true,                       // persist durable facts BEFORE summarizing
+        Summarize: func(older []any) (string, error) { return summariseWithCheapModel(older) },
+    })},
+})
+
+// 4. Inbound — one stable id = one continuous assistant.
+func onInboundMessage(ctx context.Context, from, text string) {
+    r, _ := ava.Ask(ctx, text, tk, "ava:"+from)
+    sendToTelegram(from, r.Text)
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java
+import io.github.muthuishere.toolnexus.Compaction;
+import io.github.muthuishere.toolnexus.agents.Agents;
+
+Path dir = Path.of("personas/ava");
+
+// 1. Identity — frozen snapshot of the bootstrap files.
+String soul = Agents.composeSoul(dir).soul();
+
+// 2. Tools — built-ins + MCP + her memory.
+Toolkit tk = Toolkit.create(new Toolkit.Options().mcpConfig("./mcp.json"));
+tk.register(Agents.memoryTool(dir));
+
+// 3. The loop — compaction with a memory flush on the beforeLLM seam.
+LlmClient.Hooks hooks = new LlmClient.Hooks();
+hooks.beforeLLM = Compaction.compactor(new Compaction.Options()
+        .maxTokens(120_000).keepTail(40_000)
+        .flushToMemory(true)                       // persist durable facts BEFORE summarizing
+        .summarize(older -> summariseWithCheapModel(older)));
+
+LlmClient ava = LlmClient.create(new LlmClient.Options()
+        .baseUrl("https://openrouter.ai/api/v1").style("openai").model("openai/gpt-4o-mini")
+        .systemPrompt(soul).hooks(hooks));
+
+// 4. Inbound — one stable id = one continuous assistant.
+void onInboundMessage(String from, String text) {
+    RunResult r = ava.ask(text, tk, "ava:" + from);
+    sendToTelegram(from, r.text());
+}
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+using Toolnexus.Agents;
+
+var dir = "./personas/ava";
+
+// 1. Identity — frozen snapshot of the bootstrap files.
+var (soul, _) = Home.ComposeSoul(dir);
+
+// 2. Tools — built-ins + MCP + her memory.
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { McpConfig = "./mcp.json" });
+tk.Register(Home.MemoryTool(dir));
+
+// 3. The loop — compaction with a memory flush on the BeforeLLM seam.
+var ava = LlmClient.Create(new LlmClient.Options {
+    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai", Model = "openai/gpt-4o-mini",
+    SystemPrompt = soul,
+    Hooks = new LlmClient.Hooks {
+        BeforeLLM = Compaction.Compactor(new Compaction.Options {
+            MaxTokens = 120_000, KeepTail = 40_000,
+            FlushToMemory = true,                  // persist durable facts BEFORE summarizing
+            Summarize = older => SummariseWithCheapModel(older),
+        }),
+    },
+});
+
+// 4. Inbound — one stable id = one continuous assistant.
+async Task OnInboundMessageAsync(string from, string text)
+{
+    var r = await ava.AskAsync(text, tk, $"ava:{from}");
+    await SendToTelegramAsync(from, r.Text);
+}
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+dir = "./personas/ava"
+
+# 1. Identity — frozen snapshot of the bootstrap files.
+{soul, _found} = Toolnexus.Agents.Home.compose_soul(dir)
+
+# 2. Tools — built-ins + MCP + her memory.
+{:ok, tk} = Toolnexus.create_toolkit(mcp_config: "./mcp.json")
+tk = Toolnexus.Toolkit.register(tk, [Toolnexus.Agents.Home.memory_tool(dir)])
+
+# 3. The loop — compaction with a memory flush on the before_llm seam.
+ava = Toolnexus.Client.create(
+  base_url: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini",
+  system_prompt: soul,
+  hooks: %{before_llm: Toolnexus.Agents.Compaction.compactor(
+    max_tokens: 120_000, keep_tail: 40_000,
+    flush_to_memory: true,                        # persist durable facts BEFORE summarizing
+    summarize: fn older -> summarise_with_cheap_model(older) end)})
+
+# 4. Inbound — one stable id = one continuous assistant.
+def on_inbound_message(ava, tk, from, text) do
+  r = Toolnexus.Client.ask(ava, text, tk, "ava:#{from}")
+  send_to_telegram(from, r.text)
+end
+```
+</TabItem>
+</Tabs>
+
+<Aside type="tip" title="Running both loops at once">
+The assembled build above is the **conversational** loop. Run the **heartbeat** (Step 4) beside
+it on the same home directory: `startAgent(ava, …)` with the `fromDir` persona. They share the
+folder, not the transcript — the heartbeat's beats and the conversation's turns are separate
+sessions over the same identity, and both write to the same `MEMORY.md`. That separation is a
+feature: an ambient reminder never pollutes the conversation's context, and it never inherits
+its token cost.
+</Aside>
+
+## What this is — and what it isn't
+
+Being precise here is the point; it is what lets you plan the rest of your build.
+
+| toolnexus ships | you bring |
+|---|---|
+| The **identity format** — bootstrap order, byte cap, frozen-snapshot composition | The *content* of `SOUL.md` / `USER.md` / `HEARTBEAT.md` — the actual personality and policy |
+| The **memory tool** — three actions, two targets, disk-backed, loud on a missed substring | The *policy* for what is worth remembering (prose in `SOUL.md`) |
+| The **trigger→turn seam** — `post` / `wake` / `wait`, inbox coalescing, `HEARTBEAT_OK` silence | The **transport**: Telegram/WhatsApp/Slack/email adapters, webhooks, auth, delivery retries |
+| An **in-process interval heartbeat** on an injectable clock | A **scheduler daemon**, cron, process supervision, restart-on-crash, "what runs when the box reboots" |
+| **Compaction** primitives (`maxTokens`, `keepTail`, `flushToMemory`, tool-pair safety) | The **summarizer** — the compactor calls *your* `summarize`; the library never calls a model for you |
+| **Suspension** (`§10`) so the persona can park on a human decision | The approval UI / the channel round-trip that answers it |
+
+That split is deliberate: a library that shipped a Telegram adapter and a cron daemon would be
+a *product*, and you would fight it the first time your infrastructure disagreed with it.
+The seam is `post`/`wake` precisely so a messenger-style host (one process owning channels,
+sessions and delivery, calling into the runtime) sits cleanly on top — and so does an AWS
+Lambda, a Phoenix app, or a systemd unit.
+
+<Aside type="caution" title="Two failure modes worth designing against up front">
+**Memory bloat.** `MEMORY.md` only grows, and it is in the prompt prefix every session. Left
+alone for months it becomes your largest per-turn cost. The fix is the consolidation loop —
+see [the self-improving agent](/toolnexus/scenarios/self-improving-agent/), which merges
+duplicates on a slow heartbeat.
+
+**Beat spam.** Any `HEARTBEAT.md` that does not end in an explicit "otherwise reply exactly
+`HEARTBEAT_OK`" will produce a chatty assistant, because a helpful model asked "anything to
+do?" will always find something. Silence must be stated, not implied.
+</Aside>
+
+## Try it
+
+The real Ava — soul, user model, heartbeat rule, seed memory — lives at
+[`examples/persona-agent/ava/`](https://github.com/muthuishere/toolnexus/tree/main/examples/persona-agent).
+The runnable entrypoints copy it to a writable temp dir and prove the loop end to end: session
+1 saves a preference with the `memory` tool (it lands on disk), session 2's fresh `fromDir`
+recalls it from the reloaded snapshot.
+
+```bash
+# JS
+OPENROUTER_API_KEY=... node --experimental-strip-types js/examples/persona.ts
+# Python
+OPENROUTER_API_KEY=... python python/examples/persona.py
+# Go
+OPENROUTER_API_KEY=... go run ./golang/examples/persona
+```
+
+The key is read from the environment by name and never printed.
+
+## See also
+
+- [Persona agents](/toolnexus/persona-agents/) — the per-feature reference for `fromDir`, `memory`, `startAgent`, `compactor`.
+- [An agent that learns from its own runs](/toolnexus/scenarios/self-improving-agent/) — the reviewer + consolidator loop that keeps this memory clean.
+- [Sub-agents & teams](/toolnexus/subagents/) — the six host verbs the heartbeat and channel handler ride on.
+- [Suspension & the human loop](/toolnexus/suspension/) — parking on a human decision mid-turn.
+- `SPEC.md §7E` (agent home) · `§7F` (compaction) · `§7D` (agent runtime) · `§10` (suspension).
