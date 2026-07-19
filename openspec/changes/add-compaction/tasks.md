@@ -5,10 +5,10 @@ Reference: branch `spike-compaction` (`js/spike/compaction.ts` + `compaction-dem
 
 ## 0. Contract + fixture
 
-- [ ] 0.1 SPEC.md §7F (context compaction): the `compactor` beforeLLM contract, no-op below
+- [x] 0.1 SPEC.md §7F (context compaction): the `compactor` beforeLLM contract, no-op below
       budget (byte-identical), tail-begins-at-user-turn (tool-pair safety), system-prompt
       preserved, pluggable summarize/countTokens, optional flushToMemory. Match §7A–E style.
-- [ ] 0.2 Shared fixture `examples/compaction/`: a transcript with tool groups + options
+- [x] 0.2 Shared fixture `examples/compaction/`: a transcript with tool groups + options
       (maxTokens/keepTail) + expected compacted output (summary present, tail boundary at a
       user turn, tool-pair safety, system preserved) — the §0 conformance artifact.
 

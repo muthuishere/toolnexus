@@ -1,0 +1,45 @@
+{
+  "$schema": "toolnexus-compaction-fixture/v1",
+  "description": "Context compaction (SPEC §7F): a transcript with tool groups is compacted when it exceeds maxTokens — the older body becomes one summary system message, a recent tail is kept, tool-pair safety holds, and the leading system prompt is preserved verbatim. Encodes C2–C4 of the spike.",
+
+  "input": {
+    "comment": "Build the transcript deterministically so every port produces the same bytes. Start with the systemPrompt, then repeat `userTurns` groups of exactly these four messages (i = 0..userTurns-1).",
+    "systemPrompt": "You are Ava. SOUL.",
+    "generator": {
+      "userTurns": 30,
+      "group": [
+        { "role": "user", "content": "question <i> <repeat 'pad ' 40 times>" },
+        { "role": "assistant", "content": null, "tool_calls": [ { "id": "c<i>", "type": "function", "function": { "name": "lookup", "arguments": "{}" } } ] },
+        { "role": "tool", "tool_call_id": "c<i>", "content": "result <i> <repeat 'data ' 40 times>" },
+        { "role": "assistant", "content": "answer <i>" }
+      ]
+    }
+  },
+
+  "options": {
+    "maxTokens": 2000,
+    "keepTail": 800,
+    "summarize": "the deterministic summarizer returns the literal string \"summarized <N> messages\" where <N> = the count of older messages being summarized (everything between the leading system prompt and the retained tail)",
+    "countTokens": "default estimator: for each message, ceil(len(JSON-serialized message) / 4); sum over messages"
+  },
+
+  "expect": {
+    "compacts": true,
+    "resultSmallerThanInput": true,
+    "summarySystemMessagePresent": true,
+    "summaryContentPrefix": "[Summary of earlier conversation]\n",
+    "leadingSystemMessage": { "role": "system", "contentContains": "SOUL", "mustBeFirst": true },
+    "firstNonSystemMessageRole": "user",
+    "toolPairSafe": "every message with role 'tool' is preceded (earlier in the result) by an assistant message whose tool_calls contains its tool_call_id — no orphaned tool result",
+    "flushToMemoryVariant": {
+      "option": "flushToMemory=true",
+      "expect": "the result additionally contains a system message instructing the model to save durable facts with the memory tool, positioned before the retained tail"
+    }
+  },
+
+  "notes": [
+    "Below maxTokens the compactor is a NO-OP (returns nothing); the transcript is byte-identical to no compactor — assert this separately with a short transcript (C1).",
+    "The tail begins at a USER turn by construction of the split rule; this is what guarantees tool-pair safety.",
+    "summarize is deterministic here only so the fixture is checkable; in production it MAY call an LLM."
+  ]
+}
