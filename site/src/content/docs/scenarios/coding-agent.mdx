@@ -1,0 +1,861 @@
+---
+title: Build a Claude-Code-style coding agent
+description: A complete build — an AGENTS.md soul, the built-in shell/file pack, a read-only explore sub-agent, hierarchical budgets, compaction, and a human approval gate on dangerous bash — assembled in all six languages.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+You want the thing you already use every day: an agent that is pointed at a repository, reads
+it, forms a plan, edits files, runs the tests, and comes back with a diff — while a human keeps
+a hand on the brake.
+
+That agent is not one model call. It is a **loop** with six things wired around it: an identity,
+a filesystem tool pack, a way to research a codebase without drowning in context, a spend
+ceiling, a way to survive a session longer than the context window, and an approval gate on the
+commands that can hurt you. toolnexus ships all six as first-class seams. This page wires them
+together end to end.
+
+<Aside type="note" title="When to reach for this page">
+Reach for this build when the agent must **act on a working tree** — a code migration bot, a
+CI-triggered fixer, an in-house `/refactor` command, a repo-aware support tool. If you only need
+one model plus your own functions, [native tools](/toolnexus/native/) is a much shorter page. If
+you need a long-lived assistant with a heartbeat rather than a bounded job, you want
+[persona agents](/toolnexus/persona-agents/).
+</Aside>
+
+## What we are building
+
+| Piece | Shipped seam | Why it is in the build |
+|---|---|---|
+| An identity that survives edits | `soulFile` → `AGENTS.md` (§7D) | The operating rules live in a file in the repo, reviewable in a PR — not in a string literal. |
+| Filesystem + shell hands | the 10 built-ins (§4A) | `read`/`write`/`edit`/`bash`/`grep`/`glob` are what turn a chat model into something that can change a repo. |
+| Codebase research without context rot | an `explore` sub-agent (§7D) | The child burns **its own** window on 40 file reads and returns one paragraph. |
+| A spend ceiling | `Budget` + `status: "incomplete"` (§7D) | A runaway loop that reads the whole monorepo stops loudly instead of billing you. |
+| Sessions longer than the window | `compactor` on `beforeLLM` (§7F) | Coding agents are the highest tool-volume agents there are. |
+| A brake on destructive commands | `pending(...)` + `waitFor` (§10) | `rm -rf`, `git push --force`, `terraform apply` — a human says yes first. |
+
+Everything below is additive over the classic API. No piece requires the others.
+
+## 1. The soul — `AGENTS.md`
+
+The agent's operating manual is a **file in the repository**, not a string in your source. That
+matters for a real deployment: the rules get reviewed in a pull request, diffed when behavior
+changes, and read by humans who never open your code. `soulFile` reads it at registry-build time
+and makes it the agent's system prompt.
+
+```md title="AGENTS.md"
+You are a senior engineer working directly in this repository.
+
+## How you work
+1. UNDERSTAND FIRST. Before editing anything, delegate to `explore` with a specific
+   question ("where is the retry budget applied to MCP reconnects?"). Do not read
+   twenty files yourself — that is what `explore` is for, and its context is not yours.
+2. Make the smallest change that solves the problem. No drive-by refactors, no style
+   fixes in files you were not asked to touch.
+3. Prefer `edit` (exact-string replace) over `write` (whole-file overwrite). `write` on
+   an existing file loses anything you did not know was there.
+4. After every change, run the narrowest useful test command and read the output. A
+   change you have not run is a guess.
+5. If you cannot finish, say exactly what is done, what is not, and what you tried.
+
+## Boundaries
+- Never `git push`, never force-push, never touch `.env` or anything under `vault/`.
+- Destructive shell commands will pause for human approval. That is expected — explain
+  in the command's `description` why you need it, because the human reads that line.
+- Secrets are use-only: reference `$VAR`, never print or echo a value.
+```
+
+<Aside type="tip" title="Why a file and not a prompt string">
+The soul is composed **once, at session start**, and is then frozen for the run (`SPEC.md §7D`,
+§7E). A frozen prefix is exactly what provider prompt caches want — every turn after the first
+hits a warm cache. Rewriting the system prompt mid-run is the single most expensive mistake in a
+long agent session.
+</Aside>
+
+## 2. Hands — the built-in tool pack (§4A)
+
+toolnexus ships opencode's ten built-ins with identical names and input schemas in every port.
+Six of them are the coding agent's hands:
+
+| Tool | What it buys the agent |
+|---|---|
+| `read` | A file, or a line window of it (`offset`/`limit`) — so a 6,000-line file costs 40 lines of context. |
+| `grep` | Regex over file contents under a path, `include` glob filter, capped at `limit` (default 100). The agent's search. |
+| `glob` | Find files by pattern. How it discovers structure without `ls`-ing the world. |
+| `edit` | Exact-string replace. Non-unique `oldString` without `replaceAll` is a **loud `isError`** — the model cannot silently corrupt the wrong occurrence. |
+| `write` | Create or overwrite, parent dirs included. Use for new files. |
+| `bash` | One shell command in a `workdir`, combined stdout+stderr, non-zero exit ⇒ `isError` with the exit code, `timeout` kills the child. This is how it runs your tests. |
+
+The other four (`webfetch`, `question`, `apply_patch`, `todowrite`) are all useful here too —
+`apply_patch` for multi-file atomic edits, `todowrite` for the agent's own plan, `question` to
+ask you something structured (it [suspends](/toolnexus/suspension/), it does not block).
+
+<Aside type="caution" title="The gotcha that bites first: agents do not inherit built-ins">
+A **toolkit** has built-ins on by default. An **agent** does not. Every port's agent runtime
+builds its per-turn toolkit with `builtins: false` and populates it from `uses.tools` plus the
+`task` tool — because for an agent, the scoped tool view *is* the security model, and silently
+handing every child `bash` would break that. So you pass the pack in explicitly:
+`uses: { tools: tk.tools() }` where `tk` is a toolkit you configured. That single line is also
+where you *drop* what a given agent must not have.
+</Aside>
+
+## 3. Research without context rot — the `explore` sub-agent
+
+Here is the failure mode that separates a real coding agent from a demo: answering "where does
+this behavior come from?" costs thirty tool calls and forty file excerpts. If the main agent does
+that itself, its context is now 80% stale file contents, and it has to keep re-reading them
+through every subsequent turn. Quality degrades, cost climbs, and it eventually overflows.
+
+Delegation fixes it structurally. `explore` runs on a **fresh transcript**, spends its own window
+on those thirty calls, and returns **one tool message** to the parent: the answer. The parent's
+context grows by a paragraph, not by a codebase.
+
+The second thing delegation buys is **scoping**. `explore` is given a read-only tool view — no
+`bash`, no `write`, no `edit`, no `apply_patch`. It is not asked to behave; it is structurally
+incapable of writing. Scoping is the security model (`SPEC.md §7D`), and a research agent that
+cannot mutate the tree is a research agent you can point at an untrusted prompt.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createToolkit, agents } from "toolnexus"
+
+// A READ-ONLY view: drop everything that mutates or executes.
+const readOnly = await createToolkit({
+  builtins: { tools: { bash: false, write: false, edit: false, apply_patch: false } },
+})
+
+const explore = agents.agent("explore", {
+  does: "Answers a specific question about this codebase. Give it ONE question, not a task. " +
+        "Read-only: it cannot edit files or run commands.",
+  uses: { tools: readOnly.tools() },        // read, grep, glob, webfetch, question, todowrite
+  soul: "Answer the question and nothing else. Cite file:line for every claim. " +
+        "If the answer is not in the code, say so — never guess.",
+  budget: { maxTurns: 20, maxTokens: 60_000 },
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_toolkit
+from toolnexus.agents import agent, Budget
+
+read_only = await create_toolkit(
+    builtins={"tools": {"bash": False, "write": False, "edit": False, "apply_patch": False}},
+)
+
+explore = agent(
+    "explore",
+    does=("Answers a specific question about this codebase. Give it ONE question, not a task. "
+          "Read-only: it cannot edit files or run commands."),
+    uses={"tools": read_only.tools()},
+    soul=("Answer the question and nothing else. Cite file:line for every claim. "
+          "If the answer is not in the code, say so — never guess."),
+    budget=Budget(max_turns=20, max_tokens=60_000),
+)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+import (
+    tn "github.com/muthuishere/toolnexus/golang"
+    "github.com/muthuishere/toolnexus/golang/agents"
+)
+
+readOnly, _ := tn.CreateToolkit(ctx, tn.Options{
+    Builtins: tn.BuiltinsConfig{Tools: map[string]bool{
+        "bash": false, "write": false, "edit": false, "apply_patch": false,
+    }},
+})
+
+explore := agents.New("explore", agents.Spec{
+    Does: "Answers a specific question about this codebase. Give it ONE question, not a task. " +
+        "Read-only: it cannot edit files or run commands.",
+    Tools: readOnly.Tools(),
+    Soul: "Answer the question and nothing else. Cite file:line for every claim. " +
+        "If the answer is not in the code, say so — never guess.",
+    Budget: &agents.Budget{MaxTurns: 20, MaxTokens: 60_000},
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+import io.github.muthuishere.toolnexus.*;
+import io.github.muthuishere.toolnexus.agents.*;
+
+Toolkit readOnly = Toolkit.create(new Toolkit.Options()
+        .builtins(Map.of("tools", Map.of(
+            "bash", false, "write", false, "edit", false, "apply_patch", false))));
+
+Agents.Agent explore = Agents.agent("explore", new Agents.AgentSpec()
+        .does("Answers a specific question about this codebase. Give it ONE question, not a task. "
+            + "Read-only: it cannot edit files or run commands.")
+        .tools(readOnly.tools().toArray(new Tool[0]))
+        .soul("Answer the question and nothing else. Cite file:line for every claim. "
+            + "If the answer is not in the code, say so — never guess.")
+        .budget(new Budget().maxTurns(20).maxTokens(60_000)));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+using Toolnexus;
+using Toolnexus.Agents;
+
+await using var readOnly = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Builtins = new Dictionary<string, object?> {
+        ["tools"] = new Dictionary<string, object?> {
+            ["bash"] = false, ["write"] = false, ["edit"] = false, ["apply_patch"] = false,
+        },
+    },
+});
+
+var explore = new Agent("explore", new AgentSpec
+{
+    Does = "Answers a specific question about this codebase. Give it ONE question, not a task. "
+         + "Read-only: it cannot edit files or run commands.",
+    Uses = readOnly.Tools(),
+    Soul = "Answer the question and nothing else. Cite file:line for every claim. "
+         + "If the answer is not in the code, say so — never guess.",
+    Budget = new Budget { MaxTurns = 20, MaxTokens = 60_000 },
+});
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Agents
+
+{:ok, read_only} =
+  Toolnexus.create_toolkit(
+    builtins: %{tools: %{"bash" => false, "write" => false, "edit" => false, "apply_patch" => false}}
+  )
+
+explore =
+  Agents.agent("explore",
+    does:
+      "Answers a specific question about this codebase. Give it ONE question, not a task. " <>
+        "Read-only: it cannot edit files or run commands.",
+    uses: %{tools: Toolnexus.Toolkit.tools(read_only)},
+    soul:
+      "Answer the question and nothing else. Cite file:line for every claim. " <>
+        "If the answer is not in the code, say so — never guess.",
+    budget: %{max_turns: 20, max_tokens: 60_000}
+  )
+```
+</TabItem>
+</Tabs>
+
+<Aside type="tip" title="`does` is not documentation — it is the router">
+The parent model picks a delegate by reading `does`. Every port composes the `task` tool's
+description from the caller's team, sorted by name. A vague `does` ("helps with code") produces
+vague routing; a `does` that states the **shape of a good input** ("give it ONE question, not a
+task") measurably improves delegation. Write it for the model.
+</Aside>
+
+## 4. Budgets — a runaway cannot spend unbounded
+
+An agent with `bash` and a loop is a machine for spending money. `Budget` bounds it in seven
+dimensions, and the bound is **hierarchical and live**: carved at spawn as
+`min(own, parent remaining)`, then re-checked against the whole ancestor chain before *every*
+turn and *every* spawn — so a sibling's spend counts against you.
+
+| Dimension | Bounds |
+|---|---|
+| `maxTurns` | LLM round trips on this handle (never reset — a resume grows it). |
+| `maxTokens` | Tokens for this handle **and its whole subtree**. |
+| `maxToolCalls` | Total tool invocations in the subtree. |
+| `maxWallMs` | Wall-clock deadline (on the runtime's injectable clock). |
+| `maxChildren` | How many sub-agents may be spawned. |
+| `maxConcurrent` | Running children per parent — the fan-out gate. |
+| `maxDepth` | How deep delegation may nest. |
+
+When a limit stops a run, the result is **`status: "incomplete"`** — never a silent `"done"`,
+never a crash. Partial work and the transcript are preserved, so you can inspect what it got
+through before the ceiling. The status vocabulary is closed and byte-identical in all six ports:
+
+```
+"done" | "pending" | "incomplete" | "interrupted" | "closed" | "timeout" | "error"
+```
+
+<Aside type="caution" title="Branch on `incomplete`, not on `isError`">
+`"incomplete"` is the status your dashboards and retry logic care about — it means *the work was
+truncated by a policy you set*, which is a completely different operational event from
+`"error"` (the run broke) or `"done"` (it finished). Code that only checks `status === "done"`
+will treat a budget stop as a failure and a `maxTurns` stop as success-with-garbage. This also
+touches the plain client loop: a `client.run()` that exits on `maxTurns` with tool calls still in
+flight is now `"incomplete"` too.
+</Aside>
+
+## 5. Surviving a long session — compaction (§7F)
+
+Coding agents have the worst context profile of any agent type: dozens of file reads, long test
+output, stack traces. Even with `explore` absorbing the research, a serious session overflows.
+
+`compactor(opts)` returns a **`beforeLLM` hook**: once the transcript estimate crosses
+`maxTokens`, it summarizes the older body into one message and keeps a recent tail verbatim. It
+adds **no loop behavior** — it is a pure `messages → messages` rewrite on a seam that already
+existed, and below `maxTokens` it is a no-op byte-identical to running without it.
+
+Two invariants worth knowing before you tune it:
+
+- **Tool-pair safety.** The retained tail always begins at a `user` turn, so a `tool` result is
+  never orphaned from the `assistant` message carrying its `tool_call_id`. Providers reject that
+  shape; the compactor cannot produce it.
+- **The soul survives.** A leading `system` message is preserved verbatim. Only the body between
+  it and the tail is summarized — your `AGENTS.md` rules never get summarized away.
+
+Because compaction rides the **client** loop's hook and the agent runtime owns its own clients,
+wire it on the client when you run a coding session through `client.ask(...)` directly. The full
+assembly below shows the agent path; see
+[persona agents → compaction](/toolnexus/persona-agents/#staying-under-the-context-window--compaction)
+for the client-loop wiring in all six languages.
+
+## 6. The brake — human approval on dangerous `bash`
+
+The built-in `bash` runs what it is given. For anything touching production, you want a human in
+front of the destructive subset — and you want the *safe* subset (running tests, `git status`) to
+stay fast and unattended. Prompting for it is not a control; the model can ignore prose.
+
+The control is a **tool that suspends**. You wrap the built-in `bash` in a tool of the same name
+and schema that classifies the command: safe ones pass straight through, dangerous ones return
+`pending(...)`. The loop halts, your `waitFor` asks the human, and the tool is **re-executed**
+with `ctx.answer` carrying the verdict.
+
+This is [§10 suspension](/toolnexus/suspension/) with nothing special-cased — the same primitive
+that handles OAuth and structured questions.
+
+<Aside type="note" title="Why wrap the tool instead of using a `beforeTool` hook">
+The classic client loop exposes §8 hooks, and a `beforeTool` hook **can** raise a suspension
+without the tool running. The **agent runtime does not surface those hooks** — it owns the
+per-turn client. So inside an agent, the gate belongs in the tool. This is a real constraint, not
+a style preference: if you need hook-level interception, run that stage through
+`client.run(...)` with a toolkit instead of through `agent().run(...)`.
+</Aside>
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createToolkit, defineTool, pending, type Tool } from "toolnexus"
+
+const DANGEROUS = /\b(rm\s+-rf|git\s+push|--force|drop\s+table|terraform\s+apply|kubectl\s+delete)\b/i
+
+/** Same name + schema as the built-in — the model cannot tell it apart. */
+function gatedBash(raw: Tool): Tool {
+  return defineTool({
+    name: raw.name,
+    description: raw.description,
+    inputSchema: raw.inputSchema,
+    run: async (args, ctx) => {
+      const command = String(args.command ?? "")
+      if (!DANGEROUS.test(command)) return raw.execute(args, ctx)      // safe: straight through
+      if (!ctx?.answer) {
+        // First pass: halt. `data` is plain serializable payload for your UI.
+        return pending({
+          kind: "question",
+          prompt: `Approve destructive command?\n\n  ${command}\n\n(${args.description ?? "no reason given"})`,
+          data: { command, workdir: args.workdir ?? null },
+        })
+      }
+      if (!ctx.answer.ok) return { output: `Operator declined: ${command}`, isError: true }
+      return raw.execute(args, ctx)                                    // approved: run it
+    },
+  })
+}
+
+const full = await createToolkit()
+const coderTools = full.tools().map((t) => (t.name === "bash" ? gatedBash(t) : t))
+```
+</TabItem>
+<TabItem label="Python">
+```python
+import re
+from toolnexus import create_toolkit, define_tool, pending, ToolResult
+
+DANGEROUS = re.compile(r"\b(rm\s+-rf|git\s+push|--force|drop\s+table|terraform\s+apply|kubectl\s+delete)\b", re.I)
+
+def gated_bash(raw):
+    """Same name + schema as the built-in — the model cannot tell it apart."""
+    async def run(args, ctx=None):
+        command = str(args.get("command", ""))
+        if not DANGEROUS.search(command):
+            return await raw.execute(args, ctx)                        # safe: straight through
+        answer = getattr(ctx, "answer", None) if ctx else None
+        if answer is None:
+            return pending(
+                kind="question",
+                prompt=f"Approve destructive command?\n\n  {command}\n\n({args.get('description', 'no reason given')})",
+                data={"command": command, "workdir": args.get("workdir")},
+            )
+        if not answer.ok:
+            return ToolResult(output=f"Operator declined: {command}", is_error=True)
+        return await raw.execute(args, ctx)                            # approved: run it
+
+    return define_tool(run, name=raw.name, description=raw.description, input_schema=raw.input_schema)
+
+full = await create_toolkit()
+coder_tools = [gated_bash(t) if t.name == "bash" else t for t in full.tools()]
+```
+</TabItem>
+<TabItem label="Go">
+```go
+var dangerous = regexp.MustCompile(`(?i)\b(rm\s+-rf|git\s+push|--force|drop\s+table|terraform\s+apply|kubectl\s+delete)\b`)
+
+// Same name + schema as the built-in — the model cannot tell it apart.
+func gatedBash(raw tn.Tool) tn.Tool {
+    inner := raw.Execute
+    raw.Execute = func(args map[string]any, ctx *tn.ToolContext) (tn.ToolResult, error) {
+        command, _ := args["command"].(string)
+        if !dangerous.MatchString(command) {
+            return inner(args, ctx)                                    // safe: straight through
+        }
+        if ctx == nil || ctx.Answer == nil {
+            return tn.Pending(tn.Request{
+                Kind:   "question",
+                Prompt: fmt.Sprintf("Approve destructive command?\n\n  %s", command),
+                Data:   map[string]any{"command": command, "workdir": args["workdir"]},
+            }), nil
+        }
+        if !ctx.Answer.Ok {
+            return tn.ToolResult{Output: "Operator declined: " + command, IsError: true}, nil
+        }
+        return inner(args, ctx)                                        // approved: run it
+    }
+    return raw
+}
+
+full, _ := tn.CreateToolkit(ctx, tn.Options{})
+coderTools := make([]tn.Tool, 0, len(full.Tools()))
+for _, t := range full.Tools() {
+    if t.Name == "bash" {
+        t = gatedBash(t)
+    }
+    coderTools = append(coderTools, t)
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java
+static final Pattern DANGEROUS = Pattern.compile(
+    "\\b(rm\\s+-rf|git\\s+push|--force|drop\\s+table|terraform\\s+apply|kubectl\\s+delete)\\b",
+    Pattern.CASE_INSENSITIVE);
+
+/** Same name + schema as the built-in — the model cannot tell it apart. */
+static Tool gatedBash(Tool raw) {
+    return NativeTool.of(raw.name(), raw.description(), raw.inputSchema(), (args, ctx) -> {
+        String command = String.valueOf(args.getOrDefault("command", ""));
+        if (!DANGEROUS.matcher(command).find()) {
+            return raw.execute(args, ctx);                              // safe: straight through
+        }
+        if (ctx == null || ctx.answer() == null) {
+            return ToolResult.pending(new Request(
+                "bash-" + UUID.randomUUID(), "question",
+                "Approve destructive command?\n\n  " + command));
+        }
+        if (!ctx.answer().ok()) {
+            return ToolResult.error("Operator declined: " + command);
+        }
+        return raw.execute(args, ctx);                                  // approved: run it
+    });
+}
+
+Toolkit full = Toolkit.create(new Toolkit.Options());
+List<Tool> coderTools = full.tools().stream()
+        .map(t -> "bash".equals(t.name()) ? gatedBash(t) : t).toList();
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+static readonly Regex Dangerous = new(
+    @"\b(rm\s+-rf|git\s+push|--force|drop\s+table|terraform\s+apply|kubectl\s+delete)\b",
+    RegexOptions.IgnoreCase);
+
+// Same name + schema as the built-in — the model cannot tell it apart.
+static ITool GatedBash(ITool raw) => NativeTool.OfAsync(
+    raw.Name, raw.Description, raw.InputSchema, async (args, ctx) =>
+    {
+        var command = args.TryGetValue("command", out var c) ? c?.ToString() ?? "" : "";
+        if (!Dangerous.IsMatch(command))
+            return await raw.ExecuteAsync(args, ctx);                   // safe: straight through
+        if (ctx?.Answer is null)
+            return ToolResult.Pending(new Request
+            {
+                Id = $"bash-{Guid.NewGuid():N}",
+                Kind = "question",
+                Prompt = $"Approve destructive command?\n\n  {command}",
+                Data = new Dictionary<string, object?> { ["command"] = command },
+            });
+        if (!ctx.Answer.Ok)
+            return new ToolResult { Output = $"Operator declined: {command}", IsError = true };
+        return await raw.ExecuteAsync(args, ctx);                       // approved: run it
+    });
+
+await using var full = await Toolkit.CreateAsync(new Toolkit.Options());
+var coderTools = full.Tools().Select(t => t.Name == "bash" ? GatedBash(t) : t).ToList();
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.{Request, ToolResult}
+
+@dangerous ~r/\b(rm\s+-rf|git\s+push|--force|drop\s+table|terraform\s+apply|kubectl\s+delete)\b/i
+
+# Same name + schema as the built-in — the model cannot tell it apart.
+defp gated_bash(raw) do
+  Toolnexus.Native.define_tool(
+    name: raw.name,
+    description: raw.description,
+    input_schema: raw.input_schema,
+    run: fn args, ctx ->
+      command = Map.get(args, "command", "")
+
+      cond do
+        not Regex.match?(@dangerous, command) ->
+          raw.execute.(args, ctx)                                     # safe: straight through
+
+        is_nil(ctx) or is_nil(ctx.answer) ->
+          %ToolResult{
+            output: "Approve destructive command?\n\n  #{command}",
+            is_error: true,
+            metadata: %{
+              pending: %Request{
+                id: "bash-" <> Base.encode16(:crypto.strong_rand_bytes(8)),
+                kind: "question",
+                prompt: "Approve destructive command?\n\n  #{command}",
+                data: %{"command" => command}
+              }
+            }
+          }
+
+        not ctx.answer.ok ->
+          %ToolResult{output: "Operator declined: #{command}", is_error: true}
+
+        true ->
+          raw.execute.(args, ctx)                                     # approved: run it
+      end
+    end
+  )
+end
+
+{:ok, full} = Toolnexus.create_toolkit()
+coder_tools = Enum.map(Toolnexus.Toolkit.tools(full), fn t ->
+  if t.name == "bash", do: gated_bash(t), else: t
+end)
+```
+</TabItem>
+</Tabs>
+
+### Where the human actually answers
+
+`waitFor` on the agent is the **interpreter** for its subtree. Give it one and the pause is
+invisible to the caller — `run()` blocks on your prompt and returns `"done"`. Omit it and the run
+returns `status: "pending"` with the `Request`, which you persist, post to Slack, and resume days
+later. Same tool, same gate; you pick by **when the human answers**, not by what you are asking.
+
+```ts
+// answer NOW — a terminal, a chat you can await
+waitFor: async (req) => ({ id: req.id, ok: await confirmOnTerminal(req.prompt) })
+
+// answer LATER — omit waitFor entirely; run() returns status:"pending" + req, you resume
+```
+
+Nearest interpreter wins, strict one hop: if `explore` had a `waitFor` it would resolve its own
+suspensions; otherwise the request rides up to the coder's, then to the root. Parked levels burn
+**zero tokens** while they wait.
+
+## The full assembly
+
+Everything above, wired. The coder owns the full (gated) pack and one delegate; `explore` is
+read-only; budgets bound the tree; the approval gate is live.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createToolkit, agents } from "toolnexus"
+
+const llm = { baseUrl: "https://openrouter.ai/api/v1", style: "openai" as const, model: "anthropic/claude-sonnet-4" }
+
+// --- tools -----------------------------------------------------------------
+const readOnly = await createToolkit({
+  builtins: { tools: { bash: false, write: false, edit: false, apply_patch: false } },
+})
+const full = await createToolkit()
+const coderTools = full.tools().map((t) => (t.name === "bash" ? gatedBash(t) : t))
+
+// --- the team --------------------------------------------------------------
+const explore = agents.agent("explore", {
+  does: "Answers ONE specific question about this codebase. Read-only: cannot edit or run commands.",
+  uses: { tools: readOnly.tools() },
+  soul: "Answer the question and nothing else. Cite file:line. Never guess.",
+  budget: { maxTurns: 20, maxTokens: 60_000 },
+})
+
+const coder = agents.agent("coder", {
+  does: "Implements a change in this repository",
+  soulFile: "./AGENTS.md",
+  uses: { tools: coderTools },
+  team: [explore],
+  budget: { maxTurns: 60, maxTokens: 400_000, maxChildren: 8, maxDepth: 2 },
+  waitFor: async (req) => ({ id: req.id, ok: await confirmOnTerminal(req.prompt) }),
+})
+
+// --- run -------------------------------------------------------------------
+const r = await coder.run("The MCP stdio client leaks a child process on reconnect. Find it and fix it.", { llm })
+
+console.log(r.status)        // "done" | "incomplete" | "pending" | "error"
+console.log(r.text)          // the final report
+console.log(r.totalTokens)   // WHOLE-TREE tokens: coder + every explore call
+if (r.status === "incomplete") console.warn("stopped by a budget:", r.text)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_toolkit
+from toolnexus.agents import agent, Budget
+
+llm = {"base_url": "https://openrouter.ai/api/v1", "style": "openai", "model": "anthropic/claude-sonnet-4"}
+
+# --- tools -----------------------------------------------------------------
+read_only = await create_toolkit(
+    builtins={"tools": {"bash": False, "write": False, "edit": False, "apply_patch": False}})
+full = await create_toolkit()
+coder_tools = [gated_bash(t) if t.name == "bash" else t for t in full.tools()]
+
+# --- the team --------------------------------------------------------------
+explore = agent(
+    "explore",
+    does="Answers ONE specific question about this codebase. Read-only: cannot edit or run commands.",
+    uses={"tools": read_only.tools()},
+    soul="Answer the question and nothing else. Cite file:line. Never guess.",
+    budget=Budget(max_turns=20, max_tokens=60_000),
+)
+
+async def approve(req):
+    return Answer(id=req.id, ok=await confirm_on_terminal(req.prompt))
+
+coder = agent(
+    "coder",
+    does="Implements a change in this repository",
+    soul_file="./AGENTS.md",
+    uses={"tools": coder_tools},
+    team=[explore],
+    budget=Budget(max_turns=60, max_tokens=400_000, max_children=8, max_depth=2),
+    wait_for=approve,
+)
+
+# --- run -------------------------------------------------------------------
+r = await coder.run("The MCP stdio client leaks a child process on reconnect. Find it and fix it.", llm=llm)
+
+print(r.status, r.total_tokens)          # whole-tree tokens: coder + every explore call
+if r.status == "incomplete":
+    print("stopped by a budget:", r.text)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+llm := &agents.LLMOptions{
+    BaseURL: "https://openrouter.ai/api/v1", Style: tn.StyleOpenAI, Model: "anthropic/claude-sonnet-4",
+}
+
+// --- tools -----------------------------------------------------------------
+readOnly, _ := tn.CreateToolkit(ctx, tn.Options{Builtins: tn.BuiltinsConfig{
+    Tools: map[string]bool{"bash": false, "write": false, "edit": false, "apply_patch": false}}})
+full, _ := tn.CreateToolkit(ctx, tn.Options{})
+coderTools := make([]tn.Tool, 0, len(full.Tools()))
+for _, t := range full.Tools() {
+    if t.Name == "bash" {
+        t = gatedBash(t)
+    }
+    coderTools = append(coderTools, t)
+}
+
+// --- the team --------------------------------------------------------------
+explore := agents.New("explore", agents.Spec{
+    Does:   "Answers ONE specific question about this codebase. Read-only: cannot edit or run commands.",
+    Tools:  readOnly.Tools(),
+    Soul:   "Answer the question and nothing else. Cite file:line. Never guess.",
+    Budget: &agents.Budget{MaxTurns: 20, MaxTokens: 60_000},
+})
+
+coder := agents.New("coder", agents.Spec{
+    Does:     "Implements a change in this repository",
+    SoulFile: "./AGENTS.md",
+    Tools:    coderTools,
+    Team:     []*agents.Agent{explore},
+    Budget:   &agents.Budget{MaxTurns: 60, MaxTokens: 400_000, MaxChildren: 8, MaxDepth: 2},
+    WaitFor: func(req tn.Request) (tn.Answer, error) {
+        return tn.Answer{ID: req.ID, Ok: confirmOnTerminal(req.Prompt)}, nil
+    },
+})
+
+// --- run -------------------------------------------------------------------
+r, _ := coder.Run(agents.Options{LLM: llm},
+    "The MCP stdio client leaks a child process on reconnect. Find it and fix it.")
+
+fmt.Println(r.Status, r.TotalTokens)   // whole-tree tokens: coder + every explore call
+if r.Status == "incomplete" {
+    log.Println("stopped by a budget:", r.Text)
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java
+RuntimeOptions rt = new RuntimeOptions()
+        .baseUrl("https://openrouter.ai/api/v1").style("openai")
+        .defaultModel("anthropic/claude-sonnet-4");
+
+// --- tools -----------------------------------------------------------------
+Toolkit readOnly = Toolkit.create(new Toolkit.Options().builtins(Map.of("tools",
+        Map.of("bash", false, "write", false, "edit", false, "apply_patch", false))));
+Toolkit full = Toolkit.create(new Toolkit.Options());
+List<Tool> coderTools = full.tools().stream()
+        .map(t -> "bash".equals(t.name()) ? gatedBash(t) : t).toList();
+
+// --- the team --------------------------------------------------------------
+Agents.Agent explore = Agents.agent("explore", new Agents.AgentSpec()
+        .does("Answers ONE specific question about this codebase. Read-only: cannot edit or run commands.")
+        .tools(readOnly.tools().toArray(new Tool[0]))
+        .soul("Answer the question and nothing else. Cite file:line. Never guess.")
+        .budget(new Budget().maxTurns(20).maxTokens(60_000)));
+
+Agents.Agent coder = Agents.agent("coder", new Agents.AgentSpec()
+        .does("Implements a change in this repository")
+        .soulFile(Path.of("AGENTS.md"))
+        .tools(coderTools.toArray(new Tool[0]))
+        .team(explore)
+        .budget(new Budget().maxTurns(60).maxTokens(400_000).maxChildren(8).maxDepth(2))
+        .waitFor(req -> new Answer(req.id(), confirmOnTerminal(req.prompt()), null)));
+
+// --- run -------------------------------------------------------------------
+TaskResult r = coder.run(rt,
+        "The MCP stdio client leaks a child process on reconnect. Find it and fix it.");
+
+System.out.println(r.status() + " " + r.totalTokens());   // whole-tree tokens
+if ("incomplete".equals(r.status())) System.err.println("stopped by a budget: " + r.text());
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var rt = new RuntimeOptions
+{
+    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai", Model = "anthropic/claude-sonnet-4",
+};
+
+// --- tools -----------------------------------------------------------------
+await using var readOnly = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Builtins = new Dictionary<string, object?> { ["tools"] = new Dictionary<string, object?> {
+        ["bash"] = false, ["write"] = false, ["edit"] = false, ["apply_patch"] = false } },
+});
+await using var full = await Toolkit.CreateAsync(new Toolkit.Options());
+var coderTools = full.Tools().Select(t => t.Name == "bash" ? GatedBash(t) : t).ToList();
+
+// --- the team --------------------------------------------------------------
+var explore = new Agent("explore", new AgentSpec
+{
+    Does = "Answers ONE specific question about this codebase. Read-only: cannot edit or run commands.",
+    Uses = readOnly.Tools(),
+    Soul = "Answer the question and nothing else. Cite file:line. Never guess.",
+    Budget = new Budget { MaxTurns = 20, MaxTokens = 60_000 },
+});
+
+var coder = new Agent("coder", new AgentSpec
+{
+    Does = "Implements a change in this repository",
+    SoulFile = "./AGENTS.md",
+    Uses = coderTools,
+    Team = new List<Agent> { explore },
+    Budget = new Budget { MaxTurns = 60, MaxTokens = 400_000, MaxChildren = 8, MaxDepth = 2 },
+    WaitFor = async req => new Answer { Id = req.Id, Ok = await ConfirmOnTerminalAsync(req.Prompt) },
+});
+
+// --- run -------------------------------------------------------------------
+var r = await coder.RunAsync(rt,
+    "The MCP stdio client leaks a child process on reconnect. Find it and fix it.");
+
+Console.WriteLine($"{r.Status} {r.TotalTokens}");   // whole-tree tokens
+if (r.Status == "incomplete") Console.Error.WriteLine($"stopped by a budget: {r.Text}");
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Agents
+
+llm = %{base_url: "https://openrouter.ai/api/v1", style: "openai", model: "anthropic/claude-sonnet-4"}
+
+# --- tools -----------------------------------------------------------------
+{:ok, read_only} =
+  Toolnexus.create_toolkit(
+    builtins: %{tools: %{"bash" => false, "write" => false, "edit" => false, "apply_patch" => false}})
+
+{:ok, full} = Toolnexus.create_toolkit()
+
+coder_tools =
+  Enum.map(Toolnexus.Toolkit.tools(full), fn t ->
+    if t.name == "bash", do: gated_bash(t), else: t
+  end)
+
+# --- the team --------------------------------------------------------------
+explore =
+  Agents.agent("explore",
+    does: "Answers ONE specific question about this codebase. Read-only: cannot edit or run commands.",
+    uses: %{tools: Toolnexus.Toolkit.tools(read_only)},
+    soul: "Answer the question and nothing else. Cite file:line. Never guess.",
+    budget: %{max_turns: 20, max_tokens: 60_000}
+  )
+
+coder =
+  Agents.agent("coder",
+    does: "Implements a change in this repository",
+    soul_file: "AGENTS.md",
+    uses: %{tools: coder_tools},
+    team: [explore],
+    budget: %{max_turns: 60, max_tokens: 400_000, max_children: 8, max_depth: 2},
+    wait_for: fn req -> %Toolnexus.Answer{id: req.id, ok: confirm_on_terminal(req.prompt)} end
+  )
+
+# --- run -------------------------------------------------------------------
+r = Agents.run(coder, [llm: llm],
+      "The MCP stdio client leaks a child process on reconnect. Find it and fix it.")
+
+IO.puts("#{r.status} #{r.total_tokens}")   # whole-tree tokens
+if r.status == "incomplete", do: IO.warn("stopped by a budget: #{r.text}")
+```
+</TabItem>
+</Tabs>
+
+## What this is — and what it is not
+
+**It is the engine.** The loop, the tool pack, delegation with real context isolation,
+hierarchical budgets, durable suspension, compaction, and a scoped security model — the parts
+that are genuinely hard to build correctly and that behave identically in six languages.
+
+**It is not the product around the engine.** You bring:
+
+| Not shipped | What you'd add | Why it isn't in the library |
+|---|---|---|
+| A TUI | Your own renderer over [streaming](/toolnexus/streaming/) events | Terminal UX is opinionated and app-specific. |
+| A diff viewer / patch review UI | Render `edit`/`apply_patch` args yourself before approving | Same reason — it is presentation. |
+| LSP / type-aware navigation | An MCP server exposing your language server, wired via [`mcp.json`](/toolnexus/mcp/) | This is exactly what MCP is for; toolnexus consumes it. |
+| Git safety (worktrees, auto-branch, rollback) | Your own tools, or a policy in `AGENTS.md` + the approval gate | Repo policy varies too much to standardize. |
+| Sandboxing | Run the process in a container/jail; drop `bash` for untrusted input | `bash` is a real shell. Process isolation is the host's job, not a flag. |
+| Cost in currency | Convert `totalTokens` with your own price table | Vendor pricing is vendor data — budgets are deliberately token-denominated (`SPEC.md §7D`). |
+
+**Honest limits worth knowing before you commit:**
+
+- **Token counting is an estimate.** The compactor's default `countTokens` is `ceil(chars/4)` per
+  message — an estimator, not a tokenizer. Pass your own for exactness, and leave headroom.
+- **Budgets are eventually consistent between turn boundaries.** Enforcement happens before each
+  turn and each spawn, so a single in-flight turn can overshoot its ceiling before being stopped.
+- **The agent runtime does not expose §8 hooks.** No `beforeTool`/`afterTool` inside `agent()`.
+  Gate in the tool (above), or run that stage on the client loop.
+- **Cancellation latency differs by port.** JS/Go/C#/Elixir abort mid-request; Python and Java
+  cancel cooperatively between attempts. The observable *outcome* is identical everywhere — an
+  interrupted result and a restored inbox — only the latency differs (`SPEC.md §7D`).
+
+## See also
+
+- [Sub-agents & teams](/toolnexus/subagents/) — the delegation surface in full, plus the six host verbs.
+- [Built-in tools](/toolnexus/builtins/) — all ten, their schemas, and both levels of off-switch.
+- [Suspension & the human loop](/toolnexus/suspension/) — the §10 primitive the approval gate is built from.
+- [Fan out research across parallel sub-agents](/toolnexus/scenarios/research-orchestrator/) — the other half of the sub-agent story: concurrency, not depth.
+- `SPEC.md §4A`, `§7D`, `§7F`, `§10` — the cross-language contracts behind every claim on this page.
