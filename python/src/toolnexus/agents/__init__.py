@@ -32,6 +32,8 @@ from .surface import (
     StartedAgent,
     agent,
     agent_from_dir,
+    compose_soul,
+    memory_tool,
     start_agent,
 )
 
@@ -53,5 +55,7 @@ __all__ = [
     "TaskResult",
     "agent",
     "agent_from_dir",
+    "compose_soul",
+    "memory_tool",
     "start_agent",
 ]

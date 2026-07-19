@@ -1,16 +1,18 @@
-"""§7D Level-1/2 agent surface (S10–S13, 10 checks).
+"""§7D Level-1 agent surface (S10, S11, S13).
 
-agent() + team wiring + soul file, team-scoped registries, agent_from_dir with a
-virtual-clock heartbeat, and the asTool bridge into the classic API.
+agent() + team wiring + soul file, team-scoped registries, and the asTool bridge
+into the classic API. The Level-2 persona surface (agent_from_dir + memory
+builtin + heartbeat, §7E) is covered by ``test_agents_home.py`` against the shared
+``examples/persona-agent`` fixture (H1–H7).
 """
 from __future__ import annotations
 
 import json
 
 from toolnexus import create_client, create_toolkit
-from toolnexus.agents import HEARTBEAT_OK, Budget, agent, agent_from_dir, start_agent
+from toolnexus.agents import Budget, agent
 
-from _agent_mocks import MockTransport, VirtualClock, lookup
+from _agent_mocks import MockTransport, lookup
 
 
 # --------------------------------------------------------------------------- #
@@ -48,39 +50,6 @@ async def test_team_scoping_registry_is_transitive_closure():
     assert ",".join(sorted(reg)) == "coder,explore", sorted(reg)
     # 2. coder's task targets are exactly its team
     assert json.dumps(reg["coder"].task_targets) == '["explore"]'
-
-
-# --------------------------------------------------------------------------- #
-# S12 — Level 2: the directory IS the agent · heartbeat on the virtual clock ·
-# HEARTBEAT_OK silence
-# --------------------------------------------------------------------------- #
-async def test_agent_from_dir_heartbeat_virtual_clock(tmp_path):
-    (tmp_path / "SOUL.md").write_text("You are Mia. Warm, brief.", encoding="utf-8")
-    (tmp_path / "USER.md").write_text("The user is Muthu.", encoding="utf-8")
-    (tmp_path / "MEMORY.md").write_text("- Likes green tea.", encoding="utf-8")
-    (tmp_path / "HEARTBEAT.md").write_text(
-        "On heartbeat: if it is watering day, remind to water the plants.", encoding="utf-8"
-    )
-    mia = agent_from_dir(str(tmp_path), model="m-mia")
-    direct = await mia.run("hello", transport=MockTransport(sleep=0))
-    # 1. bootstrap files discovered + injected as ## sections (in bootstrap order)
-    assert direct.text == "soul-sections:[SOUL.md,USER.md,MEMORY.md]", direct.text
-
-    reports: list[str] = []
-    clock = VirtualClock()
-    started = start_agent(
-        mia, every_ms=25, on_report=reports.append, transport=MockTransport(sleep=0), clock=clock
-    )
-    for _ in range(3):
-        await clock.advance(0.025)
-    await started.stop()
-    hb_turns = sum(1 for l in started.rt.trace if "idle→running" in l)
-    # 2. the heartbeat woke the agent repeatedly (driven purely by the virtual clock)
-    assert hb_turns >= 2, started.rt.trace
-    # 3. HEARTBEAT_OK wakes stay SILENT (only actionable beats report)
-    assert all("water" in t and HEARTBEAT_OK not in t for t in reports), reports
-    # 4. the agent closed cleanly on stop()
-    assert started.handle.state == "closed"
 
 
 # --------------------------------------------------------------------------- #

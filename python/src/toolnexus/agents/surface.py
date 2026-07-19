@@ -28,9 +28,10 @@ from ..types import Tool, ToolResult
 from .runtime import AgentDef, AgentRuntime, Budget, Clock, Handle, InboxItem, TaskResult
 
 # Bootstrap discovery order for agent_from_dir (all files optional). Each found
-# file is injected as a named ``## <file>`` section at session start.
+# file is injected as a named ``## <file>`` section at session start (§7E).
 BOOTSTRAP_ORDER = ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md", "HEARTBEAT.md", "MEMORY.md"]
 MAX_BOOTSTRAP_FILE_BYTES = 2 * 1024 * 1024
+_TRUNCATION_NOTICE = "\n[truncated: exceeds 2 MB bootstrap cap]"
 
 # The heartbeat sentinel — a wake that answers this produces no outbound report.
 HEARTBEAT_OK = "HEARTBEAT_OK"
@@ -39,6 +40,89 @@ HEARTBEAT_PROMPT = (
     "Heartbeat. Read your HEARTBEAT.md section and follow it. "
     "If nothing needs attention, reply HEARTBEAT_OK."
 )
+
+
+def _read_capped(path: str) -> Optional[str]:
+    """Read a bootstrap file with the 2 MB cap; ``None`` if absent. A larger file
+    is truncated with an explicit notice — the on-disk file is left untouched."""
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as fh:
+        body = fh.read()
+    if len(body) > MAX_BOOTSTRAP_FILE_BYTES:
+        return body[:MAX_BOOTSTRAP_FILE_BYTES] + _TRUNCATION_NOTICE
+    return body
+
+
+def compose_soul(dir: str) -> tuple[str, list[str]]:  # noqa: A002
+    """Compose the discovered :data:`BOOTSTRAP_ORDER` files into one soul string
+    (the frozen snapshot). Returns ``(soul, found)`` — ``found`` is the ordered
+    list of present filenames. Each file becomes a ``## <file>`` section; absent
+    files are skipped; oversized files are truncated with a notice."""
+    sections: list[str] = []
+    found: list[str] = []
+    for f in BOOTSTRAP_ORDER:
+        body = _read_capped(os.path.join(dir, f))
+        if body is not None:
+            sections.append(f"## {f}\n\n{body.strip()}")
+            found.append(f)
+    return "\n\n".join(sections), found
+
+
+def memory_tool(dir: str) -> Tool:  # noqa: A002
+    """The ``memory`` builtin (§7E) — one tool, three actions over ``MEMORY.md``
+    (the agent's own notes) and ``USER.md`` (its model of the user). All actions
+    write to DISK; the live session prompt is intentionally NOT mutated (the
+    frozen-snapshot rule — the next session re-reads). A ``replace``/``remove``
+    whose substring is absent is a loud ``is_error``."""
+
+    def _file_for(target: str) -> str:
+        return os.path.join(dir, "USER.md" if target == "user" else "MEMORY.md")
+
+    async def execute(args: Optional[dict[str, Any]] = None, ctx: Any = None) -> ToolResult:
+        a = args or {}
+        action = a.get("action")
+        target = str(a.get("target") or "self")
+        text = str(a.get("text", ""))
+        file = _file_for(target)
+        cur = ""
+        if os.path.exists(file):
+            with open(file, encoding="utf-8") as fh:
+                cur = fh.read()
+        if action == "add":
+            nxt = (cur.rstrip() + f"\n- {text}\n").lstrip()
+        elif action in ("replace", "remove"):
+            if text not in cur:
+                return ToolResult(output=f"not found: {text}", is_error=True)
+            nxt = cur.replace(text, str(a.get("with", "")) if action == "replace" else "")
+        else:
+            return ToolResult(output=f"unknown action: {action}", is_error=True)
+        os.makedirs(os.path.dirname(file) or ".", exist_ok=True)
+        with open(file, "w", encoding="utf-8") as fh:
+            fh.write(nxt)
+        return ToolResult(output=f"ok ({action} → {os.path.basename(file)}); loads next session", is_error=False)
+
+    return Tool(
+        name="memory",
+        description=(
+            "Persist durable memory. action=add appends an entry; replace swaps an existing "
+            "substring; remove deletes one. target=self (MEMORY.md, default) or user (USER.md). "
+            "Writes persist to disk and load at the START of your next session — they do NOT "
+            "change your current context."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["add", "replace", "remove"]},
+                "target": {"type": "string", "enum": ["self", "user"]},
+                "text": {"type": "string", "description": "For add: the entry. For replace/remove: the existing text."},
+                "with": {"type": "string", "description": "For replace: the replacement text."},
+            },
+            "required": ["action", "text"],
+        },
+        source="native",
+        execute=execute,
+    )
 
 
 def _runtime_options(kw: dict[str, Any]) -> dict[str, Any]:
@@ -182,24 +266,32 @@ def agent(name: str, **spec: Any) -> Agent:
     return Agent(name, **spec)
 
 
-def agent_from_dir(dir: str, *, name: Optional[str] = None, does: Optional[str] = None, **opts: Any) -> Agent:  # noqa: A002
-    """Level 2: the directory IS the agent. Discovers the :data:`BOOTSTRAP_ORDER`
-    files (all optional) and injects them as named ``## <file>`` sections at
-    session start (oversized files are truncated at the bootstrap cap)."""
-    sections: list[str] = []
-    for f in BOOTSTRAP_ORDER:
-        p = os.path.join(dir, f)
-        if os.path.exists(p):
-            size = os.stat(p).st_size
-            with open(p, encoding="utf-8") as fh:
-                body = fh.read()
-            if size > MAX_BOOTSTRAP_FILE_BYTES:
-                body = body[:MAX_BOOTSTRAP_FILE_BYTES] + "\n[truncated: file exceeds bootstrap cap]"
-            sections.append(f"## {f}\n\n{body.strip()}")
+def agent_from_dir(  # noqa: A002
+    dir: str,
+    *,
+    name: Optional[str] = None,
+    does: Optional[str] = None,
+    memory: bool = True,
+    tools: Optional[list[Tool]] = None,
+    **opts: Any,
+) -> Agent:
+    """Level 2: the directory IS the agent (§7E). Discovers the
+    :data:`BOOTSTRAP_ORDER` files (all optional), injects them as named
+    ``## <file>`` sections at session start (frozen snapshot; oversized files are
+    truncated at the 2 MB cap), and — unless ``memory=False`` — wires a
+    :func:`memory_tool` over the same directory so the persona can edit its own
+    durable memory. Extra ``tools`` are appended to the toolkit view."""
+    soul, _found = compose_soul(dir)
+    uses = dict(opts.pop("uses", None) or {})
+    extra: list[Tool] = list(tools or []) + list(uses.get("tools") or [])
+    if memory:
+        extra.append(memory_tool(dir))
+    uses["tools"] = extra
     return Agent(
         name or os.path.basename(dir.rstrip("/")),
         does=does or f"persona agent from {dir}",
-        soul="\n\n".join(sections),
+        soul=soul,
+        uses=uses,
         **opts,
     )
 

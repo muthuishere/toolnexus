@@ -24,8 +24,8 @@ per port; reconcile the `add-subagents` fromDir/heartbeat drift.
 
 ## 2. python  (reconcile: agent_from_dir already shipped in surface.py — align to §7E)
 
-- [ ] 2.1 `toolnexus/agents/home.py` (or fold into surface.py): fromDir/memory/heartbeat per §7E.
-- [ ] 2.2 15 checks as pytest against the shared fixture; full suite green.
+- [x] 2.1 `toolnexus/agents/home.py` (or fold into surface.py): fromDir/memory/heartbeat per §7E.
+- [x] 2.2 15 checks as pytest against the shared fixture; full suite green.
 
 ## 3. golang
 
