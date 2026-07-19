@@ -7,29 +7,70 @@
     "HEARTBEAT.md": "If it is time, remind about the 3pm sync.",
     "MEMORY.md": "- Onboarded 2026-07."
   },
-  "bootstrapOrder": ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md", "HEARTBEAT.md", "MEMORY.md"],
+  "bootstrapOrder": [
+    "AGENTS.md",
+    "SOUL.md",
+    "IDENTITY.md",
+    "USER.md",
+    "TOOLS.md",
+    "HEARTBEAT.md",
+    "MEMORY.md"
+  ],
   "maxFileBytes": 2097152,
   "mockLLM": {
     "style": "openai",
-    "usagePerCall": { "prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40 },
+    "usagePerCall": {
+      "prompt_tokens": 30,
+      "completion_tokens": 10,
+      "total_tokens": 40
+    },
     "scripts": {
       "m-echo-soul": [
-        { "always": true, "text": "sections:[<comma-join of the bootstrapOrder files whose '## <file>' header appears in the system prompt>]" }
+        {
+          "always": true,
+          "text": "sections:[<comma-join of the bootstrapOrder files whose '## <file>' header appears in the system prompt>]"
+        }
       ],
       "m-remember": [
-        { "whenToolMsgs": 0, "toolCalls": [ { "name": "memory", "args": { "action": "add", "target": "user", "text": "Prefers dark roast" } } ] },
-        { "whenToolMsgs": ">=1", "text": "saved: <first tool msg content>" }
+        {
+          "whenToolMsgs": 0,
+          "toolCalls": [
+            {
+              "name": "memory",
+              "args": {
+                "action": "add",
+                "target": "user",
+                "text": "Prefers dark roast"
+              }
+            }
+          ]
+        },
+        {
+          "whenToolMsgs": ">=1",
+          "text": "saved: <first tool msg content>"
+        }
       ],
       "m-recall": [
-        { "always": true, "text": "<if system prompt contains 'Prefers dark roast' then 'I recall: dark roast' else 'no memory'>" }
+        {
+          "always": true,
+          "text": "<if system prompt contains 'Prefers dark roast' then 'I recall: dark roast' else 'no memory'>"
+        }
       ],
       "m-heartbeat": [
-        { "always": true, "text": "<if system prompt contains 'remind about the 3pm sync' AND last user message contains 'Heartbeat' then 'Reminder: 3pm sync 🔔' else 'HEARTBEAT_OK'>" }
+        {
+          "always": true,
+          "text": "<if system prompt contains 'remind about the 3pm sync' AND last user message contains 'Heartbeat' then 'Reminder: 3pm sync 🔔' else 'HEARTBEAT_OK'>"
+        }
       ]
     }
   },
   "expect": {
-    "H1_composedSoulSectionsInOrder": ["SOUL.md", "USER.md", "HEARTBEAT.md", "MEMORY.md"],
+    "H1_composedSoulSectionsInOrder": [
+      "SOUL.md",
+      "USER.md",
+      "HEARTBEAT.md",
+      "MEMORY.md"
+    ],
     "H1_soulReachesChildSystemPrompt": true,
     "H2_over2MBFileTruncatedWithNotice": true,
     "H3_memoryAddAppendsEntry": true,
@@ -37,11 +78,23 @@
     "H3_memoryRemoveDeletesEntry": true,
     "H3_missingSubstringIsLoudError": true,
     "H3_targetUserWritesUSERmd": true,
-    "H4_writeLandsOnDisk": { "file": "USER.md", "contains": "Prefers dark roast" },
-    "H4_nextSessionSnapshotCarriesMemory": { "model": "m-recall", "text": "I recall: dark roast" },
+    "H4_writeLandsOnDisk": {
+      "file": "USER.md",
+      "contains": "Prefers dark roast"
+    },
+    "H4_nextSessionSnapshotCarriesMemory": {
+      "model": "m-recall",
+      "text": "I recall: dark roast"
+    },
     "H5_heartbeatOKisSilent": true,
-    "H5_dueHeartbeatSurfaces": { "beatContains": "3pm sync" },
+    "H5_dueHeartbeatSurfaces": {
+      "beatContains": "3pm sync"
+    },
     "H5_ticksCoalesceToOneTurn": true
   },
-  "notes": "Language-neutral fixture, mirrors examples/subagent-*/fixture.json. Behavior reference: js/spike/home.ts + home-demo.ts. 'memory' is a file-backed, opt-in tool (SPEC §7E / §4A note), not a default builtin. Heartbeat timing must run on the runtime's injectable/virtual clock."
+  "notes": "Language-neutral fixture, mirrors examples/subagent-*/fixture.json. Behavior reference: js/spike/home.ts + home-demo.ts. 'memory' is a file-backed, opt-in tool (SPEC §7E / §4A note), not a default builtin. Heartbeat timing must run on the runtime's injectable/virtual clock. Silent-OK gap: the primary bootstrapDir's HEARTBEAT.md contains '3pm sync', so a persona built from it always speaks. Use heartbeatNotDue.HEARTBEAT.md to positively test the silent HEARTBEAT_OK path.",
+  "heartbeatNotDue": {
+    "HEARTBEAT.md": "On heartbeat, if there is a due reminder, surface it. Otherwise reply HEARTBEAT_OK.",
+    "note": "m-heartbeat replies HEARTBEAT_OK for this variant (no '3pm sync' phrase in the soul), so a persona built from it exercises the SILENT path positively — onBeat/onReport receives nothing."
+  }
 }
