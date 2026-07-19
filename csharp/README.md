@@ -342,6 +342,40 @@ var system = tk.SkillsPrompt();  // skills catalog for your system prompt
 var res = await tk.ExecuteAsync(name, args);   // -> ToolResult(Output, IsError, Metadata)
 ```
 
+## Sub-agents & teams
+
+An **Agent is a Tool**: a system prompt × a scoped toolkit view × the client loop. One agent
+delegates to another **in-process** via one `task` tool — isolated context, one result back,
+tokens rolled up, hierarchical budgets, durable suspension (`SPEC.md §7D`). Lives in the
+`Toolnexus.Agents` namespace (never the A2A `Agent`):
+
+```csharp
+using Toolnexus.Agents;
+
+var explore = new Agent("explore", new AgentSpec
+{
+    Does = "read-only research",
+    Uses = new List<ITool> { lookup },
+});
+var coder = new Agent("coder", new AgentSpec
+{
+    Does = "implements changes",
+    SoulFile = "./AGENTS.md",
+    Team = new List<Agent> { explore },   // team = the task tool's only targets; no team ⇒ no task tool
+    Budget = new Budget { MaxTokens = 10_000 },
+});
+
+var r = await coder.RunAsync(new RuntimeOptions
+{
+    BaseUrl = "https://openrouter.ai/api/v1",
+    Style = "openai",
+    Model = "openai/gpt-4o-mini",
+}, "fix the failing test");
+Console.WriteLine($"{r.Status} {r.Text} {r.TotalTokens}");
+```
+
+Full guide: [Sub-agents & teams](https://muthuishere.github.io/toolnexus/subagents/).
+
 ## API
 
 | Member | Description |

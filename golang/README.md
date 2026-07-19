@@ -421,6 +421,35 @@ A2A) and never panics across the boundary — a failure comes back as `ToolResul
 `<-chan StreamEvent` — `range` over it for `text` deltas, `tool_call` / `tool_result`, `usage`,
 and a terminal `done` or `error` event.
 
+## Sub-agents & teams
+
+An **Agent is a Tool**: a system prompt × a scoped toolkit view × the client loop. One agent
+delegates to another **in-process** via one `task` tool — isolated context, one result back,
+tokens rolled up, hierarchical budgets, durable suspension (`SPEC.md §7D`). Lives in the `agents`
+package (`agents.Agent`, since `toolnexus.Agent` is the A2A type):
+
+```go
+import "github.com/muthuishere/toolnexus/golang/agents"
+
+explore := agents.New("explore", agents.Spec{
+    Does:  "read-only research",
+    Tools: []toolnexus.Tool{lookup},
+})
+coder := agents.New("coder", agents.Spec{
+    Does:     "implements changes",
+    SoulFile: "./AGENTS.md",
+    Team:     []*agents.Agent{explore},   // team = the task tool's only targets; no team ⇒ no task tool
+    Budget:   &agents.Budget{MaxTokens: 10_000},
+})
+
+r, _ := coder.Run(agents.Options{
+    LLM: &agents.LLMOptions{BaseURL: "https://openrouter.ai/api/v1", Style: toolnexus.StyleOpenAI, Model: "openai/gpt-4o-mini"},
+}, "fix the failing test")
+fmt.Println(r.Status, r.Text, r.TotalTokens)   // "done" | "incomplete" | "pending", final text, tree-wide tokens
+```
+
+Full guide: [Sub-agents & teams](https://muthuishere.github.io/toolnexus/subagents/).
+
 ## API at a glance
 
 | Call | What it does |

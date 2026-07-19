@@ -12,13 +12,13 @@
 ### Your LLM, with MCP tools and agent skills built in — in 3 lines, in 6 languages.
 
 Point toolnexus at an `mcp.json` and a `skills/` folder and you get a **working agent**: the
-tool-calling loop, skills injection, five unified tool sources, and conversation memory — all
+tool-calling loop, skills injection, six unified tool sources, and conversation memory — all
 included. Vendor-neutral, byte-identical across **JavaScript · Python · Go · Java · C# · Elixir**.
 
 > **Right-sized.** Not a framework — no builders, advisors, runnables, or config to wade through.
 > Not a toy that falls over the moment you need streaming or a retry. Exactly what a real agent
-> needs — MCP, skills, native + HTTP + built-in tools, remote A2A agents, the loop, hooks,
-> streaming, retries, memory — and nothing it doesn't.
+> needs — MCP, skills, native + HTTP + built-in tools, remote A2A agents, in-process sub-agents,
+> the loop, hooks, streaming, retries, memory — and nothing it doesn't.
 
 ```sh
 npm i toolnexus                                   # JS / TypeScript
@@ -30,9 +30,10 @@ dotnet add package Toolnexus                       # C#
 ```
 
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
-tools, agent skills, your own functions, remote HTTP endpoints, and the built-in shell/file
-tools are all *the same thing* to an LLM — a named, described, schema'd callable. toolnexus
-unifies **every tool source** behind one `Tool` interface and drives **any** model with them.
+tools, agent skills, your own functions, remote HTTP endpoints, the built-in shell/file
+tools, remote A2A agents, and in-process **sub-agents** are all *the same thing* to an LLM — a
+named, described, schema'd callable. toolnexus unifies **every tool source** behind one `Tool`
+interface and drives **any** model with them.
 
 ```
    SOURCES                          TOOLKIT                          ANY LLM
@@ -53,6 +54,7 @@ unifies **every tool source** behind one `Tool` interface and drives **any** mod
  │  (10, on by dflt)│        │ + memory: ask() / ConversationStore│
  └──────────────────┘        └───────────────────────────────────┘
         + remote A2A agents (each skill → a tool) · or serve your toolkit as an A2A agent
+        + in-process sub-agents (agent() + team → one task tool; SPEC §7D)
 ```
 
 ## From zero to agent in 3 steps
@@ -138,7 +140,7 @@ from scratch:
 The language-independent behavior is pinned in **[SPEC.md](SPEC.md)** so all six stay
 byte-compatible (especially the skill loader output).
 
-## Five tool sources, one interface
+## Six tool sources, one interface
 
 Everything below surfaces as the same uniform `Tool` — one registry, any model.
 
@@ -149,6 +151,9 @@ Everything below surfaces as the same uniform `Tool` — one registry, any model
 | 3 | **Native functions** | `defineTool` | A plain function → a tool; schema inferred from type hints / struct tags. |
 | 4 | **HTTP / REST** | `httpTool` | Declare an endpoint; `{ph}` URL substitution, `${ENV}` header expansion; OpenAPI import (best-effort). |
 | 5 | **Built-in tools** | on by default | 10 opencode shell/file tools so an agent can *act* with zero wiring (see below). |
+| 6 | **Sub-agents** | `agent()` + `team` | An in-process agent (prompt × scoped toolkit × loop) delegated to via one `task` tool — isolated context, tokens rolled up, hierarchical budgets, durable suspension ([SPEC §7D](SPEC.md), [docs](https://muthuishere.github.io/toolnexus/subagents/)). |
+
+(A **7th**, remote **A2A** agents, joins the same registry over HTTP — outbound as tools, or serve your toolkit *as* an agent; see below.)
 
 Registering your own native + HTTP tools is one call:
 

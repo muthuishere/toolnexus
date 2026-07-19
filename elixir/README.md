@@ -48,6 +48,32 @@ process; a crashed stdio server is isolated (status `"failed"`) without taking
 your toolkit down; parallel tool calls ride `Task.async_stream`. Same contract
 as the other five ports, native OTP underneath.
 
+## Sub-agents & teams
+
+An **Agent is a Tool**: a system prompt × a scoped toolkit view × the client loop. One agent
+delegates to another **in-process** via one `task` tool — isolated context, one result back,
+tokens rolled up, hierarchical budgets, durable suspension (`SPEC.md §7D`). Each handle is a
+GenServer with an inbox-as-state; `interrupt` kills only the in-flight Run, never the agent.
+
+```elixir
+alias Toolnexus.Agents
+
+explore = Agents.agent("explore", does: "read-only research", uses: %{tools: [lookup]})
+
+coder =
+  Agents.agent("coder",
+    does: "implements changes",
+    soul_file: "AGENTS.md",
+    team: [explore],                     # team = the task tool's only targets; no team ⇒ no task tool
+    budget: %{max_tokens: 10_000}
+  )
+
+r = Agents.run(coder, [llm: %{base_url: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini"}], "fix the failing test")
+IO.puts("#{r.status} #{r.text} #{r.total_tokens}")
+```
+
+Full guide: [Sub-agents & teams](https://muthuishere.github.io/toolnexus/subagents/).
+
 ## Docs
 
 Full documentation (all six languages, one site):
