@@ -6,12 +6,12 @@ per port; reconcile the `add-subagents` fromDir/heartbeat drift.
 
 ## 0. Contract + fixtures (before any port)
 
-- [ ] 0.1 SPEC.md §7E (agent home): bootstrap order + 2 MB cap + `## <file>` injection;
+- [x] 0.1 SPEC.md §7E (agent home): bootstrap order + 2 MB cap + `## <file>` injection;
       `memory` builtin (add/replace/remove, self/user, frozen-snapshot, loud miss, opt-out);
       heartbeat (post-tick→wake, HEARTBEAT_OK silent, injectable clock, coalesce). Match §7A–D
       house style.
-- [ ] 0.2 SPEC.md §4A note: the file-backed `memory` tool is opt-in, not a default builtin.
-- [ ] 0.3 Shared fixture `examples/persona-agent/`: a real bootstrap dir (SOUL.md + USER.md +
+- [x] 0.2 SPEC.md §4A note: the file-backed `memory` tool is opt-in, not a default builtin.
+- [x] 0.3 Shared fixture `examples/persona-agent/`: a real bootstrap dir (SOUL.md + USER.md +
       HEARTBEAT.md + MEMORY.md), scripted mock-LLM turns (soul-echo, memory write, next-session
       recall, heartbeat due/not-due), and expected behavior — the §0 conformance artifact.
 
