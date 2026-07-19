@@ -6,6 +6,12 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.10.0 — 2026-07-19
+
+The agent release: both agent archetypes — coding (sub-agents) and persona (agent home) —
+ship on a shared actor-model runtime, with compaction to keep either alive over long
+sessions. All six ports, byte-parity against the shared `examples/` fixtures.
+
 ### Added
 
 - **Context compaction in all six ports** (`SPEC.md §7F`, OpenSpec change `add-compaction`).
