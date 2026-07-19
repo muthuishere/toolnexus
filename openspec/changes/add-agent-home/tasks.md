@@ -29,8 +29,8 @@ per port; reconcile the `add-subagents` fromDir/heartbeat drift.
 
 ## 3. golang
 
-- [ ] 3.1 `golang/agents/home.go`: FromDir/MemoryTool/StartAgent per §7E.
-- [ ] 3.2 15 checks as go tests (-race) against the fixture; full suite green.
+- [x] 3.1 `golang/agents/home.go`: FromDir/MemoryTool/StartAgent per §7E.
+- [x] 3.2 15 checks as go tests (-race) against the fixture; full suite green.
 
 ## 4. java  (reconcile: agentFromDir already in Agents.java — align to §7E)
 
@@ -39,8 +39,8 @@ per port; reconcile the `add-subagents` fromDir/heartbeat drift.
 
 ## 5. csharp
 
-- [ ] 5.1 `Toolnexus/Agents/Home.cs`: FromDir/MemoryTool/StartAgent per §7E.
-- [ ] 5.2 15 checks as xUnit against the fixture; full suite green.
+- [x] 5.1 `Toolnexus/Agents/Home.cs`: FromDir/MemoryTool/StartAgent per §7E.
+- [x] 5.2 15 checks as xUnit against the fixture; full suite green.
 
 ## 6. elixir
 
