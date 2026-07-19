@@ -44,9 +44,9 @@ per port; reconcile the `add-subagents` fromDir/heartbeat drift.
 
 ## 6. elixir
 
-- [ ] 6.1 `toolnexus/agents/home.ex`: from_dir/memory_tool/start_agent per §7E (heartbeat via
+- [x] 6.1 `toolnexus/agents/home.ex`: from_dir/memory_tool/start_agent per §7E (heartbeat via
       the runtime's injectable clock; :timer only in the host recipe).
-- [ ] 6.2 15 checks as ExUnit against the fixture; full suite green; coverage ≥ 95%.
+- [x] 6.2 15 checks as ExUnit against the fixture; full suite green; coverage ≥ 95%.
 
 ## 7. Real deliverables (owner steer: production, not college projects)
 
