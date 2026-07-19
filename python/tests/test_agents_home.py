@@ -12,7 +12,9 @@ of ``js/spike/home-demo.ts``. The behavior reference is ``js/spike/home.ts``.
 from __future__ import annotations
 
 import json
-from typing import Any
+import re
+import threading
+from typing import Any, Optional
 
 from toolnexus.agents import (
     BOOTSTRAP_ORDER,
@@ -36,8 +38,13 @@ class MockHomeTransport:
     """Zero-cost scripted LLM keyed by ``model``, implementing the fixture's four
     scripts (soul-echo, memory write, next-session recall, heartbeat due/not-due)."""
 
-    def __init__(self, sleep: float = 0.0) -> None:
+    def __init__(self, sleep: float = 0.0, gate: Optional[threading.Event] = None) -> None:
         self.sleep = sleep
+        # Optional gate: when set, m-heartbeat blocks a turn IN-FLIGHT (in its worker
+        # thread) so the beat loop keeps posting ticks that coalesce (pin #3).
+        self.gate = gate
+        # Max number of timer ticks the runtime coalesced into a single drained turn.
+        self.max_coalesced = 0
 
     def post(self, url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float) -> dict[str, Any]:
         model = payload["model"]
@@ -58,6 +65,11 @@ class MockHomeTransport:
         if model == "m-recall":
             return openai_body({"content": "I recall: dark roast" if "Prefers dark roast" in sys else "no memory"})
         if model == "m-heartbeat":
+            m = re.search(r"tick \(x(\d+) coalesced\)", last)
+            if m:
+                self.max_coalesced = max(self.max_coalesced, int(m.group(1)))
+            if self.gate is not None:
+                self.gate.wait(timeout=5)  # hold this turn in-flight until released
             due = "remind about the 3pm sync" in sys and "Heartbeat" in last
             return openai_body({"content": "Reminder: 3pm sync \U0001f514" if due else HEARTBEAT_OK})
         return openai_body({"content": "ok"})
@@ -66,10 +78,11 @@ class MockHomeTransport:
         raise NotImplementedError("mock is non-streaming")
 
 
-def _write_dir(tmp_path, files: dict[str, str]):
+def _write_dir(base, files: dict[str, str]):
+    base.mkdir(parents=True, exist_ok=True)
     for name, body in files.items():
-        (tmp_path / name).write_text(body, encoding="utf-8")
-    return str(tmp_path)
+        (base / name).write_text(body, encoding="utf-8")
+    return str(base)
 
 
 def _tool_names(a) -> list[str]:
@@ -149,25 +162,67 @@ async def test_h4_frozen_snapshot_injection(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# H5 — heartbeat: HEARTBEAT_OK stays silent; speaks only when due (2 checks)
+# H5 — heartbeat: speaks only when due, HEARTBEAT_OK silent; ticks coalesce
+# while a turn is in-flight (2 checks)
 # --------------------------------------------------------------------------- #
-async def test_h5_heartbeat_silent_ok_speaks_when_due(tmp_path):
-    dir = _write_dir(tmp_path, {"SOUL.md": BOOTSTRAP_DIR["SOUL.md"], "HEARTBEAT.md": BOOTSTRAP_DIR["HEARTBEAT.md"]})
-    ava = agent_from_dir(dir, model="m-heartbeat")
-    reports: list[str] = []
+async def test_h5_heartbeat_speaks_when_due_ok_silent(tmp_path):
+    # DUE dir: HEARTBEAT.md rule is live → every beat surfaces a real reminder.
+    due_dir = _write_dir(tmp_path / "due", {"SOUL.md": BOOTSTRAP_DIR["SOUL.md"], "HEARTBEAT.md": BOOTSTRAP_DIR["HEARTBEAT.md"]})
+    due_reports: list[str] = []
     clock = VirtualClock()
-    started = start_agent(
-        ava, every_ms=20, on_report=reports.append, transport=MockHomeTransport(), clock=clock
+    due = start_agent(
+        agent_from_dir(due_dir, model="m-heartbeat"),
+        every_ms=20, on_report=due_reports.append, transport=MockHomeTransport(), clock=clock,
     )
     for _ in range(3):
         await clock.advance(0.020)
+    await due.stop()
+
+    # NOT-DUE dir: no HEARTBEAT.md rule in the soul → the model replies HEARTBEAT_OK,
+    # which must stay SILENT (no report emitted to the host).
+    quiet_dir = _write_dir(tmp_path / "quiet", {"SOUL.md": BOOTSTRAP_DIR["SOUL.md"]})
+    quiet_reports: list[str] = []
+    clock2 = VirtualClock()
+    quiet = start_agent(
+        agent_from_dir(quiet_dir, model="m-heartbeat"),
+        every_ms=20, on_report=quiet_reports.append, transport=MockHomeTransport(), clock=clock2,
+    )
+    for _ in range(3):
+        await clock2.advance(0.020)
+    quiet_woke = sum(1 for l in quiet.rt.trace if "idle→running" in l)
+    await quiet.stop()
+
+    # a due heartbeat surfaces the reminder; a HEARTBEAT_OK beat stays silent
+    assert due_reports and all("3pm sync" in b and HEARTBEAT_OK not in b for b in due_reports), due_reports
+    assert quiet_woke >= 2 and quiet_reports == [], (quiet_woke, quiet_reports)
+    assert due.handle.state == "closed" and quiet.handle.state == "closed"
+
+
+async def test_h5_ticks_coalesce_while_turn_in_flight(tmp_path):
+    # A real coalesce test (pin #3): keep the FIRST beat's turn genuinely in-flight
+    # (gate the model in its worker thread) while later intervals post more ticks;
+    # the next idle wake must drain the whole backlog as ONE coalesced turn.
+    dir = _write_dir(tmp_path, {"SOUL.md": BOOTSTRAP_DIR["SOUL.md"], "HEARTBEAT.md": BOOTSTRAP_DIR["HEARTBEAT.md"]})
+    gate = threading.Event()
+    mock = MockHomeTransport(gate=gate)
+    clock = VirtualClock()
+    started = start_agent(agent_from_dir(dir, model="m-heartbeat"), every_ms=20, transport=mock, clock=clock)
+
+    # The first beat wakes a turn that blocks on the gate; every later interval only
+    # POSTS a tick (handle is running → no new wake), so ticks pile up in the inbox
+    # rather than each spawning its own turn.
+    for _ in range(5):
+        await clock.advance(0.020, settle=0.06)
+    assert len(started.handle.inbox) >= 2, started.handle.inbox  # accumulated, not one-turn-per-tick
+
+    gate.set()  # release the in-flight turn → it completes → handle returns idle
+    await clock.advance(0.0, settle=0.12)
+    await clock.advance(0.020, settle=0.12)  # next idle wake drains the WHOLE backlog as one turn
+    await clock.advance(0.0, settle=0.12)
     await started.stop()
-    hb_turns = sum(1 for l in started.rt.trace if "idle→running" in l)
-    # 1. woke repeatedly on the interval (driven purely by the virtual clock)
-    assert hb_turns >= 2, started.rt.trace
-    # 2. every beat that spoke was a real reminder (HEARTBEAT_OK beats stay silent)
-    assert reports and all("3pm sync" in b and HEARTBEAT_OK not in b for b in reports), reports
-    assert started.handle.state == "closed"
+
+    # the runtime coalesced the queued ticks into a SINGLE drained turn (not N turns)
+    assert mock.max_coalesced >= 2, mock.max_coalesced
 
 
 # --------------------------------------------------------------------------- #

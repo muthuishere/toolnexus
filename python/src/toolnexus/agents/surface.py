@@ -43,15 +43,18 @@ HEARTBEAT_PROMPT = (
 
 
 def _read_capped(path: str) -> Optional[str]:
-    """Read a bootstrap file with the 2 MB cap; ``None`` if absent. A larger file
-    is truncated with an explicit notice — the on-disk file is left untouched."""
+    """Read a bootstrap file with the 2 MB cap; ``None`` if absent. The cap is
+    measured in **bytes** (not code points): a file whose UTF-8 encoding exceeds
+    :data:`MAX_BOOTSTRAP_FILE_BYTES` is truncated at that byte boundary and given an
+    explicit notice — the on-disk file is left untouched."""
     if not os.path.exists(path):
         return None
-    with open(path, encoding="utf-8") as fh:
-        body = fh.read()
-    if len(body) > MAX_BOOTSTRAP_FILE_BYTES:
-        return body[:MAX_BOOTSTRAP_FILE_BYTES] + _TRUNCATION_NOTICE
-    return body
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    if len(raw) > MAX_BOOTSTRAP_FILE_BYTES:
+        # Truncate on the byte boundary; drop a partial trailing multibyte char.
+        return raw[:MAX_BOOTSTRAP_FILE_BYTES].decode("utf-8", "ignore") + _TRUNCATION_NOTICE
+    return raw.decode("utf-8")
 
 
 def compose_soul(dir: str) -> tuple[str, list[str]]:  # noqa: A002
@@ -315,12 +318,14 @@ def start_agent(
     on_report: Optional[Callable[[str], None]] = None,
     **rt_opts: Any,
 ) -> StartedAgent:
-    """Level 2: start a long-lived persona. The heartbeat posts a timer tick onto
-    the agent's own inbox (unsolicited rail — ticks coalesce) and wakes it; a
-    :data:`HEARTBEAT_OK` answer stays silent. All timing runs on the runtime's
-    injectable clock, so fixtures drive the heartbeat virtually. Beats serialize
-    (each awaits its turn) — wake/coalesce semantics are unchanged under a slow
-    turn, only tick pacing differs.
+    """Level 2: start a long-lived persona. Each interval the heartbeat ``post``s a
+    timer tick onto the agent's own inbox (the unsolicited rail) and, **only when
+    idle**, ``wake``s it; a :data:`HEARTBEAT_OK` answer stays silent. The interval
+    is FIRE-AND-FORGET — it never blocks on the turn (the ``wait`` runs detached), so
+    ticks that arrive while a beat's turn is still running pile up in the inbox and
+    the next idle wake drains them as ONE coalesced turn (the runtime's timer-tick
+    dedupe). All timing runs on the runtime's injectable clock, so fixtures drive the
+    heartbeat on a virtual clock.
     """
     rt = a._runtime(**rt_opts)
     spawned = rt.spawn(rt.root, a.name)
@@ -328,16 +333,30 @@ def start_agent(
         raise RuntimeError(spawned.error)
     handle = spawned
     beat_task: Optional[asyncio.Task] = None
+    collectors: set[asyncio.Task] = set()
     if every_ms:
+
+        async def collect() -> None:
+            r = await rt.wait(handle)
+            if not r.is_error and HEARTBEAT_OK not in r.text and on_report is not None:
+                on_report(r.text)
+
+        def spawn_collect() -> None:
+            t = asyncio.ensure_future(collect())
+            collectors.add(t)
+            t.add_done_callback(collectors.discard)
 
         async def beat() -> None:
             while True:
                 await rt.clock.sleep(every_ms / 1000.0)
+                # unsolicited rail: the tick lands in the inbox (coalesces); an idle
+                # wake drains the whole backlog as one turn. A running/suspended turn
+                # is left alone — its inbox keeps accumulating ticks.
                 rt.post(handle, InboxItem(from_="clock", channel="timer", text="tick"))
                 if handle.state == "idle":
-                    r = await rt.run_turn(handle, HEARTBEAT_PROMPT)
-                    if not r.is_error and HEARTBEAT_OK not in r.text and on_report is not None:
-                        on_report(r.text)
+                    woke = rt.wake(handle, HEARTBEAT_PROMPT)
+                    if woke.ok:
+                        spawn_collect()  # detached — the loop keeps posting ticks
 
         beat_task = asyncio.ensure_future(beat())
 
@@ -348,6 +367,8 @@ def start_agent(
                 await beat_task
             except asyncio.CancelledError:
                 pass
+        for t in list(collectors):
+            t.cancel()
         await rt.close(rt.root)
 
     return StartedAgent(handle, rt, stop)
