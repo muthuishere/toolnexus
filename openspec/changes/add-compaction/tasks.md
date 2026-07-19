@@ -31,8 +31,8 @@ Reference: branch `spike-compaction` (`js/spike/compaction.ts` + `compaction-dem
 - [x] 4.2 11 checks as JUnit against the fixture; full suite green.
 
 ## 5. csharp
-- [ ] 5.1 `Toolnexus/…/Compaction.cs`: Compactor/EstimateTokens per §7F.
-- [ ] 5.2 11 checks as xUnit against the fixture; full suite green.
+- [x] 5.1 `Toolnexus/…/Compaction.cs`: Compactor/EstimateTokens per §7F.
+- [x] 5.2 11 checks as xUnit against the fixture; full suite green.
 
 ## 6. elixir
 - [ ] 6.1 `toolnexus/…/compaction.ex`: compactor/estimate_tokens per §7F.
