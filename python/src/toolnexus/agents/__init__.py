@@ -12,6 +12,7 @@ the outbound-A2A ``toolnexus.agent``):
 
     from toolnexus.agents import agent, Budget
 """
+from .compaction import compactor, estimate_tokens
 from .runtime import (
     AgentDef,
     AgentRuntime,
@@ -55,7 +56,9 @@ __all__ = [
     "TaskResult",
     "agent",
     "agent_from_dir",
+    "compactor",
     "compose_soul",
+    "estimate_tokens",
     "memory_tool",
     "start_agent",
 ]

@@ -882,6 +882,37 @@ Higher patterns are recipes over the above, no new surface: **dream / consolidat
 
 ---
 
+## 7F. Context compaction (keep a long-lived agent under budget)
+
+A long-lived agent grows its transcript until it overflows the model's window. `compactor(opts)`
+returns a **`beforeLLM` hook** (§8) that summarizes the older transcript and keeps a recent
+tail. It rides the existing seam — the loop applies a `beforeLLM` message rewrite by
+**replacing the working transcript**, and that array flows into `RunResult.messages` and the
+`ConversationStore` — so compaction is a pure `messages → messages` helper and adds **no loop
+behavior**. Compaction is the canonical use of the §8 `beforeLLM` hook.
+
+| option | meaning |
+|--------|---------|
+| `maxTokens` | compact only when the estimate exceeds this; at/below ⇒ **no-op, byte-identical** to no compactor |
+| `keepTail` | keep at least this many tokens of the most recent tail (default `maxTokens/2`) |
+| `summarize(older) → string` | produces the summary; **MAY call an LLM** — the library makes no model call on the host's behalf by default |
+| `countTokens(messages) → number` | token estimate; default `ceil(chars/4)` summed over messages (an **estimator, not a tokenizer** — exactness is the host's call) |
+| `flushToMemory` | when set, inject a pre-compact system reminder to persist durable facts via the §7E `memory` tool before the head is summarized (off by default) |
+
+The compacted transcript is `[leading system prompt (verbatim), summary system message,
+(flush reminder?), …tail]`. Two invariants ports MUST hold:
+
+- **Tool-pair safety.** The retained tail SHALL begin at a `user` turn, so no `tool` message
+  is ever orphaned from the `assistant` carrying its `tool_call_id`. The split is the largest
+  user-boundary tail that fits `keepTail`; if none fits, extend to the most recent user turn
+  (safety over size).
+- **System prompt preserved.** A leading `system` message (identity / soul / skills) is kept
+  unchanged; only the body between it and the tail is summarized.
+
+Absent a `compactor`, a run is byte-identical to today (compaction is entirely opt-in).
+
+---
+
 ## 8. Unified LLM client (the host loop)
 
 The payoff: give it a plain base URL + a "style", and it runs the whole tool-calling
@@ -941,7 +972,8 @@ working agent" a few lines in any of the three languages.
 observe; the noted ones may mutate or short-circuit.
 
 - `beforeLLM({ messages, tools, model, turn })` → optionally return `{ messages?, tools? }`
-  to replace them (trim/inject history, swap tools).
+  to replace them (trim/inject history, swap tools). Returning `messages` replaces the working
+  transcript for the rest of the run — the canonical use is **context compaction** (§7F).
 - `afterLLM({ response, model, turn })` → observe (logging, cost, tracing). `response` is
   the raw provider payload (carries `usage`).
 - `beforeTool({ name, args, id, turn })` → return `{ result }` to **short-circuit** the tool

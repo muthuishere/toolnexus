@@ -8,6 +8,21 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ### Added
 
+- **Context compaction in all six ports** (`SPEC.md §7F`, OpenSpec change `add-compaction`).
+  An opt-in `beforeLLM` helper that keeps a long-lived or high-tool-volume agent under its
+  context window — **additive, no core loop change**. In the `agents` surface:
+  `compactor({ maxTokens, keepTail, summarize, countTokens, flushToMemory })` returns a
+  `beforeLLM` hook that, once the transcript estimate exceeds `maxTokens`, replaces the older
+  body with one summary system message and keeps a recent tail; below budget it is a **no-op,
+  byte-identical** to no compactor. Two invariants: the retained tail begins at a `user` turn
+  (**tool-pair safety** — a `tool` result is never orphaned from its `tool_call_id`), and a
+  leading `system` prompt is preserved verbatim. `summarize(older)` is pluggable and MAY call an
+  LLM; `countTokens` defaults to `ceil(chars/4)` (`estimateTokens`, an estimator not a
+  tokenizer); `flushToMemory` injects a pre-compact reminder to persist durable facts via the
+  §7E `memory` tool before summarizing. Ships a shared `examples/compaction/` conformance
+  fixture and a "keep a persona alive for weeks" recipe (compactor + `flushToMemory` + the
+  memory builtin) on the persona-agents docs page.
+
 - **Persona agents (agent home) in all six ports** (`SPEC.md §7E`, OpenSpec change
   `add-agent-home`). The persona archetype over the §7D runtime — additive and opt-in, no
   runtime change. In the `agents` namespace: `fromDir(dir)` (Python `agent_from_dir`, Java

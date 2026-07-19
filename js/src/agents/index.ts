@@ -7,3 +7,4 @@
 export * from "./runtime.js"
 export * from "./agent.js"
 export * from "./home.js"
+export * from "./compaction.js"
