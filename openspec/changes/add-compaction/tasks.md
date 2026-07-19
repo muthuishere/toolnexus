@@ -35,8 +35,8 @@ Reference: branch `spike-compaction` (`js/spike/compaction.ts` + `compaction-dem
 - [x] 5.2 11 checks as xUnit against the fixture; full suite green.
 
 ## 6. elixir
-- [ ] 6.1 `toolnexus/…/compaction.ex`: compactor/estimate_tokens per §7F.
-- [ ] 6.2 11 checks as ExUnit against the fixture; full suite green; coverage ≥ 95%.
+- [x] 6.1 `toolnexus/…/compaction.ex`: compactor/estimate_tokens per §7F.
+- [x] 6.2 11 checks as ExUnit against the fixture; full suite green; coverage ≥ 95%.
 
 ## 7. Docs + close
 
