@@ -839,9 +839,12 @@ runtime behavior.
 | 6 | `HEARTBEAT.md` | what to do on a heartbeat |
 | 7 | `MEMORY.md` | durable long-term notes |
 
-Absent files are skipped. Each is read with a **2 MB cap** (larger ⇒ truncated with a
-notice, on-disk file untouched). Composition happens **at session start**; the soul is fixed
-for the run (frozen snapshot — the cache-stability rule, for free).
+Absent files are skipped. Each is read with a **2 MB cap** — measured in **bytes**
+(`2097152`), not characters; truncation is byte-based and may split a multibyte character —
+larger ⇒ truncated with a notice, on-disk file untouched. The `memory` tool returns a plain
+success string (a full `{output, isError:true}` only on a miss). Composition happens **at
+session start**; the soul is fixed for the run (frozen snapshot — the cache-stability rule,
+for free).
 
 ### The `memory` builtin (file-backed, opt-in)
 
