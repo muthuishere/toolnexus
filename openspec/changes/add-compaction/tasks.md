@@ -14,9 +14,9 @@ Reference: branch `spike-compaction` (`js/spike/compaction.ts` + `compaction-dem
 
 ## 1. js (reference)
 
-- [ ] 1.1 `js/src/agents/compaction.ts` (or client-adjacent): `compactor`, `estimateTokens`;
+- [x] 1.1 `js/src/agents/compaction.ts` (or client-adjacent): `compactor`, `estimateTokens`;
       export under the appropriate namespace. Rewrite the spike to shipped quality.
-- [ ] 1.2 Port C1–C6 (11 checks) into `js/test/` against `examples/compaction/`; npm test green.
+- [x] 1.2 Port C1–C6 (11 checks) into `js/test/` against `examples/compaction/`; npm test green.
 
 ## 2. python
 - [ ] 2.1 `toolnexus/…/compaction.py`: compactor/estimate_tokens per §7F.
