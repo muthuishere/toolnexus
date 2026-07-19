@@ -8,6 +8,7 @@ import io.github.muthuishere.toolnexus.ToolResult;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -64,6 +65,9 @@ public final class Agents {
         public Function<Request, Answer> waitFor;
         public Consumer<Handle> onSpawn;
         public BiConsumer<Handle, String> onClose;
+        /** §7E persona surface: {@code false} omits the file-backed {@code memory} builtin that
+         * {@link #agentFromDir} otherwise wires (read-only personas). {@code null} ⇒ enabled. */
+        public Boolean memory;
 
         public AgentSpec name(String v) { this.name = v; return this; }
         public AgentSpec does(String v) { this.does = v; return this; }
@@ -76,6 +80,7 @@ public final class Agents {
         public AgentSpec waitFor(Function<Request, Answer> v) { this.waitFor = v; return this; }
         public AgentSpec onSpawn(Consumer<Handle> v) { this.onSpawn = v; return this; }
         public AgentSpec onClose(BiConsumer<Handle, String> v) { this.onClose = v; return this; }
+        public AgentSpec memory(boolean v) { this.memory = v; return this; }
     }
 
     /** The one new noun. */
@@ -164,33 +169,132 @@ public final class Agents {
         }
     }
 
+    /** The composed soul (frozen snapshot) plus the bootstrap files that contributed to it. */
+    public record ComposedSoul(String soul, List<String> found) {}
+
     /**
-     * Level 2: the directory IS the agent. Discovers (all optional, in {@link #BOOTSTRAP_ORDER}):
-     * AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md, HEARTBEAT.md, MEMORY.md — injected as
-     * named {@code ## <file>} sections into the soul at session start.
+     * Compose the discovered bootstrap files into one soul string (SPEC §7E "The directory is the
+     * agent"). Present files in {@link #BOOTSTRAP_ORDER} are each injected as a {@code ## <file>}
+     * section; absent files are skipped; each is read with the 2 MB cap ({@link #readCapped}).
+     * Composition is a snapshot — the returned soul is fixed for the run (the frozen-snapshot rule).
      */
-    public static Agent agentFromDir(Path dir, AgentSpec overrides) {
+    public static ComposedSoul composeSoul(Path dir) {
         List<String> sections = new ArrayList<>();
+        List<String> found = new ArrayList<>();
         for (String f : BOOTSTRAP_ORDER) {
-            Path p = dir.resolve(f);
-            if (Files.exists(p)) {
+            String body = readCapped(dir.resolve(f));
+            if (body != null) {
+                sections.add("## " + f + "\n\n" + body.strip());
+                found.add(f);
+            }
+        }
+        return new ComposedSoul(String.join("\n\n", sections), found);
+    }
+
+    /** Notice appended to a bootstrap file truncated at {@link #MAX_BOOTSTRAP_FILE_BYTES}. */
+    static final String TRUNCATION_NOTICE = "\n[truncated: exceeds 2 MB bootstrap cap]";
+
+    /** Read a bootstrap file with the 2 MB cap applied in BYTES; {@code null} if absent. A larger
+     * file is injected truncated with an explicit notice (the on-disk file is never touched). */
+    private static String readCapped(Path p) {
+        byte[] bytes;
+        try {
+            bytes = Files.readAllBytes(p);
+        } catch (java.nio.file.NoSuchFileException e) {
+            return null; // absent files are skipped (§7E)
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        if (bytes.length > MAX_BOOTSTRAP_FILE_BYTES) {
+            return new String(bytes, 0, (int) MAX_BOOTSTRAP_FILE_BYTES, StandardCharsets.UTF_8)
+                    + TRUNCATION_NOTICE;
+        }
+        return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    /**
+     * The {@code memory} builtin (SPEC §7E, §4A note) — file-backed, opt-in, NOT a default builtin.
+     * One tool, three actions ({@code add}/{@code replace}/{@code remove}) over {@code MEMORY.md}
+     * (target {@code self}, default) or {@code USER.md} (target {@code user}) under {@code dir}.
+     *
+     * <p>All actions write to DISK. A {@code replace}/{@code remove} whose substring is absent
+     * returns a loud {@code isError}. The tool does NOT mutate the current session's system prompt:
+     * the frozen snapshot in the live prompt is intentionally left stale — the next {@code fromDir}
+     * session re-reads the file (the cache-stability rule the tool description states to the model).
+     */
+    public static Tool memoryTool(Path dir) {
+        return new Tool() {
+            @Override public String name() { return "memory"; }
+            @Override public String description() {
+                return "Persist durable memory. action=add appends an entry; replace swaps an "
+                        + "existing substring (with); remove deletes one. target=self (MEMORY.md, "
+                        + "default) or user (USER.md). Writes persist to disk and load at the START of "
+                        + "your NEXT session — they do NOT change your current context.";
+            }
+            @Override public Map<String, Object> inputSchema() {
+                return Map.of("type", "object",
+                        "properties", new LinkedHashMap<>(Map.of(
+                                "action", Map.of("type", "string", "enum", List.of("add", "replace", "remove")),
+                                "target", Map.of("type", "string", "enum", List.of("self", "user"),
+                                        "description", "self=MEMORY.md (default), user=USER.md"),
+                                "text", Map.of("type", "string",
+                                        "description", "For add: the entry. For replace/remove: the existing text."),
+                                "with", Map.of("type", "string",
+                                        "description", "For replace: the replacement text."))),
+                        "required", List.of("action", "text"));
+            }
+            @Override public String source() { return "custom"; }
+            @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
+                String target = args.get("target") != null ? String.valueOf(args.get("target")) : "self";
+                Path file = dir.resolve("user".equals(target) ? "USER.md" : "MEMORY.md");
+                String action = String.valueOf(args.get("action"));
+                String text = String.valueOf(args.get("text"));
+                String next;
                 try {
-                    long size = Files.size(p);
-                    String body = Files.readString(p);
-                    if (size > MAX_BOOTSTRAP_FILE_BYTES) {
-                        body = body.substring(0, (int) Math.min(body.length(), MAX_BOOTSTRAP_FILE_BYTES))
-                                + "\n[truncated: file exceeds bootstrap cap]";
+                    String cur = readCapped(file);
+                    if (cur == null) cur = "";
+                    switch (action) {
+                        case "add" -> next = (cur.stripTrailing() + "\n- " + text + "\n").stripLeading();
+                        case "replace" -> {
+                            if (!cur.contains(text)) return ToolResult.error("not found: " + text);
+                            String with = args.get("with") != null ? String.valueOf(args.get("with")) : "";
+                            next = cur.replace(text, with);
+                        }
+                        case "remove" -> {
+                            if (!cur.contains(text)) return ToolResult.error("not found: " + text);
+                            next = cur.replace(text, "");
+                        }
+                        default -> { return ToolResult.error("unknown action: " + action); }
                     }
-                    sections.add("## " + f + "\n\n" + body.strip());
+                    if (file.getParent() != null) Files.createDirectories(file.getParent());
+                    Files.writeString(file, next);
                 } catch (IOException e) {
                     throw new UncheckedIOException(e);
                 }
+                return ToolResult.ok("ok (" + action + " → " + file.getFileName() + "); loads next session");
             }
-        }
+        };
+    }
+
+    /**
+     * Level 2: the directory IS the agent (SPEC §7E). Discovers the bootstrap files (all optional,
+     * in {@link #BOOTSTRAP_ORDER}) into the soul as {@code ## <file>} sections at session start
+     * (frozen snapshot), and wires the file-backed {@link #memoryTool} over the same dir — unless
+     * {@code overrides.memory(false)} opts out (a read-only persona). Any {@code overrides.tools}
+     * are preserved; the memory tool is appended.
+     */
+    public static Agent agentFromDir(Path dir, AgentSpec overrides) {
+        ComposedSoul composed = composeSoul(dir);
         AgentSpec spec = overrides != null ? overrides : new AgentSpec();
         String name = spec.name != null ? spec.name : dir.getFileName().toString();
         if (spec.does == null) spec.does = "persona agent from " + dir;
-        spec.soul = String.join("\n\n", sections);
+        spec.soul = composed.soul();
+        if (spec.memory == null || spec.memory) {
+            List<Tool> tools = new ArrayList<>();
+            if (spec.tools != null) tools.addAll(spec.tools);
+            tools.add(memoryTool(dir));
+            spec.tools = tools;
+        }
         return agent(name, spec);
     }
 

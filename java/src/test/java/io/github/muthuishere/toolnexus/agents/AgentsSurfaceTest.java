@@ -14,18 +14,15 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CopyOnWriteArrayList;
 
-import static io.github.muthuishere.toolnexus.agents.Agents.HEARTBEAT_OK;
 import static io.github.muthuishere.toolnexus.agents.Agents.agent;
-import static io.github.muthuishere.toolnexus.agents.Agents.agentFromDir;
-import static io.github.muthuishere.toolnexus.agents.Agents.startAgent;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * SPEC §7D "Level-1 surface" conformance (S10–S13, 10 checks): {@code agent()} + team wiring +
- * soul file, team scoping (registry = reachable graph), {@code agentFromDir} + a clock-driven
- * heartbeat, and the {@code asTool()} bridge into the classic API.
+ * SPEC §7D "Level-1 surface" conformance (S10, S11, S13): {@code agent()} + team wiring + soul
+ * file, team scoping (registry = reachable graph), and the {@code asTool()} bridge into the classic
+ * API. The §7E persona surface ({@code agentFromDir} + memory + heartbeat) lives in
+ * {@link AgentHomeTest}.
  */
 class AgentsSurfaceTest {
 
@@ -96,35 +93,7 @@ class AgentsSurfaceTest {
                 String.valueOf(reg.get("coder").team));
     }
 
-    // S12 — Level 2: agentFromDir + heartbeat + HEARTBEAT_OK silence ----------
-    @Test
-    void s12_level2Ux_directoryIsTheAgent_heartbeat_silentOk() throws Exception {
-        Path dir = Files.createTempDirectory("mia-");
-        Files.writeString(dir.resolve("SOUL.md"), "You are Mia. Warm, brief.");
-        Files.writeString(dir.resolve("USER.md"), "The user is Muthu.");
-        Files.writeString(dir.resolve("MEMORY.md"), "- Likes green tea.");
-        Files.writeString(dir.resolve("HEARTBEAT.md"),
-                "On heartbeat: if it is watering day, remind to water the plants.");
-        var mia = agentFromDir(dir, new Agents.AgentSpec().model("m-mia"));
-        TaskResult direct = mia.run(rtOpts(), "hello");
-        check("bootstrap files discovered + injected as ## sections",
-                "soul-sections:[SOUL.md,USER.md,MEMORY.md]".equals(direct.text()), direct.text());
-
-        List<String> reports = new CopyOnWriteArrayList<>();
-        Agents.StartedAgent started = startAgent(mia, rtOpts(), 25L, reports::add);
-        long deadline = System.currentTimeMillis() + 3000;
-        while (System.currentTimeMillis() < deadline) {
-            long hb = started.rt.trace().stream().filter(l -> l.contains("idle→running")).count();
-            if (hb >= 2) break;
-            Thread.sleep(10);
-        }
-        started.stop();
-        long hbTurns = started.rt.trace().stream().filter(l -> l.contains("idle→running")).count();
-        check("heartbeat woke the agent repeatedly", hbTurns >= 2, "turns=" + hbTurns);
-        check("HEARTBEAT_OK wakes stayed SILENT (no reports for quiet beats)",
-                reports.stream().allMatch(t -> t.contains("water")), String.valueOf(reports));
-        check("agent closed cleanly on stop()", started.handle.state == Handle.State.CLOSED);
-    }
+    // S12 — Level 2 (agentFromDir + heartbeat) moved to AgentHomeTest (§7E, H1–H7) --------------
 
     // S13 — the bridge: agent.asTool() inside the classic API -----------------
     @Test

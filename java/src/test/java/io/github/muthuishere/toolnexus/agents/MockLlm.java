@@ -30,6 +30,16 @@ final class MockLlm implements AutoCloseable {
     final String base;
     /** The {@code m-slow} model blocks on this latch until the scenario releases it. */
     final AtomicReference<CountDownLatch> slowGate = new AtomicReference<>();
+    /** The {@code m-heartbeat-gated} model blocks its turn on this latch (coalesce probe). */
+    final AtomicReference<CountDownLatch> heartbeatGate = new AtomicReference<>();
+
+    /** Arm the heartbeat gate: the next {@code m-heartbeat-gated} turn blocks until the returned
+     * latch is counted down. */
+    CountDownLatch gateHeartbeat() {
+        CountDownLatch g = new CountDownLatch(1);
+        heartbeatGate.set(g);
+        return g;
+    }
 
     @SuppressWarnings("unchecked")
     MockLlm() {
@@ -110,20 +120,41 @@ final class MockLlm implements AutoCloseable {
                     if (toolMsgs.isEmpty()) message = calls(call("e1", "lookup", Map.of("q", "bug")));
                     else message = text("bug at line 42 (" + toolMsgs.get(0) + ")");
                 }
-                case "m-mia" -> {
+                case "m-echo-soul" -> {
+                    // reports which bootstrap sections it can see in the composed soul
+                    List<String> present = new ArrayList<>();
+                    for (String f : Agents.BOOTSTRAP_ORDER) {
+                        if (sys.contains("## " + f)) present.add(f);
+                    }
+                    message = text("sections:[" + String.join(",", present) + "]");
+                }
+                case "m-remember" -> {
+                    // first turn: write a memory; then confirm what the tool returned
+                    if (toolMsgs.isEmpty()) {
+                        message = calls(call("w1", "memory",
+                                Map.of("action", "add", "target", "user", "text", "Prefers dark roast")));
+                    } else {
+                        message = text("saved: " + toolMsgs.get(0));
+                    }
+                }
+                case "m-recall" -> // proves the next-session snapshot carries prior USER.md content
+                        message = text(sys.contains("Prefers dark roast") ? "I recall: dark roast" : "no memory");
+                case "m-heartbeat" -> {
+                    // speaks only when the HEARTBEAT.md rule fires on a heartbeat wake
                     String last = msgs.isEmpty() ? "" :
                             String.valueOf(((Map<String, Object>) msgs.get(msgs.size() - 1)).get("content"));
-                    if (last.contains("Heartbeat")) {
-                        boolean hasTicks = last.contains("channel=timer");
-                        message = text(sys.contains("water the plants") && hasTicks
-                                ? "Reminder: water the plants!" : Agents.HEARTBEAT_OK);
-                    } else {
-                        List<String> present = new ArrayList<>();
-                        for (String f : List.of("SOUL.md", "USER.md", "MEMORY.md")) {
-                            if (sys.contains("## " + f)) present.add(f);
-                        }
-                        message = text("soul-sections:[" + String.join(",", present) + "]");
+                    message = text(sys.contains("remind about the 3pm sync") && last.contains("Heartbeat")
+                            ? "Reminder: 3pm sync 🔔" : Agents.HEARTBEAT_OK);
+                }
+                case "m-heartbeat-gated" -> {
+                    // a due heartbeat whose turn blocks on the gate — the coalesce probe
+                    CountDownLatch g = heartbeatGate.get();
+                    try {
+                        if (g != null) g.await();
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
                     }
+                    message = text("Reminder: 3pm sync 🔔");
                 }
                 case "m-old-api" -> {
                     if (toolMsgs.isEmpty()) message = calls(call("b1", "explore", Map.of("prompt", "scan the repo")));
@@ -141,6 +172,8 @@ final class MockLlm implements AutoCloseable {
     public void close() {
         CountDownLatch gate = slowGate.get();
         if (gate != null) gate.countDown();
+        CountDownLatch hb = heartbeatGate.get();
+        if (hb != null) hb.countDown();
         server.stop(0);
     }
 

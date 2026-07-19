@@ -34,8 +34,8 @@ per port; reconcile the `add-subagents` fromDir/heartbeat drift.
 
 ## 4. java  (reconcile: agentFromDir already in Agents.java — align to §7E)
 
-- [ ] 4.1 `agents/Home.java` (or fold into Agents): fromDir/memory/heartbeat per §7E.
-- [ ] 4.2 15 checks as JUnit against the fixture; full suite green.
+- [x] 4.1 `agents/Home.java` (or fold into Agents): fromDir/memory/heartbeat per §7E.
+- [x] 4.2 15 checks as JUnit against the fixture; full suite green.
 
 ## 5. csharp
 
