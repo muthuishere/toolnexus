@@ -23,8 +23,8 @@ Reference: branch `spike-compaction` (`js/spike/compaction.ts` + `compaction-dem
 - [ ] 2.2 11 checks as pytest against the fixture; full suite green.
 
 ## 3. golang
-- [ ] 3.1 `golang/…/compaction.go`: Compactor/EstimateTokens per §7F.
-- [ ] 3.2 11 checks as go tests (-race) against the fixture; full suite green.
+- [x] 3.1 `golang/agents/compaction.go`: Compactor/EstimateTokens per §7F.
+- [x] 3.2 11 checks as go tests (-race) against the fixture; full suite green.
 
 ## 4. java
 - [ ] 4.1 `…/Compaction.java`: compactor/estimateTokens per §7F.
