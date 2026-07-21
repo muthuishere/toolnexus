@@ -17,7 +17,7 @@ dispatch that has no Release to attach to).
   platform plus a `SHA256SUMS` file
 
 #### Scenario: npm wrapper installs the matching binary
-- **WHEN** a user runs `npm install -g toolnexus-cli` at version `X.Y.Z`
+- **WHEN** a user runs `npm install -g @muthuishere/toolnexus-cli` at version `X.Y.Z`
 - **THEN** the wrapper downloads the `X.Y.Z` binary for the host platform, verifies it against
   the published checksums, and exposes a working `toolnexus` command
 
