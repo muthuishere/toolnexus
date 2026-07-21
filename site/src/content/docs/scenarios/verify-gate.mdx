@@ -1,0 +1,775 @@
+---
+title: The verify-before-commit gate
+description: The universal spine of real agent work — a worker produces an artifact, an isolated adversarial verifier must pass it before the result leaves, and on exhausted retries the agent returns its best effort loudly flagged as unverified. Pure composition over the §7D sub-agent primitives — no new API.
+---
+
+import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
+
+An agent writes a database migration. It looks right. It reads well. It is wrong in a way that
+only shows up when it runs — a missing `NOT NULL` default that locks the table on deploy. The
+same agent that produced it is the worst possible reviewer of it: it already believes it is
+correct, because it just argued itself into writing it.
+
+The fix is the oldest one in engineering, moved inside the agent: **nothing leaves until an
+independent check passes.** A worker produces an artifact; a separate **adversarial verifier**
+sub-agent tries to break it; only a pass lets the result out. On a fail, the verifier's critique
+is fed back and the worker retries — a **bounded** number of times. When the retries run out, the
+agent returns its best effort **loudly flagged as unverified**, never a silent pass.
+
+<Aside type="note" title="The point of this page: there is no new API">
+Everything below is `agent()` + `task`/`.asTool()` + `budget` (`SPEC.md §7D`) and a plain
+`for` loop in your own code. There is no `verify()` helper, no gate primitive, no pass/fail type.
+The library ships the **isolation and the budgets**; the gate is a composition you assemble and
+own. The loop is on this page in full — nothing is hidden behind a function you cannot see.
+</Aside>
+
+## When to reach for this
+
+| Reach for the gate when… | Skip it when… |
+|---|---|
+| A step's wrongness is **expensive and checkable** — a diff that must compile, a refund that must be policy-legal, a research claim that must be sourced | The work is trivial or cheap to reverse — the check costs more than just fixing a mistake later |
+| There is a **cheaper independent check** than redoing the work — running the tests, re-deriving the number, following the citation | The only way to verify is to do the whole task again — you have not saved anything |
+| The artifact **leaves the agent** — it commits, it ships, it answers a customer | The output is a draft a human reviews anyway; you already have a verifier (you) |
+| The failure is **plausible-but-wrong** — it passes a glance and fails on contact | Failures are obvious and loud on their own (a crash, an empty result) |
+
+<Aside type="caution" title="Honest framing">
+The gate is only as good as the verifier's soul. A verifier that rubber-stamps is **worse than
+no gate** — it manufactures false confidence and costs you a second LLM pass to do it. This is a
+pattern you tune, not a switch you flip: the first thing you will tune is the verifier's prompt,
+and nothing in the library detects when a verifier has quietly gone lazy.
+</Aside>
+
+## Why toolnexus makes the verifier independent for free
+
+Here is the property this whole page rests on, and the reason it belongs to toolnexus rather than
+to a prompt-engineering blog post.
+
+When the worker delegates to the verifier through `task` (or when you call `verifier.run(...)`
+yourself), the verifier runs on a **fresh transcript** and returns its **final text only**. The
+worker's reasoning — the chain of thought that talked it into believing the artifact is correct —
+is never sent to the verifier. The verifier sees the *artifact*, not the *argument for it*.
+
+That is a **structural** guarantee, not a prompt instruction. You cannot forget to add it, the
+model cannot leak past it, and it does not depend on the verifier being told to ignore anything.
+An independent reviewer that never saw the persuasive case for the work cannot be talked into
+agreeing by it.
+
+<Aside type="note" title="Where the isolation lives in the source">
+Each agent turn builds its per-turn toolkit with `builtins: false` on a conversation keyed to the
+handle's own id, and the `task` tool returns exactly the child's `text` plus
+`{agent, turns, totalTokens}` metadata — the transcript never crosses the boundary.
+See `js/src/agents/runtime.ts:700` (fresh toolkit) and the `task` tool's return around
+`runtime.ts:882`; the same shape is byte-identical in every port, e.g. `golang/agents/runtime.go:1097`
+(`Builtins: false`) returning `r.Text`. This is the same isolation documented under
+[what `task` guarantees](/toolnexus/subagents/#isolation--roll-up--what-task-guarantees).
+</Aside>
+
+## This is not the self-improving loop — it is its mirror image
+
+There is a [sibling page](/toolnexus/scenarios/self-improving-agent/) about a scoped reviewer
+sub-agent, and it is easy to think this page repeats it. It does not. They use the **same
+primitive** — an isolated child reading a finished result — placed at **opposite points in time**.
+
+| | **This page — the gate** | [Self-improving agent](/toolnexus/scenarios/self-improving-agent/) |
+|---|---|---|
+| **When it runs** | *Before* the result leaves — synchronously | *After* the result has already left — asynchronously |
+| **Blocking?** | **Blocking.** The answer is withheld until it passes | **Fire-and-forget.** The user already has the answer |
+| **What it changes** | *This* result — retries or flags it | The *next* run — writes a lesson to `MEMORY.md` |
+| **Failure mode it fights** | Shipping a wrong artifact *now* | Repeating a known mistake *tomorrow* |
+| **Cost model** | On the critical path — latency you pay every time | Off the critical path — a background tax |
+
+Same isolated-child mechanic, opposite placement: **verify-before-commit** here,
+**learn-after-commit** there. A serious agent often has both — the gate stops today's bad diff,
+and the reviewer makes sure it does not write that diff again next week.
+
+## Why the isolated verifier beats a same-context self-check
+
+The tempting shortcut is to append *"now double-check your work"* to the same conversation. It
+fails on the same axes the [self-improving page lays out in full](/toolnexus/scenarios/self-improving-agent/#why-a-separate-reviewer-beats-self-reflection)
+— in short:
+
+| | Self-check (same context) | Isolated verifier sub-agent |
+|---|---|---|
+| **Bias** | Grades its own reasoning while committed to it — rationalizes | Sees the artifact, never the reasoning — nothing to defend |
+| **Cost** | Re-sends the whole transcript at the worker's model price | Reads a short artifact, on a cheap model, under a hard budget |
+| **Contamination** | The self-review stays in the transcript and steers later turns | The child's tokens never flow back up — one result crosses the boundary |
+| **Blast radius** | Inherits every tool the worker had, including the destructive ones | `uses` scopes it to inspection tools — it *cannot* write or commit |
+
+The point specific to a **gate**: the whole value is the verifier's independence, and same-context
+self-check has none. The isolation above is not an optimization here — it is the feature.
+
+## The verifier's soul — try to refute, default to FAIL
+
+A verifier is defined by its prose. The one instruction that matters more than any other:
+**when uncertain, FAIL.** A pass must be a positive claim — *"I ran the checks that would expose
+this and could not break it"* — not the absence of an objection.
+
+```md title="verifier/SOUL.md — the adversarial contract"
+You are an adversarial verifier. Your job is to REFUTE the artifact, not to approve it.
+
+You are given a TASK and an ARTIFACT produced by another agent. You did NOT see how it
+was produced, and you must not assume it is correct.
+
+Work to find a reason it FAILS:
+- Check every clause of the task. Partial satisfaction is a FAIL.
+- Run the checks that would expose it: compile it, run the tests, re-derive the number,
+  follow the cited source. A claim you did not check is a claim you cannot pass.
+- Hunt the plausible-but-wrong: the off-by-one, the unhandled case, the citation that
+  does not actually say what it is quoted as saying.
+
+Reply on the FIRST line with exactly `PASS` or `FAIL`. If you FAIL, the rest of the reply
+is the critique: specific, actionable, ordered by severity — what is wrong and what would
+make it pass.
+
+When you are uncertain, FAIL. A verifier that waves through work it could not confirm is
+worse than none: it manufactures false confidence. Passing means you TRIED to break it and
+could not.
+```
+
+The second half of the verifier is its **tool scope**, and this is a security boundary, not a
+convenience. A verifier's job is to *inspect*: read files, run tests, follow a link. It must never
+be able to *change* the artifact it is judging or commit anything. `uses` gives it a view with the
+mutating tools dropped — it is not asked to behave, it is structurally incapable of writing.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createToolkit, agents } from "toolnexus"
+
+// Inspection-only: it can read and run the tests, but never write, edit, patch, or commit.
+const inspect = await createToolkit({
+  builtins: { tools: { write: false, edit: false, apply_patch: false } },
+})
+
+const verifier = agents.agent("verifier", {
+  does: "Adversarially verifies an artifact against a task. Replies PASS or FAIL + critique. Read/test-only.",
+  soulFile: "./verifier/SOUL.md",
+  uses: { tools: inspect.tools() },        // read, grep, glob, bash(tests) — no write/edit/patch
+  model: "openai/gpt-4o-mini",             // cheap: verifying is not a frontier-model task
+  budget: { maxTurns: 10, maxTokens: 40_000 },
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_toolkit
+from toolnexus.agents import agent, Budget
+
+inspect = await create_toolkit(
+    builtins={"tools": {"write": False, "edit": False, "apply_patch": False}})
+
+verifier = agent(
+    "verifier",
+    does="Adversarially verifies an artifact against a task. Replies PASS or FAIL + critique. Read/test-only.",
+    soul_file="./verifier/SOUL.md",
+    uses={"tools": inspect.tools()},         # read, grep, glob, bash(tests) — no write/edit/patch
+    model="openai/gpt-4o-mini",              # cheap: verifying is not a frontier-model task
+    budget=Budget(max_turns=10, max_tokens=40_000),
+)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+import (
+    tn "github.com/muthuishere/toolnexus/golang"
+    "github.com/muthuishere/toolnexus/golang/agents"
+)
+
+inspect, _ := tn.CreateToolkit(ctx, tn.Options{Builtins: tn.BuiltinsConfig{
+    Tools: map[string]bool{"write": false, "edit": false, "apply_patch": false}}})
+
+verifier := agents.New("verifier", agents.Spec{
+    Does:   "Adversarially verifies an artifact against a task. Replies PASS or FAIL + critique. Read/test-only.",
+    SoulFile: "./verifier/SOUL.md",
+    Tools:  inspect.Tools(),                 // read, grep, glob, bash(tests) — no write/edit/patch
+    Model:  "openai/gpt-4o-mini",            // cheap: verifying is not a frontier-model task
+    Budget: &agents.Budget{MaxTurns: 10, MaxTokens: 40_000},
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+import io.github.muthuishere.toolnexus.*;
+import io.github.muthuishere.toolnexus.agents.*;
+
+Toolkit inspect = Toolkit.create(new Toolkit.Options()
+        .builtins(Map.of("tools", Map.of("write", false, "edit", false, "apply_patch", false))));
+
+Agents.Agent verifier = Agents.agent("verifier", new Agents.AgentSpec()
+        .does("Adversarially verifies an artifact against a task. Replies PASS or FAIL + critique. Read/test-only.")
+        .soulFile(Path.of("verifier/SOUL.md"))
+        .tools(inspect.tools().toArray(new Tool[0]))   // no write/edit/patch
+        .model("openai/gpt-4o-mini")
+        .budget(new Budget().maxTurns(10).maxTokens(40_000)));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+using Toolnexus;
+using Toolnexus.Agents;
+
+await using var inspect = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Builtins = new Dictionary<string, object?> { ["tools"] = new Dictionary<string, object?> {
+        ["write"] = false, ["edit"] = false, ["apply_patch"] = false } },
+});
+
+var verifier = new Agent("verifier", new AgentSpec
+{
+    Does = "Adversarially verifies an artifact against a task. Replies PASS or FAIL + critique. Read/test-only.",
+    SoulFile = "./verifier/SOUL.md",
+    Uses = inspect.Tools(),                  // no write/edit/patch
+    Model = "openai/gpt-4o-mini",
+    Budget = new Budget { MaxTurns = 10, MaxTokens = 40_000 },
+});
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Agents
+
+{:ok, inspect} =
+  Toolnexus.create_toolkit(
+    builtins: %{tools: %{"write" => false, "edit" => false, "apply_patch" => false}})
+
+verifier =
+  Agents.agent("verifier",
+    does: "Adversarially verifies an artifact against a task. Replies PASS or FAIL + critique. Read/test-only.",
+    soul_file: "verifier/SOUL.md",
+    uses: %{tools: Toolnexus.Toolkit.tools(inspect)},   # no write/edit/patch
+    model: "openai/gpt-4o-mini",
+    budget: %{max_turns: 10, max_tokens: 40_000}
+  )
+```
+</TabItem>
+</Tabs>
+
+<Aside type="caution" title="`bash` is a real shell — scope it honestly">
+Dropping `write`/`edit`/`apply_patch` stops the verifier editing files, but `bash` (kept so it can
+run your tests) *could* still `git commit` or `rm`. Coarse tool scoping is not a sandbox. If
+"cannot commit" must be **structural**, drop `bash` too and give the verifier a single narrow
+`run_tests` tool instead, or gate `bash` the way the
+[coding-agent page gates destructive commands](/toolnexus/scenarios/coding-agent/#6-the-brake--human-approval-on-dangerous-bash).
+Process isolation is the host's job, not a flag.
+</Aside>
+
+## The gate loop — run, verify, retry, or flag
+
+This is the whole pattern, and it is deliberately shown in full: a `for` loop in your code, not a
+library call. Run the worker, hand the **artifact only** to the verifier, parse its first line. On
+`PASS`, return. On `FAIL`, feed the critique back into the worker's next attempt. Cap the retries;
+on exhaustion, return the best artifact with the unresolved critique attached and a **loud
+unverified marker**.
+
+<Aside type="tip" title="You define what PASS means">
+The library has no notion of pass/fail — the verifier returns text, and *you* parse it. The `PASS`/`FAIL`
+first-line convention below is a choice, not an API. Pick a contract the verifier can hit reliably
+(a first-line token is more robust than JSON from a small model) and parse it defensively.
+</Aside>
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const MAX_RETRIES = 2                       // total attempts = MAX_RETRIES + 1
+
+interface Gated { text: string; verified: boolean; critique?: string }
+
+async function verifiedRun(task: string): Promise<Gated> {
+  let critique: string | undefined
+  let artifact = ""
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    // Feed the previous critique back in — this is the only way the worker improves.
+    const prompt = critique
+      ? `${task}\n\nA reviewer REJECTED your last attempt. Fix EXACTLY this and return the corrected artifact:\n${critique}`
+      : task
+    artifact = (await worker.run(prompt, { llm })).text
+
+    // The verifier sees the ARTIFACT — never the worker's reasoning (that is the isolation).
+    const verdict = await verifier.run(
+      `Verify this artifact against the task.\n\nTASK:\n${task}\n\nARTIFACT:\n${artifact}`,
+      { llm },
+    )
+    if (/^\s*PASS\b/i.test(verdict.text)) return { text: artifact, verified: true }
+    critique = verdict.text                  // carry the critique into the next attempt
+  }
+
+  // Retries exhausted. Return the best effort — LOUDLY marked, never a silent pass.
+  return {
+    text: `⚠️ UNVERIFIED — failed ${MAX_RETRIES + 1} checks.\n\n${artifact}\n\nUnresolved critique:\n${critique}`,
+    verified: false,
+    critique,
+  }
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python
+import re
+
+MAX_RETRIES = 2                              # total attempts = MAX_RETRIES + 1
+
+async def verified_run(task: str) -> dict:
+    critique = None
+    artifact = ""
+
+    for attempt in range(MAX_RETRIES + 1):
+        prompt = task if critique is None else (
+            f"{task}\n\nA reviewer REJECTED your last attempt. Fix EXACTLY this and "
+            f"return the corrected artifact:\n{critique}")
+        artifact = (await worker.run(prompt, llm=llm)).text
+
+        # The verifier sees the ARTIFACT — never the worker's reasoning.
+        verdict = await verifier.run(
+            f"Verify this artifact against the task.\n\nTASK:\n{task}\n\nARTIFACT:\n{artifact}",
+            llm=llm)
+        if re.match(r"\s*PASS\b", verdict.text, re.I):
+            return {"text": artifact, "verified": True}
+        critique = verdict.text              # carry the critique forward
+
+    # Retries exhausted — best effort, loudly flagged.
+    return {
+        "text": f"⚠️ UNVERIFIED — failed {MAX_RETRIES + 1} checks.\n\n{artifact}\n\n"
+                f"Unresolved critique:\n{critique}",
+        "verified": False,
+        "critique": critique,
+    }
+```
+</TabItem>
+<TabItem label="Go">
+```go
+const maxRetries = 2                         // total attempts = maxRetries + 1
+
+var passLine = regexp.MustCompile(`(?i)^\s*PASS\b`)
+
+func verifiedRun(task string) (text string, verified bool, critique string) {
+    for attempt := 0; attempt <= maxRetries; attempt++ {
+        prompt := task
+        if critique != "" {
+            prompt = fmt.Sprintf("%s\n\nA reviewer REJECTED your last attempt. Fix EXACTLY this and "+
+                "return the corrected artifact:\n%s", task, critique)
+        }
+        work, _ := worker.Run(agents.Options{LLM: llm}, prompt)
+        text = work.Text
+
+        // The verifier sees the ARTIFACT — never the worker's reasoning.
+        verdict, _ := verifier.Run(agents.Options{LLM: llm},
+            fmt.Sprintf("Verify this artifact against the task.\n\nTASK:\n%s\n\nARTIFACT:\n%s", task, text))
+        if passLine.MatchString(verdict.Text) {
+            return text, true, ""
+        }
+        critique = verdict.Text              // carry the critique forward
+    }
+
+    // Retries exhausted — best effort, loudly flagged.
+    return fmt.Sprintf("⚠️ UNVERIFIED — failed %d checks.\n\n%s\n\nUnresolved critique:\n%s",
+        maxRetries+1, text, critique), false, critique
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java
+static final int MAX_RETRIES = 2;            // total attempts = MAX_RETRIES + 1
+static final Pattern PASS = Pattern.compile("(?i)^\\s*PASS\\b");
+
+record Gated(String text, boolean verified, String critique) {}
+
+Gated verifiedRun(String task) {
+    String critique = null, artifact = "";
+
+    for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        String prompt = (critique == null) ? task
+            : task + "\n\nA reviewer REJECTED your last attempt. Fix EXACTLY this and "
+                   + "return the corrected artifact:\n" + critique;
+        artifact = worker.run(rt, prompt).text();
+
+        // The verifier sees the ARTIFACT — never the worker's reasoning.
+        String verdict = verifier.run(rt,
+            "Verify this artifact against the task.\n\nTASK:\n" + task + "\n\nARTIFACT:\n" + artifact).text();
+        if (PASS.matcher(verdict).find()) return new Gated(artifact, true, null);
+        critique = verdict;                  // carry the critique forward
+    }
+
+    // Retries exhausted — best effort, loudly flagged.
+    return new Gated("⚠️ UNVERIFIED — failed " + (MAX_RETRIES + 1) + " checks.\n\n"
+        + artifact + "\n\nUnresolved critique:\n" + critique, false, critique);
+}
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+const int MaxRetries = 2;                    // total attempts = MaxRetries + 1
+static readonly Regex Pass = new(@"^\s*PASS\b", RegexOptions.IgnoreCase);
+
+async Task<(string Text, bool Verified, string? Critique)> VerifiedRunAsync(string task)
+{
+    string? critique = null;
+    var artifact = "";
+
+    for (var attempt = 0; attempt <= MaxRetries; attempt++)
+    {
+        var prompt = critique is null ? task
+            : $"{task}\n\nA reviewer REJECTED your last attempt. Fix EXACTLY this and " +
+              $"return the corrected artifact:\n{critique}";
+        artifact = (await worker.RunAsync(rt, prompt)).Text;
+
+        // The verifier sees the ARTIFACT — never the worker's reasoning.
+        var verdict = (await verifier.RunAsync(rt,
+            $"Verify this artifact against the task.\n\nTASK:\n{task}\n\nARTIFACT:\n{artifact}")).Text;
+        if (Pass.IsMatch(verdict)) return (artifact, true, null);
+        critique = verdict;                  // carry the critique forward
+    }
+
+    // Retries exhausted — best effort, loudly flagged.
+    return ($"⚠️ UNVERIFIED — failed {MaxRetries + 1} checks.\n\n{artifact}\n\n" +
+            $"Unresolved critique:\n{critique}", false, critique);
+}
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+@max_retries 2                               # total attempts = @max_retries + 1
+
+def verified_run(worker, verifier, opts, task) do
+  Enum.reduce_while(0..@max_retries, {nil, ""}, fn _attempt, {critique, _last} ->
+    prompt =
+      if critique,
+        do: "#{task}\n\nA reviewer REJECTED your last attempt. Fix EXACTLY this and " <>
+              "return the corrected artifact:\n#{critique}",
+        else: task
+
+    artifact = Agents.run(worker, opts, prompt).text
+
+    # The verifier sees the ARTIFACT — never the worker's reasoning.
+    verdict =
+      Agents.run(verifier, opts,
+        "Verify this artifact against the task.\n\nTASK:\n#{task}\n\nARTIFACT:\n#{artifact}").text
+
+    if Regex.match?(~r/^\s*PASS\b/i, verdict) do
+      {:halt, %{text: artifact, verified: true}}
+    else
+      {:cont, {verdict, artifact}}           # carry the critique forward
+    end
+  end)
+  |> case do
+    %{} = ok ->
+      ok
+
+    {critique, artifact} ->
+      # Retries exhausted — best effort, loudly flagged.
+      %{
+        text: "⚠️ UNVERIFIED — failed #{@max_retries + 1} checks.\n\n#{artifact}\n\n" <>
+                "Unresolved critique:\n#{critique}",
+        verified: false,
+        critique: critique
+      }
+  end
+end
+```
+</TabItem>
+</Tabs>
+
+<Aside type="note" title="The loud-unverified rule is the whole point">
+The one behavior you must not compromise: **a gate that runs out of retries never returns a silent
+pass.** Return the artifact if you must (a best effort a human can salvage beats nothing), but the
+`verified: false` flag and the unresolved critique travel *with* it. A caller that ignores the flag
+made an informed choice; a caller that never saw it was lied to. Branch on `verified` upstream —
+block the commit, route to a human, or mark the answer provisional.
+</Aside>
+
+## Escalation — perspective-diverse verification
+
+For a high-stakes artifact, one verifier is a single point of failure: it has one lens, and what
+it does not think to check, it does not catch. Run **N independent verifiers**, each with a
+distinct lens — *does it satisfy the spec?*, *is it safe?*, *does it actually reproduce?* — and
+accept only on a **majority**. Because parallel work is just multiple `task` calls (or, in
+userland, concurrent `run`s), the fan-out is free — the concurrency primitive is the one from the
+[research orchestrator](/toolnexus/scenarios/research-orchestrator/#the-shape).
+
+```ts
+// Three lenses, three fresh transcripts, run concurrently. Each is the verifier agent above
+// with a different SOUL.md (correctness / security / reproduces).
+const lenses = [correctnessVerifier, securityVerifier, reproVerifier]
+
+const verdicts = await Promise.all(
+  lenses.map((v) =>
+    v.run(`Verify this artifact against the task.\n\nTASK:\n${task}\n\nARTIFACT:\n${artifact}`, { llm })),
+)
+const passes = verdicts.filter((r) => /^\s*PASS\b/i.test(r.text)).length
+const accepted = passes > lenses.length / 2           // strict majority
+const critique = verdicts.filter((r) => !/^\s*PASS\b/i.test(r.text)).map((r) => r.text).join("\n---\n")
+```
+
+<Aside type="tip" title="Same fan-out in every port">
+The concurrency construct is idiomatic per language — `Promise.all` (JS), `asyncio.gather`
+(Python), an `errgroup`/goroutines (Go), `Stream.parallel()` or virtual threads (Java),
+`Task.WhenAll` (C#), `Task.async_stream` (Elixir). Or push the fan-out into the model: give a
+`judge` agent a `team` of the three verifiers and let it issue the three `task` calls in one turn,
+exactly as the research orchestrator does. Either way the majority rule is your userland code.
+</Aside>
+
+This is an escalation, not the default: **it costs N extra passes.** Reach for it when a single
+wrong artifact is genuinely costly (a production migration, a financial action), and keep the
+single verifier everywhere else.
+
+## Budget the verifier — it should be a rounding error on the worker
+
+The gate adds at least one LLM pass to every run, so the verifier must be **cheap and bounded** or
+the gate becomes the dominant cost. Three levers, same as any scoped sub-agent:
+
+| Lever | Why |
+|---|---|
+| A **cheaper `model`** | Checking an artifact against a task is not a frontier-model job. Run the worker on the strong model and the verifier on a small one. |
+| A small **`maxTurns` / `maxTokens`** | A verifier that needs sixty turns is not verifying, it is re-doing the work. Bound it low; a budget stop returns `status: "incomplete"` — **loud**, so you see a runaway. |
+| **Hand it the artifact, not the world** | The verifier reads the artifact and runs the checks. It does not need the worker's transcript (it never gets it) or the whole repo in context. |
+
+A verifier whose cost is more than a small fraction of the worker's is misconfigured. And because
+every agent's tokens **roll up into the parent's `totalTokens`** (`SPEC.md §7D`), you can measure
+the gate's true overhead directly: run a task with the gate and without, and compare the root
+`totalTokens`.
+
+## The full assembly
+
+A worker that edits a repository, an adversarial verifier that must compile it and pass the tests
+before the change is accepted, and the bounded gate loop around both. The `verifiedRun` helper is
+the one from above.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createToolkit, agents } from "toolnexus"
+
+const llm = { baseUrl: "https://openrouter.ai/api/v1", style: "openai" as const }
+
+// --- tool views: worker can change the tree; verifier can only inspect + test ---
+const full = await createToolkit()                                   // read/write/edit/bash/...
+const inspect = await createToolkit({
+  builtins: { tools: { write: false, edit: false, apply_patch: false } },
+})
+
+// --- the worker: strong model, full hands ---
+const worker = agents.agent("worker", {
+  does: "Implements a change in this repository and returns the diff.",
+  soulFile: "./AGENTS.md",
+  uses: { tools: full.tools() },
+  model: "anthropic/claude-sonnet-4",
+  budget: { maxTurns: 40, maxTokens: 300_000 },
+})
+
+// --- the verifier: cheap model, inspection-only, adversarial soul ---
+const verifier = agents.agent("verifier", {
+  does: "Adversarially verifies a diff. Compiles + runs the tests. PASS or FAIL + critique.",
+  soulFile: "./verifier/SOUL.md",
+  uses: { tools: inspect.tools() },
+  model: "openai/gpt-4o-mini",
+  budget: { maxTurns: 10, maxTokens: 40_000 },
+})
+
+// --- the gate (verifiedRun as defined above), then act on the flag ---
+const result = await verifiedRun("Fix the child-process leak on MCP stdio reconnect. Add a test.")
+
+if (result.verified) {
+  await git.commit(result.text)                 // it passed the gate — safe to ship
+} else {
+  await slack.post("#eng", result.text)         // loudly unverified — a human decides
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_toolkit
+from toolnexus.agents import agent, Budget
+
+llm = {"base_url": "https://openrouter.ai/api/v1", "style": "openai"}
+
+full = await create_toolkit()
+inspect = await create_toolkit(
+    builtins={"tools": {"write": False, "edit": False, "apply_patch": False}})
+
+worker = agent(
+    "worker",
+    does="Implements a change in this repository and returns the diff.",
+    soul_file="./AGENTS.md",
+    uses={"tools": full.tools()},
+    model="anthropic/claude-sonnet-4",
+    budget=Budget(max_turns=40, max_tokens=300_000),
+)
+
+verifier = agent(
+    "verifier",
+    does="Adversarially verifies a diff. Compiles + runs the tests. PASS or FAIL + critique.",
+    soul_file="./verifier/SOUL.md",
+    uses={"tools": inspect.tools()},
+    model="openai/gpt-4o-mini",
+    budget=Budget(max_turns=10, max_tokens=40_000),
+)
+
+result = await verified_run("Fix the child-process leak on MCP stdio reconnect. Add a test.")
+
+if result["verified"]:
+    await git.commit(result["text"])            # passed the gate
+else:
+    await slack.post("#eng", result["text"])    # loudly unverified — a human decides
+```
+</TabItem>
+<TabItem label="Go">
+```go
+llm := &agents.LLMOptions{BaseURL: "https://openrouter.ai/api/v1", Style: tn.StyleOpenAI}
+
+full, _ := tn.CreateToolkit(ctx, tn.Options{})
+inspect, _ := tn.CreateToolkit(ctx, tn.Options{Builtins: tn.BuiltinsConfig{
+    Tools: map[string]bool{"write": false, "edit": false, "apply_patch": false}}})
+
+worker := agents.New("worker", agents.Spec{
+    Does:     "Implements a change in this repository and returns the diff.",
+    SoulFile: "./AGENTS.md",
+    Tools:    full.Tools(),
+    Model:    "anthropic/claude-sonnet-4",
+    Budget:   &agents.Budget{MaxTurns: 40, MaxTokens: 300_000},
+})
+
+verifier := agents.New("verifier", agents.Spec{
+    Does:     "Adversarially verifies a diff. Compiles + runs the tests. PASS or FAIL + critique.",
+    SoulFile: "./verifier/SOUL.md",
+    Tools:    inspect.Tools(),
+    Model:    "openai/gpt-4o-mini",
+    Budget:   &agents.Budget{MaxTurns: 10, MaxTokens: 40_000},
+})
+
+text, verified, _ := verifiedRun("Fix the child-process leak on MCP stdio reconnect. Add a test.")
+
+if verified {
+    git.Commit(text)                            // passed the gate
+} else {
+    slack.Post("#eng", text)                    // loudly unverified — a human decides
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java
+RuntimeOptions rt = new RuntimeOptions()
+        .baseUrl("https://openrouter.ai/api/v1").style("openai");
+
+Toolkit full = Toolkit.create(new Toolkit.Options());
+Toolkit inspect = Toolkit.create(new Toolkit.Options().builtins(Map.of("tools",
+        Map.of("write", false, "edit", false, "apply_patch", false))));
+
+Agents.Agent worker = Agents.agent("worker", new Agents.AgentSpec()
+        .does("Implements a change in this repository and returns the diff.")
+        .soulFile(Path.of("AGENTS.md"))
+        .tools(full.tools().toArray(new Tool[0]))
+        .model("anthropic/claude-sonnet-4")
+        .budget(new Budget().maxTurns(40).maxTokens(300_000)));
+
+Agents.Agent verifier = Agents.agent("verifier", new Agents.AgentSpec()
+        .does("Adversarially verifies a diff. Compiles + runs the tests. PASS or FAIL + critique.")
+        .soulFile(Path.of("verifier/SOUL.md"))
+        .tools(inspect.tools().toArray(new Tool[0]))
+        .model("openai/gpt-4o-mini")
+        .budget(new Budget().maxTurns(10).maxTokens(40_000)));
+
+Gated result = verifiedRun("Fix the child-process leak on MCP stdio reconnect. Add a test.");
+
+if (result.verified()) git.commit(result.text());        // passed the gate
+else slack.post("#eng", result.text());                  // loudly unverified — a human decides
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var rt = new RuntimeOptions { BaseUrl = "https://openrouter.ai/api/v1", Style = "openai" };
+
+await using var full = await Toolkit.CreateAsync(new Toolkit.Options());
+await using var inspect = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Builtins = new Dictionary<string, object?> { ["tools"] = new Dictionary<string, object?> {
+        ["write"] = false, ["edit"] = false, ["apply_patch"] = false } },
+});
+
+var worker = new Agent("worker", new AgentSpec
+{
+    Does = "Implements a change in this repository and returns the diff.",
+    SoulFile = "./AGENTS.md",
+    Uses = full.Tools(),
+    Model = "anthropic/claude-sonnet-4",
+    Budget = new Budget { MaxTurns = 40, MaxTokens = 300_000 },
+});
+
+var verifier = new Agent("verifier", new AgentSpec
+{
+    Does = "Adversarially verifies a diff. Compiles + runs the tests. PASS or FAIL + critique.",
+    SoulFile = "./verifier/SOUL.md",
+    Uses = inspect.Tools(),
+    Model = "openai/gpt-4o-mini",
+    Budget = new Budget { MaxTurns = 10, MaxTokens = 40_000 },
+});
+
+var result = await VerifiedRunAsync("Fix the child-process leak on MCP stdio reconnect. Add a test.");
+
+if (result.Verified) await git.CommitAsync(result.Text);      // passed the gate
+else await slack.PostAsync("#eng", result.Text);              // loudly unverified — a human decides
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Agents
+
+opts = [llm: %{base_url: "https://openrouter.ai/api/v1", style: "openai"}]
+
+{:ok, full} = Toolnexus.create_toolkit()
+{:ok, inspect} =
+  Toolnexus.create_toolkit(
+    builtins: %{tools: %{"write" => false, "edit" => false, "apply_patch" => false}})
+
+worker =
+  Agents.agent("worker",
+    does: "Implements a change in this repository and returns the diff.",
+    soul_file: "AGENTS.md",
+    uses: %{tools: Toolnexus.Toolkit.tools(full)},
+    model: "anthropic/claude-sonnet-4",
+    budget: %{max_turns: 40, max_tokens: 300_000})
+
+verifier =
+  Agents.agent("verifier",
+    does: "Adversarially verifies a diff. Compiles + runs the tests. PASS or FAIL + critique.",
+    soul_file: "verifier/SOUL.md",
+    uses: %{tools: Toolnexus.Toolkit.tools(inspect)},
+    model: "openai/gpt-4o-mini",
+    budget: %{max_turns: 10, max_tokens: 40_000})
+
+result = verified_run(worker, verifier, opts, "Fix the child-process leak on MCP stdio reconnect. Add a test.")
+
+if result.verified do
+  Git.commit(result.text)                     # passed the gate
+else
+  Slack.post("#eng", result.text)             # loudly unverified — a human decides
+end
+```
+</TabItem>
+</Tabs>
+
+## What you bring — and what this is not
+
+**The library gives you the hard parts:** isolated sub-agents (the verifier structurally cannot see
+the worker's reasoning), tool scoping (it structurally cannot mutate the artifact), hierarchical
+budgets (it cannot outspend its ceiling), and usage roll-up (you can measure the gate's true cost) —
+identical in six languages. The gate itself is yours, and so are its limits:
+
+| Not shipped | What you do instead |
+|---|---|
+| **A `verify()` primitive or a pass/fail type** | There is none by design. The verifier returns text; you define the `PASS`/`FAIL` contract and parse it. |
+| **A scoring model or threshold** | The library never decides "good enough". Your loop defines what a pass is and how many retries you allow. |
+| **Detection of a lazy verifier** | Nothing notices a verifier that has drifted to rubber-stamping. Spot-check its critiques; seed it with known-bad artifacts and confirm it FAILs them. |
+| **Free verification** | The gate is at least one extra LLM pass per run — real latency and tokens on the critical path. Budget the verifier cheap; use perspective-diverse only for high stakes. |
+| **A guarantee the artifact is correct** | A gate raises the floor; it does not certify. A verifier is only as good as its soul and the checks it can actually run. |
+| **A sandbox** | Tool scoping drops the mutating tools, but `bash` is a real shell. If "cannot commit" must be structural, drop `bash` or gate it — process isolation is the host's job. |
+
+## See also
+
+- [Build a Claude-Code-style coding agent](/toolnexus/scenarios/coding-agent/) — the natural home of this gate: verify the diff compiles and the tests pass before it commits.
+- [A customer-support agent](/toolnexus/scenarios/support-agent/) — gate the *action*: verify a refund is policy-legal before `issue_refund` runs.
+- [Fan out research across parallel sub-agents](/toolnexus/scenarios/research-orchestrator/) — verify each section against its sources before synthesis; the concurrency the escalation reuses.
+- [An agent that learns from its own runs](/toolnexus/scenarios/self-improving-agent/) — the async cousin: learn-after-commit, where this page is verify-before-commit.
+- [Sub-agents & teams](/toolnexus/subagents/) — the isolation, `uses` scoping, budgets, and usage roll-up the gate is built from.
+- `SPEC.md §7D` — the agent runtime, isolation, scoping, and budgets behind every claim here.
+
+<LinkButton href="/toolnexus/scenarios/" variant="secondary" icon="right-arrow">Back to all scenarios</LinkButton>
