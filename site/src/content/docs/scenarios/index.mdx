@@ -24,6 +24,7 @@ If you have not run toolnexus yet, do [**zero to agent in 3 steps**](/toolnexus/
 | **"Research five things at once and merge the findings"** — a coordinator fanning out to isolated workers | [Research orchestrator](/toolnexus/scenarios/research-orchestrator/) | `agent()` + `team` · parallel `task` calls · `maxConcurrent` · usage roll-up | §7D, §8 |
 | **"An agent over my real systems, with a human on the risky bits"** — orders/CRM over MCP, policy as skills, refunds gated by approval, served to a web app | [Support / ops agent](/toolnexus/scenarios/support-agent/) | `mcpConfig` + per-server allowlist · skills · `pending`/`waitFor` · `serve` · budgets | §2, §3, §10, §7B |
 | **"An agent that gets better over time"** — records what worked, folds it back into its own instructions | [Self-improving agent](/toolnexus/scenarios/self-improving-agent/) | `memory` tool · heartbeat consolidation · `onTask`/metrics · skills as the editable policy layer | §7E, §3, §8 |
+| **"Output that must be right before it ships"** — a worker produces, an independent adversarial verifier must pass it before the result leaves the agent | [Verify-before-commit gate](/toolnexus/scenarios/verify-gate/) | `agent()` + `task` isolation (final-text-only) · adversarial verifier soul · scoped `uses` · bounded retry loop · `budget` | §7D, §8 |
 
 Nothing here is mutually exclusive. A support agent that remembers a customer is the support
 scenario plus `fromDir`; a coding assistant that asks before force-pushing is the coding scenario
