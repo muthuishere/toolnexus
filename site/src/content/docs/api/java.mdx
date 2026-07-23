@@ -1,10 +1,10 @@
 ---
 title: API Reference — Java
-description: The io.github.muthuishere:toolnexus public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other four ports.
+description: The io.github.muthuishere:toolnexus public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other five ports.
 ---
 
 Artifact **`io.github.muthuishere:toolnexus`** (Java 21). See the [combined API Reference](/api/)
-for every symbol shown in five-language synced tabs.
+for every symbol shown in six-language synced tabs.
 
 ## Toolkit
 
@@ -12,7 +12,7 @@ for every symbol shown in five-language synced tabs.
 - `Options` builder: `.mcpConfig`, `.skillsDir`, `.skills`, `.skillProvider`, `.skillsFilter`,
   `.skillSampleLimit`, `.builtins`, `.agents`, `.extraTools`, `.waitFor`.
 - Equivalents: `createToolkit` (js) · `create_toolkit` (py) · `CreateToolkit` (go) ·
-  `Toolkit.CreateAsync` (c#).
+  `Toolkit.CreateAsync` (c#) · `Toolnexus.create_toolkit` (elixir).
 
 ## Skills
 
@@ -25,7 +25,7 @@ for every symbol shown in five-language synced tabs.
 - `LoadOptions` builder: `.dirs`, `.skills`, `.filter`, `.sampleLimit`.
 - `skillProvider` is a `Supplier<List<SkillDef>>`.
 - Equivalents: `loadSkills` / `listSkills` (js) · `load_skills` / `list_skills` (py) ·
-  `LoadSkillsWith` / `ListSkills` (go) · `SkillSource.LoadWith` / `ListSkills` (c#).
+  `LoadSkillsWith` / `ListSkills` (go) · `SkillSource.LoadWith` / `ListSkills` (c#) · `Toolnexus.Skill.load` / `Toolnexus.Skill.list` (elixir).
 
 ## MCP · Adapters · Client
 

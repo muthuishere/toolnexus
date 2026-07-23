@@ -1,10 +1,10 @@
 ---
 title: API Reference — C#
-description: The Toolnexus (NuGet) public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other four ports.
+description: The Toolnexus (NuGet) public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other five ports.
 ---
 
 Package **`Toolnexus`** (NuGet, .NET). See the [combined API Reference](/api/) for every symbol
-shown in five-language synced tabs.
+shown in six-language synced tabs.
 
 ## Toolkit
 
@@ -12,7 +12,7 @@ shown in five-language synced tabs.
 - `Options`: `McpConfig`, `SkillsDir`, `Skills`, `SkillProvider`, `SkillsFilter`,
   `SkillSampleLimit`, `Builtins`, `Agents`, `ExtraTools`, `WaitFor` (plus `With…` fluent setters).
 - Equivalents: `createToolkit` (js) · `create_toolkit` (py) · `CreateToolkit` (go) ·
-  `Toolkit.create` (java).
+  `Toolkit.create` (java) · `Toolnexus.create_toolkit` (elixir).
 
 ## Skills
 
@@ -25,7 +25,7 @@ shown in five-language synced tabs.
 - `LoadOptions { Dirs, Skills, Filter, SampleLimit }`
 - `SkillProvider` is a `Func<IEnumerable<SkillDef>>`.
 - Equivalents: `loadSkills` / `listSkills` (js) · `load_skills` / `list_skills` (py) ·
-  `LoadSkillsWith` / `ListSkills` (go) · `SkillSource.loadWith` / `listSkills` (java).
+  `LoadSkillsWith` / `ListSkills` (go) · `SkillSource.loadWith` / `listSkills` (java) · `Toolnexus.Skill.load` / `Toolnexus.Skill.list` (elixir).
 
 ## MCP · Adapters · Client
 

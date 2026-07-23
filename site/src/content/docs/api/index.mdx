@@ -1,14 +1,14 @@
 ---
 title: API Reference
-description: The public surface of every port — toolkit options, client options, skill loading and inventory, MCP load, and adapters — with the exact symbol in all five languages side by side.
+description: The public surface of every port — toolkit options, client options, skill loading and inventory, MCP load, and adapters — with the exact symbol in all six languages side by side.
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-The same API, five languages. Every entry below shows its **exact per-language equivalent** in
+The same API, six languages. Every entry below shows its **exact per-language equivalent** in
 synced tabs — pick your language once and it sticks across the page. Per-port index pages:
 [JavaScript](/api/javascript/) · [Python](/api/python/) · [Go](/api/go/) · [Java](/api/java/) ·
-[C#](/api/csharp/).
+[C#](/api/csharp/) · [Elixir](/api/elixir/).
 
 <Aside type="tip">These are the public entry points. Behavior is identical across ports by
 contract — see <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC.md</a>.</Aside>
@@ -94,6 +94,22 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
 });
 ```
 </TabItem>
+<TabItem label="Elixir">
+```elixir
+{:ok, tk} =
+  Toolnexus.create_toolkit(
+    mcp_config: "./mcp.json",
+    skills_dir: ["./skills"],
+    skills: [%{name: "…", content: "…"}],       # data skills (§3, S1)
+    skill_provider: fn -> [] end,               # lazy, resolved once
+    skills_filter: %{"deploy" => true},         # per-agent allowlist (§3, S2)
+    skill_sample_limit: 0,                       # 0=10, n=cap, -1=off (§3, S5)
+    builtins: true,
+    agents: [],
+    extra_tools: []
+  )
+```
+</TabItem>
 </Tabs>
 
 ## Skills — load, supply as data, filter, inventory
@@ -149,6 +165,18 @@ new SkillSource.SkillDef(Name, Description, Content,
     Resources: null, Base: null);   // record
 ```
 </TabItem>
+<TabItem label="Elixir">
+```elixir
+# a data skill is a plain map; keys mirror the struct
+%{
+  name: "…",
+  description: "…",
+  content: "…",
+  resources: nil,   # logical names; nil ⇒ instruction-only
+  base: nil         # logical base; default "skill://<name>/"
+}
+```
+</TabItem>
 </Tabs>
 
 ### List & validate — `ListSkills` (§3, S3)
@@ -191,6 +219,12 @@ var inv = SkillSource.ListSkills(new SkillSource.LoadOptions { Dirs = new[] { ".
 // inv.Skills   inv.Skipped  (SkillSkip.Reason)
 ```
 </TabItem>
+<TabItem label="Elixir">
+```elixir
+inv = Toolnexus.Skill.list("./skills")
+# inv.skills   inv.skipped  (%{location, reason})
+```
+</TabItem>
 </Tabs>
 
 ## Load MCP servers
@@ -225,6 +259,11 @@ McpSource mcp = McpSource.load("./mcp.json");
 var mcp = await McpSource.LoadAsync("./mcp.json");
 ```
 </TabItem>
+<TabItem label="Elixir">
+```elixir
+{:ok, mcp} = Toolnexus.Mcp.load("./mcp.json")   # mcp.tools
+```
+</TabItem>
 </Tabs>
 
 ## Adapters — emit provider schema
@@ -257,6 +296,11 @@ var tools = Adapters.toOpenAI(tk);   // toAnthropic · toGemini
 <TabItem label="C#">
 ```csharp
 var tools = Adapters.ToOpenAI(tk);   // ToAnthropic · ToGemini
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+tools = Toolnexus.Adapters.to_openai(tk.tools)   # to_anthropic · to_gemini
 ```
 </TabItem>
 </Tabs>
@@ -305,6 +349,13 @@ var client = Client.Create(new Client.Options {
     ApiKey = "…",
 });
 var res = await client.AskAsync("…", tk);
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+client = Toolnexus.Client.create(style: "openai", model: "gpt-5",
+                                 base_url: "…", api_key: "…")
+res = Toolnexus.Client.run(client, "…", tk)
 ```
 </TabItem>
 </Tabs>

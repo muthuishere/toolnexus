@@ -106,6 +106,7 @@ export default defineConfig({
 						{ label: 'Go', slug: 'api/go' },
 						{ label: 'Java', slug: 'api/java' },
 						{ label: 'C#', slug: 'api/csharp' },
+							{ label: 'Elixir', slug: 'api/elixir' },
 					],
 				},
 				{

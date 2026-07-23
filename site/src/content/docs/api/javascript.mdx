@@ -1,10 +1,10 @@
 ---
 title: API Reference — JavaScript
-description: The toolnexus (npm) public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other four ports.
+description: The toolnexus (npm) public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other five ports.
 ---
 
 Package **`toolnexus`** (npm). See the [combined API Reference](/api/) for every symbol shown in
-five-language synced tabs.
+six-language synced tabs.
 
 ## Toolkit
 
@@ -12,7 +12,7 @@ five-language synced tabs.
 - `ToolkitOptions`: `mcpConfig`, `skillsDir`, `skills`, `skillProvider`, `skillsFilter`,
   `skillSampleLimit`, `builtins`, `agents`, `extraTools`, `waitFor`.
 - Equivalents: `create_toolkit` (py) · `CreateToolkit` (go) · `Toolkit.create` (java) ·
-  `Toolkit.CreateAsync` (c#).
+  `Toolkit.CreateAsync` (c#) · `Toolnexus.create_toolkit` (elixir).
 
 ## Skills
 
@@ -23,7 +23,7 @@ five-language synced tabs.
 - `LoadSkillsOptions { dirs?, skills?, filter?, sampleLimit? }`
 - Equivalents: `load_skills` / `list_skills` (py) · `LoadSkills` / `LoadSkillsWith` / `ListSkills`
   (go) · `SkillSource.load` / `loadWith` / `listSkills` (java) · `SkillSource.Load` / `LoadWith` /
-  `ListSkills` (c#).
+  `ListSkills` (c#) · `Toolnexus.Skill.load` / `Toolnexus.Skill.list` (elixir).
 
 ## MCP · Adapters · Client
 
