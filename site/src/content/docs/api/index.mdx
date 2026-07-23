@@ -359,3 +359,444 @@ res = Toolnexus.Client.run(client, "…", tk)
 ```
 </TabItem>
 </Tabs>
+
+## Your own functions — native tools
+
+Wrap a function as a `Tool` (`source: "native"`). Pass them via `extraTools` or hand them to an
+agent's `uses.tools`. See the [Native tools](/native/) guide.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { defineTool } from "toolnexus"
+
+const add = defineTool({
+  name: "add", description: "Add two numbers",
+  run: (a) => String(Number(a.x) + Number(a.y)),
+})
+// decorator sugar: @tool(description, { name?, inputSchema? }) + collectTools(obj)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import tool   # or define_tool(...)
+
+@tool                        # schema inferred from type hints + docstring
+def add(a: int, b: int) -> str:
+    """Add two numbers."""
+    return str(a + b)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+add := toolnexus.NativeTool("add", "Add two numbers", nil,
+    func(ctx context.Context, a map[string]any) (string, error) {
+        return fmt.Sprint(a["x"], a["y"]), nil
+    })
+// or NativeToolReflect[T] — schema derived from a struct's json tags
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Tool add = NativeTool.of("add", "Add two numbers", schema,
+    args -> String.valueOf((int) args.get("a") + (int) args.get("b")));
+// overload with (args, ToolContext) for suspension-aware tools
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var add = NativeTool.Of("add", "Add two numbers", inputSchema: null,
+    args => (object?)((int)args["a"]! + (int)args["b"]!));
+// also NativeTool.OfAsync(...) and an (args, ToolContext) overload
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+add = Toolnexus.Native.define_tool(
+  name: "add", description: "Add two numbers",
+  execute: fn args -> to_string(args["a"] + args["b"]) end)
+# execute may be fn args -> end or fn args, ctx -> end
+```
+</TabItem>
+</Tabs>
+
+## HTTP / REST tools
+
+Turn any endpoint into a `Tool` (`source: "http"`). `{placeholder}` path substitution, `${ENV_VAR}`
+header expansion (never logged), `resultMode` `text` (default) · `json` · `status+text`. See the
+[HTTP tools](/http/) guide.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { httpTool } from "toolnexus"
+
+const weather = httpTool({
+  name: "weather", description: "Current weather",
+  method: "GET", url: "https://api.example.com/weather/{city}",
+})   // timeout ms (default 30000)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import http_tool
+
+weather = http_tool(name="weather", description="Current weather",
+                    method="GET", url="https://api.example.com/weather/{city}")
+# timeout in SECONDS here
+```
+</TabItem>
+<TabItem label="Go">
+```go
+weather := toolnexus.HTTPTool(toolnexus.HTTPToolOptions{
+    Name: "weather", Description: "Current weather",
+    Method: "GET", URL: "https://api.example.com/weather/{city}",
+})   // Timeout ms (0 ⇒ 30000)
+```
+</TabItem>
+<TabItem label="Java">
+```java
+var o = new HttpTool.Options();
+o.name = "weather"; o.description = "Current weather";
+o.method = "GET"; o.url = "https://api.example.com/weather/{city}";
+Tool weather = HttpTool.of(o);   // timeout Long ms
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var weather = HttpTool.Of(new HttpTool.Options {
+    Name = "weather", Description = "Current weather",
+    Method = "GET", Url = "https://api.example.com/weather/{city}",
+});   // Timeout long? ms
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+weather = Toolnexus.Http.tool(
+  name: "weather", description: "Current weather",
+  method: "GET", url: "https://api.example.com/weather/{city}")
+# note: Toolnexus.Http.tool/1 (not http_tool); :timeout in ms
+```
+</TabItem>
+</Tabs>
+
+## Built-in tools
+
+`builtins` (toolkit option, default **on**) ships the same ten tools in every port, `source:
+"builtin"`, identical names:
+
+```
+bash · read · write · edit · grep · glob · webfetch · question · apply_patch · todowrite
+```
+
+`question` suspends through the human loop (a `kind: "question"` Request, §10). The toggle accepts
+`true | false | { enabled?, disabled?, tools?: { <name>: false } }` — `disabled: true` wins, and a
+`tools` entry set to `false` drops that one built-in. See the [Built-in tools](/builtins/) guide.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const tk = await createToolkit({
+  builtins: { tools: { bash: false } },   // all built-ins except bash
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+tk = await create_toolkit(builtins={"tools": {"bash": False}})
+```
+</TabItem>
+<TabItem label="Go">
+```go
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{
+    Builtins: map[string]any{"tools": map[string]any{"bash": false}},
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Toolkit tk = Toolkit.create(new Toolkit.Options()
+    .builtins(Map.of("tools", Map.of("bash", false))));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options {
+    Builtins = new Dictionary<string, object?> {
+        ["tools"] = new Dictionary<string, object?> { ["bash"] = false } },
+});
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+{:ok, tk} = Toolnexus.create_toolkit(builtins: %{"tools" => %{"bash" => false}})
+```
+</TabItem>
+</Tabs>
+
+## Sub-agents & teams
+
+An **Agent is a Tool**: a soul (system prompt) × a scoped toolkit × the client loop. `team` is the
+only set of targets the built-in `task` tool can delegate to — no team ⇒ no `task` tool. `asTool`
+turns an agent into a `Tool` for `extraTools`; `composeSoul` builds a soul from a directory
+(`AGENTS.md` + sections). Result `status` ∈ `done · pending · incomplete · interrupted · closed ·
+timeout · error`. See the [Sub-agents & teams](/subagents/) guide.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { agents } from "toolnexus"
+
+const explore = agents.agent("explore", { does: "read-only research", uses: { tools: [lookup] } })
+const coder = agents.agent("coder", {
+  does: "implements changes", soulFile: "./AGENTS.md",
+  team: [explore], budget: { maxTokens: 10_000 },
+})
+const r = await coder.run("fix the failing test", {
+  llm: { baseUrl: "…", style: "openai", model: "gpt-4o-mini" },
+})
+// r.status · r.text · r.totalTokens ; delegate as a tool: explore.asTool({ llm })
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus.agents import agent, Budget
+
+explore = agent("explore", does="read-only research", uses={"tools": [lookup]})
+coder = agent("coder", does="implements changes", soul_file="./AGENTS.md",
+              team=[explore], budget=Budget(max_tokens=10_000))
+r = await coder.run("fix the failing test",
+    llm={"base_url": "…", "style": "openai", "model": "gpt-4o-mini"})
+# r.status · r.text · r.total_tokens ; explore.as_tool(llm=llm)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+import "github.com/muthuishere/toolnexus/golang/agents"
+
+explore := agents.New("explore", agents.Spec{Does: "read-only research", Tools: []toolnexus.Tool{lookup}})
+coder := agents.New("coder", agents.Spec{
+    Does: "implements changes", SoulFile: "./AGENTS.md",
+    Team: []*agents.Agent{explore}, Budget: &agents.Budget{MaxTokens: 10_000}})
+r, _ := coder.Run(agents.Options{LLM: &agents.LLMOptions{
+    BaseURL: "…", Style: toolnexus.StyleOpenAI, Model: "gpt-4o-mini"}}, "fix the failing test")
+// r.Status · r.Text · r.TotalTokens ; explore.AsTool(agents.Options{LLM: llm})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+import static io.github.muthuishere.toolnexus.agents.Agents.agent;
+
+var explore = agent("explore", new Agents.AgentSpec().does("read-only research").tools(lookup));
+var coder = agent("coder", new Agents.AgentSpec()
+    .does("implements changes").soulFile(Path.of("AGENTS.md"))
+    .team(explore).budget(new Budget().maxTokens(10_000)));
+TaskResult r = coder.run(new RuntimeOptions()
+    .baseUrl("…").style("openai").defaultModel("gpt-4o-mini"), "fix the failing test");
+// r.status() · r.text() · r.totalTokens() ; explore.asTool(rtOpts)
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+using Toolnexus.Agents;
+
+var explore = new Agent("explore", new AgentSpec { Does = "read-only research", Uses = new List<ITool> { lookup } });
+var coder = new Agent("coder", new AgentSpec {
+    Does = "implements changes", SoulFile = "./AGENTS.md",
+    Team = new List<Agent> { explore }, Budget = new Budget { MaxTokens = 10_000 } });
+var r = await coder.RunAsync(new RuntimeOptions {
+    BaseUrl = "…", Style = "openai", Model = "gpt-4o-mini" }, "fix the failing test");
+// r.Status · r.Text · r.TotalTokens ; explore.AsTool(rtOpts)
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Agents
+
+explore = Agents.agent("explore", does: "read-only research", uses: %{tools: [lookup]})
+coder = Agents.agent("coder",
+  does: "implements changes", soul_file: "AGENTS.md",
+  team: [explore], budget: %{max_tokens: 10_000})
+r = Agents.run(coder,
+  [llm: %{base_url: "…", style: "openai", model: "gpt-4o-mini"}], "fix the failing test")
+# r.status · r.text · r.total_tokens ; Agents.as_tool(explore, rt_opts)
+```
+</TabItem>
+</Tabs>
+
+## A2A — serve inbound, consume remote agents
+
+Two directions of the same protocol (JSON-RPC 2.0; card at `GET /.well-known/agent-card.json`).
+**Serve** exposes a toolkit as a remote A2A agent; **remote agents** pull a peer's card and expose
+its skills as `<agent>_<skill>` tools (`source: "a2a"`). See the [A2A](/a2a/) guide.
+
+### Serve — expose a toolkit
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const handle = await tk.serve("127.0.0.1:0", {
+  client: llm,
+  a2a: { name: "my-agent", store: "memory" },   // store: "memory" | "file:<dir>" | TaskStore
+})
+// handle.url speaks A2A ; await handle.stop()
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import A2AConfig
+
+handle = await tk.serve("127.0.0.1:0", client=llm,
+                        a2a=A2AConfig(name="my-agent", store="memory"))
+# handle.url ; await handle.stop()
+```
+</TabItem>
+<TabItem label="Go">
+```go
+handle, _ := tk.Serve("127.0.0.1:0", toolnexus.ServeOptions{
+    Client: llm,
+    A2A:    &toolnexus.A2AConfig{Name: "my-agent", Store: "memory"},
+})
+// handle.URL ; handle.Stop()
+```
+</TabItem>
+<TabItem label="Java">
+```java
+A2AServer.ServeHandle handle = tk.serve("127.0.0.1:0",
+    new Toolkit.ServeOptions()
+        .client(llm)
+        .a2a(new A2AServer.A2AConfig().name("my-agent").store("memory")));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var handle = await tk.ServeAsync("127.0.0.1:0", new Toolkit.ServeOptions {
+    Client = llm,
+    A2A = new A2AConfig { Name = "my-agent", Store = "memory" },
+});
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+handle = Toolnexus.Toolkit.serve(tk, "127.0.0.1:0",
+  client: llm, a2a: %{name: "my-agent", store: "memory"})
+# handle.url ; Toolnexus.Serve.stop(handle)
+```
+</TabItem>
+</Tabs>
+
+### Remote agents — consume a peer
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const tk = await createToolkit({
+  agents: [agent({ card: "https://peer.example.com/.well-known/agent-card.json" })],
+})
+await tk.addAgent("https://other.example.com/.well-known/agent-card.json")
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_toolkit, agent
+
+tk = await create_toolkit(
+    agents=[agent("https://peer.example.com/.well-known/agent-card.json")])
+await tk.add_agent("https://other.example.com/.well-known/agent-card.json")
+```
+</TabItem>
+<TabItem label="Go">
+```go
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{
+    Agents: []toolnexus.Agent{{Card: "https://peer.example.com/.well-known/agent-card.json"}},
+})
+tk.AddAgent(ctx, "https://other.example.com/.well-known/agent-card.json", nil)
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Toolkit tk = Toolkit.create(new Toolkit.Options()
+    .agents(List.of(A2A.agent("https://peer.example.com/.well-known/agent-card.json"))));
+tk.addAgent("https://other.example.com/.well-known/agent-card.json");
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options {
+    Agents = new List<Agent> {
+        new() { Card = "https://peer.example.com/.well-known/agent-card.json" } },
+});
+await tk.AddAgentAsync("https://other.example.com/.well-known/agent-card.json");
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+{:ok, tk} = Toolnexus.create_toolkit(
+  agents: [Toolnexus.A2A.agent(card: "https://peer.example.com/.well-known/agent-card.json")])
+Toolnexus.Toolkit.add_agent(tk, "https://other.example.com/.well-known/agent-card.json")
+```
+</TabItem>
+</Tabs>
+
+## Suspension & the human loop (§10)
+
+`waitFor` is the host resolver `(Request) → Answer`. A tool suspends by returning a **pending**
+result (`isError: true`, `metadata.pending = Request`); the loop calls `waitFor`, then re-runs the
+tool with `Answer` on the tool context. `Request { id, kind, prompt, url?, data?, expiresAt? }` ·
+`Answer { id, ok, data?, reason? }`. This is also the bridge for MCP elicitation and the built-in
+`question` tool. See the [Suspension](/suspension/) guide.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { pending, authRequired, pendingOf } from "toolnexus"
+
+const tk = await createToolkit({
+  waitFor: async (req) => ({ id: req.id, ok: true, data: { answer: "…" } }),
+})
+// inside a tool: return pending({ kind: "input", prompt: "…" })  // or authRequired(url)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import pending, auth_required, Answer
+
+tk = await create_toolkit(
+    wait_for=lambda req: Answer(id=req.id, ok=True, data={"answer": "…"}))
+# inside a tool: return pending(kind="input", prompt="…")
+```
+</TabItem>
+<TabItem label="Go">
+```go
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{
+    WaitFor: func(req toolnexus.Request) (toolnexus.Answer, error) {
+        return toolnexus.Answer{ID: req.ID, Ok: true, Data: map[string]any{"answer": "…"}}, nil
+    },
+})
+// inside a tool: return toolnexus.Pending(toolnexus.Request{Kind: "input", Prompt: "…"})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Toolkit tk = Toolkit.create(new Toolkit.Options()
+    .waitFor(req -> new Answer(req.id(), true, Map.of("answer", "…"), null)));
+// inside a tool: return ToolResult.pending(new Request(id, "input", "…"));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options()
+    .WithWaitFor(req => Task.FromResult(
+        new Answer { Id = req.Id, Ok = true, Data = new() { ["answer"] = "…" } })));
+// inside a tool: return ToolResult.Pending(new Request { Kind = "input", Prompt = "…" });
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+{:ok, tk} = Toolnexus.create_toolkit(
+  wait_for: fn req -> %Toolnexus.Answer{id: req.id, ok: true, data: %{"answer" => "…"}} end)
+# a tool suspends by returning %Toolnexus.ToolResult{is_error: true,
+#   metadata: %{pending: %Toolnexus.Request{kind: "input", prompt: "…"}}}
+```
+</TabItem>
+</Tabs>

@@ -32,3 +32,43 @@ shown in six-language synced tabs.
 - `McpSource.LoadAsync(config)`
 - `Adapters.ToOpenAI(tk)` · `ToAnthropic(tk)` · `ToGemini(tk)`
 - `Client.Create(Client.Options)` → `await client.AskAsync(prompt, tk)`.
+
+## Tools you build — native, HTTP, built-ins
+
+- `NativeTool.Of(name, description, schema, fn)` · `NativeTool.OfAsync(...)` — `(args,
+  ToolContext)` overloads.
+- `HttpTool.Of(HttpTool.Options)` — `{ Name, Description, Method, Url, Headers, Query, Body,
+  ResultMode, Timeout }`; `Timeout` `long?` ms.
+- `Builtins` toggle → ten built-ins: `bash · read · write · edit · grep · glob · webfetch ·
+  question · apply_patch · todowrite`. (`BuiltinTools.Create()` / `.Select(cfg)`.)
+- Equivalents: `defineTool` / `httpTool` (js) · `define_tool` / `http_tool` (py) · `NativeTool` /
+  `HTTPTool` (go) · `NativeTool.of` / `HttpTool.of` (java) · `Toolnexus.Native.define_tool` /
+  `Toolnexus.Http.tool` (elixir).
+
+## Sub-agents & teams
+
+- `new Agent(name, new AgentSpec { Does, Uses, Soul, SoulFile, Team, Budget, Model, WaitFor })`.
+- `Agent.RunAsync(RuntimeOptions, prompt): Task<AgentResult>` — `.Status`, `.Text`,
+  `.TotalTokens`.
+- `Agent.AsTool(RuntimeOptions): ITool` · `Home.ComposeSoul(dir): (Soul, Found)`.
+- Equivalents: `agents.agent` / `.run` / `.asTool` / `composeSoul` (js) · `agent` (py) ·
+  `agents.New` (go) · `Agents.agent` (java/elixir).
+
+## A2A — serve & remote agents
+
+- `tk.ServeAsync(addr, new Toolkit.ServeOptions { Client, A2A, OnTask, Mcp, OnCall }): Task<ServeHandle>`.
+- `new Agent { Card, Headers, Timeout, PollEvery }` + `Options { Agents }` /
+  `await tk.AddAgentAsync(cardUrl)`.
+- Equivalents: `tk.serve` / `tk.addAgent` (js) · `serve` / `add_agent` (py) · `Serve` / `AddAgent`
+  (go) · `serve` / `addAgent` (java) · `Toolkit.serve` / `Toolkit.add_agent` (elixir).
+
+## Suspension & the human loop
+
+- `Options.WithWaitFor(Func<Request, Task<Answer>>)` (toolkit option).
+- `record Request { Id, Kind, Prompt, Url?, Data?, ExpiresAt? }` · `record Answer { Id, Ok, Data?,
+  Reason? }`.
+- `ToolResult.Pending(Request)` · `ToolResult.AuthRequired(url, prompt?)` ·
+  `ToolResult.PendingOf(result): Request?`.
+- Equivalents: `waitFor` / `pending` / `authRequired` / `pendingOf` (js) · `wait_for` / `pending`
+  (py) · `WaitFor` / `Pending` (go) · `waitFor` / `ToolResult.pending` (java) · `wait_for` /
+  `ToolResult.pending?` (elixir).
