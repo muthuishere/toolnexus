@@ -5,7 +5,9 @@
 **Mastra** and **toolnexus** are not the same kind of thing, and neither is a strict
 superset of the other.
 
-**Mastra** is a **batteries-included TypeScript agent platform**. It ships an agent
+**Mastra** is a **batteries-included TypeScript agent platform** — the same *class* of thing as
+**Spring AI** (JVM) or **LangGraph** (Python): a broad, ecosystem-anchored framework you build
+your whole agent stack on, not a focused core you embed. It ships an agent
 runtime, a full **workflows engine** (`packages/core/src/workflows/workflow.ts:1545`,
 `createWorkflow`), **RAG** (`@mastra/rag`), **evals/scorers** (`@mastra/evals`),
 **long-term memory with storage adapters** (`@mastra/memory`), a **dev playground UI**

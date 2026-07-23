@@ -89,11 +89,14 @@ Mastra **155 MB**. All four do real MCP.
 
 <Aside type="note" title="Mastra is a platform, not just a runtime">
 This measures **per-call runtime overhead only** — the tool-calling loop against a mock LLM.
-[Mastra](https://github.com/mastra-ai/mastra) is a batteries-included **TypeScript platform**
-(workflows, RAG, evals, a playground, deployers) that toolnexus deliberately is not; it wraps the
-Vercel AI SDK and adds its own agent/processor layers, which is why it lands heaviest per call
-here. The honest tradeoff — platform breadth vs a portable, low-overhead core that runs
-byte-identically in six languages — is written up in full (capability matrix + who-wins-where) in
+[Mastra](https://github.com/mastra-ai/mastra) is a **broad, batteries-included platform** — the
+TypeScript-ecosystem counterpart to something like **Spring AI** on the JVM or **LangGraph** in
+Python: workflows, RAG, evals, a playground, deployers, all in one framework. toolnexus
+deliberately is not that — it is a focused, portable *core*. Mastra wraps the Vercel AI SDK and
+adds its own agent/processor layers, which is why it lands heaviest per call here; that overhead
+buys the platform breadth. The honest tradeoff — platform breadth vs a portable, low-overhead core
+that runs byte-identically in six languages — is written up in full (capability matrix +
+who-wins-where) in
 [`benchmarks/mastra-comparison.md`](https://github.com/muthuishere/toolnexus/blob/main/benchmarks/mastra-comparison.md).
 </Aside>
 </TabItem>
