@@ -1,10 +1,10 @@
 ---
 title: API Reference — Python
-description: The toolnexus (PyPI) public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other four ports.
+description: The toolnexus (PyPI) public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other five ports.
 ---
 
 Package **`toolnexus`** (PyPI, Python ≥ 3.11). See the [combined API Reference](/api/) for every
-symbol shown in five-language synced tabs.
+symbol shown in six-language synced tabs.
 
 ## Toolkit
 
@@ -12,7 +12,7 @@ symbol shown in five-language synced tabs.
 - Keyword args: `mcp_config`, `skills_dir`, `skills`, `skill_provider`, `skills_filter`,
   `skill_sample_limit`, `builtins`, `agents`, `extra_tools`, `wait_for`.
 - Equivalents: `createToolkit` (js) · `CreateToolkit` (go) · `Toolkit.create` (java) ·
-  `Toolkit.CreateAsync` (c#).
+  `Toolkit.CreateAsync` (c#) · `Toolnexus.create_toolkit` (elixir).
 
 ## Skills
 
@@ -22,7 +22,7 @@ symbol shown in five-language synced tabs.
 - `SkillDef(name, content, description=None, resources=None, base=None)`
 - `skill_provider` may be sync or async.
 - Equivalents: `loadSkills` / `listSkills` (js) · `LoadSkillsWith` / `ListSkills` (go) ·
-  `SkillSource.loadWith` / `listSkills` (java) · `SkillSource.LoadWith` / `ListSkills` (c#).
+  `SkillSource.loadWith` / `listSkills` (java) · `SkillSource.LoadWith` / `ListSkills` (c#) · `Toolnexus.Skill.load` / `Toolnexus.Skill.list` (elixir).
 
 ## MCP · Adapters · Client
 

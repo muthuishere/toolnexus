@@ -1,0 +1,51 @@
+---
+title: API Reference — Elixir
+description: The toolnexus (Hex) public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other five ports.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Package **`toolnexus`** (Hex), Elixir ≥ 1.16 / OTP 26. See the [combined API Reference](/api/) for
+every symbol shown in six-language synced tabs.
+
+<Aside type="note" title="Why the BEAM port exists">
+Long-running agents want supervision, isolation, and cheap concurrency — and that is exactly what
+**agent orchestration** needs. The Elixir/OTP port is where sub-agents, teams, hierarchical
+budgets, and durable suspension feel native (every MCP connection is a supervised process; a
+crashed stdio server is isolated as `"failed"` without taking the toolkit down; parallel tool
+calls ride `Task.async_stream`). Proving that shape on the BEAM is the reason toolnexus carries
+**agentic orchestration across all six languages** — same contract everywhere, native OTP
+underneath. The MCP client is in-house on OTP (no third-party SDK), which is also why this port
+ships the **full** elicitation bridge (form *and* URL mode).
+</Aside>
+
+## Toolkit
+
+- `Toolnexus.create_toolkit(opts) :: {:ok, toolkit} | {:error, term}` — the aggregator.
+  `Toolnexus.create_toolkit!/1` returns the toolkit or raises.
+- `opts` (keyword): `:mcp_config`, `:skills_dir`, `:skills`, `:skill_provider`, `:skills_filter`,
+  `:skill_sample_limit`, `:builtins`, `:agents`, `:extra_tools`, `:disable_tools`,
+  `:disable_skills`, `:wait_for`.
+- Equivalents: `createToolkit` (js) · `create_toolkit` (py) · `CreateToolkit` (go) ·
+  `Toolkit.create` (java) · `Toolkit.CreateAsync` (c#).
+
+## Skills
+
+- `Toolnexus.Skill.load(input) :: %Toolnexus.Skill.Source{}` — `input` is a path, a list of paths,
+  or an options keyword.
+- `Toolnexus.Skill.list(input) :: %{skills: [...], skipped: [...]}` — discover + validate; each
+  skip is `%{location, reason}` with reasons `missing-name` · `malformed-frontmatter` ·
+  `duplicate-name` · `unreadable`.
+- A **data skill** is a plain map: `%{name, description, content, resources, base}` (only `:name`
+  and `:content` required).
+- Equivalents: `loadSkills` / `listSkills` (js) · `load_skills` / `list_skills` (py) ·
+  `LoadSkills` / `ListSkills` (go) · `SkillSource.load` / `listSkills` (java) · `SkillSource.Load`
+  / `ListSkills` (c#).
+
+## MCP · Adapters · Client
+
+- `Toolnexus.Mcp.load(config, opts \\ []) :: {:ok, mcp} | {:error, term}` — `mcp.tools`.
+- `Toolnexus.Adapters.to_openai(tools)` · `to_anthropic(tools)` · `to_gemini(tools)`.
+- `Toolnexus.Client.create(opts) :: %Toolnexus.Client{}` →
+  `Toolnexus.Client.run(client, prompt, toolkit, opts \\ [])`,
+  `Toolnexus.Client.stream(client, prompt, toolkit, opts \\ [])`.

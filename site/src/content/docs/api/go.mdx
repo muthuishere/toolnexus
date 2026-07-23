@@ -1,10 +1,10 @@
 ---
 title: API Reference — Go
-description: The github.com/muthuishere/toolnexus/golang public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other four ports.
+description: The github.com/muthuishere/toolnexus/golang public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other five ports.
 ---
 
 Module **`github.com/muthuishere/toolnexus/golang`** (Go 1.23). See the
-[combined API Reference](/api/) for every symbol shown in five-language synced tabs.
+[combined API Reference](/api/) for every symbol shown in six-language synced tabs.
 
 ## Toolkit
 
@@ -12,7 +12,7 @@ Module **`github.com/muthuishere/toolnexus/golang`** (Go 1.23). See the
 - `Options` fields: `McpConfig`, `SkillsDir`, `Skills`, `SkillProvider`, `SkillsFilter`,
   `SkillSampleLimit`, `Builtins`, `Agents`, `ExtraTools`, `WaitFor`.
 - Equivalents: `createToolkit` (js) · `create_toolkit` (py) · `Toolkit.create` (java) ·
-  `Toolkit.CreateAsync` (c#).
+  `Toolkit.CreateAsync` (c#) · `Toolnexus.create_toolkit` (elixir).
 
 ## Skills
 
@@ -25,7 +25,7 @@ Module **`github.com/muthuishere/toolnexus/golang`** (Go 1.23). See the
 - `LoadSkillsOptions{ Dirs, Skills, Filter, SampleLimit }`
 - `SkillProvider func(context.Context) ([]SkillDef, error)` (on `Options`).
 - Equivalents: `loadSkills` / `listSkills` (js) · `load_skills` / `list_skills` (py) ·
-  `SkillSource.loadWith` / `listSkills` (java) · `SkillSource.LoadWith` / `ListSkills` (c#).
+  `SkillSource.loadWith` / `listSkills` (java) · `SkillSource.LoadWith` / `ListSkills` (c#) · `Toolnexus.Skill.load` / `Toolnexus.Skill.list` (elixir).
 
 ## MCP · Adapters · Client
 
