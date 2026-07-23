@@ -17,14 +17,14 @@ If you have not run toolnexus yet, do [**zero to agent in 3 steps**](/toolnexus/
 
 ## Pick your goal
 
-| Your goal | Scenario | Core primitives | SPEC |
-|---|---|---|---|
-| **"An assistant that works on my codebase"** — reads files, runs the test suite, proposes an edit, and delegates the boring parts | [Coding assistant](/toolnexus/scenarios/coding-agent/) | built-in tools (`bash`, file read/write) · agent skills · `agent()` + `team` + the `task` tool · budgets | §4A, §3, §7D |
-| **"An assistant that remembers me"** — an identity in files, notes it updates over weeks, acts on its own clock | [Personal assistant](/toolnexus/scenarios/persona-assistant/) | `fromDir` · the `memory` tool · `startAgent` heartbeat · `compactor` | §7E, §7F |
-| **"Research five things at once and merge the findings"** — a coordinator fanning out to isolated workers | [Research orchestrator](/toolnexus/scenarios/research-orchestrator/) | `agent()` + `team` · parallel `task` calls · `maxConcurrent` · usage roll-up | §7D, §8 |
-| **"An agent over my real systems, with a human on the risky bits"** — orders/CRM over MCP, policy as skills, refunds gated by approval, served to a web app | [Support / ops agent](/toolnexus/scenarios/support-agent/) | `mcpConfig` + per-server allowlist · skills · `pending`/`waitFor` · `serve` · budgets | §2, §3, §10, §7B |
-| **"An agent that gets better over time"** — records what worked, folds it back into its own instructions | [Self-improving agent](/toolnexus/scenarios/self-improving-agent/) | `memory` tool · heartbeat consolidation · `onTask`/metrics · skills as the editable policy layer | §7E, §3, §8 |
-| **"Output that must be right before it ships"** — a worker produces, an independent adversarial verifier must pass it before the result leaves the agent | [Verify-before-commit gate](/toolnexus/scenarios/verify-gate/) | `agent()` + `task` isolation (final-text-only) · adversarial verifier soul · scoped `uses` · bounded retry loop · `budget` | §7D, §8 |
+| Your goal | Scenario | Core primitives |
+|---|---|---|
+| **"An assistant that works on my codebase"** — reads files, runs the test suite, proposes an edit, and delegates the boring parts | [Coding assistant](/toolnexus/scenarios/coding-agent/) | built-in tools (`bash`, file read/write) · agent skills · `agent()` + `team` + the `task` tool · budgets |
+| **"An assistant that remembers me"** — an identity in files, notes it updates over weeks, acts on its own clock | [Personal assistant](/toolnexus/scenarios/persona-assistant/) | `fromDir` · the `memory` tool · `startAgent` heartbeat · `compactor` |
+| **"Research five things at once and merge the findings"** — a coordinator fanning out to isolated workers | [Research orchestrator](/toolnexus/scenarios/research-orchestrator/) | `agent()` + `team` · parallel `task` calls · `maxConcurrent` · usage roll-up |
+| **"An agent over my real systems, with a human on the risky bits"** — orders/CRM over MCP, policy as skills, refunds gated by approval, served to a web app | [Support / ops agent](/toolnexus/scenarios/support-agent/) | `mcpConfig` + per-server allowlist · skills · `pending`/`waitFor` · `serve` · budgets |
+| **"An agent that gets better over time"** — records what worked, folds it back into its own instructions | [Self-improving agent](/toolnexus/scenarios/self-improving-agent/) | `memory` tool · heartbeat consolidation · `onTask`/metrics · skills as the editable policy layer |
+| **"Output that must be right before it ships"** — a worker produces, an independent adversarial verifier must pass it before the result leaves the agent | [Verify-before-commit gate](/toolnexus/scenarios/verify-gate/) | `agent()` + `task` isolation (final-text-only) · adversarial verifier soul · scoped `uses` · bounded retry loop · `budget` |
 
 Nothing here is mutually exclusive. A support agent that remembers a customer is the support
 scenario plus `fromDir`; a coding assistant that asks before force-pushing is the coding scenario
@@ -33,22 +33,22 @@ plus `waitFor`. The primitives compose because they are all the same two nouns u
 
 ## Primitives cheat sheet
 
-One line each. Follow the SPEC column when you need the exact contract.
+One line each.
 
-| Primitive | What it gives you | SPEC |
-|---|---|---|
-| `createToolkit` | The aggregator: MCP servers + skills + your functions + HTTP + built-ins + A2A agents behind one `Tool` interface. | §4 |
-| `createClient` / `run` / `ask` | The host loop — tool calling, retries, streaming, conversation memory — against any OpenAI- or Anthropic-style endpoint. | §8 |
-| `agent()` | An agent **is** a tool: system prompt × a filtered toolkit view × the loop. `.run()` for one-shot, `.asTool()` to drop it into any toolkit. | §7D |
-| `team` + `task` | Listing agents in `team` *is* the sub-agent wiring — they become the only targets of the child-facing `task` tool. No team ⇒ no delegation (opt-in, non-recursive by default). | §7D |
-| `Budget` | `maxTurns`/`maxTokens`/`maxToolCalls`/`maxWallMs`/`maxChildren`/`maxConcurrent`/`maxDepth`, carved at spawn and re-walked live before every turn. Any stop is loud: `status:"incomplete"` with the limit named. | §7D |
-| `pending` / `waitFor` | A tool returns `Pending(request)` instead of an answer; the host resolves it. Inline with a `waitFor`, or durably as `status:"pending"` you persist and resume later. | §10 |
-| `fromDir` | The directory *is* the agent: `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `MEMORY.md` compose the system prompt at session start. | §7E |
-| `memory` | An opt-in, file-backed tool with three actions (`add`/`replace`/`remove`) over `MEMORY.md` or `USER.md`. Writes hit disk now; they load into the prompt at the **next** session (frozen-snapshot rule). | §7E |
-| `startAgent` heartbeat | Gives a persona its own clock: each `everyMs` it posts a tick to its own inbox and wakes it to read `HEARTBEAT.md`. A `HEARTBEAT_OK` reply is silent. | §7E |
-| `compactor` | A `beforeLLM` hook that summarizes the older transcript and keeps a recent tail — tool-pair safe, system prompt preserved. Below `maxTokens` it is a byte-identical no-op. | §7F |
-| `serve` | The inbound direction: expose the toolkit as an **A2A agent** (Agent Card + JSON-RPC, skills-based) and/or as an **MCP server** (`POST /mcp`, tools-based). No auth in core. | §7B, §7C |
-| Hooks | `beforeLLM` / `afterLLM` / `beforeTool` / `afterTool` — guardrails, redaction, caching, cost tracking. `beforeTool` can deny or rewrite a call before it runs. | §8 |
+| Primitive | What it gives you |
+|---|---|
+| `createToolkit` | The aggregator: MCP servers + skills + your functions + HTTP + built-ins + A2A agents behind one `Tool` interface. |
+| `createClient` / `run` / `ask` | The host loop — tool calling, retries, streaming, conversation memory — against any OpenAI- or Anthropic-style endpoint. |
+| `agent()` | An agent **is** a tool: system prompt × a filtered toolkit view × the loop. `.run()` for one-shot, `.asTool()` to drop it into any toolkit. |
+| `team` + `task` | Listing agents in `team` *is* the sub-agent wiring — they become the only targets of the child-facing `task` tool. No team ⇒ no delegation (opt-in, non-recursive by default). |
+| `Budget` | `maxTurns`/`maxTokens`/`maxToolCalls`/`maxWallMs`/`maxChildren`/`maxConcurrent`/`maxDepth`, carved at spawn and re-walked live before every turn. Any stop is loud: `status:"incomplete"` with the limit named. |
+| `pending` / `waitFor` | A tool returns `Pending(request)` instead of an answer; the host resolves it. Inline with a `waitFor`, or durably as `status:"pending"` you persist and resume later. |
+| `fromDir` | The directory *is* the agent: `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `MEMORY.md` compose the system prompt at session start. |
+| `memory` | An opt-in, file-backed tool with three actions (`add`/`replace`/`remove`) over `MEMORY.md` or `USER.md`. Writes hit disk now; they load into the prompt at the **next** session (frozen-snapshot rule). |
+| `startAgent` heartbeat | Gives a persona its own clock: each `everyMs` it posts a tick to its own inbox and wakes it to read `HEARTBEAT.md`. A `HEARTBEAT_OK` reply is silent. |
+| `compactor` | A `beforeLLM` hook that summarizes the older transcript and keeps a recent tail — tool-pair safe, system prompt preserved. Below `maxTokens` it is a byte-identical no-op. |
+| `serve` | The inbound direction: expose the toolkit as an **A2A agent** (Agent Card + JSON-RPC, skills-based) and/or as an **MCP server** (`POST /mcp`, tools-based). No auth in core. |
+| Hooks | `beforeLLM` / `afterLLM` / `beforeTool` / `afterTool` — guardrails, redaction, caching, cost tracking. `beforeTool` can deny or rewrite a call before it runs. |
 
 ## How to read a scenario page
 
@@ -62,7 +62,7 @@ Each one follows the same spine, so you can skim to the part you need:
 <Aside type="note" title="Six ports, one behavior">
 Every scenario is expressible in all six languages because parity is the product: the same
 `mcp.json` and the same `SKILL.md` folder produce the same tools and the same byte-exact `skill`
-output in JavaScript, Python, Go, Java, C# and Elixir (`SPEC.md §0`). Pick the language your
+output in JavaScript, Python, Go, Java, C# and Elixir. Pick the language your
 service is already written in.
 </Aside>
 

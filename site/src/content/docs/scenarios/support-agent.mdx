@@ -23,13 +23,13 @@ those is one shipped toolnexus primitive, and they compose without glue.
 
 ## The wiring at a glance
 
-| Layer | What it is here | Primitive | SPEC |
-|---|---|---|---|
-| Systems of record | Orders service (stdio MCP), CRM (remote MCP with a bearer token) | `mcpConfig` + per-server `tools` allowlist | [§2](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md) |
-| Knowledge & policy | `refund-policy/SKILL.md`, `shipping-claims/SKILL.md` — loaded only when relevant | `skillsDir` + the `skill` tool | §3 |
-| The irreversible action | An `issue_refund` tool that **suspends** above a threshold | `pending(Request)` → `waitFor` / durable `status:"pending"` | §10 |
-| The front door | The web app POSTs a task; the agent answers | `toolkit.serve(addr, { client, a2a })` | §7B |
-| Cost control | Turn cap per run; token/turn budget when run as an agent | `maxTurns`, `Budget` | §8, §7D |
+| Layer | What it is here | Primitive |
+|---|---|---|
+| Systems of record | Orders service (stdio MCP), CRM (remote MCP with a bearer token) | `mcpConfig` + per-server `tools` allowlist |
+| Knowledge & policy | `refund-policy/SKILL.md`, `shipping-claims/SKILL.md` — loaded only when relevant | `skillsDir` + the `skill` tool |
+| The irreversible action | An `issue_refund` tool that **suspends** above a threshold | `pending(Request)` → `waitFor` / durable `status:"pending"` |
+| The front door | The web app POSTs a task; the agent answers | `toolkit.serve(addr, { client, a2a })` |
+| Cost control | Turn cap per run; token/turn budget when run as an agent | `maxTurns`, `Budget` |
 
 ---
 
@@ -67,7 +67,7 @@ Both live in one file, and neither needs a line of integration code.
 
 ### It can read, but it cannot refund
 
-That `tools` map is the load-bearing part. It is the **per-server allowlist** (SPEC §2, Gap 7),
+That `tools` map is the load-bearing part. It is the **per-server allowlist**,
 keyed on the server's *original* tool name and applied before the `<server>_<tool>` prefix is added:
 
 | Filter shape | Meaning |
@@ -82,8 +82,7 @@ them: they are not in the allowlist, so they are not in the toolkit, so they can
 refund path goes through *your* gated tool instead (step 3).
 
 <Aside type="caution" title="Secrets are use-only">
-`headers` values expand `${ENV_VAR}` from the environment **at call time** and are never logged
-(SPEC §2). Never write a real token into `mcp.json`, a commit, or an example — reference it by
+`headers` values expand `${ENV_VAR}` from the environment **at call time** and are never logged. Never write a real token into `mcp.json`, a commit, or an example — reference it by
 name and let it expand at the edge.
 </Aside>
 
@@ -101,7 +100,7 @@ rather than 500-ing the ticket.
 Refund rules change. Prompt strings that encode them rot, and stuffing all of them into every
 request burns tokens on the 95% of tickets that are "where is my package".
 
-Agent skills give you **progressive disclosure** (SPEC §3): only the one-line `description` of each
+Agent skills give you **progressive disclosure**: only the one-line `description` of each
 skill sits in the system prompt; the full body loads on demand when the model calls the `skill`
 tool.
 
@@ -152,9 +151,8 @@ this agent. Policy lives in your repo, gets reviewed in a PR, and is not duplica
 
 ## 3. The refund gate — one tool that suspends
 
-This is the only bespoke code in the whole scenario. A native tool (SPEC §6) that decides,
-mid-execution, that it cannot finish alone — and returns `pending(...)` instead of a result
-(SPEC §10).
+This is the only bespoke code in the whole scenario. A native tool that decides,
+mid-execution, that it cannot finish alone — and returns `pending(...)` instead of a result.
 
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">
@@ -350,7 +348,7 @@ issue_refund =
 Three properties of this gate matter in production:
 
 - **The threshold is enforced in code, not in the prompt.** The model cannot talk its way past it.
-- **A suspension is not a tool error** (SPEC §10). The `tool` observability event carries
+- **A suspension is not a tool error**. The `tool` observability event carries
   `isError: false` with a `pending: true` marker, so your error-rate dashboards and circuit
   breakers do not light up every time a human is asked something.
 - **The retry is bounded.** On `ok: true` the loop re-executes the *same tool with the same args
@@ -605,7 +603,7 @@ done = Toolnexus.Client.ask(resume, ticket_text, tk, ticket_id)
 </Tabs>
 
 <Aside type="note" title="Why this survives a restart">
-`Request` and `Answer` are **fixed-key, plain serializable data** across all six ports (SPEC §10) —
+`Request` and `Answer` are **fixed-key, plain serializable data** across all six ports —
 not objects holding a live connection. That is the entire reason the durable posture works: the
 pending approval can sit in Postgres over a deploy, be rendered by a React queue written by another
 team, and be resolved by a different process in a different language.
@@ -616,7 +614,7 @@ team, and be resolved by a different process in a different language.
 ## 5. Serving it to your web app (A2A)
 
 The support agent should not be a script you run. Your helpdesk backend needs to POST a ticket and
-get an answer. `toolkit.serve` mounts an **A2A** endpoint (SPEC §7B): an Agent Card at
+get an answer. `toolkit.serve` mounts an **A2A** endpoint: an Agent Card at
 `/.well-known/agent-card.json` built from your **skills**, and JSON-RPC `SendMessage` / `GetTask`
 at `POST /`.
 
@@ -692,13 +690,13 @@ Two behaviors make this usable as a real backend:
 
 - **Conversation continuity for free.** When an inbound message carries an A2A `contextId`, the
   server fulfils it via `ask(text, { toolkit, id: contextId })` — so a customer's follow-up turns
-  continue the same transcript through the client's `ConversationStore` (SPEC §8).
+  continue the same transcript through the client's `ConversationStore`.
 - **Suspension crosses the wire.** If a run halts pending approval and no `waitFor` is set, the A2A
   layer reports the task as **`input-required`** with the prompt in the status message — never a
-  bogus `completed`. Your web app sees "waiting on approval", not a fabricated answer (SPEC §10).
+  bogus `completed`. Your web app sees "waiting on approval", not a fabricated answer.
 
 <Aside type="caution" title="serve() has no auth in core">
-The A2A profile ships **no authentication** (SPEC §7B). Bind it to loopback or a private network and
+The A2A profile ships **no authentication**. Bind it to loopback or a private network and
 put your own gateway, mTLS, or reverse proxy in front. Do not expose `serve()` to the internet.
 </Aside>
 
@@ -710,10 +708,10 @@ Anyone can open a ticket, so the blast radius of one conversation must be capped
 
 | Control | Where | What it stops |
 |---|---|---|
-| `maxTurns` (default 10) | client option, §8 | An unbounded tool-calling loop. Exhausting it returns `status: "incomplete"` with `limit: "maxTurns"` — **loud, never a silent `"done"`**, and the partial transcript is preserved. |
-| `Budget { maxTurns, maxTokens, maxToolCalls, maxWallMs, maxChildren, maxConcurrent, maxDepth }` | agent runtime, §7D | Token/wall/tool-call spend across a whole agent tree. Enforced by a live ancestor-chain walk before every turn and spawn, so sibling spend counts. |
-| `onBudget(info) → "stop" \| "extend" \| "suspend"` | agent runtime, §7D | Lets you escalate instead of dying — `"suspend"` routes the overrun through §10 as an approval ("this ticket wants another 20k tokens, OK?"). |
-| `timeoutMs` + `retries` | client options, §8 | A wedged provider. Whole-run deadline; retries on `429`/`5xx` with backoff and `Retry-After`. |
+| `maxTurns` (default 10) | client option | An unbounded tool-calling loop. Exhausting it returns `status: "incomplete"` with `limit: "maxTurns"` — **loud, never a silent `"done"`**, and the partial transcript is preserved. |
+| `Budget { maxTurns, maxTokens, maxToolCalls, maxWallMs, maxChildren, maxConcurrent, maxDepth }` | agent runtime | Token/wall/tool-call spend across a whole agent tree. Enforced by a live ancestor-chain walk before every turn and spawn, so sibling spend counts. |
+| `onBudget(info) → "stop" \| "extend" \| "suspend"` | agent runtime | Lets you escalate instead of dying — `"suspend"` routes the overrun through the human-in-the-loop layer as an approval ("this ticket wants another 20k tokens, OK?"). |
+| `timeoutMs` + `retries` | client options | A wedged provider. Whole-run deadline; retries on `429`/`5xx` with backoff and `Retry-After`. |
 
 Run the support agent as an **agent** rather than a bare client when you want the token budget:
 
@@ -793,7 +791,7 @@ r = Toolnexus.Agents.run(support, [llm: llm], ticket_text)
 <Aside type="note" title="Budgets never lie about why they stopped">
 Any limit stop yields `status: "incomplete"` with the limit **named** — never a silent `"done"` and
 never a crash. Partial work and the transcript are preserved, so you can hand the half-finished
-ticket to a person with context intact (SPEC §7D).
+ticket to a person with context intact.
 </Aside>
 
 ---
@@ -966,7 +964,7 @@ IO.inspect(Toolnexus.Toolkit.mcp_status(tk), label: "mcp")
 </Tabs>
 
 <Aside type="tip" title="Turn the built-ins off deliberately">
-Built-in tools (shell, file read/write, …) are **on by default** (SPEC §4A). A customer-facing agent
+Built-in tools (shell, file read/write, …) are **on by default**. A customer-facing agent
 that reads untrusted text should not have a shell. Either drop them per name with `disableTools`, or
 turn the whole source off with `builtins: false` and add back only what you need.
 </Aside>
@@ -983,9 +981,9 @@ tool/loop layer, not your product.
 | **A ticketing UI** | No inbox, no queue view, no agent console. `serve()` is a JSON-RPC endpoint; the front end is yours (or your existing helpdesk calling it). |
 | **End-user authentication** | The library never learns *which customer* is asking. Authenticate at your gateway and pass the verified identity into the prompt or tool args — never let the model assert who it is talking to. |
 | **Authorization on the approval** | `waitFor` returns an `Answer`; the library does not check that the approver was entitled to approve. Enforce that inside your approvals service. |
-| **Auth on `serve()`** | No authentication in the A2A or MCP serve profiles (SPEC §7B/§7C). Loopback or private network + your own gateway. |
-| **OAuth for MCP servers** | Out of scope for v1 — pass a bearer token via `headers` with `${ENV}` expansion. Interactive login is expressible as a §10 `kind:"authorization"` suspension, but the token dance lives in your `waitFor`. |
-| **PII redaction** | Nothing scrubs customer data before it reaches the model. Use the `beforeTool` / `afterTool` hooks (SPEC §8) to redact arguments and outputs at the boundary. |
+| **Auth on `serve()`** | No authentication in the A2A or MCP serve profiles. Loopback or private network + your own gateway. |
+| **OAuth for MCP servers** | Out of scope for v1 — pass a bearer token via `headers` with `${ENV}` expansion. Interactive login is expressible as a `kind:"authorization"` suspension, but the token dance lives in your `waitFor`. |
+| **PII redaction** | Nothing scrubs customer data before it reaches the model. Use the `beforeTool` / `afterTool` hooks to redact arguments and outputs at the boundary. |
 | **Anything the model says** | The gate is the tool, not the sentence. The threshold check runs in code precisely because the model's promise ("you'll get a refund!") is not enforceable. Set expectations in the skill body. |
 | **Approval expiry** | `Request.expiresAt` is carried but the library does not sweep stale requests. Your queue decides when a pending approval times out, and resolves it `ok: false, reason: "expired"`. |
 
@@ -995,7 +993,7 @@ tool/loop layer, not your product.
 
 - Split the work: a triage agent that routes and a specialist that refunds — see
   [Sub-agents & teams](/toolnexus/subagents/).
-- Keep a long conversation under the window with [context compaction](/toolnexus/memory/) (SPEC §7F).
+- Keep a long conversation under the window with [context compaction](/toolnexus/memory/).
 - Let a **server** ask the customer a question mid-call via the
   [MCP elicitation bridge](/toolnexus/mcp/) — it lands on this same `waitFor`.
 

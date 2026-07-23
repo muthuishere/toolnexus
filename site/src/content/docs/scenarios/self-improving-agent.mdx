@@ -20,11 +20,11 @@ The fix is a loop with two moving parts:
 
 Lessons written today are part of the agent's identity tomorrow, because
 [`fromDir`](/toolnexus/persona-agents/) composes `MEMORY.md` into the soul at the start of every
-session (`SPEC.md §7E`).
+session.
 
 <Aside type="note" title="The point of this page: there is no new API">
-Nothing below is a new surface. This is `agent()` (§7D) + the `memory` builtin (§7E) +
-`startAgent`'s heartbeat (§7E) + the client's `RunResult` (§8), composed. The library ships
+Nothing below is a new surface. This is `agent()` + the `memory` builtin +
+`startAgent`'s heartbeat + the client's `RunResult`, composed. The library ships
 **primitives, not a learning policy** — deliberately. Everything that makes this *your* learning
 loop is prose in a soul file and a budget you choose.
 </Aside>
@@ -190,7 +190,7 @@ and the budget stop is loud (`status: "incomplete"`), so you will see it.
 
 ## Part 2 — the digest: what the reviewer actually sees
 
-Do **not** hand the reviewer the transcript. `RunResult` (§8) already carries a structured
+Do **not** hand the reviewer the transcript. `RunResult` already carries a structured
 summary of the run — the final text, every tool call with its error flag, the turn count, and
 the token usage. That is enough to spot "this tool failed twice with the same args", and it is
 two orders of magnitude smaller than the messages array.
@@ -428,7 +428,7 @@ end
 </Tabs>
 
 The reviewer's `memory add` lands in `MEMORY.md` on disk immediately. It becomes part of Ava's
-soul at the **start of her next session** — the frozen-snapshot rule (`§7E`), which is what keeps
+soul at the **start of her next session** — the frozen-snapshot rule, which is what keeps
 a long-lived persona's prompt cache warm. See
 [the persona build](/toolnexus/scenarios/persona-assistant/#the-frozen-snapshot-rule-read-this-before-you-design-around-it)
 for how to design session boundaries around it.
@@ -527,7 +527,7 @@ nightly = Home.start_agent(ava, rt_opts,
 
 <Aside type="note" title="Why the beat is silent by default">
 A consolidation beat that found nothing to merge replies `HEARTBEAT_OK`, and that reply **never
-reaches `onBeat`** (`§7E`). So a nightly tidy-up produces log lines only on nights it actually
+reaches `onBeat`**. So a nightly tidy-up produces log lines only on nights it actually
 changed something — the loop is observable when it acts and invisible when it doesn't. That is
 also why you can run it daily without building a notification-suppression layer.
 </Aside>
@@ -538,14 +538,14 @@ also why you can run it daily without building a notification-suppression layer.
   user request
        │
        ▼
-  ┌─────────┐   RunResult (§8)   ┌────────────┐   memory.add    ┌───────────┐
+  ┌─────────┐   RunResult        ┌────────────┐   memory.add    ┌───────────┐
   │  Ava    │ ─────digest──────▶ │  reviewer  │ ──────────────▶ │ MEMORY.md │
   │  (run)  │                    │  (cheap,   │                 │  (disk)   │
   └─────────┘                    │  memory-   │                 └─────┬─────┘
        ▲                         │  only)     │                       │
        │                         └────────────┘                       │
        │                                                              │
-       │  composeSoul at session start (§7E frozen snapshot)          │
+       │  composeSoul at session start (frozen snapshot)              │
        └──────────────────────────────────────────────────────────────┘
                                                                       │
                     ┌────────────────┐   memory.replace / remove      │
@@ -568,7 +568,7 @@ back on the next session; a **heartbeat** keeps the notes clean.
 | **Reviewer model + budget** | `model`, `budget` on the agent | A learning tax bigger than the work. Cheap model, ≤ 4k tokens, ≤ 3 turns. |
 | **What the reviewer can see** | your `digest` function | Secrets and PII persisted into a prompt prefix, forever. Redact here. |
 | **Consolidation cadence + entry cap** | `everyMs`, `HEARTBEAT.md` | A `MEMORY.md` that grows until it dominates your per-session token cost. |
-| **When memory takes effect** | your session boundaries (§7E frozen snapshot) | "It didn't learn!" — it did; the write lands next session, not this turn. |
+| **When memory takes effect** | your session boundaries (frozen snapshot) | "It didn't learn!" — it did; the write lands next session, not this turn. |
 | **Bad lessons** | `git` on the home directory | No way to undo a wrong lesson. Commit `personas/ava/`; a bad entry becomes a revert. |
 
 <Aside type="caution" title="What the library does not promise">
@@ -586,4 +586,4 @@ build very different learning loops on the same primitives.
 - [Build an openclaw-style personal assistant](/toolnexus/scenarios/persona-assistant/) — the home directory, memory, heartbeat and channel wiring this loop sits on.
 - [Sub-agents & teams](/toolnexus/subagents/) — context isolation, `uses` scoping, budgets, and usage roll-up.
 - [Persona agents](/toolnexus/persona-agents/) — `fromDir`, the `memory` builtin, `startAgent`, `compactor` reference.
-- `SPEC.md §7D` (agent runtime, budgets, isolation) · `§7E` (agent home: bootstrap, memory, heartbeat) · `§8` (`RunResult`).
+- [SPEC.md §7D](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7d-sub-agents--agent-runtime-source-agent) (agent runtime, budgets, isolation) · [§7E](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7e-agent-home--personas-source-agent-persona-surface) (agent home: bootstrap, memory, heartbeat) · [§8](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#8-unified-llm-client-the-host-loop) (`RunResult`).

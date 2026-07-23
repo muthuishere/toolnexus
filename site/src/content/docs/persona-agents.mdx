@@ -1,6 +1,6 @@
 ---
 title: Persona agents
-description: Build a long-lived assistant whose identity lives in files, whose memory it can edit, and which acts on a heartbeat — fromDir + the memory builtin + startAgent, in all six languages (SPEC §7E).
+description: Build a long-lived assistant whose identity lives in files, whose memory it can edit, and which acts on a heartbeat — fromDir + the memory builtin + startAgent, in all six languages.
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -12,7 +12,7 @@ that survives restarts, a memory it updates over weeks, and the ability to act *
 prompted**. `fromDir` + the `memory` builtin + `startAgent` add exactly those three things —
 and nothing else. They ride the same shipped seams sub-agents do (the composed soul is just a
 system prompt, memory is a plain `Tool`, the heartbeat is `post`+`wake` on the runtime clock),
-so there is **no new runtime**. (`SPEC.md §7E`.)
+so there is **no new runtime**.
 
 ## When to use which surface
 
@@ -266,7 +266,7 @@ send. The library is deliberately not a scheduler or a gateway — that is the
 A heartbeat and durable memory keep a persona *running* — but every turn it also *grows* its
 transcript, and eventually that transcript overflows the model's window and the provider
 errors. That is the classic persona killer: an assistant that "dies within days." Compaction
-is the fix. `compactor(opts)` returns a **`beforeLLM` hook** (`SPEC.md §7F`): once the
+is the fix. `compactor(opts)` returns a **`beforeLLM` hook**: once the
 transcript estimate crosses `maxTokens`, it summarizes the older body into one system message
 and keeps a recent tail verbatim. It rides the **existing** `beforeLLM` seam — the loop applies
 a `beforeLLM` rewrite by *replacing* the working transcript — so it is a pure `messages →
@@ -286,7 +286,7 @@ otherwise overflow the window. A short, bounded one-shot never needs it — and 
 | `keepTail` | keep at least this many tokens of the most recent tail verbatim (default `maxTokens/2`) |
 | `summarize(older) → string` | produces the summary; **MAY call an LLM** (e.g. a cheap model) — the library never makes a model call on your behalf |
 | `countTokens(messages) → number` | token estimate; default `ceil(chars/4)` summed over messages (an **estimator**, not a tokenizer — override for exactness) |
-| `flushToMemory` | inject a pre-compact reminder to persist durable facts via the §7E `memory` tool **before** the head is summarized (off by default) |
+| `flushToMemory` | inject a pre-compact reminder to persist durable facts via the `memory` tool **before** the head is summarized (off by default) |
 
 ### Wire it as a `beforeLLM` hook
 
@@ -399,7 +399,7 @@ loses detail, so on its own compaction slowly forgets. The fix is to pair it wit
 `flushToMemory` nudges the model to persist anything worth keeping to `MEMORY.md` *before* the
 older turns are summarized away, and that note reloads into the soul at the start of the next
 session. So the agent stays **under budget** (compactor) while its **durable facts survive**
-(the §7E memory builtin) — a persona that runs for weeks without either overflowing or amnesia.
+(the memory builtin) — a persona that runs for weeks without either overflowing or amnesia.
 
 Because compaction lives on the client loop's `beforeLLM` seam, the persona here runs through
 that loop directly: its identity is just the composed soul (`composeSoul`), and its memory is
@@ -414,7 +414,7 @@ import { createToolkit, createClient, agents } from "toolnexus"
 const dir = "./personas/ava"
 const { soul } = agents.composeSoul(dir)               // identity + durable MEMORY.md, frozen for the session
 const tk = await createToolkit()                       // shell/file built-ins …
-tk.register(agents.memoryTool(dir))                    // … plus the §7E memory builtin
+tk.register(agents.memoryTool(dir))                    // … plus the memory builtin
 
 const ava = createClient({
   baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini",
@@ -439,7 +439,7 @@ from toolnexus import create_toolkit, create_client, compactor, compose_soul, me
 dir = "./personas/ava"
 soul, _found = compose_soul(dir)                       # identity + durable MEMORY.md, frozen for the session
 tk = await create_toolkit()                            # shell/file built-ins …
-tk.register(memory_tool(dir))                          # … plus the §7E memory builtin
+tk.register(memory_tool(dir))                          # … plus the memory builtin
 
 ava = create_client(
     base_url="https://openrouter.ai/api/v1", style="openai", model="openai/gpt-4o-mini",
@@ -459,7 +459,7 @@ await ava.ask(user_text, tk, "ava")                    # weeks of turns; transcr
 dir := "./personas/ava"
 soul, _ := agents.ComposeSoul(dir)                     // identity + durable MEMORY.md, frozen for the session
 tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{})   // shell/file built-ins …
-tk.Register(agents.MemoryTool(dir))                    // … plus the §7E memory builtin
+tk.Register(agents.MemoryTool(dir))                    // … plus the memory builtin
 
 ava := toolnexus.CreateClient(toolnexus.ClientOptions{
     BaseURL: "https://openrouter.ai/api/v1", Style: toolnexus.StyleOpenAI, Model: "openai/gpt-4o-mini",
@@ -482,7 +482,7 @@ import io.github.muthuishere.toolnexus.agents.Agents;
 Path dir = Path.of("personas/ava");
 String soul = Agents.composeSoul(dir).soul();          // identity + durable MEMORY.md, frozen for the session
 Toolkit tk = Toolkit.create(new Toolkit.Options());    // shell/file built-ins …
-tk.register(Agents.memoryTool(dir));                   // … plus the §7E memory builtin
+tk.register(Agents.memoryTool(dir));                   // … plus the memory builtin
 
 LlmClient.Hooks hooks = new LlmClient.Hooks();
 hooks.beforeLLM = Compaction.compactor(new Compaction.Options()
@@ -504,7 +504,7 @@ using Toolnexus.Agents;
 var dir = "./personas/ava";
 var (soul, _) = Home.ComposeSoul(dir);                 // identity + durable MEMORY.md, frozen for the session
 await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());   // shell/file built-ins …
-tk.Register(Home.MemoryTool(dir));                     // … plus the §7E memory builtin
+tk.Register(Home.MemoryTool(dir));                     // … plus the memory builtin
 
 var ava = LlmClient.Create(new LlmClient.Options {
     BaseUrl = "https://openrouter.ai/api/v1", Style = "openai", Model = "openai/gpt-4o-mini",
@@ -526,7 +526,7 @@ await ava.AskAsync(userText, tk, "ava");               // weeks of turns; transc
 dir = "./personas/ava"
 {soul, _found} = Toolnexus.Agents.Home.compose_soul(dir)   # identity + durable MEMORY.md, frozen for the session
 {:ok, tk} = Toolnexus.create_toolkit()                     # shell/file built-ins …
-tk = Toolnexus.Toolkit.register(tk, [Toolnexus.Agents.Home.memory_tool(dir)])  # … plus the §7E memory builtin
+tk = Toolnexus.Toolkit.register(tk, [Toolnexus.Agents.Home.memory_tool(dir)])  # … plus the memory builtin
 
 ava = Toolnexus.Client.create(
   base_url: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini",
@@ -639,5 +639,5 @@ The key is read from the environment by name and never printed.
 
 - [Sub-agents & teams](/toolnexus/subagents/) — the worker archetype and the six host verbs the heartbeat rides on.
 - [Suspension & the human loop](/toolnexus/suspension/) — how a persona parks on a human-in-the-loop request.
-- `SPEC.md §7E` — the full cross-language contract (bootstrap order, memory semantics, heartbeat).
-- `SPEC.md §7F` — context compaction: the `beforeLLM` contract, tool-pair rule, and no-op-below-budget guarantee.
+- [SPEC.md §7E](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7e-agent-home--personas-source-agent-persona-surface) — the full cross-language contract (bootstrap order, memory semantics, heartbeat).
+- [SPEC.md §7F](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7f-context-compaction-keep-a-long-lived-agent-under-budget) — context compaction: the `beforeLLM` contract, tool-pair rule, and no-op-below-budget guarantee.

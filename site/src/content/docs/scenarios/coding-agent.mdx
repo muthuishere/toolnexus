@@ -27,12 +27,12 @@ you need a long-lived assistant with a heartbeat rather than a bounded job, you 
 
 | Piece | Shipped seam | Why it is in the build |
 |---|---|---|
-| An identity that survives edits | `soulFile` → `AGENTS.md` (§7D) | The operating rules live in a file in the repo, reviewable in a PR — not in a string literal. |
-| Filesystem + shell hands | the 10 built-ins (§4A) | `read`/`write`/`edit`/`bash`/`grep`/`glob` are what turn a chat model into something that can change a repo. |
-| Codebase research without context rot | an `explore` sub-agent (§7D) | The child burns **its own** window on 40 file reads and returns one paragraph. |
-| A spend ceiling | `Budget` + `status: "incomplete"` (§7D) | A runaway loop that reads the whole monorepo stops loudly instead of billing you. |
-| Sessions longer than the window | `compactor` on `beforeLLM` (§7F) | Coding agents are the highest tool-volume agents there are. |
-| A brake on destructive commands | `pending(...)` + `waitFor` (§10) | `rm -rf`, `git push --force`, `terraform apply` — a human says yes first. |
+| An identity that survives edits | `soulFile` → `AGENTS.md` | The operating rules live in a file in the repo, reviewable in a PR — not in a string literal. |
+| Filesystem + shell hands | the 10 built-ins | `read`/`write`/`edit`/`bash`/`grep`/`glob` are what turn a chat model into something that can change a repo. |
+| Codebase research without context rot | an `explore` sub-agent | The child burns **its own** window on 40 file reads and returns one paragraph. |
+| A spend ceiling | `Budget` + `status: "incomplete"` | A runaway loop that reads the whole monorepo stops loudly instead of billing you. |
+| Sessions longer than the window | `compactor` on `beforeLLM` | Coding agents are the highest tool-volume agents there are. |
+| A brake on destructive commands | `pending(...)` + `waitFor` | `rm -rf`, `git push --force`, `terraform apply` — a human says yes first. |
 
 Everything below is additive over the classic API. No piece requires the others.
 
@@ -66,13 +66,12 @@ You are a senior engineer working directly in this repository.
 ```
 
 <Aside type="tip" title="Why a file and not a prompt string">
-The soul is composed **once, at session start**, and is then frozen for the run (`SPEC.md §7D`,
-§7E). A frozen prefix is exactly what provider prompt caches want — every turn after the first
+The soul is composed **once, at session start**, and is then frozen for the run. A frozen prefix is exactly what provider prompt caches want — every turn after the first
 hits a warm cache. Rewriting the system prompt mid-run is the single most expensive mistake in a
 long agent session.
 </Aside>
 
-## 2. Hands — the built-in tool pack (§4A)
+## 2. Hands — the built-in tool pack
 
 toolnexus ships opencode's ten built-ins with identical names and input schemas in every port.
 Six of them are the coding agent's hands:
@@ -112,7 +111,7 @@ context grows by a paragraph, not by a codebase.
 
 The second thing delegation buys is **scoping**. `explore` is given a read-only tool view — no
 `bash`, no `write`, no `edit`, no `apply_patch`. It is not asked to behave; it is structurally
-incapable of writing. Scoping is the security model (`SPEC.md §7D`), and a research agent that
+incapable of writing. Scoping is the security model, and a research agent that
 cannot mutate the tree is a research agent you can point at an untrusted prompt.
 
 <Tabs syncKey="lang">
@@ -286,7 +285,7 @@ touches the plain client loop: a `client.run()` that exits on `maxTurns` with to
 flight is now `"incomplete"` too.
 </Aside>
 
-## 5. Surviving a long session — compaction (§7F)
+## 5. Surviving a long session — compaction
 
 Coding agents have the worst context profile of any agent type: dozens of file reads, long test
 output, stack traces. Even with `explore` absorbing the research, a serious session overflows.
@@ -321,11 +320,11 @@ and schema that classifies the command: safe ones pass straight through, dangero
 `pending(...)`. The loop halts, your `waitFor` asks the human, and the tool is **re-executed**
 with `ctx.answer` carrying the verdict.
 
-This is [§10 suspension](/toolnexus/suspension/) with nothing special-cased — the same primitive
+This is [suspension](/toolnexus/suspension/) with nothing special-cased — the same primitive
 that handles OAuth and structured questions.
 
 <Aside type="note" title="Why wrap the tool instead of using a `beforeTool` hook">
-The classic client loop exposes §8 hooks, and a `beforeTool` hook **can** raise a suspension
+The classic client loop exposes hooks, and a `beforeTool` hook **can** raise a suspension
 without the tool running. The **agent runtime does not surface those hooks** — it owns the
 per-turn client. So inside an agent, the gate belongs in the tool. This is a real constraint, not
 a style preference: if you need hook-level interception, run that stage through
@@ -838,7 +837,7 @@ that are genuinely hard to build correctly and that behave identically in six la
 | LSP / type-aware navigation | An MCP server exposing your language server, wired via [`mcp.json`](/toolnexus/mcp/) | This is exactly what MCP is for; toolnexus consumes it. |
 | Git safety (worktrees, auto-branch, rollback) | Your own tools, or a policy in `AGENTS.md` + the approval gate | Repo policy varies too much to standardize. |
 | Sandboxing | Run the process in a container/jail; drop `bash` for untrusted input | `bash` is a real shell. Process isolation is the host's job, not a flag. |
-| Cost in currency | Convert `totalTokens` with your own price table | Vendor pricing is vendor data — budgets are deliberately token-denominated (`SPEC.md §7D`). |
+| Cost in currency | Convert `totalTokens` with your own price table | Vendor pricing is vendor data — budgets are deliberately token-denominated. |
 
 **Honest limits worth knowing before you commit:**
 
@@ -846,16 +845,16 @@ that are genuinely hard to build correctly and that behave identically in six la
   message — an estimator, not a tokenizer. Pass your own for exactness, and leave headroom.
 - **Budgets are eventually consistent between turn boundaries.** Enforcement happens before each
   turn and each spawn, so a single in-flight turn can overshoot its ceiling before being stopped.
-- **The agent runtime does not expose §8 hooks.** No `beforeTool`/`afterTool` inside `agent()`.
+- **The agent runtime does not expose client-loop hooks.** No `beforeTool`/`afterTool` inside `agent()`.
   Gate in the tool (above), or run that stage on the client loop.
 - **Cancellation latency differs by port.** JS/Go/C#/Elixir abort mid-request; Python and Java
   cancel cooperatively between attempts. The observable *outcome* is identical everywhere — an
-  interrupted result and a restored inbox — only the latency differs (`SPEC.md §7D`).
+  interrupted result and a restored inbox — only the latency differs.
 
 ## See also
 
 - [Sub-agents & teams](/toolnexus/subagents/) — the delegation surface in full, plus the six host verbs.
 - [Built-in tools](/toolnexus/builtins/) — all ten, their schemas, and both levels of off-switch.
-- [Suspension & the human loop](/toolnexus/suspension/) — the §10 primitive the approval gate is built from.
+- [Suspension & the human loop](/toolnexus/suspension/) — the primitive the approval gate is built from.
 - [Fan out research across parallel sub-agents](/toolnexus/scenarios/research-orchestrator/) — the other half of the sub-agent story: concurrency, not depth.
-- `SPEC.md §4A`, `§7D`, `§7F`, `§10` — the cross-language contracts behind every claim on this page.
+- [SPEC.md §4A](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#4a-built-in-tools-source-builtin), [§7D](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7d-sub-agents--agent-runtime-source-agent), [§7F](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7f-context-compaction-keep-a-long-lived-agent-under-budget), [§10](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#10-suspension--pending--waitfor) — the cross-language contracts behind every claim on this page.
