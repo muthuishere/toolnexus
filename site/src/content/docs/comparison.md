@@ -1,5 +1,5 @@
 ---
-title: Comparison — Spring AI, LangGraph, ADK
+title: Comparison — Spring AI, LangGraph, ADK, Mastra
 description: >-
   An honest, metrics-first capability and standards-compliance comparison. Measured where possible, cited otherwise, and explicit about where toolnexus is only partial.
 ---
@@ -27,6 +27,10 @@ description: >-
 
 Legend: ✅ full / first-class · 🟡 partial / via-adapter / community · ❌ none. Numbers are measured
 only where tagged.
+
+> **Mastra** (a broad TypeScript platform) is covered in its own section below —
+> [vs. Mastra](#vs-mastra--the-typescriptnode-world) — rather than as a matrix column, because
+> several rows here have no verified Mastra data and this page does not guess cells.
 
 | Capability / metric | toolnexus | Spring AI | LangGraph | Google ADK |
 |---|---|---|---|---|
@@ -347,6 +351,35 @@ ADK promises "available in four languages with near-parity, Python-first"; tooln
 shared conformance suite** against the same `examples/` fixtures." Those are different promises.
 ADK's is backed by Google's scale; ours is a narrower surface held to a stricter, testable bar.
 ([Google's ADK 1.0 / parity framing](https://fast.io/resources/google-adk-vs-openai-agents-sdk/))
+
+### vs. Mastra (↔ the TypeScript/Node world)
+
+Mastra is a **broad, batteries-included platform** — the TypeScript-ecosystem peer of **Spring AI**
+(JVM) or **LangGraph** (Python), not a lean runtime. It is built on the **Vercel AI SDK** and ships
+workflows, RAG, evals, a dev playground, deployers, and storage-backed memory in one framework.
+[FROM DOCS]
+
+**Where toolnexus wins**
+- **Six languages, byte-identical** vs **TypeScript/Node only** (Mastra depends on `@ai-sdk/*`).
+- **Vendor-neutral schema output** (OpenAI/Anthropic/Gemini) vs a Vercel-AI-SDK-shaped core.
+- **Far smaller footprint — 26 MB vs Mastra's 155 MB** `node_modules` [MEASURED] — and the **lowest
+  per-call overhead of the JS field** in the mock-LLM [benchmark](/toolnexus/performance/) [MEASURED].
+  Mastra lands heaviest per call: it wraps the Vercel AI SDK and adds its own agent/processor layers.
+- **One unified `Tool` interface** (MCP / skills / native / HTTP / A2A); embeddable, not a framework
+  you adopt.
+
+**Where Mastra wins — decisively, on breadth**
+- **Durable workflows engine, RAG (`@mastra/rag`), evals (`@mastra/evals`), a dev playground UI, and
+  first-party deployers** — toolnexus ships **none** of these by design. [FROM DOCS]
+- **Storage-backed long-term memory** with adapters + semantic recall, vs our file-backed persona
+  memory.
+- Larger TS community, riding the Vercel AI SDK ecosystem.
+
+**Honest compliance status:** same shape as Spring AI — Mastra is a whole platform; toolnexus is a
+portable core. All-in on TypeScript and want workflows/RAG/evals/playground in one framework →
+**Mastra** is the more complete product. Need the same agent across six languages, vendor-neutral
+schemas, or a minimal embeddable core → **toolnexus**. Full capability matrix (source-cited):
+[`benchmarks/mastra-comparison.md`](https://github.com/muthuishere/toolnexus/blob/main/benchmarks/mastra-comparison.md).
 
 ---
 
