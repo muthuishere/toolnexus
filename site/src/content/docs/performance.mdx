@@ -4,7 +4,7 @@ description: >-
   Reproducible mock-LLM framework-overhead numbers across 18 framework configs in 6 languages — every figure MEASURED. Pick your language.
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 import SortableTables from '../../components/SortableTables.astro';
 
 > **Every number on this page is [MEASURED]** on the machine below, with a reproducible harness
@@ -73,6 +73,7 @@ call**; the persistent-session row is the apples-to-apples one.
 | **toolnexus** | 24 | 1.16 | 1.96 | 1.21 | 3 | ✅ |
 | Vercel AI SDK | 21 | 1.25 | 1.74 | 1.28 | 3 | ✅ |
 | LangChain.js | 25 | 3.37 | 5.14 | 3.54 | 3 | ✅ |
+| Mastra | 21 | 3.48 | 5.03 | 3.60 | 3 | ✅ |
 
 #### Native tools
 
@@ -81,8 +82,20 @@ call**; the persistent-session row is the apples-to-apples one.
 | **toolnexus** | 0.2 | **0.80** | 1.04 | 0.82 | 2 | ✅ |
 | Vercel AI SDK | 0.2 | 1.40 | 1.93 | 1.42 | 2 | ✅ |
 | LangChain.js | 2.3 | 2.69 | 3.45 | 2.75 | 2 | ✅ |
+| Mastra | 0.5 | 3.57 | 4.74 | 3.66 | 2 | ✅ |
 
-**Install footprint:** Vercel AI SDK **21 MB** · LangChain.js **106 MB**. All three do real MCP.
+**Install footprint:** Vercel AI SDK **21 MB** · toolnexus **26 MB** · LangChain.js **106 MB** ·
+Mastra **155 MB**. All four do real MCP.
+
+<Aside type="note" title="Mastra is a platform, not just a runtime">
+This measures **per-call runtime overhead only** — the tool-calling loop against a mock LLM.
+[Mastra](https://github.com/mastra-ai/mastra) is a batteries-included **TypeScript platform**
+(workflows, RAG, evals, a playground, deployers) that toolnexus deliberately is not; it wraps the
+Vercel AI SDK and adds its own agent/processor layers, which is why it lands heaviest per call
+here. The honest tradeoff — platform breadth vs a portable, low-overhead core that runs
+byte-identically in six languages — is written up in full (capability matrix + who-wins-where) in
+[`benchmarks/mastra-comparison.md`](https://github.com/muthuishere/toolnexus/blob/main/benchmarks/mastra-comparison.md).
+</Aside>
 </TabItem>
 <TabItem label="Go">
 The Go MCP client is **`mark3labs/mcp-go`** (used by both toolnexus and Eino).
@@ -199,7 +212,7 @@ names work.
 ### MCP vs native
 
 Where a framework ships a first-class MCP client (toolnexus everywhere; LangGraph, ADK, OpenAI
-Agents, Pydantic AI, CrewAI, Vercel AI SDK, LangChain.js, LangChain4j, Eino), rows use the **real
+Agents, Pydantic AI, CrewAI, Vercel AI SDK, LangChain.js, Mastra, LangChain4j, Eino), rows use the **real
 shared stdio MCP server**. Where MCP isn't first-class (Semantic Kernel, Microsoft.Extensions.AI,
 langchaingo, Elixir LangChain), the row uses **in-process native tools** with identical
 names/behavior and is tagged `(native)`. Native skips the stdio spawn + discovery, so a `(native)`
