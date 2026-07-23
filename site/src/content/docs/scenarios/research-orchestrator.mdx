@@ -34,7 +34,7 @@ coordinator                       one model, one plan, one synthesis
 ```
 
 The coordinator's turn emits four `task` tool calls at once. Parallel tool calls in a single turn
-already run concurrently in the shipped client loop (`SPEC.md §8`) — and `task` is just a tool.
+already run concurrently in the shipped client loop — and `task` is just a tool.
 **Concurrency is free**: there is no `parallel()` API to learn, no executor to configure. The
 model asking for four things in one turn *is* the fan-out.
 
@@ -47,8 +47,8 @@ sessions.
 This is where fan-out quality is actually decided, and it is prose, not configuration.
 
 The `task` tool's description is composed from the caller's team — **sorted by name**, each entry
-built from that agent's `does` (the same progressive-disclosure pattern as the `skill` tool,
-`SPEC.md §7D`). That composed description is the *entire* basis on which the coordinator picks a
+built from that agent's `does` (the same progressive-disclosure pattern as the `skill` tool).
+That composed description is the *entire* basis on which the coordinator picks a
 worker and writes its prompt. A team of four agents all described as "researches things" will get
 random routing and overlapping work.
 
@@ -89,7 +89,7 @@ are ever talking to the model at once.
 <Aside type="caution" title="Queued is not dropped, and rejected is not silent">
 Over `maxConcurrent`, a wake **queues** — the work still happens, just later. That is different
 from the **inbox gate**, which is bounded and rejects **synchronously and loudly** to the sender
-when full. All three backpressure gates in the runtime are loud by design (`SPEC.md §7D`); none
+when full. All three backpressure gates in the runtime are loud by design; none
 of them silently drops work. If you see fan-out "disappearing", it is queued behind a
 `maxConcurrent` you set, not lost.
 </Aside>
@@ -130,9 +130,9 @@ The most common real failure in a fan-out is one worker dying — a flaky source
 timeout. If that propagated as an exception, one bad thread would discard four good ones.
 
 It does not. **A failed child Run crosses the handle boundary as a uniform `isError` tool result,
-never an exception** (`SPEC.md §7D`). The coordinator's *model* sees the failure in its transcript
+never an exception**. The coordinator's *model* sees the failure in its transcript
 alongside the successes and decides what to do: re-prompt the worker, route the question to a
-different one, or write the report with a stated gap. Mechanical retry and backoff (§8) already
+different one, or write the report with a stated gap. Mechanical retry and backoff already
 ran at the level where the failure happened; what reaches the parent is the considered outcome.
 Only the **root** throws to the host.
 
@@ -574,6 +574,6 @@ on your own workload. The right fan-out width is an empirical number, not a defa
 
 - [Sub-agents & teams](/toolnexus/subagents/) — the full delegation surface, the six host verbs, and the backpressure gates.
 - [Build a Claude-Code-style coding agent](/toolnexus/scenarios/coding-agent/) — the depth-first counterpart: one agent acting on a working tree.
-- [Suspension & the human loop](/toolnexus/suspension/) — the §10 primitive escalation and durable resume ride on.
+- [Suspension & the human loop](/toolnexus/suspension/) — the primitive escalation and durable resume ride on.
 - [Persona agents](/toolnexus/persona-agents/) — long-lived agents, memory, and compaction.
-- `SPEC.md §7D` (state machine, gates, budgets, reattachment) and `§8` (parallel tool calls, retries).
+- [SPEC.md §7D](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7d-sub-agents--agent-runtime-source-agent) (state machine, gates, budgets, reattachment) and [§8](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#8-unified-llm-client-the-host-loop) (parallel tool calls, retries).

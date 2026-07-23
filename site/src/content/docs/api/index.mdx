@@ -26,10 +26,10 @@ import { createToolkit } from "toolnexus"
 const tk = await createToolkit({
   mcpConfig: "./mcp.json",      // path | object
   skillsDir: "./skills",        // string | string[]
-  skills: [/* SkillDef[] */],   // data skills (§3, S1)
+  skills: [/* SkillDef[] */],   // data skills
   skillProvider: async () => [/* SkillDef[] */], // lazy, resolved once
-  skillsFilter: { deploy: true },   // per-agent allowlist (§3, S2)
-  skillSampleLimit: 0,              // 0=10, n=cap, -1=off (§3, S5)
+  skillsFilter: { deploy: true },   // per-agent allowlist
+  skillSampleLimit: 0,              // 0=10, n=cap, -1=off
   builtins: true,
   agents: [/* Agent[] */],
   extraTools: [/* Tool[] */],
@@ -43,7 +43,7 @@ from toolnexus import create_toolkit
 tk = await create_toolkit(
     mcp_config="./mcp.json",
     skills_dir="./skills",
-    skills=[...],                  # SkillDef list (§3, S1)
+    skills=[...],                  # SkillDef list
     skill_provider=lambda: [...],  # sync or async
     skills_filter={"deploy": True},
     skill_sample_limit=0,
@@ -100,10 +100,10 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
   Toolnexus.create_toolkit(
     mcp_config: "./mcp.json",
     skills_dir: ["./skills"],
-    skills: [%{name: "…", content: "…"}],       # data skills (§3, S1)
+    skills: [%{name: "…", content: "…"}],       # data skills
     skill_provider: fn -> [] end,               # lazy, resolved once
-    skills_filter: %{"deploy" => true},         # per-agent allowlist (§3, S2)
-    skill_sample_limit: 0,                       # 0=10, n=cap, -1=off (§3, S5)
+    skills_filter: %{"deploy" => true},         # per-agent allowlist
+    skill_sample_limit: 0,                       # 0=10, n=cap, -1=off
     builtins: true,
     agents: [],
     extra_tools: []
@@ -117,7 +117,7 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
 Directories, in-memory `SkillDef`s, and a lazy provider all compose (first-wins dedupe). See the
 [Agent skills](/skills/) guide for the concepts; this is the exact surface.
 
-### `SkillDef` — a skill as data (§3, S1)
+### `SkillDef` — a skill as data
 
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">
@@ -179,7 +179,7 @@ new SkillSource.SkillDef(Name, Description, Content,
 </TabItem>
 </Tabs>
 
-### List & validate — `ListSkills` (§3, S3)
+### List & validate — `ListSkills`
 
 Discover + validate without building a toolkit. Returns parsed skills plus **typed skip reasons**:
 `missing-name` · `malformed-frontmatter` · `duplicate-name` · `unreadable`.
@@ -489,7 +489,7 @@ weather = Toolnexus.Http.tool(
 bash · read · write · edit · grep · glob · webfetch · question · apply_patch · todowrite
 ```
 
-`question` suspends through the human loop (a `kind: "question"` Request, §10). The toggle accepts
+`question` suspends through the human loop (a `kind: "question"` Request). The toggle accepts
 `true | false | { enabled?, disabled?, tools?: { <name>: false } }` — `disabled: true` wins, and a
 `tools` entry set to `false` drops that one built-in. See the [Built-in tools](/builtins/) guide.
 
@@ -738,7 +738,7 @@ Toolnexus.Toolkit.add_agent(tk, "https://other.example.com/.well-known/agent-car
 </TabItem>
 </Tabs>
 
-## Suspension & the human loop (§10)
+## Suspension & the human loop
 
 `waitFor` is the host resolver `(Request) → Answer`. A tool suspends by returning a **pending**
 result (`isError: true`, `metadata.pending = Request`); the loop calls `waitFor`, then re-runs the

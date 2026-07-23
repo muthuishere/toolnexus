@@ -1,6 +1,6 @@
 ---
 title: The verify-before-commit gate
-description: The universal spine of real agent work — a worker produces an artifact, an isolated adversarial verifier must pass it before the result leaves, and on exhausted retries the agent returns its best effort loudly flagged as unverified. Pure composition over the §7D sub-agent primitives — no new API.
+description: The universal spine of real agent work — a worker produces an artifact, an isolated adversarial verifier must pass it before the result leaves, and on exhausted retries the agent returns its best effort loudly flagged as unverified. Pure composition over the sub-agent primitives — no new API.
 ---
 
 import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
@@ -17,7 +17,7 @@ is fed back and the worker retries — a **bounded** number of times. When the r
 agent returns its best effort **loudly flagged as unverified**, never a silent pass.
 
 <Aside type="note" title="The point of this page: there is no new API">
-Everything below is `agent()` + `task`/`.asTool()` + `budget` (`SPEC.md §7D`) and a plain
+Everything below is `agent()` + `task`/`.asTool()` + `budget` and a plain
 `for` loop in your own code. There is no `verify()` helper, no gate primitive, no pass/fail type.
 The library ships the **isolation and the budgets**; the gate is a composition you assemble and
 own. The loop is on this page in full — nothing is hidden behind a function you cannot see.
@@ -524,7 +524,7 @@ the gate becomes the dominant cost. Three levers, same as any scoped sub-agent:
 | **Hand it the artifact, not the world** | The verifier reads the artifact and runs the checks. It does not need the worker's transcript (it never gets it) or the whole repo in context. |
 
 A verifier whose cost is more than a small fraction of the worker's is misconfigured. And because
-every agent's tokens **roll up into the parent's `totalTokens`** (`SPEC.md §7D`), you can measure
+every agent's tokens **roll up into the parent's `totalTokens`**, you can measure
 the gate's true overhead directly: run a task with the gate and without, and compare the root
 `totalTokens`.
 
@@ -770,6 +770,6 @@ identical in six languages. The gate itself is yours, and so are its limits:
 - [Fan out research across parallel sub-agents](/toolnexus/scenarios/research-orchestrator/) — verify each section against its sources before synthesis; the concurrency the escalation reuses.
 - [An agent that learns from its own runs](/toolnexus/scenarios/self-improving-agent/) — the async cousin: learn-after-commit, where this page is verify-before-commit.
 - [Sub-agents & teams](/toolnexus/subagents/) — the isolation, `uses` scoping, budgets, and usage roll-up the gate is built from.
-- `SPEC.md §7D` — the agent runtime, isolation, scoping, and budgets behind every claim here.
+- [SPEC.md §7D](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7d-sub-agents--agent-runtime-source-agent) — the agent runtime, isolation, scoping, and budgets behind every claim here.
 
 <LinkButton href="/toolnexus/scenarios/" variant="secondary" icon="right-arrow">Back to all scenarios</LinkButton>

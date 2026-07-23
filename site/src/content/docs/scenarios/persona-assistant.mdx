@@ -15,11 +15,11 @@ That is three capabilities a plain chat loop does not have:
 
 | Capability | What it means concretely | What ships it |
 |---|---|---|
-| **Identity that survives restarts** | Ava's personality, your profile, and her operating rules live in files you can `ls`, `git diff`, and code-review — not in a prompt string in `main.ts`. | `fromDir` (`SPEC.md §7E`) |
-| **Memory she writes herself** | She learns "Muthu prefers dark roast" during a conversation and *still knows it* next Tuesday. | the `memory` builtin (`§7E`) |
-| **Acting unprompted** | A clock beat wakes her; she decides whether there is anything worth saying, and stays silent if not. | `startAgent` heartbeat (`§7E`) |
+| **Identity that survives restarts** | Ava's personality, your profile, and her operating rules live in files you can `ls`, `git diff`, and code-review — not in a prompt string in `main.ts`. | `fromDir` |
+| **Memory she writes herself** | She learns "Muthu prefers dark roast" during a conversation and *still knows it* next Tuesday. | the `memory` builtin |
+| **Acting unprompted** | A clock beat wakes her; she decides whether there is anything worth saying, and stays silent if not. | `startAgent` heartbeat |
 
-Plus one that decides whether she survives past week one: **compaction** (`§7F`), so a
+Plus one that decides whether she survives past week one: **compaction**, so a
 months-long transcript never blows the context window.
 
 <Aside type="note" title="When to reach for this page">
@@ -472,7 +472,7 @@ fighting over the same persona.
 
 Everything above gets you an assistant that works on day one. What kills it on day twenty is
 the transcript: every turn appends, and eventually the provider rejects the request. Compaction
-(`SPEC.md §7F`) is the fix, and it is a **pure `messages → messages` helper** riding the
+is the fix, and it is a **pure `messages → messages` helper** riding the
 existing `beforeLLM` hook — no new loop behavior.
 
 | option | meaning |
@@ -709,7 +709,7 @@ Being precise here is the point; it is what lets you plan the rest of your build
 | The **trigger→turn seam** — `post` / `wake` / `wait`, inbox coalescing, `HEARTBEAT_OK` silence | The **transport**: Telegram/WhatsApp/Slack/email adapters, webhooks, auth, delivery retries |
 | An **in-process interval heartbeat** on an injectable clock | A **scheduler daemon**, cron, process supervision, restart-on-crash, "what runs when the box reboots" |
 | **Compaction** primitives (`maxTokens`, `keepTail`, `flushToMemory`, tool-pair safety) | The **summarizer** — the compactor calls *your* `summarize`; the library never calls a model for you |
-| **Suspension** (`§10`) so the persona can park on a human decision | The approval UI / the channel round-trip that answers it |
+| **Suspension** so the persona can park on a human decision | The approval UI / the channel round-trip that answers it |
 
 That split is deliberate: a library that shipped a Telegram adapter and a cron daemon would be
 a *product*, and you would fight it the first time your infrastructure disagreed with it.
@@ -753,4 +753,4 @@ The key is read from the environment by name and never printed.
 - [An agent that learns from its own runs](/toolnexus/scenarios/self-improving-agent/) — the reviewer + consolidator loop that keeps this memory clean.
 - [Sub-agents & teams](/toolnexus/subagents/) — the six host verbs the heartbeat and channel handler ride on.
 - [Suspension & the human loop](/toolnexus/suspension/) — parking on a human decision mid-turn.
-- `SPEC.md §7E` (agent home) · `§7F` (compaction) · `§7D` (agent runtime) · `§10` (suspension).
+- [SPEC.md §7E](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7e-agent-home--personas-source-agent-persona-surface) (agent home) · [§7F](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7f-context-compaction-keep-a-long-lived-agent-under-budget) (compaction) · [§7D](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7d-sub-agents--agent-runtime-source-agent) (agent runtime) · [§10](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#10-suspension--pending--waitfor) (suspension).

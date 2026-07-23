@@ -32,7 +32,7 @@ no hang, no silently-wrong answer.
   tools stay present and the toolkit still builds (R1-R3).
 - A **malformed `mcp.json`** surfaces a clear parse error, no crash (R4).
 - **LLM failure is surfaced, not swallowed**: an out-of-credits `402` and a
-  persistent `500` both surface as a bounded error via the §8 default classifier;
+  persistent `500` both surface as a bounded error via the default classifier;
   a transient `429` is retried and succeeds (R5-R7).
 - A **native tool that throws mid-run** is fed back to the model as an error result,
   and the agent loop continues to a final answer (R8).
@@ -109,7 +109,7 @@ returns `parse mcp config: unexpected end of JSON input`, Elixir returns
 
 ### LLM failure is surfaced or retried (R5-R7)
 
-These exercise the §8 resilience classifier (default: retryable → retry, else
+These exercise the resilience classifier (default: retryable → retry, else
 fail) against the mock LLM.
 
 - **R5 — out of credits (402).** A `402` is **not** in the retryable set, so the

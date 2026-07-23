@@ -8,7 +8,7 @@ import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 toolnexus already treats every tool *source* as the same thing to an LLM. Sub-agents complete
 that axiom **locally**: **an Agent is a Tool** — a system prompt × a filtered toolkit view × the
 shipped client loop, invocable as a named, described, schema'd callable. One agent can delegate
-to another **in-process**: isolated context, one result back, tokens rolled up. (`SPEC.md §7D`.)
+to another **in-process**: isolated context, one result back, tokens rolled up.
 
 <Aside type="note" title="Namespacing — this is not the A2A Agent">
 Every port ships this surface in an **`agents` namespace** that never collides with the existing
@@ -242,7 +242,7 @@ wait → close, fused. Its guarantees:
 ## Suspension escalation & durable resume
 
 A suspending child agent presents to its parent **exactly as a suspending tool** —
-[the §10 suspension layer](/toolnexus/suspension/), verbatim, no new pending type. The nearest
+[the suspension layer](/toolnexus/suspension/), verbatim, no new pending type. The nearest
 `waitFor` interpreter wins, one hop at a time: child's `waitFor` → else the child's Request
 (plus its handle path in `data.path`) rides up through the parent's `task` result → parent's
 `waitFor` → … → the root returns `status: "pending"`. Parked levels burn zero tokens.
@@ -289,7 +289,7 @@ instead of `"done"`. Code that matched `status === "done"` after a maxTurns stop
 </Aside>
 
 An optional `onBudget(info) → "stop" | "extend" | "suspend"` hook lets the host convert a limit
-into an approval — `"suspend"` routes it through §10 like any other human-in-the-loop request.
+into an approval — `"suspend"` routes it through the suspension layer like any other human-in-the-loop request.
 
 ## Advanced — the six host verbs
 
@@ -352,7 +352,7 @@ The same shapes work in every port — only the `agent()` spelling changes (tabs
 
 ## See also
 
-- [Suspension & the human loop](/toolnexus/suspension/) — the §10 machinery escalation rides on.
-- [Persona agents](/toolnexus/persona-agents/#staying-under-the-context-window--compaction) — keep a high-tool-volume worker under its context budget with the `compactor` `beforeLLM` hook (§7F).
+- [Suspension & the human loop](/toolnexus/suspension/) — the machinery escalation rides on.
+- [Persona agents](/toolnexus/persona-agents/#staying-under-the-context-window--compaction) — keep a high-tool-volume worker under its context budget with the `compactor` `beforeLLM` hook.
 - [A2A — remote agents](/toolnexus/a2a/) — the same axiom across the network; `serve(agent)` is unchanged.
-- `SPEC.md §7D` — the full cross-language contract (state machine, gates, cancellation table).
+- [SPEC.md §7D](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7d-sub-agents--agent-runtime-source-agent) — the full cross-language contract (state machine, gates, cancellation table).
