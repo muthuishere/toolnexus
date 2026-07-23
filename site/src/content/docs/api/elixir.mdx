@@ -49,3 +49,42 @@ ships the **full** elicitation bridge (form *and* URL mode).
 - `Toolnexus.Client.create(opts) :: %Toolnexus.Client{}` →
   `Toolnexus.Client.run(client, prompt, toolkit, opts \\ [])`,
   `Toolnexus.Client.stream(client, prompt, toolkit, opts \\ [])`.
+
+## Tools you build — native, HTTP, built-ins
+
+- `Toolnexus.Native.define_tool(name:, description:, input_schema?, execute:)` — `execute` is
+  `fn args -> end` or `fn args, ctx -> end`.
+- `Toolnexus.Http.tool(name:, description:, method:, url:, headers?, query?, body?, result_mode?,
+  timeout?)` — note the function is `tool/1` (not `http_tool`); `:timeout` in ms.
+- `:builtins` toggle → ten built-ins: `bash · read · write · edit · grep · glob · webfetch ·
+  question · apply_patch · todowrite`. (`Toolnexus.Builtin.tools/0` · `load/1`.)
+- Equivalents: `defineTool` / `httpTool` (js) · `define_tool` / `http_tool` (py) · `NativeTool` /
+  `HTTPTool` (go) · `NativeTool.of` / `HttpTool.of` (java) · `NativeTool.Of` / `HttpTool.Of` (c#).
+
+## Sub-agents & teams
+
+- `Toolnexus.Agents.agent(name, does:, uses?, soul?/soul_file?, team?, budget?, model?, wait_for?)`.
+- `Toolnexus.Agents.run(agent, rt_opts, prompt)` — result map `%{status:, text:, total_tokens:,
+  turns:, is_error:, pending:}`.
+- `Toolnexus.Agents.as_tool(agent, rt_opts)` · `Toolnexus.Agents.compose_soul(dir) :: {soul, found}`.
+- Equivalents: `agents.agent` / `.run` / `.asTool` / `composeSoul` (js) · `agent` (py) ·
+  `agents.New` (go) · `Agents.agent` (java) · `new Agent` (c#).
+
+## A2A — serve & remote agents
+
+- `Toolnexus.Toolkit.serve(tk, addr, client:, a2a:, mcp?, on_task?, on_call?) ::
+  Toolnexus.Serve.Handle.t()` — `handle.url` · `Toolnexus.Serve.stop/1`.
+- `Toolnexus.A2A.agent(card:, headers?, timeout?, poll_every?)` +
+  `create_toolkit(agents: [...])` / `Toolnexus.Toolkit.add_agent(tk, card_url)`.
+- Equivalents: `tk.serve` / `tk.addAgent` (js) · `serve` / `add_agent` (py) · `Serve` / `AddAgent`
+  (go) · `serve` / `addAgent` (java) · `ServeAsync` / `AddAgentAsync` (c#).
+
+## Suspension & the human loop
+
+- `:wait_for` (toolkit option; `fn Request -> Answer`).
+- `%Toolnexus.Request{id, kind, prompt, url, data, expires_at}` (serializes `expiresAt`) ·
+  `%Toolnexus.Answer{id, ok, data, reason}`.
+- `Toolnexus.ToolResult.pending?/1` detects a suspension; a tool suspends by returning
+  `%ToolResult{is_error: true, metadata: %{pending: %Request{}}}`.
+- Equivalents: `waitFor` / `pending` (js) · `wait_for` / `pending` (py) · `WaitFor` / `Pending`
+  (go) · `waitFor` / `ToolResult.pending` (java) · `WithWaitFor` / `ToolResult.Pending` (c#).

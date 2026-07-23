@@ -66,6 +66,15 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
 await tk.AddAgentAsync("https://other.example.com/.well-known/agent-card.json");   // or at runtime
 ```
 </TabItem>
+<TabItem label="Elixir">
+```elixir
+{:ok, tk} = Toolnexus.create_toolkit(
+  agents: [Toolnexus.A2A.agent(card: "https://peer.example.com/.well-known/agent-card.json")])
+# each advertised skill is now a tool named <agent>_<skill>, source "a2a"
+
+Toolnexus.Toolkit.add_agent(tk, "https://other.example.com/.well-known/agent-card.json")  # runtime
+```
+</TabItem>
 </Tabs>
 
 The `agents` block mirrors `mcpServers` — a config list you can also load from a top-level `agents`
@@ -133,6 +142,15 @@ var handle = await tk.ServeAsync("127.0.0.1:0", new Toolkit.ServeOptions
     Client = ClientFor(llm),
     A2A = new A2AConfig { Name = "my-agent" },
 });
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+llm = Toolnexus.Client.create(base_url: base, style: "openai", model: model)
+handle = Toolnexus.Toolkit.serve(tk, "127.0.0.1:0",
+  client: llm,
+  a2a: %{name: "my-agent", store: "memory"})
+# handle.url now speaks A2A; Toolnexus.Serve.stop(handle)
 ```
 </TabItem>
 </Tabs>

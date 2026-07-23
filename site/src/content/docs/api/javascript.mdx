@@ -30,3 +30,46 @@ six-language synced tabs.
 - `loadMcp(config): Promise<McpSource>`
 - `toOpenAI(tk)` · `toAnthropic(tk)` · `toGemini(tk)`
 - `createClient(opts): Client` → `client.ask(prompt, tk)`, `client.stream(...)`.
+
+## Tools you build — native, HTTP, built-ins
+
+- `defineTool({ name, description, inputSchema?, run })` — your function as a `Tool`. Decorator
+  sugar: `@tool(description, { name?, inputSchema? })` + `collectTools(obj)`.
+- `httpTool({ name, description, method, url, headers?, query?, body?, resultMode?, timeout? })` —
+  an endpoint as a `Tool`.
+- `builtins` toggle → ten built-ins: `bash · read · write · edit · grep · glob · webfetch ·
+  question · apply_patch · todowrite`.
+- Equivalents: `define_tool`/`tool` · `http_tool` (py) · `NativeTool`/`NativeToolReflect` ·
+  `HTTPTool` (go) · `NativeTool.of` · `HttpTool.of` (java) · `NativeTool.Of` · `HttpTool.Of` (c#) ·
+  `Toolnexus.Native.define_tool` · `Toolnexus.Http.tool` (elixir).
+
+## Sub-agents & teams
+
+- `agents.agent(name, spec): Agent` — `spec { does, uses?, soul?, soulFile?, team?, budget?, model?,
+  waitFor? }`.
+- `agent.run(prompt, opts): Promise<AgentRunResult>` — `{ status, text, totalTokens, turns, runtime }`.
+- `agent.asTool(opts): Tool` (delegate as one tool) · `composeSoul(dir): { soul, found }`.
+- Equivalents: `agent` / `.run` / `.as_tool` / `compose_soul` (py) · `agents.New` / `.Run` /
+  `.AsTool` / `ComposeSoul` (go) · `Agents.agent` / `.run` / `.asTool` / `Agents.composeSoul`
+  (java) · `new Agent` / `.RunAsync` / `.AsTool` / `Home.ComposeSoul` (c#) · `Agents.agent` /
+  `Agents.run` / `Agents.as_tool` / `Agents.compose_soul` (elixir).
+
+## A2A — serve & remote agents
+
+- `tk.serve(addr, { client, a2a, onTask?, mcp?, onCall? }): Promise<ServeHandle>` — expose the
+  toolkit; `handle.url`, `handle.stop()`.
+- `agent({ card, headers?, timeout?, pollEvery? })` + `createToolkit({ agents })` /
+  `tk.addAgent(cardUrl)` — consume a peer's skills as `<agent>_<skill>` tools.
+- Equivalents: `serve` / `add_agent` (py) · `Serve` / `AddAgent` (go) · `serve` / `addAgent`
+  (java) · `ServeAsync` / `AddAgentAsync` (c#) · `Toolkit.serve` / `Toolkit.add_agent` (elixir).
+
+## Suspension & the human loop
+
+- `waitFor?: (req: Request) => Promise<Answer>` (toolkit option).
+- `Request { id, kind, prompt, url?, data?, expiresAt? }` · `Answer { id, ok, data?, reason? }`.
+- `pending({ kind, prompt, url?, data? }): ToolResult` · `authRequired(url, prompt?)` ·
+  `pendingOf(result): Request | undefined`.
+- Equivalents: `wait_for` / `pending` / `auth_required` / `pending_of` (py) · `WaitFor` /
+  `Pending` / `AuthRequired` / `PendingOf` (go) · `waitFor` / `ToolResult.pending` /
+  `authRequired` / `pendingOf` (java) · `WithWaitFor` / `ToolResult.Pending` / `AuthRequired` /
+  `PendingOf` (c#) · `wait_for` / `ToolResult.pending?` (elixir).

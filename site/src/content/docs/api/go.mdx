@@ -32,3 +32,42 @@ Module **`github.com/muthuishere/toolnexus/golang`** (Go 1.23). See the
 - `LoadMcp(config any) (*McpSource, error)`
 - `tk.ToOpenAI()` · `tk.ToAnthropic()` · `tk.ToGemini()`
 - `CreateClient(opts ClientOptions) *Client` → `client.Ask(ctx, prompt, tk, id)`.
+
+## Tools you build — native, HTTP, built-ins
+
+- `NativeTool(name, description, schema, fn)` · `NativeToolReflect[T](name, description, fn)` —
+  schema from struct json tags.
+- `HTTPTool(opts HTTPToolOptions)` — `{ Name, Description, Method, URL, Headers, Query, Body,
+  ResultMode, Timeout }`; `Timeout` ms (0 ⇒ 30000).
+- `Builtins` toggle → ten built-ins: `bash · read · write · edit · grep · glob · webfetch ·
+  question · apply_patch · todowrite`.
+- Equivalents: `defineTool` / `httpTool` (js) · `define_tool` / `http_tool` (py) · `NativeTool.of`
+  / `HttpTool.of` (java) · `NativeTool.Of` / `HttpTool.Of` (c#) · `Toolnexus.Native.define_tool` /
+  `Toolnexus.Http.tool` (elixir).
+
+## Sub-agents & teams
+
+- `agents.New(name, agents.Spec{Does, Tools, Soul, SoulFile, Team, Budget, Model, WaitFor}) *Agent`.
+- `(a *Agent) Run(agents.Options{LLM: ...}, prompt) (TaskResult, *Runtime)` — `.Status`, `.Text`,
+  `.TotalTokens`.
+- `(a *Agent) AsTool(agents.Options) tn.Tool` · `agents.ComposeSoul(dir) (soul, found)`.
+- Equivalents: `agents.agent` / `.run` / `.asTool` / `composeSoul` (js) · `agent` (py) ·
+  `Agents.agent` (java/elixir) · `new Agent` (c#).
+
+## A2A — serve & remote agents
+
+- `(tk *Toolkit) Serve(addr, ServeOptions{Client, A2A: *A2AConfig, OnTask, MCP, OnCall}) (*ServeHandle, error)`.
+- `Agent{Card, Headers, Timeout, PollEvery}` + `Options{Agents: []Agent}` /
+  `tk.AddAgent(ctx, cardURL, opts)`.
+- Equivalents: `tk.serve` / `tk.addAgent` (js) · `serve` / `add_agent` (py) · `serve` / `addAgent`
+  (java) · `ServeAsync` / `AddAgentAsync` (c#) · `Toolkit.serve` / `Toolkit.add_agent` (elixir).
+
+## Suspension & the human loop
+
+- `WaitFor` field on `Options` — `func(Request) (Answer, error)`.
+- `Request{ID, Kind, Prompt, URL, Data, ExpiresAt}` · `Answer{ID, Ok, Data, Reason}`.
+- `Pending(req Request) ToolResult` · `AuthRequired(url, prompt) ToolResult` ·
+  `PendingOf(result) *Request`.
+- Equivalents: `waitFor` / `pending` / `authRequired` / `pendingOf` (js) · `wait_for` / `pending`
+  (py) · `waitFor` / `ToolResult.pending` (java) · `WithWaitFor` / `ToolResult.Pending` (c#) ·
+  `wait_for` / `ToolResult.pending?` (elixir).

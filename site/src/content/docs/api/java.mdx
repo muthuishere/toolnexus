@@ -32,3 +32,40 @@ for every symbol shown in six-language synced tabs.
 - `McpSource.load(config)`
 - `Adapters.toOpenAI(tk)` · `toAnthropic(tk)` · `toGemini(tk)`
 - `Client.create(Client.Options)` → `client.ask(prompt, tk)`.
+
+## Tools you build — native, HTTP, built-ins
+
+- `NativeTool.of(name, description, schema, fn)` — overload takes `(args, ToolContext)`.
+- `HttpTool.of(HttpTool.Options)` — `{ name, description, method, url, headers, query, body,
+  resultMode, timeout }`; `timeout` `Long` ms.
+- `.builtins(...)` toggle → ten built-ins: `bash · read · write · edit · grep · glob · webfetch ·
+  question · apply_patch · todowrite`. (`BuiltinTools.create()` / `.select(cfg)`.)
+- Equivalents: `defineTool` / `httpTool` (js) · `define_tool` / `http_tool` (py) · `NativeTool` /
+  `HTTPTool` (go) · `NativeTool.Of` / `HttpTool.Of` (c#) · `Toolnexus.Native.define_tool` /
+  `Toolnexus.Http.tool` (elixir).
+
+## Sub-agents & teams
+
+- `Agents.agent(name, new Agents.AgentSpec().does(...).tools(...).soulFile(...).team(...).budget(...))`.
+- `Agents.Agent.run(RuntimeOptions, prompt): TaskResult` — `.status()`, `.text()`,
+  `.totalTokens()`.
+- `Agents.Agent.asTool(RuntimeOptions): Tool` · `Agents.composeSoul(Path): ComposedSoul`.
+- Equivalents: `agents.agent` / `.run` / `.asTool` / `composeSoul` (js) · `agent` (py) ·
+  `agents.New` (go) · `new Agent` (c#) · `Agents.agent` (elixir).
+
+## A2A — serve & remote agents
+
+- `tk.serve(addr, new Toolkit.ServeOptions().client(llm).a2a(new A2AServer.A2AConfig()...))`.
+- `A2A.agent(cardUrl)` + `Toolkit.Options().agents(List<A2A.Agent>)` / `tk.addAgent(cardUrl)`.
+- Equivalents: `tk.serve` / `tk.addAgent` (js) · `serve` / `add_agent` (py) · `Serve` / `AddAgent`
+  (go) · `ServeAsync` / `AddAgentAsync` (c#) · `Toolkit.serve` / `Toolkit.add_agent` (elixir).
+
+## Suspension & the human loop
+
+- `Options.waitFor(Function<Request, Answer>)` (toolkit option).
+- `record Request(id, kind, prompt, url, data, expiresAt)` · `record Answer(id, ok, data, reason)`.
+- `ToolResult.pending(Request)` · `ToolResult.authRequired(url[, prompt])` ·
+  `ToolResult.pendingOf(result): Request`.
+- Equivalents: `waitFor` / `pending` / `authRequired` / `pendingOf` (js) · `wait_for` / `pending`
+  (py) · `WaitFor` / `Pending` (go) · `WithWaitFor` / `ToolResult.Pending` (c#) · `wait_for` /
+  `ToolResult.pending?` (elixir).
