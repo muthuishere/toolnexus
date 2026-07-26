@@ -74,6 +74,30 @@ The three event shapes: `{ event: "llm", model, status, ms, promptTokens, comple
 `{ event: "run", model, turns, toolCalls, totalTokens, ms, error? }` — names idiomatic per port
 (snake_case in Python).
 
+### On an agent run
+
+The examples above build a client directly. When you run **[sub-agents](/toolnexus/subagents/)**
+the runtime builds that client for you, so `onMetric` is set on the runtime — covering every
+agent — or on an individual agent, which replaces the runtime-wide sink for that agent alone.
+Setting it per agent is how you attribute events to the agent that produced them.
+
+The events are identical on both paths: same names, same fields. The runtime forwards the sink
+verbatim and adds, renames, drops, buffers, reorders and aggregates nothing.
+
+```ts
+// every agent in this runtime reports to one sink…
+const rt = new agents.AgentRuntime({ registry, onMetric: ev => track(ev) })
+
+// …or give one agent its own, and it wins for that agent only
+const researcher = agents.agent("researcher", {
+  does: "digs through long documents",
+  onMetric: ev => track({ ...ev, agent: "researcher" }),
+})
+```
+
+`hooks` resolves the same way and independently — an agent may override one and inherit the
+other. See [Sub-agents → hooks & metrics](/toolnexus/subagents/#hooks--metrics-on-an-agent-run).
+
 ## Built-in Prometheus — `client.metrics()`
 
 The *same* events feed a tiny in-memory registry that renders the Prometheus text exposition format
