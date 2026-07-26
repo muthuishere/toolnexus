@@ -33,6 +33,14 @@ public sealed class AgentSpec
 
     public Func<Handle, Task>? OnSpawn { get; set; }
     public Func<Handle, string, Task>? OnClose { get; set; }
+
+    /// <summary>The §8 lifecycle hooks for this agent's runs (SPEC §7D). Set ⇒ replaces the
+    /// runtime-wide hooks for this agent; forwarded verbatim.</summary>
+    public LlmClient.Hooks? Hooks { get; set; }
+
+    /// <summary>The §8 observability sink for this agent's runs (SPEC §7D). Resolves independently
+    /// of <see cref="Hooks"/>.</summary>
+    public Action<MetricEvent>? OnMetric { get; set; }
 }
 
 /// <summary>
@@ -73,6 +81,8 @@ public sealed class Agent
             WaitFor = Spec.WaitFor,
             OnSpawn = Spec.OnSpawn,
             OnClose = Spec.OnClose,
+            Hooks = Spec.Hooks,
+            OnMetric = Spec.OnMetric,
             // Team scoping: task targets = ONLY this agent's team; null team ⇒ no task tool.
             Team = Spec.Team?.Select(a => a.Name).ToList(),
         };

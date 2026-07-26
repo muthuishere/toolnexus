@@ -291,6 +291,43 @@ instead of `"done"`. Code that matched `status === "done"` after a maxTurns stop
 An optional `onBudget(info) → "stop" | "extend" | "suspend"` hook lets the host convert a limit
 into an approval — `"suspend"` routes it through the suspension layer like any other human-in-the-loop request.
 
+## Hooks & metrics on an agent run
+
+The runtime builds each agent's client itself, so the two lifecycle seams reach an agent by
+being handed to it. `hooks` (the four lifecycle callbacks) and `onMetric` (the observability
+sink) can be set on the **runtime** — applying to every agent — or on an **individual agent**,
+which replaces the runtime-wide value for that agent alone.
+
+| | on the runtime | on an agent |
+|---|---|---|
+| `hooks` | every agent's turns | that agent's turns only |
+| `onMetric` | every agent's turns | that agent's turns only |
+
+Four rules hold in all six ports:
+
+1. **Agent beats runtime, replace never merge.** Two transcript rewrites have no defined
+   order, so an agent that sets `hooks` runs only its own. The two fields resolve
+   independently — override one, inherit the other.
+2. **Forwarded verbatim.** The runtime doesn't compose, wrap, reorder or read either value.
+   Everything documented for a hand-built client holds identically here.
+3. **They can't reach the runtime's own options.** Neither value can change an agent's composed
+   soul, its escalation authority, its HTTP seam or the shared conversation store — that's why
+   these are two typed fields and not one "configure the client" escape hatch.
+4. **Unset changes nothing.** With neither set, a run is byte-identical to one on a runtime that
+   never had the fields.
+
+The headline use is **context compaction on a long-lived agent** — a compactor *is* a
+`beforeLLM` hook. See [Persona agents → compaction](/toolnexus/persona-agents/#wire-it-on-an-agent-run-per-agent)
+for the per-agent snippets in all six languages.
+
+<Aside type="note" title="Compaction and suspension interact — correctly">
+A turn that compacts and *then* suspends is rewound with the rest of the turn: the stored
+transcript returns to its full pre-turn state and the resumed replay compacts again. The
+compactor is a pure `messages → messages` function, so re-running it is free of surprises — and
+the durable-resume guarantee (the parent re-invokes `task` and reattaches by task key) is
+untouched.
+</Aside>
+
 ## Advanced — the six host verbs
 
 `agent().run()` and the `task` tool compile down to a small runtime you can drive directly

@@ -157,6 +157,8 @@ class Agent:
         wait_for: Optional[Callable[..., Any]] = None,
         on_spawn: Optional[Callable[..., Any]] = None,
         on_close: Optional[Callable[..., Any]] = None,
+        hooks: Optional[Any] = None,
+        on_metric: Optional[Callable[[dict[str, Any]], None]] = None,
     ) -> None:
         self.name = name
         self.does = does
@@ -169,6 +171,9 @@ class Agent:
         self.wait_for = wait_for
         self.on_spawn = on_spawn
         self.on_close = on_close
+        # §8 seams for THIS agent (§7D) — set ⇒ replaces the runtime-wide value.
+        self.hooks = hooks
+        self.on_metric = on_metric
 
     def registry(self, acc: Optional[dict[str, AgentDef]] = None) -> dict[str, AgentDef]:
         """The runtime registry = the TRANSITIVE CLOSURE of this agent's team graph
@@ -190,6 +195,8 @@ class Agent:
             wait_for=self.wait_for,
             on_spawn=self.on_spawn,
             on_close=self.on_close,
+            hooks=self.hooks,
+            on_metric=self.on_metric,
             # task targets = ONLY this agent's team, never the whole registry.
             task_targets=[a.name for a in self.team],
         )
@@ -207,6 +214,8 @@ class Agent:
         shutdown_ms: Optional[float] = None,
         store: Optional[ConversationStore] = None,
         clock: Optional[Clock] = None,
+        hooks: Optional[Any] = None,
+        on_metric: Optional[Callable[[dict[str, Any]], None]] = None,
     ) -> AgentRuntime:
         return AgentRuntime(
             registry=self.registry(),
@@ -219,6 +228,8 @@ class Agent:
                     "shutdown_ms": shutdown_ms,
                     "store": store,
                     "clock": clock,
+                    "hooks": hooks,
+                    "on_metric": on_metric,
                 }
             ),
         )

@@ -1,0 +1,96 @@
+{
+  "$schema": "toolnexus-agent-hooks-fixture/v1",
+  "description": "SPEC §7D 'The §8 seams on an agent run': the agent runtime forwards `hooks` and `onMetric` verbatim into the client it builds for each handle, resolved def-over-runtime (replace, never merge). This is how §7F compaction reaches a §7E persona agent. Every port asserts these six scenarios; unset must stay byte-identical.",
+
+  "scenarios": [
+    {
+      "id": "H1",
+      "name": "runtime hooks reach an agent turn",
+      "given": "the runtime options carry hooks.beforeLLM, which appends a system message with content 'INJECTED-BY-HOOK'",
+      "when": "an agent handle runs one turn",
+      "expect": {
+        "hookRan": true,
+        "wireTranscriptContains": "INJECTED-BY-HOOK",
+        "comment": "the rewrite must reach the provider payload, not merely be observed"
+      }
+    },
+    {
+      "id": "H2",
+      "name": "runtime onMetric receives the §8 events",
+      "given": "the runtime options carry onMetric",
+      "when": "an agent handle completes a turn",
+      "expect": {
+        "eventsReceived": ["llm", "run"],
+        "comment": "same event names and fields §8 specifies for a directly constructed client; the runtime adds, renames, drops, buffers, reorders and aggregates nothing"
+      }
+    },
+    {
+      "id": "H3",
+      "name": "a def's hooks REPLACE the runtime's, for that agent only",
+      "given": "the runtime sets a beforeLLM, agent A's def sets its own beforeLLM, agent B's def sets none",
+      "when": "A runs one turn, then B runs one turn",
+      "expect": {
+        "agentAHookFired": 1,
+        "runtimeHookFired": 1,
+        "comment": "the runtime hook fires ONLY for B. Merging is non-conformant: composing two transcript rewrites has no defined order"
+      }
+    },
+    {
+      "id": "H4",
+      "name": "hooks and onMetric resolve independently",
+      "given": "the runtime sets both hooks and onMetric; agent A's def overrides hooks only",
+      "when": "A runs one turn",
+      "expect": {
+        "usesDefHooks": true,
+        "usesRuntimeOnMetric": true
+      }
+    },
+    {
+      "id": "H5",
+      "name": "a §7F compactor attached per-agent compacts an agent run",
+      "given": {
+        "comment": "seed the runtime's conversation store for the handle's id (conversation id = handle id) with 81 messages built deterministically, so every port produces the same bytes",
+        "generator": {
+          "leading": { "role": "system", "content": "SOUL-VERBATIM" },
+          "pairs": 40,
+          "group": [
+            { "role": "user", "content": "<repeat 'q' 200 times>" },
+            { "role": "assistant", "content": "<repeat 'a' 200 times>" }
+          ]
+        },
+        "compactorOptions": {
+          "maxTokens": 200,
+          "keepTail": 80,
+          "summarize": "returns the literal string 'SUMMARY-OF-HEAD'"
+        },
+        "attachedVia": "the agent def's hooks.beforeLLM"
+      },
+      "when": "the agent runs one turn",
+      "expect": {
+        "preRunStoredMessages": 81,
+        "wireTranscriptSmallerThanPreRun": true,
+        "firstWireMessageContent": "SOUL-VERBATIM",
+        "wireTranscriptContains": "SUMMARY-OF-HEAD",
+        "comment": "the leading system prompt survives verbatim; the retained tail begins at a user turn (tool-pair safety, §7F)"
+      }
+    },
+    {
+      "id": "H6",
+      "name": "a compacted turn that suspends is rewound with the rest of the turn",
+      "given": "H5's seeded 81-message transcript and compactor, on an agent whose tool suspends under §10, with no waitFor interpreter anywhere in the chain",
+      "when": "the agent runs one turn and the turn parks durably",
+      "expect": {
+        "status": "pending",
+        "storedMessagesAfter": 81,
+        "comment": "the stored transcript returns to its FULL pre-turn checkpoint and the compaction is discarded — the resumed replay compacts again. A port that persists the compacted head across a suspension is non-conformant."
+      }
+    }
+  ],
+
+  "invariants": {
+    "unsetIsByteIdentical": "with neither hooks nor onMetric set at either level, a run's wire transcript, stored transcript, transition trace and result are byte-identical to a runtime without the fields. Ports SHOULD pin this against output recorded BEFORE the capability existed, not against their own current output.",
+    "forwardedNotInterpreted": "the runtime does not compose, wrap, reorder, default or read either value",
+    "runtimeInvariantsUntouchable": "neither value can alter the handle's composed soul (systemPrompt), its §10 escalating waitFor, its turn-gated HTTP seam, or the runtime-wide conversation store",
+    "cloneParity": "ports whose def/options are rebuilt field-by-field (java withBudget + copyWithRegistry, csharp CloneWith + CloneWithRegistry) MUST carry both fields through every such clone — a missed field is a silent per-spawn or per-subtree drop"
+  }
+}

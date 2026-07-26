@@ -382,6 +382,88 @@ client = Toolnexus.Client.create(
 </TabItem>
 </Tabs>
 
+### Wire it on an **agent run** (per agent)
+
+The snippets above build a client yourself. A persona usually runs on the agent runtime instead
+— and the runtime builds that client for you, so you hand it the hook rather than the options.
+Both the runtime and an individual agent accept `hooks` (and `onMetric`). An agent's own value
+**replaces** the runtime-wide one — never merges — which is what lets two agents in one runtime
+carry **different compaction budgets**.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+const researcher = agents.agent("researcher", {
+  does: "digs through long documents",
+  soul: "You are a careful researcher.",
+  hooks: { beforeLLM: agents.compactor({ maxTokens: 60_000, summarize }) },
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+researcher = agent(
+    "researcher",
+    does="digs through long documents",
+    soul="You are a careful researcher.",
+    hooks={"before_llm": compactor(max_tokens=60_000, summarize=summarize)},
+)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+researcher := agents.New("researcher", agents.Spec{
+    Does:  "digs through long documents",
+    Soul:  "You are a careful researcher.",
+    Hooks: &toolnexus.Hooks{BeforeLLM: agents.Compactor(agents.CompactorOptions{
+        MaxTokens: 60000, Summarize: summarize,
+    })},
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+var hooks = new LlmClient.Hooks();
+hooks.beforeLLM = Compaction.compactor(new Compaction.Options()
+        .maxTokens(60_000).summarize(summarize));
+
+var researcher = Agents.agent("researcher")
+        .does("digs through long documents")
+        .soul("You are a careful researcher.")
+        .hooks(hooks);
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var researcher = Agent.Create("researcher", new AgentSpec {
+    Does  = "digs through long documents",
+    Soul  = "You are a careful researcher.",
+    Hooks = new LlmClient.Hooks {
+        BeforeLLM = Compaction.Compactor(new Compaction.Options {
+            MaxTokens = 60_000, Summarize = summarize,
+        }),
+    },
+});
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+researcher =
+  Toolnexus.Agents.agent("researcher",
+    does: "digs through long documents",
+    soul: "You are a careful researcher.",
+    hooks: %{
+      before_llm: Toolnexus.Agents.Compaction.compactor(max_tokens: 60_000, summarize: summarize)
+    }
+  )
+```
+</TabItem>
+</Tabs>
+
+Set the same field on the **runtime** instead and every agent gets it. Set both and the agent
+wins for that agent only; the two fields resolve independently, so an agent may override `hooks`
+and still inherit the runtime's `onMetric`.
+
 <Aside type="note" title="Two invariants the ports never break">
 **No-op below budget.** At or under `maxTokens` the hook returns nothing and the run is
 byte-identical to one with no compactor — you pay for compaction only once you actually need

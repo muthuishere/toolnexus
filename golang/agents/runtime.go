@@ -143,6 +143,14 @@ type Def struct {
 	OnSpawn func(h *Handle)
 	// OnClose runs before the final checkpoint with one of the Reason* values.
 	OnClose func(h *Handle, reason string)
+	// Hooks are the §8 lifecycle callbacks for THIS agent's turns, forwarded
+	// verbatim into the client the runtime builds. Set ⇒ replaces Options.Hooks
+	// for this agent (never merged). Nil ⇒ inherit Options.Hooks. This is the
+	// seam a §7F compactor rides (per-agent budgets).
+	Hooks *tn.Hooks
+	// OnMetric is the §8 observability sink for THIS agent's turns, forwarded
+	// verbatim. Set ⇒ replaces Options.OnMetric (never merged); nil ⇒ inherit.
+	OnMetric func(tn.MetricEvent)
 }
 
 // InboxItem is one unsolicited-rail message with provenance (§7D two rails).
@@ -280,6 +288,18 @@ type Options struct {
 	Store tn.ConversationStore
 	// Clock is the injectable time source (default: real clock).
 	Clock Clock
+	// Hooks are the §8 lifecycle callbacks applied to EVERY agent's turns,
+	// forwarded verbatim into the client the runtime builds. A Def.Hooks
+	// replaces this for that agent (never merged). Nil ⇒ no hooks, and the run
+	// is byte-identical to one with this field absent.
+	//
+	// The runtime never composes, wraps, reorders, defaults or reads these —
+	// and they are NOT a route to alter SystemPrompt, WaitFor, HTTPClient or
+	// Store, which the runtime owns.
+	Hooks *tn.Hooks
+	// OnMetric is the §8 observability sink for every agent's turns, forwarded
+	// verbatim. A Def.OnMetric replaces this for that agent (never merged).
+	OnMetric func(tn.MetricEvent)
 }
 
 // HandleView is one read-only row of List/Inspect.
@@ -1097,6 +1117,16 @@ func (rt *Runtime) execute(runCtx context.Context, h *Handle, def Def, input str
 	toolkit, err := tn.CreateToolkit(runCtx, tn.Options{Builtins: false, ExtraTools: tools})
 	var r tn.RunResult
 	if err == nil {
+		// §8 seams, resolved def-over-runtime (replace, never merge) and forwarded
+		// VERBATIM — the runtime attaches no meaning to either.
+		hooks := rt.opts.Hooks
+		if def.Hooks != nil {
+			hooks = def.Hooks
+		}
+		onMetric := rt.opts.OnMetric
+		if def.OnMetric != nil {
+			onMetric = def.OnMetric
+		}
 		client := tn.CreateClient(tn.ClientOptions{
 			BaseURL:      baseURL,
 			Style:        style,
@@ -1106,6 +1136,8 @@ func (rt *Runtime) execute(runCtx context.Context, h *Handle, def Def, input str
 			MaxTurns:     maxTurns,
 			HTTPClient:   &http.Client{Transport: gatedTransport{rt: rt, base: rt.opts.Transport}},
 			WaitFor:      waitFor,
+			Hooks:        hooks,
+			OnMetric:     onMetric,
 		})
 		history, _ := rt.store.Get(h.ID)
 		r, err = client.RunWithHistory(runCtx, input, toolkit, history)

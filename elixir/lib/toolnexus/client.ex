@@ -826,6 +826,15 @@ defmodule Toolnexus.Client do
 
   defp before_llm(client, messages, tools, turn) do
     case hook(client, :before_llm) do
+      f when is_function(f) and not is_function(f, 1) ->
+        # Loud, not silent: a wrong-arity hook used to fall through to the no-op
+        # branch, so it simply never ran. That is far easier to hit now that hooks
+        # also arrive via the §7D runtime and an AgentDef.
+        raise ArgumentError,
+              "hooks.before_llm must be a 1-arity function taking " <>
+                "%{messages:, tools:, model:, turn:}, got arity " <>
+                inspect(:erlang.fun_info(f, :arity) |> elem(1))
+
       f when is_function(f, 1) ->
         case f.(%{messages: messages, tools: tools, model: client.model, turn: turn}) do
           %{} = ov -> {Map.get(ov, :messages) || messages, Map.get(ov, :tools) || tools}
