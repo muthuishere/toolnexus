@@ -678,3 +678,37 @@ func TestListAndInspectViews(t *testing.T) {
 	}
 	_ = fmt.Sprintf("%v", v)
 }
+
+// ConversationStore() is the §7D read handle onto the ONE runtime-wide store —
+// present in the other five ports (js `store`, python `conversation_store`, java
+// `conversationStore()`, csharp `ConversationStore`, elixir `conversation_store/1`)
+// and previously missing here, so Go tests had to inject their own store to read a
+// transcript at all.
+func TestConversationStoreAccessor(t *testing.T) {
+	// Default (no Options.Store): the accessor exposes the runtime's own store.
+	rt := NewRuntime(Options{Transport: &mockLLM{}, Registry: testRegistry()})
+	defer rt.Close(rt.Root, nil)
+	if rt.ConversationStore() == nil {
+		t.Fatal("ConversationStore() must expose the runtime-owned default store")
+	}
+
+	h, _ := rt.Spawn(rt.Root, "peer", nil)
+	rt.Wake(h, "hello")
+	rt.Wait(h, 0)
+
+	msgs, err := rt.ConversationStore().Get(h.ID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", h.ID, err)
+	}
+	if len(msgs) == 0 {
+		t.Fatal("the transcript should be readable through the accessor (conversation id = handle id)")
+	}
+
+	// An injected store is the SAME object back — not a copy, not a wrapper.
+	injected := tn.NewInMemoryConversationStore()
+	rt2 := NewRuntime(Options{Transport: &mockLLM{}, Registry: testRegistry(), Store: injected})
+	defer rt2.Close(rt2.Root, nil)
+	if rt2.ConversationStore() != injected {
+		t.Error("ConversationStore() must return the injected Options.Store itself")
+	}
+}

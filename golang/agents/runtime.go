@@ -424,6 +424,15 @@ func (rt *Runtime) Trace() []string {
 	return append([]string(nil), rt.trace...)
 }
 
+// ConversationStore returns the ONE runtime-wide conversation store (conversation
+// id = handle id). The runtime owns it, so this is a read handle for inspecting a
+// handle's transcript — not a seam for swapping it; supply Options.Store for that.
+// Mirrors js `runtime.store`, python `conversation_store`, java `conversationStore()`,
+// csharp `ConversationStore`, elixir `conversation_store/1`.
+func (rt *Runtime) ConversationStore() tn.ConversationStore {
+	return rt.store
+}
+
 // MaxObservedConcurrentTurns reports the high-water mark of in-flight LLM calls.
 func (rt *Runtime) MaxObservedConcurrentTurns() int {
 	rt.mu.Lock()
