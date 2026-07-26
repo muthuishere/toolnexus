@@ -32,6 +32,13 @@ type Spec struct {
 	WaitFor func(tn.Request) (tn.Answer, error)
 	OnSpawn func(h *Handle)
 	OnClose func(h *Handle, reason string)
+	// Hooks are the §8 lifecycle callbacks for THIS agent's turns; set ⇒ replaces
+	// the runtime-wide Options.Hooks for this agent (never merged). The seam a
+	// §7F compactor rides, per agent.
+	Hooks *tn.Hooks
+	// OnMetric is the §8 observability sink for THIS agent's turns; set ⇒
+	// replaces Options.OnMetric for this agent (never merged).
+	OnMetric func(tn.MetricEvent)
 }
 
 // Agent is the one new noun.
@@ -73,16 +80,18 @@ func (a *Agent) registryInto(acc map[string]Def) {
 		team = append(team, t.Name)
 	}
 	acc[a.Name] = Def{
-		Name:    a.Name,
-		Does:    a.Spec.Does,
-		Soul:    soul,
-		Model:   model,
-		Tools:   a.Spec.Tools,
-		Team:    team,
-		Budget:  a.Spec.Budget,
-		WaitFor: a.Spec.WaitFor,
-		OnSpawn: a.Spec.OnSpawn,
-		OnClose: a.Spec.OnClose,
+		Name:     a.Name,
+		Does:     a.Spec.Does,
+		Soul:     soul,
+		Model:    model,
+		Tools:    a.Spec.Tools,
+		Team:     team,
+		Budget:   a.Spec.Budget,
+		WaitFor:  a.Spec.WaitFor,
+		OnSpawn:  a.Spec.OnSpawn,
+		OnClose:  a.Spec.OnClose,
+		Hooks:    a.Spec.Hooks,
+		OnMetric: a.Spec.OnMetric,
 	}
 	for _, t := range a.Spec.Team {
 		t.registryInto(acc)

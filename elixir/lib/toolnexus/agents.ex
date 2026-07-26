@@ -48,6 +48,8 @@ defmodule Toolnexus.Agents do
     * `:model` — default `"inherit"` (the runtime's `llm.model`)
     * `:wait_for` — §10 interpreter authority (`(Request -> Answer)`)
     * `:on_spawn` / `:on_close` — lifecycle callbacks
+    * `:hooks` / `:on_metric` — the §8 seams for THIS agent's turns; each replaces
+      the runtime-wide value (never merged). A §7F compactor rides `:hooks`.
   """
   @spec agent(String.t(), keyword() | map()) :: AgentDef.t()
   def agent(name, spec), do: %AgentDef{name: name, spec: Map.new(spec)}
@@ -84,6 +86,9 @@ defmodule Toolnexus.Agents do
           wait_for: spec[:wait_for],
           on_spawn: spec[:on_spawn],
           on_close: spec[:on_close],
+          # §8 seams for THIS agent; set ⇒ replaces the runtime-wide value (never merged)
+          hooks: spec[:hooks],
+          on_metric: spec[:on_metric],
           # task targets = ONLY this agent's team, sorted (never the whole registry)
           task_targets: team |> Enum.map(& &1.name) |> Enum.sort()
         })

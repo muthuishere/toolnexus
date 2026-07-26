@@ -34,6 +34,14 @@ public final class AgentDef {
     /** Team scoping for the {@code task} tool: {@code null} = no team declared (the agent gets no
      * task targets beyond the registry default), a list = ONLY these agents are reachable. */
     public List<String> team;
+    /** §8 lifecycle hooks for THIS agent's per-turn client (SPEC §7D "The §8 seams on an agent
+     * run"). When set it REPLACES {@link RuntimeOptions#hooks} for this agent — never merged
+     * (composing two transcript rewrites has no defined order). Forwarded verbatim. This is how a
+     * §7F compactor reaches one agent without touching its siblings. */
+    public io.github.muthuishere.toolnexus.LlmClient.Hooks hooks;
+    /** §8 observability sink for THIS agent's per-turn client; REPLACES
+     * {@link RuntimeOptions#onMetric} for this agent. Resolves INDEPENDENTLY of {@link #hooks}. */
+    public Consumer<io.github.muthuishere.toolnexus.LlmClient.MetricEvent> onMetric;
 
     public AgentDef(String name, String does, String soul, String model) {
         this.name = name;
@@ -48,6 +56,8 @@ public final class AgentDef {
     public AgentDef onSpawn(Consumer<Handle> v) { this.onSpawn = v; return this; }
     public AgentDef onClose(BiConsumer<Handle, String> v) { this.onClose = v; return this; }
     public AgentDef team(List<String> v) { this.team = v; return this; }
+    public AgentDef hooks(io.github.muthuishere.toolnexus.LlmClient.Hooks v) { this.hooks = v; return this; }
+    public AgentDef onMetric(Consumer<io.github.muthuishere.toolnexus.LlmClient.MetricEvent> v) { this.onMetric = v; return this; }
 
     /** Copy with a merged budget — used when {@code spawn()} carries a budget override. */
     AgentDef withBudget(Budget b) {
@@ -58,6 +68,8 @@ public final class AgentDef {
         d.onSpawn = onSpawn;
         d.onClose = onClose;
         d.team = team;
+        d.hooks = hooks;
+        d.onMetric = onMetric;
         return d;
     }
 }

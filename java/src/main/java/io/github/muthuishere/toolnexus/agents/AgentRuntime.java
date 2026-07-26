@@ -543,6 +543,14 @@ public final class AgentRuntime {
                         // The global turn gate wraps the LLM HTTP call ONLY, via the shipped
                         // Options.httpClient seam — never the whole Run.
                         .httpClient(gated);
+                // The §8 seams (SPEC §7D "The §8 seams on an agent run"): resolved def-over-runtime,
+                // REPLACE never merge, each field INDEPENDENTLY — and forwarded VERBATIM (never
+                // composed, wrapped, reordered, defaulted or read). Unset ⇒ byte-identical.
+                LlmClient.Hooks hooks = h.def.hooks != null ? h.def.hooks : opts.hooks;
+                java.util.function.Consumer<LlmClient.MetricEvent> onMetric =
+                        h.def.onMetric != null ? h.def.onMetric : opts.onMetric;
+                if (hooks != null) co.hooks(hooks);
+                if (onMetric != null) co.onMetric(onMetric);
                 if (opts.apiKey != null) co.apiKey(opts.apiKey);
                 if (h.def.soul != null && !h.def.soul.isEmpty()) co.systemPrompt(h.def.soul);
                 if (waitFor != null) co.waitFor(waitFor);

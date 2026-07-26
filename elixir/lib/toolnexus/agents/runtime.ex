@@ -82,6 +82,11 @@ defmodule Toolnexus.Agents.Runtime do
       store: store,
       metrics: metrics,
       llm: opts[:llm] || %{},
+      # §8 seams forwarded verbatim into each handle's client (SPIKE).
+      # NOTE: :registry here is the AGENT registry; the client's :registry is the
+      # MetricsRegistry — different things, same key name, one layer apart.
+      hooks: opts[:hooks],
+      on_metric: opts[:on_metric],
       gated_transport: transport && gated(gate, transport)
     }
 

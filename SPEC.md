@@ -795,6 +795,43 @@ clock** (all timers/timeouts/deadlines; fixtures run virtual), the **handle tabl
 (rebuildable tree), and **name-sorted registry iteration** wherever prose or traces are
 composed.
 
+### The §8 seams on an agent run (`hooks`, `onMetric`)
+
+The runtime builds each handle's client itself, so the §8 seams reach an agent run only
+by being handed to it. Both the runtime options and `AgentDef` accept two optional
+values, spelled as each port's client already spells them:
+
+| option | is | on runtime | on `AgentDef` |
+|---|---|---|---|
+| `hooks` | the §8 lifecycle callbacks | applies to every agent | applies to that agent |
+| `onMetric` | the §8 observability sink | applies to every agent | applies to that agent |
+
+Four rules, identical in all six ports:
+
+1. **Resolved def-over-runtime, replace never merge.** For each field independently: the
+   def's value when set, else the runtime's, else none. A def that sets `hooks` means the
+   runtime-wide `hooks` does **not** also run for that agent (composing two transcript
+   rewrites has no defined order). The two fields resolve independently — a def may
+   override one and inherit the other.
+2. **Forwarded verbatim, never interpreted.** The runtime does not compose, wrap, reorder,
+   default, or read either value. All §8 hook and metric semantics hold identically
+   whether the client was built by the host or by the runtime.
+3. **Not a route to the runtime's own options.** Supplying either value can never change
+   the handle's composed soul (`systemPrompt`), its §10 escalating `waitFor`, its
+   turn-gated HTTP seam, or the runtime-wide store. This is why the seam is two typed
+   fields and not a `configureClient` escape hatch.
+4. **Unset ⇒ byte-identical.** With neither set at either level, a run's wire transcript,
+   stored transcript, transition trace and result are unchanged from a runtime without
+   the fields.
+
+This is how **§7F compaction reaches a §7E persona agent**: a compactor is a `beforeLLM`
+hook, so it attaches through `hooks` — per agent, which is what lets two agents in one
+runtime carry different budgets. Because compaction rewrites the working transcript and
+that list is what gets persisted, it interacts with the durable-pending rewind above: a
+turn that compacts and then suspends is rewound to its **full pre-turn transcript**, the
+compaction discarded, and the resumed replay compacts again. A port that persists the
+compacted head across a suspension is non-conformant.
+
 ### Cancellation contract (per port)
 
 | port | seam | guarantee |
@@ -812,8 +849,9 @@ Only abort **latency** may differ; the observable outcome is identical everywher
 ### Level-1 surface
 
 `agent(name, { does, uses?, soul?|soulFile?, team?, budget?, model? ("inherit"),
-waitFor?, onSpawn?, onClose? })` → `.run(prompt)` (one-shot) and `.asTool()` (the bridge
-into `extraTools` — the axiom's other direction). `serve(agent)` = §7B unchanged.
+waitFor?, onSpawn?, onClose?, hooks?, onMetric? })` → `.run(prompt)` (one-shot) and
+`.asTool()` (the bridge into `extraTools` — the axiom's other direction). `serve(agent)` =
+§7B unchanged.
 
 ---
 
@@ -890,6 +928,12 @@ tail. It rides the existing seam — the loop applies a `beforeLLM` message rewr
 **replacing the working transcript**, and that array flows into `RunResult.messages` and the
 `ConversationStore` — so compaction is a pure `messages → messages` helper and adds **no loop
 behavior**. Compaction is the canonical use of the §8 `beforeLLM` hook.
+
+On a bare client, hand the compactor to `hooks.beforeLLM`. On a **§7D agent run**, hand it to
+the runtime's or the `AgentDef`'s `hooks` (§7D "The §8 seams on an agent run") — per agent, so
+two agents in one runtime may carry different budgets. A compacted turn that then suspends is
+rewound with the rest of the turn: the stored transcript returns to its full pre-turn state and
+the resumed replay compacts again.
 
 | option | meaning |
 |--------|---------|
@@ -983,6 +1027,11 @@ observe; the noted ones may mutate or short-circuit.
 
 These are what make it programmable as an agent: permissions/guardrails (deny in `beforeTool`),
 caching, arg rewriting, and observability (cost/latency in `afterLLM`).
+
+**Two entry points, one semantics.** `hooks` and `onMetric` reach a client either directly
+through `ClientOptions` or by being forwarded, verbatim and uninterpreted, by the §7D agent
+runtime (§7D "The §8 seams on an agent run"). Everything above holds identically on both paths;
+the runtime adds, renames, drops, buffers, reorders and aggregates nothing.
 
 ### Streaming
 

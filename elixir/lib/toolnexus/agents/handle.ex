@@ -150,7 +150,10 @@ defmodule Toolnexus.Agents.Handle do
       retries: llm[:retries] || 0,
       transport: ctx.gated_transport,
       store: ctx.store,
-      registry: ctx.metrics
+      registry: ctx.metrics,
+      # §8 seams, resolved def-over-runtime (replace, never merge), forwarded verbatim.
+      hooks: defn[:hooks] || ctx[:hooks],
+      on_metric: defn[:on_metric] || ctx[:on_metric]
     )
   end
 

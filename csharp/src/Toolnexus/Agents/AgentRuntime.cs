@@ -499,6 +499,10 @@ public sealed class AgentRuntime
                 MaxTurns = h.EffMaxTurns,
                 HttpHandler = _gate,             // the turn gate wraps ONLY the LLM HTTP call
                 WaitFor = oneShot ?? Escalator(h),
+                // §7D "the §8 seams on an agent run": def-over-runtime, REPLACE never merge, each
+                // field independently — and forwarded VERBATIM (never composed/wrapped/read).
+                Hooks = h.Def.Hooks ?? _opts.Hooks,
+                OnMetric = h.Def.OnMetric ?? _opts.OnMetric,
             });
 
             // Transcripts genuinely survive turns: history is loaded from the runtime store under

@@ -32,6 +32,12 @@ export interface AgentSpec {
   waitFor?: (request: Request) => Promise<Answer>
   onSpawn?: AgentDef["onSpawn"]
   onClose?: AgentDef["onClose"]
+  /** §8 lifecycle callbacks for this agent (e.g. a §7F `compactor`). Set ⇒ replaces
+   * the runtime-wide `hooks` for this agent; forwarded verbatim. */
+  hooks?: AgentDef["hooks"]
+  /** §8 observability sink for this agent. Set ⇒ replaces the runtime-wide
+   * `onMetric` for this agent; resolves independently of `hooks`. */
+  onMetric?: AgentDef["onMetric"]
 }
 
 /** Runtime options for a one-shot `run`/`asTool` (the registry is derived). */
@@ -66,6 +72,8 @@ export class Agent {
       waitFor: this.spec.waitFor,
       onSpawn: this.spec.onSpawn,
       onClose: this.spec.onClose,
+      hooks: this.spec.hooks,
+      onMetric: this.spec.onMetric,
     }
     for (const t of this.spec.team ?? []) t.registry(acc)
     return acc

@@ -14,7 +14,7 @@
  * the ConversationStore. SPEC pins transitions, never scheduling — conformance is
  * identical per-handle transition traces against `examples/subagent-*` fixtures.
  */
-import { createClient, InMemoryConversationStore, type ClientStyle, type ConversationStore } from "../client.js"
+import { createClient, InMemoryConversationStore, type ClientStyle, type ConversationStore, type Hooks, type MetricEvent } from "../client.js"
 import { createToolkit, type Toolkit } from "../toolkit.js"
 import { defineTool } from "../native.js"
 import type { Answer, Request, Tool, ToolResult } from "../types.js"
@@ -90,6 +90,14 @@ export interface AgentDef {
   onSpawn?: (h: Handle) => void | Promise<void>
   /** Runs before the final checkpoint on close. */
   onClose?: (h: Handle, reason: CloseReason) => void | Promise<void>
+  /** §8 lifecycle callbacks for THIS agent's client. Set ⇒ REPLACES the runtime-wide
+   * `hooks` for this agent (never merged — composing two transcript rewrites has no
+   * defined order). Forwarded verbatim; the runtime never reads or wraps it.
+   * This is how a §7F compactor attaches per agent. */
+  hooks?: Hooks
+  /** §8 observability sink for THIS agent's client. Set ⇒ REPLACES the runtime-wide
+   * `onMetric` for this agent. Resolves independently of `hooks`. Forwarded verbatim. */
+  onMetric?: (ev: MetricEvent) => void
 }
 
 /** An unsolicited inbox item. Delivered ONLY as part of a fresh turn's coalesced
@@ -270,6 +278,13 @@ export interface RuntimeOptions {
   maxConcurrentTurns?: number
   /** Graceful-close bound for a running turn before escalating to abort. Default 200. */
   shutdownMs?: number
+  /** §8 lifecycle callbacks applied to EVERY agent's client, unless that agent's
+   * def sets its own `hooks` (def-over-runtime, replace never merge). Forwarded
+   * verbatim into `createClient` — never composed, wrapped, reordered or read. */
+  hooks?: Hooks
+  /** §8 observability sink applied to EVERY agent's client, unless that agent's def
+   * sets its own `onMetric`. Resolves independently of `hooks`. Forwarded verbatim. */
+  onMetric?: (ev: MetricEvent) => void
 }
 
 interface GateWaiter {
@@ -748,6 +763,10 @@ export class AgentRuntime {
         fetch: this.gatedFetch(),
         store: this.store,
         waitFor: oneShotWaitFor ?? this.wrapWaitFor(h),
+        // The §8 seams: def-over-runtime, REPLACE never merge, each field resolved
+        // independently, forwarded verbatim (never composed, wrapped or read).
+        hooks: h.def.hooks ?? this.opts.hooks,
+        onMetric: h.def.onMetric ?? this.opts.onMetric,
       })
       const r = await client.ask(input, { toolkit, id: h.id, signal: h.abort!.signal })
       h.turnsTotal += r.turns

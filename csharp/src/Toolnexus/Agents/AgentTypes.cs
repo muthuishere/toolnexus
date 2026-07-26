@@ -65,10 +65,23 @@ public sealed class AgentDef
     /// (<c>closed | interrupted | budget | error</c>).</summary>
     public Func<Handle, string, Task>? OnClose { get; set; }
 
+    /// <summary>(SPEC §7D "the §8 seams on an agent run") The §8 lifecycle hooks for THIS agent's
+    /// runs. Set ⇒ REPLACES the runtime-wide <see cref="RuntimeOptions.Hooks"/> for this agent
+    /// (never merged — composing two transcript rewrites has no defined order). Forwarded verbatim
+    /// to the client the runtime builds; never composed, wrapped, reordered, or read. This is how a
+    /// §7F compactor (a <c>beforeLLM</c> hook) attaches to one agent.</summary>
+    public LlmClient.Hooks? Hooks { get; set; }
+
+    /// <summary>(SPEC §7D) The §8 observability sink for THIS agent's runs. Set ⇒ REPLACES the
+    /// runtime-wide <see cref="RuntimeOptions.OnMetric"/> for this agent. Resolves INDEPENDENTLY of
+    /// <see cref="Hooks"/> — a def may override one and inherit the other.</summary>
+    public Action<MetricEvent>? OnMetric { get; set; }
+
     internal AgentDef CloneWith(Budget budget) => new()
     {
         Name = Name, Does = Does, Soul = Soul, Model = Model, Budget = budget,
         Tools = Tools, Team = Team, WaitFor = WaitFor, OnSpawn = OnSpawn, OnClose = OnClose,
+        Hooks = Hooks, OnMetric = OnMetric,
     };
 }
 
@@ -131,11 +144,23 @@ public sealed class RuntimeOptions
     public string? ApiKey { get; set; }
     public string? Model { get; set; }
 
+    /// <summary>(SPEC §7D "the §8 seams on an agent run") Runtime-wide §8 lifecycle hooks: applied
+    /// to EVERY agent whose def does not set its own <see cref="AgentDef.Hooks"/>. Forwarded
+    /// verbatim into each handle's client — never composed, wrapped, reordered, or read. It cannot
+    /// reach the runtime's own options (soul, §10 waitFor, the gated HTTP seam, the store).</summary>
+    public LlmClient.Hooks? Hooks { get; set; }
+
+    /// <summary>(SPEC §7D) Runtime-wide §8 observability sink: applied to every agent whose def does
+    /// not set its own <see cref="AgentDef.OnMetric"/>. Resolves independently of
+    /// <see cref="Hooks"/>.</summary>
+    public Action<MetricEvent>? OnMetric { get; set; }
+
     internal RuntimeOptions CloneWithRegistry(Dictionary<string, AgentDef> registry) => new()
     {
         Handler = Handler, Registry = registry, InboxCap = InboxCap,
         MaxConcurrentTurns = MaxConcurrentTurns, ShutdownMs = ShutdownMs,
         Store = Store, Clock = Clock,
         BaseUrl = BaseUrl, Style = Style, ApiKey = ApiKey, Model = Model,
+        Hooks = Hooks, OnMetric = OnMetric,
     };
 }

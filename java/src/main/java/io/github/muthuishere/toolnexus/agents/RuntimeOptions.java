@@ -33,6 +33,13 @@ public final class RuntimeOptions {
     public LlmClient.ConversationStore store;
     /** Injectable clock for every timer/timestamp/deadline. {@code null} = the system clock. */
     public RuntimeClock clock;
+    /** §8 lifecycle hooks handed to EVERY handle's per-turn client (SPEC §7D "The §8 seams on an
+     * agent run"). Forwarded verbatim — never composed, wrapped, reordered or read. An
+     * {@link AgentDef#hooks} REPLACES this for that agent. {@code null} = no hooks. */
+    public LlmClient.Hooks hooks;
+    /** §8 observability sink handed to EVERY handle's per-turn client. Forwarded verbatim; an
+     * {@link AgentDef#onMetric} REPLACES this for that agent. {@code null} = no sink. */
+    public java.util.function.Consumer<LlmClient.MetricEvent> onMetric;
 
     public RuntimeOptions baseUrl(String v) { this.baseUrl = v; return this; }
     public RuntimeOptions style(String v) { this.style = v; return this; }
@@ -44,6 +51,8 @@ public final class RuntimeOptions {
     public RuntimeOptions shutdownMs(long v) { this.shutdownMs = v; return this; }
     public RuntimeOptions store(LlmClient.ConversationStore v) { this.store = v; return this; }
     public RuntimeOptions clock(RuntimeClock v) { this.clock = v; return this; }
+    public RuntimeOptions hooks(LlmClient.Hooks v) { this.hooks = v; return this; }
+    public RuntimeOptions onMetric(java.util.function.Consumer<LlmClient.MetricEvent> v) { this.onMetric = v; return this; }
 
     /** Copy the scalar options with a different registry (the {@link Agents} layer builds its own). */
     RuntimeOptions copyWithRegistry(Map<String, AgentDef> reg) {
@@ -58,6 +67,8 @@ public final class RuntimeOptions {
         o.shutdownMs = shutdownMs;
         o.store = store;
         o.clock = clock;
+        o.hooks = hooks;
+        o.onMetric = onMetric;
         return o;
     }
 }

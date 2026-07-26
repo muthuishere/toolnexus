@@ -44,7 +44,7 @@ public final class Agents {
 
     /** The declarative spec behind {@link #agent(String, AgentSpec)} — SPEC §7D field-for-field:
      * {@code does, uses(tools), soul|soulFile, team, budget, model("inherit"), waitFor, onSpawn,
-     * onClose}. */
+     * onClose, hooks, onMetric}. */
     public static final class AgentSpec {
         /** Optional explicit name ({@link #agentFromDir} override). */
         public String name;
@@ -65,6 +65,12 @@ public final class Agents {
         public Function<Request, Answer> waitFor;
         public Consumer<Handle> onSpawn;
         public BiConsumer<Handle, String> onClose;
+        /** §8 lifecycle hooks for this agent's per-turn client (SPEC §7D "The §8 seams on an agent
+         * run"); REPLACES the runtime-wide {@code hooks} for this agent. */
+        public io.github.muthuishere.toolnexus.LlmClient.Hooks hooks;
+        /** §8 observability sink for this agent; REPLACES the runtime-wide {@code onMetric}.
+         * Resolves independently of {@link #hooks}. */
+        public Consumer<io.github.muthuishere.toolnexus.LlmClient.MetricEvent> onMetric;
         /** §7E persona surface: {@code false} omits the file-backed {@code memory} builtin that
          * {@link #agentFromDir} otherwise wires (read-only personas). {@code null} ⇒ enabled. */
         public Boolean memory;
@@ -80,6 +86,8 @@ public final class Agents {
         public AgentSpec waitFor(Function<Request, Answer> v) { this.waitFor = v; return this; }
         public AgentSpec onSpawn(Consumer<Handle> v) { this.onSpawn = v; return this; }
         public AgentSpec onClose(BiConsumer<Handle, String> v) { this.onClose = v; return this; }
+        public AgentSpec hooks(io.github.muthuishere.toolnexus.LlmClient.Hooks v) { this.hooks = v; return this; }
+        public AgentSpec onMetric(Consumer<io.github.muthuishere.toolnexus.LlmClient.MetricEvent> v) { this.onMetric = v; return this; }
         public AgentSpec memory(boolean v) { this.memory = v; return this; }
     }
 
@@ -115,6 +123,8 @@ public final class Agents {
             def.waitFor = spec.waitFor;
             def.onSpawn = spec.onSpawn;
             def.onClose = spec.onClose;
+            def.hooks = spec.hooks;
+            def.onMetric = spec.onMetric;
             // Team scoping: task targets = ONLY this agent's team (empty = no delegation at all —
             // recursion is opt-in, never default).
             List<String> targets = new ArrayList<>();

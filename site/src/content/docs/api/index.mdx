@@ -540,7 +540,10 @@ An **Agent is a Tool**: a soul (system prompt) × a scoped toolkit × the client
 only set of targets the built-in `task` tool can delegate to — no team ⇒ no `task` tool. `asTool`
 turns an agent into a `Tool` for `extraTools`; `composeSoul` builds a soul from a directory
 (`AGENTS.md` + sections). Result `status` ∈ `done · pending · incomplete · interrupted · closed ·
-timeout · error`. See the [Sub-agents & teams](/subagents/) guide.
+timeout · error`. An agent (or the runtime) also accepts `hooks` and `onMetric` — the same two
+lifecycle seams a hand-built client takes, forwarded verbatim; an agent's value replaces the
+runtime-wide one, which is how a `compactor` gives each agent its own context budget. See the
+[Sub-agents & teams](/subagents/) guide.
 
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">

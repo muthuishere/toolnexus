@@ -156,6 +156,15 @@ class AgentDef:
     # runtime registry — the runtime scopes by this list; [] ⇒ task tool with an
     # empty team). Children get no delegation unless their own def declares a team.
     task_targets: Optional[list[str]] = None
+    # The §8 lifecycle callbacks for THIS agent's turns, forwarded VERBATIM into the
+    # client the runtime builds. Set ⇒ REPLACES the runtime-wide ``hooks`` for this
+    # agent (never merged — composing two transcript rewrites has no defined order).
+    # None ⇒ inherit. This is the seam a §7F compactor rides (per-agent budgets).
+    hooks: Optional[Any] = None
+    # The §8 observability sink for THIS agent's turns, forwarded verbatim.
+    # Set ⇒ REPLACES the runtime-wide ``on_metric`` (never merged); None ⇒ inherit.
+    # Resolves INDEPENDENTLY of ``hooks``.
+    on_metric: Optional[Callable[[dict[str, Any]], None]] = None
 
 
 @dataclass
@@ -340,8 +349,17 @@ class AgentRuntime:
         llm: Optional[dict[str, Any]] = None,
         store: Optional[ConversationStore] = None,
         clock: Optional[Clock] = None,
+        hooks: Optional[Any] = None,
+        on_metric: Optional[Callable[[dict[str, Any]], None]] = None,
     ) -> None:
         self._registry = registry
+        # The §8 seams (SPEC §7D "The §8 seams on an agent run"): applied to EVERY
+        # agent's turns unless that agent's def replaces them. Forwarded verbatim —
+        # the runtime never composes, wraps, reorders, defaults or reads either — and
+        # they are NOT a route to the runtime's own options (system_prompt, wait_for,
+        # the gated HTTP transport, the store). Unset ⇒ byte-identical runs.
+        self._hooks = hooks
+        self._on_metric = on_metric
         self._inner_transport: HttpTransport = transport if transport is not None else UrllibTransport()
         self._gated = _GatedTransport(self)
         self._inbox_cap = inbox_cap
@@ -753,6 +771,10 @@ class AgentRuntime:
             extra.append(self._task_tool(h))
         toolkit = await create_toolkit(builtins=False, extra_tools=extra)
         model = (self._llm.get("model") or "inherit") if h.defn.model == "inherit" else h.defn.model
+        # §8 seams resolved def-over-runtime — REPLACE, never merge, each field
+        # independently — and forwarded VERBATIM (no composing/wrapping/reading).
+        hooks = h.defn.hooks if h.defn.hooks is not None else self._hooks
+        on_metric = h.defn.on_metric if h.defn.on_metric is not None else self._on_metric
         client = create_client(
             base_url=self._llm.get("base_url", "http://mock.local"),
             style=self._llm.get("style", "openai"),
@@ -763,6 +785,8 @@ class AgentRuntime:
             http_transport=self._gated,
             store=self._store,  # ONE runtime-wide store; conversation id = handle id
             wait_for=one_shot or self._escalator(h),
+            hooks=hooks,
+            on_metric=on_metric,
         )
         result: TaskResult
         try:
