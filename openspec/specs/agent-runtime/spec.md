@@ -243,6 +243,12 @@ are composed from the registry, iteration SHALL be sorted by agent name.
   clock in two ports
 - **THEN** the transition traces are identical
 
+#### Scenario: The runtime-wide store is readable back off the runtime
+- **WHEN** a host asks a runtime for its conversation store (`store` / `conversation_store`
+  / `conversationStore()` / `ConversationStore` per port) after a handle has run a turn
+- **THEN** it receives the runtime's own store — the injected one itself when `Store` was
+  supplied — and can read that handle's transcript by its handle id
+
 ### Requirement: The agent runtime forwards the §8 hooks and metric sink into the client it builds
 
 The `§7D` agent runtime SHALL accept two optional configuration values — `hooks` (the `§8`

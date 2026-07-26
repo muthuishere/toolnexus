@@ -218,9 +218,34 @@ defmodule Toolnexus.ClientTest do
   # ---- parallel multi-tool call: concurrent execution, original order preserved ----
 
   test "openai: parallel tool calls run concurrently, results fed back in call order" do
-    # Both tools sleep 150ms so the concurrency check is real: serialized ⇒ ≥300ms, concurrent ⇒ ~150ms.
-    slow = tool("slow", fn _, _ -> Process.sleep(150); ToolResult.ok("slow-out") end)
-    fast = tool("fast", fn _, _ -> Process.sleep(150); ToolResult.ok("fast-out") end)
+    # Concurrency is asserted STRUCTURALLY, not by wall clock: track the PEAK number
+    # of tools inside the body at the same instant. Serialized execution can only ever
+    # reach a peak of 1 (each tool exits before the next enters), so this fails loudly
+    # on a regression while a loaded CI runner cannot turn a pass into a failure — the
+    # old `elapsed < 280` bound flaked at 524ms on a slow runner.
+    {:ok, inflight} = Agent.start_link(fn -> %{current: 0, peak: 0} end)
+
+    body = fn ->
+      Agent.update(inflight, fn %{current: c, peak: p} ->
+        %{current: c + 1, peak: max(p, c + 1)}
+      end)
+
+      # Park until the sibling is demonstrably inside too — bounded, so a serialized
+      # loop gives up (leaving peak at 1) instead of hanging the suite.
+      Enum.reduce_while(1..100, nil, fn _, _ ->
+        if Agent.get(inflight, & &1.peak) >= 2 do
+          {:halt, :overlapped}
+        else
+          Process.sleep(5)
+          {:cont, nil}
+        end
+      end)
+
+      Agent.update(inflight, fn st -> %{st | current: st.current - 1} end)
+    end
+
+    slow = tool("slow", fn _, _ -> body.(); ToolResult.ok("slow-out") end)
+    fast = tool("fast", fn _, _ -> body.(); ToolResult.ok("fast-out") end)
 
     {base, agent} =
       start_stub([
@@ -229,14 +254,13 @@ defmodule Toolnexus.ClientTest do
       ])
 
     client = make_client(base)
-    t0 = System.monotonic_time(:millisecond)
     result = Client.run(client, "go", [slow, fast])
-    elapsed = System.monotonic_time(:millisecond) - t0
 
     assert result.text == "done"
-    # concurrent: two 150ms tools; serialized would be ≥300ms, so <280 proves they ran in parallel
-    # (generous headroom over the ~150ms parallel baseline keeps it stable on loaded CI runners).
-    assert elapsed < 280
+
+    assert Agent.get(inflight, & &1.peak) == 2,
+           "both tools must be in flight SIMULTANEOUSLY (parallel tool calls, §8); " <>
+             "a peak of 1 means they ran one after the other"
 
     assert [%{name: "slow", output: "slow-out"}, %{name: "fast", output: "fast-out"}] = result.tool_calls
 

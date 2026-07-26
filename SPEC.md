@@ -793,7 +793,11 @@ The runtime owns: **one ConversationStore for all handles** (conversation id = h
 — transcripts genuinely survive turns; resume reads real history), an **injectable
 clock** (all timers/timeouts/deadlines; fixtures run virtual), the **handle table**
 (rebuildable tree), and **name-sorted registry iteration** wherever prose or traces are
-composed.
+composed. That store is **readable back off the runtime** — `store` (js) /
+`conversation_store` (python, elixir) / `conversationStore()` (java) /
+`ConversationStore` (csharp, golang) — returning the injected `Store` itself when one was
+supplied. It is a read handle for inspecting a handle's transcript, not a seam for
+swapping the store; supply it at construction for that.
 
 ### The §8 seams on an agent run (`hooks`, `onMetric`)
 
