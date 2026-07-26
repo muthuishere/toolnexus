@@ -6,6 +6,70 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.11.0 — 2026-07-26
+
+Makes §7F compaction actually reachable from a §7E persona agent. `SPEC.md §7F` defined
+compaction *as* a use of the §8 `beforeLLM` hook, but the §7D agent runtime built each
+handle's client internally and forwarded no hooks — so the spec promised a capability its
+own runtime could not deliver. All six ports; nothing changes unless you opt in.
+
+### Added
+
+- **The §8 seams on a §7D agent run** (`SPEC.md §7D` "The §8 seams on an agent run",
+  OpenSpec change `expose-agent-runtime-hooks`, driven by `docs/adr/0008`). `hooks` and
+  `onMetric` are now optional on **both** the agent runtime and an **individual agent
+  definition** — spelled as each port already spells them (`hooks`/`onMetric` in js,
+  `hooks`/`on_metric` in python and elixir, `Hooks`/`OnMetric` in golang and csharp,
+  `hooks(...)`/`onMetric(...)` on the java builder). Four rules hold identically everywhere:
+  resolved **def-over-runtime, replace never merge**, each field independently (so an agent
+  may override `hooks` and still inherit the runtime's `onMetric`); **forwarded verbatim**,
+  never composed, wrapped, reordered, defaulted or read; **not a route** to alter the
+  handle's composed soul, its §10 escalating `waitFor`, its turn-gated HTTP seam or the
+  runtime-wide store (which is why it is two typed fields and not a `configureClient` escape
+  hatch); and **unset ⇒ byte-identical** to a runtime without the fields.
+
+  Per-agent is the point: two agents in one runtime can now carry **different compaction
+  budgets**, and a metric sink can attribute events to the agent that produced them. Ships a
+  shared `examples/agent-hooks/fixture.json` conformance fixture (scenarios H1–H6 plus four
+  invariants) cited by every port's test file.
+
+- **golang: `Runtime.ConversationStore()`.** The other five ports already exposed the
+  runtime-wide conversation store (`store` in js, `conversation_store` in python and elixir,
+  `conversationStore()` in java, `ConversationStore` in csharp); Go had no accessor, so a
+  caller had to inject its own `Options.Store` just to read a handle's transcript. Returns the
+  injected store itself when one was supplied. Read handle only — the store is still chosen at
+  construction. The obligation is now stated in `SPEC.md §7D` for all six.
+
+### Specified (behavior was already correct, but unpinned)
+
+- **Compaction × §10 suspension.** A turn that compacts and *then* suspends is rewound with
+  the rest of the turn: the stored transcript returns to its **full pre-turn** state, the
+  compaction is discarded, and the resumed replay compacts again. Every port already behaved
+  this way by accident; it is now a requirement with a scenario and a per-port test, so a port
+  cannot "optimize" by persisting the compacted head.
+
+### Fixed
+
+- **elixir: a wrong-arity `before_llm` hook was silently ignored.** The client guarded on
+  `is_function(f, 1)` and otherwise fell through to the no-op branch — the hook simply never
+  ran, with no error. It now raises `ArgumentError`. Much easier to hit now that hooks can
+  arrive from two places.
+- **java / csharp: hooks could be silently dropped on spawn.** Both ports rebuild defs and
+  options field-by-field in two places each (`withBudget` + `copyWithRegistry`; `CloneWith` +
+  `CloneWithRegistry`), all on the spawn / Level-1 path. Both now carry the new fields, pinned
+  by a clone test in csharp. Not a risk in the other four (golang copies by value, js spreads,
+  python uses `dataclasses.replace`, elixir uses `Map.put`).
+- **elixir: de-flaked the parallel-tool-call test.** It proved concurrency by wall clock
+  (`elapsed < 280` over two 150ms sleeps) and hit 524ms on a loaded CI runner. Now asserts the
+  **peak** number of tools in flight simultaneously, which serialized execution can never
+  reach; mutation-verified by forcing `max_concurrency: 1`.
+
+### Not included
+
+Both deferrals from `docs/adr/0008` stand: a `preCompact` hook able to **abort** a compaction
+(new control flow across six ports, awaiting downstream evidence) and `cache_control`
+breakpoints (a provider-payload change). Each wants its own ADR.
+
 ## 0.10.0 — 2026-07-19
 
 The agent release: both agent archetypes — coding (sub-agents) and persona (agent home) —
