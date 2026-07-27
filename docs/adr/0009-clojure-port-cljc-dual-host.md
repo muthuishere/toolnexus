@@ -13,7 +13,7 @@
   1.12.5, `cljgo` 0.1.0-dev, and Glojure and let-go built from source — not reasoned from
   documentation. Reader-feature claims are cited to each implementation's source, not its
   README. Measurements are reproduced in `clojure/spikes/` and in the
-  [`cljhost`](https://github.com/muthuishere/cljhost) conformance runner. Where a claim is
+  [`koine`](https://github.com/muthuishere/koine) conformance runner. Where a claim is
   unverified it says so.
 
 ## Context
@@ -112,16 +112,16 @@ cannot spawn a subprocess, so stdio MCP servers — roughly half of what toolnex
 are impossible there. A port that silently drops half the spec is not a port. This is a
 decision, not an omission; revisit only if `:cljs` gains a process model.
 
-### 2. toolnexus depends on `clojure.core` + `cljhost` only — never on a third-party library
+### 2. toolnexus depends on `clojure.core` + `koine` only — never on a third-party library
 
 Given Measurement 2, any third-party Clojure dependency in the port itself makes the port
 JVM-only. Given Measurement 3, `clojure.core` covers everything except the seam.
 
-**`cljhost` is exempt and is where host libraries live.** It may use Java libraries on the
+**`koine` is exempt and is where host libraries live.** It may use Java libraries on the
 JVM branch and Go libraries on the cljgo branch freely — that is its whole purpose. The
 port calls its portable API and never sees either.
 
-#### 2a. `cljhost`'s contract is byte-identical output, not "wraps a library" [Measurement 5]
+#### 2a. `koine`'s contract is byte-identical output, not "wraps a library" [Measurement 5]
 
 Wrapping two host libraries and calling it portable does not survive contact with the
 prime directive. Six basic payloads were encoded through Go's `encoding/json` and JVM
@@ -145,7 +145,7 @@ Two of these are semantic, not cosmetic:
   work (the `cache_control` breakpoints deferred in ADR 0008). Sorted-vs-insertion
   ordering silently destroys cache hits.
 
-Therefore `cljhost` MUST normalize every host library it wraps to one agreed output, and
+Therefore `koine` MUST normalize every host library it wraps to one agreed output, and
 a conformance test MUST assert the two hosts produce identical bytes.
 
 #### 2b. Both JSON encode and decode are ours
@@ -153,12 +153,12 @@ a conformance test MUST assert the two hosts produce identical bytes.
 Every one of the four divergences is an **output-formatting** choice. Parsing is
 unambiguous — both hosts turn a given document into the same Clojure data. So:
 
-- **encode** — pure portable Clojure inside `cljhost`, ~80 lines, no host library.
+- **encode** — pure portable Clojure inside `koine`, ~80 lines, no host library.
 - **decode** — *also* pure portable Clojure. Delegation was the original decision here
   and it was **revised on evidence**: with four hosts it would mean four parsers to keep
   in agreement, and two are unreachable (cljgo's decoder is a private builtin; Glojure
   ships no `encoding/json` by default). A core-only parser is smaller *and* more
-  portable, and it leaves `cljhost` with **zero third-party dependencies**.
+  portable, and it leaves `koine` with **zero third-party dependencies**.
   Controlling key order, escaping and number formatting *is* the entire encoder;
   normalizing someone else's encoder into agreement costs the same code while leaving us
   debugging two libraries' escaping rules. The Elixir port made the identical call with
@@ -191,7 +191,7 @@ implementation, so all future libraries build on it instead of re-solving the se
 
 **Shape when extracted: one artifact, not three.** A single `.cljc` library carrying both
 hosts' branches — so reader conditionals exist in exactly one place in the whole ecosystem
-and consumers write `(:require [cljhost.process :as proc])` with no conditional and no
+and consumers write `(:require [koine.process :as proc])` with no conditional and no
 implementation-selection step. The alternative (a pure `api` artifact of protocols plus
 `-jvm` and `-go` implementation artifacts) buys pluggable third hosts, which Decision 1
 has already ruled out of scope, at the cost of a second dependency for every consumer.
@@ -252,12 +252,12 @@ are unrelated: cljgo uses `require-go` + `cljg.*`; Glojure exposes Go's stdlib d
 with `/` munged to `:` (`os:exec.Command`, `net:http`), shipping ~26 packages by default;
 let-go has its own `os`/`io`/`http`/`json` namespaces *plus* Java-shaped shims — its
 `System/getenv` works. Adding a dialect is therefore a branch, not a fork, and
-`cljhost` is structured for it:
+`koine` is structured for it:
 
 - every seam function ends in a `:default` branch that either delegates to a
   dialect-agnostic implementation or throws a **named, actionable** error
-  (`"cljhost: no <capability> implementation for this host; add a branch in
-  cljhost/<ns>.cljc"`) — never a silent `nil` or an obscure resolution failure;
+  (`"koine: no <capability> implementation for this host; add a branch in
+  koine/<ns>.cljc"`) — never a silent `nil` or an obscure resolution failure;
 - branch order is `#?(:clj … :cljgo … :default …)`, extended in place;
 - the conformance suite is host-parameterised, so a new dialect is onboarded by running
   the existing suite against it and fixing what fails.
@@ -289,12 +289,12 @@ Writing one file for four hosts surfaced five traps, each now encoded as a rule:
 - We own a JSON implementation and must test it as such (round-trip, unicode escapes,
   deep nesting, number formats, malformed input). It is spiked before it is trusted.
 - ~95% of the port is dialect-blind, so cljgo support reduces to four functions.
-- The seam is implemented in **[`cljhost`](https://github.com/muthuishere/cljhost)** — its
+- The seam is implemented in **[`koine`](https://github.com/muthuishere/koine)** — its
   own public repo, per Decision 3b. S5's encoder contract passes byte-identically on both
   hosts there (7/7 on cljgo, 38 assertions on the JVM).
 - **cljgo work items**, each independently useful to cljgo beyond toolnexus:
   1. **Streaming subprocess** in `cljg.io` — a long-lived child with piped stdin/stdout.
-     **Blocks stdio MCP; the only hard blocker found.** `cljhost.process/spawn` throws a
+     **Blocks stdio MCP; the only hard blocker found.** `koine.process/spawn` throws a
      named error on cljgo rather than pretending.
   2. **Environment-variable access.** cljgo cannot read env vars at all: `cljg.os` is
      cron/service only, there is no `System/getenv` shim, and `require-go` reaches only
@@ -303,7 +303,7 @@ Writing one file for four hosts surfaced five traps, each now encoded as a rule:
      the installed *and* the in-repo binary). toolnexus needs this for `${ENV_VAR}`
      expansion in MCP headers. **Blocks remote MCP auth.**
   3. **A public JSON namespace.** `-json-decode` is a *private* builtin, unreachable from
-     user code. No longer affects toolnexus — `cljhost` ships its own parser — but it is
+     user code. No longer affects toolnexus — `koine` ships its own parser — but it is
      a real hole in cljgo's stdlib.
   4. **Clojars consumption** — so cljgo users get the same coordinate as JVM users.
      Not a blocker; a git coordinate works today.

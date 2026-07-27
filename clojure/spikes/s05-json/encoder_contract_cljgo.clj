@@ -1,5 +1,5 @@
-(require 'cljhost.json)
-(alias 'json 'cljhost.json)
+(require 'koine.json)
+(alias 'json 'koine.json)
 (doseq [[label got want]
         [["sorted keys"  (json/write-str {"b" 1 "a" 2 "c" 3}) "{\"a\":2,\"b\":1,\"c\":3}"]
          ["float keeps"  (json/write-str {:f 1.0 :h 100.0})   "{\"f\":1.0,\"h\":100.0}"]
