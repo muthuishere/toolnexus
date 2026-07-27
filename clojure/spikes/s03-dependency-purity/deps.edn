@@ -1,0 +1,11 @@
+{:paths []
+ :deps {org.clojure/data.json      {:mvn/version "2.5.1"}
+        borkdude/edamame           {:mvn/version "1.4.27"}
+        dev.weavejester/medley     {:mvn/version "1.8.1"}
+        org.clojure/tools.cli      {:mvn/version "1.1.230"}
+        org.clojure/core.match     {:mvn/version "1.1.0"}
+        funcool/cuerdas            {:mvn/version "2022.06.16-403"}
+        lambdaisland/uri           {:mvn/version "1.19.155"}
+        org.clojure/data.csv       {:mvn/version "1.1.0"}
+        rewrite-clj/rewrite-clj    {:mvn/version "1.1.49"}
+        org.babashka/http-client   {:mvn/version "0.4.22"}}}
