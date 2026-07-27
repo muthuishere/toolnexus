@@ -1,16 +1,20 @@
-# ADR 0009 — The Clojure port is a single `.cljc` source tree on `clojure.core` alone, JVM-first, cljgo-second
+# ADR 0009 — The Clojure port is a single `.cljc` source tree on `clojure.core` alone, JVM-first, Go-hosted second
 
 - **Status:** **Proposed** — spike battery in progress on branch `cljc`. Nothing in
   `SPEC.md` or the six existing ports has been changed by this document.
 - **Date:** 2026-07-27
 - **Driver:** toolnexus ships six ports (js / python / golang / java / csharp / elixir). A
-  seventh — Clojure — is wanted, and it must run on **two hosts from one source**: JVM
-  Clojure (the ecosystem, Clojars, `clojure.test`) and
-  [cljgo](https://github.com/muthuishere/cljgo) (Clojure hosted on Go, AOT-compiled to a
-  static binary).
-- **Evidence note:** every claim below was **measured on this machine** against
-  `clojure` CLI 1.12.5 and `cljgo` 0.1.0-dev, not reasoned from documentation. The
-  measurements are reproduced in `clojure/spikes/`. Where a claim is unverified it says so.
+  seventh — Clojure — is wanted, and it must run on **every host from one source**: JVM
+  Clojure (the ecosystem, Clojars, `clojure.test`) and the Go-hosted dialects —
+  [cljgo](https://github.com/muthuishere/cljgo),
+  [Glojure](https://github.com/glojurelang/glojure) and
+  [let-go](https://github.com/nooga/let-go). All four are verified below.
+- **Evidence note:** every claim below was **measured on this machine** — `clojure` CLI
+  1.12.5, `cljgo` 0.1.0-dev, and Glojure and let-go built from source — not reasoned from
+  documentation. Reader-feature claims are cited to each implementation's source, not its
+  README. Measurements are reproduced in `clojure/spikes/` and in the
+  [`cljhost`](https://github.com/muthuishere/cljhost) conformance runner. Where a claim is
+  unverified it says so.
 
 ## Context
 
@@ -98,10 +102,10 @@ interpreted mode (verified — `no such namespace: ex`).
 
 ## Decision
 
-### 1. One `.cljc` source tree, two dialects: `:clj` and `:cljgo`
+### 1. One `.cljc` source tree, four dialects: `:clj`, `:cljgo`, `:glj`, `:lg`
 
 No `.clj`/`.cljg` forks, no per-host copies. `.cljc` is chosen as the *portable
-extension*, not as a promise of five hosts.
+extension*.
 
 **ClojureScript, `:cljr`, `:bb` and jank are explicitly out of scope.** ClojureScript
 cannot spawn a subprocess, so stdio MCP servers — roughly half of what toolnexus does —
@@ -144,13 +148,17 @@ Two of these are semantic, not cosmetic:
 Therefore `cljhost` MUST normalize every host library it wraps to one agreed output, and
 a conformance test MUST assert the two hosts produce identical bytes.
 
-#### 2b. JSON decode is delegated; JSON encode is ours
+#### 2b. Both JSON encode and decode are ours
 
 Every one of the four divergences is an **output-formatting** choice. Parsing is
 unambiguous — both hosts turn a given document into the same Clojure data. So:
 
-- **decode** — delegated to the host library. Battle-tested, fast, nothing to own.
 - **encode** — pure portable Clojure inside `cljhost`, ~80 lines, no host library.
+- **decode** — *also* pure portable Clojure. Delegation was the original decision here
+  and it was **revised on evidence**: with four hosts it would mean four parsers to keep
+  in agreement, and two are unreachable (cljgo's decoder is a private builtin; Glojure
+  ships no `encoding/json` by default). A core-only parser is smaller *and* more
+  portable, and it leaves `cljhost` with **zero third-party dependencies**.
   Controlling key order, escaping and number formatting *is* the entire encoder;
   normalizing someone else's encoder into agreement costs the same code while leaving us
   debugging two libraries' escaping rules. The Elixir port made the identical call with
@@ -218,11 +226,33 @@ source, two coordinates, until Clojars consumption lands in cljgo.
 We do **not** use `cljgo publish clojars` — its validator rejects any Go interop, and it
 emits a git coordinate rather than a Clojars artifact anyway (ADR 0054, deferred items).
 
-### 6. `cljhost` is dialect-extensible by construction; only `:clj` and `:cljgo` are verified
+### 6. Four hosts are verified: `:clj`, `:cljgo`, `:glj`, `:lg`
 
-cljgo is not the only Clojure hosted on Go — Glojure, let-go, gloat and Joker exist, and
-more will. `cljhost` is therefore structured so a new Go-hosted dialect is **an added
-branch in one file**, not a fork:
+cljgo is not the only Clojure hosted on Go. **Glojure and let-go are now verified
+alongside it** — built from source, one `.cljc` file, all four hosts:
+
+```
+jvm        9/9 pass
+cljgo      9/9 pass
+let-go     9/9 pass
+glojure    9/9 pass
+```
+
+Reader features were read out of each implementation's source, not its README:
+
+| host | feature | source |
+|---|---|---|
+| Clojure | `:clj` | — |
+| cljgo | `:cljgo` + `:default`, never `:clj` | cljgo ADR 0036 §A |
+| Glojure | `:glj` + `:default` | `pkg/reader/reader.go:1403` |
+| let-go | `:lg` + `:default`; opt-in `:clj`/`:bb` via `set-read-clj!` / `LG_READ_CLJ`, **off by default** | `pkg/compiler/reader.go:1122-1145` |
+
+The three Go dialects do **not** share an implementation, because their interop models
+are unrelated: cljgo uses `require-go` + `cljg.*`; Glojure exposes Go's stdlib directly
+with `/` munged to `:` (`os:exec.Command`, `net:http`), shipping ~26 packages by default;
+let-go has its own `os`/`io`/`http`/`json` namespaces *plus* Java-shaped shims — its
+`System/getenv` works. Adding a dialect is therefore a branch, not a fork, and
+`cljhost` is structured for it:
 
 - every seam function ends in a `:default` branch that either delegates to a
   dialect-agnostic implementation or throws a **named, actionable** error
@@ -232,10 +262,24 @@ branch in one file**, not a fork:
 - the conformance suite is host-parameterised, so a new dialect is onboarded by running
   the existing suite against it and fixing what fails.
 
-**Honesty:** only `:clj` (Clojure 1.12.5) and `:cljgo` (0.1.0-dev) are measured in this
-document. Glojure, let-go, gloat and Joker have **not** been tested, and their interop
-models differ enough that "seamless" is a design goal here, not a verified claim.
-Supporting any of them is its own spike and its own evidence.
+**Honesty:** `:clj` (1.12.5), `:cljgo` (0.1.0-dev), `:glj` and `:lg` are measured for
+**JSON and env only**. `http`, `process` and `fs` have per-host branches but are verified
+on the JVM alone. gloat and Joker are untested.
+
+#### Measurement 6 — portability bugs that are invisible on the JVM
+
+Writing one file for four hosts surfaced five traps, each now encoded as a rule:
+
+1. **`(= key-fn keyword)` throws on Glojure** — "comparing uncomparable type
+   `lang.ArityFn`". Apply a function; never compare one.
+2. **`^:dynamic` is not honoured on Glojure** — "cannot dynamically bind non-dynamic
+   var". Thread the parameter; it is also less code.
+3. **Go's `os.Getenv` returns `""` where the JVM returns `null`**, and `""` is *truthy*
+   in Clojure — so `(or (getenv x) default)` silently never falls back on Go-hosted
+   dialects.
+4. **`file-seq` takes different argument types** (Measurement 4, item 3).
+5. **Map print order differs per host**, so any assertion over `pr-str` of a map is a
+   false failure waiting to happen. This bit our own conformance script.
 
 ## Consequences
 
@@ -252,14 +296,18 @@ Supporting any of them is its own spike and its own evidence.
   1. **Streaming subprocess** in `cljg.io` — a long-lived child with piped stdin/stdout.
      **Blocks stdio MCP; the only hard blocker found.** `cljhost.process/spawn` throws a
      named error on cljgo rather than pretending.
-  2. **A public JSON namespace.** `-json-decode` is a *private* builtin and unreachable
-     from user code (verified). The public route today is
-     `(cljg.net.http/json-body {:body s})` — decoding a fabricated response map — which
-     works but is clearly a workaround. `cljhost` uses it and says so at the call site.
-     **Not a blocker.**
-  3. **Clojars consumption** — so cljgo users get the same coordinate as JVM users.
+  2. **Environment-variable access.** cljgo cannot read env vars at all: `cljg.os` is
+     cron/service only, there is no `System/getenv` shim, and `require-go` reaches only
+     the seed registry — `strings`/`strconv`/`math`/`fmt` (`pkg/eval/host.go:15`) — so
+     `(require-go '[os])` fails in **both** interpreted and AOT mode (verified against
+     the installed *and* the in-repo binary). toolnexus needs this for `${ENV_VAR}`
+     expansion in MCP headers. **Blocks remote MCP auth.**
+  3. **A public JSON namespace.** `-json-decode` is a *private* builtin, unreachable from
+     user code. No longer affects toolnexus — `cljhost` ships its own parser — but it is
+     a real hole in cljgo's stdlib.
+  4. **Clojars consumption** — so cljgo users get the same coordinate as JVM users.
      Not a blocker; a git coordinate works today.
-  4. **A `java.io`/`java.lang`/`java.util` shim** *(large, strategic, NOT required by this
+  5. **A `java.io`/`java.lang`/`java.util` shim** *(large, strategic, NOT required by this
      port)*. Measurement 2 showed the ecosystem's interop is concentrated in ~20 boring
      classes with direct Go equivalents. Shimming them would unlock a wide slice of
      Clojars for cljgo. Recorded here because the measurement is the evidence for it; it
@@ -276,9 +324,10 @@ Supporting any of them is its own spike and its own evidence.
 | S2 | seam confined to one namespace | Decision 3 | ✅ passed |
 | S3 | dependency purity scan | Decision 2 | ✅ passed (0 of 11 pure) |
 | S4 | `clojure.core` parity probe (22 vars) | Decision 2 | ✅ passed (22/22) |
-| S5 | JSON encode/decode identical on both hosts | Decision 2a/2b | ✅ passed |
+| S5 | JSON encode/decode identical on all hosts | Decision 2a/2b | ✅ passed (9/9 × 4 hosts) |
 | S6 | HTTP POST both hosts against a local server | seam 1 | ☐ |
 | S7 | streaming stdio subprocess, both hosts | seam 2 | ⚠️ JVM passes, **cljgo gap confirmed** |
+| S14 | Glojure + let-go run the same `.cljc` | Decision 6 | ✅ passed |
 | S8 | skills discovery: `**/SKILL.md` glob + frontmatter | seam 3 | ☐ |
 | S9 | `clojure.test` suite runs identically on both hosts | Decision 4 | ☐ |
 | S10 | parallel tool calls via `future`/`promise` | §8 loop | ☐ |
