@@ -293,15 +293,29 @@ Writing one file for four hosts surfaced five traps, each now encoded as a rule:
   own public repo, per Decision 3b. S5's encoder contract passes byte-identically on both
   hosts there (7/7 on cljgo, 38 assertions on the JVM).
 - **cljgo work items**, each independently useful to cljgo beyond toolnexus:
-  1. **Streaming subprocess** in `cljg.io` — a long-lived child with piped stdin/stdout.
-     **Blocks stdio MCP; the only hard blocker found.** `koine.process/spawn` throws a
-     named error on cljgo rather than pretending.
-  2. **Environment-variable access.** cljgo cannot read env vars at all: `cljg.os` is
-     cron/service only, there is no `System/getenv` shim, and `require-go` reaches only
-     the seed registry — `strings`/`strconv`/`math`/`fmt` (`pkg/eval/host.go:15`) — so
-     `(require-go '[os])` fails in **both** interpreted and AOT mode (verified against
-     the installed *and* the in-repo binary). toolnexus needs this for `${ENV_VAR}`
-     expansion in MCP headers. **Blocks remote MCP auth.**
+  1. ~~**Streaming subprocess**~~ — **CLOSED upstream 2026-07-30.** cljgo ADR 0104
+     ("`require-go` reaches the Go standard library") admits stdlib import paths to the
+     existing zero-bindings AOT route, so `exec.Cmd.StdinPipe`/`StdoutPipe` are reachable
+     directly. Spike S57 built a 6.8 MB AOT binary driving a long-lived `cat` child over
+     two stdin→stdout round trips — **stdio MCP is expressible on cljgo**. The fix was
+     ~15 lines in one file (`pkg/eval/host.go`), commit `4423d12`; it also had to add the
+     missing `HostUnlinkedTolerant` guards to `OpHostMethod`/`OpHostField`, without which
+     every method on a host-returned value dies in the AOT discovery pass.
+  2. ~~**Environment-variable access**~~ — **CLOSED upstream 2026-07-30**, same change:
+     `os.Getenv` in an AOT binary (spike S56). Unblocks `${ENV_VAR}` expansion in MCP
+     headers, hence remote MCP auth. *Correction to this ADR's original evidence:*
+     `(require-go '[os])` does **not** fail at the form — it returns cleanly with exit 0
+     and interns nothing, and the error surfaces later at the call site. Re-measured
+     2026-07-30.
+  2b. **Streaming HTTP responses** — a blocker this ADR never listed. cljgo's only HTTP
+     shim did `io.ReadAll` then closed the body, so streaming LLM responses were
+     impossible. Also **closed** by ADR 0104 (spike S58 reads `resp.Body` line-by-line
+     through `bufio` with the body still open).
+  2c. **Caveat carried forward.** cljgo's AOT discovery pass evaluates Clojure with `nil`
+     substituted for every host result, so a nil-intolerant pure function applied to a
+     host value fails at *build* time, not run time. koine's cljgo branch must keep host
+     results on a nil-tolerant path; this is the most likely source of future
+     "works in `run`, fails in `build`" reports.
   3. **A public JSON namespace.** `-json-decode` is a *private* builtin, unreachable from
      user code. No longer affects toolnexus — `koine` ships its own parser — but it is
      a real hole in cljgo's stdlib.
@@ -326,7 +340,7 @@ Writing one file for four hosts surfaced five traps, each now encoded as a rule:
 | S4 | `clojure.core` parity probe (22 vars) | Decision 2 | ✅ passed (22/22) |
 | S5 | JSON encode/decode identical on all hosts | Decision 2a/2b | ✅ passed (9/9 × 4 hosts) |
 | S6 | HTTP POST both hosts against a local server | seam 1 | ☐ |
-| S7 | streaming stdio subprocess, both hosts | seam 2 | ⚠️ JVM passes, **cljgo gap confirmed** |
+| S7 | streaming stdio subprocess, both hosts | seam 2 | ✅ JVM passes; **cljgo gap CLOSED upstream 2026-07-30** (cljgo ADR 0104, commit `4423d12`) — pending a cljgo release |
 | S14 | Glojure + let-go run the same `.cljc` | Decision 6 | ✅ passed |
 | S8 | skills discovery: `**/SKILL.md` glob + frontmatter | seam 3 | ☐ |
 | S9 | `clojure.test` suite runs identically on both hosts | Decision 4 | ☐ |
@@ -335,5 +349,12 @@ Writing one file for four hosts surfaced five traps, each now encoded as a rule:
 | S12 | `cljgo build` AOT-compiles a program requiring the port | cljgo release path | ☐ |
 | S13 | Clojars publish dry-run + cljgo git-coord consumption | Decision 5 | ☐ |
 
-S5, S7 and S11 are the ones that can still kill or reshape this design. S7 is expected to
-fail on cljgo and that failure is the specification for cljgo work item 1.
+S5, S7 and S11 are the ones that can still kill or reshape this design. S5 passed. S7 did
+fail on cljgo as expected, that failure became the specification for cljgo work item 1,
+and **the fix has since landed upstream** (cljgo ADR 0104, commit `4423d12`, 2026-07-30) —
+so no seam capability is now known to be unreachable on either host. **S11 (a real MCP
+handshake against `examples/mcp.json`) is the last spike that can still reshape this
+design**, and it is untouched.
+
+Note that Decision 4 (JVM-first) means none of the cljgo work was ever a release gate; it
+is recorded here because the measurements were the specification cljgo built against.
