@@ -35,34 +35,34 @@ reference port (D7); the other five port its tests and match its behavior.
 
 Go's assertions are the cross-port oracle; D4 is the most likely divergence.
 
-- [ ] One provider call per `translate`; three repeated calls accumulate no state
-- [ ] A toolkit tool is DECLARED but its handler never runs
-- [ ] A toolkit and an OpenAI `tools` array compose
-- [ ] OpenAI declarations reach an Anthropic upstream as `input_schema`, with no
+- [x] One provider call per `translate`; three repeated calls accumulate no state
+- [x] A toolkit tool is DECLARED but its handler never runs
+- [x] A toolkit and an OpenAI `tools` array compose
+- [x] OpenAI declarations reach an Anthropic upstream as `input_schema`, with no
       `parameters` key leaking
-- [ ] Multi-turn exchange survives: system hoisted, `tool_use` with object arguments,
+- [x] Multi-turn exchange survives: system hoisted, `tool_use` with object arguments,
       `tool_result` keyed by the same `tool_call_id`
-- [ ] Three consecutive tool results → ONE user turn carrying three `tool_result` blocks,
+- [x] Three consecutive tool results → ONE user turn carrying three `tool_result` blocks,
       and one assistant turn carrying three `tool_use` blocks
-- [ ] Parallel calls: text + three `tool_use` → text + three tool calls in provider order
-- [ ] `arguments` returned as a JSON string that parses back to the original object
-- [ ] `arguments` ACCEPTED as either a JSON string or an object on the way in
-- [ ] `tool_choice` mapping: absent/auto omitted; required/none/specific mapped
-- [ ] `finishReason`: stop / length / content_filter, and tool calls winning
-- [ ] Content-parts array flattened to text
-- [ ] OpenAI-style upstream passes `arguments` through byte-for-byte
-- [ ] `beforeLLM`/`afterLLM` fire exactly once; no tool hook fires
+- [x] Parallel calls: text + three `tool_use` → text + three tool calls in provider order
+- [x] `arguments` returned as a JSON string that parses back to the original object
+- [x] `arguments` ACCEPTED as either a JSON string or an object on the way in
+- [x] `tool_choice` mapping: absent/auto omitted; required/none/specific mapped
+- [x] `finishReason`: stop / length / content_filter, and tool calls winning
+- [x] Content-parts array flattened to text
+- [x] OpenAI-style upstream passes `arguments` through byte-for-byte
+- [x] `beforeLLM`/`afterLLM` fire exactly once; no tool hook fires
 
 ## 3. Per-language parity checklist
 
 If a pass covers only a subset, the rest stay unchecked — never let parity drift silently.
 
-- [ ] `js/` — implementation + all cases · `npm test`
-- [ ] `python/` — implementation + all cases · `python -m pytest -q`
+- [x] `js/` — implementation + all cases · `npm test` (13 tests; suite 130/130)
+- [x] `python/` — implementation + all cases · `python -m pytest -q` (20 tests; suite 169 passed)
 - [x] `golang/` — implementation + all cases · `go test -race ./...` (12 tests green)
-- [ ] `java/` — implementation + all cases · `./gradlew test --no-daemon`
-- [ ] `csharp/` — implementation + all cases · `dotnet test`
-- [ ] `elixir/` — implementation + all cases · `mix test` + `mix coveralls` (≥95%)
+- [x] `java/` — implementation + all cases · `./gradlew test --no-daemon` (13 tests; suite green)
+- [x] `csharp/` — implementation + all cases · `dotnet test` (20 tests; suite 194 passed)
+- [x] `elixir/` — implementation + all cases · `mix test` + `mix coveralls` (≥95%) (27 tests; suite 370 passed; coverage 96.9%, translate.ex 96.5%)
 
 ## 4. Docs
 
