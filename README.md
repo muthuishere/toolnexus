@@ -26,7 +26,7 @@ pip install toolnexus                             # Python
 go get github.com/muthuishere/toolnexus/golang    # Go
 dotnet add package Toolnexus                       # C#
 {:toolnexus, "~> 0.11"}                             # Elixir (mix.exs deps)
-# Java (Maven): io.github.muthuishere:toolnexus:0.11.0
+# Java (Maven): io.github.muthuishere:toolnexus:0.12.0
 ```
 
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
