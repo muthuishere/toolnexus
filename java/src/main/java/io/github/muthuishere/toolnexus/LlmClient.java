@@ -634,6 +634,183 @@ public final class LlmClient {
     }
 
     /**
+     * Single-turn translation (§11): exactly ONE provider call, returned in OpenAI shape.
+     * No agent loop, no tool execution, no conversation state — every call is self-contained,
+     * so this may be run statelessly and concurrently.
+     *
+     * <p>The inbound half of the adapters: {@code toAnthropic}/{@code toGemini} send
+     * declarations out, this reads the provider's tool calls back in. A {@code toolkit} on the
+     * request is DECLARED and never executed.
+     *
+     * <p>Retries/backoff, request-param merging and the {@code llm} metric are shared with the
+     * loop. {@code beforeLLM}/{@code afterLLM} fire once; tool hooks never fire, as no tool runs.
+     */
+    public Translate.Result translate(Translate.Request req) {
+        return "anthropic".equals(opts.style)
+                ? translateAnthropic(req)
+                : translateOpenAI(req);
+    }
+
+    /** OpenAI-style upstream: near-passthrough. */
+    @SuppressWarnings("unchecked")
+    private Translate.Result translateOpenAI(Translate.Request req) {
+        String key = resolveKey();
+        String base = stripTrailingSlash(opts.baseUrl);
+        String url = base.endsWith("/v1") || base.contains("/chat/")
+                ? base + "/chat/completions"
+                : base + "/v1/chat/completions";
+
+        List<Object> messages = new ArrayList<>(req.messages == null ? List.of() : req.messages);
+        String sys = req.system != null ? req.system : (opts.systemPrompt == null ? "" : opts.systemPrompt);
+        if (!sys.isEmpty() && !Translate.hasSystemMessage(messages)) {
+            messages.add(0, msg("system", sys));
+        }
+        List<Map<String, Object>> declared = new ArrayList<>();
+        if (req.toolkit != null) declared.addAll(req.toolkit.toOpenAI());
+        for (Object t : req.tools == null ? List.of() : req.tools) {
+            if (t instanceof Map<?, ?> tm) declared.add((Map<String, Object>) tm);
+        }
+
+        Object[] hooked = translateBeforeLLM(messages, declared);
+        messages = (List<Object>) hooked[0];
+        declared = (List<Map<String, Object>>) hooked[1];
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("model", opts.model);
+        body.put("messages", messages);
+        if (!declared.isEmpty()) body.put("tools", declared);
+        if (req.toolChoice != null) body.put("tool_choice", req.toolChoice);
+        if (req.maxTokens > 0) body.put("max_tokens", req.maxTokens);
+        body = finalizeBody(body);
+
+        Map<String, String> headers = new LinkedHashMap<>();
+        headers.put("Authorization", "Bearer " + key);
+        headers.put("Content-Type", "application/json");
+        if (opts.headers != null) headers.putAll(opts.headers);
+
+        Map<String, Object> data = llmCallJson(url, headers, body, newDeadline(), "openai");
+        translateAfterLLM(data);
+
+        Translate.Result out = new Translate.Result();
+        out.model = opts.model;
+        out.raw = data;
+        addUsage(out.usage, (Map<String, Object>) data.get("usage"), "openai");
+
+        List<Object> choices = (List<Object>) data.get("choices");
+        if (choices == null || choices.isEmpty()) {
+            out.finishReason = "stop";
+            return out;
+        }
+        Map<String, Object> choice = (Map<String, Object>) choices.get(0);
+        Map<String, Object> message = (Map<String, Object>) choice.get("message");
+        if (message != null) {
+            if (message.get("content") instanceof String c) out.text = c;
+            Object tcs = message.get("tool_calls");
+            if (tcs instanceof List<?> list) {
+                for (Object e : list) {
+                    if (!(e instanceof Map<?, ?> tc)) continue;
+                    Object fnObj = tc.get("function");
+                    if (!(fnObj instanceof Map<?, ?> fn)) continue;
+                    out.toolCalls.add(new Translate.ToolCall(
+                            tc.get("id") instanceof String id ? id : "",
+                            fn.get("name") instanceof String n ? n : "",
+                            Translate.argsString(fn.get("arguments"))));
+                }
+            }
+        }
+        out.finishReason = choice.get("finish_reason") instanceof String fr && !fr.isEmpty()
+                ? fr
+                : Translate.finishReasonFor(!out.toolCalls.isEmpty(), null);
+        return out;
+    }
+
+    /** Anthropic-style upstream: the real translation. */
+    @SuppressWarnings("unchecked")
+    private Translate.Result translateAnthropic(Translate.Request req) {
+        String key = resolveKey();
+        String base = stripTrailingSlash(opts.baseUrl);
+        String endpoint = base.endsWith("/v1") ? base + "/messages" : base + "/v1/messages";
+
+        Translate.Converted conv = Translate.openAIMessagesToAnthropic(req.messages);
+        List<Object> messages = new ArrayList<>(conv.messages());
+        String sys = req.system != null
+                ? req.system
+                : (opts.systemPrompt != null && !opts.systemPrompt.isEmpty() ? opts.systemPrompt : conv.system());
+
+        List<Map<String, Object>> declared = new ArrayList<>();
+        if (req.toolkit != null) declared.addAll(req.toolkit.toAnthropic());
+        declared.addAll(Translate.openAIToolsToAnthropic(req.tools));
+
+        Object[] hooked = translateBeforeLLM(messages, declared);
+        messages = (List<Object>) hooked[0];
+        declared = (List<Map<String, Object>>) hooked[1];
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("model", opts.model);
+        body.put("max_tokens", req.maxTokens > 0 ? req.maxTokens : 4096);
+        if (sys != null && !sys.isEmpty()) body.put("system", sys);
+        body.put("messages", messages);
+        if (!declared.isEmpty()) body.put("tools", declared);
+        Map<String, Object> nativeChoice = Translate.openAIToolChoiceToAnthropic(req.toolChoice);
+        if (nativeChoice != null) body.put("tool_choice", nativeChoice);
+        body = finalizeBody(body);
+
+        Map<String, String> headers = new LinkedHashMap<>();
+        headers.put("x-api-key", key);
+        headers.put("anthropic-version", "2023-06-01");
+        headers.put("Content-Type", "application/json");
+        if (opts.headers != null) headers.putAll(opts.headers);
+
+        Map<String, Object> data = llmCallJson(endpoint, headers, body, newDeadline(), "anthropic");
+        translateAfterLLM(data);
+
+        Translate.Result out = new Translate.Result();
+        out.model = opts.model;
+        out.raw = data;
+        addUsage(out.usage, (Map<String, Object>) data.get("usage"), "anthropic");
+
+        StringBuilder text = new StringBuilder();
+        Object content = data.get("content");
+        if (content instanceof List<?> blocks) {
+            for (Object b : blocks) {
+                if (!(b instanceof Map<?, ?> bm)) continue;
+                Object type = bm.get("type");
+                if ("text".equals(type)) {
+                    if (bm.get("text") instanceof String t) text.append(t);
+                } else if ("tool_use".equals(type)) {
+                    Object input = bm.get("input");
+                    out.toolCalls.add(new Translate.ToolCall(
+                            bm.get("id") instanceof String id ? id : "",
+                            bm.get("name") instanceof String n ? n : "",
+                            input instanceof Map<?, ?> im ? Json.stringify(im) : "{}"));
+                }
+            }
+        }
+        out.text = text.toString();
+        out.finishReason = Translate.finishReasonFor(!out.toolCalls.isEmpty(),
+                data.get("stop_reason") instanceof String sr ? sr : null);
+        return out;
+    }
+
+    /** Runs {@code beforeLLM} for the single translate call, honoring overrides. */
+    private Object[] translateBeforeLLM(List<Object> messages, List<Map<String, Object>> tools) {
+        if (opts.hooks == null || opts.hooks.beforeLLM == null) return new Object[]{messages, tools};
+        LLMOverride ov = opts.hooks.beforeLLM.apply(new BeforeLLMEvent(messages, tools, opts.model, 0));
+        if (ov != null) {
+            if (ov.messages() != null) messages = ov.messages();
+            if (ov.tools() != null) tools = new ArrayList<>(ov.tools());
+        }
+        return new Object[]{messages, tools};
+    }
+
+    /** Runs {@code afterLLM} for the single translate call. */
+    private void translateAfterLLM(Map<String, Object> data) {
+        if (opts.hooks != null && opts.hooks.afterLLM != null) {
+            opts.hooks.afterLLM.accept(new AfterLLMEvent(data, opts.model, 0));
+        }
+    }
+
+    /**
      * Stateful ask. With an {@code id}, the client's {@link ConversationStore} remembers the
      * conversation: it loads that id's transcript, runs, saves the updated transcript, and
      * returns the answer — so the next {@code ask} with the same {@code id} continues it.

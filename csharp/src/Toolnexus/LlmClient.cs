@@ -449,6 +449,131 @@ public sealed class LlmClient
     }
 
     /// <summary>
+    /// Single-turn translation (§11): exactly ONE provider call, returned in OpenAI shape.
+    /// No agent loop, no tool execution, no conversation state — every call is self-contained,
+    /// so this may be run statelessly and concurrently.
+    /// <para>
+    /// The inbound half of the adapters: <c>ToAnthropic</c>/<c>ToGemini</c> send declarations
+    /// out, this reads the provider's tool calls back in. A <c>Toolkit</c> on the request is
+    /// DECLARED and never executed.
+    /// </para>
+    /// <para>
+    /// Retries/backoff, request-param merging and the <c>llm</c> metric are shared with the
+    /// loop. <c>BeforeLLM</c>/<c>AfterLLM</c> fire once; tool hooks never fire, as no tool runs.
+    /// </para>
+    /// </summary>
+    public Task<Translate.Result> TranslateAsync(Translate.Request request, CancellationToken cancellationToken = default)
+    {
+        var deadline = new Deadline(_opts.TimeoutMs);
+        return _opts.Style == "anthropic"
+            ? TranslateAnthropicAsync(request, deadline, cancellationToken)
+            : TranslateOpenAIAsync(request, deadline, cancellationToken);
+    }
+
+    /// <summary>OpenAI-style upstream: near-passthrough.</summary>
+    private async Task<Translate.Result> TranslateOpenAIAsync(Translate.Request req, Deadline deadline, CancellationToken external)
+    {
+        var key = ResolveKey();
+        var url = StripTrailingSlash(_opts.BaseUrl) + "/chat/completions";
+
+        var messages = new List<object?>(req.Messages ?? new List<object?>());
+        var sys = req.System ?? _opts.SystemPrompt ?? "";
+        if (sys.Length > 0 && !Translate.HasSystemMessage(messages)) messages.Insert(0, Msg("system", sys));
+
+        var declared = new List<Dictionary<string, object?>>();
+        if (req.Toolkit != null) declared.AddRange(req.Toolkit.ToOpenAI());
+        foreach (var t in req.Tools ?? new List<object?>())
+            if (t is IDictionary<string, object?> tm) declared.Add(new Dictionary<string, object?>(tm));
+
+        ApplyBeforeLLM(ref messages, ref declared, 0);
+
+        var body = new Dictionary<string, object?> { ["model"] = _opts.Model, ["messages"] = messages };
+        if (declared.Count > 0) body["tools"] = declared;
+        if (req.ToolChoice != null) body["tool_choice"] = req.ToolChoice;
+        if (req.MaxTokens > 0) body["max_tokens"] = req.MaxTokens;
+        body = FinalizeBody(body);
+
+        var data = await LlmCallJsonAsync(url, BaseHeaders(key, false), body, deadline, external, "openai").ConfigureAwait(false);
+        _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(data, _opts.Model, 0));
+
+        var result = new Translate.Result { Model = _opts.Model, Raw = data };
+        AddUsage(result.Usage, data.Get("usage") as IDictionary<string, object?>, "openai");
+
+        if (data.Get("choices") is not List<object?> choices || choices.Count == 0
+            || choices[0] is not IDictionary<string, object?> choice)
+        {
+            result.FinishReason = "stop";
+            return result;
+        }
+        if (choice.Get("message") is IDictionary<string, object?> message)
+        {
+            result.Text = message.Get("content") as string ?? "";
+            result.ToolCalls = Translate.ToolCallsOf(message);
+        }
+        var fr = choice.Get("finish_reason") as string;
+        result.FinishReason = string.IsNullOrEmpty(fr)
+            ? Translate.FinishReasonFor(result.ToolCalls.Count > 0, null)
+            : fr!;
+        return result;
+    }
+
+    /// <summary>Anthropic-style upstream: the real translation.</summary>
+    private async Task<Translate.Result> TranslateAnthropicAsync(Translate.Request req, Deadline deadline, CancellationToken external)
+    {
+        var key = ResolveKey();
+        var endpoint = AnthropicEndpoint();
+
+        var conv = Translate.OpenAIMessagesToAnthropic(req.Messages);
+        var messages = new List<object?>(conv.Messages);
+        var sys = req.System
+                  ?? (!string.IsNullOrEmpty(_opts.SystemPrompt) ? _opts.SystemPrompt! : conv.System);
+
+        var declared = new List<Dictionary<string, object?>>();
+        if (req.Toolkit != null) declared.AddRange(req.Toolkit.ToAnthropic());
+        declared.AddRange(Translate.OpenAIToolsToAnthropic(req.Tools));
+
+        ApplyBeforeLLM(ref messages, ref declared, 0);
+
+        var body = new Dictionary<string, object?>
+        {
+            ["model"] = _opts.Model,
+            ["max_tokens"] = req.MaxTokens > 0 ? req.MaxTokens : 4096,
+            ["messages"] = messages,
+        };
+        if (!string.IsNullOrEmpty(sys)) body["system"] = sys;
+        if (declared.Count > 0) body["tools"] = declared;
+        var nativeChoice = Translate.OpenAIToolChoiceToAnthropic(req.ToolChoice);
+        if (nativeChoice != null) body["tool_choice"] = nativeChoice;
+        body = FinalizeBody(body);
+
+        var data = await LlmCallJsonAsync(endpoint, BaseHeaders(key, true), body, deadline, external, "anthropic").ConfigureAwait(false);
+        _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(data, _opts.Model, 0));
+
+        var result = new Translate.Result { Model = _opts.Model, Raw = data };
+        AddUsage(result.Usage, data.Get("usage") as IDictionary<string, object?>, "anthropic");
+
+        var text = new StringBuilder();
+        foreach (var b in (data.Get("content") as List<object?> ?? new List<object?>()).OfType<IDictionary<string, object?>>())
+        {
+            switch (b.Get("type") as string)
+            {
+                case "text":
+                    text.Append(b.Get("text") as string ?? "");
+                    break;
+                case "tool_use":
+                    result.ToolCalls.Add(new Translate.ToolCall(
+                        b.Get("id") as string ?? "",
+                        b.Get("name") as string ?? "",
+                        b.Get("input") is IDictionary<string, object?> input ? Json.Stringify(input) : "{}"));
+                    break;
+            }
+        }
+        result.Text = text.ToString();
+        result.FinishReason = Translate.FinishReasonFor(result.ToolCalls.Count > 0, data.Get("stop_reason") as string);
+        return result;
+    }
+
+    /// <summary>
     /// Stateful ask. With an <paramref name="id"/>, the client's <see cref="IConversationStore"/>
     /// remembers the conversation: it loads that id's transcript, runs, saves the updated
     /// transcript, and returns the answer — so the next <c>AskAsync</c> with the same id continues

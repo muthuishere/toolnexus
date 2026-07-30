@@ -204,6 +204,12 @@ func CreateToolkit(ctx context.Context, opts Options) (*Toolkit, error) {
 	all = append(all, agentTools...)
 	all = append(all, opts.ExtraTools...)
 
+	// A relay tool must never share a name with a builtin (ADR-0010 D5). Checked before
+	// anything is registered, and unconditionally — see checkRelayCollisions.
+	if err := checkRelayCollisions(all); err != nil {
+		return nil, err
+	}
+
 	// DisableTools drops tools by their final exposed name across every source.
 	disabled := make(map[string]bool, len(opts.DisableTools))
 	for _, n := range opts.DisableTools {

@@ -801,7 +801,9 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 	} else if sys := c.system(tk); sys != "" {
 		messages = append(messages, map[string]any{"role": "system", "content": sys})
 	}
-	messages = append(messages, map[string]any{"role": "user", "content": prompt})
+	if prompt != resumeNoPrompt { // a resume continues from the transcript, with no new user turn
+		messages = append(messages, map[string]any{"role": "user", "content": prompt})
+	}
 	tools := tk.ToOpenAI()
 	var toolCalls []ToolCall
 	var usage Usage
@@ -926,6 +928,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 				args, result, err := c.runTool(ctx, tk, tc.Function.Name, safeJSONArgs(tc.Function.Arguments), tc.ID, turn)
 				if err == nil {
 					if req := PendingOf(result); req != nil {
+						stampRelayCallID(req, tc.ID) // the tool cannot know its own call id
 						r, h, rerr := c.resolvePending(ctx, tk, tc.Function.Name, args, *req, tc.ID, turn)
 						err, result = rerr, r
 						haltedAt[i] = h
@@ -960,6 +963,9 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 		// Record in tool-call order; on the FIRST durable halt, surface it and stop —
 		// deterministic, and the later suspensions' placeholder results never enter the
 		// transcript (they re-suspend on resume). Mirrors the streaming path (G3).
+		// Fold every relay suspension of this turn into the first (§10, ADR-0010 F2-a);
+		// the first-in-order halt rule below is untouched.
+		mergeRelayCalls(haltedAt)
 		for i := range msg.ToolCalls {
 			toolCalls = append(toolCalls, records[i])
 			messages = append(messages, results[i])
@@ -1063,7 +1069,9 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 	if len(history) > 0 {
 		messages = append(messages, history...)
 	}
-	messages = append(messages, map[string]any{"role": "user", "content": prompt})
+	if prompt != resumeNoPrompt { // a resume continues from the transcript, with no new user turn
+		messages = append(messages, map[string]any{"role": "user", "content": prompt})
+	}
 	tools := tk.ToAnthropic()
 	var toolCalls []ToolCall
 	var usage Usage
@@ -1194,6 +1202,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 				args, result, err := c.runTool(ctx, tk, u.Name, in, u.ID, turn)
 				if err == nil {
 					if req := PendingOf(result); req != nil {
+						stampRelayCallID(req, u.ID) // the tool cannot know its own call id
 						r, h, rerr := c.resolvePending(ctx, tk, u.Name, args, *req, u.ID, turn)
 						err, result = rerr, r
 						haltedAt[i] = h
@@ -1230,6 +1239,10 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 		// include up to and including that block, surface it and stop — the later
 		// suspensions' placeholder results never enter the transcript (they re-suspend
 		// on resume). Mirrors the streaming path (G3).
+		// Fold every relay suspension of this turn into the first one, so a single
+		// surfaced Request carries all N calls (§10, ADR-0010 F2-a). The first-in-order
+		// halt rule below is untouched — only the Request's payload grows.
+		mergeRelayCalls(haltedAt)
 		blocks := make([]any, 0, len(uses))
 		var haltReq *Request
 		for i := range uses {
@@ -1359,7 +1372,9 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, h
 	} else if sys := c.system(tk); sys != "" {
 		messages = append(messages, map[string]any{"role": "system", "content": sys})
 	}
-	messages = append(messages, map[string]any{"role": "user", "content": prompt})
+	if prompt != resumeNoPrompt { // a resume continues from the transcript, with no new user turn
+		messages = append(messages, map[string]any{"role": "user", "content": prompt})
+	}
 	tools := tk.ToOpenAI()
 	var toolCalls []ToolCall
 	var usage Usage
@@ -1534,6 +1549,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, h
 				args, result, err := c.runTool(ctx, tk, cc.name, safeJSONArgs(cc.args), cc.id, turn)
 				if err == nil {
 					if req := PendingOf(result); req != nil {
+						stampRelayCallID(req, cc.id)                     // the tool cannot know its own call id
 						ch <- StreamEvent{Type: "pending", Request: req} // surface BEFORE WaitFor so a channel can push the link
 						r, h, rerr := c.resolvePending(ctx, tk, cc.name, args, *req, cc.id, turn)
 						err, result = rerr, r
@@ -1560,6 +1576,9 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, h
 		// Record in tool-call order; on the FIRST durable halt, append that one tool
 		// result, surface it and stop — later suspensions' placeholder results never
 		// enter the transcript (they re-suspend on resume). Mirrors js streamOpenAI (G3).
+		// Relay suspensions of this turn are folded into the first (§10, ADR-0010 F2-a);
+		// the first-in-order halt rule is untouched.
+		mergeRelayCalls(haltedAt)
 		for i := range calls {
 			toolCalls = append(toolCalls, records[i])
 			messages = append(messages, results[i])
@@ -1609,7 +1628,9 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 	if len(history) > 0 {
 		messages = append(messages, history...)
 	}
-	messages = append(messages, map[string]any{"role": "user", "content": prompt})
+	if prompt != resumeNoPrompt { // a resume continues from the transcript, with no new user turn
+		messages = append(messages, map[string]any{"role": "user", "content": prompt})
+	}
 	tools := tk.ToAnthropic()
 	var toolCalls []ToolCall
 	var usage Usage
@@ -1790,6 +1811,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 				args, result, err := c.runTool(ctx, tk, u.name, in, u.id, turn)
 				if err == nil {
 					if req := PendingOf(result); req != nil {
+						stampRelayCallID(req, u.id)                      // the tool cannot know its own call id
 						ch <- StreamEvent{Type: "pending", Request: req} // surface BEFORE WaitFor so a channel can push the link
 						r, h, rerr := c.resolvePending(ctx, tk, u.name, args, *req, u.id, turn)
 						err, result = rerr, r
@@ -1817,6 +1839,9 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 		// up to and including that block, push the user message, surface it and stop —
 		// later suspensions' placeholder results never enter the transcript (they
 		// re-suspend on resume). Mirrors js streamAnthropic (G3).
+		// Fold every relay suspension of this turn into the first (§10, ADR-0010 F2-a);
+		// the first-in-order halt rule below is untouched.
+		mergeRelayCalls(haltedAt)
 		resultBlocks := make([]any, 0, len(uses))
 		for i := range uses {
 			toolCalls = append(toolCalls, records[i])

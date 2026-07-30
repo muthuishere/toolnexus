@@ -6,6 +6,74 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.12.0 — 2026-07-30
+
+Adds **single-turn translation** (`SPEC.md` §11, ADR-0011) — the inbound half of the format
+adapters. Additive: nothing existing changes, and no port behaves differently unless you call
+the new entry point.
+
+`SPEC.md §0` item 7 pinned the adapters as *schema only*: `toOpenAI`/`toAnthropic`/`toGemini`
+translate tool declarations **outbound**, and nothing read a provider's tool calls back
+**inbound**. Every user of those public functions hit the same wall — they could tell a
+provider about their tools but not receive the calls it made. So the library served one
+posture well ("the library executes tools in a loop") and the majority posture — *"I want
+provider-portable tool calling, but **I** execute the tools"*, the premise of the entire
+OpenAI function-calling protocol — not at all.
+
+**New: `translate`** (idiomatic naming per port). Exactly **one** provider call, returned in
+OpenAI shape. No agent loop, no tool execution, no conversation state — every call is
+self-contained, so it can be run statelessly and scaled horizontally.
+
+- **Request** takes the OpenAI `messages`, `tools` and `tool_choice` **verbatim**, so a caller
+  never builds provider-native payloads. It also accepts an ordinary **toolkit** — MCP tools,
+  skills, native functions, A2A agents, builtins — which is **declared and never executed**.
+  The two tool sources compose.
+- **Inbound translation preserves tool structure** that a text flattening destroys: an
+  assistant turn's `tool_calls` become native tool-use blocks with `arguments` re-parsed from
+  its JSON string into an object; a `tool`-role result becomes a tool-result block keyed by
+  `tool_call_id`, **merged into one user turn** when consecutive; `system`/`developer` messages
+  are hoisted into the provider's separate field; content-parts arrays are flattened. Both
+  `arguments` wire forms (JSON string *and* object) are accepted.
+- **Outbound** returns `text`, `toolCalls` with `arguments` as a JSON **string** (the wire
+  form, echoable byte-for-byte), a mapped `finishReason` — **any tool call wins, giving
+  `"tool_calls"`** — plus `usage`, `model` and the raw response. No tool call is dropped or
+  truncated.
+- **Shares the loop's infrastructure**: retries/backoff, request-param merging and the `llm`
+  observability event. `beforeLLM`/`afterLLM` fire **once**; tool hooks never fire, because no
+  tool runs.
+
+**Parity verified by byte-diff, not assumed** (spike 0003). One adversarial fixture hitting
+every §11 rule at once was run through all six ports and diffed: `js`, `python`, `java`,
+`csharp` and `elixir` are **byte-identical to `golang`**, first diff, no corrections needed.
+The agreed output is committed at `docs/spikes/0003-translation-parity-fixture.json` so a
+future port or refactor can be checked against it directly.
+
+Test counts: js 13 · python 20 · golang 12 · java 13 · csharp 20 · elixir 27. Every port's
+full suite green; Elixir coverage 96.9% (gate 95).
+
+Also adds `golang/examples/translator` — a stateless OpenAI-compatible proxy in ~60 lines.
+
+### Relay tools + durable resume — `golang` ONLY, a preview
+
+`golang/` also gains **relay (declaration-only) tools** and an **answer-carrying durable resume**
+(`RelayTool`, `RunWithAnswer`/`AskWithAnswer`) built on the §10 suspension primitive — ADR-0010,
+issue #37. **The other five ports do not implement this yet**, so it is deliberately **not** part of
+the `SPEC.md §0` conformance contract; the §10 subsections carry a status banner and the remaining
+ports are tracked as unchecked tasks in `openspec/changes/add-tool-relay-mode/tasks.md`. Saying so
+out loud rather than letting parity drift silently is the point.
+
+If you want cross-port behaviour today, use §11 translation. ADR-0011 explains the split: translation
+is the right mechanism when the **caller** owns the conversation (the pass-through posture, ~95% of
+proxy traffic), and relay is for **proxy-managed memory**, where toolnexus owns the conversation and
+the caller sends only the new message. Two postures, two mechanisms.
+
+`golang` relay is green — 24 tests, `-race` clean, and the pre-existing hardened §10 concurrency
+tests pass unmodified.
+
+**Fixed:** `python` pinned `mcp>=1.0.0,<2.0.0`. `mcp` 2.x renamed `streamablehttp_client` to
+`streamable_http_client`, which broke `mcp_source.py` at **import** time — the whole package failed
+to load for anyone resolving a fresh 2.x. Pinned until the rename is adopted.
+
 ## 0.11.0 — 2026-07-26
 
 Makes §7F compaction actually reachable from a §7E persona agent. `SPEC.md §7F` defined
