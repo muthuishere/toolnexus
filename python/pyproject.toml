@@ -11,7 +11,10 @@ requires-python = ">=3.11"
 authors = [{ name = "Muthukumaran Navaneethakrishnan", email = "muthuishere@gmail.com" }]
 license = { text = "MIT" }
 dependencies = [
-    "mcp>=1.0.0",
+    # mcp 2.x renamed streamablehttp_client -> streamable_http_client, which breaks
+    # mcp_source.py at IMPORT time (the whole package fails to load). Pinned until the
+    # 2.x rename is adopted.
+    "mcp>=1.0.0,<2.0.0",
     "pyyaml>=6.0",
 ]
 

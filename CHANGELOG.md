@@ -53,9 +53,26 @@ full suite green; Elixir coverage 96.9% (gate 95).
 
 Also adds `golang/examples/translator` — a stateless OpenAI-compatible proxy in ~60 lines.
 
-**Known issue, pre-existing:** `python/pyproject.toml` allows `mcp>=1.0.0`, but `mcp` 2.x
-renamed `streamablehttp_client` and `mcp_source.py` fails **at import**, so the package will
-not load. Pin `mcp<2.0.0` until the constraint is tightened.
+### Relay tools + durable resume — `golang` ONLY, a preview
+
+`golang/` also gains **relay (declaration-only) tools** and an **answer-carrying durable resume**
+(`RelayTool`, `RunWithAnswer`/`AskWithAnswer`) built on the §10 suspension primitive — ADR-0010,
+issue #37. **The other five ports do not implement this yet**, so it is deliberately **not** part of
+the `SPEC.md §0` conformance contract; the §10 subsections carry a status banner and the remaining
+ports are tracked as unchecked tasks in `openspec/changes/add-tool-relay-mode/tasks.md`. Saying so
+out loud rather than letting parity drift silently is the point.
+
+If you want cross-port behaviour today, use §11 translation. ADR-0011 explains the split: translation
+is the right mechanism when the **caller** owns the conversation (the pass-through posture, ~95% of
+proxy traffic), and relay is for **proxy-managed memory**, where toolnexus owns the conversation and
+the caller sends only the new message. Two postures, two mechanisms.
+
+`golang` relay is green — 24 tests, `-race` clean, and the pre-existing hardened §10 concurrency
+tests pass unmodified.
+
+**Fixed:** `python` pinned `mcp>=1.0.0,<2.0.0`. `mcp` 2.x renamed `streamablehttp_client` to
+`streamable_http_client`, which broke `mcp_source.py` at **import** time — the whole package failed
+to load for anyone resolving a fresh 2.x. Pinned until the rename is adopted.
 
 ## 0.11.0 — 2026-07-26
 

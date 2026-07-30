@@ -86,21 +86,7 @@ A new language port is "correct" iff these hold. Run it against the shared
     `run` does not hang — it returns `{status:"pending", pending:request}`. `Request` =
     `{id,kind,prompt,url?,data?,expiresAt?}`, `Answer` = `{id,ok,data?}`, keys byte-identical across ports.
     Streaming emits `{type:"pending",request}`. Never name the slot `await` (reserved in JS/Python/C#).
-13. **Relay tools** (§10): `relayTool(name,description,schema)` ⇒ a declaration-only `Tool`
-    (`source:"relay"`) that is NEVER executed locally — the model's call is surfaced to the host,
-    which executes it. It suspends with `kind:"tool_call"` carrying `data.calls` =
-    `[{id,name,input,arguments}]` — ALL of the turn's relay calls, in tool-call order, on the one
-    surfaced request (the first-in-order halt rule is unchanged). The host resolves with
-    `Answer.data.results` = `[{id,output,isError}]` (single-call shorthand: `data.output`/`data.isError`).
-    Toolkit construction FAILS if a relay name collides with a builtin name, even when builtins are off.
-    No relay tool declared ⇒ byte-identical behavior.
-14. **Durable resume** (§10): `runWithAnswer(toolkit,history,pending,answer)` /
-    `askWithAnswer(toolkit,id,pending,answer)`. The `answer` MUST echo `pending.id` (mismatch = error,
-    never a silent continue). The resume fills EVERY outstanding `tool_result` slot of the halted turn —
-    replacing the halt's placeholder, not sitting beside it — so the provider gets one `tool_result` per
-    `tool_use`; an unanswered call gets an explicit error result. No new user turn is appended.
-
-15. **Single-turn translation** (§11): `translate(request) -> result` — ONE provider call, NO loop,
+13. **Single-turn translation** (§11): `translate(request) -> result` — ONE provider call, NO loop,
     NO tool execution, NO conversation state. Request takes OpenAI `messages`/`tools`/`tool_choice`
     VERBATIM, plus an optional `toolkit` that is DECLARED (via the §5 adapters) and never executed.
     Result = `{text, toolCalls:[{id,name,arguments}], finishReason, usage, model, raw?}` with
@@ -1459,6 +1445,14 @@ channel handler can push the link in real time:
 
 ### Relay (declaration-only) tools — §10 addendum
 
+> **STATUS: `golang` only — a preview, NOT part of the §0 conformance contract.** Relay ships in
+> `golang/` as of 0.12.0; `js`, `python`, `java`, `csharp` and `elixir` do **not** implement it yet
+> (tracked in `openspec/changes/add-tool-relay-mode/tasks.md`). Do not treat this subsection or the
+> durable-resume subsection below as a porting obligation until they are promoted into §0. A caller
+> that needs cross-port behaviour today should use §11 translation instead — see ADR-0011, which
+> explains why translation is the right mechanism for the pass-through posture and relay for
+> proxy-managed memory.
+
 A **relay tool** carries a schema but no host-side behavior. The model emits a call, the
 call is surfaced to the host, the **host executes it**, and the host's output is fed back
 as that call's `tool_result`. Nothing runs in toolnexus. This is what lets a port act as a
@@ -1504,6 +1498,8 @@ is no relay loop mode and no second suspension mechanism.
   any port.
 
 ### Durable resume — the answer-carrying entry point
+
+> **STATUS: `golang` only — a preview**, same caveat as the relay subsection above.
 
 The durable path above (`waitFor` absent → `status:"pending"`) needs a way back in. Every
 port provides:
