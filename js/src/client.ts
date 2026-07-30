@@ -6,6 +6,16 @@
 import type { Toolkit } from "./toolkit.js"
 import type { ToolResult, Request, Answer } from "./types.js"
 import { pendingOf } from "./types.js"
+import type { TranslateRequest, TranslateResult, TranslatedToolCall } from "./translate.js"
+import {
+  finishReasonFor,
+  contentText,
+  argsString,
+  openAIMessagesToAnthropic,
+  openAIToolsToAnthropic,
+  openAIToolChoiceToAnthropic,
+  hasSystemMessage,
+} from "./translate.js"
 
 export type ClientStyle = "openai" | "anthropic"
 
@@ -399,6 +409,159 @@ export class Client {
     return this.opts.style === "anthropic"
       ? this.runAnthropic(prompt, ctx.toolkit, ctx.signal, ctx.history)
       : this.runOpenAI(prompt, ctx.toolkit, ctx.signal, ctx.history)
+  }
+
+  /**
+   * Single-turn translation (§11): exactly ONE provider call, returned in OpenAI shape.
+   * No agent loop, no tool execution, no conversation state — every call is
+   * self-contained, so this may be run statelessly and concurrently.
+   *
+   * The inbound half of the adapters: `toAnthropic`/`toGemini` send declarations out,
+   * this reads the provider's tool calls back in. A `toolkit` passed in the request is
+   * DECLARED and never executed.
+   *
+   * Retries/backoff, requestParams merging and the `llm` metric are shared with the loop.
+   * `beforeLLM`/`afterLLM` fire once; tool hooks do not, because no tool runs.
+   */
+  async translate(req: TranslateRequest): Promise<TranslateResult> {
+    return this.opts.style === "anthropic" ? this.translateAnthropic(req) : this.translateOpenAI(req)
+  }
+
+  /** OpenAI-style upstream: near-passthrough. */
+  private async translateOpenAI(req: TranslateRequest): Promise<TranslateResult> {
+    const key = resolveKey(this.opts)
+    const declared = [...(req.toolkit ? req.toolkit.toOpenAI() : []), ...(req.tools ?? [])]
+    let messages = (req.messages ?? []).slice()
+    const sys = req.system ?? this.opts.systemPrompt ?? ""
+    if (sys && !hasSystemMessage(messages)) messages = [{ role: "system", content: sys }, ...messages]
+
+    let tools = declared
+    if (this.opts.hooks?.beforeLLM) {
+      const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn: 0 })
+      if (ov?.messages) messages = ov.messages
+      if (ov?.tools) tools = ov.tools
+    }
+
+    const body: Record<string, any> = { model: this.opts.model, messages }
+    if (tools.length) body.tools = tools
+    if (req.toolChoice !== undefined) body.tool_choice = req.toolChoice
+    if (req.maxTokens) body.max_tokens = req.maxTokens
+
+    const signal = this.makeSignal(req.signal)
+    {
+      const data = await this.llmCallJson(
+        `${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${key}`, ...this.opts.headers },
+          body: JSON.stringify(this.finalizeBody(body)),
+        },
+        signal,
+        "openai",
+      )
+      if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: this.opts.model, turn: 0 })
+      const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+      addUsage(usage, data.usage, "openai")
+      const choice = data.choices?.[0]
+      const toolCalls: TranslatedToolCall[] = (choice?.message?.tool_calls ?? []).map((tc: any) => ({
+        id: String(tc.id ?? ""),
+        name: String(tc.function?.name ?? ""),
+        arguments: argsString(tc.function?.arguments),
+      }))
+      return {
+        text: choice?.message?.content ?? "",
+        toolCalls,
+        finishReason: choice?.finish_reason ?? finishReasonFor(toolCalls.length > 0),
+        usage,
+        model: this.opts.model,
+        raw: data,
+      }
+    }
+  }
+
+  /** Anthropic-style upstream: the real translation. */
+  private async translateAnthropic(req: TranslateRequest): Promise<TranslateResult> {
+    const key = resolveKey(this.opts)
+    const base = this.opts.baseUrl.replace(/\/$/, "")
+    const endpoint = base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`
+
+    const converted = openAIMessagesToAnthropic(req.messages ?? [])
+    let messages = converted.messages
+    const system = req.system ?? this.opts.systemPrompt ?? converted.system
+    let tools = [
+      ...(req.toolkit ? req.toolkit.toAnthropic() : []),
+      ...openAIToolsToAnthropic(req.tools),
+    ]
+
+    if (this.opts.hooks?.beforeLLM) {
+      const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn: 0 })
+      if (ov?.messages) messages = ov.messages
+      if (ov?.tools) tools = ov.tools
+    }
+
+    const body: Record<string, any> = {
+      model: this.opts.model,
+      max_tokens: req.maxTokens && req.maxTokens > 0 ? req.maxTokens : 4096,
+      messages,
+    }
+    if (system) body.system = system
+    if (tools.length) body.tools = tools
+    const tc = openAIToolChoiceToAnthropic(req.toolChoice)
+    if (tc) body.tool_choice = tc
+
+    const signal = this.makeSignal(req.signal)
+    {
+      const data = await this.llmCallJson(
+        endpoint,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+            ...this.opts.headers,
+          },
+          body: JSON.stringify(this.finalizeBody(body)),
+        },
+        signal,
+        "anthropic",
+      )
+      if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: this.opts.model, turn: 0 })
+      const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+      addUsage(usage, data.usage, "anthropic")
+      const text: string[] = []
+      const toolCalls: TranslatedToolCall[] = []
+      for (const b of data.content ?? []) {
+        if (b?.type === "text") text.push(b.text ?? "")
+        else if (b?.type === "tool_use") {
+          toolCalls.push({
+            id: String(b.id ?? ""),
+            name: String(b.name ?? ""),
+            arguments: JSON.stringify(b.input ?? {}),
+          })
+        }
+      }
+      return {
+        text: text.join(""),
+        toolCalls,
+        finishReason: finishReasonFor(toolCalls.length > 0, data.stop_reason),
+        usage,
+        model: this.opts.model,
+        raw: data,
+      }
+    }
+  }
+
+  /**
+   * Renders a translate result's tool calls as an OpenAI `tool_calls` array, ready to put
+   * on an assistant message. Convenience for assembling a response envelope.
+   */
+  static toolCallsJSON(res: TranslateResult): any[] {
+    return res.toolCalls.map((tc) => ({
+      id: tc.id,
+      type: "function",
+      function: { name: tc.name, arguments: tc.arguments },
+    }))
   }
 
   /**
