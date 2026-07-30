@@ -139,6 +139,53 @@ The general (non-relay) case — two concurrent *auth* suspensions on a durable 
 is **not** fixed by this ADR and is not fixed inline. It remains an open defect
 against §10's durable path and wants its own change.
 
+## Addendum (2026-07-30) — relay is an upgrade, not a blocker
+
+The owner asked whether the consumer could build this on the primitive as-is (hooks and
+what already ships) rather than changing toolnexus. The consumer (routsi) independently
+asked the same thing. Checked, and largely **yes** — which changes the urgency of this
+ADR, though not its correctness.
+
+**The in-process trampoline works on shipped API.** Measured, not read
+(`golang/relay_test.go` `TestParkedWaitForAcrossTurns`): a host may PARK its `waitFor`
+across an external boundary and release it from another goroutine, and N relay calls in
+one turn produce **N concurrent callbacks**, each carrying exactly its own call. So the
+first-in-order drop rule is purely the *durable* branch, and F2-a is not needed for the
+in-process route. A stateless HTTP proxy can therefore hold a goroutine per suspended
+conversation, learn N, emit one response with N tool calls, and resume on the next turn.
+
+Two measured caveats a parking host must know:
+
+- **`TimeoutMs` must be unset.** It does not interrupt a parked `waitFor` (a plain
+  blocking call with no ctx of its own) — the park runs to completion and the run *then*
+  dies at the next context-aware step. The host does the work and still loses the run
+  (`TestRunDeadlineBreaksParking`).
+- **Nothing is persisted while parked.** `Ask` saves only after it returns, so a restart
+  loses the in-flight run. No durability mid-suspension.
+
+**What this ADR still buys:** stateless, restart-safe, multi-instance resume. The parking
+route is stateful between turns, dies on restart, and does not work across proxy
+instances. So F1-a/F2-a is a genuine **operational upgrade**, and the six-port push can be
+done properly rather than urgently.
+
+**Recommended even on the parking route:** use `relayTool`, not a `beforeTool`
+short-circuit. The hook route requires declaring client tools as *ordinary* tools with real
+handlers, so a misconfiguration **executes them host-side** — it is fail-open, against the
+whole point of a proxy. `relayTool` is fail-closed: no handler can do anything. It also
+carries the collision guard, the provider call-id stamping, and `source:"relay"`.
+
+## Second observation (filed, not fixed) — no abandon path
+
+Found by the consumer, confirmed in source: `Ask` saves `res.Messages`
+**unconditionally, including on a pending halt** (`client.go:648`), and
+`ConversationStore` is `Get`/`Save` only — there is **no `Delete`/discard**.
+(`Conversation.Reset()` is the sugar wrapper's method, not the store's.) So a client that
+walks away mid-tool-call leaves a wedged, unbalanced transcript in the store forever.
+
+A host can work around it today by implementing `Delete` in its own `ConversationStore`
+and dropping the transcript on abandon/TTL. A first-class discard path is a follow-up
+change, not in scope here.
+
 ## Alternatives
 
 - **A new `RelayTools` field + a return-on-first-`tool_use` loop mode** (issue #37 as

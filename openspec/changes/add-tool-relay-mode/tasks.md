@@ -3,6 +3,12 @@
 Per the prime directive, a behavior change lands in **all six ports** or it is not done.
 Go is the reference port (D7); the other five port its tests and match its behavior.
 
+**Urgency downgraded 2026-07-30** (ADR-0010 addendum): the consumer can ship on the
+in-process parking route using shipped API, so this change is an operational upgrade
+(stateless, restart-safe, multi-instance) rather than a consumer blocker. Do the five
+remaining ports properly, not urgently — and wait for the consumer's E2E numbers on the
+parking prototype before deciding merge order.
+
 ## 0. Contract first
 
 - [x] `SPEC.md` §10: pin `kind: "tool_call"` and the `data.calls` entry shape
@@ -83,6 +89,18 @@ If a pass covers only a subset, the rest stay unchecked — never let parity dri
 - [ ] Docs site: cookbook recipe — "use toolnexus as a translator with client-executed
       tools", per language
 - [ ] API-reference entries for `RelayTool` and the resume entry point, all six ports
+
+## 4b. Follow-ups this change does NOT do (filed, tracked)
+
+- [ ] A first-class **discard/abandon path** for a suspended conversation: `Ask` saves the
+      transcript even on a pending halt and `ConversationStore` has no `Delete`, so an
+      abandoned suspension wedges the conversation. Own change; a host can implement
+      `Delete` in its own store meanwhile.
+- [ ] The general **two concurrent non-relay suspensions** durable defect (N `tool_use`,
+      one `tool_result`). Own change.
+- [ ] Document the **parking route** caveats for hosts that use the in-process path:
+      `TimeoutMs` must be unset (it does not interrupt a park but still kills the run), and
+      nothing is persisted while parked.
 
 ## 5. Close the loop
 
