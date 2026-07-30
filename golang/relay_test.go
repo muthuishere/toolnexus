@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func relayTool(name string) Tool { return RelayTool(name, "relayed to the caller", nil) }
@@ -671,5 +672,153 @@ func TestRelayRoundTripsThroughConversationStore(t *testing.T) {
 		if !strings.Contains(string(last), want) {
 			t.Fatalf("history did not round-trip %s structurally:\n%s", want, last)
 		}
+	}
+}
+
+// TestParkedWaitForAcrossTurns answers routsi's Q1/Q2/Q5 by measurement rather than by
+// reading: a host may PARK its WaitFor across an external boundary (an HTTP turn) and
+// release it later from another goroutine. Three relay calls in one turn each get their
+// OWN concurrent WaitFor callback, so a proxy can learn N, answer all N out-of-band, and
+// let the loop resume with real tool_result blocks.
+//
+// This is the "hooks/trampoline" route working on the in-process path with no durable
+// resume involved. It is supported provided the client sets no run deadline (TimeoutMs);
+// nothing else in the loop assumes WaitFor returns promptly, and no lock is held across it.
+func TestParkedWaitForAcrossTurns(t *testing.T) {
+	llm := newSpikeScriptedLLM(t, [][]spikeCall{{
+		{"c1", "alpha", `{}`}, {"c2", "beta", `{}`}, {"c3", "gamma", `{}`},
+	}}, "all parked calls answered")
+
+	type parked struct {
+		req   Request
+		reply chan Answer
+	}
+	arrivals := make(chan parked, 3)
+
+	c := CreateClient(ClientOptions{
+		BaseURL: llm.srv.URL, Style: StyleOpenAI, Model: "stub", APIKey: "k",
+		// No TimeoutMs: a run deadline is the ONE thing that breaks parking.
+		WaitFor: func(req Request) (Answer, error) {
+			p := parked{req: req, reply: make(chan Answer, 1)}
+			arrivals <- p         // hand the call to the "HTTP turn"
+			return <-p.reply, nil // park until the client comes back
+		},
+	})
+
+	// The "proxy": collect all three parked calls (this is the N it would emit in one
+	// OpenAI response), then answer them all on the next "turn".
+	done := make(chan RunResult, 1)
+	go func() {
+		res, err := c.Run(context.Background(), "go", spikeToolkit(t,
+			relayTool("alpha"), relayTool("beta"), relayTool("gamma")))
+		if err != nil {
+			t.Errorf("parked run: %v", err)
+		}
+		done <- res
+	}()
+
+	var collected []parked
+	for len(collected) < 3 {
+		select {
+		case p := <-arrivals:
+			collected = append(collected, p)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d of 3 relay calls surfaced a WaitFor callback — parallel calls "+
+				"do NOT each get their own callback", len(collected))
+		}
+	}
+	// Each callback carried exactly its own call — proof they are per-tool, not coalesced.
+	names := map[string]bool{}
+	for _, p := range collected {
+		calls := RelayCallsOf(&p.req)
+		if len(calls) != 1 {
+			t.Fatalf("an in-process callback carried %d calls, want exactly its own 1", len(calls))
+		}
+		names[calls[0].Name] = true
+	}
+	for _, want := range []string{"alpha", "beta", "gamma"} {
+		if !names[want] {
+			t.Fatalf("no WaitFor callback for %q", want)
+		}
+	}
+	// Now the "next HTTP turn" returns the client's results.
+	for _, p := range collected {
+		calls := RelayCallsOf(&p.req)
+		p.reply <- Answer{ID: p.req.ID, Ok: true, Data: map[string]any{
+			RelayOutputKey: "out-" + calls[0].Name,
+		}}
+	}
+
+	select {
+	case res := <-done:
+		if res.Status != "done" || res.Text != "all parked calls answered" {
+			t.Fatalf("parked run result: status=%q text=%q", res.Status, res.Text)
+		}
+		if len(res.ToolCalls) != 3 {
+			t.Fatalf("want 3 resolved calls, got %d", len(res.ToolCalls))
+		}
+		calls, results, _ := spikeMessageCounts(res.Messages)
+		if calls != results {
+			t.Fatalf("parked resume left an unbalanced transcript: %d vs %d", calls, results)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the run never resumed after the parked answers were delivered")
+	}
+}
+
+// TestRunDeadlineBreaksParking pins what a run deadline actually does to a parked
+// WaitFor — measured, because the intuitive answer is wrong. WaitFor is a plain blocking
+// call with no ctx of its own, so the deadline does NOT interrupt the wait; the park runs
+// to completion. The run then dies at the next context-aware step (the follow-up LLM
+// call). Net effect for a proxy: TimeoutMs does not cap the park, but any park outliving
+// it turns the whole run into an error AFTER the host has already done its work — the
+// worst of both. So a parking host must leave TimeoutMs unset.
+func TestRunDeadlineBreaksParking(t *testing.T) {
+	llm := newSpikeScriptedLLM(t, [][]spikeCall{{{"c1", "alpha", `{}`}}}, "x")
+	const park = 400 * time.Millisecond
+	c := CreateClient(ClientOptions{
+		BaseURL: llm.srv.URL, Style: StyleOpenAI, Model: "stub", APIKey: "k",
+		TimeoutMs: 100, // deadline shorter than the park
+		WaitFor: func(req Request) (Answer, error) {
+			<-time.After(park)
+			return Answer{ID: req.ID, Ok: true, Data: map[string]any{RelayOutputKey: "late"}}, nil
+		},
+	})
+	start := time.Now()
+	_, err := c.Run(context.Background(), "go", spikeToolkit(t, relayTool("alpha")))
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("a park outliving TimeoutMs must not silently succeed")
+	}
+	// The wait was NOT cut short — proof the deadline does not interrupt WaitFor itself.
+	if elapsed < park {
+		t.Fatalf("the run aborted after %s, before the %s park finished — WaitFor now IS "+
+			"deadline-interruptible; update the guidance to routsi", elapsed, park)
+	}
+	t.Logf("MEASURED: TimeoutMs=100ms did NOT interrupt a %s park (ran %s), but the run then "+
+		"failed at the next context-aware step: %v", park, elapsed, err)
+}
+
+// TestToolkitNeedNotBeTheSameInstanceOnResume answers routsi's Q4: resume resolves relay
+// tools BY NAME, so a proxy that rebuilds its toolkit per HTTP request from the client's
+// declared tools can resume with a freshly constructed toolkit.
+func TestToolkitNeedNotBeTheSameInstanceOnResume(t *testing.T) {
+	llm := newSpikeScriptedLLM(t, [][]spikeCall{{{"c1", "lookup", `{}`}}}, "resumed on a new toolkit")
+	c := CreateClient(ClientOptions{BaseURL: llm.srv.URL, Style: StyleOpenAI, Model: "stub", APIKey: "k"})
+
+	halted, err := c.Run(context.Background(), "go", spikeToolkit(t, relayTool("lookup")))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// A DIFFERENT toolkit instance, same relay tool name — as a per-request proxy builds.
+	fresh := spikeToolkit(t, relayTool("lookup"))
+	resumed, err := c.RunWithAnswer(context.Background(), fresh, halted.Messages, *halted.Pending,
+		RelayAnswer(halted.Pending.ID, []RelayResult{{ID: "c1", Output: "fresh-toolkit"}}))
+	if err != nil {
+		t.Fatalf("resume on a fresh toolkit: %v", err)
+	}
+	if resumed.Status != "done" {
+		t.Fatalf("status = %q", resumed.Status)
 	}
 }
