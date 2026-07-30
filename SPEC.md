@@ -86,6 +86,19 @@ A new language port is "correct" iff these hold. Run it against the shared
     `run` does not hang — it returns `{status:"pending", pending:request}`. `Request` =
     `{id,kind,prompt,url?,data?,expiresAt?}`, `Answer` = `{id,ok,data?}`, keys byte-identical across ports.
     Streaming emits `{type:"pending",request}`. Never name the slot `await` (reserved in JS/Python/C#).
+13. **Relay tools** (§10): `relayTool(name,description,schema)` ⇒ a declaration-only `Tool`
+    (`source:"relay"`) that is NEVER executed locally — the model's call is surfaced to the host,
+    which executes it. It suspends with `kind:"tool_call"` carrying `data.calls` =
+    `[{id,name,input,arguments}]` — ALL of the turn's relay calls, in tool-call order, on the one
+    surfaced request (the first-in-order halt rule is unchanged). The host resolves with
+    `Answer.data.results` = `[{id,output,isError}]` (single-call shorthand: `data.output`/`data.isError`).
+    Toolkit construction FAILS if a relay name collides with a builtin name, even when builtins are off.
+    No relay tool declared ⇒ byte-identical behavior.
+14. **Durable resume** (§10): `runWithAnswer(toolkit,history,pending,answer)` /
+    `askWithAnswer(toolkit,id,pending,answer)`. The `answer` MUST echo `pending.id` (mismatch = error,
+    never a silent continue). The resume fills EVERY outstanding `tool_result` slot of the halted turn —
+    replacing the halt's placeholder, not sitting beside it — so the provider gets one `tool_result` per
+    `tool_use`; an unanswered call gets an explicit error result. No new user turn is appended.
 
 That's it. The sections below just expand each point with wire-format detail.
 
@@ -1433,3 +1446,80 @@ channel handler can push the link in real time:
 - The elicitation bridge (§2) and agent escalation produce byte-identical Request wire
   shapes (modulo `data.path` presence) and resolve through the same single `waitFor` slot
   — there is no second suspension mechanism.
+
+### Relay (declaration-only) tools — §10 addendum
+
+A **relay tool** carries a schema but no host-side behavior. The model emits a call, the
+call is surfaced to the host, the **host executes it**, and the host's output is fed back
+as that call's `tool_result`. Nothing runs in toolnexus. This is what lets a port act as a
+pure translator — a proxy — while still supporting standard OpenAI function calling, where
+the *client* owns execution.
+
+Relay is a **use of the suspension primitive**, exactly as auth is (`§10` opening). There
+is no relay loop mode and no second suspension mechanism.
+
+- **Constructor.** `relayTool(name, description, schema)` (idiomatic naming per port)
+  returns a normal `Tool` with `source: "relay"`. It is declared to every provider by the
+  §5 adapters like any other tool — no adapter change.
+- **Suspension shape.** A relayed call suspends with `kind: "tool_call"` and carries the
+  calls under `data.calls` — an array whose entries are pinned as:
+
+  ```
+  { id: string,          // the provider's tool-call id — the tool_result correlation key
+    name: string,        // the tool the model called
+    input: object,       // parsed arguments
+    arguments: string }  // the RAW arguments JSON, so an OpenAI-shaped caller can echo it
+  ```
+
+  The **loop** stamps `id` (the tool cannot know its own call id).
+- **All N calls ride one request.** When several relay tools are called in one assistant
+  turn, the single surfaced suspension carries **all** of that turn's relay calls in
+  `data.calls`, in tool-call order. The first-in-order halt rule above is **unchanged** —
+  only the surfaced request's payload grows. This matches OpenAI's `tool_calls` array
+  one-to-one, so a caller never sees a truncated call list.
+- **Resolution.** `Answer.data.results` is an array of `{ id, output, isError }`, one per
+  relayed call. A single-call relay may instead use the shorthand `Answer.data.output` /
+  `Answer.data.isError`. `ok:false` means the host declined and feeds back an error
+  `tool_result` — the loop continues either way, and a relayed tool's *failure* is an error
+  result, never an aborted run.
+- **Not a tool error.** A relay suspension inherits the rule above verbatim:
+  `isError:false` + `pending:true` on the `tool` event, no `afterTool` failure path.
+  Relaying is normal operation for a translator and must not move error-rate metrics.
+- **Collision guard.** Toolkit construction **fails** when a relay tool's name collides
+  with a built-in tool's name — **unconditionally, even when builtins are disabled**. The
+  guard exists so a *future* builtin cannot capture a declaration-only tool on a proxy, and
+  a proxy always runs with builtins off. Ordinary (non-relay) host overrides of builtin
+  names are unaffected.
+- **Byte-identical when absent.** No relay tool declared ⇒ not one observable difference in
+  any port.
+
+### Durable resume — the answer-carrying entry point
+
+The durable path above (`waitFor` absent → `status:"pending"`) needs a way back in. Every
+port provides:
+
+```
+runWithAnswer(toolkit, history, pending: Request, answer: Answer) -> RunResult
+askWithAnswer(toolkit, conversationId, pending: Request, answer: Answer) -> RunResult
+```
+
+(idiomatic naming per port; `askWithAnswer` loads and saves through the conversation store).
+
+- The `Answer` **must echo** `pending.id`; a mismatch is an **error**, not a silent
+  continue, so a stale or misrouted answer cannot corrupt a conversation.
+- The resume fills **every** `tool_result` slot left outstanding on the halted assistant
+  turn — not only the halted call's. The halt's placeholder result is **replaced**, not
+  left alongside it, and the calls whose placeholders never entered the transcript (the
+  first-in-order rule) get their slots filled. The transcript sent to the provider is
+  therefore **balanced** — one `tool_result` per `tool_use` — and replayable, which
+  providers require.
+- A call for which the host supplied no result gets an explicit **error** `tool_result`
+  rather than an absent slot, because an unanswered tool call is rejected by the provider.
+- The resume continues from the transcript and appends **no new user turn**.
+- Because `Request` and `Answer` are plain serializable data, resume works across a
+  process boundary: persist both, restart, resume with a fresh client.
+
+> The general case of two concurrent **non-relay** suspensions on the durable path still
+> leaves an unbalanced turn (N `tool_use`, one `tool_result`). That is a known open defect
+> of the durable path, out of scope here; the relay path is fully covered by the rules
+> above.

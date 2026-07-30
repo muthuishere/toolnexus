@@ -5,14 +5,14 @@ Go is the reference port (D7); the other five port its tests and match its behav
 
 ## 0. Contract first
 
-- [ ] `SPEC.md` §10: pin `kind: "tool_call"` and the `data.calls` entry shape
-      (`{id, name, input}`, tool-call order), byte-identical across ports
-- [ ] `SPEC.md` §10: specify the answer-carrying resume entry point — applies the `Answer`
+- [x] `SPEC.md` §10: pin `kind: "tool_call"` and the `data.calls` entry shape
+      (`{id, name, input, arguments}`, tool-call order), byte-identical across ports
+- [x] `SPEC.md` §10: specify the answer-carrying resume entry point — applies the `Answer`
       by id, fills **every** outstanding `tool_result` slot of the halted turn (D4), errors
       on an `Answer` matching no outstanding suspension
-- [ ] `SPEC.md` §8: add the resume entry point to the client API surface table
-- [ ] `SPEC.md` §0: add relay to the one-page conformance contract
-- [ ] `SPEC.md` §10: state explicitly that the first-in-order halt rule and the
+- [x] `SPEC.md` §8: add the resume entry point to the client API surface table
+- [x] `SPEC.md` §0: add relay to the one-page conformance contract
+- [x] `SPEC.md` §10: state explicitly that the first-in-order halt rule and the
       not-a-tool-error rule are **unchanged** and inherited by relay
 - [x] Resolve design open question: `data.calls` entries DO carry the raw `arguments` JSON
       string alongside the parsed `input` — routsi confirmed it needs byte-for-byte echo to
