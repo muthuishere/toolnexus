@@ -27,6 +27,9 @@ const (
 	SourceCustom  ToolSource = "custom"
 	SourceBuiltin ToolSource = "builtin"
 	SourceA2A     ToolSource = "a2a"
+	// SourceRelay is a declaration-only tool: the model's call is surfaced to the host,
+	// which executes it (§10, ADR-0010). Nothing runs here.
+	SourceRelay ToolSource = "relay"
 )
 
 // ToolResult is the uniform result handed back to the model.

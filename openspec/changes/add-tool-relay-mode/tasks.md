@@ -14,30 +14,31 @@ Go is the reference port (D7); the other five port its tests and match its behav
 - [ ] `SPEC.md` §0: add relay to the one-page conformance contract
 - [ ] `SPEC.md` §10: state explicitly that the first-in-order halt rule and the
       not-a-tool-error rule are **unchanged** and inherited by relay
-- [ ] Resolve design open question: do `data.calls` entries also carry the raw arguments
-      JSON string alongside the parsed `input`? Decide before the first port lands.
+- [x] Resolve design open question: `data.calls` entries DO carry the raw `arguments` JSON
+      string alongside the parsed `input` — routsi confirmed it needs byte-for-byte echo to
+      a conforming OpenAI client. Implemented in Go; the other five must match.
 
 ## 1. Reference port — `golang/`
 
-- [ ] `RelayTool(name, description, schema)` constructor (D1)
-- [ ] Relay suspension carries all of the turn's relay calls in `Request.data.calls` (D2),
+- [x] `RelayTool(name, description, schema)` constructor (D1)
+- [x] Relay suspension carries all of the turn's relay calls in `Request.data.calls` (D2),
       non-streaming loop
-- [ ] Same on the streaming loop — spike S12 measured the identical gap there
-- [ ] Same on the Anthropic-native loop — spike S11 measured the identical gap there
-- [ ] `RunWithAnswer` / `Ask(..., answer)` resume entry point (D3)
-- [ ] Resume fills **every** outstanding `tool_result` slot of the halted turn (D4)
-- [ ] Resume errors when the `Answer` matches no outstanding suspension
-- [ ] `Answer.data` carries `output` + error flag; caller-side failure → error
+- [x] Same on the streaming loop — spike S12 measured the identical gap there
+- [x] Same on the Anthropic-native loop — spike S11 measured the identical gap there
+- [x] `RunWithAnswer` / `Ask(..., answer)` resume entry point (D3)
+- [x] Resume fills **every** outstanding `tool_result` slot of the halted turn (D4)
+- [x] Resume errors when the `Answer` matches no outstanding suspension
+- [x] `Answer.data` carries `output` + error flag; caller-side failure → error
       `tool_result`, `ok:false` → declined error result (D6)
-- [ ] Unconditional builtin-name collision guard at toolkit construction, enforced even
+- [x] Unconditional builtin-name collision guard at toolkit construction, enforced even
       when builtins are off (D5)
-- [ ] Fold `golang/relay_spike_test.go` into the real suite (or delete it) — it is
+- [x] Fold `golang/relay_spike_test.go` into the real suite (or delete it) — it is
       explicitly temporary scaffolding
-- [ ] Update the three baseline tests (S4, S11 durable, S12 durable) that assert *today's*
+- [x] Update the three baseline tests (S4, S11 durable, S12 durable) that assert *today's*
       pre-change numbers — they are designed to fail once `data.calls` exists
-- [ ] Verify the pre-existing `TestConcurrentSuspensionsSurfaceFirst` and its streaming
+- [x] Verify the pre-existing `TestConcurrentSuspensionsSurfaceFirst` and its streaming
       twin still pass **unmodified** — this is the non-regression gate
-- [ ] `go build ./... && go vet ./... && go test -race ./...` green
+- [x] `go build ./... && go vet ./... && go test -race ./...` green
 
 ## 2. Test cases every port must carry (from spike 0002)
 
@@ -60,8 +61,10 @@ Port all fourteen; S4's measured numbers are the cross-port oracle (D7).
 - [ ] Streaming loop — emits `pending` carrying the relay `Request`; resolves inline
 - [ ] Collision guard rejects a builtin-colliding relay name, builtins on **and** off
 - [ ] Resume across a process boundary — persist request + transcript, new client resumes
-- [ ] **New, not in spike 0002:** a relay call and an auth-required MCP suspension in the
-      same turn (design risk item — currently unmeasured)
+- [x] **New, not in spike 0002:** a relay call and an auth-required suspension in the same
+      turn — the auth call is first-in-order and is the one surfaced, and the merge must NOT
+      contaminate it with relay calls (covered in Go by
+      `TestRelayAndAuthSuspensionInTheSameTurn`)
 
 ## 3. Per-language parity checklist
 
@@ -69,7 +72,7 @@ If a pass covers only a subset, the rest stay unchecked — never let parity dri
 
 - [ ] `js/` — implementation + all cases · `npm test`
 - [ ] `python/` — implementation + all cases · `python -m pytest -q`
-- [ ] `golang/` — implementation + all cases · `go test -race ./...`
+- [x] `golang/` — implementation + all cases · `go test -race ./...` (24 relay tests green; §10 gate holds)
 - [ ] `java/` — implementation + all cases · `./gradlew test --no-daemon`
 - [ ] `csharp/` — implementation + all cases · `dotnet test`
 - [ ] `elixir/` — implementation + all cases · `mix test` + `mix coveralls` (≥95%)
