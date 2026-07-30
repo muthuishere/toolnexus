@@ -34,6 +34,16 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Callable, Literal, Mapping, Optional, Protocol, TypedDict
 
 from .toolkit import Toolkit
+from .translate import (
+    TranslatedToolCall,
+    TranslateResult,
+    args_string,
+    finish_reason_for,
+    has_system_message,
+    openai_messages_to_anthropic,
+    openai_tool_choice_to_anthropic,
+    openai_tools_to_anthropic,
+)
 from .types import Answer, Request, ToolContext, ToolResult, pending_of
 
 # §10 Suspension resolver: (request) -> answer, idiomatic async per port. May be a
@@ -883,6 +893,188 @@ class Client:
         except Exception:
             self._emit({"event": "llm", "model": self.model, "status": "error", "ms": _ms_since(t0), "prompt_tokens": 0, "completion_tokens": 0})
             raise
+
+    async def translate(
+        self,
+        messages: list[Any],
+        *,
+        tools: Optional[list[Any]] = None,
+        toolkit: Optional[Toolkit] = None,
+        tool_choice: Any = None,
+        system: Optional[str] = None,
+        max_tokens: int = 0,
+        cancel: Optional[asyncio.Event] = None,
+    ) -> TranslateResult:
+        """Single-turn translation (§11): exactly ONE provider call, returned in OpenAI
+        shape. No agent loop, no tool execution, no conversation state — every call is
+        self-contained, so this may be run statelessly and concurrently.
+
+        The inbound half of the adapters: ``to_anthropic``/``to_gemini`` send declarations
+        out, this reads the provider's tool calls back in. A ``toolkit`` passed here is
+        DECLARED and never executed.
+
+        ``messages``/``tools``/``tool_choice`` are the OpenAI shapes, taken verbatim.
+        Retries/backoff, request-param merging and the ``llm`` metric are shared with the
+        loop; ``before_llm``/``after_llm`` fire once and tool hooks never fire.
+        """
+        if self.style == "anthropic":
+            return await self._translate_anthropic(messages, tools, toolkit, tool_choice, system, max_tokens, cancel)
+        return await self._translate_openai(messages, tools, toolkit, tool_choice, system, max_tokens, cancel)
+
+    async def _translate_openai(
+        self,
+        messages: list[Any],
+        tools: Optional[list[Any]],
+        toolkit: Optional[Toolkit],
+        tool_choice: Any,
+        system: Optional[str],
+        max_tokens: int,
+        cancel: Optional[asyncio.Event],
+    ) -> TranslateResult:
+        """OpenAI-style upstream: near-passthrough."""
+        key = _resolve_key(self.api_key, self.style)
+        base = self.base_url.rstrip("/")
+        endpoint = f"{base}/chat/completions" if base.endswith("/v1") or "/chat/" in base else f"{base}/v1/chat/completions"
+        req_headers = {"content-type": "application/json", "authorization": f"Bearer {key}", **self.headers}
+
+        msgs = [m for m in (messages or [])]
+        sys_prompt = system if system is not None else (self.system_prompt or "")
+        if sys_prompt and not has_system_message(msgs):
+            msgs = [{"role": "system", "content": sys_prompt}, *msgs]
+
+        declared = list(toolkit.to_openai()) if toolkit is not None else []
+        declared.extend(tools or [])
+
+        msgs, declared = await self._translate_before_llm(msgs, declared)
+
+        payload: dict[str, Any] = {"model": self.model, "messages": msgs}
+        if declared:
+            payload["tools"] = declared
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
+        if max_tokens > 0:
+            payload["max_tokens"] = max_tokens
+        payload = self._finalize_body(payload)
+
+        data = await self._llm_call_json(endpoint, req_headers, payload, self._deadline(), cancel, "openai")
+        await self._translate_after_llm(data)
+
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        _add_usage(usage, data.get("usage"), "openai")
+        choices = data.get("choices") or []
+        if not choices:
+            return TranslateResult(finish_reason="stop", usage=usage, model=self.model, raw=data)
+        message = (choices[0].get("message") or {}) if isinstance(choices[0], dict) else {}
+        calls = [
+            TranslatedToolCall(
+                id=str(tc.get("id") or ""),
+                name=str((tc.get("function") or {}).get("name") or ""),
+                arguments=args_string((tc.get("function") or {}).get("arguments")),
+            )
+            for tc in (message.get("tool_calls") or [])
+            if isinstance(tc, dict)
+        ]
+        return TranslateResult(
+            text=message.get("content") or "",
+            tool_calls=calls,
+            finish_reason=choices[0].get("finish_reason") or finish_reason_for(bool(calls)),
+            usage=usage,
+            model=self.model,
+            raw=data,
+        )
+
+    async def _translate_anthropic(
+        self,
+        messages: list[Any],
+        tools: Optional[list[Any]],
+        toolkit: Optional[Toolkit],
+        tool_choice: Any,
+        system: Optional[str],
+        max_tokens: int,
+        cancel: Optional[asyncio.Event],
+    ) -> TranslateResult:
+        """Anthropic-style upstream: the real translation."""
+        key = _resolve_key(self.api_key, self.style)
+        base = self.base_url.rstrip("/")
+        endpoint = f"{base}/messages" if base.endswith("/v1") else f"{base}/v1/messages"
+        req_headers = {
+            "content-type": "application/json",
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+            **self.headers,
+        }
+
+        msgs, extracted_system = openai_messages_to_anthropic(messages or [])
+        sys_prompt = system if system is not None else (self.system_prompt or extracted_system)
+
+        declared = list(toolkit.to_anthropic()) if toolkit is not None else []
+        declared.extend(openai_tools_to_anthropic(tools))
+
+        msgs, declared = await self._translate_before_llm(msgs, declared)
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": max_tokens if max_tokens > 0 else 4096,
+            "messages": msgs,
+        }
+        if sys_prompt:
+            payload["system"] = sys_prompt
+        if declared:
+            payload["tools"] = declared
+        native_choice = openai_tool_choice_to_anthropic(tool_choice)
+        if native_choice is not None:
+            payload["tool_choice"] = native_choice
+        payload = self._finalize_body(payload)
+
+        data = await self._llm_call_json(endpoint, req_headers, payload, self._deadline(), cancel, "anthropic")
+        await self._translate_after_llm(data)
+
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        _add_usage(usage, data.get("usage"), "anthropic")
+        text_parts: list[str] = []
+        calls: list[TranslatedToolCall] = []
+        for b in data.get("content") or []:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "text":
+                text_parts.append(b.get("text") or "")
+            elif b.get("type") == "tool_use":
+                calls.append(
+                    TranslatedToolCall(
+                        id=str(b.get("id") or ""),
+                        name=str(b.get("name") or ""),
+                        arguments=json.dumps(b.get("input") or {}, separators=(",", ":")),
+                    )
+                )
+        return TranslateResult(
+            text="".join(text_parts),
+            tool_calls=calls,
+            finish_reason=finish_reason_for(bool(calls), data.get("stop_reason")),
+            usage=usage,
+            model=self.model,
+            raw=data,
+        )
+
+    async def _translate_before_llm(
+        self, messages: list[Any], tools: list[Any]
+    ) -> tuple[list[Any], list[Any]]:
+        """Run ``before_llm`` for the single translate call, honoring overrides."""
+        before = _get_hook(self.hooks, "before_llm")
+        if before is None:
+            return messages, tools
+        ov = await _call_hook(before, {"messages": messages, "tools": tools, "model": self.model, "turn": 0})
+        if ov:
+            if ov.get("messages") is not None:
+                messages = ov["messages"]
+            if ov.get("tools") is not None:
+                tools = ov["tools"]
+        return messages, tools
+
+    async def _translate_after_llm(self, data: dict[str, Any]) -> None:
+        """Run ``after_llm`` for the single translate call."""
+        after = _get_hook(self.hooks, "after_llm")
+        if after is not None:
+            await _call_hook(after, {"response": data, "model": self.model, "turn": 0})
 
     async def run(
         self,

@@ -14,6 +14,7 @@ from .a2a import (
     parse_agents_config,
 )
 from .adapters import to_anthropic, to_gemini, to_openai
+from .translate import TranslatedToolCall, TranslateResult
 from .client import (
     Client,
     ClientStyle,
@@ -152,6 +153,9 @@ __all__ = [
     "builtins_enabled",
     "create_builtin_tools",
     "select_builtins",
+    # translation (§11)
+    "TranslateResult",
+    "TranslatedToolCall",
     # adapters
     "to_anthropic",
     "to_gemini",
