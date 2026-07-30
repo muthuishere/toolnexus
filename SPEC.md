@@ -100,6 +100,16 @@ A new language port is "correct" iff these hold. Run it against the shared
     replacing the halt's placeholder, not sitting beside it — so the provider gets one `tool_result` per
     `tool_use`; an unanswered call gets an explicit error result. No new user turn is appended.
 
+15. **Single-turn translation** (§11): `translate(request) -> result` — ONE provider call, NO loop,
+    NO tool execution, NO conversation state. Request takes OpenAI `messages`/`tools`/`tool_choice`
+    VERBATIM, plus an optional `toolkit` that is DECLARED (via the §5 adapters) and never executed.
+    Result = `{text, toolCalls:[{id,name,arguments}], finishReason, usage, model, raw?}` with
+    `arguments` a JSON **string**. Inbound: assistant `tool_calls`⇒tool-use blocks (arguments
+    re-parsed to objects), `tool` results⇒tool-result blocks keyed by `tool_call_id` and MERGED
+    into ONE user turn when consecutive, `system` hoisted. `finishReason`: any tool call ⇒
+    `"tool_calls"`, else length/content_filter/stop. `beforeLLM`/`afterLLM` fire once; tool hooks
+    never fire. This is the INBOUND half of the adapters, which are outbound-only.
+
 That's it. The sections below just expand each point with wire-format detail.
 
 ---
@@ -1523,3 +1533,81 @@ askWithAnswer(toolkit, conversationId, pending: Request, answer: Answer) -> RunR
 > leaves an unbalanced turn (N `tool_use`, one `tool_result`). That is a known open defect
 > of the durable path, out of scope here; the relay path is fully covered by the rules
 > above.
+
+---
+
+## 11. Single-turn translation — `translate`
+
+`translate` is toolnexus used as a **pure wire-format translator**: OpenAI shapes in, exactly
+**one** provider call, OpenAI shapes out. No agent loop, no tool execution, no conversation
+state. It is the **inbound half of the §5 adapters** — those send declarations *out*, this
+reads the provider's tool calls back *in*.
+
+Use it when the CALLER owns the conversation and executes tools itself (the standard OpenAI
+function-calling posture, where every request carries the full history including prior tool
+results). When toolnexus owns the conversation, use the agent loop with relay tools +
+`runWithAnswer` instead (§10). Two postures, two mechanisms.
+
+```
+translate(request) -> result
+
+request {
+  messages:    []              // OpenAI `messages`, VERBATIM (incl. assistant tool_calls
+                               // and tool-role results with tool_call_id)
+  tools?:      []              // OpenAI `tools`, VERBATIM
+  toolkit?:    Toolkit         // an ordinary toolkit — DECLARED, never executed
+  toolChoice?: any             // OpenAI `tool_choice`, VERBATIM
+  system?:     string          // overrides the system prompt
+  maxTokens?:  int             // 0/absent ⇒ per-provider default
+}
+
+result {
+  text:         string
+  toolCalls:    [{ id, name, arguments }]   // arguments is a JSON **string**
+  finishReason: "stop" | "tool_calls" | "length" | "content_filter"
+  usage:        Usage
+  model:        string
+  raw:          object?        // the provider's decoded response
+}
+```
+
+**Nothing executes, ever.** There is no execution path in this entry point. A `toolkit`
+passed here is declared via the §5 adapters and never run — a property of the design, not of
+configuration, so there is no `builtins:false` discipline to remember. `tools` and `toolkit`
+compose; toolkit declarations come first.
+
+### Inbound translation (the part a text-flattening translator gets wrong)
+
+To a provider that uses native content blocks:
+
+- an assistant turn's `tool_calls` become **tool-use blocks**, with `arguments` **parsed back
+  from its JSON string into an object**;
+- a `tool`-role result becomes a **tool-result block** keyed by its `tool_call_id`;
+- **consecutive tool results merge into ONE user turn** — providers expect a single
+  result-bearing turn answering the preceding assistant turn, not one turn per result;
+- `system` (and `developer`) messages are **hoisted** into the provider's separate system
+  field; an explicit `request.system` overrides them;
+- a `content` given as an array of parts is flattened to text.
+
+A port MUST also accept `arguments` supplied as an **object** rather than a string, because
+some clients send it that way.
+
+### Outbound translation
+
+- Tool calls are returned in **provider order**, and **none is dropped or truncated**.
+- `arguments` is a JSON **string** — the OpenAI wire form — so a caller can hand it to a
+  conforming client byte-for-byte.
+- `finishReason` mapping: **a turn emitting any tool call is always `"tool_calls"`**,
+  whatever the provider said. Otherwise `max_tokens`/`length` ⇒ `"length"`,
+  `refusal`/`content_filter` ⇒ `"content_filter"`, everything else ⇒ `"stop"`.
+
+### Shared infrastructure
+
+Retries/backoff (§7), request-param merging (§8) and the `llm` observability event (§9) are
+the same as the loop's, so a translating caller loses neither resilience nor metrics.
+`beforeLLM` and `afterLLM` each fire **exactly once**. **Tool hooks do NOT fire** — no tool
+runs.
+
+> Streaming translation is a deliberate follow-up, not part of this contract. Client styles
+> are `openai` | `anthropic`; a Gemini-style *upstream* is out of scope (`ToGemini` covers
+> declarations only).
