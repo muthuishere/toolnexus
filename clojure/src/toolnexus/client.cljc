@@ -32,6 +32,7 @@
             [koine.http :as http]
             [koine.json :as json]
             [koine.time :as ktime]
+            [toolnexus.adapter :as adapter]
             [toolnexus.tool :as tool]))
 
 ;; ---------------------------------------------------------------------------
@@ -144,27 +145,6 @@
        (map #(or % ""))
        (remove str/blank?)
        (str/join "\n\n")))
-
-;; ---------------------------------------------------------------------------
-;; adapters (§0.7) — schema only
-;; ---------------------------------------------------------------------------
-;;
-;; Inlined here on purpose: `toolnexus.adapter` (task 3.1) does not exist yet.
-;; When it lands these two become one-line delegations; the SHAPES below are
-;; the contract and must not diverge from it.
-
-(defn- openai-tools [toolkit]
-  (mapv (fn [t] {:type "function"
-                 :function {:name (:name t)
-                            :description (:description t)
-                            :parameters (:input-schema t)}})
-        (tool/all-tools toolkit)))
-
-(defn- anthropic-tools [toolkit]
-  (mapv (fn [t] {:name (:name t)
-                 :description (:description t)
-                 :input_schema (:input-schema t)})
-        (tool/all-tools toolkit)))
 
 ;; ---------------------------------------------------------------------------
 ;; transport
@@ -392,7 +372,9 @@
   [client prompt {:keys [toolkit history on-event]}]
   (let [anthropic? (= "anthropic" (:style client))
         system     (system-message client toolkit)
-        tools      (if anthropic? (anthropic-tools toolkit) (openai-tools toolkit))
+        ;; §0.7 schema comes from toolnexus.adapter — one source of truth for
+        ;; the provider shapes, never a second copy in the loop.
+        tools      (if anthropic? (adapter/to-anthropic toolkit) (adapter/to-openai toolkit))
         max-turns  (or (:max-turns client) default-max-turns)
         seed       (cond
                      (seq history) (vec history)

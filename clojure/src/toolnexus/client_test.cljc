@@ -14,6 +14,7 @@
             [koine.json :as json]
             [koine.server :as server]
             [koine.time :as ktime]
+            [toolnexus.builtin :as builtin]
             [toolnexus.client :as client]
             [toolnexus.tool :as tool]))
 
@@ -430,3 +431,35 @@
       (is (= "Login required: https://x" (:output r)))
       (is (= "authorization" (:kind (client/pending-of r))))
       (is (nil? (client/pending-of (tool/success "plain")))))))
+
+;; ---------------------------------------------------------------------------
+;; §4A + §10 — a REAL suspending builtin, end to end through the loop
+;; ---------------------------------------------------------------------------
+;;
+;; Not a fixture tool: `toolnexus.builtin`'s `question` is the canonical
+;; kind:"question" producer, written by another namespace against the same
+;; §1 Context contract. If the client's arity convention or its pending
+;; detection drifted from it, this is where it shows.
+
+(deftest builtin-question-suspends-and-resumes-through-the-client
+  (with-llm "openai"
+    [{:calls [{:id "q1" :name "question"
+               :args {:questions [{:question "Ship it?" :header "release"
+                                   :options ["yes" "no"]}]}}]}
+     {:text "shipped"}]
+    (fn [{:keys [base]}]
+      (let [tk   (tool/toolkit builtin/builtin-tools)
+            seen (atom nil)
+            wf   (fn [req]
+                   (reset! seen req)
+                   (client/make-answer (:id req) true {:answers ["yes"]}))
+            rr   (client/run (client-for "openai" base {:wait-for wf}) "go" {:toolkit tk})]
+        (testing "the client saw the builtin's Request"
+          (is (= "question" (:kind @seen)))
+          (is (= "Ship it? (options: yes, no)" (:prompt @seen)))
+          (is (= [{:question "Ship it?" :header "release" :options ["yes" "no"]}]
+                 (get-in @seen [:data :questions]))))
+        (testing "and the resolution IS the answer, verbatim"
+          (is (= "done" (:status rr)))
+          (is (= "shipped" (:text rr)))
+          (is (= ["{\"answers\":[\"yes\"]}"] (outputs-of rr))))))))
