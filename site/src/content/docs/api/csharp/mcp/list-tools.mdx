@@ -8,49 +8,125 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/McpSource.cs">McpSource.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public static Task<McpSource.McpInventory> ListMcpToolsAsync(object input, CancellationToken cancellationToken = default)
 ```
 
-List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+Connects to every enabled server, lists its tool definitions, and **disconnects before returning** —
+no toolkit, no `ExecuteAsync` wiring, nothing left running. The result is a plain
+`McpInventory { Tools, Status }`:
+
+- `Tools` — `server → IReadOnlyList<ToolInfo>`, each `ToolInfo(Name, Description, InputSchema)` using
+  the **original, unprefixed** tool name (not the `server_tool` name a connected [`McpSource`](/api/csharp/mcp/load/)
+  would expose).
+- `Status` — `server → "connected" | "disabled" | "failed"`, same vocabulary as `LoadAsync`.
+
+The returned inventory is **unfiltered** by any per-server `tools` allowlist — it exists to author or
+validate that allowlist, so it needs to see everything a server offers.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Building a config UI or a CLI that shows "here's what `mcp.json` would give you" without paying for a
+live toolkit. Also the right call for authoring a per-server `tools` allowlist: list first, see the
+real names, then write the allowlist against them.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use LoadAsync when you actually want to call the tools">
+`ListMcpToolsAsync` never leaves a connection open — every client it opens is disposed before the
+method returns. Reach for [`McpSource.LoadAsync`](/api/csharp/mcp/load/) when you intend to execute
+tools, not just inventory them.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. A disabled server never connects, and reports no tools
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+var config = new Dictionary<string, object?>
+{
+    ["mcpServers"] = new Dictionary<string, object?>
+    {
+        ["docs_demo"] = new Dictionary<string, object?>
+        {
+            ["type"] = "local",
+            ["command"] = new[] { "echo", "hi" },
+            ["enabled"] = false,
+        },
+    },
+};
+
+var inventory = await McpSource.ListMcpToolsAsync(config);
+
+if (inventory.Status["docs_demo"] != "disabled") throw new Exception(inventory.Status["docs_demo"]);
+if (inventory.Tools.ContainsKey("docs_demo")) throw new Exception("a disabled server has no tool list");
+
+Console.WriteLine($"ok: {inventory.Status["docs_demo"]}");
 ```
 
-### 2. TODO — the realistic case
+### 2. A server that can't spawn is "failed", not fatal
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+var config = new Dictionary<string, object?>
+{
+    ["mcpServers"] = new Dictionary<string, object?>
+    {
+        ["broken"] = new Dictionary<string, object?>
+        {
+            ["type"] = "local",
+            ["command"] = new[] { "toolnexus-docs-nonexistent-binary-xyz" },
+            ["timeout"] = 2_000,
+        },
+    },
+};
+
+var inventory = await McpSource.ListMcpToolsAsync(config);
+
+if (inventory.Status["broken"] != "failed") throw new Exception(inventory.Status["broken"]);
+if (inventory.Tools.ContainsKey("broken")) throw new Exception("a failed server has no tool list");
+
+Console.WriteLine($"ok: {inventory.Status["broken"]}");
 ```
 
-### 3. TODO — the full surface
+### 3. Inventory the shared fixture, gated for a hermetic run
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+var repo = Environment.GetEnvironmentVariable("TOOLNEXUS_REPO") ?? ".";
+var fixture = Path.Combine(repo, "examples", "mcp.json");
+
+// Parse the real fixture, then gate every server off so this doc example never dials out —
+// the shape (parse -> gate -> inventory) is what an "author the allowlist" tool would run.
+var config = McpSource.ParseConfig(fixture);
+foreach (var (_, value) in config)
+    ((IDictionary<string, object?>)value!)["enabled"] = false;
+
+var inventory = await McpSource.ListMcpToolsAsync(config);
+
+if (inventory.Status.Values.Any(s => s != "disabled"))
+    throw new Exception($"unexpected: {string.Join(",", inventory.Status.Values)}");
+if (inventory.Tools.Count != 0) throw new Exception("no server connected, so no tool lists");
+
+Console.WriteLine($"ok: {string.Join(", ", inventory.Status.Keys.OrderBy(k => k))} all disabled");
 ```
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `McpInventory.Tools` | `IReadOnlyDictionary<string, IReadOnlyList<ToolInfo>>` | Per-server tool defs, unfiltered by any allowlist. |
+| `McpInventory.Status` | `IReadOnlyDictionary<string, string>` | `server → "connected" \| "disabled" \| "failed"`. |
+| `ToolInfo.Name` | `string` | The original, unprefixed MCP tool name. |
+| `ToolInfo.Description` | `string` | |
+| `ToolInfo.InputSchema` | `IDictionary<string, object?>` | The built JSON-Schema object (same shape `LoadAsync` uses). |
 
 ## The same call in the other five ports
 

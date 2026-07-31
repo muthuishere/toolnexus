@@ -37,10 +37,10 @@ also the fastest way to add one tool to a toolkit that is otherwise all MCP and 
 
 ## Why this and not the alternative
 
-<Aside type="tip" title="Use [ToolMethod] + Tools.Collect when you have many">
+<Aside type="tip" title="Use [ToolMethod] + Tools.FromObject when you have many">
 Writing the schema by hand is right for one or two tools and tedious for ten.
 [`ToolMethodAttribute`](/api/csharp/native/reflect/) derives the schema from the method signature,
-and [`Tools.Collect`](/api/csharp/native/collect/) sweeps a whole class of them in one call. Go the
+and [`Tools.FromObject`](/api/csharp/native/collect/) sweeps a whole class of them in one call. Go the
 other way — implement [`ITool`](/api/csharp/types/tool/) directly — only when you are generating
 tools from data and need control over the type itself.
 </Aside>
@@ -212,6 +212,6 @@ conformance obligation.
 ## See also
 
 - [`ToolMethodAttribute`](/api/csharp/native/reflect/) — derive the schema from the method signature
-- [`Tools.Collect`](/api/csharp/native/collect/) — sweep a class for annotated methods
+- [`Tools.FromObject`](/api/csharp/native/collect/) — sweep a class for annotated methods
 - [`ITool`](/api/csharp/types/tool/) · [`ToolResult`](/api/csharp/types/tool-result/) · [`ToolContext`](/api/csharp/types/context/)
 - [`HttpTool.Of`](/api/csharp/http/tool/) — the same idea when the logic is a REST call

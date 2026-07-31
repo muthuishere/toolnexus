@@ -8,49 +8,182 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/mcp.ts">js/src/mcp.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function loadMcp(
+  input: string | object,
+  opts?: { waitFor?: (request: Request) => Promise<Answer>; signal?: AbortSignal }
+): Promise<McpSource>
+
+interface McpSource {
+  tools: Tool[]
+  status: Record<string, McpStatus>
+  close(): Promise<void>
+}
 ```
 
-Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+Parses an `mcp.json` (via [`parseMcpConfig`](/api/javascript/mcp/parse-config/)) and connects to
+every **enabled** server — local stdio child processes and remote streamable-HTTP endpoints alike —
+in parallel. Each listed tool comes back as a uniform `Tool`, namespaced `server_tool` so two
+servers exposing `search` don't collide.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- You are wiring MCP servers into your **own** loop, outside a `Toolkit` — you want the `Tool[]`
+  and the connection lifecycle directly.
+- You need `mcpStatus()`-style visibility (which servers connected, which failed) without paying
+  for skills, built-ins, or the rest of `createToolkit`'s aggregation.
+- You are handling MCP elicitation yourself and want to pass `waitFor` straight through, without a
+  toolkit in between.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use createToolkit when MCP is one of several sources">
+[`createToolkit`](/api/javascript/toolkit/create/) calls `loadMcp` internally, merges its tools
+with skills/built-ins/your own functions, and owns `close()` for the whole aggregate. Reach for
+`loadMcp` directly only when MCP is the *only* source, or when you are building your own
+aggregator and want the primitive.
 </Aside>
+
+Failures are isolated **per server** — one broken server never stops the others from connecting.
+That isolation is the reason `loadMcp` returns a `status` map instead of throwing on the first bad
+config: a caller building a UI can show "3 of 4 servers connected" instead of a blank error.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — nothing actually connects
 
-{/* TODO:example1 */}
-```ts
-// TODO
+An inline config with everything disabled. No child process, no HTTP request — `loadMcp` still
+does the parse + status bookkeeping, which is often all you need to test against.
+
+```ts test
+import assert from "node:assert"
+import { loadMcp } from "toolnexus"
+
+const mcp = await loadMcp({
+  search: { type: "remote", url: "https://example.com/mcp", enabled: false },
+})
+
+// Nothing connected — the disabled server contributes zero tools.
+assert.deepEqual(mcp.tools, [])
+assert.deepEqual(mcp.status, { search: "disabled" })
+
+// close() is always safe to call, even with nothing to shut down.
+await mcp.close()
+
+console.log("ok:", JSON.stringify(mcp.status))
 ```
 
-### 2. TODO — the realistic case
+<Aside type="caution">
+Always `await mcp.close()`, even in a code path where you expect zero servers to connect — the
+moment a server is added later, a missing `close()` becomes a leaked child process.
+</Aside>
 
-{/* TODO:example2 */}
-```ts
-// TODO
+### 2. A real, hermetic connection — no network required
+
+`loadMcp` connecting over stdio to an actual MCP server, side by side with the shared
+`examples/mcp.json` fixture's disabled remote entry. The server here is a few lines of toolnexus
+itself (`buildMcpServer` + `defineTool`), spawned as a child process — the same pattern toolnexus's
+own test suite uses to avoid depending on the network or `npx` fetching a package in CI. (A real
+project just keeps this as its own `server.mjs` file next to its own `@modelcontextprotocol/sdk`
+dependency — writing it to a temp path here is only to keep this example self-contained.)
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import path from "node:path"
+import { loadMcp, parseMcpConfig } from "toolnexus"
+
+// A tiny real MCP server, written next to toolnexus's own source so it can resolve
+// both `toolnexus` and `@modelcontextprotocol/sdk`, and run over stdio.
+const serverScript = `
+import { buildMcpServer, defineTool } from "toolnexus"
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
+const tools = [
+  defineTool({ name: "greet", description: "Greet by name", run: (args) => "Hello, " + args.name + "!" }),
+]
+const server = buildMcpServer(tools, { name: "docs-demo" })
+await server.connect(new StdioServerTransport())
+`
+const scriptPath = path.resolve(process.cwd(), "js", `_docs_mcp_load_demo_${Date.now()}.mjs`)
+fs.writeFileSync(scriptPath, serverScript)
+
+try {
+  // examples/mcp.json's "example-remote" is enabled:false — inspect it without connecting.
+  const fixture = parseMcpConfig("examples/mcp.json")
+  assert.equal(fixture["example-remote"].enabled, false)
+
+  const mcp = await loadMcp({
+    greeter: { type: "local", command: ["node", scriptPath] },
+    remote: fixture["example-remote"],
+  })
+
+  assert.deepEqual(mcp.status, { greeter: "connected", remote: "disabled" })
+  assert.deepEqual(mcp.tools.map((t) => t.name), ["greeter_greet"])
+
+  const res = await mcp.tools[0].execute({ name: "Muthu" })
+  assert.equal(res.output, "Hello, Muthu!")
+
+  await mcp.close()
+  console.log("ok:", JSON.stringify(mcp.status))
+} finally {
+  fs.rmSync(scriptPath, { force: true })
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — waitFor, signal, and a failing server isolated
 
-{/* TODO:example3 */}
-```ts
-// TODO
+`opts.signal` bounds the whole load; `opts.waitFor` is the §10 resolver an MCP server can call
+mid-`tools/call` to ask the host a question. A server with a broken command fails without taking
+the others down with it.
+
+```ts test
+import assert from "node:assert"
+import { loadMcp } from "toolnexus"
+
+const waitFor = async (request: { prompt: string }) => ({ id: "a1", ok: true, data: { value: "approved" } })
+
+const mcp = await loadMcp(
+  {
+    broken: { type: "local", command: ["node", "/no/such/script.mjs"] },
+    off: { type: "remote", url: "https://example.com/mcp", disabled: true },
+  },
+  { waitFor, signal: AbortSignal.timeout(5_000) },
+)
+
+// The broken server is isolated as "failed" — parsing/loading the others is unaffected.
+assert.equal(mcp.status.broken, "failed")
+assert.equal(mcp.status.off, "disabled")
+assert.deepEqual(mcp.tools, [])
+
+await mcp.close()
+console.log("ok:", JSON.stringify(mcp.status))
 ```
+
+<Aside type="caution">
+`opts.signal` bounds the **whole load**, not just one server: firing it rejects `loadMcp` outright
+rather than waiting for every per-server timeout. A per-server `timeout` in the config still
+isolates a single hung server without aborting the rest — see
+[`loadMcp` (ctx-aware)](/api/javascript/mcp/load-with-context/) for the difference in detail.
+</Aside>
+
+## Options
+
+| Field | Type | What it does |
+|---|---|---|
+| `input` | `string \| object` | Same accepted shapes as [`parseMcpConfig`](/api/javascript/mcp/parse-config/) — a path or a parsed config object. |
+| `opts.waitFor` | `(req: Request) => Promise<Answer>` | Resolver for MCP elicitation (§10). Omit ⇒ elicitation capability is not advertised to the server. |
+| `opts.signal` | `AbortSignal` | Bounds the entire load. Firing it rejects the in-flight `loadMcp` call. |
+
+## What you get back
+
+| Field | Type | |
+|---|---|---|
+| `tools` | `Tool[]` | Flattened across every connected server, prefixed `server_tool`. |
+| `status` | `Record<string, McpStatus>` | `"connected"`, `"disabled"`, or `"failed"` per server name. |
+| `close()` | `() => Promise<void>` | Shuts down every connected server's transport. **Always call it.** |
 
 ## The same call in the other five ports
 

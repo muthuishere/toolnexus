@@ -8,49 +8,204 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/native.ts">js/src/native.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function tool(
+  description: string,
+  opts?: { name?: string; inputSchema?: JSONSchema },
+): (value: Function, context: { name?: PropertyKey; addInitializer?: (fn: () => void) => void }) => Function
 ```
 
-Derive the schema from the function signature or annotation instead of writing it by hand.
+A [TC39 method decorator](https://github.com/tc39/proposal-decorators): tag a method or function
+with `tool(description, opts)` right where it is declared, and it becomes collectible as a `Tool`
+by [`collectTools`](/api/javascript/native/collect/) later. In a project with decorator syntax
+enabled, that looks like this:
+
+```ts
+class Weather {
+  @tool("Current weather for a city")
+  getWeather(args: { city: string }) {
+    return `sunny in ${args.city}`
+  }
+}
+```
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **A whole class or object is your tool surface.** Annotate each method once, at its declaration,
+  instead of writing a separate `defineTool({...})` block per function somewhere else.
+- **You want the schema/description physically next to the implementation**, so a reviewer sees
+  "this is a tool, here's what it does" without jumping to a registration file.
+- **You're porting from a framework with the same shape** — decorator-annotated tools are a common
+  pattern (FastMCP, several agent SDKs); `tool` gives you the equivalent without adopting a whole
+  framework.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use defineTool for one-off functions">
+[`defineTool`](/api/javascript/native/define-tool/) is the plainer choice for a single function, a
+tool built from data, or anywhere the schema needs to be visible at the call site rather than at a
+declaration site. Reach for `tool` + `collectTools` specifically when annotating **many** methods
+on the same class/object is the natural shape of your code.
 </Aside>
+
+`tool` itself does not return a `Tool` — it returns the original function, marked. Nothing is
+collected until you call [`collectTools`](/api/javascript/native/collect/) on the object those
+methods live on. That two-step split (mark now, sweep later) is what lets you decorate a class
+definition once and reuse it across many instances.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+<Aside type="note" title="Why these examples call tool(...) directly instead of using @">
+`tool(description, opts)` returns an ordinary function — the `(value, context) => value` shape a
+`@` decorator invokes for you. These examples call that function directly, which is exactly what
+`@tool(...)` desugars to; it also keeps the examples runnable on any JavaScript runtime, decorator
+support or not, including the one that executes this documentation.
+</Aside>
 
-{/* TODO:example1 */}
-```ts
-// TODO
+### 1. The smallest useful call — one standalone function
+
+```ts test
+import assert from "node:assert"
+import { tool, collectTools } from "toolnexus"
+
+function greet(args: { name: string }) {
+  return `Hello, ${args.name}!`
+}
+
+// Equivalent to `@tool("Greet someone by name") function greet(...) {...}`.
+tool("Greet someone by name")(greet, { name: "greet" })
+
+const tools = collectTools({ greet })
+assert.equal(tools.length, 1)
+assert.equal(tools[0].name, "greet")
+assert.equal(tools[0].source, "native")
+
+const res = await tools[0].execute({ name: "Muthu" })
+assert.equal(res.output, "Hello, Muthu!")
+
+console.log("ok:", tools[0].name, "->", res.output)
 ```
 
-### 2. TODO — the realistic case
+### 2. A service object with several annotated methods
 
-{/* TODO:example2 */}
-```ts
-// TODO
+`opts.name` overrides the property name when the model-facing name should differ from the
+JavaScript identifier; `opts.inputSchema` attaches real schema instead of the empty-object default.
+Omitting `opts.name` falls back to the decorator context's `name` — the property key itself.
+
+```ts test
+import assert from "node:assert"
+import { tool, collectTools } from "toolnexus"
+
+const orders = {
+  lookupOrder(args: { id: string }) {
+    return { id: args.id, status: "shipped" }
+  },
+  cancelOrder(args: { id: string; reason: string }) {
+    return `cancelled ${args.id}: ${args.reason}`
+  },
+}
+
+// name omitted ⇒ falls back to the property key ("lookupOrder").
+tool("Fetch an order by id")(orders.lookupOrder, { name: "lookupOrder" })
+// name + inputSchema both supplied ⇒ the model-facing name can differ from the JS identifier.
+tool("Cancel an order", {
+  name: "cancel_order",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string" }, reason: { type: "string" } },
+    required: ["id", "reason"],
+  },
+})(orders.cancelOrder, { name: "cancelOrder" })
+
+const tools = collectTools(orders)
+assert.deepEqual(tools.map((t) => t.name).sort(), ["cancel_order", "lookupOrder"])
+
+const cancel = tools.find((t) => t.name === "cancel_order")!
+assert.deepEqual(cancel.inputSchema.required, ["id", "reason"])
+const res = await cancel.execute({ id: "A-1", reason: "customer request" })
+assert.equal(res.output, "cancelled A-1: customer request")
+
+console.log("ok:", tools.map((t) => t.name).join(", "))
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — class instances, `addInitializer`, and `ctx`
 
-{/* TODO:example3 */}
-```ts
-// TODO
+On a **class**, the decorator context carries `addInitializer` — called once per instance at
+construction, which is how `collectTools` finds tools keyed to a specific instance (not just to
+functions with a marked property). `run`'s second argument is the same `ToolContext` `defineTool`
+receives.
+
+```ts test
+import assert from "node:assert"
+import { tool, collectTools, type ToolContext } from "toolnexus"
+
+class Weather {
+  // A genuine prototype method — not an own instance property — so `tool()`'s
+  // `addInitializer` path (REGISTRY, keyed per instance) is the ONLY way
+  // `collectTools` discovers it. `run` calls the function with no bound
+  // receiver, so reach for `ctx` rather than `this` for anything you need.
+  getWeather(args: { city: string }, ctx?: ToolContext) {
+    if (ctx?.signal?.aborted) return { output: "cancelled", isError: true }
+    return `sunny in ${args.city}`
+  }
+}
+
+// A minimal stand-in for what a real `@tool(...)` method decorator's context
+// provides: `name` and `addInitializer`, normally called once per instance, at
+// construction.
+const initializers: Array<(instance: object) => void> = []
+Weather.prototype.getWeather = tool("Current weather for a city")(Weather.prototype.getWeather, {
+  name: "getWeather",
+  addInitializer(fn: () => void) {
+    initializers.push(fn as unknown as (instance: object) => void)
+  },
+}) as typeof Weather.prototype.getWeather
+
+const w = new Weather()
+for (const init of initializers) init.call(w) // what a real constructor runs for you
+
+const tools = collectTools(w)
+assert.equal(tools.length, 1, "found via REGISTRY only — getWeather is not an own property of w")
+assert.equal(tools[0].name, "getWeather")
+
+const res = await tools[0].execute({ city: "Chennai" })
+assert.equal(res.output, "sunny in Chennai")
+
+const ac = new AbortController()
+ac.abort()
+const cancelled = await tools[0].execute({ city: "Chennai" }, { signal: ac.signal })
+assert.equal(cancelled.isError, true)
+
+// A second instance gets its OWN registry entry too — addInitializer runs per
+// instance, keyed off `this` in the WeakMap-backed REGISTRY, not off the class.
+const w2 = new Weather()
+for (const init of initializers) init.call(w2)
+assert.equal(collectTools(w2).length, 1)
+assert.equal(collectTools(w).length, 1, "w's own entry is unaffected by decorating w2")
+
+console.log("ok:", tools[0].name, "->", res.output)
 ```
+
+<Aside type="caution">
+`tool` calls the function you decorated directly — it does **not** bind a receiver, so `this`
+inside `run` is `undefined` unless you supply it yourself (an arrow-function class field closes
+over `this` lexically, but then it is also an *own* property of the instance — picked up by BOTH
+`addInitializer`'s registry and the `.__tool` duck-typing scan, so it is double-counted by
+`collectTools`. Prefer `ctx` over `this` for a decorated method, as above.) It also does not
+validate arguments against `inputSchema` any more than [`defineTool`](/api/javascript/native/define-tool/)
+does — the schema is what the model reads, not a runtime guard.
+</Aside>
+
+## Options
+
+| Option | Type | Required | What it does |
+|---|---|---|---|
+| `description` | `string` | yes | What the model reads to decide whether to call this tool. |
+| `opts.name` | `string` | no | Overrides the exposed tool name. Defaults to the decorator context's `name` (the method/property key), then the function's own `.name`. |
+| `opts.inputSchema` | `JSONSchema` | no | Defaults to an empty-object schema, same as [`defineTool`](/api/javascript/native/define-tool/). |
 
 ## The same call in the other five ports
 

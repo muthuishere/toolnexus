@@ -8,49 +8,158 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/McpSource.java">McpSource.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public static McpSource load(Object input)
+public static McpSource load(Object input, Function<Request, Answer> waitFor)
+public static McpSource load(Object input, Function<Request, Answer> waitFor, CancelSignal cancel)
 ```
 
-Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+Parses an `mcp.json`-shaped config, connects to every enabled server in parallel (stdio for
+local, streamable-HTTP — falling back to SSE — for remote), lists each server's tools, and
+converts every one into a uniform `Tool` prefixed `<server>_<tool>`. A bad server never breaks
+the load: it is marked `"failed"` in `status()` and everything else still comes up.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When you want a ready-to-call `List<Tool>` from an MCP config in one call — the common case.
+`input` accepts a path to `mcp.json`, a raw JSON string, or an already-parsed `Map`, and the
+config may be wrapped in `mcpServers` / `servers` / `mcp`, or be a bare server map.
+
+The returned `McpSource` implements `AutoCloseable` — closing it gracefully disconnects every
+connected client. Always close it (try-with-resources) once you are done calling its tools.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Prefer Toolkit.create when MCP is one source among several">
+[`Toolkit.create`](/api/java/toolkit/create/) takes `mcpConfig(...)` and calls `McpSource.load`
+internally, merging the resulting tools with skills, native tools and builtins behind one
+`Toolkit`. Reach for `McpSource.load` directly when MCP is the *only* source you need, or when
+you want the `McpSource` itself (its `status()` map, or to pass its tools somewhere else).
 </Aside>
+
+Need a bounded connection time and a way to cancel a slow/hung server without leaking a child
+process? Use [`McpSource.loadWith`](/api/java/mcp/load-with-context/) instead — same result
+type, plus a `CancelSignal`. Want an inventory of what a config *would* expose without keeping
+any connection open? Use [`McpSource.listMcpTools`](/api/java/mcp/list-tools/).
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Parsing an mcp.json — wrapper keys and raw JSON
 
-{/* TODO:example1 */}
-```java
-// TODO
+`parseConfig` accepts a path, a raw JSON string, or a parsed `Map`, and unwraps `mcpServers` /
+`servers` / `mcp` regardless of which top-level key wraps it (the repo's own
+`examples/mcp.json` uses `mcpServers`, same as this shape). This is the parsing step `load` runs
+first; it is `package`-private, so this example checks the observable behavior through `load`
+itself with every server disabled — hermetic, no process spawned, no network reached.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        // A raw JSON string, wrapped in "mcpServers" — same shape as examples/mcp.json.
+        // Both servers are disabled, so load() never spawns a process or dials a URL.
+        String json = "{"
+            + "\"mcpServers\":{"
+            + "\"everything\":{\"type\":\"local\",\"command\":[\"npx\",\"-y\",\"@modelcontextprotocol/server-everything\"],\"enabled\":false},"
+            + "\"example-remote\":{\"type\":\"remote\",\"url\":\"https://example.com/mcp\",\"enabled\":false}"
+            + "}}";
+
+        try (McpSource src = McpSource.load(json)) {
+            if (!"disabled".equals(src.status().get("everything"))) throw new AssertionError(src.status());
+            if (!"disabled".equals(src.status().get("example-remote"))) throw new AssertionError(src.status());
+            if (!src.tools().isEmpty()) throw new AssertionError("expected no tools: " + src.tools());
+            System.out.println("ok: " + src.status());
+        }
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. A config with every server disabled — no network, deterministic status
 
-{/* TODO:example2 */}
-```java
-// TODO
+The common hermetic shape for tests: build the config in-process so nothing needs an external
+process or a live endpoint.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Map<String, Object> config = Map.of(
+            "mcpServers", Map.of(
+                "local-disabled", Map.of(
+                    "command", List.of("nonexistent-binary"),
+                    "enabled", false
+                ),
+                "remote-disabled", Map.of(
+                    "type", "remote",
+                    "url", "https://example.com/mcp",
+                    "enabled", false
+                )
+            )
+        );
+
+        try (McpSource src = McpSource.load(config)) {
+            if (!src.tools().isEmpty()) throw new AssertionError("expected no tools: " + src.tools());
+            if (!"disabled".equals(src.status().get("local-disabled"))) throw new AssertionError(src.status());
+            if (!"disabled".equals(src.status().get("remote-disabled"))) throw new AssertionError(src.status());
+            System.out.println("ok: " + src.status());
+        }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. A malformed / unreachable server is isolated, never fatal
 
-{/* TODO:example3 */}
-```java
-// TODO
+An enabled server whose command does not exist fails to connect — `load` still returns, the
+server is `"failed"`, and every *other* server's tools are unaffected. This is the isolation
+guarantee `load` gives: one bad entry never aborts the whole call.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Map<String, Object> config = Map.of(
+            "mcpServers", Map.of(
+                "broken", Map.of(
+                    // a command that cannot possibly launch — proves failure isolation, not a hang.
+                    "command", List.of("/no/such/binary-toolnexus-docs-example"),
+                    "timeout", 2000
+                )
+            )
+        );
+
+        try (McpSource src = McpSource.load(config)) {
+            if (!"failed".equals(src.status().get("broken"))) {
+                throw new AssertionError("expected failed, got " + src.status());
+            }
+            // load() itself never throws for a per-server failure.
+            System.out.println("ok: " + src.status());
+        }
+    }
+}
 ```
+
+## Fields and overloads
+
+| Member | Type | What it is |
+|---|---|---|
+| `load(input)` | `McpSource` | Connect + convert; no elicitation bridge, no cancellation. |
+| `load(input, waitFor)` | `McpSource` | Also advertises MCP elicitation and bridges it onto `waitFor`. `null` degrades cleanly. |
+| `load(input, waitFor, cancel)` | `McpSource` | Also bounds the whole load by a `CancelSignal` (§2 Gap 3) — see [`loadWith`](/api/java/mcp/load-with-context/). |
+| `src.tools()` | `List<Tool>` | Every converted tool, named `<server>_<tool>` (sanitized). |
+| `src.status()` | `Map<String,String>` | Per server: `connected` \| `disabled` \| `failed`. |
+| `src.close()` | `void` | Gracefully disconnects every connected client. `AutoCloseable`. |
 
 ## The same call in the other five ports
 
@@ -67,6 +176,7 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`McpSource.loadWith`](/api/java/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
-- [`McpSource.listMcpTools`](/api/java/mcp/list-tools/) — List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
-- [`McpSource.elicitationToRequest`](/api/java/mcp/elicitation/) — Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.
+- [`McpSource.loadWith`](/api/java/mcp/load-with-context/) — the ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+- [`McpSource.listMcpTools`](/api/java/mcp/list-tools/) — list what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+- [`McpSource.elicitationToRequest`](/api/java/mcp/elicitation/) — map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.
+- [`Toolkit.create`](/api/java/toolkit/create/) — `mcpConfig(...)` does this for you, merged with every other source.

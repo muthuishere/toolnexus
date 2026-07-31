@@ -19,8 +19,38 @@ Sweep a module or class and collect every function marked as a tool.
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+There is no module-sweeping collector in this port — nothing scans a module for functions marked
+with an attribute or convention and turns them into tools automatically. Every native tool in
+Elixir is built one at a time with
+[`Toolnexus.Native.define_tool/1`](/api/elixir/native/define-tool/); "collecting" a set of them is
+just building a plain Elixir list:
+
+```elixir
+alias Toolnexus.Native
+
+defmodule MyTools do
+  def weather, do: Native.define_tool(%{
+    name: "get_weather",
+    description: "Current weather for a city",
+    input_schema: %{"type" => "object", "properties" => %{"city" => %{"type" => "string"}}},
+    execute: fn args, _ctx -> "sunny in #{args["city"]}" end
+  })
+
+  def ping, do: Native.define_tool(%{
+    name: "ping",
+    description: "Health check",
+    execute: fn _args, _ctx -> "pong" end
+  })
+
+  # The "collector" is just a list of the tools you defined above.
+  def tools, do: [weather(), ping()]
+end
+```
+
+If you are generating many tools **from data** rather than from hand-written functions — a table
+of endpoints, a set of database-backed jobs — build `%Toolnexus.Tool{}` structs directly in an
+`Enum.map/2` instead; see the third example on the
+[`Toolnexus.Tool`](/api/elixir/types/tool/) reference page for that pattern.
 
 ## The same capability in the other ports
 
@@ -29,8 +59,8 @@ _TODO: the closest thing this port does offer, and how to get the same outcome._
 | JavaScript | `collectTools` | [→](/api/javascript/native/collect/) |
 | Python | _not shipped in this port_ |  |
 | Go | _not shipped in this port_ |  |
-| Java | `Tools.collect` | [→](/api/java/native/collect/) |
-| C# | `Tools.Collect` | [→](/api/csharp/native/collect/) |
+| Java | `Tools.fromObject` | [→](/api/java/native/collect/) |
+| C# | `Tools.FromObject` | [→](/api/csharp/native/collect/) |
 
 ## See also
 

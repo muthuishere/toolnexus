@@ -8,49 +8,142 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/McpSource.cs">McpSource.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public static Task<McpSource> LoadAsync(object input, Func<Request, Task<Answer>>? waitFor = null,
+    CancellationToken cancellationToken = default)
 ```
 
-The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+Same method as [`McpSource.LoadAsync`](/api/csharp/mcp/load/) — this page scopes to the
+`cancellationToken` parameter and its relationship to each server's own `timeout` config value
+(§2 Gap 3).
+
+Two bounds are in play at once:
+
+- Each server's own `timeout` (config, milliseconds) bounds **that server's** connect + list. A
+  server that blows its own timeout is marked `Status[name] == "failed"` — the overall load
+  continues.
+- The caller's `cancellationToken` is linked into every server's wait. Cancel it (or let a deadline
+  built from it expire) and the **whole load** aborts: any clients that did connect are disposed,
+  and `LoadAsync` throws `OperationCanceledException` — not a per-server failure.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Pass a real `CancellationToken` whenever `LoadAsync` runs inside a request, a job with its own
+deadline, or anything that can be told "stop now" — a shutdown signal, a client disconnect, a
+user-cancelled operation. Without it, a hung server is still bounded by its own `timeout`, but you
+have no way to cut the whole load short from outside.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Per-server timeout vs. caller cancellation are not the same knob">
+Set `timeout` in `mcp.json` to bound one flaky server without touching your code. Pass a
+`CancellationToken` when the caller — not the server config — decides the load should stop; for
+example, a web request whose client disconnected mid-startup.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Passing the token explicitly
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+var config = new Dictionary<string, object?>
+{
+    ["mcpServers"] = new Dictionary<string, object?>
+    {
+        ["docs_demo"] = new Dictionary<string, object?>
+        {
+            ["type"] = "local",
+            ["command"] = new[] { "echo", "hi" },
+            ["enabled"] = false,
+        },
+    },
+};
+
+// CancellationToken.None means "no external deadline" — the same as omitting the parameter.
+await using var mcp = await McpSource.LoadAsync(config, waitFor: null, cancellationToken: CancellationToken.None);
+
+if (mcp.Status["docs_demo"] != "disabled") throw new Exception(mcp.Status["docs_demo"]);
+Console.WriteLine($"ok: {mcp.Status["docs_demo"]}");
 ```
 
-### 2. TODO — the realistic case
+### 2. A per-server timeout bounds only that server
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+var config = new Dictionary<string, object?>
+{
+    ["mcpServers"] = new Dictionary<string, object?>
+    {
+        ["hung"] = new Dictionary<string, object?>
+        {
+            ["type"] = "local",
+            // Spawns fine but never speaks MCP on stdout — the handshake just hangs.
+            ["command"] = new[] { "sleep", "30" },
+            ["timeout"] = 300, // ms — bounds THIS server only, no network involved.
+        },
+    },
+};
+
+var sw = System.Diagnostics.Stopwatch.StartNew();
+await using var mcp = await McpSource.LoadAsync(config);
+sw.Stop();
+
+if (mcp.Status["hung"] != "failed") throw new Exception($"status: {mcp.Status["hung"]}");
+// Bounded by the server's own 300ms timeout, not left hanging for the caller's lifetime.
+if (sw.ElapsedMilliseconds > 15_000) throw new Exception($"took too long: {sw.ElapsedMilliseconds}ms");
+
+Console.WriteLine($"ok: {mcp.Status["hung"]} in {sw.ElapsedMilliseconds}ms");
 ```
 
-### 3. TODO — the full surface
+### 3. Parent cancellation aborts the whole load
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+var config = new Dictionary<string, object?>
+{
+    ["mcpServers"] = new Dictionary<string, object?>
+    {
+        ["docs_demo"] = new Dictionary<string, object?>
+        {
+            ["type"] = "local",
+            ["command"] = new[] { "sleep", "30" },
+            ["timeout"] = 30_000, // longer than the parent deadline below — the parent wins
+        },
+    },
+};
+
+using var cts = new CancellationTokenSource();
+cts.Cancel(); // already cancelled — simulates a caller-imposed deadline that already expired
+
+var threw = false;
+try
+{
+    await McpSource.LoadAsync(config, cancellationToken: cts.Token);
+}
+catch (OperationCanceledException)
+{
+    // Parent cancellation aborts the WHOLE build, unlike a per-server timeout which only
+    // marks that one server "failed" and lets the rest continue.
+    threw = true;
+}
+
+if (!threw) throw new Exception("expected OperationCanceledException");
+Console.WriteLine("ok: parent cancellation aborted the whole load");
 ```
+
+## Parameters
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `cancellationToken` | `CancellationToken` | Linked into every server's connect+list wait. Cancel/expire ⇒ the whole load throws `OperationCanceledException`. |
+| server `timeout` (config) | milliseconds | Bounds only that server; a timeout marks it `"failed"` and the load continues. |
 
 ## The same call in the other five ports
 

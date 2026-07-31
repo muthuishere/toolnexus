@@ -8,49 +8,178 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/mcp.go">golang/mcp.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+func LoadMcp(input any, waitFor ...func(Request) (Answer, error)) (*McpSource, error)
 ```
 
-Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+Reads MCP server configuration (via [`ParseMcpConfig`](/api/go/mcp/parse-config/)), connects to
+every enabled server — local stdio child processes and remote streamable-HTTP/SSE servers — lists
+each one's tools, and converts each into a uniform [`Tool`](/api/go/types/tool/). A bad server
+never fails the whole load: it is isolated, logged, and marked `failed` in `McpSource.Status`.
+
+<Aside type="note" title="waitFor is variadic, not optional-by-nil">
+`waitFor ...func(Request) (Answer, error)` is Go's way of expressing "this parameter is optional."
+Pass nothing to skip elicitation entirely; pass one function to bridge MCP `elicitation/create`
+requests onto the §10 suspension contract (see [`ElicitationToRequest`](/api/go/mcp/elicitation/)).
+Passing more than one is a caller bug — only the first is used.
+</Aside>
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `LoadMcp` when you want tools from an `mcp.json` **without** the rest of the toolkit
+machinery — no skills, no builtins, no adapters. It is also what [`CreateToolkit`](/api/go/toolkit/create/)
+calls internally for its `McpConfig` option.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Prefer CreateToolkit when MCP is one of several sources">
+`LoadMcp` returns MCP tools alone, with `McpSource.Close()` owning the connected clients. Reach for
+[`CreateToolkit`](/api/go/toolkit/create/) instead when you also have skills, builtins, or your own
+`ExtraTools` — it merges every source once, by documented precedence, and owns the combined
+shutdown. Reach for [`LoadMcpWithContext`](/api/go/mcp/load-with-context/) instead of `LoadMcp` when
+you need to bound or cancel the connection phase itself — `LoadMcp` always connects with
+`context.Background()`.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+All three examples load the shared `examples/mcp.json` fixture — the same file every port is
+tested against. It has one **enabled** local server (`everything`, spawned via `npx`, which is not
+reachable in a hermetic CI sandbox) and one **disabled** remote server (`example-remote`). Because
+`npx` cannot actually reach the network here, these examples deliberately do not assert that the
+enabled server connects — they assert what `LoadMcp` guarantees regardless: the disabled server is
+skipped, a failed connection is isolated rather than fatal, and a malformed config still errors
+before any connection is attempted.
 
-{/* TODO:example1 */}
-```go
-// TODO
+### 1. Load the shared fixture and read per-server status
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	// TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+	fixture := filepath.Join(os.Getenv("TOOLNEXUS_REPO"), "examples", "mcp.json")
+
+	src, err := toolnexus.LoadMcp(fixture)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer src.Close()
+
+	// The disabled remote server never gets a connection attempt.
+	if src.Status["example-remote"] != toolnexus.StatusDisabled {
+		log.Fatalf("expected example-remote disabled, got %v", src.Status["example-remote"])
+	}
+
+	// The enabled local server has SOME status — connected or failed, sandbox-dependent —
+	// but it is never silently absent from Status.
+	status, ok := src.Status["everything"]
+	if !ok {
+		log.Fatal("expected a status entry for 'everything'")
+	}
+
+	fmt.Println("ok: example-remote=disabled, everything=", status)
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. A bad server is isolated, not fatal
 
-{/* TODO:example2 */}
-```go
-// TODO
+Two servers in one config: one that can never start (`command` points at a binary that does not
+exist) and one that is disabled. `LoadMcp` still returns successfully — the failure is reported per
+server, not as a returned `error`.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	config := toolnexus.McpConfig{
+		"broken": toolnexus.ServerConfig{
+			Type:    "local",
+			Command: []string{"toolnexus-docs-does-not-exist"},
+		},
+	}
+
+	src, err := toolnexus.LoadMcp(config)
+	if err != nil {
+		log.Fatalf("LoadMcp itself should not fail: %v", err)
+	}
+	defer src.Close()
+
+	if src.Status["broken"] != toolnexus.StatusFailed {
+		log.Fatalf("expected 'broken' marked failed, got %v", src.Status["broken"])
+	}
+	// A failed server contributes zero tools — the load degrades, it does not abort.
+	if len(src.Tools) != 0 {
+		log.Fatalf("expected no tools from a failed server, got %d", len(src.Tools))
+	}
+
+	fmt.Println("ok: broken server isolated as", src.Status["broken"])
+}
 ```
 
-### 3. TODO — the full surface
+### 3. Malformed config fails fast, before any connection
 
-{/* TODO:example3 */}
-```go
-// TODO
+`LoadMcp` calls `ParseMcpConfig` first — a syntax error in the JSON never reaches the network or
+spawns a process.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	_, err := toolnexus.LoadMcp([]byte(`{not valid json`))
+	if err == nil {
+		log.Fatal("expected a parse error for malformed config")
+	}
+
+	// A well-formed input of an unsupported type is also rejected up front.
+	if _, err := toolnexus.LoadMcp(42); err == nil {
+		log.Fatal("expected an error for an unsupported input type")
+	}
+
+	fmt.Println("ok: malformed config rejected before connecting:", err)
+}
 ```
+
+## Parameters
+
+| Parameter | Type | What it does |
+|---|---|---|
+| `input` | `any` | Anything [`ParseMcpConfig`](/api/go/mcp/parse-config/) accepts — path, raw bytes, `McpConfig`, or `map[string]any`. |
+| `waitFor` | `...func(Request) (Answer, error)` | Optional (variadic) host resolver for MCP elicitation (§10). Omit to skip. |
+
+## Return value
+
+| Field | Type | What it holds |
+|---|---|---|
+| `McpSource.Tools` | `[]Tool` | Every tool from every successfully connected server, namespaced `server_tool`. |
+| `McpSource.Status` | `map[string]McpStatus` | Per-server `"connected"`, `"disabled"`, or `"failed"`. |
+| `McpSource.Close()` | `func()` | Disconnects every connected client. Always `defer` this. |
 
 ## The same call in the other five ports
 
@@ -67,7 +196,8 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`LoadMcpWithContext`](/api/go/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
-- [`ListMcpTools`](/api/go/mcp/list-tools/) — List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
-- [`ParseMcpConfig`](/api/go/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
-- [`ElicitationToRequest`](/api/go/mcp/elicitation/) — Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.
+- [`LoadMcpWithContext`](/api/go/mcp/load-with-context/) — the ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+- [`ListMcpTools`](/api/go/mcp/list-tools/) — list what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+- [`ParseMcpConfig`](/api/go/mcp/parse-config/) — parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
+- [`ElicitationToRequest`](/api/go/mcp/elicitation/) — map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.
+- [`CreateToolkit`](/api/go/toolkit/create/) — the aggregator; MCP is one of several sources.

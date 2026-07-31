@@ -8,49 +8,178 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/mcp_source.py">python/src/toolnexus/mcp_source.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+async def load_mcp_with_context(
+    input: str | dict[str, Any],
+    wait_for: Any = None,
+    *,
+    cancel: asyncio.Event | None = None,
+) -> McpSource
 ```
 
-The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+The same connect-and-convert as [`load_mcp`](/api/python/mcp/load/) — in fact `load_mcp` just
+calls this with `cancel=None` — plus two bounds `load_mcp` does not surface on its own: **every
+server's connect + list is wrapped in `asyncio.timeout(server_timeout)`**, so a hung endpoint marks
+only that server `"failed"` instead of blocking the whole load, and an optional `cancel` event lets
+a parent abort the entire load — tearing down whatever connected so far — instead of waiting it
+out server by server.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- A server might hang mid-handshake (a stuck subprocess, a streamable-HTTP endpoint that never
+  answers) and you need the load to keep moving instead of stalling on it.
+- You are wiring MCP load into something with its own cancellation — a request timeout, a user
+  hitting "stop", a parent `asyncio` task being cancelled — and want that to abort cleanly instead
+  of leaking a child process.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="load_mcp is this function with no cancel token">
+Call [`load_mcp`](/api/python/mcp/load/) for the ordinary path — per-server timeouts from `mcp.json`
+already apply either way. Reach for `load_mcp_with_context` specifically when you have an
+`asyncio.Event` to wire up, or want to *prove* the timeout bound holds for a server that won't
+answer.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+<Aside type="note" title="Hermetic on purpose">
+No example dials a real MCP server. Example 1 proves the per-server timeout bound against a local
+process that deliberately never speaks the MCP protocol — it just sleeps — using `sys.executable`
+so the fixture needs nothing beyond the Python already running the test. Example 2 proves the
+`cancel` event aborts before anything connects.
+</Aside>
 
-{/* TODO:example1 */}
-```python
-// TODO
+### 1. A hung server is bounded by its own timeout, not the sleep
+
+The child process here never writes a byte of MCP protocol — it just sleeps for 5 seconds. The
+server's configured `timeout` is 300ms, so `load_mcp_with_context` gives up on it in well under a
+second and marks it `"failed"`, instead of the caller waiting out the full sleep.
+
+```python test
+import asyncio
+import sys
+import time
+from toolnexus import load_mcp_with_context
+
+config = {
+    "hung": {
+        "type": "local",
+        "command": [sys.executable, "-c", "import time; time.sleep(5)"],
+        "timeout": 300,  # ms — far shorter than the 5s sleep
+    },
+}
+
+
+async def main():
+    started = time.monotonic()
+    source = await load_mcp_with_context(config)
+    elapsed = time.monotonic() - started
+    try:
+        assert source.status["hung"] == "failed"
+        # Bounded by the server's own timeout, not the 5-second sleep.
+        assert elapsed < 3.0
+    finally:
+        await source.close()
+
+    print("ok: failed after", round(elapsed, 2), "s")
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+### 2. A pre-set cancel event aborts the whole load
 
-{/* TODO:example2 */}
-```python
-// TODO
+Set the event before calling, and nothing connects at all — the whole load raises
+`asyncio.CancelledError` instead of returning a partial `McpSource`.
+
+<Aside type="caution">
+The cancel check runs just before each **enabled** server is dialed — a config of only disabled
+servers never reaches it and returns normally. At least one enabled server needs to be present for
+a pre-set `cancel` to actually abort anything, as below.
+</Aside>
+
+```python test
+import asyncio
+from toolnexus import load_mcp_with_context
+
+config = {
+    "off": {"type": "local", "command": ["echo", "hi"], "enabled": False},
+    # Enabled, so the loop reaches the cancel check for it — and never gets to dial it.
+    "would-connect": {"type": "local", "command": ["echo", "hi"]},
+}
+
+
+async def main():
+    cancel = asyncio.Event()
+    cancel.set()  # already fired before the call starts
+
+    try:
+        await load_mcp_with_context(config, cancel=cancel)
+        raise AssertionError("expected CancelledError")
+    except asyncio.CancelledError:
+        pass
+
+    print("ok: cancelled before anything connected")
+
+
+asyncio.run(main())
 ```
 
-### 3. TODO — the full surface
+### 3. Disabled, broken, and hung servers together — one status map
 
-{/* TODO:example3 */}
-```python
-// TODO
+Three servers, three fates, one call: `off` never dials, `broken` fails fast on a missing binary,
+`hung` times out on its own per-server budget. No `cancel` event is set, so the load runs to
+completion and reports all three.
+
+```python test
+import asyncio
+import sys
+from toolnexus import load_mcp_with_context
+
+config = {
+    "off": {"type": "local", "command": ["echo", "hi"], "enabled": False},
+    "broken": {"type": "local", "command": ["/no/such/binary-toolnexus-docs-example"]},
+    "hung": {
+        "type": "local",
+        "command": [sys.executable, "-c", "import time; time.sleep(5)"],
+        "timeout": 300,
+    },
+}
+
+
+async def main():
+    source = await load_mcp_with_context(config, cancel=asyncio.Event())
+    try:
+        assert source.status == {
+            "off": "disabled",
+            "broken": "failed",
+            "hung": "failed",
+        }
+        assert source.tools == []
+    finally:
+        await source.close()
+
+    print("ok:", source.status)
+
+
+asyncio.run(main())
 ```
+
+## Options
+
+| Parameter | Type | What it does |
+|---|---|---|
+| `input` | `str \| dict` | Same accepted shapes as `load_mcp` — see [`parse_mcp_config`](/api/python/mcp/parse-config/). |
+| `wait_for` | `Callable \| None` | The §10 suspension resolver, wired as the elicitation callback when present. |
+| `cancel` | `asyncio.Event \| None` | When set (before or during the call), aborts the whole load: releases every already-connected server and raises `asyncio.CancelledError`. Distinct from a per-server timeout, which isolates only that server. |
+
+## Returns
+
+Same `McpSource` as [`load_mcp`](/api/python/mcp/load/) — `tools`, `status`, `close()`.
 
 ## The same call in the other five ports
 
@@ -64,6 +193,12 @@ _TODO: name the alternative and when to prefer it._
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+<Aside type="note" title="JavaScript folds cancellation into loadMcp itself">
+JS does not expose a separate `loadMcpWithContext` — its single `loadMcp` already accepts an
+`AbortSignal`. Python, Go, Java and C# split the ctx-aware variant out as its own entry point;
+the underlying bound (per-server timeout + whole-load cancel) is the same contract.
+</Aside>
 
 ## See also
 

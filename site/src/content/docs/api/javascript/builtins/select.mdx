@@ -8,49 +8,119 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/builtin.ts">js/src/builtin.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function selectBuiltins(cfg?: BuiltinsConfig): Tool[]
+
+type BuiltinsConfig =
+  | boolean
+  | { enabled?: boolean; disabled?: boolean; tools?: Record<string, boolean> }
 ```
 
-Pick which built-in file/shell/web tools are in play, by name or by source toggle.
+Applies [`createToolkit`](/api/javascript/toolkit/create/)'s `builtins` option — the same value you
+would pass there — to [`createBuiltinTools()`](/api/javascript/builtins/create/), without needing a
+toolkit around it. This is the filtering `createToolkit` runs internally, exposed directly.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- You're assembling a tool list **yourself**, outside `createToolkit`, and want the built-ins
+  filtered the same way — same config shape, same semantics, same result.
+- You want to preview what a given `builtins` config resolves to before wiring it into a toolkit
+  ("if I set `{ tools: { bash: false } }`, what's actually left?").
+- You're testing the filtering logic itself, independent of MCP/skills/toolkit aggregation.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Pass builtins straight to createToolkit in the ordinary path">
+[`createToolkit`](/api/javascript/toolkit/create/)'s `builtins` option calls `selectBuiltins` for
+you and merges the result with every other source. Reach for `selectBuiltins` directly only when
+you need the filtered `Tool[]` on its own, with nothing else mixed in.
 </Aside>
+
+`undefined` behaves exactly like `true` — built-ins are **on by default**, matching the MCP-server
+and skill enable/disable precedence used everywhere else in toolnexus: `disabled: true` wins over
+everything, then `enabled: false`, otherwise on.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — the default, and the off switch
 
-{/* TODO:example1 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import { selectBuiltins } from "toolnexus"
+
+// Omitted config ⇒ same as `true` ⇒ all ten built-ins.
+assert.equal(selectBuiltins().length, 10)
+assert.equal(selectBuiltins(true).length, 10)
+
+// The boolean shorthand for "off" — no built-ins at all.
+assert.deepEqual(selectBuiltins(false), [])
+
+console.log("ok:", selectBuiltins().length, "on by default, 0 when false")
 ```
 
-### 2. TODO — the realistic case
+### 2. A per-tool drop-list — the realistic case
 
-{/* TODO:example2 */}
-```ts
-// TODO
+The object form's `tools` map is a **drop-list over an all-on baseline**: name a tool `false` to
+remove just that one; every unnamed tool (and `true`-mapped ones) stays on. Unknown names are
+ignored.
+
+```ts test
+import assert from "node:assert"
+import { selectBuiltins } from "toolnexus"
+
+// Turn off just `bash` — everything else stays.
+const noBash = selectBuiltins({ tools: { bash: false } })
+assert.equal(noBash.length, 9)
+assert.ok(!noBash.some((t) => t.name === "bash"))
+assert.ok(noBash.some((t) => t.name === "read"))
+
+// A name that isn't a real built-in is silently ignored, not an error.
+const withUnknown = selectBuiltins({ tools: { bash: false, not_a_real_tool: false } })
+assert.equal(withUnknown.length, 9)
+
+console.log("ok:", noBash.map((t) => t.name).join(", "))
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — `enabled`/`disabled` precedence, and the object form's `false`
 
-{/* TODO:example3 */}
-```ts
-// TODO
+The object form's own `enabled`/`disabled` fields take precedence **over** `tools` — turning the
+whole source off short-circuits before any per-tool filtering happens.
+
+```ts test
+import assert from "node:assert"
+import { selectBuiltins } from "toolnexus"
+
+// disabled:true wins outright — tools is never consulted.
+assert.deepEqual(selectBuiltins({ disabled: true, tools: { bash: true } }), [])
+
+// enabled:false is the same as disabled:true when disabled is absent.
+assert.deepEqual(selectBuiltins({ enabled: false }), [])
+
+// enabled:true (or omitted) + a tools map ⇒ normal per-tool filtering.
+const onlyFileTools = selectBuiltins({ enabled: true, tools: { bash: false, webfetch: false, question: false, apply_patch: false, todowrite: false } })
+assert.deepEqual(onlyFileTools.map((t) => t.name).sort(), ["edit", "glob", "grep", "read", "write"])
+
+console.log("ok:", onlyFileTools.map((t) => t.name).join(", "))
 ```
+
+<Aside type="caution">
+There is no **allowlist** form for built-ins — unlike the MCP `tools` filter and the skills
+`filter`, a `true` entry in `BuiltinsConfig.tools` is a no-op (it's already on by default); the map
+only ever *removes* tools. To keep just one or two built-ins, filter the result of
+[`createBuiltinTools()`](/api/javascript/builtins/create/) yourself instead.
+</Aside>
+
+## Options
+
+| Field | Type | What it does |
+|---|---|---|
+| `cfg` (bare `boolean`) | `boolean` | `true`/omitted ⇒ all ten. `false` ⇒ none. |
+| `cfg.enabled` | `boolean` | `false` turns every built-in off (unless overridden by `disabled`). |
+| `cfg.disabled` | `boolean` | `true` turns every built-in off — takes precedence over `enabled`. |
+| `cfg.tools` | `Record<string, boolean>` | Drop-list over the all-on default: `false` removes that tool by name; unknown names are ignored. |
 
 ## The same call in the other five ports
 

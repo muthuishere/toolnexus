@@ -8,49 +8,158 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10 · §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/mcp.ts">js/src/mcp.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function elicitationToRequest(params: ElicitRequest["params"]): Request
+function answerToElicitResult(answer: Answer): ElicitResult
 ```
 
-Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.
+The two pure functions behind the MCP elicitation bridge: an MCP server can pause a `tools/call`
+mid-flight to ask **you** for something — a form of input, or a URL to visit and authorize. Both
+directions of that reverse-request collapse onto toolnexus's own suspension contract (§10), so a
+host only ever implements one `waitFor` — never a separate code path per tool source.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- You are implementing a **host resolver** (`waitFor`) yourself, outside `createToolkit`/`loadMcp`'s
+  built-in wiring, and need to turn a raw MCP `elicitation/create` request into the `Request` shape
+  your resolver already understands.
+- You are inspecting or logging elicitation traffic and want the readable §10 shape instead of the
+  wire-level `ElicitRequest`.
+- You are testing a `waitFor` implementation and need to construct realistic `Request`/`Answer`
+  values without standing up an actual MCP server.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Pass waitFor to loadMcp/createToolkit instead, in the ordinary path">
+[`loadMcp`](/api/javascript/mcp/load/) and [`createToolkit`](/api/javascript/toolkit/create/) both
+call `elicitationToRequest` and `answerToElicitResult` for you internally — you supply `waitFor`
+once, in the §10 `Request → Answer` shape, and every connected MCP server that elicits routes
+through it automatically. Reach for these two functions directly only when you are building the
+bridge yourself, or testing it in isolation.
 </Aside>
+
+The mapping is intentionally narrow: MCP's elicitation has two modes carried in one `params` shape
+(`mode: "url"` vs. everything else, which is form input). `elicitationToRequest` reads `mode` and
+produces one of two `Request.kind`s; `answerToElicitResult` reads only `Answer.ok` and, when it is
+`false`, `Answer.reason` — every other Answer field is ignored by design, so a host resolver never
+needs MCP-specific knowledge to satisfy one.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Form-mode elicitation → `kind: "input"`
 
-{/* TODO:example1 */}
-```ts
-// TODO
+The common case: a server wants structured input mid-call. The requested JSON Schema survives
+under `data.schema`, unmodified.
+
+```ts test
+import assert from "node:assert"
+import { elicitationToRequest } from "toolnexus"
+
+const params = {
+  message: "What is your deployment target?",
+  requestedSchema: {
+    type: "object",
+    properties: { env: { type: "string", enum: ["staging", "production"] } },
+    required: ["env"],
+  },
+}
+
+const req = elicitationToRequest(params)
+
+assert.equal(req.kind, "input")
+assert.equal(req.prompt, "What is your deployment target?")
+assert.deepEqual(req.data?.schema, params.requestedSchema)
+assert.ok(req.id.length > 0, "an id is always assigned")
+assert.equal(req.url, undefined)
+
+console.log("ok:", req.kind, "->", req.prompt)
 ```
 
-### 2. TODO — the realistic case
+### 2. URL-mode elicitation → `kind: "authorization"`
 
-{/* TODO:example2 */}
-```ts
-// TODO
+An OAuth-style flow: the server wants the human to visit a URL. `mode: "url"` routes to
+`"authorization"` and carries the `url` through instead of a schema.
+
+```ts test
+import assert from "node:assert"
+import { elicitationToRequest } from "toolnexus"
+
+const req = elicitationToRequest({
+  mode: "url",
+  message: "Authorize access to your GitHub account",
+  url: "https://github.com/login/oauth/authorize?client_id=abc123",
+})
+
+assert.equal(req.kind, "authorization")
+assert.equal(req.url, "https://github.com/login/oauth/authorize?client_id=abc123")
+assert.equal(req.data, undefined, "form-only field, absent in url mode")
+
+console.log("ok:", req.kind, "->", req.url)
 ```
 
-### 3. TODO — the full surface
+### 3. The full round trip — a `waitFor` resolver, and every Answer outcome
 
-{/* TODO:example3 */}
-```ts
-// TODO
+`answerToElicitResult` is the other half: it turns whatever a `waitFor` resolver returns back into
+the MCP wire shape the server expects. `ok: true` accepts with the resolver's `data` as `content`;
+`ok: false` distinguishes an explicit decline from every other non-answer (dismissal, timeout,
+expiry), all of which the MCP side treats as `"cancel"`.
+
+```ts test
+import assert from "node:assert"
+import { elicitationToRequest, answerToElicitResult } from "toolnexus"
+
+// A minimal host resolver, in the shape loadMcp's `waitFor` option expects.
+async function waitFor(request: { kind: string; prompt: string }) {
+  if (request.kind === "authorization") return { id: "a1", ok: false, reason: "declined" as const }
+  return { id: "a1", ok: true, data: { env: "production" } }
+}
+
+const inputReq = elicitationToRequest({ message: "Pick an environment", requestedSchema: { type: "object" } })
+const accepted = answerToElicitResult(await waitFor(inputReq))
+assert.equal(accepted.action, "accept")
+assert.deepEqual(accepted.content, { env: "production" })
+
+const authReq = elicitationToRequest({ mode: "url", message: "Authorize", url: "https://example.com/auth" })
+const declined = answerToElicitResult(await waitFor(authReq))
+assert.equal(declined.action, "decline")
+
+// Every other falsy outcome (dismissed, timed out, expired — anything but an explicit
+// decline) maps to "cancel", not "decline". The MCP server can't tell those apart, by design.
+const timedOut = answerToElicitResult({ id: "a2", ok: false, reason: "expired" })
+assert.equal(timedOut.action, "cancel")
+const noReason = answerToElicitResult({ id: "a3", ok: false })
+assert.equal(noReason.action, "cancel")
+
+// An accept with no data still produces a valid (empty) content object.
+const emptyAccept = answerToElicitResult({ id: "a4", ok: true })
+assert.deepEqual(emptyAccept.content, {})
+
+console.log("ok:", accepted.action, declined.action, timedOut.action, noReason.action)
 ```
+
+<Aside type="caution">
+`answerToElicitResult` reads only `answer.ok` and `answer.reason` — it does not know or care what
+kind of `Request` produced the `Answer`. Getting the MCP `action` right (`accept`/`decline`/
+`cancel`) is entirely the resolver's responsibility, driven by how it answered.
+</Aside>
+
+## Mapping
+
+| MCP `params` | §10 `Request` |
+|---|---|
+| `mode: "url"` | `kind: "authorization"`, `url` set, `data` absent |
+| anything else (form) | `kind: "input"`, `data: { schema: requestedSchema }` if present, `url` absent |
+| `message` | `prompt` (`""` if absent) |
+| — | `id` — freshly generated, `elc-<time>-<seq>` |
+
+| §10 `Answer` | MCP `ElicitResult` |
+|---|---|
+| `ok: true` | `{ action: "accept", content: answer.data ?? {} }` |
+| `ok: false, reason: "declined"` | `{ action: "decline" }` |
+| `ok: false`, any other/absent `reason` | `{ action: "cancel" }` |
 
 ## The same call in the other five ports
 
@@ -60,7 +169,7 @@ _TODO: name the alternative and when to prefer it._
 | Go | `ElicitationToRequest` | [→](/api/go/mcp/elicitation/) |
 | Java | `McpSource.elicitationToRequest` | [→](/api/java/mcp/elicitation/) |
 | C# | `McpSource.ElicitationToRequest` | [→](/api/csharp/mcp/elicitation/) |
-| Elixir | `Toolnexus.Mcp.elicitation_to_request` | [→](/api/elixir/mcp/elicitation/) |
+| Elixir | `Toolnexus.Mcp.Protocol.elicitation_to_request` | [→](/api/elixir/mcp/elicitation/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).

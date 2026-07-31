@@ -8,49 +8,183 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3 S1/S2/S4/S5</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/skill.ts">js/src/skill.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function loadSkills(input: string | string[] | LoadSkillsOptions): SkillSource
+
+interface LoadSkillsOptions {
+  dirs?: string | string[]
+  skills?: SkillDef[]
+  filter?: Record<string, boolean>
+  sampleLimit?: number
+}
+
+interface SkillDef {
+  name: string
+  description?: string
+  content: string
+  resources?: string[]
+  base?: string
+}
 ```
 
-Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist.
+This is [`loadSkills`](/api/javascript/skills/load/) — the same function, one signature — looked at
+through its `LoadSkillsOptions` form instead of a bare path. Pass an options object instead of a
+string/array and three more sources of behavior open up: skills supplied directly **as data**
+(bypassing the filesystem entirely), a per-agent **allowlist**, and a **sample cap** on the sibling
+files a directory-sourced skill reports.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **Skills don't live on disk.** They come from a database, a CMS, an admin UI, or are generated at
+  startup — `skills: SkillDef[]` builds the same `skill` tool without ever calling `readFileSync`.
+- **Different agents should see different skills.** `filter` narrows the set per call site, from the
+  same underlying directory or data — no need to maintain separate `skills/` folders per agent.
+- **A skill directory has many sibling files** (reference docs, sample data) and the default sample
+  of 10 is too many, too few, or you want to suppress the `<skill_files>` block entirely.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="A bare string/array is still the shortest path for on-disk skills">
+`loadSkills("./skills")` and `loadSkills(["./skills", "./team-skills"])` are shorthand for
+`{ dirs: "./skills" }` / `{ dirs: [...] }` — see [`loadSkills` (directory
+form)](/api/javascript/skills/load/). Reach for the options object the moment you need `skills`,
+`filter`, or `sampleLimit` — anything beyond "glob these folders."
+</Aside>
+
+`dirs` and `skills` are not mutually exclusive — both can be set, and directory-discovered skills
+and data-supplied skills merge into one set, first-name-wins, exactly like two directories would.
+That is what lets a data-sourced "premium" skill sit alongside a folder of ordinary ones.
+
+<Aside type="note" title="skillProvider lives on createToolkit, not here">
+`LoadSkillsOptions` has no `provider` field — the *lazy, resolved-once* provider is a
+[`createToolkit`](/api/javascript/toolkit/create/) option (`skillProvider`) that resolves to a
+`SkillDef[]` and feeds it into `skills` for you. Call `loadSkills` directly once you already have
+the array; call it through `createToolkit` when you want the laziness.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — skills as data, no filesystem at all
 
-{/* TODO:example1 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import { loadSkills } from "toolnexus"
+
+const source = loadSkills({
+  skills: [
+    { name: "refund-policy", description: "How to process a refund", content: "Refunds within 30 days..." },
+  ],
+})
+
+assert.deepEqual(Object.keys(source.skills), ["refund-policy"])
+assert.equal(source.skills["refund-policy"].location, "skill://refund-policy/", "a logical, not filesystem, base")
+
+const res = await source.tool.execute({ name: "refund-policy" })
+assert.ok(res.output.includes("Refunds within 30 days"))
+
+console.log("ok:", Object.keys(source.skills).join(", "))
 ```
 
-### 2. TODO — the realistic case
+### 2. Directory + data together, narrowed by an allowlist
 
-{/* TODO:example2 */}
-```ts
-// TODO
+The shared `examples/skills` fixture (one skill: `hello-world`) merged with a data-supplied skill,
+then narrowed to just one of the two for this particular agent.
+
+```ts test
+import assert from "node:assert"
+import { loadSkills } from "toolnexus"
+
+const everything = loadSkills({
+  dirs: "examples/skills",
+  skills: [{ name: "refund-policy", description: "How to process a refund", content: "..." }],
+})
+assert.deepEqual(Object.keys(everything.skills).sort(), ["hello-world", "refund-policy"])
+
+// Same sources, but this agent may only use refund-policy.
+const narrowed = loadSkills({
+  dirs: "examples/skills",
+  skills: [{ name: "refund-policy", description: "How to process a refund", content: "..." }],
+  filter: { "refund-policy": true },
+})
+assert.deepEqual(Object.keys(narrowed.skills), ["refund-policy"])
+
+// The tool still reports what IS available when asked for a filtered-out name.
+const miss = await narrowed.tool.execute({ name: "hello-world" })
+assert.equal(miss.isError, true)
+assert.ok(miss.output.includes("Available skills: refund-policy"))
+
+console.log("ok:", Object.keys(everything.skills).join(","), "->", Object.keys(narrowed.skills).join(","))
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — resources, a drop-list filter, and the sample cap
 
-{/* TODO:example3 */}
-```ts
-// TODO
+A data skill can declare its own `resources` list (surfaced in `<skill_files>` exactly like a
+directory skill's sampled siblings). `filter` also works as a **drop**-list when every value is
+`false`. `sampleLimit: -1` omits `<skill_files>` entirely.
+
+```ts test
+import assert from "node:assert"
+import { loadSkills } from "toolnexus"
+
+const source = loadSkills({
+  dirs: "examples/skills",
+  skills: [
+    {
+      name: "deploy",
+      description: "Ship a release",
+      content: "Run the deploy pipeline.",
+      resources: ["runbook.md", "rollback.md"],
+      base: "internal://deploy-skill/",
+    },
+  ],
+  // Drop-list form: only `false` entries are named, everything else stays on.
+  filter: { "hello-world": false },
+  sampleLimit: 5,
+})
+
+assert.deepEqual(Object.keys(source.skills).sort(), ["deploy"], "hello-world dropped, deploy kept")
+
+const res = await source.tool.execute({ name: "deploy" })
+assert.ok(res.output.includes("Base directory for this skill: internal://deploy-skill/"))
+assert.ok(res.output.includes("<file>runbook.md</file>"))
+assert.ok(res.output.includes("<file>rollback.md</file>"))
+
+// sampleLimit: -1 would instead omit <skill_files> — including for data skills with resources.
+const noFiles = loadSkills({ skills: [{ name: "x", content: "body", resources: ["a.md"] }], sampleLimit: -1 })
+const xRes = await noFiles.tool.execute({ name: "x" })
+assert.ok(!xRes.output.includes("<skill_files>"))
+
+console.log("ok:", Object.keys(source.skills).join(","), "| files omitted:", !xRes.output.includes("<skill_files>"))
 ```
+
+<Aside type="caution">
+`filter` and `sampleLimit` have the same semantics as everywhere else in toolnexus: an allowlist is
+"≥1 `true` entry ⇒ only those survive"; a drop-list is "only `false` entries ⇒ everything else
+survives." Mixing `true` and `false` in the same filter treats it as an allowlist — the `false`
+entries are then redundant, not a deny-override.
+</Aside>
+
+## Options
+
+| Field | Type | What it does |
+|---|---|---|
+| `dirs` | `string \| string[]` | Folders globbed for `**/SKILL.md`, same as the bare-string/array form. |
+| `skills` | `SkillDef[]` | Skills supplied as data. Merges with `dirs` results; first-name-wins on collision. |
+| `filter` | `Record<string, boolean>` | Per-agent allowlist/drop-list keyed on skill name (§3 S2). Unknown names warn once. |
+| `sampleLimit` | `number` | Sibling-file sample cap: `0`/omitted ⇒ default 10, `n > 0` ⇒ cap at `n`, `-1` ⇒ omit `<skill_files>` entirely (§3 S5). |
+
+## `SkillDef` fields
+
+| Field | Required | What it does |
+|---|---|---|
+| `name` | yes | Keys the skill; missing name ⇒ skipped, same as an on-disk `SKILL.md` with no `name:`. |
+| `description` | no | Shown in the catalog (`prompt()`). A skill with no description never appears there. |
+| `content` | yes | The body injected into `<skill_content>` when the model loads this skill. |
+| `resources` | no | Logical file list surfaced in `<skill_files>` — only emitted when non-empty. |
+| `base` | no | Logical base URI reported to the model. Defaults to `skill://<name>/`. |
 
 ## The same call in the other five ports
 
@@ -69,3 +203,4 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 - [`loadSkills`](/api/javascript/skills/load/) — Glob a skills directory and expose one skill tool with progressive disclosure.
 - [`listSkills`](/api/javascript/skills/list/) — Enumerate discovered skills and, crucially, the ones that were skipped and why.
+- [`createToolkit`](/api/javascript/toolkit/create/) — Takes `skills`/`skillProvider`/`skillsFilter` and calls `loadSkills` for you.

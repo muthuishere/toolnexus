@@ -1,56 +1,166 @@
 ---
-title: "Toolnexus.Skill.load"
-description: "Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist. — Elixir."
+title: Toolnexus.Skill.load (data, providers, filters)
+description: Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist. Elixir.
 sidebar:
-  label: "Toolnexus.Skill.load"
+  label: Skill.load (data + filter)
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/skill.ex">elixir/lib/toolnexus/skill.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec load(String.t() | [String.t()] | keyword() | map()) :: Toolnexus.Skill.Source.t()
+def load(input)
+
+# options relevant here:
+#   :skills   — [%{name:, description:, content:, resources:, base:}]
+#   :provider — (-> [skill-data]) resolved once
+#   :filter   — %{name => boolean}
 ```
 
-Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist.
+There is no separate `load_with` function in this port — `Toolnexus.Skill.load/1` is one
+function that accepts `:dirs`, `:skills`, `:provider` and `:filter` together, and merges whatever
+you give it into a single skill source. This page is scoped to the three options
+[`Skill.load` (directories)](/api/elixir/skills/load/) doesn't cover: supplying skills as data,
+supplying them from a lazy provider, and narrowing the result with an allowlist.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **Skills that don't live on disk** — generated at runtime, pulled from a database, assembled
+  from a config file. `:skills` takes the same shape `load/1` would otherwise parse out of a
+  `SKILL.md`, minus the parsing.
+- **Skills that are expensive to enumerate** — `:provider` is a 0-arity function resolved exactly
+  once, so you can defer a database call or an API fetch until `load/1` actually runs, without
+  eagerly building the list every time your module loads.
+- **The same catalog, narrowed per agent** — `:filter` is a `name => boolean` allowlist/droplist
+  applied after directories, `:skills` and `:provider` are all merged, so one skill inventory can
+  back several agents with different subsets.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Directories are still the common case">
+If every skill is a `SKILL.md` on disk, [`Skill.load/1` with `:dirs`](/api/elixir/skills/load/)
+(or a bare path, its shorthand) is all you need — you never touch `:skills` or `:provider`. Reach
+for this page's options when at least one skill's source of truth is *not* a file.
+</Aside>
+
+<Aside type="note" title="Directories and data skills can mix in one call">
+`:dirs` and `:skills`/`:provider` are not mutually exclusive — pass both, and `load/1` merges the
+candidates from every source before deduping by name (first source wins, same rule as duplicate
+`SKILL.md` files).
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Skills supplied as data — no disk, no `SKILL.md`
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+A data-sourced skill gets `origin: :logical` and a `skill://name/` base instead of a `file://`
+directory — nothing here ever touches the filesystem.
+
+```elixir test
+alias Toolnexus.{Context, Skill}
+
+source =
+  Skill.load(
+    skills: [
+      %{
+        name: "changelog",
+        description: "Draft a changelog entry from a diff",
+        content: "1. Summarize the diff.\n2. Pick a Conventional Commits type.",
+        resources: ["templates/entry.md", "templates/breaking.md"]
+      }
+    ]
+  )
+
+[info] = source.skills
+true = info.name == "changelog"
+true = info.origin == :logical
+true = info.base == "skill://changelog/"
+
+res = source.tool.execute.(%{"name" => "changelog"}, %Context{})
+false = res.is_error
+true = String.contains?(res.output, "Base directory for this skill: skill://changelog/")
+true = String.contains?(res.output, "<file>templates/entry.md</file>")
+
+IO.puts("ok: #{info.name} (#{info.origin}) -> #{info.base}")
 ```
 
-### 2. TODO — the realistic case
+### 2. A lazy `:provider`, resolved once, isolated on failure
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+`:provider` is called exactly once when `load/1` runs. If it raises or returns something that
+isn't a list, the failure is isolated with a warning — exactly like one MCP server failing to
+connect never takes the others down.
+
+```elixir test
+alias Toolnexus.Skill
+
+calls = :counters.new(1, [])
+
+provider = fn ->
+  :counters.add(calls, 1, 1)
+  [%{name: "triage", description: "Triage an incoming bug report", content: "1. Reproduce it."}]
+end
+
+source = Skill.load(provider: provider)
+
+true = Enum.map(source.skills, & &1.name) == ["triage"]
+true = :counters.get(calls, 1) == 1
+
+# A failing provider does not crash load/1 — it just contributes nothing.
+failing = fn -> raise "upstream unavailable" end
+empty_source = Skill.load(provider: failing)
+[] = empty_source.skills
+true = empty_source.tool.name == "skill"
+
+IO.puts("ok: provider called #{:counters.get(calls, 1)}x, failure isolated")
 ```
 
-### 3. TODO — the full surface
+### 3. `:filter` narrows a merged directory + data catalog
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+Directories and data skills merge first; `:filter` is applied to the merged result, so it can drop
+names from either source alike. `has_true` semantics: if the filter contains at least one `true`,
+it becomes an allowlist (only those survive); otherwise it's a droplist (only `false` entries are
+removed).
+
+```elixir test
+alias Toolnexus.Skill
+
+repo = System.get_env("TOOLNEXUS_REPO") || "."
+dir = Path.join([repo, "examples", "skills"])
+
+config = [
+  dirs: [dir],
+  skills: [
+    %{name: "triage", description: "Triage a bug report", content: "1. Reproduce it."},
+    %{name: "release", description: "Cut a release", content: "1. Bump the version."}
+  ]
+]
+
+# No filter: everything from every source.
+all = Skill.load(config)
+true = all.skills |> Enum.map(& &1.name) |> Enum.sort() == ["hello-world", "release", "triage"]
+
+# Allowlist mode: at least one `true` present, so only those survive.
+allow = Skill.load(Keyword.put(config, :filter, %{"triage" => true}))
+true = Enum.map(allow.skills, & &1.name) == ["triage"]
+
+# Droplist mode: no `true` present, so only `false` entries are removed.
+drop = Skill.load(Keyword.put(config, :filter, %{"release" => false}))
+true = drop.skills |> Enum.map(& &1.name) |> Enum.sort() == ["hello-world", "triage"]
+
+IO.puts("ok: all=#{length(all.skills)} allow=#{length(allow.skills)} drop=#{length(drop.skills)}")
 ```
+
+## Options (this page's scope)
+
+| Option | Default | What it does |
+|---|---|---|
+| `:skills` | `[]` | Skills as data: `%{name:, description:, content:, resources:, base:}`. `resources` is the sibling-file list the `skill` tool samples from (no disk walk); `base` defaults to `skill://<name>/`. |
+| `:provider` | `nil` | A 0-arity function returning a list in the same shape as `:skills`, resolved exactly once. A raise, or a non-list return, is isolated with a stderr warning — the rest of the source still loads. |
+| `:filter` | `nil` | `%{name => boolean}`. `nil`/`%{}` means all. If any value is `true`, the filter is an allowlist (only `true` names survive); otherwise it's a droplist (only `false` names are dropped). A name that matches no skill logs a warning. Identical semantics to the MCP `tools` filter and the builtins `tools` toggle map. |
 
 ## The same call in the other five ports
 
@@ -62,10 +172,14 @@ _TODO: name the alternative and when to prefer it._
 | Java | `SkillSource.loadWith` | [→](/api/java/skills/load-with/) |
 | C# | `SkillSource.LoadWith` | [→](/api/csharp/skills/load-with/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+<Aside type="note" title="Elixir collapses load + loadWith into one function">
+Other ports expose a separate `loadWith`-style entry point for data/provider/filter; Elixir's
+`Skill.load/1` accepts all of it through the same options map as `:dirs` — there is nothing extra
+to import or call.
+</Aside>
 
 ## See also
 
-- [`Toolnexus.Skill.load`](/api/elixir/skills/load/) — Glob a skills directory and expose one skill tool with progressive disclosure.
-- [`Toolnexus.Skill.list`](/api/elixir/skills/list/) — Enumerate discovered skills and, crucially, the ones that were skipped and why.
+- [`Toolnexus.Skill.load`](/api/elixir/skills/load/) — the directory-sourced form and the `skill` tool shape
+- [`Toolnexus.Skill.list`](/api/elixir/skills/list/) — discovery and skip reasons, unfiltered, for authoring the allowlist
+- [`Toolnexus.Tool`](/api/elixir/types/tool/) — what `source.tool` is

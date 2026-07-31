@@ -8,49 +8,170 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2 Gap 6</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/mcp.ts">js/src/mcp.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function listMcpTools(input: string | object, opts?: { signal?: AbortSignal }): Promise<McpInventory>
+
+interface ToolInfo {
+  name: string
+  description: string
+  inputSchema: JSONSchema
+}
+
+interface McpInventory {
+  tools: Record<string, ToolInfo[]>
+  status: Record<string, McpStatus>
+}
 ```
 
-List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+Connects to every enabled server just long enough to list its tools, then **disconnects** — no
+`Tool[]` you can execute, no toolkit, nothing left running. It answers "what would this config give
+me" without any of the commitment of `loadMcp`.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **Authoring a per-server `tools` allowlist.** You need the real, original tool names a server
+  exposes before you can write `{ tools: { search: true } }` correctly — `listMcpTools` is
+  unfiltered by that allowlist for exactly this reason.
+- **A dry-run / doctor command.** "Which of my configured servers actually come up, and what would
+  they add?" without executing anything or holding a connection open.
+- **Building UI for an `mcp.json` editor.** Show the user what a server offers before they enable
+  it in the running agent.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use loadMcp when you intend to call the tools">
+`listMcpTools` disconnects before returning — there is no `execute()` on anything it gives you.
+The moment you want to actually **call** a tool, you need [`loadMcp`](/api/javascript/mcp/load/)
+or [`createToolkit`](/api/javascript/toolkit/create/), which keep the connection open for that.
 </Aside>
+
+The other difference from `loadMcp` is filtering: `McpInventory.tools` is **always the full,
+unfiltered list**, keyed by each tool's **original** (unprefixed) name — even if the server's
+config carries a `tools` allowlist. That is deliberate: this is the function you use to *write*
+the allowlist, so it has to show you everything there is to choose from.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — an inline, disabled-only config
 
-{/* TODO:example1 */}
-```ts
-// TODO
+No connection happens at all; `listMcpTools` still reports the status.
+
+```ts test
+import assert from "node:assert"
+import { listMcpTools } from "toolnexus"
+
+const inv = await listMcpTools({
+  search: { type: "remote", url: "https://example.com/mcp", enabled: false },
+})
+
+assert.deepEqual(inv.status, { search: "disabled" })
+assert.deepEqual(inv.tools, {})
+
+console.log("ok:", JSON.stringify(inv.status))
 ```
 
-### 2. TODO — the realistic case
+### 2. A real, hermetic listing — unfiltered names, then disconnected
 
-{/* TODO:example2 */}
-```ts
-// TODO
+A real stdio MCP server (the same tiny toolnexus-built server used on the [`loadMcp`
+page](/api/javascript/mcp/load/)) exposing three tools, listed with a per-server allowlist present
+in the config — and ignored, because inventory is always unfiltered.
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import path from "node:path"
+import { listMcpTools } from "toolnexus"
+
+const serverScript = `
+import { buildMcpServer, defineTool } from "toolnexus"
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
+const tools = ["a", "b", "c"].map((n) => defineTool({ name: n, description: n, run: () => n }))
+const server = buildMcpServer(tools, { name: "docs-demo" })
+await server.connect(new StdioServerTransport())
+`
+const scriptPath = path.resolve(process.cwd(), "js", `_docs_mcp_list_demo_${Date.now()}.mjs`)
+fs.writeFileSync(scriptPath, serverScript)
+
+try {
+  const inv = await listMcpTools({
+    // A `tools` allowlist here narrows what loadMcp would expose — listMcpTools ignores it.
+    srv: { type: "local", command: ["node", scriptPath], tools: { a: true } },
+    bad: { type: "local", command: ["node", "/no/such/script.mjs"] },
+  })
+
+  assert.deepEqual(inv.tools.srv.map((t) => t.name).sort(), ["a", "b", "c"], "unfiltered, original names")
+  assert.equal(inv.status.srv, "connected")
+  assert.equal(inv.status.bad, "failed")
+  assert.equal(inv.tools.bad, undefined, "a failed server contributes no entry")
+
+  console.log("ok:", inv.tools.srv.map((t) => t.name).join(","), "|", JSON.stringify(inv.status))
+} finally {
+  fs.rmSync(scriptPath, { force: true })
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — full ToolInfo shape and a bounding signal
 
-{/* TODO:example3 */}
-```ts
-// TODO
+Each `ToolInfo` carries `name`, `description`, and `inputSchema` — enough to render a picker UI or
+validate an allowlist entry against real argument shapes, all bounded by `opts.signal`.
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import path from "node:path"
+import { listMcpTools } from "toolnexus"
+
+const serverScript = `
+import { buildMcpServer, defineTool } from "toolnexus"
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
+const tools = [
+  defineTool({
+    name: "search",
+    description: "Search the docs",
+    inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] },
+    run: ({ q }) => "results for " + q,
+  }),
+]
+const server = buildMcpServer(tools, { name: "docs-demo" })
+await server.connect(new StdioServerTransport())
+`
+const scriptPath = path.resolve(process.cwd(), "js", `_docs_mcp_list_full_demo_${Date.now()}.mjs`)
+fs.writeFileSync(scriptPath, serverScript)
+
+try {
+  const inv = await listMcpTools(
+    { srv: { type: "local", command: ["node", scriptPath] } },
+    { signal: AbortSignal.timeout(10_000) },
+  )
+
+  const info = inv.tools.srv[0]
+  assert.equal(info.name, "search")
+  assert.equal(info.description, "Search the docs")
+  assert.deepEqual(info.inputSchema.required, ["q"])
+  assert.equal(inv.status.srv, "connected")
+
+  console.log("ok:", info.name, JSON.stringify(info.inputSchema))
+} finally {
+  fs.rmSync(scriptPath, { force: true })
+}
 ```
+
+## Options
+
+| Field | Type | What it does |
+|---|---|---|
+| `input` | `string \| object` | Same accepted shapes as [`parseMcpConfig`](/api/javascript/mcp/parse-config/). |
+| `opts.signal` | `AbortSignal` | Bounds the entire listing. Firing it rejects the in-flight call. |
+
+## What you get back
+
+| Field | Type | |
+|---|---|---|
+| `tools` | `Record<string, ToolInfo[]>` | Per-server, **unfiltered**, **original** tool names — no `server_tool` prefix, no `tools` allowlist applied. |
+| `status` | `Record<string, McpStatus>` | `"connected"`, `"disabled"`, or `"failed"` per server name. A failed/disabled server has no entry in `tools`. |
 
 ## The same call in the other five ports
 

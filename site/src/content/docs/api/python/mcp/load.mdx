@@ -8,49 +8,169 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/mcp_source.py">python/src/toolnexus/mcp_source.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+async def load_mcp(
+    input: str | dict[str, Any],
+    wait_for: Any = None,
+) -> McpSource
 ```
 
-Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+Parses config with [`parse_mcp_config`](/api/python/mcp/parse-config/), then connects to every
+**enabled** server — local stdio via a child process, remote via streamable-HTTP (falling back to
+SSE) — lists each server's tools, and converts them into a flat `list[Tool]`, name-prefixed by
+server (`sanitize(server) + "_" + sanitize(tool)`). One bad server never sinks the load: a failed
+connect is isolated to that server's `status` entry.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- You have an `mcp.json` (or equivalent dict) and want every enabled server's tools as `Tool`s,
+  ready to hand to an adapter or the client loop, in one call.
+- You are wiring MCP servers **without** skills, builtins, or a toolkit — this is the bare MCP
+  source.
+- You need per-server `status` (`"connected" | "disabled" | "failed"`) to decide whether to warn,
+  retry, or just proceed with whatever connected.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use create_toolkit when MCP is one source among several">
+[`create_toolkit(mcp_config=…)`](/api/python/toolkit/create/) calls `load_mcp` internally and
+merges the result with skills, builtins and your own tools behind one `execute()` router. Reach
+for `load_mcp` directly when MCP is the *only* source, or when you specifically need the
+`McpSource` object — its `tools`, its `status`, and its `close()`.
 </Aside>
+
+For a hung or slow server you want to bound and cancel, use
+[`load_mcp_with_context`](/api/python/mcp/load-with-context/) — `load_mcp` delegates to it with no
+cancellation token, so a healthy config behaves identically either way. For the tool inventory
+*without* anything staying connected afterward, use
+[`list_mcp_tools`](/api/python/mcp/list-tools/) instead.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+<Aside type="note" title="Hermetic on purpose">
+These examples never dial an external MCP server — CI has no network and no `npx`. They exercise
+the parts of `load_mcp` that do not depend on one: disabled-server bookkeeping and per-server
+failure isolation on a bad local command. The shared fixture `examples/mcp.json` is still the
+config in play, just with every server disabled before it is loaded.
+</Aside>
 
-{/* TODO:example1 */}
-```python
-// TODO
+### 1. Every server disabled — nothing connects, nothing hangs
+
+`examples/mcp.json` is the fixture every port is tested against. Flip both servers off before
+loading it, and `load_mcp` returns immediately with an empty tool list and a `status` entry per
+server.
+
+```python test
+import asyncio
+from toolnexus import load_mcp, parse_mcp_config
+
+config = parse_mcp_config("examples/mcp.json")
+for cfg in config.values():
+    cfg["enabled"] = False
+
+
+async def main():
+    source = await load_mcp(config)
+    try:
+        assert source.tools == []
+        assert source.status == {"everything": "disabled", "example-remote": "disabled"}
+    finally:
+        # close() is safe even when nothing connected.
+        await source.close()
+
+    print("ok:", source.status)
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+### 2. A bad local server fails fast and stays isolated
 
-{/* TODO:example2 */}
-```python
-// TODO
+A `command` that does not exist raises immediately — no 30-second timeout to wait out. The good
+server still connects (here, "connects" by virtue of being disabled and thus never dialed).
+
+```python test
+import asyncio
+from toolnexus import load_mcp
+
+config = {
+    "broken": {
+        "type": "local",
+        "command": ["/no/such/binary-toolnexus-docs-example"],
+    },
+    "off": {
+        "type": "local",
+        "command": ["echo", "hi"],
+        "enabled": False,
+    },
+}
+
+
+async def main():
+    source = await load_mcp(config)
+    try:
+        # The bad server is isolated as "failed" — the call itself does not raise.
+        assert source.status["broken"] == "failed"
+        assert source.status["off"] == "disabled"
+        assert source.tools == []
+    finally:
+        await source.close()
+
+    print("ok:", source.status)
+
+
+asyncio.run(main())
 ```
 
-### 3. TODO — the full surface
+### 3. Validate with parse_mcp_config, then decide what to load
 
-{/* TODO:example3 */}
-```python
-// TODO
+The realistic shape: parse the config yourself first, inspect it, and only call `load_mcp` on the
+subset you actually want connected — here, none of it, which is exactly the CI-safe path for a
+config that names real network services.
+
+```python test
+import asyncio
+from toolnexus import load_mcp, parse_mcp_config
+
+config = parse_mcp_config("examples/mcp.json")
+assert sorted(config.keys()) == ["everything", "example-remote"]
+
+# example-remote already ships disabled; disable "everything" too so this call
+# never tries to spawn a real process.
+config["everything"]["enabled"] = False
+
+
+async def main():
+    source = await load_mcp(config)
+    try:
+        assert source.tools == []
+        assert all(status == "disabled" for status in source.status.values())
+    finally:
+        await source.close()
+
+    print("ok:", sorted(source.status))
+
+
+asyncio.run(main())
 ```
+
+## Options
+
+| Parameter | Type | What it does |
+|---|---|---|
+| `input` | `str \| dict` | A path or dict, in any of the forms [`parse_mcp_config`](/api/python/mcp/parse-config/) accepts. |
+| `wait_for` | `Callable \| None` | The §10 suspension resolver. Registered as the MCP elicitation callback when present — see [`elicitation_to_request`](/api/python/mcp/elicitation/). `None` means a server that elicits gets no answer. |
+
+## Returns — `McpSource`
+
+| Member | Type | What it is |
+|---|---|---|
+| `tools` | `list[Tool]` | Every tool from every connected server, name-prefixed `<server>_<tool>`. |
+| `status` | `dict[str, McpStatus]` | Per-server `"connected"`, `"disabled"`, or `"failed"`. |
+| `close()` | `async () -> None` | Tears down every connection this call opened. Always call it (or let a context manager, once you have wired one, do it for you). |
 
 ## The same call in the other five ports
 

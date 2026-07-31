@@ -1,55 +1,114 @@
 ---
-title: "Toolnexus.Builtin.create"
-description: "Construct every built-in tool directly, outside a toolkit. — Elixir."
+title: Toolnexus.Builtin.tools
+description: Construct every built-in tool directly, outside a toolkit — no config, no toggles. Elixir.
 sidebar:
-  label: "Toolnexus.Builtin.create"
+  label: Builtin.tools
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/builtin.ex">elixir/lib/toolnexus/builtin.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec tools() :: [Toolnexus.Tool.t()]
+def tools()
 ```
 
-Construct every built-in tool directly, outside a toolkit.
+<Aside type="caution" title="The real symbol is Toolnexus.Builtin.tools/0, not .create">
+There is no `Toolnexus.Builtin.tools` function in this port. The zero-arity constructor for "all
+ten built-ins, unconditionally" is `Toolnexus.Builtin.tools/0` — this page documents that function.
+</Aside>
+
+Builds all ten built-in tools — `bash`, `read`, `write`, `edit`, `grep`, `glob`, `webfetch`,
+`question`, `apply_patch`, `todowrite` — in fixed order, every time, with no config and no
+filtering. This is what [`Toolnexus.Builtin.load/1`](/api/elixir/builtins/select/) calls
+internally before applying the on/off and per-tool toggles.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **You want the full set, unconditionally** — no `enabled`/`disabled` check, no `tools` allowlist
+  to reason about, just the ten tools.
+- **Testing or inspecting a single builtin** — `tools/0` is the shortest path to a real `bash` or
+  `read` tool struct you can call `execute.(args, ctx)` on directly.
+- **Building your own selection logic** — if `Builtin.load/1`'s toggle shape doesn't fit your
+  config format, call `tools/0` and filter the list yourself.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use load/1 when config decides which tools are in play">
+[`Toolnexus.Builtin.load/1`](/api/elixir/builtins/select/) is `tools/0` plus the on/off and
+per-name toggle logic driven by a config map — reach for it whenever "which builtins" is a
+decision that comes from outside your code (an agent's config, a per-tenant setting). Use
+`tools/0` directly when the answer is always "all of them."
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. All ten, in fixed order, every call
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.Builtin
+
+tools = Builtin.tools()
+
+true =
+  Enum.map(tools, & &1.name) ==
+    ["bash", "read", "write", "edit", "grep", "glob", "webfetch", "question", "apply_patch", "todowrite"]
+
+true = Enum.all?(tools, &(&1.source == "builtin"))
+# Calling it again returns the same shape — no memoization surprises, no shared state.
+true = Enum.map(Builtin.tools(), & &1.name) == Enum.map(tools, & &1.name)
+
+IO.puts("ok: #{length(tools)} builtins, fixed order")
 ```
 
-### 2. TODO — the realistic case
+### 2. Executing one directly — no toolkit, no agent, just the tool
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.{Builtin, Context}
+
+tools = Builtin.tools()
+write = Enum.find(tools, &(&1.name == "write"))
+read = Enum.find(tools, &(&1.name == "read"))
+
+dir = Path.join(System.tmp_dir!(), "toolnexus-docs-builtins-#{System.unique_integer([:positive])}")
+path = Path.join(dir, "note.txt")
+
+wrote = write.execute.(%{"path" => path, "content" => "hello from tools/0"}, %Context{})
+false = wrote.is_error
+true = wrote.metadata.bytes == byte_size("hello from tools/0")
+
+got = read.execute.(%{"path" => path}, %Context{})
+false = got.is_error
+true = got.output == "hello from tools/0"
+
+File.rm_rf!(dir)
+
+IO.puts("ok: wrote #{wrote.metadata.bytes} bytes, read back #{byte_size(got.output)}")
 ```
 
-### 3. TODO — the full surface
+### 3. `tools/0` ignores config entirely — unlike `load/1`
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+Same underlying ten tools, but `tools/0` never looks at a config map — passing one to `load/1`
+still narrows the set; there is no equivalent argument to `tools/0`.
+
+```elixir test
+alias Toolnexus.Builtin
+
+full = Builtin.tools()
+10 = length(full)
+
+# load/1 with a `tools` toggle narrows the set...
+narrowed = Builtin.load(%{"tools" => %{"bash" => false}})
+9 = length(narrowed)
+
+# ...but tools/0 has no config argument at all — always the full ten.
+true = length(Builtin.tools()) == length(full)
+true = Enum.map(Builtin.tools(), & &1.name) == Enum.map(full, & &1.name)
+
+IO.puts("ok: tools/0 always #{length(full)}, load/1 narrowed to #{length(narrowed)}")
 ```
 
 ## The same call in the other five ports
@@ -62,9 +121,11 @@ _TODO: name the alternative and when to prefer it._
 | Java | `BuiltinTools.create` | [→](/api/java/builtins/create/) |
 | C# | `BuiltinTools.Create` | [→](/api/csharp/builtins/create/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Same ten tools, same names, same input schemas, same fixed order across every port — a §0
+conformance obligation. See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Toolnexus.Builtin.load`](/api/elixir/builtins/select/) — Pick which built-in file/shell/web tools are in play, by name or by source toggle.
+- [`Toolnexus.Builtin.load`](/api/elixir/builtins/select/) — the config-driven on/off and per-tool toggle
+- [`Toolnexus.create_toolkit`](/api/elixir/toolkit/create/) — where builtins normally get wired into an agent
+- [`Toolnexus.Tool`](/api/elixir/types/tool/) — the struct every builtin returns

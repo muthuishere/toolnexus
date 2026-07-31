@@ -8,49 +8,108 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/BuiltinTools.cs">BuiltinTools.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public static List<ITool> Select(object? cfg)
 ```
 
-Pick which built-in file/shell/web tools are in play, by name or by source toggle.
+Resolves the active built-in tools for a config value. `cfg` is the same shape MCP servers use for
+`isEnabled`-style precedence:
+
+- `null` — default on: all ten built-ins.
+- `bool` — the whole source on (`true`) or off (`false`).
+- `IDictionary<string, object?>` with `disabled`/`enabled`/`tools` keys — `disabled: true` wins over
+  everything; else `enabled: false` turns the whole source off; otherwise a `tools` name→bool map
+  drops individual tools from the all-on baseline (`false`-mapped names are dropped, `true`/absent
+  stay on, unknown names are ignored).
+
+Whole-source-off returns an empty list. Otherwise `Select` calls
+[`BuiltinTools.Create`](/api/csharp/builtins/create/) and filters it.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Wiring `Toolkit.Options.Builtins` — this is what the toolkit calls internally to decide which
+built-ins to expose. Call it directly when you want the filtered `ITool` list itself, outside a
+toolkit: for inspection, for a custom aggregation, or to report which built-ins a given config would
+turn on before you actually build anything.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Create() for everything, Select(cfg) for the config-shaped subset">
+[`BuiltinTools.Create`](/api/csharp/builtins/create/) always returns all ten, unconditionally — no
+config, no filtering. Reach for `Select` the moment you need to honor a user- or agent-supplied
+`builtins` config value, including turning the whole source off.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. `null` means all ten are on
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+var tools = BuiltinTools.Select(null);
+
+var names = tools.Select(t => t.Name).ToList();
+var expected = new[] { "bash", "read", "write", "edit", "grep", "glob", "webfetch", "question", "apply_patch", "todowrite" };
+if (!names.SequenceEqual(expected)) throw new Exception(string.Join(",", names));
+
+Console.WriteLine($"ok: {tools.Count} built-ins, order: {string.Join(", ", names)}");
 ```
 
-### 2. TODO — the realistic case
+### 2. `false` turns the whole source off
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+var off = BuiltinTools.Select(false);
+if (off.Count != 0) throw new Exception($"expected 0 tools, got {off.Count}");
+
+// A dict with disabled:true wins even if enabled:true is also present.
+var alsoOff = BuiltinTools.Select(new Dictionary<string, object?> { ["enabled"] = true, ["disabled"] = true });
+if (alsoOff.Count != 0) throw new Exception($"expected 0 tools, got {alsoOff.Count}");
+
+Console.WriteLine("ok: false and disabled:true both turn every built-in off");
 ```
 
-### 3. TODO — the full surface
+### 3. A `tools` map drops individual built-ins from the all-on baseline
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+var cfg = new Dictionary<string, object?>
+{
+    ["tools"] = new Dictionary<string, object?>
+    {
+        ["bash"] = false,       // dropped
+        ["apply_patch"] = false, // dropped
+        ["read"] = true,        // stays on (redundant with the baseline)
+        // everything else is unmapped -> stays on (all-on baseline)
+    },
+};
+
+var tools = BuiltinTools.Select(cfg);
+var names = tools.Select(t => t.Name).ToList();
+
+if (names.Contains("bash") || names.Contains("apply_patch")) throw new Exception(string.Join(",", names));
+if (!names.Contains("read") || !names.Contains("grep")) throw new Exception(string.Join(",", names));
+if (names.Count != 8) throw new Exception($"expected 8, got {names.Count}: {string.Join(",", names)}");
+
+Console.WriteLine($"ok: {names.Count} of 10 built-ins survive: {string.Join(", ", names)}");
 ```
+
+## `cfg` shapes
+
+| `cfg` | Result |
+|---|---|
+| `null` | All ten built-ins. |
+| `false` | Empty list. |
+| `true` | All ten built-ins. |
+| `{ "disabled": true, ... }` | Empty list — wins over everything else. |
+| `{ "enabled": false, ... }` | Empty list, unless `disabled` is also set (same outcome). |
+| `{ "tools": { name: bool } }` | All-on baseline, minus any name mapped to `false`. Unknown names ignored. |
 
 ## The same call in the other five ports
 

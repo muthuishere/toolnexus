@@ -8,49 +8,133 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/McpSource.java">McpSource.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public static McpInventory listMcpTools(Object input)
+public static McpInventory listMcpTools(Object input, CancelSignal cancel)
+
+public record ToolInfo(String name, String description, Map<String, Object> inputSchema) {}
+public record McpInventory(Map<String, List<ToolInfo>> tools, Map<String, String> status) {}
 ```
 
-List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+Connects to every enabled server, lists its tool definitions, and **disconnects immediately** —
+no `Toolkit` wiring, no `execute()` routing, nothing left running afterward. The inventory is
+keyed by server name and is **unfiltered** by the per-server `tools` allowlist: this call exists
+precisely so you can see the full set and decide what that allowlist should be.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When you want to inspect what a config *would* expose — for a setup UI, a `--dry-run`, writing
+the `tools: {...}` allowlist for a server config, or a health check — without paying for a live
+toolkit or leaving a child process / HTTP connection open. Same failure isolation as
+[`load`](/api/java/mcp/load/): one bad server is `"failed"`, the rest still list.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Inspect vs. use">
+[`McpSource.load`](/api/java/mcp/load/) keeps every connection open so its `Tool`s are callable
+— that is what you use to actually run tools. `listMcpTools` is the read-only cousin: it answers
+"what's there" and tears everything down before returning, so it is safe to call repeatedly
+(a config editor, a CLI `list` command) without accumulating live connections.
 </Aside>
+
+The `ToolInfo` names here are the **original**, unprefixed server tool names — `load`'s
+`Tool.name()` is `<server>_<tool>` after sanitizing. Use `listMcpTools`'s names when authoring a
+server's `tools: {name: bool}` allowlist (§2 Gap 7), since that filter is keyed on the original
+name too.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Inventory from a hermetic, all-disabled config
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Map<String, Object> config = Map.of(
+            "mcpServers", Map.of(
+                "off", Map.of("command", java.util.List.of("x"), "enabled", false)
+            )
+        );
+
+        McpSource.McpInventory inv = McpSource.listMcpTools(config);
+
+        if (!"disabled".equals(inv.status().get("off"))) throw new AssertionError(inv.status());
+        if (inv.tools().containsKey("off")) throw new AssertionError("disabled server shouldn't list");
+
+        System.out.println("ok: " + inv.status());
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. A failed server reports status but never throws
 
-{/* TODO:example2 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Map<String, Object> config = Map.of(
+            "mcpServers", Map.of(
+                "broken", Map.of(
+                    "command", java.util.List.of("/no/such/binary-toolnexus-docs-example"),
+                    "timeout", 2000
+                )
+            )
+        );
+
+        McpSource.McpInventory inv = McpSource.listMcpTools(config);
+
+        if (!"failed".equals(inv.status().get("broken"))) throw new AssertionError(inv.status());
+        if (inv.tools().containsKey("broken")) throw new AssertionError("failed server has no tools entry");
+
+        System.out.println("ok: " + inv.status());
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. Cancelling the whole listing — same `CancelSignal` idiom as `loadWith`
 
-{/* TODO:example3 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Map;
+import java.util.concurrent.CancellationException;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Map<String, Object> config = Map.of(
+            "mcpServers", Map.of("never-runs", Map.of("command", java.util.List.of("x")))
+        );
+
+        McpSource.CancelSignal alreadyCancelled = () -> true;
+
+        boolean threw = false;
+        try {
+            McpSource.listMcpTools(config, alreadyCancelled);
+        } catch (CancellationException e) {
+            threw = true;
+        }
+        if (!threw) throw new AssertionError("expected CancellationException");
+
+        System.out.println("ok: listing aborted via CancelSignal");
+    }
+}
 ```
+
+## Fields
+
+| Member | Type | What it is |
+|---|---|---|
+| `ToolInfo.name()` | `String` | Original, unprefixed server tool name. |
+| `ToolInfo.description()` | `String` | Empty string when the server sent none. |
+| `ToolInfo.inputSchema()` | `Map<String,Object>` | Normalized: `type:object`, `properties:{}` default, `additionalProperties:false`. |
+| `McpInventory.tools()` | `Map<String, List<ToolInfo>>` | Keyed by server name; absent key for `disabled`/`failed` servers. |
+| `McpInventory.status()` | `Map<String,String>` | Per server: `connected` \| `disabled` \| `failed`. |
 
 ## The same call in the other five ports
 
@@ -67,6 +151,6 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`McpSource.load`](/api/java/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
-- [`McpSource.loadWith`](/api/java/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
-- [`McpSource.elicitationToRequest`](/api/java/mcp/elicitation/) — Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.
+- [`McpSource.load`](/api/java/mcp/load/) — connect and keep the tools callable.
+- [`McpSource.loadWith`](/api/java/mcp/load-with-context/) — the ctx-aware `load`, same `CancelSignal` idiom used here.
+- [`McpSource.elicitationToRequest`](/api/java/mcp/elicitation/) — map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.

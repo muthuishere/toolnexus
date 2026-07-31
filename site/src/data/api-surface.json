@@ -160,8 +160,9 @@
         "golang": "ElicitationToRequest",
         "java": "McpSource.elicitationToRequest",
         "csharp": "McpSource.ElicitationToRequest",
-        "elixir": "Toolnexus.Mcp.elicitation_to_request"
-      }
+        "elixir": "Toolnexus.Mcp.Protocol.elicitation_to_request"
+      },
+      "parityNote": "Elixir's elicitation_to_request lives on Toolnexus.Mcp.Protocol, not Toolnexus.Mcp — there is no delegate on the top-level Mcp module."
     },
     {
       "id": "skills/load",
@@ -263,8 +264,8 @@
         "javascript": "collectTools",
         "python": null,
         "golang": null,
-        "java": "Tools.collect",
-        "csharp": "Tools.Collect",
+        "java": "Tools.fromObject",
+        "csharp": "Tools.FromObject",
         "elixir": null
       },
       "parityNote": "JS/Java/C# expose an explicit collector; Python, Go and Elixir have no equivalent public symbol."
@@ -315,8 +316,9 @@
         "golang": "CreateBuiltinTools",
         "java": "BuiltinTools.create",
         "csharp": "BuiltinTools.Create",
-        "elixir": "Toolnexus.Builtin.create"
-      }
+        "elixir": "Toolnexus.Builtin.tools"
+      },
+      "parityNote": "Elixir has no Builtin.create/1 — the zero-arg 'build the full set' constructor is Toolnexus.Builtin.tools/0."
     },
     {
       "id": "adapters/openai",

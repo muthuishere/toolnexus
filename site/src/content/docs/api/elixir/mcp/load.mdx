@@ -1,56 +1,157 @@
 ---
-title: "Toolnexus.Mcp.load"
-description: "Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool. — Elixir."
+title: Toolnexus.Mcp.load
+description: Read an mcp.json, connect every enabled server, and expose each server tool as a Tool — with per-server failure isolation. Elixir.
 sidebar:
-  label: "Toolnexus.Mcp.load"
+  label: Mcp.load
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/mcp.ex">elixir/lib/toolnexus/mcp.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec load(String.t() | map(), keyword()) :: Toolnexus.Mcp.Source.t()
+def load(input, opts \\ [])
+
+# %Toolnexus.Mcp.Source{
+#   tools: [%Toolnexus.Tool{}],
+#   status: %{String.t() => "connected" | "failed" | "disabled"},
+#   sup: pid(),
+#   connections: %{String.t() => pid()}
+# }
 ```
 
-Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+Parses an `mcp.json` (path, raw JSON, or a map — see
+[`Toolnexus.Mcp.parse_config/1`](/api/elixir/mcp/parse-config/)), then connects to every
+**enabled** server concurrently — local stdio and remote streamable-HTTP alike — and converts
+each server's tools into uniform `Toolnexus.Tool` structs named
+`sanitize(server)_sanitize(tool)`. One server failing to connect never takes the others down: it
+is isolated to a `"failed"` status entry, and `load/2` still returns.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **Wiring MCP servers into an agent** — this is the whole point of the MCP source: config in,
+  a flat list of callable `Tool` structs out.
+- **You want per-server outcome, not just a tool list** — `status` tells you which servers
+  connected, which were skipped as disabled, and which failed, so you can log or surface it.
+- **You need the supervisor** — `sup` is a `DynamicSupervisor` holding every connection; pass the
+  whole `Source` to [`close/1`](#see-also) when you are done to terminate stdio children cleanly.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for load-with-context when a server might hang">
+This page covers the base call. When you need to **bound how long the overall connect phase can
+take** — so one hung stdio child doesn't stall your whole agent boot — or you want to bridge
+server-initiated elicitation onto your own prompt handler, see
+[`Toolnexus.Mcp.load` (the ctx-aware form)](/api/elixir/mcp/load-with-context/): same function,
+scoped to the `:deadline`/`:timeout` and `:wait_for` options.
 </Aside>
+
+If you only want the tool **definitions** without leaving anything connected — for an inventory,
+a doctor command, a CI check — use [`Toolnexus.Mcp.list_tools/2`](/api/elixir/mcp/list-tools/)
+instead; it connects, lists, and disconnects everything before returning.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — a disabled server
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+`enabled: false` (or `disabled: true`) servers are skipped entirely — no connection attempt, no
+process spawned — and show up in `status` as `"disabled"`.
+
+```elixir test
+alias Toolnexus.Mcp
+
+config = %{
+  "mcpServers" => %{
+    "off" => %{"type" => "local", "command" => ["true"], "enabled" => false}
+  }
+}
+
+source = Mcp.load(config)
+
+[] = source.tools
+true = source.status == %{"off" => "disabled"}
+true = is_pid(source.sup)
+
+Mcp.close(source)
+
+IO.puts("ok: #{inspect(source.status)}")
 ```
 
-### 2. TODO — the realistic case
+### 2. Per-server isolation — one disabled, one that fails to connect
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+A server whose command cannot even start (or whose handshake fails) does not stop the others —
+it is recorded as `"failed"` and simply contributes no tools. This is what makes `load/2` safe to
+call against config you do not fully trust.
+
+```elixir test
+alias Toolnexus.Mcp
+
+config = %{
+  "mcpServers" => %{
+    "off" => %{"type" => "local", "command" => ["true"], "enabled" => false},
+    "broken" => %{
+      "type" => "local",
+      "command" => ["/nonexistent-toolnexus-docs-binary"],
+      "timeout" => 500
+    }
+  }
+}
+
+source = Mcp.load(config)
+
+true = source.status["off"] == "disabled"
+true = source.status["broken"] == "failed"
+# Neither server contributed a tool.
+[] = source.tools
+# Only isolation matters here — a failed server still leaves the supervisor alive
+# for the servers that DID connect.
+true = Process.alive?(source.sup)
+
+Mcp.close(source)
+false = Process.alive?(source.sup)
+
+IO.puts("ok: #{inspect(source.status)}")
 ```
 
-### 3. TODO — the full surface
+### 3. Malformed config raises before anything connects
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+`load/2` calls `parse_config/1` first — a JSON syntax error surfaces immediately, as a raise, not
+as a per-server `"failed"` status. No process is spawned.
+
+```elixir test
+alias Toolnexus.Mcp
+
+raised? =
+  try do
+    Mcp.load(~s({not valid json))
+    false
+  rescue
+    _ -> true
+  end
+
+true = raised?
+
+IO.puts("ok: malformed config raised before connecting")
 ```
+
+## Options
+
+| Option | Default | What it does |
+|---|---|---|
+| `:wait_for` | `nil` | `(Request.t() -> Answer.t())`. When set, the client advertises the MCP `elicitation` capability and bridges an inbound `elicitation/create` onto it (§10). See [`Toolnexus.Mcp.Protocol.elicitation_to_request`](/api/elixir/mcp/elicitation/). |
+| `:deadline` (alias `:timeout`) | `:infinity` | Overall load deadline in ms. See [the ctx-aware form](/api/elixir/mcp/load-with-context/). |
+
+## What you get back
+
+| Field | Type | What it is |
+|---|---|---|
+| `tools` | `[%Toolnexus.Tool{}]` | Every tool from every connected server, concatenated. |
+| `status` | `%{name => status}` | `"connected"`, `"failed"`, or `"disabled"` per configured server. |
+| `sup` | `pid()` | The `DynamicSupervisor` holding all connections — pass to `close/1`. |
+| `connections` | `%{name => pid()}` | The connection process per connected server. |
 
 ## The same call in the other five ports
 
@@ -62,12 +163,13 @@ _TODO: name the alternative and when to prefer it._
 | Java | `McpSource.load` | [→](/api/java/mcp/load/) |
 | C# | `McpSource.LoadAsync` | [→](/api/csharp/mcp/load/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Behavior is identical across ports by contract — same `examples/` fixtures, same tool naming and
+per-server isolation. See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Toolnexus.Mcp.load`](/api/elixir/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
-- [`Toolnexus.Mcp.list_tools`](/api/elixir/mcp/list-tools/) — List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
-- [`Toolnexus.Mcp.parse_config`](/api/elixir/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
-- [`Toolnexus.Mcp.elicitation_to_request`](/api/elixir/mcp/elicitation/) — Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.
+- [`Toolnexus.Mcp.load` (ctx-aware form)](/api/elixir/mcp/load-with-context/) — the `:deadline` and `:wait_for` options
+- [`Toolnexus.Mcp.list_tools`](/api/elixir/mcp/list-tools/) — inventory without leaving anything connected
+- [`Toolnexus.Mcp.parse_config`](/api/elixir/mcp/parse-config/) — parse and validate config without connecting
+- [`Toolnexus.Mcp.Protocol.elicitation_to_request`](/api/elixir/mcp/elicitation/) — what `:wait_for` receives
+- `Toolnexus.Mcp.close/1` — disconnect every server and terminate the supervisor

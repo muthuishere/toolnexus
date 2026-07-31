@@ -8,49 +8,172 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/skill.py">python/src/toolnexus/skill.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+def load_skills(
+    dirs: str | list[str] | None = None,
+    *,
+    skills: list[SkillDef] | None = None,
+    filter: dict[str, bool] | None = None,
+    sample_limit: int = 0,
+) -> SkillSource
 ```
 
-Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist.
+This is the same [`load_skills`](/api/python/skills/load/) function — Python has one entry point,
+not two — scoped here to the part of its surface that is not "walk a directory": supplying skills
+as **data** (`skills=[SkillDef(...)]`) with no filesystem involved at all, and narrowing whatever
+was discovered — from disk, from data, or both — with a per-agent `filter` allowlist/drop-list.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- Skills come from somewhere that is not a directory of Markdown files: generated at startup, read
+  from a database row, assembled from a config object.
+- One process serves several agents and each should see a **different slice** of the same skill
+  catalog — `filter` narrows without re-discovering anything.
+- You want to combine on-disk and in-memory skills in one `SkillSource`, because an agent's
+  capabilities come from both a shared `skills/` folder and a few skills generated at runtime.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="A lazy provider is a create_toolkit concept, not a load_skills parameter">
+`load_skills` itself takes `skills` as an already-resolved `list[SkillDef]` — there is no
+provider callback here. [`create_toolkit(skill_provider=...)`](/api/python/toolkit/create/) is
+where a **lazy**, possibly-async provider function is resolved (once, at toolkit build time) and
+merged with `skills_dir` / `skills`. Reach for `create_toolkit` when the skill list needs to be
+computed — from a DB call, from an API — rather than handed over directly.
 </Aside>
+
+For plain on-disk discovery with no data skills and no filter, [`load_skills` (directories)](/api/python/skills/load/)
+already covers that shape end-to-end, including a `SkillDef` + `filter` + `sample_limit` example —
+this page goes further into the allowlist semantics and data-only sourcing.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Skills as data only — no directory at all
 
-{/* TODO:example1 */}
-```python
-// TODO
+`dirs=None` is valid: the whole catalog comes from `skills`, each getting a logical
+`skill://<name>/` base and touching disk never.
+
+```python test
+import asyncio
+from toolnexus import load_skills, SkillDef
+
+source = load_skills(
+    skills=[
+        SkillDef(
+            name="lookup-order",
+            description="Look up an order by id.",
+            content="# Lookup Order\n\nCall the orders API with the given id.",
+        ),
+        SkillDef(
+            name="cancel-order",
+            description="Cancel an order that has not shipped.",
+            content="# Cancel Order\n\nOnly cancel if status is 'pending'.",
+        ),
+    ],
+)
+
+assert sorted(source.skills) == ["cancel-order", "lookup-order"]
+assert all(s.origin == "logical" for s in source.skills.values())
+
+
+async def main():
+    res = await source.tool.execute({"name": "lookup-order"})
+    assert res.is_error is False
+    assert "Base directory for this skill: skill://lookup-order/" in res.output
+    print("ok:", sorted(source.skills))
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+### 2. `filter` as a drop-list — only-False keeps everything else on
 
-{/* TODO:example2 */}
-```python
-// TODO
+The allowlist form (`{"x": True}`) narrows to just `x`; this is the *other* shape — a filter with
+**only `False` values** drops those names and leaves everything else enabled. Same parameter,
+opposite polarity, chosen by what values are present.
+
+```python test
+import asyncio
+from toolnexus import load_skills, SkillDef
+
+source = load_skills(
+    skills=[
+        SkillDef(name="alpha", description="Alpha skill.", content="a"),
+        SkillDef(name="beta", description="Beta skill.", content="b"),
+        SkillDef(name="internal-debug", description="Internal only, never expose.", content="d"),
+    ],
+    # No True anywhere ⇒ drop-list: only "internal-debug" is removed.
+    filter={"internal-debug": False},
+)
+
+assert sorted(source.skills) == ["alpha", "beta"]
+
+# An unknown filter name is ignored (and warned on stderr) rather than raising.
+noisy = load_skills(
+    skills=[SkillDef(name="alpha", description="Alpha skill.", content="a")],
+    filter={"does-not-exist": True, "alpha": True},
+)
+assert sorted(noisy.skills) == ["alpha"]
+
+print("ok:", sorted(source.skills))
 ```
 
-### 3. TODO — the full surface
+### 3. Directory skills plus data skills plus a real allowlist, together
 
-{/* TODO:example3 */}
-```python
-// TODO
+Combine `dirs` and `skills` in one call — both feed the same name→`SkillInfo` map, duplicate
+names resolve first-wins (directory candidates are merged before data candidates) — then apply an
+allowlist across the combined set.
+
+```python test
+import asyncio
+import os
+from toolnexus import load_skills, SkillDef
+
+source = load_skills(
+    os.path.abspath("examples/skills"),  # contributes "hello-world"
+    skills=[
+        SkillDef(name="escalate", description="Escalate to a human.", content="# Escalate"),
+        SkillDef(name="refund", description="Process a refund.", content="# Refund"),
+    ],
+    # >= 1 True present ⇒ allowlist: only these two names survive, from either source.
+    filter={"hello-world": True, "refund": True},
+)
+
+assert sorted(source.skills) == ["hello-world", "refund"]
+assert source.skills["hello-world"].origin == "fs"
+assert source.skills["refund"].origin == "logical"
+
+# The catalog only lists what filter let through.
+prompt = source.prompt()
+assert "- **hello-world**:" in prompt
+assert "- **refund**:" in prompt
+assert "escalate" not in prompt
+
+
+async def main():
+    denied = await source.tool.execute({"name": "escalate"})
+    assert denied.is_error is True
+    print("ok:", sorted(source.skills))
+
+
+asyncio.run(main())
 ```
+
+## Options
+
+| Option | Type | What it does |
+|---|---|---|
+| `dirs` | `str \| list[str] \| None` | Directory root(s) to walk for `**/SKILL.md`, same as [`load_skills` (directories)](/api/python/skills/load/). `None` means data-only. |
+| `skills` | `list[SkillDef] \| None` | Skills supplied as data. `SkillDef(name, content, description=None, resources=None, base=None)`. Logical base defaults to `skill://<name>/`. |
+| `filter` | `dict[str, bool] \| None` | Per-agent narrowing over the **merged** dirs+data catalog. `None`/empty ⇒ all. Any `True` present ⇒ allowlist (only `True` names survive). Only `False` values ⇒ drop-list (those names removed, rest stay on). Unknown names are ignored and warned once on stderr. |
+| `sample_limit` | `int` | `0` ⇒ default 10 sampled files. `n > 0` ⇒ cap at n. `-1` ⇒ omit `<skill_files>` entirely. Applies to both fs and data skills — for data skills the cap is over the `SkillDef.resources` list rather than a directory walk. |
+
+## Returns
+
+Same `SkillSource` as [`load_skills`](/api/python/skills/load/) — `skills`, `tool`, `prompt()`.
 
 ## The same call in the other five ports
 
@@ -62,10 +185,16 @@ _TODO: name the alternative and when to prefer it._
 | C# | `SkillSource.LoadWith` | [→](/api/csharp/skills/load-with/) |
 | Elixir | `Toolnexus.Skill.load` | [→](/api/elixir/skills/load-with/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+<Aside type="note" title="One function in Python, a separate name elsewhere">
+Python, JavaScript and Elixir expose a single `load_skills`/`loadSkills` that already accepts
+`skills`/`filter`/`sample_limit`. Go, Java and C# name the data/filter surface separately
+(`LoadSkillsWith`, `SkillSource.loadWith`, `SkillSource.LoadWith`) because their directory-only
+`LoadSkills` overload has a narrower signature. The resulting `SkillSource` and `<skill_content>`
+output are byte-identical either way — a §0 conformance obligation.
+</Aside>
 
 ## See also
 
-- [`load_skills`](/api/python/skills/load/) — Glob a skills directory and expose one skill tool with progressive disclosure.
-- [`list_skills`](/api/python/skills/list/) — Enumerate discovered skills and, crucially, the ones that were skipped and why.
+- [`load_skills`](/api/python/skills/load/) — Directory discovery, the `<skill_content>` envelope, and the base `SkillDef`/`filter`/`sample_limit` example.
+- [`list_skills`](/api/python/skills/list/) — Same inputs, no tool built, plus typed skip reasons for what was rejected and why.
+- [`create_toolkit`](/api/python/toolkit/create/) — Takes `skills_dir`, `skills`, `skills_filter`, `skill_sample_limit`, **and** `skill_provider` for a lazy source.

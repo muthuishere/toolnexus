@@ -8,49 +8,170 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/builtin.py">python/src/toolnexus/builtin.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+def create_builtin_tools() -> list[Tool]
 ```
 
-Construct every built-in tool directly, outside a toolkit.
+Builds all ten built-in tools — `bash`, `read`, `write`, `edit`, `grep`, `glob`, `webfetch`,
+`question`, `apply_patch`, `todowrite` — in that fixed order, unconditionally. No config, no
+toggles: this is the raw constructor [`select_builtins`](/api/python/builtins/select/) calls
+underneath before it applies any `disabled`/`tools` logic.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- You want the full built-in set, every time, with nothing to configure — a fixed local-agent
+  toolkit, a test fixture, a demo.
+- You are building your own selection/filtering logic on top and want the unconditional base list
+  to start from, rather than reimplementing [`select_builtins`](/api/python/builtins/select/)'s
+  config parsing yourself.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use select_builtins when a config value decides what's on">
+[`select_builtins(cfg)`](/api/python/builtins/select/) is `create_builtin_tools()` plus the
+`disabled`/`enabled`/`tools`-map interpretation `create_toolkit(builtins=...)` needs. Reach for
+`create_builtin_tools` directly only when there is no config to honor — every tool, always.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The full set, in the fixed order
 
-{/* TODO:example1 */}
-```python
-// TODO
+```python test
+import asyncio
+from toolnexus import create_builtin_tools
+
+tools = create_builtin_tools()
+
+assert len(tools) == 10
+assert [t.name for t in tools] == [
+    "bash", "read", "write", "edit", "grep", "glob",
+    "webfetch", "question", "apply_patch", "todowrite",
+]
+assert all(t.source == "builtin" for t in tools)
+
+
+async def main():
+    write_tool = next(t for t in tools if t.name == "write")
+    res = await write_tool.execute({"path": "/tmp/toolnexus-docs-example.txt", "content": "hi"})
+    assert res.is_error is False
+    assert res.metadata["bytes"] == 2
+    print("ok:", [t.name for t in tools])
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+### 2. `read`/`write`/`edit`/`grep`/`glob` round trip on a real temp file
 
-{/* TODO:example2 */}
-```python
-// TODO
+Not a mock — these are real filesystem tools. `read`, `write`, `edit`, `grep` and `glob` operate on
+an actual path under the process's own temp directory, entirely self-contained.
+
+```python test
+import asyncio
+import os
+import tempfile
+from toolnexus import create_builtin_tools
+
+tools = {t.name: t for t in create_builtin_tools()}
+
+
+async def main():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "notes.txt")
+
+        w = await tools["write"].execute({"path": path, "content": "line one\nline two\n"})
+        assert w.is_error is False
+
+        r = await tools["read"].execute({"path": path})
+        assert r.output == "line one\nline two\n"
+
+        e = await tools["edit"].execute(
+            {"path": path, "oldString": "line one", "newString": "line ONE"}
+        )
+        assert e.is_error is False
+        assert e.metadata["replacements"] == 1
+
+        g = await tools["grep"].execute({"pattern": "line ONE", "path": d})
+        assert g.metadata["count"] == 1
+        assert "notes.txt" in g.output
+
+        listed = await tools["glob"].execute({"pattern": "*.txt", "path": d})
+        assert listed.output == "notes.txt"
+
+    print("ok: write -> read -> edit -> grep -> glob round trip")
+
+
+asyncio.run(main())
 ```
 
-### 3. TODO — the full surface
+### 3. `question` suspends via §10, `apply_patch` is atomic, and tools feed an adapter
 
-{/* TODO:example3 */}
-```python
-// TODO
+`question` never answers itself — it returns a `pending` `ToolResult` for the host's `wait_for` to
+resolve (§10). `apply_patch` stages every change and only touches disk if the whole patch applies.
+Every built-in is an ordinary `Tool`, so the set flows straight into an adapter.
+
+```python test
+import asyncio
+import os
+import tempfile
+from toolnexus import create_builtin_tools, pending_of, to_openai
+
+tools = {t.name: t for t in create_builtin_tools()}
+
+# Adapters don't special-case built-ins — same shape as MCP/skill/native tools.
+schema = to_openai(list(tools.values()))
+assert len(schema) == 10
+
+
+async def main():
+    asked = await tools["question"].execute(
+        {"questions": [{"question": "Proceed with deletion?", "options": ["yes", "no"]}]}
+    )
+    # A suspension is carried as is_error=True + metadata["pending"] — pending_of reads it back.
+    assert asked.is_error is True
+    req = pending_of(asked)
+    assert req is not None
+    assert req.kind == "question"
+    assert "Proceed with deletion?" in req.prompt
+
+    with tempfile.TemporaryDirectory() as d:
+        target = os.path.join(d, "new_file.txt")
+        patch = (
+            "*** Begin Patch\n"
+            f"*** Add File: {target}\n"
+            "+hello from apply_patch\n"
+            "*** End Patch\n"
+        )
+        applied = await tools["apply_patch"].execute({"patchText": patch})
+        assert applied.is_error is False
+        assert applied.metadata["added"] == 1
+        with open(target) as f:
+            assert f.read() == "hello from apply_patch"
+
+    print("ok:", req.kind, "| patch added:", 1)
+
+
+asyncio.run(main())
 ```
+
+## The ten built-ins
+
+| Name | What it does |
+|---|---|
+| `bash` | Run a shell command; combined stdout+stderr; non-zero exit is an error. |
+| `read` | Read a UTF-8 file, optionally windowed by `offset`/`limit` (1-based lines). |
+| `write` | Create or overwrite a file, making parent directories as needed. |
+| `edit` | Exact-string replace; unique by default, `replaceAll` for every occurrence. |
+| `grep` | Regex search over file contents under a directory; `file:line:text` matches. |
+| `glob` | List files matching a glob under a directory; sorted relative paths. |
+| `webfetch` | HTTP GET a URL; `text`/`markdown`(default)/`html` output. |
+| `question` | Suspend via a `kind:"question"` `Request` (§10); the host's `wait_for` resolves it. |
+| `apply_patch` | Apply an opencode Begin/End Patch (Add/Update/Delete); atomic — one bad hunk aborts with no writes. |
+| `todowrite` | Replace the session todo list; returns the rendered `[x]`/`[ ]` list. |
 
 ## The same call in the other five ports
 
@@ -60,11 +181,12 @@ _TODO: name the alternative and when to prefer it._
 | Go | `CreateBuiltinTools` | [→](/api/go/builtins/create/) |
 | Java | `BuiltinTools.create` | [→](/api/java/builtins/create/) |
 | C# | `BuiltinTools.Create` | [→](/api/csharp/builtins/create/) |
-| Elixir | `Toolnexus.Builtin.create` | [→](/api/elixir/builtins/create/) |
+| Elixir | `Toolnexus.Builtin.tools` | [→](/api/elixir/builtins/create/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Behavior is identical across ports by contract — same tool names, same input schemas, same
+`ToolResult` shape. See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`select_builtins`](/api/python/builtins/select/) — Pick which built-in file/shell/web tools are in play, by name or by source toggle.
+- [`select_builtins`](/api/python/builtins/select/) — Pick which built-ins are in play, by name or by a whole-source toggle.
+- [`create_toolkit`](/api/python/toolkit/create/) — Takes `builtins` and calls `select_builtins` internally, merged with MCP/skills/your own tools.

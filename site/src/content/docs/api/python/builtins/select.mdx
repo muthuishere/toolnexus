@@ -8,49 +8,144 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/builtin.py">python/src/toolnexus/builtin.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+BuiltinsConfig = bool | dict[str, Any]
+
+def select_builtins(cfg: BuiltinsConfig | None) -> list[Tool]
 ```
 
-Pick which built-in file/shell/web tools are in play, by name or by source toggle.
+Resolves a `builtins` config value into the actual list of active built-in `Tool`s — the ten
+opencode-style tools toolnexus ships (`bash`, `read`, `write`, `edit`, `grep`, `glob`, `webfetch`,
+`question`, `apply_patch`, `todowrite`). This is what [`create_toolkit`](/api/python/toolkit/create/)
+calls internally when you pass its `builtins=` option; `select_builtins` is the same logic exposed
+directly, for when you want the resolved list without a toolkit around it.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- You want the built-in tools **without** MCP, skills, or a toolkit — just the file/shell/web set,
+  as a plain `list[Tool]` to hand to an adapter or a client.
+- You are implementing your own toolkit-like aggregator and need the same `builtins` config
+  semantics (whole-source toggle, per-tool `tools` map) that `create_toolkit` uses.
+- You want to turn a **config value** — `True`, `False`, or a dict a user typed — into a tool list,
+  the same way `create_toolkit(builtins=...)` would, to preview or validate it.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use create_toolkit when builtins are one source among several">
+[`create_toolkit(builtins=...)`](/api/python/toolkit/create/) calls `select_builtins` internally
+and merges the result with MCP, skills and your own tools. Reach for `select_builtins` directly
+when built-ins are the *only* source, or you specifically want the resolved list to inspect or
+filter further yourself.
 </Aside>
+
+For the **unconditional** full ten with no config to interpret, use
+[`create_builtin_tools`](/api/python/builtins/create/) — `select_builtins(True)` and
+`create_builtin_tools()` return the same tools, but `select_builtins` is the one that understands
+`False` and a `tools` map.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Default on, and the two ways to turn it fully off
 
-{/* TODO:example1 */}
-```python
-// TODO
+```python test
+import asyncio
+from toolnexus import select_builtins
+
+# None and True both mean "all ten, on".
+all_default = select_builtins(None)
+all_true = select_builtins(True)
+assert len(all_default) == 10
+assert [t.name for t in all_default] == [t.name for t in all_true]
+
+# False (or {"disabled": True}, or {"enabled": False}) turns the whole source off.
+off_bool = select_builtins(False)
+off_disabled = select_builtins({"disabled": True})
+off_enabled_false = select_builtins({"enabled": False})
+assert off_bool == off_disabled == off_enabled_false == []
+
+print("ok:", len(all_default), "builtins ->", [t.name for t in all_default][:3], "...")
+
+
+async def main():
+    bash = next(t for t in all_default if t.name == "bash")
+    res = await bash.execute({"command": "echo hi"})
+    assert res.is_error is False
+    assert res.output.strip() == "hi"
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+### 2. A `tools` map drops specific tools, all-on baseline
 
-{/* TODO:example2 */}
-```python
-// TODO
+`{"tools": {name: False}}` starts from "all ten on" and removes just the named ones — unlike the
+skills/MCP `filter`, there is no allowlist form here: a `tools` map only ever *drops*.
+
+```python test
+from toolnexus import select_builtins
+
+selected = select_builtins({"tools": {"bash": False, "apply_patch": False}})
+
+names = {t.name for t in selected}
+assert "bash" not in names
+assert "apply_patch" not in names
+# Everything else stays on.
+assert names == {"read", "write", "edit", "grep", "glob", "webfetch", "question", "todowrite"}
+
+# An unknown name in the map is simply ignored — no error, nothing removed for it.
+minus_bash_only = select_builtins({"tools": {"bash": False, "not-a-real-tool": False}})
+assert {t.name for t in minus_bash_only} == names | {"apply_patch"}
+
+print("ok: dropped ->", {"bash", "apply_patch"} - names == {"bash", "apply_patch"})
 ```
 
-### 3. TODO — the full surface
+### 3. A config value round-tripped from user input
 
-{/* TODO:example3 */}
-```python
-// TODO
+The realistic shape: `cfg` came from somewhere external (a parsed JSON config, an env-derived
+dict) and might be any of the accepted shapes — validate it once with `select_builtins` rather than
+hand-rolling the same disabled/tools-map logic.
+
+```python test
+import asyncio
+import json
+from toolnexus import select_builtins, to_anthropic
+
+raw_config = json.loads('{"tools": {"bash": false, "webfetch": false}}')
+
+tools = select_builtins(raw_config)
+assert {t.name for t in tools} == {
+    "read", "write", "edit", "grep", "glob", "question", "apply_patch", "todowrite",
+}
+
+# The resolved list is ordinary Tools — adapters don't care where they came from.
+schema = to_anthropic(tools)
+assert {s["name"] for s in schema} == {t.name for t in tools}
+
+
+async def main():
+    read_tool = next(t for t in tools if t.name == "read")
+    res = await read_tool.execute({"path": "examples/mcp.json"})
+    assert res.is_error is False
+    assert "mcpServers" in res.output
+    print("ok:", sorted(t.name for t in tools))
+
+
+asyncio.run(main())
 ```
+
+## Accepted `cfg` shapes
+
+| `cfg` | Result |
+|---|---|
+| `None` | All ten, on (default). |
+| `True` | All ten, on. |
+| `False` | `[]` — whole source off. |
+| `{"disabled": True}` | `[]` — whole source off (checked before `enabled`). |
+| `{"enabled": False}` | `[]` — whole source off. |
+| `{"tools": {name: False, ...}}` | All ten minus the named ones. Unknown names ignored. `True`/absent stays on — there is no allowlist form. |
 
 ## The same call in the other five ports
 
@@ -65,6 +160,12 @@ _TODO: name the alternative and when to prefer it._
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
+<Aside type="note" title="Elixir selects via load/1, not a standalone select function">
+`Toolnexus.Builtin.load/1` takes the same config map and returns the same resolved list; Elixir
+just does not split "select" out as its own named function the way the other ports do.
+</Aside>
+
 ## See also
 
-- [`create_builtin_tools`](/api/python/builtins/create/) — Construct every built-in tool directly, outside a toolkit.
+- [`create_builtin_tools`](/api/python/builtins/create/) — Construct all ten unconditionally, with no config to interpret.
+- [`create_toolkit`](/api/python/toolkit/create/) — Takes `builtins` in exactly this shape, merged with MCP/skills/your own tools.

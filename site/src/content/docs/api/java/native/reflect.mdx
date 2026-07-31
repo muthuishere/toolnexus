@@ -1,56 +1,189 @@
 ---
-title: "@Tool annotation"
+title: "@ToolMethod annotation"
 description: "Derive the schema from the function signature or annotation instead of writing it by hand. — Java."
 sidebar:
-  label: "@Tool annotation"
+  label: "@ToolMethod annotation"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/annotations/ToolMethod.java">ToolMethod.java</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/annotations/Param.java">Param.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+public @interface ToolMethod {
+    String name() default "";        // defaults to the method name
+    String description() default "";
+}
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.PARAMETER)
+public @interface Param {
+    String name() default "";        // defaults to the parameter name
+    String description() default "";
+    boolean required() default true;
+}
 ```
 
-Derive the schema from the function signature or annotation instead of writing it by hand.
+Two annotations, not a method call: mark a method `@ToolMethod` and its parameters `@Param`, and
+[`Tools.fromObject`](/api/java/native/collect/) derives the tool's name, description and
+JSON-Schema `inputSchema` from the method signature — the Spring-AI `@Tool` feel, without a
+Spring dependency. `@Param` is optional per-parameter; an unannotated parameter still becomes a
+required schema property, using its declared name (needs `javac -parameters`, which this repo
+compiles with) and an inferred JSON type.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When you already have a plain method that does the work and want a tool wrapping it without
+hand-writing an `inputSchema` map — the common case for turning existing service methods into
+LLM-callable tools. It pairs with `Tools.fromObject` to actually collect the annotated methods
+into `Tool`s; see that page for the collection step.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Annotate a method, or build a Tool by hand">
+`@ToolMethod` trades a little control (schema is *inferred* from the parameter types — string,
+boolean, number, array, object) for zero boilerplate. Reach for
+[`NativeTool.of`](/api/java/native/define-tool/) instead when you need a schema the inference
+can't produce (enums, nested object shapes, precise numeric constraints) or when the "tool" is
+not a plain method at all (a lambda, a generated wrapper over external data).
 </Aside>
+
+`ToolContext` is a special case: a parameter of type `ToolContext` is **not** turned into a
+schema property — it is recognized and the caller's `ToolContext` is passed straight through.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest annotated tool
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.*;
+import io.github.muthuishere.toolnexus.annotations.Param;
+import io.github.muthuishere.toolnexus.annotations.ToolMethod;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    static final class Calc {
+        @ToolMethod(name = "add", description = "Add two numbers")
+        public String add(@Param(name = "a") int a, @Param(name = "b") int b) {
+            return String.valueOf(a + b);
+        }
+    }
+
+    public static void main(String[] args) {
+        List<Tool> tools = Tools.fromObject(new Calc());
+        if (tools.size() != 1) throw new AssertionError("expected 1 tool");
+
+        Tool add = tools.get(0);
+        if (!add.name().equals("add")) throw new AssertionError(add.name());
+        if (!add.description().equals("Add two numbers")) throw new AssertionError(add.description());
+        if (!add.source().equals("native")) throw new AssertionError(add.source());
+
+        ToolResult res = add.execute(Map.of("a", 2, "b", 3), new ToolContext());
+        if (!res.output().equals("5")) throw new AssertionError(res.output());
+
+        System.out.println("ok: " + add.name() + " -> " + res.output());
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. Optional parameters and the inferred schema type
 
-{/* TODO:example2 */}
-```java
-// TODO
+`@Param(name = ...)` names the schema property explicitly (this repo compiles its own sources
+with `-parameters` so an unannotated name works there too, but a portable snippet should not
+depend on that flag); `@Param(required = false)` opts a parameter out of `required`.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import io.github.muthuishere.toolnexus.annotations.Param;
+import io.github.muthuishere.toolnexus.annotations.ToolMethod;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    static final class Greeter {
+        // `name` is a required string; `loud` is optional and defaults to false when omitted.
+        @ToolMethod(description = "Greet someone, optionally loudly")
+        public String greet(@Param(name = "name") String name,
+                             @Param(name = "loud", required = false) Boolean loud) {
+            String base = "Hello, " + name;
+            return Boolean.TRUE.equals(loud) ? base.toUpperCase() + "!" : base;
+        }
+    }
+
+    public static void main(String[] args) {
+        Tool greet = Tools.fromObject(new Greeter()).get(0);
+        // No explicit name() on @ToolMethod -> defaults to the method name.
+        if (!greet.name().equals("greet")) throw new AssertionError(greet.name());
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> props = (Map<String, Object>) greet.inputSchema().get("properties");
+        if (!props.containsKey("name") || !props.containsKey("loud")) throw new AssertionError(props.keySet());
+        @SuppressWarnings("unchecked")
+        List<String> required = (List<String>) greet.inputSchema().get("required");
+        if (!required.contains("name") || required.contains("loud")) throw new AssertionError(required);
+
+        ToolResult res = greet.execute(Map.of("name", "Ada", "loud", true), new ToolContext());
+        if (!res.output().equals("HELLO, ADA!")) throw new AssertionError(res.output());
+
+        System.out.println("ok: " + res.output());
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. `ToolContext` flows through untouched — it never becomes a schema property
 
-{/* TODO:example3 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.*;
+import io.github.muthuishere.toolnexus.annotations.ToolMethod;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    static final class Cancellable {
+        @ToolMethod(name = "long_task", description = "A task that checks for cancellation")
+        public String run(ToolContext ctx) {
+            if (ctx != null && ctx.isCancelled()) return "cancelled early";
+            return "completed";
+        }
+    }
+
+    public static void main(String[] args) {
+        Tool task = Tools.fromObject(new Cancellable()).get(0);
+
+        // ToolContext is not a schema property.
+        @SuppressWarnings("unchecked")
+        Map<String, Object> props = (Map<String, Object>) task.inputSchema().get("properties");
+        if (!props.isEmpty()) throw new AssertionError("expected no properties, got " + props.keySet());
+
+        ToolResult ran = task.execute(Map.of(), new ToolContext());
+        if (!ran.output().equals("completed")) throw new AssertionError(ran.output());
+
+        ToolContext cancelled = new ToolContext();
+        cancelled.cancel();
+        ToolResult stopped = task.execute(Map.of(), cancelled);
+        if (!stopped.output().equals("cancelled early")) throw new AssertionError(stopped.output());
+
+        System.out.println("ok: " + ran.output() + " / " + stopped.output());
+    }
+}
 ```
+
+## Fields
+
+| Member | What it is |
+|---|---|
+| `@ToolMethod.name` | Tool name; empty (default) ⇒ the method's own name. |
+| `@ToolMethod.description` | Tool description, verbatim. |
+| `@Param.name` | Schema property name; empty (default) ⇒ the parameter's own name (`javac -parameters`). |
+| `@Param.description` | Added to the property's schema fragment when non-empty. |
+| `@Param.required` | Default `true`. `false` omits the name from the schema's `required` array. |
+| `ToolContext` parameter | Recognized by type; excluded from the schema, passed through from `execute`'s `ctx`. |
+| Inferred JSON type | `String`/char → `string`; `boolean`/`Boolean` → `boolean`; any numeric type → `number`; `Collection`/array → `array`; everything else → `object`. |
 
 ## The same call in the other five ports
 
@@ -65,7 +198,12 @@ _TODO: name the alternative and when to prefer it._
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
+<Aside type="note" title="Elixir has no reflection-based tool builder">
+Use `Toolnexus.Native.define_tool/1` with an explicit `input_schema` instead — the same outcome,
+written by hand rather than inferred.
+</Aside>
+
 ## See also
 
-- [`NativeTool.of`](/api/java/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.
-- [`Tools.collect`](/api/java/native/collect/) — Sweep a module or class and collect every function marked as a tool.
+- [`Tools.fromObject`](/api/java/native/collect/) — the collector that actually reflects over an object's `@ToolMethod` methods and builds the `Tool`s.
+- [`NativeTool.of`](/api/java/native/define-tool/) — build a `Tool` from a plain method when the schema needs more control than inference gives you.

@@ -8,49 +8,155 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/SkillSource.cs">SkillSource.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public static SkillSource LoadWith(SkillSource.LoadOptions opts)
+
+public sealed class LoadOptions
+{
+    public IEnumerable<string>? Dirs { get; set; }
+    public IReadOnlyList<SkillSource.SkillDef>? Skills { get; set; }
+    public IReadOnlyDictionary<string, bool>? Filter { get; set; }
+    public int SampleLimit { get; set; } // 0 => default 10, n>0 => cap, -1 => omit <skill_files>
+}
 ```
 
-Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist.
+The general-purpose skill loader behind [`SkillSource.Load`](/api/csharp/skills/load/). `Load(dirs)`
+is sugar for `LoadWith(new LoadOptions { Dirs = dirs })` — `LoadWith` is where the rest of §3 lives:
+skills supplied **as data** (`Skills`, no filesystem touched), and a per-agent allowlist (`Filter`)
+narrowing whichever skills were discovered.
+
+- `Dirs` — one or more roots, globbed for `**/SKILL.md` exactly like `Load`.
+- `Skills` — a list of `SkillDef(Name, Description, Content, Resources?, Base?)`. Each becomes a
+  skill with a **logical** `skill://name/` base (or your own `Base`) instead of a `file://` path, and
+  never reads the filesystem.
+- `Filter` — a name→bool allowlist applied *after* discovery: empty/null keeps everything; ≥1 `true`
+  entry switches to allowlist mode (only `true`-mapped names survive); an all-`false` map is a
+  drop-list over the all-on baseline.
+- `SampleLimit` — how many sibling/resource files the `skill` tool's `<skill_files>` block samples;
+  `0` is the default 10, a positive number caps it, `-1` omits the block entirely.
+
+`Dirs` and `Skills` are not exclusive — both can be set, and the two sources merge.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- You have skills that don't live on disk — generated from a database, fetched from an API,
+  assembled in memory — and want them to behave exactly like filesystem skills to the model.
+- You're serving multiple agents from one process and each should see a different subset of the
+  same discovered skills (`Filter`).
+- You want to shrink or drop the `<skill_files>` sampling block (`SampleLimit`) for a smaller system
+  prompt.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Load is LoadWith with one field set">
+[`SkillSource.Load`](/api/csharp/skills/load/) is the shortest path when all you have is one or more
+directories. Reach for `LoadWith` the moment you need `Skills`, `Filter`, or `SampleLimit` — any
+option beyond a bare list of roots.
+</Aside>
+
+<Aside type="caution" title="The 'lazy provider' lives on Toolkit, not here">
+`LoadWith` itself only accepts an eager `Skills` list. A **lazy** provider —
+`Func<IEnumerable<SkillSource.SkillDef>>`, resolved at build time and merged with any static `Skills`
+— is a [`Toolkit.Options.SkillProvider`](/api/csharp/toolkit/create/) concept, not a `LoadOptions`
+field. If you need lazy resolution outside a toolkit, call your provider function yourself and pass
+its result as `Skills`.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Skills supplied as data — no filesystem at all
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+var source = SkillSource.LoadWith(new SkillSource.LoadOptions
+{
+    Skills = new List<SkillSource.SkillDef>
+    {
+        new("weather-briefing", "Summarize today's weather for a city", "# Weather Briefing\nAsk for a city, then summarize."),
+    },
+});
+
+if (!source.Skills.ContainsKey("weather-briefing")) throw new Exception("skill not registered");
+if (source.Skills["weather-briefing"].Base != "skill://weather-briefing/")
+    throw new Exception($"unexpected base: {source.Skills["weather-briefing"].Base}");
+
+var res = await source.Tool.ExecuteAsync(new Dictionary<string, object?> { ["name"] = "weather-briefing" });
+if (res.IsError || !res.Output.Contains("Base directory for this skill: skill://weather-briefing/"))
+    throw new Exception(res.Output);
+
+Console.WriteLine("ok: data-sourced skill, no disk touched");
 ```
 
-### 2. TODO — the realistic case
+### 2. Directory + data, narrowed with an allowlist
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+var repo = Environment.GetEnvironmentVariable("TOOLNEXUS_REPO") ?? ".";
+var skillsDir = Path.Combine(repo, "examples", "skills");
+
+var source = SkillSource.LoadWith(new SkillSource.LoadOptions
+{
+    Dirs = new[] { skillsDir },
+    Skills = new List<SkillSource.SkillDef>
+    {
+        new("weather-briefing", "Summarize today's weather for a city", "# Weather Briefing"),
+    },
+    // Allowlist mode (>=1 true): only "hello-world" survives, even though two skills were discovered.
+    Filter = new Dictionary<string, bool> { ["hello-world"] = true },
+});
+
+if (!source.Skills.ContainsKey("hello-world")) throw new Exception("expected hello-world to survive the filter");
+if (source.Skills.ContainsKey("weather-briefing")) throw new Exception("expected weather-briefing to be filtered out");
+if (source.Skills.Count != 1) throw new Exception($"expected exactly 1 skill, got {source.Skills.Count}");
+
+Console.WriteLine($"ok: {string.Join(", ", source.Skills.Keys)}");
 ```
 
-### 3. TODO — the full surface
+### 3. Capping the file-sampling block
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+var withSampling = SkillSource.LoadWith(new SkillSource.LoadOptions
+{
+    Skills = new List<SkillSource.SkillDef>
+    {
+        new("triage", "Route a support ticket", "# Triage", new[] { "playbook.md", "escalation.md", "contacts.md" }),
+    },
+    SampleLimit = 2, // cap the <skill_files> block at 2 entries
+});
+
+var capped = await withSampling.Tool.ExecuteAsync(new Dictionary<string, object?> { ["name"] = "triage" });
+if (capped.Output.Split("<file>").Length - 1 != 2) throw new Exception(capped.Output);
+
+var noSampling = SkillSource.LoadWith(new SkillSource.LoadOptions
+{
+    Skills = new List<SkillSource.SkillDef>
+    {
+        new("triage", "Route a support ticket", "# Triage", new[] { "playbook.md", "escalation.md" }),
+    },
+    SampleLimit = -1, // omit <skill_files> entirely
+});
+
+var uncapped = await noSampling.Tool.ExecuteAsync(new Dictionary<string, object?> { ["name"] = "triage" });
+if (uncapped.Output.Contains("<skill_files>")) throw new Exception("expected no <skill_files> block");
+
+Console.WriteLine("ok: SampleLimit=2 capped, SampleLimit=-1 omitted");
 ```
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `Dirs` | `IEnumerable<string>?` | Roots globbed for `**/SKILL.md`, same as `Load`. |
+| `Skills` | `IReadOnlyList<SkillDef>?` | Skills supplied as data — logical base, no disk access. |
+| `Filter` | `IReadOnlyDictionary<string, bool>?` | Post-discovery allowlist/drop-list over the merged skill set. |
+| `SampleLimit` | `int` | `0` ⇒ default 10, `n>0` ⇒ cap, `-1` ⇒ omit `<skill_files>`. |
 
 ## The same call in the other five ports
 

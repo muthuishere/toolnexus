@@ -8,49 +8,162 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/native.py">python/src/toolnexus/native.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+def tool(
+    fn: Callable[..., Any] | None = None,
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    input_schema: JSONSchema | None = None,
+) -> Tool | Callable[[Callable[..., Any]], Tool]
 ```
 
-Derive the schema from the function signature or annotation instead of writing it by hand.
+The decorator form of [`define_tool`](/api/python/native/define-tool/) — same inference, same
+`ToolResult` wrapping, same everything, just spelled `@tool` above a `def` you are writing right
+now. `define_tool(fn, ..., source="native")` **is** the implementation of `tool`; `@tool` calls it
+with `source` fixed to `"native"`. The decorated function name is rebound to the resulting `Tool`,
+not the original callable.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+You are authoring the function specifically to be a tool — a new capability for an agent, not a
+library function you happen to be wrapping. `@tool` reads top-to-bottom as "this is a tool", right
+where the function is defined.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use define_tool for a function you did not write for this purpose">
+[`define_tool`](/api/python/native/define-tool/) is the same machinery as a direct call instead of
+a decorator — reach for it when wrapping a function you already have: a library call, a method
+bound to an instance, something built in a loop where a decorator has nowhere to attach.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Bare `@tool` — name and description inferred
 
-{/* TODO:example1 */}
-```python
-// TODO
+```python test
+import asyncio
+from toolnexus import tool
+
+
+@tool
+def convert_celsius(value: float) -> str:
+    """Convert Celsius to Fahrenheit."""
+    return str(value * 9 / 5 + 32)
+
+
+# `convert_celsius` IS the Tool now — the decorator rebinds the name.
+assert convert_celsius.name == "convert_celsius"
+assert convert_celsius.description == "Convert Celsius to Fahrenheit."
+assert convert_celsius.source == "native"
+assert convert_celsius.input_schema["required"] == ["value"]
+
+
+async def main():
+    res = await convert_celsius.execute({"value": 100})
+    assert res.output == "212.0"
+    print("ok:", convert_celsius.name, "->", res.output)
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+### 2. `@tool(...)` with overrides, and calling the original function directly
 
-{/* TODO:example2 */}
-```python
-// TODO
+The decorator's parenthesized form takes the same overrides as `define_tool` — useful when the
+Python name is not the name you want the model to see, but you still want to call the plain
+function yourself elsewhere.
+
+```python test
+import asyncio
+from toolnexus import tool
+
+
+@tool(name="lookup_status", description="Look up an order's shipping status.")
+def _status(order_id: str) -> str:
+    return f"{order_id}: in transit"
+
+
+assert _status.name == "lookup_status"
+assert _status.description == "Look up an order's shipping status."
+# `_status` is the Tool object, not the function — call it through .execute.
+
+
+async def main():
+    res = await _status.execute({"order_id": "A-42"})
+    assert res.output == "A-42: in transit"
+    print("ok:", _status.name, "->", res.output)
+
+
+asyncio.run(main())
 ```
 
-### 3. TODO — the full surface
+<Aside type="caution">
+`@tool` **rebinds** the decorated name to the `Tool` object — the original function is no longer
+directly callable under that name. If you need both a plain callable and a tool wrapper, define
+the function first and wrap it with [`define_tool`](/api/python/native/define-tool/) under a
+different name, rather than decorating in place.
+</Aside>
 
-{/* TODO:example3 */}
-```python
-// TODO
+### 3. An explicit `input_schema`, and feeding decorated tools to an adapter
+
+An explicit schema overrides inference — useful for an enum, a format, or per-property
+descriptions the type hints cannot express. Decorated tools are ordinary `Tool`s, so they flow
+into `to_openai` (or any adapter) exactly like `define_tool` output.
+
+```python test
+import asyncio
+from toolnexus import tool, to_openai
+
+
+@tool(
+    input_schema={
+        "type": "object",
+        "properties": {"priority": {"type": "string", "enum": ["low", "high"]}},
+        "required": ["priority"],
+        "additionalProperties": False,
+    }
+)
+def set_priority(priority: str) -> str:
+    """Set the priority of the current ticket."""
+    return f"priority set to {priority}"
+
+
+assert set_priority.input_schema["properties"]["priority"]["enum"] == ["low", "high"]
+
+schema = to_openai([set_priority])
+assert schema[0]["function"]["name"] == "set_priority"
+assert schema[0]["function"]["parameters"]["properties"]["priority"]["enum"] == ["low", "high"]
+
+
+async def main():
+    res = await set_priority.execute({"priority": "high"})
+    assert res.output == "priority set to high"
+    print("ok:", res.output)
+
+
+asyncio.run(main())
 ```
+
+## Options
+
+Identical to [`define_tool`](/api/python/native/define-tool/) minus `fn` positioned as a decorator
+target rather than a first argument, and no `source` override — `@tool` always produces
+`source="native"`.
+
+| Option | Type | What it does |
+|---|---|---|
+| `name` | `str \| None` | Overrides `fn.__name__`. |
+| `description` | `str \| None` | Overrides the first docstring line. |
+| `input_schema` | `JSONSchema \| None` | Overrides inference entirely. |
+
+Inference rules (type hints → JSON-Schema, `ctx`/`context` exclusion, async vs. thread dispatch,
+return handling, error handling) are exactly [`define_tool`'s](/api/python/native/define-tool/) —
+see that page for the full table.
 
 ## The same call in the other five ports
 
@@ -62,9 +175,15 @@ _TODO: name the alternative and when to prefer it._
 | C# | `ToolMethodAttribute` | [→](/api/csharp/native/reflect/) |
 | Elixir | _not shipped in this port_ |  |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+<Aside type="note" title="Elixir has no reflection-based builder">
+Elixir has no macro-based `@tool` equivalent — use `Toolnexus.Native.define_tool/1` with an
+explicit `input_schema`. The resulting `Tool` contract (name, description, schema, `ToolResult`
+behavior) is unaffected; only how you author the wrapper differs.
+</Aside>
 
 ## See also
 
-- [`define_tool`](/api/python/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.
+- [`define_tool`](/api/python/native/define-tool/) — The direct-call form of exactly this, for functions you did not write for this purpose.
+- [`Tool`](/api/python/types/tool/) — What you get back.
+- [`ToolResult`](/api/python/types/tool-result/) · [`ToolContext`](/api/python/types/context/)
+- [`create_toolkit`](/api/python/toolkit/create/) — Pass decorated tools in via `extra_tools`.

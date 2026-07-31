@@ -1,56 +1,128 @@
 ---
-title: "Toolnexus.Builtin.load"
-description: "Pick which built-in file/shell/web tools are in play, by name or by source toggle. — Elixir."
+title: Toolnexus.Builtin.load
+description: Pick which built-in file/shell/web tools are in play, by name or by source toggle. Elixir.
 sidebar:
-  label: "Toolnexus.Builtin.load"
+  label: Builtin.load
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/builtin.ex">elixir/lib/toolnexus/builtin.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec load(nil | boolean() | map()) :: [Toolnexus.Tool.t()]
+def load(cfg \\ nil)
 ```
 
-Pick which built-in file/shell/web tools are in play, by name or by source toggle.
+Resolves the active built-in tools for a config. The whole source can be switched off
+(`enabled: false` / `disabled: true` / `cfg == false`), or left on with individual tools dropped
+by name via a `"tools"` map — the same allowlist/droplist shape used by the MCP `tools` filter and
+[`Skill.load/1`'s `:filter`](/api/elixir/skills/load-with/).
+
+<Aside type="note" title="Elixir has no separate select* function">
+The other five ports call this operation `select` or `selectBuiltins`. In Elixir it is the same
+`load/1` you would call from [`create_toolkit/1`](/api/elixir/toolkit/create/) internally — there
+is nothing extra to import.
+</Aside>
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **You are assembling built-in tools outside a toolkit** and want to honor the same
+  `enabled`/`disabled`/`tools` config shape `create_toolkit/1` accepts for its `:builtins` option,
+  without going through a toolkit.
+- **You want fewer than the full ten** — drop `bash` and `apply_patch` for a read-only agent,
+  keep everything else, by mapping just those two names to `false`.
+- **Config-driven on/off** — `cfg` can come straight from a parsed JSON/YAML document (string
+  keys) or a hand-built map (atom or string keys); both work.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use Builtin.tools/0 when you want everything, no config">
+[`Toolnexus.Builtin.tools/0`](/api/elixir/builtins/create/) constructs all ten built-ins directly
+and ignores config entirely. Reach for `load/1` instead whenever "on/off" or "which ones" is a
+decision your caller makes — which is the normal case once builtins are wired into an agent.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The default — no config means everything, in fixed order
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.Builtin
+
+tools = Builtin.load()
+
+true =
+  Enum.map(tools, & &1.name) ==
+    ["bash", "read", "write", "edit", "grep", "glob", "webfetch", "question", "apply_patch", "todowrite"]
+
+true = Enum.all?(tools, &(&1.source == "builtin"))
+# `nil` behaves identically to omitting the argument.
+true = Builtin.load(nil) == tools
+
+IO.puts("ok: #{length(tools)} builtins, default on")
 ```
 
-### 2. TODO — the realistic case
+### 2. Turning the whole source off — a bare boolean, or `enabled`/`disabled`
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.Builtin
+
+[] = Builtin.load(false)
+[] = Builtin.load(%{"enabled" => false})
+[] = Builtin.load(%{"disabled" => true})
+
+# `disabled: true` wins even if `enabled` also says true — same precedence as the MCP source.
+[] = Builtin.load(%{"disabled" => true, "enabled" => true})
+
+10 = length(Builtin.load(true))
+10 = length(Builtin.load(%{}))
+
+IO.puts("ok: whole-source toggle honoured, disabled wins ties")
 ```
 
-### 3. TODO — the full surface
+### 3. Dropping individual tools by name
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+The `"tools"` map only ever **drops** — it is not an allowlist here. Any name mapped to `false` is
+removed; `true`, absent, or an unrecognised name all leave the rest untouched.
+
+```elixir test
+alias Toolnexus.Builtin
+
+cfg = %{"tools" => %{"bash" => false, "apply_patch" => false, "made_up_name" => false}}
+tools = Builtin.load(cfg)
+
+names = Enum.map(tools, & &1.name)
+false = "bash" in names
+false = "apply_patch" in names
+# Everything else survives, in the same fixed order.
+true = names == ["read", "write", "edit", "grep", "glob", "webfetch", "question", "todowrite"]
+
+# An explicit `true` (or omission) keeps a tool — it is not an allowlist switch.
+kept = Builtin.load(%{"tools" => %{"bash" => true}})
+true = "bash" in Enum.map(kept, & &1.name)
+10 = length(kept)
+
+IO.puts("ok: dropped #{10 - length(tools)}, kept #{length(tools)}")
 ```
+
+## `cfg` shapes accepted
+
+| `cfg` | Effect |
+|---|---|
+| `nil` (default) | All ten builtins. |
+| `false` | `[]` — the whole source is off. |
+| `true` | All ten builtins. |
+| `%{"enabled" => false}` | `[]`. |
+| `%{"disabled" => true}` | `[]` — wins over `enabled: true`. |
+| `%{"tools" => %{name => bool}}` | All ten minus any name mapped to `false`. Atom or string keys both work (`cfg_get/2` checks both). |
+
+## The ten tools, in fixed order
+
+`bash`, `read`, `write`, `edit`, `grep`, `glob`, `webfetch`, `question`, `apply_patch`, `todowrite`
+— see [`Toolnexus.Builtin.tools/0`](/api/elixir/builtins/create/) for what each does.
 
 ## The same call in the other five ports
 
@@ -62,9 +134,11 @@ _TODO: name the alternative and when to prefer it._
 | Java | `BuiltinTools.select` | [→](/api/java/builtins/select/) |
 | C# | `BuiltinTools.Select` | [→](/api/csharp/builtins/select/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Behavior is identical across ports by contract — same defaults, same toggle precedence, same
+fixed tool order. See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Toolnexus.Builtin.create`](/api/elixir/builtins/create/) — Construct every built-in tool directly, outside a toolkit.
+- [`Toolnexus.Builtin.tools/0`](/api/elixir/builtins/create/) — construct all ten directly, no config
+- [`Toolnexus.create_toolkit`](/api/elixir/toolkit/create/) — where `:builtins` config normally lives
+- [`Toolnexus.Tool`](/api/elixir/types/tool/) — the struct every builtin returns

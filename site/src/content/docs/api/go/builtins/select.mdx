@@ -8,49 +8,167 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a>
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/builtin.go">golang/builtin.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+func SelectBuiltins(cfg any) []Tool
 ```
 
-Pick which built-in file/shell/web tools are in play, by name or by source toggle.
+Resolves the active built-in tools for a config value. Whole-source-off wins and returns `nil`.
+Otherwise all ten built-ins ([`CreateBuiltinTools`](/api/go/builtins/create/)) are on by default; a
+per-tool map drops any tool explicitly mapped to `false`. This is exactly the logic
+[`CreateToolkit`](/api/go/toolkit/create/) applies to its `Options.Builtins` field — `SelectBuiltins`
+is that logic, callable on its own.
+
+<Aside type="note" title="cfg accepts four shapes">
+`nil` ⇒ on (the default); a `bool` ⇒ taken as-is; a `BuiltinsConfig` (or `*BuiltinsConfig`) ⇒
+`Enabled`/`Disabled`/`Tools` precedence, same as MCP's `enabled`/`disabled`; a `map[string]any` ⇒ the
+same precedence read off `"enabled"`, `"disabled"`, `"tools"` keys — the shape a parsed JSON
+`builtins` block naturally decodes to.
+</Aside>
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `SelectBuiltins` when you want the on/off and per-tool filtering `CreateToolkit` applies
+to its default toolset, but **without** building a whole toolkit — inspecting what a given config
+would enable, or wiring your own aggregation logic around the built-ins.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use CreateBuiltinTools when you don't need the filtering">
+[`CreateBuiltinTools`](/api/go/builtins/create/) always returns the full set of ten, with no on/off
+logic at all — reach for it instead of `SelectBuiltins` when you always want everything (or intend
+to apply your own filter). Reach for [`CreateToolkit`](/api/go/toolkit/create/)'s `Options.Builtins`
+field instead of calling `SelectBuiltins` directly when built-ins are just one part of a larger
+toolkit — it calls this for you.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. `nil` is on, `false` is off
 
-{/* TODO:example1 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	def := toolnexus.SelectBuiltins(nil)
+	if len(def) != 10 {
+		log.Fatalf("expected 10 built-ins by default, got %d", len(def))
+	}
+
+	off := toolnexus.SelectBuiltins(false)
+	if off != nil {
+		log.Fatalf("expected nil for a whole-source off, got %d tools", len(off))
+	}
+
+	on := toolnexus.SelectBuiltins(true)
+	if len(on) != 10 {
+		log.Fatalf("expected 10 built-ins for true, got %d", len(on))
+	}
+
+	fmt.Println("ok: nil=", len(def), "false=", len(off), "true=", len(on))
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. A `BuiltinsConfig` drops individual tools
 
-{/* TODO:example2 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	filtered := toolnexus.SelectBuiltins(toolnexus.BuiltinsConfig{
+		Tools: map[string]bool{"bash": false, "apply_patch": false},
+	})
+	if len(filtered) != 8 {
+		log.Fatalf("expected 8 built-ins (10 minus 2), got %d", len(filtered))
+	}
+	for _, t := range filtered {
+		if t.Name == "bash" || t.Name == "apply_patch" {
+			log.Fatalf("expected %q to be dropped", t.Name)
+		}
+	}
+
+	// disabled:true wins over an unset enabled, same precedence as MCP.
+	disabledTrue := true
+	whole := toolnexus.SelectBuiltins(toolnexus.BuiltinsConfig{Disabled: &disabledTrue})
+	if whole != nil {
+		log.Fatalf("expected nil, got %d tools", len(whole))
+	}
+
+	fmt.Println("ok:", len(filtered), "built-ins after dropping 2")
+}
 ```
 
-### 3. TODO — the full surface
+### 3. A parsed `map[string]any` — the shape JSON decodes to
 
-{/* TODO:example3 */}
-```go
-// TODO
+The same config a top-level `builtins` key in a parsed `mcp.json`-style document would produce.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	cfg := map[string]any{
+		"enabled": true,
+		"tools": map[string]any{
+			"webfetch": false,
+		},
+	}
+
+	got := toolnexus.SelectBuiltins(cfg)
+	if len(got) != 9 {
+		log.Fatalf("expected 9 built-ins (10 minus webfetch), got %d", len(got))
+	}
+	for _, t := range got {
+		if t.Name == "webfetch" {
+			log.Fatal("expected webfetch to be dropped")
+		}
+	}
+
+	// enabled:false disables the whole source, same as a bare `false`.
+	off := toolnexus.SelectBuiltins(map[string]any{"enabled": false})
+	if off != nil {
+		log.Fatalf("expected nil, got %d tools", len(off))
+	}
+
+	fmt.Println("ok:", len(got), "built-ins from a parsed map config")
+}
 ```
+
+## Parameters
+
+| Parameter | Type | What it does |
+|---|---|---|
+| `cfg` | `any` | `nil`, `bool`, `BuiltinsConfig`/`*BuiltinsConfig`, or `map[string]any`. Any other type is treated as "on." |
+
+## `BuiltinsConfig`
+
+| Field | Type | What it does |
+|---|---|---|
+| `Enabled` | `*bool` | `nil` ⇒ on; `false` ⇒ off (unless overridden by `Disabled`). |
+| `Disabled` | `*bool` | `true` ⇒ off, and wins over `Enabled`. |
+| `Tools` | `map[string]bool` | Per-tool override. A name mapped to `false` is dropped; `true`/absent stays on; unknown names are ignored. |
 
 ## The same call in the other five ports
 
@@ -67,4 +185,5 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`CreateBuiltinTools`](/api/go/builtins/create/) — Construct every built-in tool directly, outside a toolkit.
+- [`CreateBuiltinTools`](/api/go/builtins/create/) — construct every built-in tool directly, outside a toolkit.
+- [`CreateToolkit`](/api/go/toolkit/create/) — the aggregator; its `Builtins` option calls `SelectBuiltins` internally.

@@ -8,49 +8,179 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a>
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/builtin.go">golang/builtin.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+func CreateBuiltinTools() []Tool
 ```
 
-Construct every built-in tool directly, outside a toolkit.
+Constructs all ten built-in tools — the opencode-ported file/shell/web toolset toolnexus ships by
+default — with no toolkit and no filtering. The order is fixed for parity across ports: `bash`,
+`read`, `write`, `edit`, `grep`, `glob`, `webfetch`, `question`, `apply_patch`, `todowrite`.
+
+<Aside type="note" title="No arguments, no config">
+Unlike [`SelectBuiltins`](/api/go/builtins/select/), `CreateBuiltinTools` takes no config and applies
+no on/off logic — it always returns the full set of ten, every time. It is the thing
+`SelectBuiltins` filters.
+</Aside>
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `CreateBuiltinTools` when you want the file/shell/web tools **without** going through
+`Options.Builtins` on a toolkit — inspecting the full set, wiring your own selection logic on top,
+or hand-assembling a `[]Tool` for a use case that doesn't fit `CreateToolkit`.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use SelectBuiltins for the on/off/per-tool config">
+[`SelectBuiltins`](/api/go/builtins/select/) is `CreateBuiltinTools` plus the same on/off and
+per-tool logic `Options.Builtins` uses on [`CreateToolkit`](/api/go/toolkit/create/). Reach for it
+instead of `CreateBuiltinTools` the moment you need to drop some tools or turn the whole set off —
+`CreateBuiltinTools` itself has no such switch.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The full set, in the fixed order
 
-{/* TODO:example1 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	tools := toolnexus.CreateBuiltinTools()
+	if len(tools) != 10 {
+		log.Fatalf("expected 10 built-ins, got %d", len(tools))
+	}
+
+	wantOrder := []string{
+		"bash", "read", "write", "edit", "grep",
+		"glob", "webfetch", "question", "apply_patch", "todowrite",
+	}
+	for i, name := range wantOrder {
+		if tools[i].Name != name {
+			log.Fatalf("position %d: expected %q, got %q", i, name, tools[i].Name)
+		}
+		if tools[i].Source != toolnexus.SourceBuiltin {
+			log.Fatalf("expected Source builtin for %q, got %v", name, tools[i].Source)
+		}
+	}
+
+	fmt.Println("ok:", len(tools), "built-ins in fixed order")
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. Calling one directly, no toolkit involved
 
-{/* TODO:example2 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	tools := toolnexus.CreateBuiltinTools()
+
+	var write, read *toolnexus.Tool
+	for i := range tools {
+		switch tools[i].Name {
+		case "write":
+			write = &tools[i]
+		case "read":
+			read = &tools[i]
+		}
+	}
+	if write == nil || read == nil {
+		log.Fatal("expected write and read among the built-ins")
+	}
+
+	path := filepath.Join(os.TempDir(), "toolnexus-docs-createbuiltintools.txt")
+	defer os.Remove(path)
+
+	wRes, err := write.Execute(map[string]any{"path": path, "content": "hello"}, nil)
+	if err != nil || wRes.IsError {
+		log.Fatalf("unexpected write result: %+v %v", wRes, err)
+	}
+
+	rRes, err := read.Execute(map[string]any{"path": path}, nil)
+	if err != nil || rRes.IsError || rRes.Output != "hello" {
+		log.Fatalf("unexpected read result: %+v %v", rRes, err)
+	}
+
+	fmt.Println("ok:", rRes.Output)
+}
 ```
 
-### 3. TODO — the full surface
+### 3. Hand-assembling a custom set on top of the full list
 
-{/* TODO:example3 */}
-```go
-// TODO
+`CreateBuiltinTools` always returns all ten — filtering to a custom subset is your own slice logic,
+which is exactly what [`SelectBuiltins`](/api/go/builtins/select/) does for you when the source is a
+`BuiltinsConfig`.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	only := map[string]bool{"read": true, "grep": true, "glob": true}
+
+	var readOnly []toolnexus.Tool
+	for _, t := range toolnexus.CreateBuiltinTools() {
+		if only[t.Name] {
+			readOnly = append(readOnly, t)
+		}
+	}
+
+	if len(readOnly) != 3 {
+		log.Fatalf("expected 3 tools, got %d", len(readOnly))
+	}
+	for _, t := range readOnly {
+		if !only[t.Name] {
+			log.Fatalf("unexpected tool in custom set: %s", t.Name)
+		}
+	}
+
+	// Builtins:false turns the default ten OFF; only our hand-picked three go in
+	// via ExtraTools — CreateBuiltinTools never wires itself into a toolkit on its own.
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{
+		ExtraTools: readOnly,
+		Builtins:   false,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+	if len(tk.Tools()) != 3 {
+		log.Fatalf("expected exactly the 3 hand-picked tools, got %d", len(tk.Tools()))
+	}
+
+	fmt.Println("ok:", len(readOnly), "hand-picked read-only tools")
+}
 ```
+
+## Return value
+
+`[]Tool` — always length 10, always the same order, each with `Source: SourceBuiltin`.
 
 ## The same call in the other five ports
 
@@ -60,11 +190,12 @@ _TODO: name the alternative and when to prefer it._
 | Python | `create_builtin_tools` | [→](/api/python/builtins/create/) |
 | Java | `BuiltinTools.create` | [→](/api/java/builtins/create/) |
 | C# | `BuiltinTools.Create` | [→](/api/csharp/builtins/create/) |
-| Elixir | `Toolnexus.Builtin.create` | [→](/api/elixir/builtins/create/) |
+| Elixir | `Toolnexus.Builtin.tools` | [→](/api/elixir/builtins/create/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`SelectBuiltins`](/api/go/builtins/select/) — Pick which built-in file/shell/web tools are in play, by name or by source toggle.
+- [`SelectBuiltins`](/api/go/builtins/select/) — pick which built-in file/shell/web tools are in play, by name or by source toggle.
+- [`CreateToolkit`](/api/go/toolkit/create/) — the aggregator; its `Builtins` option calls `SelectBuiltins` internally.

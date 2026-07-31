@@ -1,56 +1,145 @@
 ---
-title: "Toolnexus.Mcp.elicitation_to_request"
-description: "Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back. — Elixir."
+title: Toolnexus.Mcp.Protocol.elicitation_to_request
+description: Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back. Elixir.
 sidebar:
-  label: "Toolnexus.Mcp.elicitation_to_request"
+  label: Mcp.Protocol.elicitation_to_request
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/mcp/protocol.ex">elixir/lib/toolnexus/mcp/protocol.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec elicitation_to_request(map()) :: Toolnexus.Request.t()
+def elicitation_to_request(params)
+
+@spec answer_to_elicit_result(Toolnexus.Answer.t()) :: map()
+def answer_to_elicit_result(answer)
 ```
 
-Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.
+<Aside type="caution" title="Not on Toolnexus.Mcp — it's on Toolnexus.Mcp.Protocol">
+This function lives on `Toolnexus.Mcp.Protocol`, the pure JSON-RPC codec module, not on
+`Toolnexus.Mcp` itself. You will not call it directly in ordinary use — pass `:wait_for` to
+[`Toolnexus.Mcp.load/2`](/api/elixir/mcp/load/) and the connection calls both halves of this
+bridge for you. This page documents the mapping itself, which is what you need if you are
+implementing your own `:wait_for` handler or want to understand exactly what a server's
+elicitation turns into.
+</Aside>
+
+The MCP spec lets a server pause a `tools/call` and ask the connecting client something —
+fill in a form, or go complete an OAuth flow at a URL. toolnexus doesn't invent a second
+suspension mechanism for that: `elicitation_to_request/1` maps the server's `elicitation/create`
+request onto the exact same §10 `Toolnexus.Request` your own tools use to suspend (e.g. the
+`question` builtin), and `answer_to_elicit_result/1` maps the resolved `Toolnexus.Answer` back
+onto what the MCP server expects.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **Writing your own `:wait_for` for `Mcp.load/2`** — your function receives a `Request` built by
+  this mapping; understanding the two shapes (`"input"` vs `"authorization"`) tells you what to
+  branch on.
+- **Building a host that surfaces MCP elicitation the same way it surfaces your own tool
+  suspensions** — a form UI, a Telegram/Slack prompt, a CLI question — one code path handles both,
+  because both arrive as the same `Request` struct.
+- **Testing** — construct a fake `elicitation/create` payload and assert what `Request` it becomes,
+  without a real server or network connection.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Most code never touches this function">
+If you already have a `:wait_for` you use for your own tools' suspensions (the `question` builtin,
+a custom pending tool), pass the *same function* to `Mcp.load/2`'s `:wait_for`. It will receive
+`Request`s built by this exact mapping alongside your own — you rarely need to call
+`elicitation_to_request/1` yourself.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Form-mode elicitation becomes a `kind: "input"` request
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.Mcp.Protocol
+
+params = %{
+  "message" => "What is your deployment target?",
+  "requestedSchema" => %{
+    "type" => "object",
+    "properties" => %{"target" => %{"type" => "string", "enum" => ["staging", "prod"]}}
+  }
+}
+
+req = Protocol.elicitation_to_request(params)
+
+true = req.kind == "input"
+true = req.prompt == "What is your deployment target?"
+true = req.url == nil
+true = req.data["schema"]["properties"]["target"]["enum"] == ["staging", "prod"]
+true = String.starts_with?(req.id, "elc-")
+
+IO.puts("ok: #{req.kind} — #{req.prompt}")
 ```
 
-### 2. TODO — the realistic case
+### 2. URL-mode elicitation becomes a `kind: "authorization"` request
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.Mcp.Protocol
+
+params = %{
+  "mode" => "url",
+  "message" => "Authorize toolnexus to access your calendar",
+  "url" => "https://example.com/oauth/authorize?state=abc123"
+}
+
+req = Protocol.elicitation_to_request(params)
+
+true = req.kind == "authorization"
+true = req.prompt == "Authorize toolnexus to access your calendar"
+true = req.url == "https://example.com/oauth/authorize?state=abc123"
+true = req.data == nil
+
+IO.puts("ok: #{req.kind} — #{req.url}")
 ```
 
-### 3. TODO — the full surface
+### 3. Round-tripping an `Answer` back to the MCP result shape
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+Three outcomes: accepted (with data), declined, or anything else treated as a cancel.
+
+```elixir test
+alias Toolnexus.{Answer, Mcp.Protocol}
+
+accepted = Protocol.answer_to_elicit_result(%Answer{id: "a1", ok: true, data: %{"target" => "prod"}})
+true = accepted == %{"action" => "accept", "content" => %{"target" => "prod"}}
+
+# ok: true with no data still accepts, with empty content.
+accepted_empty = Protocol.answer_to_elicit_result(%Answer{id: "a2", ok: true})
+true = accepted_empty == %{"action" => "accept", "content" => %{}}
+
+declined = Protocol.answer_to_elicit_result(%Answer{id: "a3", ok: false, reason: "declined"})
+true = declined == %{"action" => "decline"}
+
+# Anything that isn't an explicit decline is a cancel — e.g. a timeout upstream.
+cancelled = Protocol.answer_to_elicit_result(%Answer{id: "a4", ok: false, reason: "timeout"})
+true = cancelled == %{"action" => "cancel"}
+
+IO.puts("ok: accept/decline/cancel all mapped")
 ```
+
+## Mapping
+
+| MCP `elicitation/create` params | §10 `Request` |
+|---|---|
+| `message` | `prompt` |
+| `mode == "url"` | `kind: "authorization"`, and `url` carries `params["url"]` |
+| `mode != "url"` (form) | `kind: "input"`, and `data.schema` carries `params["requestedSchema"]` (when present) |
+| — | `id` is freshly generated (`"elc-<ts36>-<seq>"`) |
+
+| §10 `Answer` | MCP elicit result |
+|---|---|
+| `ok: true` | `%{"action" => "accept", "content" => data \|\| %{}}` |
+| `ok: false, reason: "declined"` | `%{"action" => "decline"}` |
+| `ok: false`, any other reason | `%{"action" => "cancel"}` |
 
 ## The same call in the other five ports
 
@@ -62,12 +151,15 @@ _TODO: name the alternative and when to prefer it._
 | Java | `McpSource.elicitationToRequest` | [→](/api/java/mcp/elicitation/) |
 | C# | `McpSource.ElicitationToRequest` | [→](/api/csharp/mcp/elicitation/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+<Aside type="note" title="Module placement is Elixir-specific">
+The other ports hang this function off their MCP source type directly (`McpSource.*`); Elixir
+splits the pure JSON-RPC codec into `Toolnexus.Mcp.Protocol`, so the equivalent symbol here is
+`Toolnexus.Mcp.Protocol.elicitation_to_request/1`, not `Toolnexus.Mcp.Protocol.elicitation_to_request/1`.
+The mapping itself is identical across all six ports.
+</Aside>
 
 ## See also
 
-- [`Toolnexus.Mcp.load`](/api/elixir/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
-- [`Toolnexus.Mcp.load`](/api/elixir/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
-- [`Toolnexus.Mcp.list_tools`](/api/elixir/mcp/list-tools/) — List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
-- [`Toolnexus.Mcp.parse_config`](/api/elixir/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
+- [`Toolnexus.Mcp.load` (ctx-aware form)](/api/elixir/mcp/load-with-context/) — where `:wait_for` receives these requests
+- [`Toolnexus.Mcp.load`](/api/elixir/mcp/load/) — the base connect call
+- `Toolnexus.Request` / `Toolnexus.Answer` — the §10 suspension contract this bridges onto

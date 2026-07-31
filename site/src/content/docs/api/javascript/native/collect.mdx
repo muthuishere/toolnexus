@@ -8,49 +8,162 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/native.ts">js/src/native.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function collectTools(obj: object): Tool[]
 ```
 
-Sweep a module or class and collect every function marked as a tool.
+The other half of [`tool`](/api/javascript/native/reflect/): sweep an object — a plain object of
+functions, a class instance, a module namespace — and return every `Tool` that was marked on it.
+Decorating marks; `collectTools` is what actually turns those marks into the `Tool[]` you hand to
+[`createToolkit`](/api/javascript/toolkit/create/) or a provider adapter.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- Right after applying [`tool(...)`](/api/javascript/native/reflect/) to a class instance or a
+  plain object — this is the call that produces the `Tool[]`.
+- Building a tool surface from a **module namespace** (`import * as api from "./service.js"`):
+  every exported function that was decorated is one `collectTools(api)` call away from a `Tool`.
+- Assembling `extraTools` for [`createToolkit`](/api/javascript/toolkit/create/) out of several
+  decorated services at once — `collectTools` is per-object, so you call it once per service and
+  concatenate.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Skip collectTools entirely if you're not using tool(...)">
+`collectTools` only finds what [`tool`](/api/javascript/native/reflect/) marked. If you're building
+tools directly rather than decorating existing methods, [`defineTool`](/api/javascript/native/define-tool/)
+already gives you a `Tool` with nothing to sweep afterward.
 </Aside>
+
+`collectTools` reads from **two independent sources** and concatenates them — understanding both is
+the whole API surface here:
+
+1. **Per-instance registry.** A decorated **class field/method** with a real decorator context
+   (one that calls `addInitializer`) registers itself into a `WeakMap` keyed on the constructed
+   instance. `collectTools(instance)` reads that instance's entries.
+2. **Own-property duck-typing.** Any function that is an **own, enumerable property** of `obj` and
+   carries a `.__tool` (set by `tool(...)` on every function it touches, decorator context or not)
+   is picked up by scanning `Object.keys(obj)`.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — a plain object of decorated functions
 
-{/* TODO:example1 */}
-```ts
-// TODO
+The duck-typing path: no class, no `addInitializer` — just functions marked with `tool(...)` and
+assigned as an object's own properties.
+
+```ts test
+import assert from "node:assert"
+import { tool, collectTools } from "toolnexus"
+
+function ping() {
+  return "pong"
+}
+tool("Health check")(ping, { name: "ping" })
+
+// A key with no .__tool (an ordinary function, or a non-function value) is silently skipped.
+const api = { ping, version: "1.0.0", helper: () => "not a tool" }
+
+const tools = collectTools(api)
+assert.equal(tools.length, 1)
+assert.equal(tools[0].name, "ping")
+assert.equal((await tools[0].execute({})).output, "pong")
+
+console.log("ok:", tools.map((t) => t.name).join(", "))
 ```
 
-### 2. TODO — the realistic case
+### 2. A module's worth of decorated exports
 
-{/* TODO:example2 */}
-```ts
-// TODO
+The realistic shape: several functions in a "module" (here, an object standing in for one),
+decorated once, swept in one call — the pattern for turning an existing service into tools without
+writing a `defineTool({...})` per function.
+
+```ts test
+import assert from "node:assert"
+import { tool, collectTools } from "toolnexus"
+
+const orders = {
+  lookupOrder(args: { id: string }) {
+    return { id: args.id, status: "shipped" }
+  },
+  cancelOrder(args: { id: string }) {
+    return `cancelled ${args.id}`
+  },
+  // Not every export needs to be a tool — undecorated functions are just ignored.
+  _internalHelper() {
+    return "not exposed"
+  },
+}
+
+tool("Fetch an order by id")(orders.lookupOrder, { name: "lookupOrder" })
+tool("Cancel an order")(orders.cancelOrder, { name: "cancelOrder" })
+
+const tools = collectTools(orders)
+assert.deepEqual(tools.map((t) => t.name).sort(), ["cancelOrder", "lookupOrder"])
+assert.ok(!tools.some((t) => t.name === "_internalHelper"))
+
+const res = await tools.find((t) => t.name === "lookupOrder")!.execute({ id: "A-1" })
+assert.deepEqual(JSON.parse(res.output), { id: "A-1", status: "shipped" })
+
+console.log("ok:", tools.map((t) => t.name).join(", "))
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — both sources on one object, and independence across instances
 
-{/* TODO:example3 */}
-```ts
-// TODO
+A class instance can carry tools from **both** sources at once: a real, `addInitializer`-backed
+method decoration (registry) alongside an own-property function marked with `tool(...)` directly
+(duck-typing) — `collectTools` returns both, and each class instance keeps its own registry
+entries.
+
+```ts test
+import assert from "node:assert"
+import { tool, collectTools } from "toolnexus"
+
+class Service {
+  // An own property, decorated directly — found via duck-typing.
+  ping = tool("Health check")(function ping() {
+    return "pong"
+  }, { name: "ping" })
+}
+
+// A real prototype method, decorated with a context that supplies addInitializer —
+// found via the per-instance registry, same mechanism a genuine `@tool(...)` uses.
+const initializers: Array<(instance: object) => void> = []
+Service.prototype.status = tool("Report status")(function status() {
+  return "ok"
+}, {
+  name: "status",
+  addInitializer(fn: () => void) {
+    initializers.push(fn as unknown as (instance: object) => void)
+  },
+})
+
+const a = new Service()
+const b = new Service()
+for (const init of initializers) {
+  init.call(a)
+  init.call(b)
+}
+
+const toolsA = collectTools(a)
+assert.deepEqual(toolsA.map((t) => t.name).sort(), ["ping", "status"], "both sources contribute")
+
+// Sweeping an object with neither source present ⇒ an empty list, not an error.
+assert.deepEqual(collectTools({}), [])
+assert.deepEqual(collectTools(new (class Empty {})()), [])
+
+console.log("ok:", toolsA.map((t) => t.name).join(", "))
 ```
+
+<Aside type="caution">
+If the same member is reachable through **both** paths at once — e.g. an arrow-function class
+field decorated with a context that also supplies `addInitializer` — `collectTools` returns it
+**twice**: once from the registry, once from the property scan. See the caution on
+[`tool`](/api/javascript/native/reflect/) for how to avoid that.
+</Aside>
 
 ## The same call in the other five ports
 
@@ -58,8 +171,8 @@ _TODO: name the alternative and when to prefer it._
 |---|---|---|
 | Python | _not shipped in this port_ |  |
 | Go | _not shipped in this port_ |  |
-| Java | `Tools.collect` | [→](/api/java/native/collect/) |
-| C# | `Tools.Collect` | [→](/api/csharp/native/collect/) |
+| Java | `Tools.fromObject` | [→](/api/java/native/collect/) |
+| C# | `Tools.FromObject` | [→](/api/csharp/native/collect/) |
 | Elixir | _not shipped in this port_ |  |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.

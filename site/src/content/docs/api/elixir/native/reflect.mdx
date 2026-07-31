@@ -19,8 +19,33 @@ Derive the schema from the function signature or annotation instead of writing i
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Elixir has no macro or attribute that inspects a function's typespec or argument list and derives
+a JSON Schema from it — there is no `@tool` decorator, no runtime reflection over a `def`'s
+signature the way JavaScript's `tool()` wrapper or Python's `tool()` decorator can read type
+hints. [`Toolnexus.Native.define_tool/1`](/api/elixir/native/define-tool/) is the whole native-tool
+surface in this port, and it always takes an **explicit** `:input_schema` map — you write the JSON
+Schema once, by hand, next to the function:
+
+```elixir
+alias Toolnexus.Native
+
+Native.define_tool(%{
+  name: "get_weather",
+  description: "Current weather for a city",
+  input_schema: %{
+    "type" => "object",
+    "properties" => %{"city" => %{"type" => "string"}},
+    "required" => ["city"]
+  },
+  execute: fn args, _ctx -> "sunny in #{args["city"]}" end
+})
+```
+
+This costs a few extra lines per tool compared to a reflected signature, in exchange for a schema
+that is never a guess about what a dynamically-typed function accepts — Elixir function clauses
+and guards don't carry the kind of static type information reflection would need anyway. If you
+are hand-writing more than a handful of these, factor the schema into a module attribute or a
+shared helper rather than repeating it inline.
 
 ## The same capability in the other ports
 
