@@ -28,9 +28,19 @@
             [toolnexus.tool :as tool]))
 
 (defn- suspend
-  "§10 — a ToolResult whose metadata.pending is a Request is a suspension."
+  "§10 — a ToolResult whose metadata.pending is a Request is a suspension.
+
+  isError is TRUE, per §10's ToolResult block: the call \"did not produce a
+  usable answer\". That does NOT contradict §10's later \"a suspension is never
+  a tool error\" — that sentence is about the `tool` OBSERVABILITY EVENT, which
+  carries isError:false plus a pending:true marker so error-rate metrics and
+  circuit-breakers do not count it. Two different objects, two different flags.
+
+  This namespace originally produced isError:false here while `client/suspend`
+  produced true. Both worked, because the loop branches on metadata.pending
+  alone — which is exactly why it would have drifted unnoticed."
   [request]
-  (tool/success "" {:pending request}))
+  (tool/failure "Waiting for a response." {:pending request}))
 
 ;; ---------------------------------------------------------------------------
 ;; small pure helpers

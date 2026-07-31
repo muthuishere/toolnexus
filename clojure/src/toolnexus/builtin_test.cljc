@@ -254,8 +254,12 @@
   (testing "first call suspends with a §10 Request in metadata.pending"
     (let [r (run "question" {:questions qs})
           pending (get-in r [:metadata :pending])]
-      (is (false? (:isError r)))
-      (is (= "" (:output r)))
+      ;; §10's ToolResult block: isError TRUE — the call "did not produce a
+      ;; usable answer". §10's later "a suspension is never a tool error" is
+      ;; about the `tool` OBSERVABILITY EVENT (isError:false + pending:true, so
+      ;; circuit-breakers do not count it), not about this result.
+      (is (true? (:isError r)))
+      (is (= "Waiting for a response." (:output r)))
       (is (= "question" (:kind pending)))
       (is (= "Pick a colour (options: red, green)\nFree text?" (:prompt pending)))
       (is (= qs (get-in pending [:data :questions])))
