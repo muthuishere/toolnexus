@@ -77,11 +77,20 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- skill-seq
-  "Skills arrive either as a SkillSource-shaped map (name -> skill) or as a
-  plain sequence of `{:name :description}`. Both normalize to a sorted seq —
-  sorted because two runtimes must not disagree on order."
+  "Skills arrive in any of the three shapes the port produces:
+    * `toolnexus.skill/list-skills` ⇒ `{:skills [info …] :skipped […]}`
+    * a SkillSource-shaped index    ⇒ `{name -> info}`
+    * a plain sequence of `{:name :description}`
+  All normalize to a sorted seq — sorted because two runtimes must not disagree
+  on order."
   [skills]
-  (sort-by :name (if (map? skills) (vals skills) (or skills []))))
+  (sort-by :name
+           (cond
+             (nil? skills)                     []
+             (and (map? skills)
+                  (contains? skills :skills))  (:skills skills)
+             (map? skills)                     (vals skills)
+             :else                             skills)))
 
 (defn agent-card
   "§7B's Agent Card, with every default the spec names.

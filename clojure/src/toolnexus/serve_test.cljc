@@ -38,7 +38,7 @@
 (defn- native [nm description f]
   (tool/tool {:name nm :description description
               :input-schema {:type "object"} :source "native"
-              :execute (fn [args] (tool/ok (f args)))}))
+              :execute (fn [args] (tool/success (f args)))}))
 
 (def ^:private tk
   (tool/toolkit
@@ -53,8 +53,8 @@
                  :input-schema {:type "object"} :source "skill"
                  :execute (fn [args]
                             (if (some (fn [s] (= (:name s) (str (:name args)))) skills)
-                              (tool/ok (str "<skill_content name=\"" (:name args) "\">"))
-                              (tool/err (str "unknown skill: " (:name args)))))})]))
+                              (tool/success (str "<skill_content name=\"" (:name args) "\">"))
+                              (tool/failure (str "unknown skill: " (:name args)))))})]))
 
 ;; ---------------------------------------------------------------------------
 ;; the fulfilment under test
@@ -138,7 +138,9 @@
   (rpc! (str (url k) "/") "SendMessage"
         {:message {:role "user" :parts [{:kind "text" :text text}]}}))
 (defn- get-task [k id] (rpc! (str (url k) "/") "GetTask" {:id id}))
-(defn- mcp! [k method params] (rpc! (str (url k) "/mcp") method params))
+(defn- mcp!
+  ([k method] (mcp! k method {}))
+  ([k method params] (rpc! (str (url k) "/mcp") method params)))
 
 (defn- poll-for [k id pred limit]
   (loop [n 0]
@@ -153,7 +155,7 @@
 ;; §7B — the Agent Card
 ;; ---------------------------------------------------------------------------
 
-(deftest card-defaults-are-exactly-the-spec's
+(deftest card-defaults-are-exactly-the-spec
   (let [c (card :s2)]
     (is (= ["capabilities" "defaultInputModes" "defaultOutputModes" "description"
             "name" "protocolVersion" "skills" "url" "version"]
@@ -327,12 +329,35 @@
          (get-in (mcp! :s2 "initialize" {}) [:result :serverInfo]))))
 
 (deftest on-call-fires-per-inbound-tools-call
+  ;; Self-contained on purpose: clojure.test's var order is NOT the source
+  ;; order, and it differs between the JVM and cljgo — a test that reads an
+  ;; atom another test filled is green on one host and red on the other.
+  (reset! calls [])
+  (mcp! :s2 "tools/call" {:name "echo_ok" :arguments {:msg "x"}})
+  (mcp! :s2 "tools/call" {:name "kaboom" :arguments {}})
+  (mcp! :s2 "tools/call" {:name "not_a_tool" :arguments {}})
   (let [evs @calls]
-    (is (seq evs))
+    (is (= 2 (count evs)) "an unknown tool never reaches a tool, so never fires on-call")
     (is (every? (fn [c] (= #{:name :source :isError} (set (keys c)))) evs))
-    (is (contains? (set (map :name evs)) "kaboom"))
-    (is (true? (:isError (first (filter (fn [c] (= "kaboom" (:name c))) evs)))))
-    (is (false? (:isError (first (filter (fn [c] (= "echo_ok" (:name c))) evs)))))))
+    (is (= ["echo_ok" "kaboom"] (mapv :name evs)) "in call order")
+    (is (= [false true] (mapv :isError evs)))
+    (is (= ["native" "native"] (mapv :source evs)))))
+
+(deftest co-mounted-profiles-carry-two-independent-identities
+  ;; NOT a bug in this port — a SPEC observation, pinned here so it cannot drift
+  ;; away unnoticed (S21 finding 7). §7B and §7C give the two profiles
+  ;; independent name/version with DIFFERENT defaults, so one base URL answers
+  ;; as two differently-named agents; and the Agent Card has no field at all
+  ;; that advertises the co-mounted /mcp surface, so an A2A peer that fetches
+  ;; the card can never discover the MCP server one path away.
+  (let [c (card :s2)]
+    (is (= "toolnexus-agent" (:name c)))
+    (is (= "toolnexus" (get-in (mcp! :s2 "initialize") [:result :serverInfo :name]))
+        "same server, same base URL, two names")
+    (is (= (str (url :s2) "/") (:url c))
+        "card.url is the A2A JSON-RPC endpoint, not the MCP one")
+    (is (not (str/includes? (json/write-str c) "/mcp"))
+        "nothing in the card advertises the co-mounted MCP surface")))
 
 ;; ---------------------------------------------------------------------------
 ;; absence

@@ -27,8 +27,9 @@
            (:input-schema upper)))
     (is (fn? (:execute upper))))
   (testing "an omitted description/schema falls back to the §1 defaults"
-    (is (= "" (:description boom)))
-    (is (= {:type "object"} (:input-schema boom)))))
+    (let [bare (native/native-tool {:name "bare" :run (fn [_] "x")})]
+      (is (= "" (:description bare)))
+      (is (= {:type "object"} (:input-schema bare))))))
 
 (deftest string-return-becomes-output
   (is (= {:output "ABC" :isError false} ((:execute upper) {:text "abc"})))
