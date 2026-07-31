@@ -63,5 +63,11 @@
 (defn -main [& _]
   (let [r (run)]
     (println (json/write-str r))
+    ;; The suite uses `future` for parallel tool calls. On the JVM the agent
+    ;; pool's non-daemon threads keep the process alive for their 60s keepalive
+    ;; after the last assertion, so a 7s suite takes 67s of wall clock. Present
+    ;; on BOTH hosts — checked with (resolve 'clojure.core/shutdown-agents) —
+    ;; so it needs no reader conditional and is a no-op where there is no pool.
+    (shutdown-agents)
     (when-not (= "OK" (:gate r))
       (throw (ex-info (:gate r) r)))))
