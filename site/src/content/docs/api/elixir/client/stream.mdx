@@ -8,49 +8,233 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/client.ex">elixir/lib/toolnexus/client.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec stream(Toolnexus.Client.t(), String.t(), term(), keyword()) :: Enumerable.t()
+def stream(client, prompt, toolkit, opts \\ [])
+
+# opts: :id — makes the stream stateful, like ask/4
+#
+# yields event maps:
+#   %{type: "text", delta: String.t()}
+#   %{type: "tool_call", id: String.t(), name: String.t(), args: map()}
+#   %{type: "tool_result", id: String.t(), name: String.t(), output: String.t(), is_error: boolean()}
+#   %{type: "usage", usage: map()}
+#   %{type: "pending", request: Toolnexus.Request.t()}          # §10
+#   %{type: "done", result: Toolnexus.Client.RunResult.t()}
 ```
 
-The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+The same agent loop as [`run/4`](/api/elixir/client/run/) — same hooks, same tools, same
+telemetry — but instead of blocking until it's finished, `stream/4` returns an `Enumerable.t()`
+of events as they happen: text token deltas, a `tool_call` right before a tool runs, a
+`tool_result` right after, and a terminal `done` event carrying the exact same `RunResult` that
+`run/4` would have returned.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **A chat UI or CLI that prints tokens as they arrive** instead of waiting for the whole answer.
+- **You want tool-call visibility mid-run** — `tool_call`/`tool_result` events fire as each tool
+  executes, useful for a "thinking…" indicator or a live audit trail.
+- **A suspended tool (§10)** — the `pending` event fires *before* `wait_for` is even consulted, so
+  a channel can push an approval link to a user the moment a tool asks for one.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for run/4 when you only need the final answer">
+[`Toolnexus.Client.run/4`](/api/elixir/client/run/) runs the identical loop and blocks for one
+`RunResult`. Use `stream/4` only when you need the incremental events — every event's payload is
+also available, in aggregate, on the `done` event's `RunResult`, so `stream/4` never trades away
+information `run/4` has.
 </Aside>
+
+For streaming with a callback instead of an `Enumerable`, see
+[`ask/4`'s `:on_text` option](/api/elixir/client/conversation/) — it consumes `stream/4`
+internally and hands back the final `RunResult`, for callers who want deltas pushed to them
+rather than an iterator to pull from.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — text deltas, then `done`
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+The underlying wire format is OpenAI SSE (`stream:true` + `stream_options.include_usage`) —
+`data: {...}` lines terminated by `data: [DONE]`. The plug below serves that shape directly, in
+process, with no network and no real key.
+
+```elixir test
+alias Toolnexus.Client
+
+sse = """
+data: {"choices":[{"delta":{"content":"Hel"}}]}
+
+data: {"choices":[{"delta":{"content":"lo"}}]}
+
+data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}
+
+data: [DONE]
+
+"""
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  conn |> Plug.Conn.put_resp_content_type("text/event-stream") |> Plug.Conn.send_resp(200, sse)
+end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "openai",
+    model: "gpt-x",
+    api_key: "test-key",
+    http_options: [plug: plug]
+  )
+
+events = client |> Client.stream("hi", []) |> Enum.to_list()
+
+true = length(events) == 4
+[e1, e2, e3, e4] = events
+
+true = e1 == %{type: "text", delta: "Hel"}
+true = e2 == %{type: "text", delta: "lo"}
+true = e3 == %{type: "usage", usage: %{prompt_tokens: 5, completion_tokens: 2, total_tokens: 7}}
+true = e4.type == "done"
+true = e4.result.text == "Hello"
+true = e4.result.status == "done"
+
+IO.puts("ok: streamed #{e4.result.text |> String.length()} chars over #{length(events)} events")
 ```
 
-### 2. TODO — the realistic case
+### 2. Tool-call events, then the final turn's text
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+`tool_call`/`tool_result` fire around the tool's execution; the assistant's `content` deltas from
+the model's *next* turn (after seeing the tool result) stream in after that.
+
+```elixir test
+alias Toolnexus.{Client, Context, Tool, ToolResult}
+
+add_tool = %Tool{
+  name: "add",
+  description: "Add two numbers",
+  input_schema: %{"type" => "object", "properties" => %{}},
+  source: "native",
+  execute: fn args, %Context{} -> ToolResult.ok(to_string(trunc(args["a"] + args["b"]))) end
+}
+
+tool_call_sse = """
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"add","arguments":""}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"a\\":2,\\"b\\":3}"}}]}}]}
+
+data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":6,"completion_tokens":4,"total_tokens":10}}
+
+data: [DONE]
+
+"""
+
+final_sse = """
+data: {"choices":[{"delta":{"content":"the sum is 5"}}]}
+
+data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}
+
+data: [DONE]
+
+"""
+
+{:ok, calls} = Agent.start_link(fn -> 0 end)
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  n = Agent.get_and_update(calls, fn c -> {c + 1, c + 1} end)
+  body = if n == 1, do: tool_call_sse, else: final_sse
+  conn |> Plug.Conn.put_resp_content_type("text/event-stream") |> Plug.Conn.send_resp(200, body)
+end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "openai",
+    model: "gpt-x",
+    api_key: "test-key",
+    http_options: [plug: plug]
+  )
+
+events = client |> Client.stream("add 2 and 3", [add_tool]) |> Enum.to_list()
+
+[call_ev, result_ev, text_ev, usage_ev, done_ev] = events
+
+true = call_ev == %{type: "tool_call", id: "c1", name: "add", args: %{"a" => 2, "b" => 3}}
+true = result_ev == %{type: "tool_result", id: "c1", name: "add", output: "5", is_error: false}
+true = text_ev == %{type: "text", delta: "the sum is 5"}
+true = usage_ev.type == "usage"
+true = done_ev.result.text == "the sum is 5"
+true = done_ev.result.tool_call_count == 1
+
+IO.puts("ok: #{call_ev.name}(#{inspect(call_ev.args)}) -> #{result_ev.output} -> #{done_ev.result.text}")
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — stateful with `:id`
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+Pass `:id` and `stream/4` becomes stateful exactly like `ask/4`: it loads that id's transcript
+from the client's `ConversationStore` before streaming, and saves the updated transcript back
+when the `done` event fires — so the *next* call with the same `:id` continues the conversation.
+
+```elixir test
+alias Toolnexus.Client
+alias Toolnexus.Client.InMemoryConversationStore
+
+ack_sse = """
+data: {"choices":[{"delta":{"content":"ack"}}]}
+
+data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}
+
+data: [DONE]
+
+"""
+
+{:ok, bodies} = Agent.start_link(fn -> [] end)
+
+plug = fn conn ->
+  {:ok, raw, conn} = Plug.Conn.read_body(conn)
+  Agent.update(bodies, fn b -> b ++ [Jason.decode!(raw)] end)
+  conn |> Plug.Conn.put_resp_content_type("text/event-stream") |> Plug.Conn.send_resp(200, ack_sse)
+end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "openai",
+    model: "gpt-x",
+    api_key: "test-key",
+    http_options: [plug: plug]
+  )
+
+_ = client |> Client.stream("remember 42", [], id: "conv-1") |> Enum.to_list()
+
+store = Client.conversation_store(client)
+history = InMemoryConversationStore.get(store, "conv-1")
+true = length(history) == 2
+
+_ = client |> Client.stream("what did I say?", [], id: "conv-1") |> Enum.to_list()
+
+[_first_body, second_body] = Agent.get(bodies, & &1)
+# The second stream's request carried the FIRST turn's history plus the new prompt.
+true = length(second_body["messages"]) == 3
+true = List.last(second_body["messages"]) == %{"role" => "user", "content" => "what did I say?"}
+
+IO.puts("ok: stream/4 with :id persisted #{length(history)} messages, continued to #{length(second_body["messages"])}")
 ```
+
+## Event shapes
+
+| Event | Fields | When |
+|---|---|---|
+| `%{type: "text", delta}` | `delta :: String.t()` | Each assistant text token as it arrives. |
+| `%{type: "tool_call", id, name, args}` | `args :: map()` | Right before a tool call executes. |
+| `%{type: "tool_result", id, name, output, is_error}` | | Right after it ran — skipped for a suspending call (see `pending` below). |
+| `%{type: "usage", usage}` | `%{prompt_tokens, completion_tokens, total_tokens}` | Once per completed turn with no further tool calls, before `done`. |
+| `%{type: "pending", request}` | `request :: Toolnexus.Request.t()` | §10 — a tool suspended; fires before `wait_for` runs. |
+| `%{type: "done", result}` | `result :: Toolnexus.Client.RunResult.t()` | Terminal — same shape `run/4` returns. |
 
 ## The same call in the other five ports
 
@@ -62,12 +246,15 @@ _TODO: name the alternative and when to prefer it._
 | Java | `LlmClient.stream` | [→](/api/java/client/stream/) |
 | C# | `LlmClient.StreamAsync` | [→](/api/csharp/client/stream/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
+Behavior is identical across ports by contract — same `examples/` fixtures, same output. Each
+language exposes the idiomatic stream shape: Elixir uses a lazy `Enumerable.t()` built with
+`Stream.resource/3`, backed by a monitored process so an early `Enum.take`/halt still tears the
+run down cleanly.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Toolnexus.Client.create`](/api/elixir/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
-- [`Toolnexus.Client.run`](/api/elixir/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
-- [`Toolnexus.Client.create`](/api/elixir/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
-- [`Toolnexus.Client conversation`](/api/elixir/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.
+- [`Toolnexus.Client.run`](/api/elixir/client/run/) — the same loop, blocking for one `RunResult`.
+- [`Toolnexus.Client conversation`](/api/elixir/client/conversation/) — `ask/4` with `:on_text`, the callback-style streaming path built on this.
+- [`Toolnexus.Client.create`](/api/elixir/client/hooks/) — hooks fire identically whether you `run/4` or `stream/4`.
+- [`Toolnexus.Mcp.Protocol.elicitation_to_request`](/api/elixir/mcp/elicitation/) — what a `pending` event's `request` looks like when it comes from an MCP server.

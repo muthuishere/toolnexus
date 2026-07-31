@@ -8,49 +8,265 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/client.go">golang/client.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+type ErrorInfo struct {
+	Err       error // transport error (nil on a non-ok response)
+	Status    int   // HTTP status (0 on a transport error)
+	Attempt   int   // zero-based attempt index
+	Retryable bool  // true if Status/Err is in the default retryable set (429/5xx/network)
+}
+
+type Tier string
+const (
+	TierRetry Tier = "retry"
+	TierFail  Tier = "fail"
+)
+
+// ClientOptions.OnError func(ErrorInfo) Tier
+// ClientOptions.Retries, RetryBaseMs, TimeoutMs int
 ```
 
-Classify an LLM error into retry / fail, bound a run with a deadline, and cancel cleanly.
+Three independent resilience knobs on `ClientOptions`: retry classification (`OnError`, given an
+`ErrorInfo` per failed attempt, returns `TierRetry` or `TierFail`), a whole-run deadline
+(`TimeoutMs`), and `ctx` cancellation — both propagate to abort the in-flight HTTP request rather
+than let it run to completion unheeded.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+The defaults (retry 429/5xx/network up to `Retries`, exponential backoff honoring `Retry-After`, no
+deadline) are right for most callers — you get resilience for free by doing nothing. Reach for
+`OnError` when a provider's failure modes don't fit the default classifier (e.g. treat a specific 400
+as retryable, or stop retrying 429 early because you're rate-limit-sensitive); reach for `TimeoutMs`
+to bound worst-case latency on a run; reach for `ctx` cancellation for the ordinary Go pattern of
+"the caller gave up, stop everything downstream."
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="A tool suspension is a different mechanism — not an error tier">
+There is no `"suspend"` `Tier`. §10 suspension (a tool halting mid-call awaiting human/out-of-band
+input) is a distinct, deliberate pause — never routed through `OnError`, and a suspended tool call is
+recorded as `Pending`, not `IsError`, on the [`MetricEvent`](/api/go/client/metrics/). `OnError`
+governs only failed LLM HTTP attempts.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+Each example points `CreateClient` at a local `httptest.Server` that returns 429/5xx or stalls — no
+real network call, no real API key. `RetryBaseMs`/`TimeoutMs` are set small so the examples run fast.
 
-{/* TODO:example1 */}
-```go
-// TODO
+### 1. The smallest useful call — default retry on a transient 503
+
+No `OnError` set: the default classifier retries 429/5xx/network up to `Retries` (2 by default),
+with exponential backoff.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"try later"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hello"}}]}`))
+	}))
+	defer srv.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "test-key", RetryBaseMs: 1,
+	})
+	res, err := client.Run(context.Background(), "hi", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if res.Text != "hello" || atomic.LoadInt32(&calls) != 3 {
+		log.Fatalf("text=%q calls=%d, want hello/3", res.Text, calls)
+	}
+
+	fmt.Println("ok: succeeded after", calls, "attempts")
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — a custom `OnError` classifier
 
-{/* TODO:example2 */}
-```go
-// TODO
+Return `TierFail` to stop retrying a status the default set would otherwise retry (rate-limit
+sensitive callers often want this for 429), or `TierRetry` to retry something the default set treats
+as terminal.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"slow down"}`))
+	}))
+	defer srv.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	var seen toolnexus.ErrorInfo
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "test-key", RetryBaseMs: 1,
+		OnError: func(info toolnexus.ErrorInfo) toolnexus.Tier {
+			seen = info
+			return toolnexus.TierFail // fail fast on 429 instead of retrying
+		},
+	})
+	_, err = client.Run(context.Background(), "hi", tk)
+	if err == nil {
+		log.Fatal("expected an error when OnError returns TierFail")
+	}
+	if atomic.LoadInt32(&calls) != 1 {
+		log.Fatalf("calls = %d, want 1 (TierFail ⇒ no retry)", calls)
+	}
+	if seen.Status != 429 || !seen.Retryable || seen.Attempt != 0 || seen.Err != nil {
+		log.Fatalf("ErrorInfo = %+v, want Status:429 Retryable:true Attempt:0 Err:nil", seen)
+	}
+
+	fmt.Println("ok: failed fast on attempt", seen.Attempt, "status", seen.Status)
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — timeout, cancellation, and retry exhaustion together
 
-{/* TODO:example3 */}
-```go
-// TODO
+A run-level `TimeoutMs` aborts an in-flight request that's taking too long; `ctx` cancellation does
+the same for an ordinary "caller gave up," and neither retries afterward — only the retry classifier
+governs retries, never a deadline or a cancellation.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"time"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	// 1. TimeoutMs aborts a run that would otherwise hang.
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	defer slow.Close()
+	timeoutClient := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: slow.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "test-key", TimeoutMs: 80,
+	})
+	start := time.Now()
+	if _, err := timeoutClient.Run(context.Background(), "hi", tk); err == nil {
+		log.Fatal("expected a timeout error")
+	}
+	if time.Since(start) > time.Second {
+		log.Fatal("Run should have aborted well under 1s")
+	}
+
+	// 2. ctx cancellation aborts in-flight and is never retried.
+	var calls int32
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	defer hang.Close()
+	cancelClient := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: hang.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "test-key", RetryBaseMs: 1,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	if _, err := cancelClient.Run(ctx, "hi", tk); err == nil {
+		log.Fatal("expected a cancellation error")
+	}
+	if atomic.LoadInt32(&calls) != 1 {
+		log.Fatalf("calls = %d, want 1 (cancellation must not retry)", calls)
+	}
+
+	// 3. Retries is a hard budget — exhausting it surfaces the failure, never loops forever.
+	var failCalls int32
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&failCalls, 1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer failing.Close()
+	budgetClient := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: failing.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "test-key", Retries: 1, RetryBaseMs: 1,
+	})
+	if _, err := budgetClient.Run(context.Background(), "hi", tk); err == nil {
+		log.Fatal("expected an error after the retry budget is exhausted")
+	}
+	if atomic.LoadInt32(&failCalls) != 2 { // 1 try + 1 retry
+		log.Fatalf("calls = %d, want 2 (1 try + Retries:1)", failCalls)
+	}
+
+	fmt.Println("ok: timeout, cancellation, and retry exhaustion all abort cleanly")
+}
 ```
+
+## ClientOptions resilience fields
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `Retries` | `int` | `2` | Retries on transient LLM errors (429/5xx/network), bounded — never unbounded even with a custom `OnError`. |
+| `RetryBaseMs` | `int` | `500` | Base backoff in ms; exponential + jitter, honoring a `Retry-After` header when present. |
+| `TimeoutMs` | `int` | `0` (no deadline) | When `> 0`, the whole run (and its in-flight request) is aborted once exceeded. |
+| `OnError` | `func(ErrorInfo) Tier` | the default classifier | Classify each failed attempt; `nil` ⇒ retryable status/network ⇒ `TierRetry`, else `TierFail` (byte-identical to no classifier at all). |
+| `HTTPClient` | `*http.Client` | `http.DefaultClient` | Overrides the client used for LLM requests (retries included); scope is the LLM path only. |
 
 ## The same call in the other five ports
 
@@ -62,6 +278,9 @@ _TODO: name the alternative and when to prefer it._
 | C# | `LlmClient.ErrorInfo` | [→](/api/csharp/client/resilience/) |
 | Elixir | `Toolnexus.Client.create` | [→](/api/elixir/client/resilience/) |
 
+Elixir configures retries/timeout as options on `Toolnexus.Client.create/1` rather than a distinct
+error-classifier type.
+
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
@@ -69,5 +288,5 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 - [`CreateClient`](/api/go/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
 - [`Client.Run`](/api/go/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
-- [`Client.Stream`](/api/go/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
 - [`Hooks`](/api/go/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+- [`MetricEvent`](/api/go/client/metrics/) — A failed run still fires a terminal `"run"` metric event with `Error` set.

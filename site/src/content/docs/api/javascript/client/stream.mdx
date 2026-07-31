@@ -8,49 +8,221 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#8-unified-llm-client-the-host-loop">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/client.ts">js/src/client.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+stream(prompt: string, ctx: { toolkit: Toolkit; id?: string; signal?: AbortSignal }): AsyncGenerator<StreamEvent, void, unknown>
 ```
 
-The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+The same host loop as [`run`](/api/javascript/client/run/), observed live. Instead of waiting for
+the whole turn, `stream` yields a `StreamEvent` as each piece happens: a `"text"` delta as the
+model writes, a `"tool_call"` the instant the model asks for one, its `"tool_result"` once it
+runs, a `"pending"` event if a tool suspends, then `"usage"` and a final `"done"` carrying the
+same `RunResult` shape `run` would have returned in one shot.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Use `stream` whenever a person or a UI is watching this turn happen — a chat window, a terminal,
+an SSE/WebSocket bridge to a browser. It is the difference between a spinner and the answer
+appearing token by token.
+
+With an `id`, `stream` is stateful exactly like `ask(prompt, { id })`: the transcript is loaded
+before streaming starts and saved back to the `ConversationStore` on the terminal `"done"` event.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use run instead when nothing is watching live">
+If the caller is a batch job, a webhook handler, or a test — anything that only cares about the
+final answer — [`Client.run`](/api/javascript/client/run/) is less code: one `await`, one
+`RunResult`. `stream` buys you live observability at the cost of consuming an `AsyncGenerator`
+correctly (a `for await` loop, one event type per iteration).
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — text deltas only
 
-{/* TODO:example1 */}
-```ts
-// TODO
+A stub server emitting an OpenAI-shaped SSE stream: two content deltas, a usage-bearing empty
+delta, then `[DONE]`. This is exactly the format `Client.stream` parses off `res.body` — no real
+network, no real key.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit } from "toolnexus"
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "content-type": "text/event-stream" })
+  res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "Hel" } }] })}\n\n`)
+  res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "lo!" } }] })}\n\n`)
+  res.write(`data: ${JSON.stringify({ choices: [{ delta: {} }], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } })}\n\n`)
+  res.write("data: [DONE]\n\n")
+  res.end()
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const tk = await createToolkit({})
+const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key" })
+
+let text = ""
+let done: any
+for await (const ev of client.stream("Say hi.", { toolkit: tk })) {
+  if (ev.type === "text") text += ev.delta
+  if (ev.type === "done") done = ev.result
+}
+assert.equal(text, "Hello!")
+assert.equal(done.text, "Hello!")
+assert.equal(done.status, "done")
+
+await tk.close()
+server.close()
+console.log("ok:", text)
 ```
 
-### 2. TODO — the realistic case
+### 2. A realistic case — tool-call events, then a stateful second turn
 
-{/* TODO:example2 */}
-```ts
-// TODO
+The model streams a `tool_calls` delta first (fragmented across chunks, the way real providers
+send it), the tool runs, then a second stream call answers in text. With `id` set, the second
+`client.stream` call continues the same transcript — proof memory works across streamed turns too.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, defineTool } from "toolnexus"
+
+let calls = 0
+const server = http.createServer((req, res) => {
+  calls++
+  res.writeHead(200, { "content-type": "text/event-stream" })
+  if (calls === 1) {
+    // tool-call arguments arrive fragmented across deltas, indexed like a real OpenAI stream
+    res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "get_weather", arguments: "" } }] } }] })}\n\n`)
+    res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"city":"Chennai"}' } }] } }] })}\n\n`)
+    res.write(`data: ${JSON.stringify({ choices: [{ delta: {} }], usage: { prompt_tokens: 6, completion_tokens: 2, total_tokens: 8 } })}\n\n`)
+  } else {
+    res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "31C in Chennai." } }] })}\n\n`)
+    res.write(`data: ${JSON.stringify({ choices: [{ delta: {} }], usage: { prompt_tokens: 12, completion_tokens: 5, total_tokens: 17 } })}\n\n`)
+  }
+  res.write("data: [DONE]\n\n")
+  res.end()
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const tk = await createToolkit({
+  builtins: false,
+  extraTools: [
+    defineTool({
+      name: "get_weather",
+      description: "Weather for a city",
+      inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+      run: ({ city }) => `31C in ${city}`,
+    }),
+  ],
+})
+const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key" })
+
+const toolCalls: string[] = []
+let finalText = ""
+for await (const ev of client.stream("Weather in Chennai?", { toolkit: tk, id: "conv-1" })) {
+  if (ev.type === "tool_call") toolCalls.push(ev.name)
+  if (ev.type === "done") finalText = ev.result.text
+}
+assert.deepEqual(toolCalls, ["get_weather"])
+assert.equal(finalText, "31C in Chennai.")
+
+// remembers by id — the store now holds this turn's transcript
+const stored = await client.conversationStore().get("conv-1")
+assert.ok(stored && stored.length > 0, "id-based stream did not persist to the store")
+
+await tk.close()
+server.close()
+console.log("ok:", finalText)
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — every event type, including a suspended tool
 
-{/* TODO:example3 */}
-```ts
-// TODO
+A tool returns a `Pending` result mid-stream; `stream` yields `"pending"` before calling `waitFor`
+so a channel can push the suspension link out immediately, then resumes once `waitFor` resolves.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, defineTool, pending } from "toolnexus"
+
+let calls = 0
+const server = http.createServer((req, res) => {
+  calls++
+  res.writeHead(200, { "content-type": "text/event-stream" })
+  if (calls === 1) {
+    res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "approve", arguments: "{}" } }] } }] })}\n\n`)
+  } else {
+    res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "Approved and done." } }] })}\n\n`)
+  }
+  res.write(`data: ${JSON.stringify({ choices: [{ delta: {} }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\n`)
+  res.write("data: [DONE]\n\n")
+  res.end()
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const tk = await createToolkit({
+  builtins: false,
+  extraTools: [
+    defineTool({
+      name: "approve",
+      description: "Needs human sign-off",
+      run: (_args, ctx) => {
+        if (ctx?.answer) return `signed off: ${ctx.answer.data?.decision}`
+        return pending({ prompt: "Approve this action?", kind: "input" })
+      },
+    }),
+  ],
+})
+const client = createClient({
+  baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key",
+  waitFor: async (request) => ({ id: request.id, ok: true, data: { decision: "yes" } }),
+})
+
+const seen: string[] = []
+let result: any
+for await (const ev of client.stream("Do the thing.", { toolkit: tk })) {
+  seen.push(ev.type)
+  if (ev.type === "done") result = ev.result
+}
+assert.ok(seen.includes("pending"), "no pending event surfaced for the suspended tool")
+assert.ok(seen.includes("tool_result"), "suspended tool never resolved to a result")
+assert.equal(result.status, "done")
+assert.equal(result.text, "Approved and done.")
+
+await tk.close()
+server.close()
+console.log("ok:", seen.join(","))
 ```
+
+## Options
+
+| Field | Type | What it does |
+|---|---|---|
+| `prompt` | `string` | The user turn to send. **Required.** |
+| `ctx.toolkit` | `Toolkit` | Tools available to the model this turn. **Required.** |
+| `ctx.id` | `string` | Conversation id. Loads history before streaming, saves it back on `"done"`. |
+| `ctx.signal` | `AbortSignal` | Aborts the run (and any in-flight request), combined with `timeoutMs`. |
+
+## What you get back
+
+`AsyncGenerator<StreamEvent>` — one of:
+
+| `type` | Fields | |
+|---|---|---|
+| `"text"` | `delta: string` | A text token as it arrives. |
+| `"tool_call"` | `id, name, args` | The model asked for a tool call. |
+| `"tool_result"` | `id, name, output, isError` | That tool call finished. |
+| `"usage"` | `usage: Usage` | Cumulative token usage so far. |
+| `"pending"` | `request: Request` | §10 — a tool suspended; yielded before `waitFor` runs. |
+| `"done"` | `result: RunResult` | Terminal event — the same shape `run` returns. |
 
 ## The same call in the other five ports
 

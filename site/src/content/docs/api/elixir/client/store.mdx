@@ -8,49 +8,182 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/client.ex">elixir/lib/toolnexus/client.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+defmodule Toolnexus.Client.ConversationStore do
+  @callback get(store :: struct(), id :: String.t()) :: [map()] | nil
+  @callback save(store :: struct(), id :: String.t(), messages :: [map()]) :: any()
+end
+
+defmodule Toolnexus.Client.InMemoryConversationStore do
+  @behaviour Toolnexus.Client.ConversationStore
+  defstruct [:pid]
+  @spec new() :: t()
+  def new()
+end
 ```
 
-Swap in-memory history for your own store so a conversation survives a process restart.
+A `ConversationStore` is any struct whose module implements two callbacks — `get/2`, `save/3`.
+The client dispatches on the struct's module, so implementing this behaviour for a file, a
+database table, or Redis is all it takes to make `ask/4` conversations outlive the process.
+`InMemoryConversationStore` is the default: an `Agent`-backed map, gone when the client's
+process tree ends.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **You want conversations to survive a restart** — implement `ConversationStore` against
+  whatever you already persist to (Postgres, Redis, a file), and pass it as `:store` on
+  [`Toolnexus.Client.create/1`](/api/elixir/client/create/).
+- **You just need per-process memory for now** — do nothing; the default in-memory store is
+  created for you and lives as long as the client's process.
+- **You need to read or rewind a transcript from outside `ask/4`** —
+  [`Toolnexus.Client.conversation_store/1`](#3-the-full-surface--sharing-the-store-outside-ask4)
+  returns the exact instance the client is using, so a host can read (or, with your own store,
+  mutate) it directly.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for run/4's :history when you don't want a store at all">
+[`Toolnexus.Client.run/4`](/api/elixir/client/run/) accepts `history:` directly — the lowest-level
+continuation primitive, no store, no id, just "here are the prior messages, append the new
+prompt". A `ConversationStore` is for when you want the client to own the load/save cycle keyed
+by an id, which is what [`ask/4`](/api/elixir/client/conversation/) uses it for.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — the default store, used directly
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+`Client.create/1` always gives you a store, even if you never mention `:store` — read/write it
+through the two behaviour callbacks, dispatched via the struct's module.
+
+```elixir test
+alias Toolnexus.Client
+alias Toolnexus.Client.{ConversationStore, InMemoryConversationStore}
+
+client = Client.create(base_url: "http://localhost", style: "openai", model: "gpt-x", api_key: "k")
+
+store = Client.conversation_store(client)
+true = match?(%InMemoryConversationStore{}, store)
+
+# Nothing saved yet.
+true = InMemoryConversationStore.get(store, "conv-1") == nil
+
+InMemoryConversationStore.save(store, "conv-1", [%{"role" => "user", "content" => "hi"}])
+true = InMemoryConversationStore.get(store, "conv-1") == [%{"role" => "user", "content" => "hi"}]
+
+# The behaviour also dispatches generically, by module — this is what the client itself does.
+%mod{} = store
+true = mod.get(store, "conv-1") == [%{"role" => "user", "content" => "hi"}]
+true = ConversationStore in InMemoryConversationStore.__info__(:attributes)[:behaviour]
+
+IO.puts("ok: default store round-tripped a transcript for conv-1")
 ```
 
-### 2. TODO — the realistic case
+### 2. A realistic case — a custom store plugged in at `create/1`
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+Any struct implementing the two callbacks works. This one is still in-memory (kept hermetic for
+the docs), but the shape is exactly what a Postgres- or file-backed store would look like: `get`
+reads, `save` writes, and `ask/4` never knows the difference.
+
+```elixir test
+alias Toolnexus.Client
+alias Toolnexus.Client.ConversationStore
+
+defmodule DocsFileLikeStore do
+  @behaviour ConversationStore
+  defstruct [:pid]
+
+  def new do
+    {:ok, pid} = Agent.start_link(fn -> %{} end)
+    %__MODULE__{pid: pid}
+  end
+
+  @impl true
+  def get(%__MODULE__{pid: pid}, id), do: Agent.get(pid, &Map.get(&1, id))
+
+  @impl true
+  def save(%__MODULE__{pid: pid}, id, messages), do: Agent.update(pid, &Map.put(&1, id, messages))
+end
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  resp = %{"choices" => [%{"message" => %{"role" => "assistant", "content" => "noted"}}], "usage" => %{"prompt_tokens" => 2, "completion_tokens" => 1, "total_tokens" => 3}}
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "openai",
+    model: "gpt-x",
+    api_key: "test-key",
+    http_options: [plug: plug],
+    store: DocsFileLikeStore.new()
+  )
+
+_ = Client.ask(client, "remember this", [], id: "conv-2")
+
+true = Client.conversation_store(client).__struct__ == DocsFileLikeStore
+history = DocsFileLikeStore.get(Client.conversation_store(client), "conv-2")
+true = length(history) == 2
+
+IO.puts("ok: ask/4 persisted #{length(history)} messages into the custom store")
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — sharing the store outside `ask/4`
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+`conversation_store/1` returns the **exact instance** the client uses (Gap 4 in SPEC §8) — you
+can write to it directly and `ask/4` will pick that up as history on its next call, with no
+shadow copy anywhere.
+
+```elixir test
+alias Toolnexus.Client
+alias Toolnexus.Client.InMemoryConversationStore
+
+{:ok, seen} = Agent.start_link(fn -> [] end)
+
+plug = fn conn ->
+  {:ok, raw, conn} = Plug.Conn.read_body(conn)
+  Agent.update(seen, fn s -> s ++ [Jason.decode!(raw)] end)
+  resp = %{"choices" => [%{"message" => %{"role" => "assistant", "content" => "ok"}}], "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}}
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "openai",
+    model: "gpt-x",
+    api_key: "test-key",
+    http_options: [plug: plug]
+  )
+
+# Seed history directly on the store the client already holds — no prior ask/4 call at all.
+store = Client.conversation_store(client)
+InMemoryConversationStore.save(store, "conv-3", [
+  %{"role" => "user", "content" => "my favorite color is teal"},
+  %{"role" => "assistant", "content" => "got it, teal"}
+])
+
+_ = Client.ask(client, "what's my favorite color?", [], id: "conv-3")
+
+[sent] = Agent.get(seen, & &1)
+# The seeded history was there BEFORE ask/4 ever ran for this id.
+true = length(sent["messages"]) == 3
+true = hd(sent["messages"]) == %{"role" => "user", "content" => "my favorite color is teal"}
+
+IO.puts("ok: seeded #{length(sent["messages"]) - 1} prior message(s) were visible to ask/4")
 ```
+
+## `ConversationStore` behaviour
+
+| Callback | Signature | What it does |
+|---|---|---|
+| `get/2` | `(store, id) -> [map()] \| nil` | Load a transcript by id, or `nil` if none exists yet. |
+| `save/3` | `(store, id, messages) -> any()` | Persist the transcript under an id. Return value is ignored. |
 
 ## The same call in the other five ports
 
@@ -62,12 +195,13 @@ _TODO: name the alternative and when to prefer it._
 | Java | `LlmClient.ConversationStore` | [→](/api/java/client/store/) |
 | C# | `LlmClient.IConversationStore` | [→](/api/csharp/client/store/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
+Behavior is identical across ports by contract — same `examples/` fixtures, same output. Each
+language exposes the idiomatic interface shape (Elixir: a behaviour + struct dispatch; JS/Python:
+a two-method object/protocol; Go: an interface; Java/C#: an interface with async methods).
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Toolnexus.Client.create`](/api/elixir/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
-- [`Toolnexus.Client.run`](/api/elixir/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
-- [`Toolnexus.Client.stream`](/api/elixir/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
-- [`Toolnexus.Client.create`](/api/elixir/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+- [`Toolnexus.Client.create`](/api/elixir/client/create/) — pass a custom store via `:store`.
+- [`Toolnexus.Client conversation`](/api/elixir/client/conversation/) — `ask/4`, the load/save cycle this store backs.
+- [`Toolnexus.Client.run`](/api/elixir/client/run/) — the store-free continuation primitive (`history:`).

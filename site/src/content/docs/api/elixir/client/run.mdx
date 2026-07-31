@@ -8,49 +8,219 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/client.ex">elixir/lib/toolnexus/client.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec run(Toolnexus.Client.t(), String.t(), term(), keyword()) :: Toolnexus.Client.RunResult.t()
+def run(client, prompt, toolkit, opts \\ [])
+
+# opts: :history — a prior transcript (RunResult.messages) to continue
 ```
 
-Send a prompt, let the loop call tools until the model stops, get a RunResult.
+Runs the whole tool-calling agent loop synchronously: build the system prompt from
+`system_prompt` + the toolkit's skills prompt, call the endpoint, execute any tool calls the
+model asked for, feed the results back, repeat — until the model stops calling tools or
+`max_turns` is hit. Returns a `%Toolnexus.Client.RunResult{}` with the final text, the full
+transcript, every tool call made, and cumulative usage.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **You just want an answer** — give it a prompt and a toolkit (a plain list of `%Tool{}`, or
+  anything with `:tools`/`:prompt` such as `Toolnexus.create_toolkit/1`'s return) and block until
+  the loop finishes.
+- **The toolkit came from MCP, skills, HTTP, or `define_tool`** — `run/4` does not care where the
+  tools came from, only that they satisfy the toolkit protocol.
+- **You need the whole outcome, not just text** — `RunResult` carries `tool_calls`, `usage`,
+  `turns`, and `status`, so you can log or bill on it.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for stream/4 when you want incremental output">
+[`Toolnexus.Client.stream/4`](/api/elixir/client/stream/) runs the identical loop but hands back
+an `Enumerable` of events (`text` deltas, `tool_call`, `tool_result`, `done`) as they happen —
+the right choice for a chat UI or a CLI that prints tokens as they arrive. `run/4` is the right
+choice when you only care about the final `RunResult` and are fine blocking for it.
 </Aside>
+
+For a stateful conversation identified by an id, see
+[`Toolnexus.Client.ask/4`](/api/elixir/client/conversation/) — it wraps `run/4` with load/save
+against a `ConversationStore`. `run/4` itself is the stateless primitive: pass `opts[:history]`
+yourself if you want to continue a transcript without a store.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+Every example below stubs the wire call with `http_options: [plug: fn conn -> ... end]` — an
+in-process `Req` plug, not a real socket — so the page runs with no network and no real API key.
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+### 1. The smallest useful call — single turn, no tools
+
+```elixir test
+alias Toolnexus.Client
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+
+  resp = %{
+    "choices" => [%{"message" => %{"role" => "assistant", "content" => "hello there"}}],
+    "usage" => %{"prompt_tokens" => 5, "completion_tokens" => 3, "total_tokens" => 8}
+  }
+
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "openai",
+    model: "gpt-x",
+    api_key: "test-key",
+    http_options: [plug: plug]
+  )
+
+result = Client.run(client, "say hi", [])
+
+true = result.text == "hello there"
+true = result.status == "done"
+true = result.turns == 1
+true = result.tool_calls == []
+true = result.usage == %{prompt_tokens: 5, completion_tokens: 3, total_tokens: 8}
+
+IO.puts("ok: #{result.text} (#{result.turns} turn)")
 ```
 
-### 2. TODO — the realistic case
+### 2. A tool-call turn, then the final answer
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+The model asks for `add`, the loop runs it and feeds `"5"` back as a `role: "tool"` message,
+then calls the endpoint again for the real answer — two turns, one tool call.
+
+```elixir test
+alias Toolnexus.{Client, Context, Tool, ToolResult}
+
+{:ok, calls} = Agent.start_link(fn -> 0 end)
+
+add_tool = %Tool{
+  name: "add",
+  description: "Add two numbers",
+  input_schema: %{"type" => "object", "properties" => %{}},
+  source: "native",
+  execute: fn args, %Context{} -> ToolResult.ok(to_string(trunc(args["a"] + args["b"]))) end
+}
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  n = Agent.get_and_update(calls, fn c -> {c + 1, c + 1} end)
+
+  resp =
+    if n == 1 do
+      %{
+        "choices" => [
+          %{
+            "message" => %{
+              "role" => "assistant",
+              "content" => nil,
+              "tool_calls" => [
+                %{"id" => "c1", "type" => "function", "function" => %{"name" => "add", "arguments" => ~s({"a":2,"b":3})}}
+              ]
+            }
+          }
+        ],
+        "usage" => %{"prompt_tokens" => 6, "completion_tokens" => 4, "total_tokens" => 10}
+      }
+    else
+      %{
+        "choices" => [%{"message" => %{"role" => "assistant", "content" => "the sum is 5"}}],
+        "usage" => %{"prompt_tokens" => 5, "completion_tokens" => 3, "total_tokens" => 8}
+      }
+    end
+
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "openai",
+    model: "gpt-x",
+    api_key: "test-key",
+    http_options: [plug: plug]
+  )
+
+result = Client.run(client, "add 2 and 3", [add_tool])
+
+true = result.text == "the sum is 5"
+true = result.turns == 2
+true = result.tool_call_count == 1
+[%{name: "add", output: "5", is_error: false}] = result.tool_calls
+true = result.usage.total_tokens == 18
+
+IO.puts("ok: #{result.text} after #{result.tool_call_count} tool call(s)")
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — Anthropic style, and continuing a transcript with `:history`
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+`opts[:history]` is the low-level continuation primitive: pass back a prior `RunResult.messages`
+and the loop appends the new prompt to it instead of starting fresh.
+
+```elixir test
+alias Toolnexus.Client
+
+{:ok, calls} = Agent.start_link(fn -> [] end)
+
+plug = fn conn ->
+  {:ok, raw, conn} = Plug.Conn.read_body(conn)
+  body = Jason.decode!(raw)
+  Agent.update(calls, fn c -> c ++ [body] end)
+
+  resp = %{
+    "content" => [%{"type" => "text", "text" => "got it"}],
+    "usage" => %{"input_tokens" => 4, "output_tokens" => 2}
+  }
+
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "anthropic",
+    model: "claude-x",
+    api_key: "test-key",
+    system_prompt: "be brief",
+    http_options: [plug: plug]
+  )
+
+first = Client.run(client, "remember the number 42", [])
+true = first.status == "done"
+
+# Continue the SAME transcript — no store, no id, just the messages from the first run.
+second = Client.run(client, "what number did I say?", [], history: first.messages)
+
+true = second.turns == 1
+bodies = Agent.get(calls, & &1)
+[_first_body, second_body] = bodies
+
+# The continued call's `messages` carries BOTH turns — the history plus the new prompt.
+true = length(second_body["messages"]) == 3
+true = List.last(second_body["messages"]) == %{"role" => "user", "content" => "what number did I say?"}
+
+IO.puts("ok: continued a transcript across two run/4 calls (#{length(second_body["messages"])} messages)")
 ```
+
+## `RunResult` shape
+
+| Field | Type | What it is |
+|---|---|---|
+| `text` | `String.t()` | The final assistant text. |
+| `messages` | `[map()]` | Full transcript in provider wire shape — pass to `run/4` as `history:` to continue. |
+| `tool_calls` | `[map()]` | `%{name, args, output, is_error, metadata}` per call, in call order. |
+| `tool_call_count` | `non_neg_integer()` | `length(tool_calls)`. |
+| `turns` | `non_neg_integer()` | LLM calls made this run. |
+| `usage` | `%{prompt_tokens, completion_tokens, total_tokens}` | Summed across turns. |
+| `model` | `String.t()` | Echoes `client.model`. |
+| `status` | `"done"` \| `"pending"` \| `"incomplete"` | `"pending"` — a tool suspended (§10) and no `wait_for`; `"incomplete"` — `max_turns` hit with the model still calling tools. |
+| `limit` | `String.t()` \| `nil` | `"maxTurns"` when `status == "incomplete"`, else `nil`. |
+| `pending` | `Toolnexus.Request.t()` \| `nil` | Set only when `status == "pending"` (§10). |
 
 ## The same call in the other five ports
 
@@ -67,7 +237,7 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Toolnexus.Client.create`](/api/elixir/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
-- [`Toolnexus.Client.stream`](/api/elixir/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
-- [`Toolnexus.Client.create`](/api/elixir/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
-- [`Toolnexus.Client conversation`](/api/elixir/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.
+- [`Toolnexus.Client.create`](/api/elixir/client/create/) — the unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Toolnexus.Client.stream`](/api/elixir/client/stream/) — the streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Toolnexus.Client conversation`](/api/elixir/client/conversation/) — `ask/4`: a stateful id-keyed conversation built on `run/4`.
+- [`Toolnexus.Client.create`](/api/elixir/client/hooks/) — intercept before/after model calls and tool calls.

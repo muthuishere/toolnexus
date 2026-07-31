@@ -8,49 +8,362 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/LlmClient.cs">LlmClient.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public sealed record ErrorInfo(Exception? Error, int? Status, int Attempt, bool Retryable);
+
+public enum Tier { Retry, Fail }
+
+// on Options:
+public Func<ErrorInfo, Tier>? OnError { get; set; }
+public int? Retries { get; set; }       // default 2
+public int? RetryBaseMs { get; set; }   // default 500
+public long? TimeoutMs { get; set; }    // whole-run deadline; null = none
 ```
 
-Classify an LLM error into retry / fail, bound a run with a deadline, and cancel cleanly.
+Three independent knobs on `LlmClient.Options` govern how a failed LLM call is handled:
+
+- **`OnError`** — classify each failed attempt into `Tier.Retry` or `Tier.Fail`. Called with an
+  `ErrorInfo`: `Status` is set for a non-2xx HTTP response, `Error` for a transport/network throw,
+  `Attempt` is zero-based, `Retryable` is whether the default classifier (429/500/502/503/504, or
+  any network error) would already retry it. `null` ⇒ the default classifier
+  (`Retryable ? Retry : Fail`) — byte-identical to not setting it at all. A `Tier.Retry` is always
+  bounded by `Retries` — the classifier cannot loop forever.
+- **`Retries` / `RetryBaseMs`** — retry budget and exponential backoff base (`baseMs * 2^attempt`
+  plus jitter), honoring a server's `Retry-After` header when present.
+- **`TimeoutMs`** — a whole-run deadline. Exceeding it throws `LlmClient.RunTimeoutException`,
+  distinct from an external `CancellationToken` cancel (`OperationCanceledException`) — so a caller
+  can always tell "the deadline elapsed" from "someone cancelled me" without inspecting exception
+  internals beyond the type.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+The default classifier already retries 429/5xx and gives up on everything else — fine for most
+callers. Reach for `OnError` when a provider needs a non-standard rule (e.g. treat a `402` as
+retryable after a top-up, or never retry a specific model's `400`s), and reach for `TimeoutMs` any
+time a run must not hang past a caller-facing SLA.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="OnError classifies retry/fail — it is not the §10 suspension path">
+`OnError` only ever returns `Tier.Retry` or `Tier.Fail` for a failed LLM HTTP call — there is no
+"suspend" tier here. A tool that needs to pause for a human/out-of-band answer uses the §10
+suspension contract (`Options.WaitFor`, see [`LlmClient.RunAsync`](/api/csharp/client/run/)'s
+`Status == "pending"`), which is a different mechanism entirely: that's a *tool* pausing, this is
+an *LLM call* failing.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The default classifier retries a transient 500
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+var calls = 0;
+using var stub = new Stub(ctx =>
+{
+    calls++;
+    if (calls == 1) { Stub.Json(ctx, 500, """{"error":"upstream hiccup"}"""); return; }
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}
+    """);
+});
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+    RetryBaseMs = 1, // keep the docs example fast — no OnError needed for the default behavior
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+var result = await client.RunAsync("try again", tk);
+
+if (calls != 2) throw new Exception($"expected 1 retry (2 calls), got {calls}");
+if (result.Text != "recovered") throw new Exception(result.Text);
+
+Console.WriteLine($"ok: {result.Text} after {calls} call(s)");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. `OnError` overrides the classifier — retry a status the default gives up on
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+var calls = 0;
+var seen = new List<LlmClient.ErrorInfo>();
+using var stub = new Stub(ctx =>
+{
+    calls++;
+    // 402 is NOT in the default retryable set (429/500/502/503/504) — RunAsync would normally
+    // fail on the first attempt. OnError below retries it anyway.
+    if (calls == 1) { Stub.Json(ctx, 402, """{"error":"payment required"}"""); return; }
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":"topped up"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}
+    """);
+});
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+    RetryBaseMs = 1,
+    OnError = info =>
+    {
+        seen.Add(info);
+        if (info.Status == 402) return LlmClient.Tier.Retry; // custom rule
+        return info.Retryable ? LlmClient.Tier.Retry : LlmClient.Tier.Fail;
+    },
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+var result = await client.RunAsync("pay and retry", tk);
+
+if (calls != 2) throw new Exception($"expected 2 calls, got {calls}");
+if (result.Text != "topped up") throw new Exception(result.Text);
+if (seen.Count != 1 || seen[0].Status != 402 || seen[0].Attempt != 0) throw new Exception($"{seen.Count}");
+if (seen[0].Retryable) throw new Exception("402 should NOT be in the default retryable set");
+
+Console.WriteLine($"ok: {result.Text} (classified status={seen[0].Status}, defaultRetryable={seen[0].Retryable})");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. Full surface — `Fail` stops immediately, and `TimeoutMs` bounds a stalled call
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+// --- Part A: Tier.Fail skips remaining retries even though the status is normally retryable.
+var callsA = 0;
+using (var stubA = new Stub(ctx => { callsA++; Stub.Json(ctx, 500, """{"error":"down"}"""); }))
+{
+    var clientA = LlmClient.Create(new LlmClient.Options
+    {
+        BaseUrl = stubA.BaseUrl,
+        Style = "openai",
+        Model = "gpt-4o-mini",
+        ApiKey = "test-key",
+        Retries = 5,
+        RetryBaseMs = 1,
+        OnError = _ => LlmClient.Tier.Fail, // never retry, regardless of status
+    });
+    await using var tkA = await Toolkit.CreateAsync(new Toolkit.Options());
+    try
+    {
+        await clientA.RunAsync("give up fast", tkA);
+        throw new Exception("expected the call to throw");
+    }
+    catch (InvalidOperationException)
+    {
+        // expected: a non-2xx response surfaces once OnError says Fail.
+    }
+    if (callsA != 1) throw new Exception($"Tier.Fail must skip retries entirely, got {callsA} call(s)");
+}
+
+// --- Part B: TimeoutMs bounds a run against a server that never answers in time.
+var stubB = new Stub(ctx =>
+{
+    Thread.Sleep(1500); // far longer than the 200ms deadline below
+    Stub.Json(ctx, 200, """{"id":"late","choices":[{"message":{"role":"assistant","content":"too late"},"finish_reason":"stop"}]}""");
+});
+using (stubB)
+{
+    var clientB = LlmClient.Create(new LlmClient.Options
+    {
+        BaseUrl = stubB.BaseUrl,
+        Style = "openai",
+        Model = "gpt-4o-mini",
+        ApiKey = "test-key",
+        Retries = 0,
+        TimeoutMs = 200,
+    });
+    await using var tkB = await Toolkit.CreateAsync(new Toolkit.Options());
+    try
+    {
+        await clientB.RunAsync("this will stall", tkB);
+        throw new Exception("expected a RunTimeoutException");
+    }
+    catch (LlmClient.RunTimeoutException)
+    {
+        // expected: the whole-run deadline fired before the server answered.
+    }
+}
+
+Console.WriteLine("ok: Tier.Fail stopped after 1 call, and TimeoutMs bounded the stalled call");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
+
+<Aside type="caution">
+An **external** cancel (the `CancellationToken` passed into `RunAsync`/`StreamAsync`) is never
+wrapped in `RunTimeoutException` — it surfaces as a plain `OperationCanceledException`, classified
+by token state (SPEC §7D). Only the `TimeoutMs` deadline expiring becomes
+`LlmClient.RunTimeoutException`. Aborts of either kind bypass `OnError` entirely — the classifier
+only ever sees a completed non-2xx response or a transport-level throw.
+</Aside>
+
+## Fields — `ErrorInfo`
+
+| Field | Type | What it is |
+|---|---|---|
+| `Error` | `Exception?` | Set on a transport/network throw; `null` for a completed non-2xx response. |
+| `Status` | `int?` | The HTTP status, when the call completed with a non-2xx response. |
+| `Attempt` | `int` | Zero-based attempt number for this call. |
+| `Retryable` | `bool` | Whether the default classifier (429/500/502/503/504, or any network error) would already retry it. |
+
+## Options that shape resilience
+
+| Option | Type | Default | What it does |
+|---|---|---|---|
+| `OnError` | `Func<ErrorInfo, Tier>?` | default classifier | Retry-vs-fail decision per failed attempt. |
+| `Retries` | `int?` | `2` | Retry budget — always caps a `Tier.Retry`. |
+| `RetryBaseMs` | `int?` | `500` | Backoff base for `baseMs * 2^attempt + jitter`, unless a `Retry-After` header says otherwise. |
+| `TimeoutMs` | `long?` | `null` (none) | Whole-run deadline; exceeding it throws `RunTimeoutException`. |
 
 ## The same call in the other five ports
 
@@ -61,6 +374,9 @@ _TODO: name the alternative and when to prefer it._
 | Go | `ErrorInfo` | [→](/api/go/client/resilience/) |
 | Java | `LlmClient.ErrorInfo` | [→](/api/java/client/resilience/) |
 | Elixir | `Toolnexus.Client.create` | [→](/api/elixir/client/resilience/) |
+
+Elixir configures retries/timeout as options on `Toolnexus.Client.create/1` rather than a distinct
+error-classifier type.
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).

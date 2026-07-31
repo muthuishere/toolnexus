@@ -8,49 +8,180 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/client.ex">elixir/lib/toolnexus/client.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+Toolnexus.Client.create(
+  retries: 2,           # default. Bounds every retry-vs-fail decision.
+  retry_base_ms: 500,    # default. Exponential backoff base (+ jitter), honors Retry-After.
+  timeout_ms: nil,        # default. Whole-run deadline; nil = no deadline.
+  on_error: (%{error: Exception.t() | nil, status: integer() | nil, attempt: non_neg_integer(), retryable: boolean()} -> :retry | :fail)
+)
 ```
 
-Classify an LLM error into retry / fail, bound a run with a deadline, and cancel cleanly.
+There is no separate resilience type — retry/timeout behavior lives on four
+[`Toolnexus.Client.create/1`](/api/elixir/client/create/) options. `on_error` is the one
+host-classification seam: it decides, per failed LLM attempt, whether the client retries or
+gives up immediately.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **The defaults are usually right** — `429`/`500`/`502`/`503`/`504` and network errors retry
+  with exponential backoff + jitter, honoring a `Retry-After` header; anything else fails
+  immediately. Most callers never touch `on_error`.
+- **You need a different retry policy** — e.g. treat `429` (rate limit) as an immediate fail
+  because your caller already backs off at a higher layer, or extend retryability to a
+  provider-specific status your upstream returns.
+- **You need a hard ceiling on total run time** — `timeout_ms` bounds the whole `run`/`stream`,
+  not just one HTTP call; a run past its deadline raises before the next attempt is even made.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Not a suspension">
+A retry-exhausted failure **raises** — it never becomes a §10 `Pending`. Suspension (`wait_for`)
+is for a tool that needs a *user action* to continue; an LLM outage is not a user action, so
+there is deliberately no `:suspend` tier here. If you want a failed run to pause-and-resume
+instead of raising, that has to happen above this layer (catch the raise, then re-`run/4` with
+`history:` once whatever was wrong is fixed).
 </Aside>
+
+`on_error` only ever sees LLM-call failures — tool failures are a `%ToolResult{is_error: true}`,
+handled entirely differently (they flow into the transcript, they never retry the wire call).
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+Every example stubs the wire call with `http_options: [plug: fn conn -> ... end]` and sets
+`retry_base_ms: 1` so backoff doesn't slow the page down.
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+### 1. The default classifier — retry on 500, then succeed
+
+```elixir test
+alias Toolnexus.Client
+
+{:ok, attempts} = Agent.start_link(fn -> 0 end)
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  n = Agent.get_and_update(attempts, fn c -> {c + 1, c + 1} end)
+
+  if n == 1 do
+    conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(500, ~s({"error":"upstream hiccup"}))
+  else
+    resp = %{"choices" => [%{"message" => %{"role" => "assistant", "content" => "ok now"}}], "usage" => %{"prompt_tokens" => 3, "completion_tokens" => 2, "total_tokens" => 5}}
+    conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+  end
+end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "openai",
+    model: "gpt-x",
+    api_key: "test-key",
+    retry_base_ms: 1,
+    http_options: [plug: plug]
+  )
+
+result = Client.run(client, "hi", [])
+
+true = result.text == "ok now"
+true = Agent.get(attempts, & &1) == 2
+
+IO.puts("ok: succeeded after #{Agent.get(attempts, & &1)} attempts (1 retry)")
 ```
 
-### 2. TODO — the realistic case
+### 2. Custom `on_error` — treat 429 as an immediate fail
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+The default classifier retries `429`. A caller that already rate-limits upstream may want the
+opposite: fail fast and let its own backoff handle it.
+
+```elixir test
+alias Toolnexus.Client
+
+{:ok, attempts} = Agent.start_link(fn -> 0 end)
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  Agent.update(attempts, &(&1 + 1))
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(429, ~s({"error":"rate limited"}))
+end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "openai",
+    model: "gpt-x",
+    api_key: "test-key",
+    retry_base_ms: 1,
+    http_options: [plug: plug],
+    on_error: fn %{status: 429} -> :fail end
+  )
+
+raised? =
+  try do
+    Client.run(client, "hi", [])
+    false
+  rescue
+    e in RuntimeError -> String.contains?(Exception.message(e), "LLM 429")
+  end
+
+true = raised?
+true = Agent.get(attempts, & &1) == 1
+
+IO.puts("ok: on_error fail-fast made exactly 1 attempt")
 ```
 
-### 3. TODO — the full surface
+### 3. `:retries` bounds even a `:retry` decision
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+Whatever `on_error` decides, `:retry` can never loop unbounded — `retries` (default 2) caps the
+total attempts. Left at the default classifier, a server that always fails still stops.
+
+```elixir test
+alias Toolnexus.Client
+
+{:ok, attempts} = Agent.start_link(fn -> 0 end)
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  Agent.update(attempts, &(&1 + 1))
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(500, ~s({"error":"down"}))
+end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "openai",
+    model: "gpt-x",
+    api_key: "test-key",
+    retries: 1,
+    retry_base_ms: 1,
+    http_options: [plug: plug]
+  )
+
+raised? =
+  try do
+    Client.run(client, "hi", [])
+    false
+  rescue
+    e in RuntimeError -> String.contains?(Exception.message(e), "LLM 500")
+  end
+
+true = raised?
+# retries: 1 -> the initial attempt PLUS 1 retry, never more.
+true = Agent.get(attempts, & &1) == 2
+
+IO.puts("ok: retries: 1 bounded the loop to #{Agent.get(attempts, & &1)} total attempts")
 ```
+
+## Options
+
+| Option | Default | What it does |
+|---|---|---|
+| `:retries` | `2` | Hard ceiling on retry attempts — bounds `:retry` no matter what `on_error` decides. |
+| `:retry_base_ms` | `500` | Exponential backoff base (`base * 2^attempt` + jitter), overridden by a `Retry-After` response header when present. |
+| `:timeout_ms` | `nil` | Whole-run deadline in ms. `nil` = no deadline. Checked before every LLM attempt; past it, the run raises rather than making another call. |
+| `:on_error` | `nil` (default classifier) | `(info -> :retry \| :fail)`. `info`: `%{status:, error:, attempt:, retryable:}` — `status` on a non-2xx response, `error` on a transport exception, `attempt` zero-based, `retryable` = whether the default rule (`429`/`5xx`/network) would already retry it. Absent ⇒ `retryable? :retry : :fail`, byte-identical to the hardcoded rule this option replaced. |
 
 ## The same call in the other five ports
 
@@ -67,7 +198,7 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Toolnexus.Client.create`](/api/elixir/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
-- [`Toolnexus.Client.run`](/api/elixir/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
-- [`Toolnexus.Client.stream`](/api/elixir/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
-- [`Toolnexus.Client.create`](/api/elixir/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+- [`Toolnexus.Client.create`](/api/elixir/client/create/) — the unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Toolnexus.Client.run`](/api/elixir/client/run/) — where the deadline and retry loop actually run.
+- [`Toolnexus.Client.create`](/api/elixir/client/hooks/) — `before_llm`/`after_llm` fire once per successful attempt, not per retry.
+- [SPEC §10](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md) — the suspension primitive `on_error` deliberately does not participate in.

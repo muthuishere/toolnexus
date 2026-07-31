@@ -8,49 +8,346 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/client.py">python/src/toolnexus/client.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+class ConversationStore(Protocol):
+    async def get(self, id: str) -> list[dict[str, Any]] | None: ...
+    async def save(self, id: str, messages: list[dict[str, Any]]) -> None: ...
+
+class InMemoryConversationStore:  # the default — satisfies ConversationStore
+    async def get(self, id: str) -> list[dict[str, Any]] | None: ...
+    async def save(self, id: str, messages: list[dict[str, Any]]) -> None: ...
 ```
 
-Swap in-memory history for your own store so a conversation survives a process restart.
+Where `Client.ask(prompt, toolkit, id=...)` and `Client.stream(prompt, toolkit, id=...)`
+remember a conversation, keyed by `id`. `InMemoryConversationStore` is the zero-config
+default the client creates for you; `ConversationStore` is the two-method `Protocol` you
+implement to back it with a file, a database, or Redis instead.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **Default (`InMemoryConversationStore`)** — you just want `ask(..., id="thread-42")` to
+  remember a thread for the client's lifetime; do nothing, it's already wired in.
+- **Custom `ConversationStore`** — the conversation must survive a process restart, or be
+  shared across multiple processes/workers (a web app with several server instances behind
+  a load balancer, a CLI invoked fresh each time).
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for Conversation when memory only needs to live in one object">
+[`Conversation`](/api/python/client/conversation/) holds a transcript directly on a Python
+object — no store, no `id` lookup, gone when the object is. Reach for a `ConversationStore`
+specifically when the *same conversation* must be resumable from a different call, request,
+or process than the one that started it.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+<Aside type="note" title="Hermetic on purpose">
+Every example points `create_client` at a local `http.server` stub instead of a real LLM
+endpoint — no network, no API key.
+</Aside>
 
-{/* TODO:example1 */}
-```python
-// TODO
+### 1. The smallest useful call — the default store remembers `id`
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def reply(body):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+
+async def main():
+    tk = await create_toolkit()
+    try:
+        with StubServer(reply) as srv:
+            # No `store=` passed — create_client wires up an InMemoryConversationStore.
+            client = create_client(base_url=srv.base_url, style="openai", model="test-model", api_key="test-key")
+
+            await client.ask("first", tk, id="thread-1")
+            await client.ask("second", tk, id="thread-1")
+
+            transcript = await client.conversation_store.get("thread-1")
+
+        assert transcript is not None
+        users = [m["content"] for m in transcript if m.get("role") == "user"]
+        assert users == ["first", "second"]
+
+        print("ok:", len(transcript), "messages saved under 'thread-1'")
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — a custom `ConversationStore` (file-backed)
 
-{/* TODO:example2 */}
-```python
-// TODO
+Any object with async `get(id)` / `save(id, messages)` satisfies the `ConversationStore`
+protocol — no base class to inherit. Here, a minimal JSON-file store shows the shape of a
+production one (database, Redis).
+
+```python test
+import asyncio
+import json
+import os
+import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+class JsonFileStore:
+    """A ConversationStore backed by one JSON file per id — satisfies the Protocol
+    with no inheritance required."""
+
+    def __init__(self, directory: str) -> None:
+        self._dir = directory
+
+    def _path(self, id: str) -> str:
+        return os.path.join(self._dir, f"{id}.json")
+
+    async def get(self, id: str):
+        path = self._path(id)
+        if not os.path.exists(path):
+            return None
+        with open(path) as f:
+            return json.load(f)
+
+    async def save(self, id: str, messages) -> None:
+        with open(self._path(id), "w") as f:
+            json.dump(messages, f)
+
+
+def reply(body):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+
+async def main():
+    tk = await create_toolkit()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JsonFileStore(tmp)
+            with StubServer(reply) as srv:
+                # A fresh client, backed by the file store, "restarts" between turns.
+                client_a = create_client(base_url=srv.base_url, style="openai", model="test-model", api_key="test-key", store=store)
+                await client_a.ask("remember this", tk, id="durable-thread")
+
+                # A brand-new Client instance, same store: the conversation is still there.
+                client_b = create_client(base_url=srv.base_url, style="openai", model="test-model", api_key="test-key", store=store)
+                loaded = await client_b.conversation_store.get("durable-thread")
+
+            assert loaded is not None
+            assert loaded[-2]["content"] == "remember this"  # user turn survived the "restart"
+            assert os.path.exists(os.path.join(tmp, "durable-thread.json"))
+
+        print("ok: conversation survived a new Client instance via JsonFileStore")
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — reading/writing the store directly, no `id`-based `ask`
 
-{/* TODO:example3 */}
-```python
-// TODO
+`client.conversation_store` is the exact instance passed as `store=` (or the default), so you
+can `get`/`save` it directly — useful for pre-seeding a conversation, migrating one, or
+inspecting it without going through `ask`.
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import InMemoryConversationStore, create_client, create_toolkit
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def reply(body):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": "continuing"}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+
+async def main():
+    store = InMemoryConversationStore()
+
+    # Pre-seed a conversation directly, with no prior ask() call.
+    seeded = [
+        {"role": "system", "content": "You are an agent."},
+        {"role": "user", "content": "earlier turn"},
+        {"role": "assistant", "content": "earlier reply"},
+    ]
+    await store.save("seeded-thread", seeded)
+
+    tk = await create_toolkit()
+    try:
+        with StubServer(reply) as srv:
+            client = create_client(base_url=srv.base_url, style="openai", model="test-model", api_key="test-key", store=store)
+            # ask() picks up the pre-seeded history under the same id.
+            result = await client.ask("continue", tk, id="seeded-thread")
+
+        assert client.conversation_store is store  # the exact instance, not a copy
+        contents = [m.get("content") for m in result.messages]
+        assert "earlier turn" in contents and "continue" in contents
+
+        # get() copies on read — mutating it never corrupts the stored transcript.
+        copy = await store.get("seeded-thread")
+        copy.append({"role": "user", "content": "mutate me"})
+        untouched = await store.get("seeded-thread")
+        assert not any(m.get("content") == "mutate me" for m in untouched)
+
+        print("ok: pre-seeded history honored;", len(result.messages), "messages after continue")
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
 ```
+
+## Protocol
+
+| Method | Type | What it does |
+|---|---|---|
+| `get(id)` | `async (str) -> list[dict] \| None` | Return the stored transcript for `id`, or `None` if none exists yet. |
+| `save(id, messages)` | `async (str, list[dict]) -> None` | Persist the (updated) transcript for `id`. |
+
+`InMemoryConversationStore` copies on both `get` and `save`, so callers can never mutate the
+stored transcript by holding a reference to it.
 
 ## The same call in the other five ports
 

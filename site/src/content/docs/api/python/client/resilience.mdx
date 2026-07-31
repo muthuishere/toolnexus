@@ -8,49 +8,351 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/client.py">python/src/toolnexus/client.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+class ErrorInfo(TypedDict, total=False):
+    error: Any        # present on a transport/network throw
+    status: int        # present on a non-ok HTTP response
+    attempt: int        # zero-based try index
+    retryable: bool     # whether status/error is in the default retryable set (429/5xx/network)
+
+ErrorTier = Literal["retry", "fail"]
+ErrorClassifier = Callable[[ErrorInfo], ErrorTier]
+
+# create_client(..., retries=2, retry_base_ms=500, timeout_ms=None, on_error: ErrorClassifier | None = None)
 ```
 
-Classify an LLM error into retry / fail, bound a run with a deadline, and cancel cleanly.
+`retries`/`retry_base_ms`/`timeout_ms` are the built-in resilience knobs every `run`/`ask`/
+`stream` call goes through: exponential backoff with jitter on 429/5xx/network errors
+(honoring `Retry-After`), and an optional whole-run deadline. `on_error` lets you override the
+default retry-vs-fail classification per failed attempt — every "retry" tier is still bounded
+by `retries`, so a classifier can never loop unbounded. A cooperative `cancel: asyncio.Event`
+aborts a run in flight.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **Defaults are usually enough** — `retries=2, retry_base_ms=500` already retries transient
+  429/5xx/network failures with backoff; most callers never touch `on_error`.
+- **`on_error`** — when your policy differs from "retryable status ⇒ retry": fail fast on a
+  429 that means "quota exhausted, don't hammer it" even though 429 is normally retryable; or
+  retry a *normally* non-retryable 400 your gateway sometimes returns transiently.
+- **`timeout_ms` + `cancel`** — bound a run's total wall-clock time, or let an external signal
+  (a user hitting stop, a request's own deadline) abort a run cleanly mid-flight.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="on_error classifies; it doesn't retry for you">
+`on_error` only answers "retry or fail" for one failed attempt — the retry loop, backoff
+timing, and `Retry-After` handling stay built in and are not reconfigurable per call. If you
+need a wholly different transport (custom auth, a proxy, a recording double for tests), that's
+`http_transport=`, a separate `create_client` option — not `on_error`.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+<Aside type="note" title="Hermetic on purpose">
+Every example points `create_client` at a local `http.server` stub instead of a real LLM
+endpoint — no network, no API key. The stub scripts specific HTTP statuses/delays to exercise
+the real retry/timeout code paths in `client.py`.
+</Aside>
 
-{/* TODO:example1 */}
-```python
-// TODO
+### 1. The smallest useful call — default retry on 503, then success
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                outer._handler(self)
+
+        self._handler = handler
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _send(req, status, payload, headers=None):
+    body = json.dumps(payload).encode("utf-8")
+    req.send_response(status)
+    req.send_header("Content-Type", "application/json")
+    req.send_header("Content-Length", str(len(body)))
+    for k, v in (headers or {}).items():
+        req.send_header(k, v)
+    req.end_headers()
+    req.wfile.write(body)
+
+
+async def main():
+    tk = await create_toolkit()
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            _send(req, 503, {"error": "unavailable"}, headers={"Retry-After": "0"})
+        else:
+            _send(req, 200, {
+                "choices": [{"message": {"role": "assistant", "content": "recovered"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            })
+
+    try:
+        with StubServer(handler) as srv:
+            client = create_client(
+                base_url=srv.base_url, style="openai", model="test-model", api_key="test-key",
+                retries=3, retry_base_ms=1,  # defaults, made fast for a docs example
+            )
+            result = await client.run("hi", tk)
+
+        assert calls["n"] == 3, "2 failures + 1 success, all against ONE run() call"
+        assert result.text == "recovered"
+
+        print("ok:", result.text, "after", calls["n"], "attempts")
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — `on_error` overrides the default classification
 
-{/* TODO:example2 */}
-```python
-// TODO
+Fail fast on a 429 the default classifier would otherwise retry (a "quota exhausted" signal
+you don't want to hammer), and see the `ErrorInfo` your classifier receives.
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                outer._handler(self)
+
+        self._handler = handler
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _send(req, status, payload, headers=None):
+    body = json.dumps(payload).encode("utf-8")
+    req.send_response(status)
+    req.send_header("Content-Type", "application/json")
+    req.send_header("Content-Length", str(len(body)))
+    for k, v in (headers or {}).items():
+        req.send_header(k, v)
+    req.end_headers()
+    req.wfile.write(body)
+
+
+async def main():
+    tk = await create_toolkit()
+    calls = {"n": 0}
+    seen_info = []
+
+    def handler(req):
+        calls["n"] += 1
+        _send(req, 429, {"error": "rate limited"}, headers={"Retry-After": "0"})
+
+    def classify(info):
+        seen_info.append(info)
+        return "fail"  # 429 is normally retryable — force it to fail immediately instead
+
+    try:
+        with StubServer(handler) as srv:
+            client = create_client(
+                base_url=srv.base_url, style="openai", model="test-model", api_key="test-key",
+                retries=3, retry_base_ms=1,
+                on_error=classify,
+            )
+            try:
+                await client.run("hi", tk)
+                raised = False
+            except Exception as e:
+                raised = True
+                assert "429" in str(e)
+
+        assert raised
+        assert calls["n"] == 1, "on_error='fail' stopped it after exactly one attempt"
+        assert seen_info[0]["status"] == 429
+        assert seen_info[0]["retryable"] is True  # 429 IS in the default retryable set
+        assert seen_info[0]["attempt"] == 0
+
+        print("ok: failed fast on attempt", seen_info[0]["attempt"], "| info:", seen_info[0])
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — `timeout_ms` raises `RunTimeout`, `cancel` raises `RunCancelled`
 
-{/* TODO:example3 */}
-```python
-// TODO
+```python test
+import asyncio
+import json
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import RunCancelled, RunTimeout, create_client, create_toolkit
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                outer._handler(self)
+
+        self._handler = handler
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _send(req, status, payload):
+    body = json.dumps(payload).encode("utf-8")
+    req.send_response(status)
+    req.send_header("Content-Type", "application/json")
+    req.send_header("Content-Length", str(len(body)))
+    req.end_headers()
+    req.wfile.write(body)
+
+
+async def main():
+    tk = await create_toolkit()
+    try:
+        # --- timeout_ms: a slow server outruns the run deadline ---
+        def slow(req):
+            time.sleep(2.0)
+            _send(req, 200, {"choices": [{"message": {"role": "assistant", "content": "too late"}}]})
+
+        with StubServer(slow) as srv:
+            client = create_client(
+                base_url=srv.base_url, style="openai", model="test-model", api_key="test-key",
+                retries=0, timeout_ms=300,
+            )
+            start = time.monotonic()
+            try:
+                await client.run("hi", tk)
+                timed_out = False
+            except RunTimeout:
+                timed_out = True
+            elapsed = time.monotonic() - start
+
+        assert timed_out
+        assert elapsed < 1.8, "aborted well before the 2s server delay"
+
+        # --- cancel: an already-fired token aborts before any request is even sent ---
+        def unreachable(req):
+            raise AssertionError("handler must never run — cancel fires before the request")
+
+        with StubServer(unreachable) as srv2:
+            client2 = create_client(base_url=srv2.base_url, style="openai", model="test-model", api_key="test-key")
+            cancel = asyncio.Event()
+            cancel.set()
+            try:
+                await client2.run("hi", tk, cancel=cancel)
+                cancelled = False
+            except RunCancelled:
+                cancelled = True
+
+        assert cancelled
+
+        print("ok: timeout after", round(elapsed, 2), "s | cancel raised RunCancelled:", cancelled)
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
 ```
+
+## `ErrorInfo` fields
+
+| Field | Type | Present when |
+|---|---|---|
+| `status` | `int` | The failed attempt got an HTTP response (its status code). |
+| `error` | `Any` | The failed attempt raised a transport/network exception instead. |
+| `attempt` | `int` | Zero-based try index — `0` is the first attempt. |
+| `retryable` | `bool` | Whether `status`/`error` is in the default retryable set (429, 500, 502, 503, 504, or network errors). |
+
+`on_error` returning `"retry"` is always bounded by `retries` — a classifier cannot make a
+run loop forever. `RunTimeout` and `RunCancelled` (an aborted attempt) are never retried,
+regardless of the classifier.
 
 ## The same call in the other five ports
 

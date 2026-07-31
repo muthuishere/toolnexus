@@ -8,49 +8,325 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/LlmClient.cs">LlmClient.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public Task<RunResult> RunAsync(string prompt, Toolkit toolkit, List<object?>? history = null,
+    CancellationToken cancellationToken = default)
 ```
 
-Send a prompt, let the loop call tools until the model stops, get a RunResult.
+One turn of the agent loop: send `prompt` (plus any `history`) to the model, execute every tool
+call the model asks for, feed the results back, and repeat until the model stops calling tools or
+`Options.MaxTurns` is hit. Returns a `RunResult` — the final text, the full message transcript, every
+`ToolCall` made along the way, and a `Status` (`"done"`, `"pending"`, or `"incomplete"`).
+
+`RunAsync` picks the OpenAI or Anthropic wire format from `Options.Style` — the loop shape (system
+prompt, tool schema, parallel tool execution, retries, `Metrics()`) is identical either way.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+You want a complete answer, not the intermediate tokens — a batch job, a Slack bot reply, a script
+that just needs the final text and the tool calls that produced it. It's also what
+[`LlmClient.Conversation.SendAsync`](/api/csharp/client/conversation/) calls underneath.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for StreamAsync when the caller needs live tokens">
+`RunAsync` blocks until the whole turn is settled — no partial text, no tool-call events as they
+happen. If a UI needs to show the model "typing" or wants to react to a tool call the instant it
+fires, use [`LlmClient.StreamAsync`](/api/csharp/client/stream/) instead; both drive the exact
+same loop and return the same `RunResult` shape at the end.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+using var stub = new Stub(ctx =>
+{
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":"hello from the stub"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}
+    """);
+});
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+var result = await client.RunAsync("say hello", tk);
+
+if (result.Status != "done") throw new Exception($"status: {result.Status}");
+if (result.Text != "hello from the stub") throw new Exception(result.Text);
+
+Console.WriteLine($"ok: {result.Text}");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. A tool call, then a final answer
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+var calls = 0;
+using var stub = new Stub(ctx =>
+{
+    calls++;
+    if (calls == 1)
+    {
+        // Turn 1: the model asks to call "add".
+        Stub.Json(ctx, 200, """
+        {"id":"c1","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"add","arguments":"{\"a\":2,\"b\":3}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}
+        """);
+    }
+    else
+    {
+        // Turn 2: the model reads the tool result and answers.
+        Stub.Json(ctx, 200, """
+        {"id":"c2","choices":[{"message":{"role":"assistant","content":"2 + 3 = 5"},"finish_reason":"stop"}],"usage":{"prompt_tokens":15,"completion_tokens":6,"total_tokens":21}}
+        """);
+    }
+});
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+});
+
+var add = NativeTool.Of(
+    "add", "Add two integers",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?>
+        {
+            ["a"] = new Dictionary<string, object?> { ["type"] = "integer" },
+            ["b"] = new Dictionary<string, object?> { ["type"] = "integer" },
+        },
+    },
+    (IDictionary<string, object?> a) => (Convert.ToInt32(a["a"]) + Convert.ToInt32(a["b"])).ToString());
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = new List<ITool> { add } });
+var result = await client.RunAsync("what is 2 + 3?", tk);
+
+if (result.Status != "done") throw new Exception($"status: {result.Status}");
+if (result.ToolCallCount != 1) throw new Exception($"expected 1 tool call, got {result.ToolCallCount}");
+if (result.ToolCalls[0].Name != "add" || result.ToolCalls[0].Output != "5") throw new Exception(result.ToolCalls[0].Output);
+if (result.Text != "2 + 3 = 5") throw new Exception(result.Text);
+
+Console.WriteLine($"ok: {result.Text} (turns={result.Turns}, tools={result.ToolCallCount})");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. Full surface — history, usage, and the run's metadata
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+using var stub = new Stub(ctx =>
+{
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":"continuing the thread"},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":4,"total_tokens":24}}
+    """);
+});
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+    SystemPrompt = "You are terse.",
+    MaxTurns = 4,
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+
+// Seed history as if a prior turn already happened — RunAsync appends to it rather than
+// starting a fresh system+user pair.
+var history = new List<object?>
+{
+    new Dictionary<string, object?> { ["role"] = "system", ["content"] = "You are terse." },
+    new Dictionary<string, object?> { ["role"] = "user", ["content"] = "part one" },
+    new Dictionary<string, object?> { ["role"] = "assistant", ["content"] = "ack" },
+};
+
+var result = await client.RunAsync("part two", tk, history);
+
+if (result.Status != "done") throw new Exception($"status: {result.Status}");
+if (result.Turns != 1) throw new Exception($"expected 1 turn, got {result.Turns}");
+if (result.Usage.TotalTokens != 24) throw new Exception($"usage: {result.Usage.TotalTokens}");
+// The returned Messages carries the full transcript forward — feed it to the next RunAsync call.
+if (result.Messages.Count != history.Count + 2) throw new Exception($"messages: {result.Messages.Count}");
+if (result.Model != "gpt-4o-mini") throw new Exception(result.Model);
+
+Console.WriteLine($"ok: {result.Text} (usage={result.Usage.TotalTokens}, messages={result.Messages.Count})");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
+
+<Aside type="caution">
+`RunAsync` never throws for a `"pending"` result — a §10 suspension (a tool waiting on
+out-of-band resolution) surfaces as `Status == "pending"` with `Pending` set, not as an exception.
+Check `Status` before trusting `Text`.
+</Aside>
+
+## Parameters
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `prompt` | `string` | The user turn to send. |
+| `toolkit` | `Toolkit` | Tools available to the model this run. |
+| `history` | `List<object?>?` | Prior transcript to continue, in provider message shape. `null`/empty ⇒ start fresh with the system prompt. |
+| `cancellationToken` | `CancellationToken` | External cancellation — surfaces as `OperationCanceledException`, distinct from a `TimeoutMs` deadline (`RunTimeoutException`). |
 
 ## The same call in the other five ports
 

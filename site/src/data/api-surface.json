@@ -498,9 +498,10 @@
         "python": "MetricEvent",
         "golang": "MetricEvent",
         "java": "LlmClient.MetricEvent",
-        "csharp": "Metrics.MetricEvent",
+        "csharp": "MetricEvent",
         "elixir": "Toolnexus.Client.MetricsRegistry"
-      }
+      },
+      "parityNote": "C# has no wrapping Metrics class — MetricEvent is a top-level record in namespace Toolnexus."
     },
     {
       "id": "client/resilience",

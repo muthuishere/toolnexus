@@ -8,49 +8,335 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/LlmClient.cs">LlmClient.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public sealed class Hooks
+{
+    public Func<BeforeLLMEvent, LLMOverride?>? BeforeLLM { get; set; }
+    public Action<AfterLLMEvent>? AfterLLM { get; set; }
+    public Func<BeforeToolEvent, ToolOverride?>? BeforeTool { get; set; }
+    public Func<AfterToolEvent, ToolOverride?>? AfterTool { get; set; }
+}
 ```
 
-Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+Four lifecycle interception points, set on `LlmClient.Options.Hooks` and invoked on every turn of
+[`RunAsync`](/api/csharp/client/run/) / [`StreamAsync`](/api/csharp/client/stream/):
+
+- **`BeforeLLM`** — runs just before each model call. Return an `LLMOverride` to rewrite the
+  `Messages`/`Tools` that will be sent (e.g. redact a message, trim history); return `null` to
+  send them unchanged.
+- **`AfterLLM`** — runs just after each model call, given the raw response. Observation only —
+  nothing to override.
+- **`BeforeTool`** — runs just before a tool executes. Return `ToolOverride.WithArgs(...)` to
+  rewrite the arguments, `ToolOverride.WithResult(...)` to skip execution entirely and substitute a
+  result (deny/cache/dry-run), or `null` to run the tool as called.
+- **`AfterTool`** — runs just after a tool executes (skipped for a §10 suspension — that path
+  isn't a real result yet). Return `ToolOverride.WithResult(...)` to replace the result, or `null`
+  to keep it.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Audit logging, PII redaction before a message reaches the model, a policy gate that denies a
+dangerous tool call outright, or a cache that short-circuits a repeated tool call without hitting
+the real implementation.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Hooks wrap the loop; a NativeTool wraps one function">
+Hooks see *every* LLM/tool call the loop makes, across every tool in the toolkit, without touching
+each tool's own code. If the interception is really specific to one tool's own logic (e.g. it
+should always validate its own input a certain way), write that directly into the
+[`NativeTool.Of`](/api/csharp/native/define-tool/) function instead — a hook is the cross-cutting
+layer, not a replacement for tool-local logic.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful hook — observe every model call
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+using var stub = new Stub(ctx =>
+{
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}
+    """);
+});
+
+var afterLlmCalls = 0;
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+    Hooks = new LlmClient.Hooks { AfterLLM = _ => afterLlmCalls++ },
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+var result = await client.RunAsync("hi", tk);
+
+if (afterLlmCalls != 1) throw new Exception($"expected 1 AfterLLM call, got {afterLlmCalls}");
+if (result.Text != "hi") throw new Exception(result.Text);
+
+Console.WriteLine($"ok: AfterLLM fired {afterLlmCalls} time(s)");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. BeforeTool denies a dangerous call without running it
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+using var stub = new Stub(ctx =>
+{
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"delete_all","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":8,"completion_tokens":4,"total_tokens":12}}
+    """);
+});
+
+var executed = false;
+var deleteAll = NativeTool.Of("delete_all", "Deletes everything", null,
+    (IDictionary<string, object?> a) => { executed = true; return "deleted"; });
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+    Hooks = new LlmClient.Hooks
+    {
+        BeforeTool = ev => ev.Name == "delete_all"
+            ? LlmClient.ToolOverride.WithResult(ToolResult.Error("denied by policy"))
+            : null,
+    },
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = new List<ITool> { deleteAll } });
+var result = await client.RunAsync("clean up everything", tk);
+
+if (executed) throw new Exception("the real tool must never run once BeforeTool denies it");
+if (result.ToolCalls[0].Output != "denied by policy") throw new Exception(result.ToolCalls[0].Output);
+if (!result.ToolCalls[0].IsError) throw new Exception("expected the denial to be an error result");
+
+Console.WriteLine($"ok: denied without executing (executed={executed})");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. Full surface — all four hooks working together
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+var calls = 0;
+using var stub = new Stub(ctx =>
+{
+    calls++;
+    if (calls == 1)
+    {
+        Stub.Json(ctx, 200, """
+        {"id":"c1","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"key\":\"secret\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}
+        """);
+    }
+    else
+    {
+        Stub.Json(ctx, 200, """
+        {"id":"c2","choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":2,"total_tokens":14}}
+        """);
+    }
+});
+
+var lookup = NativeTool.Of("lookup", "Look up a key", null,
+    (IDictionary<string, object?> a) => $"value-for-{a["key"]}");
+
+var log = new List<string>();
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+    Hooks = new LlmClient.Hooks
+    {
+        BeforeLLM = ev => { log.Add($"beforeLLM:turn{ev.Turn}"); return null; },
+        AfterLLM = ev => log.Add($"afterLLM:turn{ev.Turn}"),
+        // Rewrite the argument before it reaches the tool — "secret" -> "redacted".
+        BeforeTool = ev => ev.Name == "lookup"
+            ? LlmClient.ToolOverride.WithArgs(new Dictionary<string, object?> { ["key"] = "redacted" })
+            : null,
+        // Uppercase whatever the tool returned.
+        AfterTool = ev => LlmClient.ToolOverride.WithResult(ToolResult.Ok(ev.Result.Output.ToUpperInvariant())),
+    },
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = new List<ITool> { lookup } });
+var result = await client.RunAsync("look up the secret", tk);
+
+if (result.ToolCalls[0].Output != "VALUE-FOR-REDACTED") throw new Exception(result.ToolCalls[0].Output);
+if (!log.Contains("beforeLLM:turn0") || !log.Contains("afterLLM:turn0")) throw new Exception(string.Join(",", log));
+if (!log.Contains("beforeLLM:turn1") || !log.Contains("afterLLM:turn1")) throw new Exception(string.Join(",", log));
+if (result.Text != "done") throw new Exception(result.Text);
+
+Console.WriteLine($"ok: {result.ToolCalls[0].Output} | log={string.Join(",", log)}");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
+
+<Aside type="caution">
+`AfterTool` never fires for a §10 suspension (`ToolResult.PendingOf(result) != null`) — a
+suspension is not a completed result yet. It fires once the suspension is resolved (or declined),
+after `WaitFor` re-executes the tool.
+</Aside>
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `BeforeLLM` | `Func<BeforeLLMEvent, LLMOverride?>?` | Before each model call. Return `LLMOverride` to rewrite `Messages`/`Tools`, `null` to leave them. |
+| `AfterLLM` | `Action<AfterLLMEvent>?` | After each model call — observation only, given the raw response. |
+| `BeforeTool` | `Func<BeforeToolEvent, ToolOverride?>?` | Before a tool executes. `ToolOverride.WithArgs(...)` rewrites args, `ToolOverride.WithResult(...)` skips execution, `null` runs as called. |
+| `AfterTool` | `Func<AfterToolEvent, ToolOverride?>?` | After a tool executes (not on a suspension). `ToolOverride.WithResult(...)` replaces the result, `null` keeps it. |
 
 ## The same call in the other five ports
 
@@ -61,6 +347,9 @@ _TODO: name the alternative and when to prefer it._
 | Go | `Hooks` | [→](/api/go/client/hooks/) |
 | Java | `LlmClient.Hooks` | [→](/api/java/client/hooks/) |
 | Elixir | `Toolnexus.Client.create` | [→](/api/elixir/client/hooks/) |
+
+Elixir has no separate `Hooks` type — pass a `:hooks` map (`:before_llm`, `:after_llm`,
+`:before_tool`, `:after_tool`) to `Toolnexus.Client.create/1`.
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).

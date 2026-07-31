@@ -8,49 +8,388 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/client.py">python/src/toolnexus/client.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+async def run(
+    self,
+    prompt: str,
+    toolkit: Toolkit,
+    history: list[dict[str, Any]] | None = None,
+    cancel: asyncio.Event | None = None,
+) -> RunResult
 ```
 
-Send a prompt, let the loop call tools until the model stops, get a RunResult.
+One turn of the agent loop: send `prompt`, let the model call tools (parallel where the
+provider offers them, chained across turns) until it produces a final answer or `max_turns`
+is exhausted, and return a `RunResult` — text, the full message transcript, every tool call
+made, usage, and a `status`.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- You want a single request/response call — no live token stream, no manual conversation
+  bookkeeping — and you're fine waiting for the whole answer before you see any of it.
+- You are driving your own conversation memory (you keep `result.messages` and pass it back
+  in as `history` next time), rather than using [`Conversation`](/api/python/client/conversation/)
+  or the store-backed `ask(..., id=...)`.
+- You need the full `RunResult` — `tool_calls`, `turns`, `usage`, `status` — as one object,
+  not a sequence of events.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for stream() when you want to show progress">
+[`Client.stream`](/api/python/client/stream/) yields the same loop as a sequence of events —
+text deltas, `tool_call`/`tool_result`, `usage`, `done` — so a UI or CLI can render output as
+it arrives. `run` is the batch form: same loop, one awaited result. If you don't need to
+render anything until the model is done, `run` is simpler.
 </Aside>
+
+`run` is stateless by itself — it never touches a store. [`Conversation`](/api/python/client/conversation/)
+wraps it to retain history across calls; `Client.ask(prompt, toolkit, id=...)` wraps it again
+with a [`ConversationStore`](/api/python/client/store/) for durability across processes.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+<Aside type="note" title="Hermetic on purpose">
+Every example below points `create_client` at a local `http.server` stub instead of a real
+LLM endpoint — no network, no API key. The stub returns OpenAI-shaped chat-completion JSON,
+which is exactly what `client.py` parses when `style="openai"`.
+</Aside>
 
-{/* TODO:example1 */}
-```python
-// TODO
+### 1. The smallest useful call — no tools, one round trip
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit
+
+
+class StubServer:
+    """A local OpenAI-shaped chat-completions endpoint — no network leaves the box."""
+
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):  # silence
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def reply(body):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": "sunny in Chennai"}}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+    }
+
+
+async def main():
+    tk = await create_toolkit()
+    try:
+        with StubServer(reply) as srv:
+            client = create_client(
+                base_url=srv.base_url,
+                style="openai",
+                model="test-model",
+                api_key="test-key",  # hermetic stub — never a real key
+            )
+            result = await client.run("weather in Chennai?", tk)
+
+        assert result.text == "sunny in Chennai"
+        assert result.status == "done"
+        assert result.turns == 1
+        assert result.tool_call_count == 0
+        assert result.usage["total_tokens"] == 8
+
+        print("ok:", result.text)
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — a registered tool, two round trips
 
-{/* TODO:example2 */}
-```python
-// TODO
+The model calls a tool on turn 1; the loop executes it and feeds the result back; the model
+answers on turn 2. `RunResult.tool_calls` records exactly what ran.
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit, define_tool
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def add(a: float, b: float) -> str:
+    """Add two numbers and return the sum."""
+    return str(a + b)
+
+
+def scripted(body):
+    messages = body["messages"]
+    # First call: no tool result on the transcript yet -> ask for the tool.
+    if not any(m.get("role") == "tool" for m in messages):
+        return {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "add", "arguments": '{"a": 21, "b": 21}'},
+                    }],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+    # Second call: the tool result is in the transcript -> give the final answer.
+    return {
+        "choices": [{"message": {"role": "assistant", "content": "42"}}],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 1, "total_tokens": 13},
+    }
+
+
+async def main():
+    tk = await create_toolkit()
+    tk.register(
+        define_tool(
+            add,
+            name="add",
+            description="Add two numbers.",
+            input_schema={
+                "type": "object",
+                "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+                "required": ["a", "b"],
+            },
+        )
+    )
+    try:
+        with StubServer(scripted) as srv:
+            client = create_client(base_url=srv.base_url, style="openai", model="test-model", api_key="test-key")
+            result = await client.run("add 21 and 21", tk)
+
+        assert result.text == "42"
+        assert result.turns == 2
+        assert result.tool_call_count == 1
+        assert result.tool_calls[0]["name"] == "add"
+        assert result.tool_calls[0]["output"] == "42"
+        assert result.tool_calls[0]["is_error"] is False
+        assert result.usage["total_tokens"] == 15 + 13
+
+        print("ok:", result.text, result.tool_calls[0])
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — `history`, `RunResult` fields, and an `incomplete` status
 
-{/* TODO:example3 */}
-```python
-// TODO
+Pass a prior `result.messages` back in as `history` to continue a transcript without a store,
+and see the loud `"incomplete"` status a run reports when `max_turns` is exhausted mid-loop.
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit, define_tool
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+async def main():
+    tk = await create_toolkit()
+    try:
+        # --- history: continue a transcript without a ConversationStore ---
+        seen_second_call = {"messages": None}
+
+        def echo(body):
+            seen_second_call["messages"] = body["messages"]
+            return {
+                "choices": [{"message": {"role": "assistant", "content": "noted"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+
+        with StubServer(echo) as srv:
+            client = create_client(base_url=srv.base_url, style="openai", model="test-model", api_key="test-key")
+            first = await client.run("my name is Muthu", tk)
+            second = await client.run("what's my name?", tk, history=first.messages)
+
+        # history carried the first turn's user + assistant messages into the second call.
+        contents = [m.get("content") for m in seen_second_call["messages"]]
+        assert "my name is Muthu" in contents
+        assert "what's my name?" in contents
+
+        # --- an exhausted max_turns is a loud "incomplete", never a silent "done" ---
+        def always_tool_call(body):
+            return {
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "call_x",
+                            "type": "function",
+                            "function": {"name": "noop", "arguments": "{}"},
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+
+        with StubServer(always_tool_call) as srv2:
+            tk2 = await create_toolkit()
+            tk2.register(define_tool(lambda: "x", name="noop", description="never resolves the loop"))
+            client2 = create_client(
+                base_url=srv2.base_url, style="openai", model="test-model", api_key="test-key", max_turns=2
+            )
+            limited = await client2.run("loop forever", tk2)
+            await tk2.close()
+
+        assert limited.status == "incomplete"
+        assert limited.limit == "maxTurns"
+        assert limited.turns == 2
+
+        print("ok:", second.text, "|", limited.status, limited.limit)
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
 ```
+
+## `RunResult` fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `text` | `str` | The final assistant text (empty on `"incomplete"` with no trailing text). |
+| `messages` | `list[dict]` | The full transcript — pass to a next `run(..., history=...)` call, or into `Conversation`. |
+| `tool_calls` | `list[dict]` | Every tool call made: `name`, `args`, `output`, `is_error`, `metadata`. |
+| `tool_call_count` | `int` | `len(tool_calls)`. |
+| `turns` | `int` | Number of LLM round trips. |
+| `usage` | `dict[str, int]` | Aggregated `prompt_tokens` / `completion_tokens` / `total_tokens` across all turns. |
+| `model` | `str` | The model used. |
+| `status` | `"done" \| "pending" \| "incomplete"` | `"pending"` iff a tool suspended (§10) with no `wait_for`; `"incomplete"` iff `max_turns` was exhausted while the model was still calling tools. |
+| `limit` | `str \| None` | Which limit stopped the run (`"maxTurns"`) — set only when `status == "incomplete"`. |
+| `pending` | `Request \| None` | The unresolved suspension — set only when `status == "pending"`. |
 
 ## The same call in the other five ports
 

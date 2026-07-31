@@ -8,49 +8,193 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#8-unified-llm-client-the-host-loop">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/client.ts">js/src/client.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+type MetricEvent =
+  | { event: "llm"; model: string; status: "ok" | "error"; ms: number; promptTokens: number; completionTokens: number }
+  | { event: "tool"; tool: string; source: string; isError: boolean; ms: number; pending?: boolean }
+  | { event: "run"; model: string; turns: number; toolCalls: number; totalTokens: number; ms: number; error?: string }
+
+createClient({ onMetric?: (ev: MetricEvent) => void, … })
 ```
 
-Emit one metric event per model call and per tool call: tokens, latency, outcome.
+Semantic observability, not raw counters. Every model call, every tool call, and every finished
+run emits one readable `MetricEvent` — pass `onMetric` to `createClient` and forward it anywhere
+(statsd, structured logs, OpenTelemetry). The same events also feed the client's own built-in
+Prometheus registry, rendered by `client.metrics()`.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Use `onMetric` when you need per-call telemetry — latency, token counts, error/pending outcome —
+without hand-instrumenting every call site. It fires exactly where the loop already knows the
+answer: once per LLM round trip, once per tool execution, once per finished (or errored) run.
+
+Use `client.metrics()` when you just want a `/metrics` endpoint: it renders the same events as
+Prometheus text exposition, with **zero cost when `onMetric` is unset** — the registry always
+accumulates internally regardless.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use Hooks instead when you need to see (or change) the actual payload">
+`MetricEvent` is deliberately thin — tokens, timing, an error flag — never the prompt, the tool
+args, or the response body. If you need the *content* (to log a tool's arguments, redact a result,
+veto a call), that's [`Hooks`](/api/javascript/client/hooks/), not `onMetric`. The two compose: use
+`onMetric` for numbers, `Hooks` for content.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — count the events by kind
 
-{/* TODO:example1 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit } from "toolnexus"
+import type { MetricEvent } from "toolnexus"
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "content-type": "application/json" })
+  res.end(JSON.stringify({ choices: [{ message: { content: "hi" }, finish_reason: "stop" }], usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 } }))
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const tk = await createToolkit({})
+const events: MetricEvent[] = []
+const client = createClient({
+  baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key",
+  onMetric: (ev) => events.push(ev),
+})
+
+await client.run("say hi", { toolkit: tk })
+assert.deepEqual(events.map((e) => e.event), ["llm", "run"])
+const llm = events[0] as Extract<MetricEvent, { event: "llm" }>
+assert.equal(llm.status, "ok")
+assert.equal(llm.promptTokens, 4)
+assert.equal(llm.completionTokens, 2)
+
+await tk.close()
+server.close()
+console.log("ok:", events.map((e) => e.event).join(","))
 ```
 
-### 2. TODO — the realistic case
+### 2. A realistic case — forward to a statsd-shaped sink, including a tool call
 
-{/* TODO:example2 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, defineTool } from "toolnexus"
+
+let calls = 0
+const server = http.createServer((req, res) => {
+  calls++
+  res.writeHead(200, { "content-type": "application/json" })
+  if (calls === 1) {
+    res.end(JSON.stringify({
+      choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "add", arguments: '{"a":2,"b":3}' } }] }, finish_reason: "tool_calls" }],
+      usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+    }))
+  } else {
+    res.end(JSON.stringify({ choices: [{ message: { content: "5" }, finish_reason: "stop" }], usage: { prompt_tokens: 9, completion_tokens: 1, total_tokens: 10 } }))
+  }
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+// A statsd-shaped sink stand-in — records what a real client.timing()/increment() would receive.
+const timings: Array<{ metric: string; ms: number }> = []
+const tk = await createToolkit({ builtins: false, extraTools: [defineTool({ name: "add", description: "", run: ({ a, b }) => String((a as number) + (b as number)) })] })
+const client = createClient({
+  baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key",
+  onMetric: (ev) => {
+    if (ev.event === "llm") timings.push({ metric: "toolnexus.llm", ms: ev.ms })
+    if (ev.event === "tool") timings.push({ metric: `toolnexus.tool.${ev.tool}`, ms: ev.ms })
+  },
+})
+
+const res = await client.run("add 2 and 3", { toolkit: tk })
+assert.equal(res.text, "5")
+assert.ok(timings.some((t) => t.metric === "toolnexus.llm"))
+assert.ok(timings.some((t) => t.metric === "toolnexus.tool.add"))
+assert.equal(timings.filter((t) => t.metric === "toolnexus.llm").length, 2, "one llm event per round trip")
+
+await tk.close()
+server.close()
+console.log("ok:", timings.map((t) => t.metric).join(","))
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — a suspended tool, a run error, and the Prometheus snapshot
 
-{/* TODO:example3 */}
-```ts
-// TODO
+A suspended tool reports `pending: true` on its `tool` event (never `isError`); a thrown run
+reports a terminal `run` event carrying `error`; `client.metrics()` renders everything as
+Prometheus text, with no `onMetric` required for that snapshot to exist.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, defineTool, pending } from "toolnexus"
+import type { MetricEvent } from "toolnexus"
+
+// Server 1: a tool suspends, is answered via waitFor, run completes normally.
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "content-type": "application/json" })
+  res.end(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "approve", arguments: "{}" } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const events: MetricEvent[] = []
+const tk = await createToolkit({
+  builtins: false,
+  extraTools: [defineTool({ name: "approve", description: "", run: (_a, ctx) => ctx?.answer ? "approved" : pending({ prompt: "approve?", kind: "input" }) })],
+})
+const client = createClient({
+  baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key", maxTurns: 1,
+  waitFor: async (r) => ({ id: r.id, ok: true }),
+  onMetric: (ev) => events.push(ev),
+})
+await client.run("do it", { toolkit: tk })
+const toolEvents = events.filter((e): e is Extract<MetricEvent, { event: "tool" }> => e.event === "tool")
+assert.ok(toolEvents.some((e) => e.pending === true), "suspended tool did not report pending:true")
+assert.ok(toolEvents.every((e) => e.isError === false), "a suspension must never be reported as an error")
+
+// A snapshot always exists, whether or not onMetric was set — text exposition format.
+const snapshot = client.metrics()
+assert.match(snapshot, /# TYPE toolnexus_llm_requests_total counter/)
+assert.match(snapshot, /toolnexus_tool_calls_total\{.*tool="approve".*\}/)
+
+await tk.close()
+server.close()
+
+// Server 2: the run throws — a run event with `error` is emitted before the exception propagates.
+const badServer = http.createServer((req, res) => { res.writeHead(500); res.end("boom") })
+await new Promise<void>((r) => badServer.listen(0, "127.0.0.1", r))
+const badPort = (badServer.address() as any).port
+const tk2 = await createToolkit({})
+const runEvents: MetricEvent[] = []
+const client2 = createClient({ baseUrl: `http://127.0.0.1:${badPort}`, style: "openai", model: "stub", apiKey: "test-key", retries: 0, onMetric: (ev) => runEvents.push(ev) })
+await assert.rejects(() => client2.run("go", { toolkit: tk2 }))
+const runEvent = runEvents.find((e) => e.event === "run") as Extract<MetricEvent, { event: "run" }> | undefined
+assert.ok(runEvent?.error, "a thrown run must still emit a run event carrying the error")
+
+await tk2.close()
+badServer.close()
+console.log("ok:", toolEvents.length, !!runEvent?.error)
 ```
+
+## Fields
+
+| `event` | Fields | Fires |
+|---|---|---|
+| `"llm"` | `model, status, ms, promptTokens, completionTokens` | Once per LLM round trip. |
+| `"tool"` | `tool, source, isError, ms, pending?` | Once per tool execution. `pending:true` on a §10 suspension — never counted as `isError`. |
+| `"run"` | `model, turns, toolCalls, totalTokens, ms, error?` | Once per finished (or thrown) `run`/`stream`/`ask`. |
+
+`onMetric` is a plain `(ev: MetricEvent) => void` option on `createClient` — no return value, no
+async contract; it observes only. `client.metrics()` renders the cumulative Prometheus text
+exposition of the same events, independent of whether `onMetric` is set.
 
 ## The same call in the other five ports
 
@@ -59,7 +203,7 @@ _TODO: name the alternative and when to prefer it._
 | Python | `MetricEvent` | [→](/api/python/client/metrics/) |
 | Go | `MetricEvent` | [→](/api/go/client/metrics/) |
 | Java | `LlmClient.MetricEvent` | [→](/api/java/client/metrics/) |
-| C# | `Metrics.MetricEvent` | [→](/api/csharp/client/metrics/) |
+| C# | `MetricEvent` | [→](/api/csharp/client/metrics/) |
 | Elixir | `Toolnexus.Client.MetricsRegistry` | [→](/api/elixir/client/metrics/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
