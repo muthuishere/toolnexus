@@ -45,12 +45,18 @@ being written, both of which a `$?` check would have passed.
 
 ## What building this shook out
 
-1. **cljgo has no configurable source path.** It resolves namespaces under
-   `src/` relative to the entry file, so a `test/` tree is invisible to
-   `cljgo run` and `cljgo build` — `could not locate namespace app.core-test`.
-   In a dual-host project the tests live beside the code. This contradicts every
-   JVM convention, and the failure is a load error at the entry point rather
-   than anything that mentions paths.
+1. **`cljgo run` / `cljgo build` resolve requires relative to the entry file's
+   own root.** An entry under `src/` therefore cannot `require` a namespace
+   living in `test/` — `could not locate namespace app.core-test`. Because this
+   example's gate entry (`src/app/test_main.cljc`) requires the suite, the suite
+   lives under `src/`.
+
+   **This is not "cljgo cannot see `test/`."** `cljgo test` walks both trees:
+   measured here, it collected **6 tests / 18 assertions** from a suite in `src/`
+   plus one in `test/`. The real constraint is the same runtime-vs-test
+   classpath split the JVM has — a *require* crosses it, a *test walk* does not.
+   (Corrected 2026-07-31; the first version of this README stated the broader
+   claim, and koine disproved it with a counter-measurement.)
 2. **Two `exe` calls in one `build.cljgo` corrupt the SECOND binary**, whichever
    it is (cljgo 0.1.0-dev, measured 2026-07-31). App-then-test produced a test
    binary with 5 errors; test-then-app produced an app binary that died on

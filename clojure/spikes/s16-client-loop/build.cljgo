@@ -1,6 +1,6 @@
 ;; S16 — cljgo side. Same source, same koine artifact from Clojars.
 (defn build [b]
-  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.4.2"})
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.6.0"})
   (let [app (exe b {:name "loopslice" :main "src/toolnexus/loopslice.cljc"})]
     (install b app)
     (run b app)))

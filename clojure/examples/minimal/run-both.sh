@@ -14,7 +14,7 @@ bad()  { printf '  \033[31m%s\033[0m\n' "$1"; }
 fail=0
 
 bold "== build (cljgo)"
-cljgo build >/dev/null 2>&1 || { bad "cljgo build FAILED"; exit 1; }
+{ cljgo build && (cd aot-test && cljgo build); } >/dev/null 2>&1 || { bad "cljgo build FAILED"; exit 1; }
 
 bold "== app"
 clojure -M -m app.main 2>/dev/null | grep '^{' | tail -1 > "$OUT/jvm.json"

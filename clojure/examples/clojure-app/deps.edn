@@ -7,4 +7,4 @@
 ;; client, no JSON library, no process library. That is the point.
 {:paths ["src"]
  :deps  {org.clojure/clojure           {:mvn/version "1.12.5"}
-         net.clojars.muthuishere/koine {:mvn/version "0.4.2"}}}
+         net.clojars.muthuishere/koine {:mvn/version "0.6.0"}}}

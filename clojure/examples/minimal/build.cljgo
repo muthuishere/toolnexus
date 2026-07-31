@@ -10,7 +10,7 @@
 ;; gave an app binary that died on `cannot call unbound var #'app.core/report`.
 ;; The AOT test binary is therefore built from `aot-test/build.cljgo`.
 (defn build [b]
-  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.5.0"})
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.6.0"})
   (let [app (exe b {:name "minimal" :main "src/app/main.cljg"})]
     (install b app)
     (run b app)))
