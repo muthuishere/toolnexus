@@ -1,56 +1,179 @@
 ---
-title: "Adapters.toOpenAI"
-description: "Render the toolkit as OpenAI function-calling schema. — Java."
+title: Adapters.toOpenAI
+description: Render any tool list as OpenAI function-calling schema. Java.
 sidebar:
-  label: "Adapters.toOpenAI"
+  label: Adapters.toOpenAI
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/Adapters.java">Adapters.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public static List<Map<String, Object>> toOpenAI(List<Tool> tools)
 ```
 
-Render the toolkit as OpenAI function-calling schema.
+Turns a `List<Tool>` into the `tools` array an OpenAI-shaped chat completion expects. This is the
+bridge between "toolnexus knows about these tools" and "the model can call them".
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When you are driving the LLM call yourself and need schema to put in the request body. Every
+OpenAI-compatible endpoint takes this shape — OpenAI, OpenRouter, Groq, Together, a local Ollama,
+or your own gateway.
 
-## Why this and not the alternative
+## Why this and not the client
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Skip this entirely if you use LlmClient.create">
+[`LlmClient.create`](/api/java/client/create/) calls the right adapter for you based on its style
+option and runs the whole tool-calling loop. Reach for `toOpenAI` when you already have your own
+loop or framework and only want toolnexus for tool *aggregation*.
 </Aside>
+
+`tk.toOpenAI()` on a [`Toolkit`](/api/java/toolkit/create/) is the same function applied to that
+toolkit's tools — use it when you have a toolkit, and the static method when you have a bare list.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. One tool to OpenAI schema
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Tool weather = NativeTool.of(
+            "get_weather",
+            "Current weather for a city",
+            Map.of("type", "object",
+                   "properties", Map.of("city", Map.of("type", "string")),
+                   "required", List.of("city")),
+            (Map<String, Object> a) -> "sunny in " + a.get("city")
+        );
+
+        List<Map<String, Object>> schema = Adapters.toOpenAI(List.of(weather));
+
+        if (schema.size() != 1) throw new AssertionError("expected 1 entry");
+        if (!schema.get(0).get("type").equals("function")) throw new AssertionError("type");
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> fn = (Map<String, Object>) schema.get(0).get("function");
+        if (!fn.get("name").equals("get_weather")) throw new AssertionError("name");
+        if (!fn.get("description").equals("Current weather for a city")) throw new AssertionError("description");
+
+        System.out.println("ok: " + fn.get("name"));
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+Note the nesting: OpenAI wraps each tool in `{"type":"function","function":{...}}`. The
+`inputSchema()` on a `Tool` becomes `function.parameters` — the key is renamed.
 
-{/* TODO:example2 */}
-```java
-// TODO
+### 2. Feeding it straight into a request body
+
+The output is plain `Map`s and `List`s, so any JSON library serializes it without help.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    static Tool mk(String name, String desc) {
+        return NativeTool.of(name, desc,
+            Map.of("type", "object", "properties", Map.of()),
+            (Map<String, Object> a) -> name);
+    }
+
+    public static void main(String[] args) {
+        List<Tool> tools = List.of(mk("search", "Search the docs"), mk("ping", "Health check"));
+
+        Map<String, Object> body = Map.of(
+            "model", "gpt-4o-mini",
+            "messages", List.of(Map.of("role", "user", "content", "search for adapters")),
+            "tools", Adapters.toOpenAI(tools)
+        );
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> entries = (List<Map<String, Object>>) body.get("tools");
+        if (entries.size() != 2) throw new AssertionError("expected 2 tools");
+
+        // Order is preserved.
+        List<String> names = new ArrayList<>();
+        for (Map<String, Object> e : entries) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> fn = (Map<String, Object>) e.get("function");
+            names.add((String) fn.get("name"));
+        }
+        if (!names.equals(List.of("search", "ping"))) throw new AssertionError("order: " + names);
+
+        System.out.println("ok: " + String.join(", ", names));
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. Round-tripping a call back to the tool
 
-{/* TODO:example3 */}
-```java
-// TODO
+Schema out, tool call in. The `name()` the model returns is the same `name()` you look up.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Tool weather = NativeTool.of(
+            "get_weather",
+            "Current weather for a city",
+            Map.of("type", "object",
+                   "properties", Map.of("city", Map.of("type", "string")),
+                   "required", List.of("city")),
+            (Map<String, Object> a) -> "sunny in " + a.get("city")
+        );
+        List<Tool> tools = List.of(weather);
+
+        // What a model would send back. OpenAI encodes arguments as a JSON STRING;
+        // parse it with your JSON library before calling execute.
+        String calledName = "get_weather";
+        Map<String, Object> parsedArgs = Map.of("city", "Chennai");
+
+        Tool called = tools.stream()
+            .filter(t -> t.name().equals(calledName))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("the advertised name should resolve back"));
+
+        ToolResult res = called.execute(parsedArgs, new ToolContext());
+        if (res.isError() || !res.output().equals("sunny in Chennai")) {
+            throw new AssertionError(res.output());
+        }
+
+        // An empty tool list is valid — it just means "no tools this turn".
+        if (!Adapters.toOpenAI(List.of()).isEmpty()) throw new AssertionError("expected empty");
+
+        System.out.println("ok: " + calledName + " -> " + res.output());
+    }
+}
 ```
+
+<Aside type="caution">
+OpenAI sends `arguments` as a **JSON string**, not an object. Parse it into a
+`Map<String, Object>` before handing it to `execute`.
+</Aside>
+
+## Shape
+
+| Path | From | Notes |
+|---|---|---|
+| `[].type` | — | Always the literal `"function"`. |
+| `[].function.name` | `Tool.name()` | What the model calls back with. |
+| `[].function.description` | `Tool.description()` | |
+| `[].function.parameters` | `Tool.inputSchema()` | Renamed — `inputSchema` → `parameters`. |
 
 ## The same call in the other five ports
 
@@ -62,10 +185,10 @@ _TODO: name the alternative and when to prefer it._
 | C# | `Adapters.ToOpenAI` | [→](/api/csharp/adapters/openai/) |
 | Elixir | `Toolnexus.Adapters.to_openai` | [→](/api/elixir/adapters/openai/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Output is byte-identical across ports for the same tools — that is a §0 conformance obligation.
 
 ## See also
 
-- [`Adapters.toAnthropic`](/api/java/adapters/anthropic/) — Render the toolkit as Anthropic tool-use schema.
-- [`Adapters.toGemini`](/api/java/adapters/gemini/) — Render the toolkit as Gemini function-declaration schema.
+- [`Adapters.toAnthropic`](/api/java/adapters/anthropic/) · [`Adapters.toGemini`](/api/java/adapters/gemini/)
+- [`Toolkit.create`](/api/java/toolkit/create/) — `tk.toOpenAI()` is this, applied to the toolkit
+- [`LlmClient.create`](/api/java/client/create/) — calls the adapter for you

@@ -1,56 +1,164 @@
 ---
-title: "to_openai"
-description: "Render the toolkit as OpenAI function-calling schema. — Python."
+title: to_openai
+description: Render any tool list as OpenAI function-calling schema. Python.
 sidebar:
-  label: "to_openai"
+  label: to_openai
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/adapters.py">python/src/toolnexus/adapters.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+def to_openai(tools: list[Tool]) -> list[dict[str, Any]]
 ```
 
-Render the toolkit as OpenAI function-calling schema.
+Turns a `list[Tool]` into the `tools` array an OpenAI-shaped chat completion expects. This is the
+bridge between "toolnexus knows about these tools" and "the model can call them".
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When you are driving the LLM call yourself and need schema to put in the request body. Every
+OpenAI-compatible endpoint takes this shape — OpenAI, OpenRouter, Groq, Together, a local Ollama,
+or your own gateway.
 
-## Why this and not the alternative
+## Why this and not the client
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Skip this entirely if you use create_client">
+[`create_client`](/api/python/client/create/) calls the right adapter for you based on its `style`
+option and runs the whole tool-calling loop. Reach for `to_openai` when you already have your own
+loop or framework and only want toolnexus for tool *aggregation*.
 </Aside>
+
+`tk.to_openai()` on a [`Toolkit`](/api/python/toolkit/create/) is the same function applied to that
+toolkit's tools — use it when you have a toolkit, and the free function when you have a bare list.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. One tool to OpenAI schema
 
-{/* TODO:example1 */}
-```python
-// TODO
+```python test
+from toolnexus import to_openai, define_tool
+
+
+def get_weather(city: str) -> str:
+    """Current weather for a city."""
+    return f"sunny in {city}"
+
+
+weather = define_tool(get_weather, name="get_weather", description="Current weather for a city")
+
+schema = to_openai([weather])
+
+assert len(schema) == 1
+assert schema[0]["type"] == "function"
+assert schema[0]["function"]["name"] == "get_weather"
+assert schema[0]["function"]["description"] == "Current weather for a city"
+# The schema was inferred from the type hints.
+assert "city" in schema[0]["function"]["parameters"]["properties"]
+
+print("ok:", schema[0]["function"]["name"])
 ```
 
-### 2. TODO — the realistic case
+Note the nesting: OpenAI wraps each tool in `{"type": "function", "function": {...}}`. The
+`input_schema` on a `Tool` becomes `function.parameters` — the key is renamed.
 
-{/* TODO:example2 */}
-```python
-// TODO
+### 2. Feeding it straight into a request body
+
+The output is plain dicts, designed to be dropped into `tools` verbatim.
+
+```python test
+import json
+from toolnexus import to_openai, define_tool
+
+
+def search(q: str) -> str:
+    """Search the docs."""
+    return f"results for {q}"
+
+
+def ping() -> str:
+    """Health check."""
+    return "pong"
+
+
+tools = [
+    define_tool(search, name="search", description="Search the docs"),
+    define_tool(ping, name="ping", description="Health check"),
+]
+
+body = {
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "search for adapters"}],
+    "tools": to_openai(tools),
+}
+
+# Order is preserved, one entry per tool.
+assert len(body["tools"]) == 2
+assert [t["function"]["name"] for t in body["tools"]] == ["search", "ping"]
+# Plain JSON — serializes with no custom encoder.
+assert len(json.dumps(body)) > 0
+
+print("ok:", ", ".join(t["function"]["name"] for t in body["tools"]))
 ```
 
-### 3. TODO — the full surface
+### 3. Round-tripping a call back to the tool
 
-{/* TODO:example3 */}
-```python
-// TODO
+Schema out, tool call in. The `name` the model returns is the same `name` you look up.
+
+```python test
+import asyncio
+import json
+from toolnexus import to_openai, define_tool
+
+
+def get_weather(city: str) -> str:
+    """Current weather for a city."""
+    return f"sunny in {city}"
+
+
+tools = [define_tool(get_weather, name="get_weather", description="Current weather for a city")]
+schema = to_openai(tools)
+
+# What a model would send back for that schema.
+tool_call = {
+    "id": "call_1",
+    "type": "function",
+    "function": {"name": "get_weather", "arguments": '{"city":"Chennai"}'},
+}
+
+
+async def main():
+    # Look the tool up by the name you advertised, then execute it.
+    called = next(t for t in tools if t.name == tool_call["function"]["name"])
+    res = await called.execute(json.loads(tool_call["function"]["arguments"]))
+    assert res.output == "sunny in Chennai"
+    assert res.is_error is False
+
+    # An empty tool list is valid — it just means "no tools this turn".
+    assert to_openai([]) == []
+
+    print("ok:", schema[0]["function"]["name"], "->", res.output)
+
+
+asyncio.run(main())
 ```
+
+<Aside type="caution">
+OpenAI sends `arguments` as a **JSON string**, not a dict. `json.loads` it before handing it to
+`execute`, which expects a real mapping.
+</Aside>
+
+## Shape
+
+| Path | From | Notes |
+|---|---|---|
+| `[]["type"]` | — | Always the literal `"function"`. |
+| `[]["function"]["name"]` | `Tool.name` | What the model calls back with. |
+| `[]["function"]["description"]` | `Tool.description` | |
+| `[]["function"]["parameters"]` | `Tool.input_schema` | Renamed — `input_schema` → `parameters`. |
 
 ## The same call in the other five ports
 
@@ -62,10 +170,10 @@ _TODO: name the alternative and when to prefer it._
 | C# | `Adapters.ToOpenAI` | [→](/api/csharp/adapters/openai/) |
 | Elixir | `Toolnexus.Adapters.to_openai` | [→](/api/elixir/adapters/openai/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Output is byte-identical across ports for the same tools — that is a §0 conformance obligation.
 
 ## See also
 
-- [`to_anthropic`](/api/python/adapters/anthropic/) — Render the toolkit as Anthropic tool-use schema.
-- [`to_gemini`](/api/python/adapters/gemini/) — Render the toolkit as Gemini function-declaration schema.
+- [`to_anthropic`](/api/python/adapters/anthropic/) · [`to_gemini`](/api/python/adapters/gemini/)
+- [`create_toolkit`](/api/python/toolkit/create/) — `tk.to_openai()` is this, applied to the toolkit
+- [`create_client`](/api/python/client/create/) — calls the adapter for you

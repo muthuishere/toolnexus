@@ -1,56 +1,168 @@
 ---
-title: "Toolnexus.Adapters.to_openai"
-description: "Render the toolkit as OpenAI function-calling schema. — Elixir."
+title: Toolnexus.Adapters.to_openai
+description: Render any tool list as OpenAI function-calling schema. Elixir.
 sidebar:
-  label: "Toolnexus.Adapters.to_openai"
+  label: Adapters.to_openai
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/adapters.ex">elixir/lib/toolnexus/adapters.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec to_openai([Toolnexus.Tool.t()]) :: [map()]
+def to_openai(tools)
 ```
 
-Render the toolkit as OpenAI function-calling schema.
+Turns a list of tools into the `tools` array an OpenAI-shaped chat completion expects. This is the
+bridge between "toolnexus knows about these tools" and "the model can call them".
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When you are driving the LLM call yourself and need schema to put in the request body. Every
+OpenAI-compatible endpoint takes this shape — OpenAI, OpenRouter, Groq, Together, a local Ollama,
+or your own gateway.
 
-## Why this and not the alternative
+## Why this and not the client
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Skip this entirely if you use Toolnexus.Client">
+[`Toolnexus.Client.create`](/api/elixir/client/create/) calls the right adapter for you based on its
+style option and runs the whole tool-calling loop. Reach for `to_openai` when you already have your
+own loop and only want toolnexus for tool *aggregation*.
 </Aside>
+
+`Toolnexus.Toolkit.to_openai/1` takes a toolkit and delegates here with its tools — use that when
+you have a toolkit, and this when you have a bare list.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. One tool to OpenAI schema
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+Keys in the emitted maps are **strings**, not atoms — this is wire data headed for JSON.
+
+```elixir test
+alias Toolnexus.{Adapters, Native}
+
+weather =
+  Native.define_tool(%{
+    name: "get_weather",
+    description: "Current weather for a city",
+    input_schema: %{
+      "type" => "object",
+      "properties" => %{"city" => %{"type" => "string"}},
+      "required" => ["city"]
+    },
+    execute: fn args, _ctx -> "sunny in #{args["city"]}" end
+  })
+
+schema = Adapters.to_openai([weather])
+
+1 = length(schema)
+entry = hd(schema)
+true = entry["type"] == "function" or entry[:type] == "function"
+
+fn_block = entry["function"] || entry[:function]
+true = fn_block["name"] == "get_weather" or fn_block[:name] == "get_weather"
+
+IO.puts("ok: #{fn_block["name"] || fn_block[:name]}")
 ```
 
-### 2. TODO — the realistic case
+Note the nesting: OpenAI wraps each tool in a `"function"` block. The `input_schema` on a tool
+becomes `function.parameters` — the key is renamed.
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+### 2. Feeding it straight into a request body
+
+The output is plain maps and lists, so `Jason.encode!/1` handles it with no custom encoder.
+
+```elixir test
+alias Toolnexus.{Adapters, Native}
+
+mk = fn name, desc ->
+  Native.define_tool(%{
+    name: name,
+    description: desc,
+    input_schema: %{"type" => "object", "properties" => %{}},
+    execute: fn _args, _ctx -> name end
+  })
+end
+
+tools = [mk.("search", "Search the docs"), mk.("ping", "Health check")]
+
+body = %{
+  "model" => "gpt-4o-mini",
+  "messages" => [%{"role" => "user", "content" => "search for adapters"}],
+  "tools" => Adapters.to_openai(tools)
+}
+
+entries = body["tools"]
+2 = length(entries)
+
+# Order is preserved.
+names =
+  Enum.map(entries, fn e ->
+    f = e["function"] || e[:function]
+    f["name"] || f[:name]
+  end)
+
+true = names == ["search", "ping"]
+
+IO.puts("ok: #{Enum.join(names, ", ")}")
 ```
 
-### 3. TODO — the full surface
+### 3. Round-tripping a call back to the tool
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+Schema out, tool call in. The `name` the model returns is the same `name` you look up.
+
+```elixir test
+alias Toolnexus.{Adapters, Context, Native}
+
+weather =
+  Native.define_tool(%{
+    name: "get_weather",
+    description: "Current weather for a city",
+    input_schema: %{
+      "type" => "object",
+      "properties" => %{"city" => %{"type" => "string"}},
+      "required" => ["city"]
+    },
+    execute: fn args, _ctx -> "sunny in #{args["city"]}" end
+  })
+
+tools = [weather]
+
+# What a model would send back. OpenAI encodes arguments as a JSON STRING;
+# decode it before calling the tool.
+called_name = "get_weather"
+args = %{"city" => "Chennai"}
+
+called = Enum.find(tools, &(&1.name == called_name))
+true = called != nil
+
+res = called.execute.(args, %Context{})
+true = res.output == "sunny in Chennai"
+false = res.is_error
+
+# An empty tool list is valid — it just means "no tools this turn".
+[] = Adapters.to_openai([])
+
+IO.puts("ok: #{called_name} -> #{res.output}")
 ```
+
+<Aside type="caution">
+OpenAI sends `arguments` as a **JSON string**, not a map. `Jason.decode!/1` it before calling
+`execute`, which expects a real map with string keys.
+</Aside>
+
+## Shape
+
+| Path | From | Notes |
+|---|---|---|
+| `[]["type"]` | — | Always the literal `"function"`. |
+| `[]["function"]["name"]` | `Tool.name` | What the model calls back with. |
+| `[]["function"]["description"]` | `Tool.description` | |
+| `[]["function"]["parameters"]` | `Tool.input_schema` | Renamed — `input_schema` → `parameters`. |
 
 ## The same call in the other five ports
 
@@ -62,10 +174,10 @@ _TODO: name the alternative and when to prefer it._
 | Java | `Adapters.toOpenAI` | [→](/api/java/adapters/openai/) |
 | C# | `Adapters.ToOpenAI` | [→](/api/csharp/adapters/openai/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Output is byte-identical across ports for the same tools — that is a §0 conformance obligation.
 
 ## See also
 
-- [`Toolnexus.Adapters.to_anthropic`](/api/elixir/adapters/anthropic/) — Render the toolkit as Anthropic tool-use schema.
-- [`Toolnexus.Adapters.to_gemini`](/api/elixir/adapters/gemini/) — Render the toolkit as Gemini function-declaration schema.
+- [`Adapters.to_anthropic`](/api/elixir/adapters/anthropic/) · [`Adapters.to_gemini`](/api/elixir/adapters/gemini/)
+- [`Toolnexus.create_toolkit`](/api/elixir/toolkit/create/) — `Toolkit.to_openai/1` delegates here
+- [`Toolnexus.Client.create`](/api/elixir/client/create/) — calls the adapter for you
