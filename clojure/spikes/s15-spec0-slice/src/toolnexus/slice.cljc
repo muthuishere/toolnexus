@@ -204,7 +204,12 @@
                                     :description (or (:description meta) "")
                                     :body        (str/trim body)
                                     :dir         (parent-dir path)
-                                    :files       (vec (sort (remove #(fs/directory? %)
+                                    ;; The sibling sample EXCLUDES SKILL.md itself — Go skill.go:217
+                                    ;; and JS skill.ts:198 both do `name != "SKILL.md"`.
+                                    ;; This spike originally kept it and reported 1127
+                                    ;; bytes; the correct figure is 995. Caught by S19.
+                                    :files       (vec (sort (remove #(or (fs/directory? %)
+                                                                         (str/ends-with? % "/SKILL.md"))
                                                                     (fs/list-tree (parent-dir path)))))}))))
                {})))
 
@@ -223,15 +228,21 @@
        "</skill_files>\n"
        "</skill_content>"))
 
+(def skills-prompt-preamble
+  "SPEC §3 — byte-identical across all ports; do not reword."
+  (str "Skills provide specialized instructions and workflows for specific tasks.\n"
+       "Use the skill tool to load a skill when a task matches its description."))
+
 (defn skills-prompt
-  "SPEC §0.6 — `## Available Skills` list, sorted, described only."
+  "SPEC §0.6 — the §3 preamble + `## Available Skills`, sorted, described only.
+  This spike originally omitted the preamble entirely. Caught by S19."
   [skills]
   (let [described (->> (vals skills)
                        (remove #(str/blank? (:description %)))
                        (sort-by :name))]
     (if (empty? described)
       ""
-      (str "## Available Skills\n"
+      (str skills-prompt-preamble "\n\n## Available Skills\n"
            (str/join "\n" (map #(str "- **" (:name %) "**: " (:description %)) described))))))
 
 ;; ---------------------------------------------------------------------------

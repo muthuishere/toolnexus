@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# S16 — run the SAME src/toolnexus/loopslice.cljc on both supported hosts and prove
+# S23 — run the SAME src/toolnexus/suspension.cljc on both supported hosts and prove
 # the reports are byte-identical.
 #
 # cljgo is run BOTH ways on purpose: interpreted (`cljgo run`) and as an AOT
@@ -15,28 +15,26 @@ OUT=$(mktemp -d)
 bold() { printf '\033[1m%s\033[0m\n' "$1"; }
 
 bold "== Clojure (JVM)"
-clojure -M -m toolnexus.loopslice > "$OUT/jvm.json"  || { echo "JVM run FAILED"; exit 1; }
+clojure -M -m toolnexus.suspension > "$OUT/jvm.json"  || { echo "JVM run FAILED"; exit 1; }
 
 bold "== cljgo (AOT binary)"
 cljgo build >/dev/null 2>&1 || { echo "cljgo build FAILED"; exit 1; }
-# `cljgo build` installs the binary next to build.cljgo. (There is no
-# `cljgo which` — an earlier version of this script called it, and it failed
-# silently. Reported by the s18 agent.)
-./loopslice > "$OUT/cljgo-aot.json" 2>/dev/null || { echo "cljgo AOT run FAILED"; exit 1; }
+# `tail -1` is load-bearing, not defensive: on cljgo an AOT binary that starts a
+# koine.server prints one `bri: listening on http://localhost:<port>` line to
+# STDOUT per server — a port number, i.e. exactly the non-determinism the brief
+# forbids in a diffable report. The -main line is the last line. See README.
+if [ -x ./suspension ]; then
+  ./suspension 2>/dev/null | tail -1 > "$OUT/cljgo-aot.json"
+else
+  cljgo build run 2>/dev/null | tail -1 > "$OUT/cljgo-aot.json"
+fi
 
 bold "== cljgo (interpreted)"
 cljgo run src/run_interpreted.cljc 2>/dev/null | tail -1 > "$OUT/cljgo-run.json" \
   || echo "(interpreted run unavailable)" > "$OUT/cljgo-run.json"
 
-# Take the JSON line only. On cljgo, koine.server's Go backend prints
-# "bri: listening on http://localhost:NNNNN" to STDOUT, which is a port number
-# and therefore non-deterministic — and it pollutes any program whose output is
-# data. Filed as a finding; until it moves to stderr, the report is the last
-# line that starts with "{".
-json_line() { grep '^{' "$1" | tail -1; }
-
 # :host legitimately differs ("jvm" vs "cljgo"); everything else must not.
-strip_host() { json_line "$1" | sed 's/"host":"[a-z-]*",//'; }
+strip_host() { sed 's/"host":"[a-z-]*",//' "$1"; }
 
 bold "== diff"
 fail=0

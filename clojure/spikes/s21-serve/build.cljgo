@@ -1,0 +1,7 @@
+;; S21 — cljgo side. The same src/toolnexus/serve.cljc, the same koine artifact
+;; from Clojars. No vendored copy, no reader conditional in toolnexus' source.
+(defn build [b]
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.4.2"})
+  (let [app (exe b {:name "serve" :main "src/toolnexus/serve.cljc"})]
+    (install b app)
+    (run b app)))

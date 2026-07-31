@@ -11,9 +11,17 @@ and produce byte-identical output on Clojure (JVM) and cljgo?
 == cljgo (AOT binary)
 == cljgo (interpreted)
 == diff
-  jvm == cljgo-aot  (byte-identical, 2730 bytes)
-  jvm == cljgo-run  (byte-identical, 2730 bytes)
+  jvm == cljgo-aot  (byte-identical, 2746 bytes)
+  jvm == cljgo-run  (byte-identical, 2746 bytes)
 ```
+
+> **Corrected 2026-07-31.** The first version of this spike got §0.6 **wrong** in
+> two ways, both caught by S19 and confirmed against the shipped Go and JS ports:
+> the sibling sample must **exclude `SKILL.md` itself** (`skill.go:217`,
+> `skill.ts:198`), and `skillsPrompt()` must carry the §3 preamble. The skill
+> output is **995 bytes**, not the 1127 originally reported. Byte-identity across
+> hosts was never the problem — the spike was identically wrong on both, which is
+> exactly why a cross-host diff cannot substitute for a cross-*port* check.
 
 Reproduce: `./run-both.sh` (needs `clojure`, `cljgo`, and `npx` for the MCP server).
 

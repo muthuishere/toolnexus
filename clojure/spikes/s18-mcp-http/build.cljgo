@@ -1,0 +1,11 @@
+;; S18 — cljgo side. THE SAME src/toolnexus/mcphttp.cljc, the same koine
+;; artifact from Clojars. No vendored copy, no reader conditional in
+;; toolnexus' own source.
+;;
+;;   cljgo build        compile to a native binary
+;;   cljgo build run    ...and run it
+(defn build [b]
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.4.2"})
+  (let [app (exe b {:name "mcphttp" :main "src/toolnexus/mcphttp.cljc"})]
+    (install b app)
+    (run b app)))

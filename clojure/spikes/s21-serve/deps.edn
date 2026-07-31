@@ -1,0 +1,5 @@
+;; S21 — Clojure (JVM) side.
+;;   clojure -M -m toolnexus.serve
+{:paths ["src"]
+ :deps  {org.clojure/clojure           {:mvn/version "1.12.5"}
+         net.clojars.muthuishere/koine {:mvn/version "0.4.2"}}}

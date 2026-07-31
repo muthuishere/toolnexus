@@ -1,0 +1,5 @@
+;; S20 — Clojure (JVM) side. koine from Clojars; nothing else third-party.
+;;   clojure -M -m toolnexus.a2aout
+{:paths ["src"]
+ :deps  {org.clojure/clojure           {:mvn/version "1.12.5"}
+         net.clojars.muthuishere/koine {:mvn/version "0.4.2"}}}

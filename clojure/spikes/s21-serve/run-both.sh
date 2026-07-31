@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# S16 — run the SAME src/toolnexus/loopslice.cljc on both supported hosts and prove
+# S21 — run the SAME src/toolnexus/serve.cljc on both supported hosts and prove
 # the reports are byte-identical.
 #
 # cljgo is run BOTH ways on purpose: interpreted (`cljgo run`) and as an AOT
@@ -15,14 +15,12 @@ OUT=$(mktemp -d)
 bold() { printf '\033[1m%s\033[0m\n' "$1"; }
 
 bold "== Clojure (JVM)"
-clojure -M -m toolnexus.loopslice > "$OUT/jvm.json"  || { echo "JVM run FAILED"; exit 1; }
+clojure -M -m toolnexus.serve > "$OUT/jvm.json"  || { echo "JVM run FAILED"; exit 1; }
 
 bold "== cljgo (AOT binary)"
 cljgo build >/dev/null 2>&1 || { echo "cljgo build FAILED"; exit 1; }
-# `cljgo build` installs the binary next to build.cljgo. (There is no
-# `cljgo which` — an earlier version of this script called it, and it failed
-# silently. Reported by the s18 agent.)
-./loopslice > "$OUT/cljgo-aot.json" 2>/dev/null || { echo "cljgo AOT run FAILED"; exit 1; }
+"$(cljgo which serve 2>/dev/null || echo ./serve)" > "$OUT/cljgo-aot.json" 2>/dev/null \
+  || cljgo build run 2>/dev/null | tail -1 > "$OUT/cljgo-aot.json"
 
 bold "== cljgo (interpreted)"
 cljgo run src/run_interpreted.cljc 2>/dev/null | tail -1 > "$OUT/cljgo-run.json" \

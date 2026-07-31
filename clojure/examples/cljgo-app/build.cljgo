@@ -1,0 +1,14 @@
+;; The cljgo project — the same source, compiled to a native Go binary.
+;;
+;;   cljgo build run                     AOT binary
+;;   cljgo run src/run_interpreted.cljc  interpreted
+;;
+;; `src` is a symlink to ../src. koine is resolved from Clojars — literally the
+;; same artifact and version the JVM project resolves (cljgo ADR 0095). While
+;; resolving, cljgo statically checks every namespace in that jar for Java
+;; interop and would reject one that reached for it.
+(defn build [b]
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.4.2"})
+  (let [app (exe b {:name "demo" :main "src/toolnexus/demo.cljc"})]
+    (install b app)
+    (run b app)))

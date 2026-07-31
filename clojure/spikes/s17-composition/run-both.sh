@@ -19,8 +19,10 @@ clojure -M -m toolnexus.composition > "$OUT/jvm.json"  || { echo "JVM run FAILED
 
 bold "== cljgo (AOT binary)"
 cljgo build >/dev/null 2>&1 || { echo "cljgo build FAILED"; exit 1; }
-"$(cljgo which composition 2>/dev/null || echo ./composition)" > "$OUT/cljgo-aot.json" 2>/dev/null \
-  || cljgo build run 2>/dev/null | tail -1 > "$OUT/cljgo-aot.json"
+# `cljgo build` installs the binary next to build.cljgo. (There is no
+# `cljgo which` — an earlier version of this script called it, and it failed
+# silently. Reported by the s18 agent.)
+./composition > "$OUT/cljgo-aot.json" 2>/dev/null || { echo "cljgo AOT run FAILED"; exit 1; }
 
 bold "== cljgo (interpreted)"
 cljgo run src/run_interpreted.cljc 2>/dev/null | tail -1 > "$OUT/cljgo-run.json" \

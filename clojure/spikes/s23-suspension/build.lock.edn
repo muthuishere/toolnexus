@@ -16,7 +16,7 @@
                                  "koine.time"]}
          :mvn/pom-sha256 "sha256:bae84ec15c96153c841410394ffd6f2d2adf9b1d424eadaa326a695c5e8aca93"
          :mvn/repo "https://repo.clojars.org"
-         :mvn/sha256 "sha256:459dd831b1b8d0a4129e95a19fcf7b5b6e04a73051b27cd0b64df131ac69f1be"
+         :mvn/sha256 "sha256:aa75bdccc417e928079776ceac695caf74559ad6d608ba1d31b397475c1f0a73"
          :mvn/version "0.4.2"
          :name "net.clojars.muthuishere/koine"
          :paths [""]

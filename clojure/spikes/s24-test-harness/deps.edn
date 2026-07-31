@@ -1,0 +1,10 @@
+;; S24 — Clojure (JVM) side. koine from Clojars; nothing else third-party.
+;;   clojure -M -m toolnexus.harness
+;;
+;; Note there is no test runner dependency (no kaocha, no cognitect test-runner).
+;; The gate IS the runner: toolnexus.harness calls clojure.test/run-tests
+;; in-process and reads the summary map, because the same code has to work on
+;; cljgo where none of those runners exist.
+{:paths ["src"]
+ :deps  {org.clojure/clojure           {:mvn/version "1.12.5"}
+         net.clojars.muthuishere/koine {:mvn/version "0.4.2"}}}
