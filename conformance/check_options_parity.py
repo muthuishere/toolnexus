@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cross-port option-parity check.
 
-Every logical option in options_manifest.json must appear in all six ports'
+Every logical option in options_manifest.json must appear in every port's
 options-definition files (matched by a normalized alias). This guards against the
 class of silent drift where an option ships in five ports but not the sixth — the
 JS `disableTools`/`disableSkills` gap that sat undetected until found by hand.
@@ -25,6 +25,12 @@ ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = Path(__file__).resolve().parent / "options_manifest.json"
 
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Clojure identifiers are kebab-case, and `-` is a legal name character rather
+# than an operator. Tokenizing `.cljc` with the rule above splits `:base-url`
+# into `base` and `url`, so the port could never match `baseUrl` no matter what
+# it implements — every option would report MISSING. Applied by extension, not
+# globally: in a C-family language `a-b` really is subtraction.
+_IDENT_LISP = re.compile(r"[A-Za-z_*][A-Za-z0-9_*!?<>=-]*")
 
 
 def normalize(token: str) -> str:
@@ -33,7 +39,8 @@ def normalize(token: str) -> str:
 
 def normalized_tokens(path: Path) -> set[str]:
     text = path.read_text(encoding="utf-8", errors="replace")
-    return {normalize(t) for t in _IDENT.findall(text)}
+    pattern = _IDENT_LISP if path.suffix in (".cljc", ".clj", ".cljs") else _IDENT
+    return {normalize(t) for t in pattern.findall(text)}
 
 
 def check_group(name: str, group: dict) -> list[str]:
@@ -74,7 +81,9 @@ def main() -> int:
 
     n_client = len(manifest["clientOptions"]["options"])
     n_toolkit = len(manifest["toolkitOptions"]["options"])
-    print(f"Option parity OK: {n_client} client + {n_toolkit} toolkit options present in all 6 ports.")
+    n_ports = len(manifest["clientOptions"]["files"])
+    print(f"Option parity OK: {n_client} client + {n_toolkit} toolkit options "
+          f"present in all {n_ports} ports.")
     return 0
 
 
