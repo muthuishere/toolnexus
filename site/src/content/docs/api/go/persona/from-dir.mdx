@@ -8,49 +8,264 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a>
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang/agents</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/agents/home.go">golang/agents/home.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+type FromDirOptions struct {
+	Does   string    // routing description (default "persona agent from <dir>")
+	Name   string    // agent name (default filepath.Base(dir))
+	Model  string    // model id (default "inherit")
+	Tools  []tn.Tool // extra tools beyond the memory builtin
+	Memory *bool     // nil ⇒ enabled; point at false to omit the memory tool
+}
+
+func FromDir(dir string, opts FromDirOptions) *Agent
 ```
 
-Point at an agent home directory and get a configured agent back.
+`FromDir` is the one-call persona constructor: the directory *is* the agent. It calls
+[`ComposeSoul`](/api/go/persona/compose-soul/) to build the soul from `dir`'s bootstrap files,
+wires [`MemoryTool(dir)`](/api/go/persona/memory-tool/) into the tool list (unless
+`opts.Memory` points at `false`), and hands both to [`agents.New`](/api/go/runtime/agent/).
+The returned `*Agent` runs like any other — `Run` for a one-shot, `AsTool` to drop it into a
+classic toolkit, or [`StartAgent`](/api/go/runtime/agent/) for a heartbeat loop.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `FromDir` whenever a persona's identity lives in files on disk — the openclaw
+convention of `AGENTS.md` / `SOUL.md` / `IDENTITY.md` / `USER.md` / `TOOLS.md` /
+`HEARTBEAT.md` / `MEMORY.md`. It's the standard way to boot a long-lived, home-directory-backed
+agent: point it at a folder, get back something runnable, with durable memory already wired.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Building the Spec fields yourself instead?">
+Use [`agents.New`](/api/go/runtime/agent/) directly when your persona's soul comes from
+somewhere other than a directory (a database row, a generated string, a template) or when you
+need `Spec` fields `FromDir` doesn't expose (`Team`, `Budget`, `WaitFor`, hooks). `FromDir` is a
+convenience over `New` for the specific, common case: soul + memory tool, both rooted at one
+directory. Call [`ComposeSoul`](/api/go/persona/compose-soul/) and
+[`MemoryTool`](/api/go/persona/memory-tool/) yourself and pass them to `New` when you want that
+control back.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — a persona from a bare directory
 
-{/* TODO:example1 */}
-```go
-// TODO
+No bootstrap files at all still works: the soul is empty, the name defaults to the directory's
+base name, the model defaults to `"inherit"`, and the memory tool is wired anyway.
+
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func main() {
+	dir, err := os.MkdirTemp("", "kip-*")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	kip := agents.FromDir(dir, agents.FromDirOptions{Model: "m-kip"})
+	if kip.Name != filepathBase(dir) {
+		log.Fatalf("expected name to default to the dir base, got %q", kip.Name)
+	}
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body, _ := json.Marshal(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "hi"}}},
+			"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+	})
+	r, _ := kip.Run(agents.Options{Transport: transport}, "hello")
+	if r.Status != "done" || r.Text != "hi" {
+		log.Fatalf("unexpected: %+v", r)
+	}
+
+	fmt.Println("ok:", kip.Name, "answered", r.Text)
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func filepathBase(p string) string {
+	for i := len(p) - 1; i >= 0; i-- {
+		if p[i] == '/' {
+			return p[i+1:]
+		}
+	}
+	return p
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — bootstrap files shape the soul, and the model answers with it
 
-{/* TODO:example2 */}
-```go
-// TODO
+`SOUL.md` on disk becomes part of the request the stub LLM receives — proving the composed
+soul actually reaches the provider as the system prompt.
+
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func main() {
+	dir, err := os.MkdirTemp("", "archivist-*")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	if err := os.WriteFile(filepath.Join(dir, "SOUL.md"), []byte("You are Archivist, terse and precise."), 0o644); err != nil {
+		log.Fatal(err)
+	}
+
+	archivist := agents.FromDir(dir, agents.FromDirOptions{Name: "archivist", Does: "keeps records", Model: "m-archivist"})
+
+	var sawSoul bool
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		b, _ := io.ReadAll(req.Body)
+		if strings.Contains(string(b), "Archivist, terse and precise") {
+			sawSoul = true
+		}
+		body, _ := json.Marshal(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "logged"}}},
+			"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+	})
+
+	r, _ := archivist.Run(agents.Options{Transport: transport}, "file this record")
+	if r.Status != "done" || r.Text != "logged" {
+		log.Fatalf("unexpected: %+v", r)
+	}
+	if !sawSoul {
+		log.Fatal("expected the composed SOUL.md text in the request the provider received")
+	}
+
+	fmt.Println("ok:", archivist.Name, "ran with its composed soul")
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — extra tools, and turning the memory builtin off
 
-{/* TODO:example3 */}
-```go
-// TODO
+`opts.Memory` set to a pointer-to-`false` yields a read-only persona: no `memory` tool at all,
+even though a home directory is wired.
+
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func main() {
+	dir, err := os.MkdirTemp("", "readonly-*")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	noMemory := false
+	readonly := agents.FromDir(dir, agents.FromDirOptions{
+		Name: "readonly", Model: "m-readonly", Memory: &noMemory,
+	})
+
+	// A separate persona with memory enabled (the default) DOES get the memory tool —
+	// the mock LLM below inspects each request to prove the toggle actually removes it.
+	withMemory := agents.FromDir(dir, agents.FromDirOptions{Name: "withmemory", Model: "m-with"})
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		b, _ := io.ReadAll(req.Body)
+		hasMemoryDecl := containsToolName(string(b), "memory")
+		content := "no-memory-tool-declared"
+		if hasMemoryDecl {
+			content = "memory-tool-declared"
+		}
+		body, _ := json.Marshal(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": content}}},
+			"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+	})
+
+	r1, _ := readonly.Run(agents.Options{Transport: transport}, "go")
+	if r1.Text != "no-memory-tool-declared" {
+		log.Fatalf("expected the readonly persona to declare no memory tool, got %q", r1.Text)
+	}
+
+	r2, _ := withMemory.Run(agents.Options{Transport: transport}, "go")
+	if r2.Text != "memory-tool-declared" {
+		log.Fatalf("expected the default persona to declare a memory tool, got %q", r2.Text)
+	}
+
+	fmt.Println("ok: Memory:&false omits the tool; the default wires it")
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func containsToolName(body, name string) bool {
+	return len(body) > 0 && indexOfSub(body, "\""+name+"\"") >= 0
+}
+
+func indexOfSub(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
 ```
+
+## FromDirOptions fields
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `Does` | `string` | `"persona agent from <dir>"` | The routing description the delegating model (or a parent's `task` tool) sees. |
+| `Name` | `string` | `filepath.Base(dir)` | The agent's name. |
+| `Model` | `string` | `"inherit"` | The model id passed to `agents.Spec.Model`. |
+| `Tools` | `[]tn.Tool` | none | Extra tools beyond the memory builtin. |
+| `Memory` | `*bool` | `nil` (enabled) | Point at `false` to omit `MemoryTool(dir)` — a read-only persona. |
 
 ## The same call in the other five ports
 
@@ -69,3 +284,4 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 - [`ComposeSoul`](/api/go/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.
 - [`MemoryTool`](/api/go/persona/memory-tool/) — The opt-in built-in that lets a persona write durable notes to its own home.
+- [`agents.New`](/api/go/runtime/agent/) — The lower-level constructor `FromDir` wraps.

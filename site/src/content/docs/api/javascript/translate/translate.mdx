@@ -1,56 +1,194 @@
 ---
-title: "translate"
+title: "Client.translate"
 description: "Declare a toolkit to a provider and translate one request/response without executing anything or keeping state. — JavaScript."
 sidebar:
-  label: "translate"
+  label: "Client.translate"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#11-single-turn-translation--translate">SPEC §11</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/client.ts">js/src/client.ts</a>
 </p>
 
+<Aside type="note" title="Symbol note: an instance method, not a standalone export">
+The cross-language manifest lists this entry's JavaScript symbol as bare `translate`. The real
+shape is a method on the `Client` a [`createClient`](/api/javascript/client/create/) call returns
+— `client.translate(req)` — there is no standalone exported `translate` function. (`js/src/translate.ts`
+exports the supporting pieces — types, `openAIMessagesToAnthropic`, and friends — but the entry
+point that actually calls a provider lives on `Client`, next to `run`/`ask`/`stream`.)
+</Aside>
+
 ```ts
-{/* TODO:signature */}
+class Client {
+  async translate(req: TranslateRequest): Promise<TranslateResult>
+}
+
+interface TranslateRequest {
+  messages: any[]         // OpenAI messages, verbatim — incl. tool_calls / tool-role results
+  tools?: any[]              // OpenAI tools[], verbatim — declaration-only
+  toolkit?: Toolkit            // an ordinary Toolkit — DECLARED, never executed
+  toolChoice?: any               // OpenAI tool_choice, verbatim
+  system?: string                  // overrides the system prompt
+  maxTokens?: number
+  signal?: AbortSignal
+}
+
+interface TranslateResult {
+  text: string
+  toolCalls: { id: string; name: string; arguments: string }[]  // arguments is a JSON string
+  finishReason: "stop" | "tool_calls" | "length" | "content_filter"
+  usage: Usage
+  model: string
+  raw?: any
+}
 ```
 
-Declare a toolkit to a provider and translate one request/response without executing anything or keeping state.
+`translate` is toolnexus used as a **pure wire-format translator**: OpenAI shapes in, exactly
+**one** provider call ([`style: "openai"` or `style: "anthropic"`](/api/javascript/client/create/)
+on the same `Client`), OpenAI shapes out. No agent loop, no tool execution, no conversation state
+— every call is self-contained, so it may be run statelessly and concurrently. It is the
+**inbound** half of the [adapters](/api/javascript/adapters/to-openai/): those send tool
+declarations *out*; this reads the provider's tool calls back *in*.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `translate` when **you** — the caller — own the conversation and execute tools yourself.
+That's the standard OpenAI function-calling posture: every request already carries the full
+history, including prior tool results, and there is no run to park or resume. A gateway, a proxy,
+or an eval harness that already speaks OpenAI's wire format and wants provider-portability without
+adopting toolnexus's own conversation model is exactly the shape this serves (see ADR-0011).
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use run()/ask() instead when toolnexus should own the loop">
+`translate` never executes a tool and never keeps state — by design, there is no
+`builtins: false` discipline to remember here, because nothing runs regardless. Reach for
+[`client.run()`](/api/javascript/client/create/) (or `agents.Agent.run()`) when you want the tool
+calling **loop** itself: parallel/chained calls, retries, [§10 suspension](/api/javascript/suspension/pending/),
+memory. Use `translate` only when execution is the caller's job.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — declare `tools[]` verbatim, read the call back
 
-{/* TODO:example1 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import { createClient } from "toolnexus"
+
+const canned: typeof fetch = async () =>
+  new Response(JSON.stringify({
+    choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "get_weather", arguments: '{"city":"Paris"}' } }] }, finish_reason: "tool_calls" }],
+    usage: { prompt_tokens: 8, completion_tokens: 4, total_tokens: 12 },
+  }), { status: 200, headers: { "content-type": "application/json" } })
+
+const client = createClient({ baseUrl: "http://stub", style: "openai", model: "m", fetch: canned })
+
+const res = await client.translate({
+  messages: [{ role: "user", content: "weather in paris?" }],
+  tools: [{ type: "function", function: { name: "get_weather", description: "Get the weather", parameters: { type: "object", properties: { city: { type: "string" } } } } }],
+})
+
+assert.equal(res.finishReason, "tool_calls")
+assert.equal(res.toolCalls[0].name, "get_weather")
+assert.equal(typeof res.toolCalls[0].arguments, "string") // JSON string — the OpenAI wire form
+
+console.log("ok:", res.toolCalls[0].name, res.toolCalls[0].arguments)
 ```
 
-### 2. TODO — the realistic case
+### 2. A `Toolkit` is declared, never executed — the defining property
 
-{/* TODO:example2 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import { createClient, createToolkit, defineTool } from "toolnexus"
+
+let executed = false
+const getWeather = defineTool({
+  name: "get_weather",
+  description: "Get the weather",
+  inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+  run: (args) => { executed = true; return `sunny in ${args.city}` }, // must NEVER fire from translate
+})
+const tk = await createToolkit({ builtins: false, extraTools: [getWeather] })
+
+const canned: typeof fetch = async (_url, init) => {
+  const body = JSON.parse(String((init as any).body))
+  assert.equal(body.tools[0].function.name, "get_weather") // the toolkit WAS declared to the provider
+  return new Response(JSON.stringify({
+    choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "get_weather", arguments: '{"city":"Paris"}' } }] } }],
+    usage: { prompt_tokens: 8, completion_tokens: 4, total_tokens: 12 },
+  }), { status: 200, headers: { "content-type": "application/json" } })
+}
+
+const client = createClient({ baseUrl: "http://stub", style: "openai", model: "m", fetch: canned })
+const res = await client.translate({ messages: [{ role: "user", content: "weather in paris?" }], toolkit: tk })
+
+assert.equal(executed, false) // NEVER runs — translate only declares
+assert.equal(res.toolCalls[0].name, "get_weather")
+
+await tk.close()
+console.log("ok: declared but not executed —", res.toolCalls[0].name)
 ```
 
-### 3. TODO — the full surface
+### 3. Anthropic style — `toolChoice`, `maxTokens`, and usage/finishReason mapping
 
-{/* TODO:example3 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import { createClient, createToolkit, defineTool } from "toolnexus"
+
+const getWeather = defineTool({ name: "get_weather", description: "Get the weather", inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] }, run: () => "n/a" })
+const tk = await createToolkit({ builtins: false, extraTools: [getWeather] })
+
+let sentBody: any
+const canned: typeof fetch = async (_url, init) => {
+  sentBody = JSON.parse(String((init as any).body))
+  return new Response(JSON.stringify({
+    content: [{ type: "tool_use", id: "t1", name: "get_weather", input: { city: "Tokyo" } }],
+    stop_reason: "tool_use",
+    usage: { input_tokens: 12, output_tokens: 6 },
+  }), { status: 200, headers: { "content-type": "application/json" } })
+}
+
+const client = createClient({ baseUrl: "http://stub", style: "anthropic", model: "claude-x", fetch: canned })
+const res = await client.translate({
+  messages: [{ role: "user", content: "weather in tokyo?" }],
+  toolkit: tk,
+  toolChoice: { type: "function", function: { name: "get_weather" } }, // OpenAI shape in...
+  maxTokens: 512,
+})
+
+assert.deepEqual(sentBody.tool_choice, { type: "tool", name: "get_weather" }) // ...mapped to Anthropic shape
+assert.equal(sentBody.max_tokens, 512)
+assert.equal(res.finishReason, "tool_calls") // ANY tool call ⇒ "tool_calls", regardless of provider stop_reason
+assert.equal(res.usage.totalTokens, 18)
+
+await tk.close()
+console.log("ok:", res.finishReason, res.usage)
 ```
+
+## Options
+
+| Option | Type | What it does |
+|---|---|---|
+| `messages` | `any[]` | OpenAI `messages`, verbatim — including assistant `tool_calls` and `tool`-role results. |
+| `tools` | `any[]` | OpenAI `tools[]`, verbatim. Composes with `toolkit`; toolkit declarations come first. |
+| `toolkit` | `Toolkit` | Any ordinary toolkit — declared via the adapters, **never executed**. |
+| `toolChoice` | `any` | OpenAI `tool_choice`, verbatim — mapped to the provider's native shape. |
+| `system` | `string` | Overrides the system prompt; absent uses a `system` message found in `messages`. |
+| `maxTokens` | `number` | Overrides the per-provider default. |
+| `signal` | `AbortSignal` | Aborts the in-flight provider call. |
+
+## What you get back
+
+| Field | Type | What it is |
+|---|---|---|
+| `text` | `string` | Assistant text — `""` when the model only called tools. |
+| `toolCalls` | `{ id, name, arguments }[]` | Every tool call, in provider order — none is dropped or truncated. `arguments` is a JSON string. |
+| `finishReason` | `"stop" \| "tool_calls" \| "length" \| "content_filter"` | A turn with ANY tool call is always `"tool_calls"`. |
+| `usage` | `Usage` | This single call's token usage. |
+| `model` | `string` | The model that answered. |
+| `raw` | `any?` | The provider's decoded response, for fields this type doesn't model. |
 
 ## The same call in the other five ports
 
@@ -67,4 +205,6 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`openAIMessagesToAnthropic`](/api/javascript/translate/inbound/) — Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong.
+- [`createClient`](/api/javascript/client/create/) — Builds the `Client` this method lives on.
+- [`openAIMessagesToAnthropic`](/api/javascript/translate/inbound/) — The inbound conversion `translate` uses internally on the Anthropic path.
+- [`createToolkit`](/api/javascript/toolkit/create/) — What a `toolkit` request field declares without running.

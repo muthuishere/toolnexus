@@ -8,49 +8,147 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/agents/home.ex">elixir/lib/toolnexus/agents/home.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec from_dir(String.t(), keyword() | map()) :: Toolnexus.Agents.AgentDef.t()
+def from_dir(dir, opts \\ [])
+
+# opts: :does (routing description, default "persona agent from <dir>"),
+#       :name (default: dir's basename), :model (default "inherit"),
+#       :tools (extra tools alongside the memory builtin),
+#       :memory (set false to omit the memory tool — a read-only persona)
 ```
 
-Point at an agent home directory and get a configured agent back.
+The directory IS the agent. `from_dir/2` runs
+[`compose_soul/1`](/api/elixir/persona/compose-soul/) over `dir` for the frozen system-prompt
+snapshot, wires the `memory` tool over the same directory (unless `:memory` is `false`), and
+returns a `Toolnexus.Agents.AgentDef` — runnable with `Toolnexus.Agents.run/3` or droppable into
+a parent's `:team` like any other agent definition.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **You have a persona's files on disk** — `AGENTS.md`/`SOUL.md`/`IDENTITY.md`/... under one
+  directory — and want a runnable agent without hand-assembling the soul string and the memory
+  tool yourself.
+- **You want the persona to remember things across sessions** — the memory tool comes wired by
+  default; pass `memory: false` for a read-only persona (a fixed identity that never writes).
+- **You're building several personas the same way** — one directory convention, one call, per
+  persona; naming and routing description both have sane defaults.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for compose_soul/1 when you don't want an AgentDef">
+`from_dir/2` is the everyday path — a directory in, a runnable `AgentDef` out. Reach for
+[`compose_soul/1`](/api/elixir/persona/compose-soul/) directly only when you want the soul
+string itself (previewing it, logging it, feeding it into something that isn't a
+`Toolnexus.Agents` definition) without also getting the memory tool and the `AgentDef` wrapper.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — a directory with one file becomes a runnable agent
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.Agents.Home
+
+dir = Path.join(System.tmp_dir!(), "toolnexus_doc_from_dir_1_#{System.unique_integer([:positive])}")
+File.rm_rf!(dir)
+File.mkdir_p!(dir)
+File.write!(Path.join(dir, "SOUL.md"), "You are Kestrel, a calm research agent.")
+
+agent = Home.from_dir(dir)
+
+true = agent.name == Path.basename(dir)
+true = agent.spec[:does] == "persona agent from #{dir}"
+true = agent.spec[:model] == "inherit"
+true = agent.spec[:soul] == "## SOUL.md\n\nYou are Kestrel, a calm research agent."
+# the memory tool rides along by default
+true = Enum.any?(agent.spec[:uses][:tools], &(&1.name == "memory"))
+
+IO.puts("ok: #{agent.name} composed with #{length(agent.spec[:uses][:tools])} tool(s)")
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — explicit options, and a read-only persona with `memory: false`
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.Agents.Home
+
+dir = Path.join(System.tmp_dir!(), "toolnexus_doc_from_dir_2_#{System.unique_integer([:positive])}")
+File.rm_rf!(dir)
+File.mkdir_p!(dir)
+File.write!(Path.join(dir, "AGENTS.md"), "Answer tersely.")
+
+named = Home.from_dir(dir, does: "terse Q&A", name: "terse-bot", model: "gpt-4o-mini")
+true = named.name == "terse-bot"
+true = named.spec[:does] == "terse Q&A"
+true = named.spec[:model] == "gpt-4o-mini"
+
+read_only = Home.from_dir(dir, memory: false)
+false = Enum.any?(read_only.spec[:uses][:tools], &(&1.name == "memory"))
+
+IO.puts("ok: #{named.name} (writable) vs #{read_only.name} (#{length(read_only.spec[:uses][:tools])} tools, read-only)")
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — running the persona end to end, memory tool included
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.{Agents}
+alias Toolnexus.Agents.Home
+
+dir = Path.join(System.tmp_dir!(), "toolnexus_doc_from_dir_3_#{System.unique_integer([:positive])}")
+File.rm_rf!(dir)
+File.mkdir_p!(dir)
+File.write!(Path.join(dir, "IDENTITY.md"), "You are Kestrel.")
+
+extra_tool =
+  Toolnexus.define_tool(%{
+    name: "ping",
+    description: "health check",
+    execute: fn _args -> "pong" end
+  })
+
+agent = Home.from_dir(dir, does: "demo persona", tools: [extra_tool])
+true = Enum.map(agent.spec[:uses][:tools], & &1.name) |> Enum.sort() == ["memory", "ping"]
+
+mock_transport = fn %{body: body} ->
+  msgs = body["messages"] || []
+  tool_msgs = Enum.filter(msgs, &(&1["role"] == "tool"))
+
+  resp =
+    if tool_msgs == [] do
+      %{
+        "choices" => [%{"message" => %{"role" => "assistant", "content" => nil, "tool_calls" => [
+          %{"id" => "c1", "type" => "function", "function" => %{"name" => "memory", "arguments" => ~s({"action":"add","text":"user likes concise replies"})}}
+        ]}}],
+        "usage" => %{"prompt_tokens" => 4, "completion_tokens" => 2, "total_tokens" => 6}
+      }
+    else
+      %{"choices" => [%{"message" => %{"role" => "assistant", "content" => hd(tool_msgs)["content"]}}], "usage" => %{"prompt_tokens" => 2, "completion_tokens" => 1, "total_tokens" => 3}}
+    end
+
+  {:ok, %{status: 200, headers: %{}, body: resp}}
+end
+
+r = Agents.run(agent, %{transport: mock_transport}, "remember that I like concise replies")
+
+true = r.status == "done"
+true = String.contains?(r.text, "MEMORY.md")
+true = File.read!(Path.join(dir, "MEMORY.md")) =~ "user likes concise replies"
+
+IO.puts("ok: persona from #{Path.basename(dir)} wrote to its own MEMORY.md via the wired memory tool")
 ```
+
+## `opts` fields
+
+| Field | Type | Default | What it is |
+|---|---|---|---|
+| `:does` | `String.t()` | `"persona agent from <dir>"` | Routing description. |
+| `:name` | `String.t()` | the directory's basename | Agent name. |
+| `:model` | `String.t()` | `"inherit"` | LLM model. |
+| `:tools` | `[Tool.t()]` | `[]` | Extra tools alongside the memory builtin. |
+| `:memory` | `boolean()` | `true` | Set `false` to omit the memory tool (read-only persona). |
 
 ## The same call in the other five ports
 

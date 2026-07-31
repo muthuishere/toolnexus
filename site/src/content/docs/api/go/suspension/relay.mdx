@@ -8,51 +8,299 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10 addendum</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/relay.go">golang/relay.go</a>
 </p>
 
+<Aside type="note" title="STATUS: golang only — a preview, not part of the §0 conformance contract">
+Relay ships in `golang/` as of 0.12.0. `js`, `python`, `java`, `csharp` and `elixir` do not
+implement it yet (tracked in `openspec/changes/add-tool-relay-mode/tasks.md`). A caller that
+needs cross-port behaviour today should use [`Translate`](/api/go/translate/translate/) instead
+(ADR-0011) — translation is the right mechanism for the pass-through posture; relay is for
+proxy-managed memory (toolnexus owns the conversation, the caller owns execution).
+</Aside>
+
 ```go
-{/* TODO:signature */}
+const RelayKind = "tool_call"        // Request.Kind for a relayed call
+const RelayOutputKey = "output"      // Answer.Data key: the host's tool output
+const RelayIsErrorKey = "isError"    // Answer.Data key: whether the host's tool failed
+
+type RelayCall struct {
+	ID        string         // the provider's tool-call id — the tool_result correlation key
+	Name      string         // the tool the model called
+	Input     map[string]any // parsed arguments
+	Arguments string         // the RAW arguments JSON, so an OpenAI-shaped caller can echo it
+}
+
+func RelayTool(name, description string, schema JSONSchema) Tool
+func IsRelayRequest(req *Request) bool
+func RelayCallsOf(req *Request) []RelayCall
 ```
 
-Declare a tool the host executes, not the library: the call rides out on the suspension.
+`RelayTool` builds a declaration-only `Tool` (`Source: SourceRelay`): it carries a schema, but
+nothing runs in toolnexus when the model calls it. Instead, the call suspends with
+`Request.Kind == "tool_call"`, carrying every relay call from that assistant turn (in
+tool-call order) under `Request.Data["calls"]` — read them with `RelayCallsOf`. The host
+executes each call itself and hands back the result as an `Answer`; the loop resumes and feeds
+each output back as that call's `tool_result`, exactly as if the tool had run locally. This is
+what lets toolnexus act as a pure proxy while still declaring standard OpenAI-shaped function
+calling to the provider.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `RelayTool` when toolnexus owns the conversation loop (unlike
+[`Translate`](/api/go/translate/translate/), which owns neither loop nor state) but the
+**execution** of a specific tool belongs to the caller — a coding-agent client that runs shell
+commands itself, a browser extension that clicks buttons in a real tab, anything where "the
+tool" is inherently outside the process running toolnexus. Declare it, let the model call it,
+and resume with the caller's own output via
+[`RunWithAnswer`/`AskWithAnswer`](/api/go/suspension/resume/).
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Translator posture, not agent-loop posture? Use Translate">
+`RelayTool` still runs the full agent loop — turns, retries, conversation memory, the whole
+`Client.Run`/`Ask` machinery — with one tool's execution deferred to the caller.
+[`Translate`](/api/go/translate/translate/) is a different posture entirely: no loop, no state,
+exactly one provider call, and the CALLER owns everything (execution, history, retries).
+Reach for `Translate` when the caller already has its own agent loop and just wants toolnexus
+to speak provider wire formats; reach for `RelayTool` when toolnexus's loop should keep driving
+turns but one particular tool has to execute somewhere else.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — the relay call reaches the host, nothing runs locally
 
-{/* TODO:example1 */}
-```go
-// TODO
+The model asks for `lookup`; the suspension carries the call; `WaitFor` supplies the output;
+the loop feeds it back as the tool's result — and the run finishes normally, `Status == "done"`.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"weather\"}"}}]}}],"usage":{"prompt_tokens":4,"completion_tokens":4,"total_tokens":8}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"it is sunny"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
+	}))
+	defer srv.Close()
+
+	lookup := toolnexus.RelayTool("lookup", "look something up", toolnexus.JSONSchema{
+		"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}},
+	})
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false, ExtraTools: []toolnexus.Tool{lookup}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	var got toolnexus.Request
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "stub", APIKey: "k",
+		WaitFor: func(req toolnexus.Request) (toolnexus.Answer, error) {
+			got = req
+			return toolnexus.Answer{ID: req.ID, Ok: true, Data: map[string]any{toolnexus.RelayOutputKey: "sunny, 31C"}}, nil
+		},
+	})
+
+	res, err := client.Run(context.Background(), "weather?", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if res.Status != "done" || res.Text != "it is sunny" {
+		log.Fatalf("unexpected: %+v", res)
+	}
+	if !toolnexus.IsRelayRequest(&got) {
+		log.Fatalf("expected a relay request, got kind=%q", got.Kind)
+	}
+	calls := toolnexus.RelayCallsOf(&got)
+	if len(calls) != 1 || calls[0].ID != "c1" || calls[0].Name != "lookup" || calls[0].Input["q"] != "weather" {
+		log.Fatalf("unexpected relay call: %+v", calls)
+	}
+	if res.ToolCalls[0].Output != "sunny, 31C" || res.ToolCalls[0].IsError {
+		log.Fatalf("expected the host's output to become the tool result: %+v", res.ToolCalls)
+	}
+
+	fmt.Println("ok:", res.Text, "- relay call was", calls[0].Name+"("+calls[0].Arguments+")")
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — three relay calls in one turn ride a single suspension
 
-{/* TODO:example2 */}
-```go
-// TODO
+`Request.Data["calls"]` grows to carry ALL of a turn's relay calls, in tool-call order — the
+first-in-order halt rule is unchanged; only the surfaced request's payload grows. This mirrors
+OpenAI's `tool_calls` array one-to-one, so a caller never sees a truncated call list.
+
+<Aside type="note" title="Merging is a property of the durable halt">
+The merge into ONE request happens on the path with no `WaitFor` configured — `resolvePending`
+calls a configured `WaitFor` once per relay call as each is hit, but when there's no `WaitFor`
+the run collects every suspension from the turn and folds them into the first one before
+halting. This example omits `WaitFor` to show that merged shape directly on `RunResult.Pending`.
+</Aside>
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[` +
+			`{"id":"c1","type":"function","function":{"name":"alpha","arguments":"{}"}},` +
+			`{"id":"c2","type":"function","function":{"name":"beta","arguments":"{}"}},` +
+			`{"id":"c3","type":"function","function":{"name":"gamma","arguments":"{}"}}` +
+			`]}}],"usage":{"prompt_tokens":4,"completion_tokens":4,"total_tokens":8}}`))
+	}))
+	defer srv.Close()
+
+	relay := func(name string) toolnexus.Tool { return toolnexus.RelayTool(name, "relayed to the caller", nil) }
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{
+		Builtins: false, ExtraTools: []toolnexus.Tool{relay("alpha"), relay("beta"), relay("gamma")},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	// No WaitFor: the run halts durably, and the SINGLE surfaced request carries all 3 calls.
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "stub", APIKey: "k"})
+
+	res, err := client.Run(context.Background(), "go", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if res.Status != "pending" || res.Pending == nil {
+		log.Fatalf("expected a durable halt, got status=%q", res.Status)
+	}
+	calls := toolnexus.RelayCallsOf(res.Pending)
+	if len(calls) != 3 {
+		log.Fatalf("expected all 3 relay calls on ONE surfaced request, got %d: %+v", len(calls), calls)
+	}
+	for i, want := range []string{"alpha", "beta", "gamma"} {
+		if calls[i].Name != want {
+			log.Fatalf("call %d = %q, want %q (tool-call order preserved)", i, calls[i].Name, want)
+		}
+	}
+
+	fmt.Println("ok:", len(calls), "relay calls rode one suspension, in order:", calls[0].Name, calls[1].Name, calls[2].Name)
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — a real tool runs alongside a relay tool, and a declined relay does not abort the run
 
-{/* TODO:example3 */}
-```go
-// TODO
+Relay composes with ordinary executing tools in the same turn (only the relay one suspends),
+and a declined relay call becomes an error `tool_result` — the loop continues, exactly like any
+other declined suspension.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	realRan := false
+	real := toolnexus.Tool{
+		Name: "real_tool", Description: "runs locally", InputSchema: toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+		Source: toolnexus.SourceCustom,
+		Execute: func(_ map[string]any, _ *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			realRan = true
+			return toolnexus.ToolResult{Output: "real-output"}, nil
+		},
+	}
+	relayed := toolnexus.RelayTool("relayed_tool", "runs at the host", nil)
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{
+		Builtins: false, ExtraTools: []toolnexus.Tool{real, relayed},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		w.Header().Set("Content-Type", "application/json")
+		switch turn {
+		case 1:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"real_tool","arguments":"{}"}}]}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`))
+		case 2:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c2","type":"function","function":{"name":"relayed_tool","arguments":"{}"}}]}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`))
+		default:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"handled the decline"}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`))
+		}
+	}))
+	defer srv.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "stub", APIKey: "k",
+		WaitFor: func(req toolnexus.Request) (toolnexus.Answer, error) {
+			// The caller declines the relayed call — the run must not abort.
+			return toolnexus.Answer{ID: req.ID, Ok: false, Reason: "declined"}, nil
+		},
+	})
+
+	res, err := client.Run(context.Background(), "do both", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if !realRan {
+		log.Fatal("expected the ordinary tool to actually run")
+	}
+	if res.Status != "done" {
+		log.Fatalf("a declined relay must not abort the run: %+v", res)
+	}
+
+	fmt.Println("ok: real tool ran locally, relay decline was handled without aborting:", res.Text)
+}
 ```
 
-## The same call in the other five ports
+## Wire shape and rules
+
+| Aspect | Detail |
+|---|---|
+| `Request.Kind` | `"tool_call"` (`RelayKind`) — a use of the suspension primitive, not a second mechanism. |
+| `Request.Data["calls"]` | `[]RelayCall` — `{id, name, input, arguments}`; `id` is stamped by the loop (a tool cannot know its own call id). |
+| Multiple calls, one turn | All of one assistant turn's relay calls ride the **single** surfaced request, in tool-call order — the first-in-order halt rule is unchanged. |
+| Resolution | `Answer.Data["results"]` — `[]{id, output, isError}`, one per call. A single-call relay may use the shorthand `Answer.Data["output"]`/`Answer.Data["isError"]`. |
+| Declined (`Ok: false`) | Feeds back an error `tool_result` for that call; the run continues either way — a relayed *failure* is never an aborted run. |
+| Not a tool error | `isError:false` + `pending:true` on the `tool` observability event; no `afterTool` failure path. Relaying is normal operation for a translator. |
+| Collision guard | Toolkit construction **fails** if a relay tool's name collides with a builtin's — unconditionally, even with builtins disabled. |
+| Absent | No relay tool declared ⇒ not one observable difference from a plain toolkit. |
+
+## The same capability in the other ports
 
 | Port | Symbol | |
 |---|---|---|
@@ -62,12 +310,9 @@ _TODO: name the alternative and when to prefer it._
 | C# | _not shipped in this port_ |  |
 | Elixir | _not shipped in this port_ |  |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
-- [`Pending`](/api/go/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
-- [`AuthRequired`](/api/go/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`Client.Resume`](/api/go/suspension/resume/) — `RunWithAnswer`/`AskWithAnswer`: the durable resolution path a relay suspension typically uses.
+- [`Pending`](/api/go/suspension/pending/) — Return a Pending from a tool to park the run until someone answers — the primitive relay is built on.
 - [`WaitFor`](/api/go/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
-- [`PendingOf`](/api/go/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`Translate`](/api/go/translate/translate/) — The stateless, no-loop alternative for the caller-owns-everything posture.

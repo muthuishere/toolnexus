@@ -1,69 +1,344 @@
 ---
-title: "Client.resume"
-description: "The answer-carrying entry point: resume a parked run in a different process. — Python."
+title: "AgentRuntime.resume"
+description: "The answer-carrying entry point: resume a parked agent run after a durable §10 suspension. — Python."
 sidebar:
-  label: "Client.resume"
+  label: "AgentRuntime.resume"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D / §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/agents/runtime.py">python/src/toolnexus/agents/runtime.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+async def resume(self, answer: Answer) -> None
 ```
 
-The answer-carrying entry point: resume a parked run in a different process.
+<Aside type="caution" title="Manifest correction">
+The cross-language API surface manifest lists this entry point as `Client.resume` for every
+port. That symbol does not exist in `python/src/toolnexus/client.py` — nor in any of the
+other five ports' bare-client source. The durable, **answer-carrying** entry point that
+actually ships in Python (and identically in JS/Java/C#/Elixir) is the §7D agent runtime's
+`AgentRuntime.resume(answer)` documented on this page. `Client`-level `run_with_answer` /
+`ask_with_answer` (SPEC §10 "Durable resume") is a **Go-only preview** (`golang/relay.go`),
+not part of the six-port conformance contract yet — see
+[`suspension/relay`](/api/python/suspension/relay/) for the same Go-only caveat on its sibling
+feature.
+</Aside>
+
+The §7D counterpart to `Client`'s in-process `wait_for`: when a spawned agent's turn halts
+because a tool suspended and no `wait_for` was reachable in its ancestor chain (durable), the
+`Agent.run`/`AgentRuntime.wait` result comes back `status="pending"` carrying both the
+`Request` and the live `runtime` that produced it. Call `await runtime.resume(answer)` once
+you have an `Answer` (`answer.id` should echo `pending.id`) — it routes to the deepest
+suspended handle, replays that handle's exact suspended turn with `ctx.answer` set, and
+**cascades upward**: any suspended ancestor's turn re-runs too, its retried `task` call
+**reattaching** to the same child by task key rather than spawning a duplicate.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- A §7D agent (or team of agents) suspended durably — no `wait_for` anywhere in its ancestor
+  chain — and you now have the human's/system's answer in hand and want the run to continue.
+- You're building a host around `Agent.run`/`AgentRuntime` that separates "detect a
+  suspension" from "resolve it" — e.g. surface `result.pending.prompt` to a UI immediately,
+  then call `resume` only once the UI reports back, potentially turns later.
+- The suspension happened several levels deep in a delegated team: `resume` finds the
+  **deepest** suspended handle for you — you never have to walk the tree yourself.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for wait_for when you want it to just not hang">
+`resume` is the other half of the durable path from [`WaitFor`](/api/python/suspension/wait-for/):
+give an agent's definition a `wait_for` and its own suspensions resolve inline, in the same
+`await`, no `resume` call needed. Reach for `resume` when there's no `wait_for` in the
+chain — by design (you want the halt to surface immediately) or by omission — and something
+external now has the answer.
 </Aside>
+
+Because `Request`/`Answer` are plain, `dataclasses`-serializable data (SPEC §10), a host can
+hand `result.pending` off to a UI, a queue, or a channel message the moment it appears, then
+construct an `Answer` from whatever comes back — `resume` doesn't care where the `Answer`
+originated, only that it echoes back to the same runtime that is still holding the suspended
+tree.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — suspend, then resume in place
 
-{/* TODO:example1 */}
-```python
-// TODO
+```python test
+import asyncio
+
+from toolnexus import Answer, ToolResult, define_tool, pending
+from toolnexus.agents import agent
+
+
+class ScriptedTransport:
+    """Canned OpenAI-shaped replies, popped per model — no network, no real LLM."""
+
+    def __init__(self, scripts):
+        self._scripts = {k: list(v) for k, v in scripts.items()}
+
+    def post(self, url, headers, payload, timeout):
+        return self._scripts[payload.get("model")].pop(0)
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError
+
+
+def tool_call_reply():
+    return {
+        "choices": [{
+            "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": "c1", "type": "function",
+                                 "function": {"name": "approve", "arguments": "{}"}}],
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 6, "completion_tokens": 2, "total_tokens": 8},
+    }
+
+
+def final_reply(text):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+    }
+
+
+async def approve(args=None, ctx=None):
+    if ctx is not None and ctx.answer is not None and ctx.answer.ok:
+        return ToolResult(output="approved and deployed", is_error=False)
+    return pending(kind="approval", prompt="OK to deploy?")
+
+
+async def main():
+    approve_tool = define_tool(approve, name="approve", description="Deploy after approval.")
+    approver = agent("approver", does="deploys after human approval", uses={"tools": [approve_tool]})
+
+    # The resumed turn REPLAYS from a rolled-back transcript (§10 idempotency), so the
+    # model calls the tool a second time before it ever sees the final answer — that's
+    # why `tool_call_reply` appears twice: once to trigger the original suspension, once
+    # on the resumed replay, where `wait_for` now resolves it inline.
+    scripts = {"stub-model": [tool_call_reply(), tool_call_reply(), final_reply("deployed.")]}
+    r = await approver.run(
+        "deploy the latest build",
+        transport=ScriptedTransport(scripts),
+        llm={"base_url": "http://mock.local", "style": "openai", "model": "stub-model", "api_key": "unused"},
+    )
+
+    assert r.status == "pending"
+    assert r.pending.kind == "approval"
+    assert r.runtime is not None  # the live runtime, holding the suspended tree
+
+    answer = Answer(id=r.pending.id, ok=True)
+    await r.runtime.resume(answer)
+
+    # The spawned handle is the runtime root's only child (Agent.run spawned it there).
+    handle = r.runtime.root.children[0]
+    final = await r.runtime.wait(handle)
+
+    assert final.status == "done"
+    assert final.text == "deployed."
+
+    await r.runtime.close(r.runtime.root)
+    print("ok:", final.status, "|", final.text)
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — `Request`/`Answer` as plain data, round-tripped through JSON
 
-{/* TODO:example2 */}
-```python
-// TODO
+```python test
+import asyncio
+import dataclasses
+import json
+
+from toolnexus import Answer, ToolResult, define_tool, pending
+from toolnexus.agents import agent
+
+
+class ScriptedTransport:
+    def __init__(self, scripts):
+        self._scripts = {k: list(v) for k, v in scripts.items()}
+
+    def post(self, url, headers, payload, timeout):
+        return self._scripts[payload.get("model")].pop(0)
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError
+
+
+def tool_call_reply():
+    return {
+        "choices": [{
+            "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": "c1", "type": "function",
+                                 "function": {"name": "refund", "arguments": "{}"}}],
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 6, "completion_tokens": 2, "total_tokens": 8},
+    }
+
+
+def final_reply(text):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+    }
+
+
+async def refund(args=None, ctx=None):
+    if ctx is not None and ctx.answer is not None and ctx.answer.ok:
+        amount = (ctx.answer.data or {}).get("amount", 0)
+        return ToolResult(output=f"refunded ${amount}", is_error=False)
+    return pending(kind="input", prompt="How much should be refunded?")
+
+
+async def main():
+    refund_tool = define_tool(refund, name="refund", description="Issue a refund.")
+    support = agent("support", does="handles refunds", uses={"tools": [refund_tool]})
+
+    # Replayed on resume — the model calls the tool again before the final answer.
+    scripts = {"stub-model": [tool_call_reply(), tool_call_reply(), final_reply("refund processed.")]}
+    r = await support.run(
+        "refund the last order",
+        transport=ScriptedTransport(scripts),
+        llm={"base_url": "http://mock.local", "style": "openai", "model": "stub-model", "api_key": "unused"},
+    )
+    assert r.status == "pending"
+
+    # Request/Answer are dataclasses — plain, JSON-serializable data (SPEC §10). A durable
+    # host can persist exactly this and reconstruct it from a queue, a webhook, another
+    # process's message — anything that eventually hands the same shape back.
+    wire = json.dumps(dataclasses.asdict(r.pending))
+    restored = json.loads(wire)
+    answer = Answer(id=restored["id"], ok=True, data={"amount": 40})
+
+    await r.runtime.resume(answer)
+    handle = r.runtime.root.children[0]
+    final = await r.runtime.wait(handle)
+
+    assert final.status == "done"
+    assert final.text == "refund processed."
+
+    await r.runtime.close(r.runtime.root)
+    print("ok:", wire[:40], "... ->", final.text)
+
+
+asyncio.run(main())
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — a `TaskResult`'s numbers are per-call; the handle's are cumulative
 
-{/* TODO:example3 */}
-```python
-// TODO
+`TaskResult.turns`/`.total_tokens` report the ask() call that just finished — for the resumed
+call, that means the *replay's own* turns (the repeated tool call plus its continuation), not
+a running total since spawn. For a lifetime total, read `runtime.inspect(handle).tokens` — the
+`Handle`'s own counters, which really do only grow, across every turn since spawn.
+
+```python test
+import asyncio
+
+from toolnexus import Answer, ToolResult, define_tool, pending
+from toolnexus.agents import agent
+
+
+class ScriptedTransport:
+    def __init__(self, scripts):
+        self._scripts = {k: list(v) for k, v in scripts.items()}
+
+    def post(self, url, headers, payload, timeout):
+        return self._scripts[payload.get("model")].pop(0)
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError
+
+
+def tool_call_reply():
+    return {
+        "choices": [{
+            "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": "c1", "type": "function",
+                                 "function": {"name": "gate", "arguments": "{}"}}],
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 6, "completion_tokens": 2, "total_tokens": 8},
+    }
+
+
+def final_reply(text):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+    }
+
+
+async def gate(args=None, ctx=None):
+    if ctx is not None and ctx.answer is not None and ctx.answer.ok:
+        return ToolResult(output="through the gate", is_error=False)
+    return pending(kind="approval", prompt="let it through?")
+
+
+async def main():
+    gate_tool = define_tool(gate, name="gate", description="Gated action.")
+    worker = agent("worker", does="does gated work", uses={"tools": [gate_tool]})
+
+    # Replayed on resume: tool call, tool call again (resolved inline), final answer.
+    scripts = {"stub-model": [tool_call_reply(), tool_call_reply(), final_reply("done.")]}
+    r = await worker.run(
+        "do the gated thing",
+        transport=ScriptedTransport(scripts),
+        llm={"base_url": "http://mock.local", "style": "openai", "model": "stub-model", "api_key": "unused"},
+    )
+    assert r.status == "pending"
+    handle = r.runtime.root.children[0]
+    tokens_before = r.runtime.inspect(handle).tokens  # the suspending attempt already rolled up
+
+    await r.runtime.resume(Answer(id=r.pending.id, ok=True))
+    final = await r.runtime.wait(handle)
+
+    assert final.status == "done"
+    assert final.turns == 2  # the resumed replay's OWN two turns — not a running total
+
+    tokens_after = r.runtime.inspect(handle).tokens
+    assert tokens_after > tokens_before  # the Handle's lifetime counter really does only grow
+
+    await r.runtime.close(r.runtime.root)
+    print("ok: handle tokens", tokens_before, "->", tokens_after, "| resumed turns:", final.turns)
+
+
+asyncio.run(main())
 ```
+
+## `TaskResult` fields relevant to resume
+
+| Field | Type | What it is |
+|---|---|---|
+| `status` | `str` | `"pending"` when durably suspended — one of the closed §7D vocabulary (`done`/`pending`/`incomplete`/`interrupted`/`closed`/`timeout`/`error`). |
+| `pending` | `Request \| None` | Set iff `status == "pending"`. `Request.data["path"]` carries the suspended subtree's id path. |
+| `runtime` | `AgentRuntime \| None` | Set by `Agent.run()` — hold onto it to call `resume` later. |
+| `turns` / `total_tokens` | `int` | The ask() call that just completed — the resumed replay's own numbers, not a running total. Use `runtime.inspect(handle).tokens` for the handle's lifetime total. |
 
 ## The same call in the other five ports
 
 | Port | Symbol | |
 |---|---|---|
-| JavaScript | `Client.resume` | [→](/api/javascript/suspension/resume/) |
-| Go | `Client.Resume` | [→](/api/go/suspension/resume/) |
-| Java | `LlmClient.resume` | [→](/api/java/suspension/resume/) |
-| C# | `LlmClient.ResumeAsync` | [→](/api/csharp/suspension/resume/) |
-| Elixir | `Toolnexus.Client.resume` | [→](/api/elixir/suspension/resume/) |
+| JavaScript | `AgentRuntime.resume` | [→](/api/javascript/suspension/resume/) |
+| Go | `agents.Runtime.Resume` | [→](/api/go/suspension/resume/) |
+| Java | `AgentRuntime.resume` | [→](/api/java/suspension/resume/) |
+| C# | `AgentRuntime.ResumeAsync` | [→](/api/csharp/suspension/resume/) |
+| Elixir | `Toolnexus.Agents.Runtime.resume` | [→](/api/elixir/suspension/resume/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Verified directly against each port's source (`agents/runtime.{ts,go,ex}`, `AgentRuntime.java`,
+`AgentRuntime.cs`) — the cross-language manifest's `Client.resume` naming for this entry does
+not match any of the six ports' code. Behavior is identical across ports by contract — same
+`examples/` fixtures, same output. See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 

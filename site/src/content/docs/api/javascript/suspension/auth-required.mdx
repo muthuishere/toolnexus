@@ -8,49 +8,160 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#10-suspension--pending--waitfor">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/types.ts">js/src/types.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function authRequired(url: string, prompt?: string): ToolResult
+// = pending({ kind: "authorization", prompt, url })
 ```
 
-The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+Sugar for the single most common suspension: `pending({ kind: "authorization", prompt, url })`
+with `prompt` defaulting to `"Authorization required to continue"`. Nothing about it is special
+machinery — it is [`pending`](/api/javascript/suspension/pending/) called with one fixed `kind`.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Use `authRequired` any time a tool discovers, mid-call, that the session it needs isn't
+authenticated — an expired token, a login that never happened, a scope the current session lacks.
+By SPEC §10 convention, `kind: "authorization"` follows OAuth2/OIDC authorization-code semantics:
+`url` is the address to send the user to, and the host's `waitFor` performs the
+redirect → consent → callback out-of-band. toolnexus itself stays OIDC-agnostic — there is no auth
+library in the kernel, only this one shaped suspension.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Call pending directly for anything that isn't a login">
+`authRequired` fixes `kind` to `"authorization"` and expects a `url`. For approvals, free-text
+input, or any other out-of-band need, call [`pending`](/api/javascript/suspension/pending/)
+directly with the `kind` and shape that fits — `authRequired` buys you nothing there beyond typing
+one more field yourself.
+</Aside>
+
+<Aside type="caution" title="Never put a secret in the tool's data/answer channel">
+`kind: "input"`/`"question"` suspensions MUST NOT collect passwords, API keys, tokens, or payment
+secrets — that is precisely what `kind: "authorization"` exists to route around: the secret is
+entered out-of-band at `url`, never inside `Request.data` or `Answer.data`, and never inside the
+model's context.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The shape — `kind` and default `prompt` fixed for you
 
-{/* TODO:example1 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import { authRequired, pendingOf } from "toolnexus"
+
+const res = authRequired("https://example.com/login?token=abc")
+const req = pendingOf(res)
+
+assert.equal(req?.kind, "authorization")
+assert.equal(req?.url, "https://example.com/login?token=abc")
+assert.equal(req?.prompt, "Authorization required to continue") // the default
+assert.equal(res.output, "Authorization required to continue\nhttps://example.com/login?token=abc")
+
+// The second argument overrides the default prompt.
+const custom = authRequired("https://x.com/login", "Log in to view your balance")
+assert.equal(pendingOf(custom)?.prompt, "Log in to view your balance")
+
+console.log("ok:", req?.kind, "->", req?.url)
 ```
 
-### 2. TODO — the realistic case
+### 2. A tool that logs in via `waitFor`, then the retry succeeds
 
-{/* TODO:example2 */}
-```ts
-// TODO
+The retry carries `ctx.answer` — this tool ignores its *data* (a login has no payload to read) and
+just proceeds, because the session is now valid.
+
+```ts test
+import assert from "node:assert"
+import { createClient, createToolkit, defineTool, authRequired } from "toolnexus"
+
+let authed = false
+const getBalance = defineTool({
+  name: "get_balance",
+  description: "Return the account balance. Requires login first.",
+  inputSchema: { type: "object", properties: {} },
+  run: () => {
+    if (!authed) return authRequired("https://example.com/login?token=abc", "Log in to view your balance")
+    return "balance: $500"
+  },
+})
+
+const canned: typeof fetch = async (_url, init) => {
+  const body = JSON.parse(String((init as any).body))
+  const sawToolResult = body.messages.some((m: any) => m.role === "tool")
+  const message = sawToolResult
+    ? { role: "assistant", content: "Your balance is $500." }
+    : { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "get_balance", arguments: "{}" } }] }
+  return new Response(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } })
+}
+
+const seenUrls: string[] = []
+const client = createClient({
+  baseUrl: "http://stub", style: "openai", model: "m", fetch: canned,
+  waitFor: async (request) => {
+    seenUrls.push(request.url!) // in real life: open a browser, or message a channel
+    authed = true // the world changed out-of-band — the tool retries into a valid session
+    return { id: request.id, ok: true }
+  },
+})
+
+const tk = await createToolkit({ builtins: false, extraTools: [getBalance] })
+const res = await client.run("what is my balance?", { toolkit: tk })
+
+assert.equal(res.status, "done")
+assert.ok(seenUrls[0].includes("example.com/login"))
+assert.match(res.toolCalls[0].output, /balance: \$500/)
+
+await tk.close()
+console.log("ok:", seenUrls[0], "->", res.text)
 ```
 
-### 3. TODO — the full surface
+### 3. No `waitFor` — the durable halt carries `pending.url` for a host to deliver later
 
-{/* TODO:example3 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import { createClient, createToolkit, defineTool, authRequired } from "toolnexus"
+
+const getBalance = defineTool({
+  name: "get_balance",
+  description: "Return the account balance. Requires login first.",
+  inputSchema: { type: "object", properties: {} },
+  run: () => authRequired("https://example.com/login?token=abc", "Log in to view your balance"),
+})
+
+const canned: typeof fetch = async () =>
+  new Response(JSON.stringify({
+    choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "get_balance", arguments: "{}" } }] } }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  }), { status: 200, headers: { "content-type": "application/json" } })
+
+const client = createClient({ baseUrl: "http://stub", style: "openai", model: "m", fetch: canned }) // no waitFor
+const tk = await createToolkit({ builtins: false, extraTools: [getBalance] })
+
+const res = await client.run("what is my balance?", { toolkit: tk })
+
+assert.equal(res.status, "pending")
+assert.equal(res.pending?.kind, "authorization")
+assert.ok(res.pending?.url?.includes("example.com/login"))
+// A durable host persists `res.pending` (and `res.messages`) here and delivers the link elsewhere —
+// see agents.AgentRuntime.resume for the shipped, in-process way back in.
+
+await tk.close()
+console.log("ok:", res.status, "|", res.pending?.url)
 ```
+
+## Fields
+
+`authRequired(url, prompt?)` builds a [`Request`](/api/javascript/suspension/pending/) with:
+
+| Field | Value |
+|---|---|
+| `kind` | Always `"authorization"`. |
+| `url` | The first argument, verbatim — the authorize endpoint. |
+| `prompt` | The second argument, or `"Authorization required to continue"`. |
+| `id` | Auto-generated, same as `pending`. |
 
 ## The same call in the other five ports
 
@@ -67,7 +178,6 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`pending`](/api/javascript/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`pending`](/api/javascript/suspension/pending/) — The general primitive `authRequired` is sugar over.
 - [`waitFor`](/api/javascript/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
 - [`pendingOf`](/api/javascript/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
-- [`Client.resume`](/api/javascript/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.

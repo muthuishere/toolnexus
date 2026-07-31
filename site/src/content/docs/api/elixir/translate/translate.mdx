@@ -1,56 +1,210 @@
 ---
-title: "Toolnexus.Translate.translate"
+title: "Toolnexus.Client.translate"
 description: "Declare a toolkit to a provider and translate one request/response without executing anything or keeping state. — Elixir."
 sidebar:
-  label: "Toolnexus.Translate.translate"
+  label: "Toolnexus.Client.translate"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/client.ex">elixir/lib/toolnexus/client.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec translate(Toolnexus.Client.t(), [map()], keyword()) :: Toolnexus.Translate.Result.t()
+def translate(client, messages, opts \\ [])
+
+# messages: OpenAI `messages`, taken verbatim
+# opts: :tools (OpenAI `tools`, verbatim), :toolkit (declared, never executed, composes with :tools),
+#       :tool_choice, :system (overrides the system prompt), :max_tokens
 ```
 
-Declare a toolkit to a provider and translate one request/response without executing anything or keeping state.
+<Aside type="caution" title="The entry point is Client.translate, not Toolnexus.Translate.translate">
+`Toolnexus.Translate` (`elixir/lib/toolnexus/translate.ex`) holds the pure translation helpers —
+`openai_messages_to_anthropic/1`, `tool_calls_of/1`, and friends — but there is no
+`Toolnexus.Translate.translate/2`. The entry point that makes exactly one provider call lives on
+`Toolnexus.Client`, the same struct `run/4` and `stream/4` use.
+</Aside>
+
+Single-turn translation (§11): exactly **one** provider call, always returned in **OpenAI shape**
+regardless of the client's `:style`. No agent loop, no tool execution, no conversation state —
+every call is self-contained, so `translate/3` may be called statelessly and concurrently. A
+`:toolkit` in `opts` is **declared** to the provider and never executed — this is the inbound half
+of the §5 adapters: `to_anthropic/1`/`to_gemini/1` send declarations out, `translate/3` reads the
+provider's tool calls back in, for a caller that owns the conversation and executes tools itself
+(the standard OpenAI function-calling posture).
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **You already have your own agent loop** (or you're behind a proxy that expects OpenAI-shaped
+  responses) and just want toolnexus to make one provider call and hand back a normalized result
+  — you drive tool execution and the next turn yourself.
+- **You're building an OpenAI-compatible endpoint over an Anthropic (or other) upstream** — send
+  OpenAI `messages`/`tools` in, translate one turn, get OpenAI `tool_calls`/`finish_reason` out,
+  no matter which `:style` the client is configured for.
+- **You want tool declarations validated/echoed without ever running them** — `:toolkit` composes
+  with `:tools` for this.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for run/4 when toolnexus should own the conversation">
+`translate/3` makes exactly one call and never executes a tool — the caller is the loop.
+[`Toolnexus.Client.run/4`](/api/elixir/client/run/) is the opposite: toolnexus owns the whole
+loop (system prompt, tool execution, multi-turn continuation, suspension via §10). Reach for
+`run/4` when you want an answer; reach for `translate/3` when you want ONE normalized
+request/response and full control of what happens next.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — no tools, an OpenAI-style upstream
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+`http_options: [plug: ...]` stubs the wire call in-process — the same pattern
+[`Client.run`](/api/elixir/client/run/) uses — no network, no real API key.
+
+```elixir test
+alias Toolnexus.Client
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+
+  resp = %{
+    "choices" => [%{"message" => %{"role" => "assistant", "content" => "Paris"}, "finish_reason" => "stop"}],
+    "usage" => %{"prompt_tokens" => 6, "completion_tokens" => 1, "total_tokens" => 7}
+  }
+
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client = Client.create(base_url: "http://localhost", style: "openai", model: "gpt-x", api_key: "test-key", http_options: [plug: plug])
+
+result = Client.translate(client, [%{"role" => "user", "content" => "capital of France?"}])
+
+true = result.text == "Paris"
+true = result.tool_calls == []
+true = result.finish_reason == "stop"
+true = result.model == "gpt-x"
+true = result.usage.total_tokens == 7
+
+IO.puts("ok: #{result.text} (#{result.finish_reason}, #{result.usage.total_tokens} tokens)")
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — a declared toolkit, tool calls come back untouched
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+The model asks for a tool; `translate/3` never runs it — it hands the call back for the caller
+to execute.
+
+```elixir test
+alias Toolnexus.{Client, Tool}
+
+lookup = %Tool{
+  name: "lookup_weather",
+  description: "look up the weather",
+  input_schema: %{"type" => "object", "properties" => %{"city" => %{"type" => "string"}}},
+  source: "native",
+  execute: fn _args, _ctx -> raise "never called by translate/3" end
+}
+
+plug = fn conn ->
+  {:ok, raw, conn} = Plug.Conn.read_body(conn)
+  body = Jason.decode!(raw)
+  # The tool WAS declared to the provider — never executed locally.
+  true = Enum.any?(body["tools"], &(get_in(&1, ["function", "name"]) == "lookup_weather"))
+
+  resp = %{
+    "choices" => [%{
+      "message" => %{"role" => "assistant", "content" => nil, "tool_calls" => [
+        %{"id" => "c1", "type" => "function", "function" => %{"name" => "lookup_weather", "arguments" => ~s({"city":"Chennai"})}}
+      ]},
+      "finish_reason" => "tool_calls"
+    }],
+    "usage" => %{"prompt_tokens" => 8, "completion_tokens" => 5, "total_tokens" => 13}
+  }
+
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client = Client.create(base_url: "http://localhost", style: "openai", model: "gpt-x", api_key: "test-key", http_options: [plug: plug])
+
+result = Client.translate(client, [%{"role" => "user", "content" => "weather in Chennai?"}], toolkit: [lookup])
+
+true = result.text == ""
+true = result.finish_reason == "tool_calls"
+[call] = result.tool_calls
+true = call.name == "lookup_weather"
+true = call.arguments == ~s({"city":"Chennai"})
+
+IO.puts("ok: declared #{length([lookup])} tool(s), got back #{length(result.tool_calls)} call(s) — none executed")
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — an Anthropic-style upstream, same OpenAI-shaped result
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+Set `style: "anthropic"` on the client and `translate/3` still returns the same
+`Toolnexus.Translate.Result` shape — the translation, not just the call, is the point.
+
+```elixir test
+alias Toolnexus.Client
+
+plug = fn conn ->
+  {:ok, raw, conn} = Plug.Conn.read_body(conn)
+  body = Jason.decode!(raw)
+  true = body["system"] == "be concise"
+
+  resp = %{
+    "content" => [
+      %{"type" => "text", "text" => "checking the weather"},
+      %{"type" => "tool_use", "id" => "tu_1", "name" => "lookup_weather", "input" => %{"city" => "Chennai"}}
+    ],
+    "stop_reason" => "tool_use",
+    "usage" => %{"input_tokens" => 10, "output_tokens" => 6}
+  }
+
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "anthropic",
+    model: "claude-x",
+    api_key: "test-key",
+    http_options: [plug: plug]
+  )
+
+result = Client.translate(client, [%{"role" => "user", "content" => "weather in Chennai?"}], system: "be concise", max_tokens: 512)
+
+true = result.text == "checking the weather"
+true = result.finish_reason == "tool_calls"
+[call] = result.tool_calls
+true = call.id == "tu_1"
+true = call.name == "lookup_weather"
+true = call.arguments == Jason.encode!(%{"city" => "Chennai"})
+true = result.usage == %{prompt_tokens: 10, completion_tokens: 6, total_tokens: 16}
+
+IO.puts("ok: anthropic upstream, OpenAI-shaped result — #{result.text}, #{length(result.tool_calls)} call(s)")
 ```
+
+## `opts` fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `:tools` | `[map()]` | OpenAI `tools` array, sent verbatim (declaration-only). |
+| `:toolkit` | toolkit | An ordinary toolkit, declared to the provider and never executed; composes with `:tools`. |
+| `:tool_choice` | `term()` | OpenAI `tool_choice`, translated per `:style`. |
+| `:system` | `String.t()` | Overrides the client's `system_prompt` for this call. |
+| `:max_tokens` | `pos_integer()` | Overrides the per-provider default (Anthropic requires one; default `4096`). |
+
+## `Toolnexus.Translate.Result` shape
+
+| Field | Type | What it is |
+|---|---|---|
+| `text` | `String.t()` | Assistant text (`""` when the model only called tools). |
+| `tool_calls` | `[Toolnexus.Translate.ToolCall.t()]` | `%{id, name, arguments}`, in provider order — none ever dropped. |
+| `finish_reason` | `String.t()` | `"stop" \| "tool_calls" \| "length" \| "content_filter"`. |
+| `usage` | `%{prompt_tokens, completion_tokens, total_tokens}` | This single call's usage. |
+| `model` | `String.t()` | The model that answered. |
+| `raw` | `term()` | The provider's decoded response, for fields this struct doesn't model. |
 
 ## The same call in the other five ports
 
@@ -62,9 +216,11 @@ _TODO: name the alternative and when to prefer it._
 | Java | `Translate.translate` | [→](/api/java/translate/translate/) |
 | C# | `Translate.Run` | [→](/api/csharp/translate/translate/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
+Behavior is identical across ports by contract — same `examples/` fixtures, same output. Elixir's
+entry point sits on `Client` rather than a standalone `Translate` module, per the note above.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
 - [`Toolnexus.Translate.openai_messages_to_anthropic`](/api/elixir/translate/inbound/) — Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong.
+- [`Toolnexus.Client.run`](/api/elixir/client/run/) — the multi-turn loop, for when toolnexus should own the conversation and execute tools itself.

@@ -1,56 +1,203 @@
 ---
-title: "Suspension.AuthRequired"
+title: "ToolResult.AuthRequired"
 description: "The auth-shaped suspension: hand back a URL, resume once the user has granted access. — C#."
 sidebar:
-  label: "Suspension.AuthRequired"
+  label: "ToolResult.AuthRequired"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/ToolResult.cs">ToolResult.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public sealed record ToolResult(string Output, bool IsError, IDictionary<string, object?>? Metadata = null)
+{
+    public static ToolResult AuthRequired(string url, string prompt = "Authorization required to continue");
+}
 ```
 
-The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+<Aside type="note" title="Not `Suspension.AuthRequired`">
+This port puts the §10 producer helpers directly on **`ToolResult`** — there is no separate
+`Suspension` class in C#. Java does the same; JavaScript, Python and Go expose free functions
+(`authRequired`/`auth_required`) instead.
+</Aside>
+
+Sugar over [`ToolResult.Pending`](/api/csharp/suspension/pending/) for the login case: it builds a
+`Request` with `Kind = "authorization"` and the given `Url`, with a sensible default `Prompt`.
+There is no auth subsystem in toolnexus — `kind:"authorization"` is a convention, not special
+handling: it means "the host's `WaitFor` should perform an OAuth2/OIDC-shaped redirect → consent →
+callback out-of-band," but the kernel itself never touches OIDC.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+A tool needs a valid session before it can do anything useful — an API that requires a signed-in
+user, a service behind SSO. Return `AuthRequired(loginUrl)` the first time; the host's `WaitFor`
+drives the actual login flow, and the tool is retried once login succeeds.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for ToolResult.Pending when it isn't a URL-based login">
+`AuthRequired` only fits the "go to this link and come back" shape. An approval, a free-text
+question, or any suspension without a URL should use
+[`ToolResult.Pending`](/api/csharp/suspension/pending/) directly with the `Kind` that fits —
+`"approval"`, `"input"`, or an open vocabulary of your own choosing.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — the default prompt
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+var res = ToolResult.AuthRequired("https://example.com/login");
+
+if (!res.IsError) throw new Exception("a parked call is not a success");
+var req = ToolResult.PendingOf(res)!;
+if (req.Kind != "authorization") throw new Exception(req.Kind);
+if (req.Url != "https://example.com/login") throw new Exception(req.Url);
+if (req.Prompt != "Authorization required to continue") throw new Exception(req.Prompt);
+
+Console.WriteLine($"ok: {req.Kind} at {req.Url}");
 ```
 
-### 2. TODO — the realistic case
+### 2. A custom prompt, and ignoring the answer's payload — the session is what changed
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+var res = ToolResult.AuthRequired("https://accounts.example.com/authorize", "Sign in to read your calendar");
+var req = ToolResult.PendingOf(res)!;
+if (req.Prompt != "Sign in to read your calendar") throw new Exception(req.Prompt);
+
+// A tool behind AuthRequired typically doesn't need answer.Data — the world changed out-of-band
+// (the session is now valid), so it just re-runs its normal logic on the retry.
+var calendar = NativeTool.Of("read_calendar", "reads today's events", null,
+    (IDictionary<string, object?> _, ToolContext? ctx) => ctx?.Answer?.Ok == true
+        ? (object)"09:00 standup, 14:00 1:1"
+        : (object)ToolResult.AuthRequired("https://accounts.example.com/authorize", "Sign in to read your calendar"));
+
+var first = await calendar.ExecuteAsync(new Dictionary<string, object?>());
+if (ToolResult.PendingOf(first) is null) throw new Exception("expected a suspension on the first call");
+
+var retried = await calendar.ExecuteAsync(new Dictionary<string, object?>(), new ToolContext(answer: new Answer { Id = req.Id, Ok = true }));
+if (retried.IsError || retried.Output != "09:00 standup, 14:00 1:1") throw new Exception(retried.Output);
+
+Console.WriteLine($"ok: suspended, then resolved: {retried.Output}");
 ```
 
-### 3. TODO — the full surface
+### 3. Full surface — inside a real client run, `WaitFor` performs the "login"
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+var httpCalls = 0;
+using var stub = new Stub(ctx =>
+{
+    httpCalls++;
+    if (httpCalls == 1)
+    {
+        Stub.Json(ctx, 200, """
+        {"id":"c1","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_calendar","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":8,"completion_tokens":4,"total_tokens":12}}
+        """);
+    }
+    else
+    {
+        Stub.Json(ctx, 200, """
+        {"id":"c2","choices":[{"message":{"role":"assistant","content":"You have a 09:00 standup and a 14:00 1:1."},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":6,"total_tokens":18}}
+        """);
+    }
+});
+
+var loginsPerformed = 0;
+var calendar = NativeTool.Of("read_calendar", "reads today's events", null,
+    (IDictionary<string, object?> _, ToolContext? ctx) => ctx?.Answer?.Ok == true
+        ? (object)"09:00 standup, 14:00 1:1"
+        : (object)ToolResult.AuthRequired("https://accounts.example.com/authorize"));
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "openai", Model = "gpt-4o-mini", ApiKey = "test-key",
+    WaitFor = request =>
+    {
+        if (request.Kind != "authorization") throw new Exception($"unexpected kind: {request.Kind}");
+        loginsPerformed++; // stand in for driving an actual OAuth redirect/consent/callback
+        return Task.FromResult(new Answer { Id = request.Id, Ok = true });
+    },
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = new List<ITool> { calendar } });
+var result = await client.RunAsync("what's on my calendar today?", tk);
+
+if (result.Status != "done") throw new Exception($"status: {result.Status}");
+if (loginsPerformed != 1) throw new Exception($"expected exactly one login, got {loginsPerformed}");
+if (result.Text != "You have a 09:00 standup and a 14:00 1:1.") throw new Exception(result.Text);
+
+Console.WriteLine($"ok: {result.Text} (1 login, tool retried once)");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
+
+<Aside type="caution">
+`Kind == "authorization"` is a convention, not a code path with special handling in the kernel —
+there is no OIDC library inside toolnexus. Everything about *how* login happens lives in your
+`WaitFor`, at the edge, which is what keeps the mechanism identical whether the "auth" is OAuth2,
+a magic link, or a Slack approval.
+</Aside>
+
+## Parameters
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `url` | `string` | The authorize endpoint / login link the host's `WaitFor` should drive. |
+| `prompt` | `string` | Human-readable prompt. Defaults to `"Authorization required to continue"`. |
 
 ## The same call in the other five ports
 
@@ -67,7 +214,7 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Suspension.Pending`](/api/csharp/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`ToolResult.Pending`](/api/csharp/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
 - [`LlmClient.WaitFor`](/api/csharp/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
-- [`Suspension.PendingOf`](/api/csharp/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
-- [`LlmClient.ResumeAsync`](/api/csharp/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.
+- [`ToolResult.PendingOf`](/api/csharp/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`ToolResult`](/api/csharp/types/tool-result/) — The result envelope this rides on.

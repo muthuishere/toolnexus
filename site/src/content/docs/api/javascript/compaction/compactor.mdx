@@ -8,49 +8,170 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7F</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7f-context-compaction-keep-a-long-lived-agent-under-budget">SPEC §7F</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/agents/compaction.ts">js/src/agents/compaction.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function compactor(opts: CompactorOptions): (ev: BeforeLLMEvent) => Promise<{ messages: Message[] } | undefined>
+
+interface CompactorOptions {
+  maxTokens: number                                      // compact only above this; required
+  keepTail?: number                                       // default maxTokens / 2
+  summarize: (older: Message[]) => Promise<string> | string  // required — MAY call an LLM
+  countTokens?: (messages: Message[]) => number             // default ceil(chars/4) summed
+  flushToMemory?: boolean                                    // default false
+}
 ```
 
-Summarise older turns when the transcript grows, so a long-lived agent stays inside its context window.
+`compactor` builds a [`beforeLLM`](/api/javascript/client/hooks/) hook (§8) — nothing more. It
+does not run a loop, does not own a timer, and makes no model call itself; `summarize` is yours to
+implement, and the returned function is a pure `messages -> messages | undefined` rewrite that the
+client applies at the top of every turn. Under `maxTokens` it returns `undefined` — a true no-op,
+byte-identical to a run with no compactor at all.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `compactor` the moment a long-running [`agents.Agent`](/api/javascript/runtime/agent/)
+or a bare [`createClient`](/api/javascript/client/create/) conversation risks overflowing the
+model's context window — a persona that runs for weeks via
+[`startAgent`](/api/javascript/runtime/runtime/)'s heartbeat, a support agent that accumulates a
+long back-and-forth. It rewrites the *working transcript in place*, so the effect compounds:
+`RunResult.messages` and whatever a `ConversationStore` persists are both the compacted shape from
+then on.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Write your own beforeLLM hook instead for a non-token-count trigger">
+`compactor` is one specific, well-tested policy: summarize by token estimate, split at a `user`
+boundary. If your trigger is something else — turn count, wall-clock age, an explicit "compact now"
+command — write your own `hooks.beforeLLM` function; the seam it rides is public and this is not
+the only thing that can occupy it. Reach for `compactor` when a token budget is exactly the
+constraint you have.
 </Aside>
+
+Two invariants make it safe to bolt onto an arbitrary transcript without inspecting it yourself:
+
+- **Tool-pair safety.** The retained tail always starts at a `user` turn, so a `tool` message is
+  never orphaned from the `assistant` turn carrying its `tool_call_id` — a broken pair is silently
+  rejected by every provider.
+- **System prompt preserved.** A leading `system` message (persona soul, skill catalog) is kept
+  verbatim; only the body between it and the tail is ever summarized.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Under budget — a true no-op
 
-{/* TODO:example1 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import { agents } from "toolnexus"
+
+const hook = agents.compactor({
+  maxTokens: 10_000,
+  summarize: () => { throw new Error("must never be called under budget") },
+})
+
+const messages = [
+  { role: "system", content: "You are terse." },
+  { role: "user", content: "hi" },
+  { role: "assistant", content: "hello" },
+]
+
+const result = await hook({ messages, tools: [], model: "m", turn: 1 })
+
+assert.equal(result, undefined) // no-op ⇒ the caller keeps its own array unchanged
+
+console.log("ok: no-op below maxTokens")
 ```
 
-### 2. TODO — the realistic case
+### 2. Over budget — summarized head, a clean `user`-boundary tail
 
-{/* TODO:example2 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import { agents } from "toolnexus"
+
+const hook = agents.compactor({
+  maxTokens: 60,
+  summarize: (older) => `${older.length} earlier messages covered pricing and shipping questions.`,
+})
+
+const messages = [
+  { role: "system", content: "You are terse." },
+  { role: "user", content: "What is the price of the pro plan? ".repeat(4) },
+  { role: "assistant", content: "It is $49/month. ".repeat(4) },
+  { role: "user", content: "Does it ship internationally? ".repeat(4) },
+  { role: "assistant", content: "Yes, to 40 countries. ".repeat(4) },
+]
+
+const result = await hook({ messages, tools: [], model: "m", turn: 1 })
+
+assert.ok(result, "over budget ⇒ a rewrite")
+const [system, summary, tail] = result!.messages
+assert.equal(system.role, "system")
+assert.equal(system.content, "You are terse.") // preserved verbatim
+assert.match(String(summary.content), /^\[Summary of earlier conversation\]/)
+assert.equal(tail.role, "user") // the tail starts at a user turn — never mid tool-pair
+
+console.log("ok:", result!.messages.length, "messages after compaction (was", messages.length, ")")
 ```
 
-### 3. TODO — the full surface
+### 3. Wired into a real client run, with `flushToMemory`
 
-{/* TODO:example3 */}
-```ts
-// TODO
+`flushToMemory` injects a reminder to persist durable facts via the §7E
+[`memory`](/api/javascript/persona/memory-tool/) tool before the head is summarized — it composes
+with [`fromDir`](/api/javascript/persona/from-dir/) personas for free. This runs the REAL client
+loop against a stubbed fetch (no network) to show the hook firing inside an actual turn.
+
+```ts test
+import assert from "node:assert"
+import { agents, createClient, createToolkit } from "toolnexus"
+
+// A long prior conversation, loaded as `history` (e.g. from a ConversationStore).
+const history: any[] = [{ role: "system", content: "You are terse." }]
+for (let i = 0; i < 6; i++) {
+  history.push({ role: "user", content: `turn ${i}: ` + "detail ".repeat(30) })
+  history.push({ role: "assistant", content: `ack ${i}: ` + "noted ".repeat(30) })
+}
+
+let sentMessages: any[] = []
+const canned: typeof fetch = async (_url, init) => {
+  sentMessages = JSON.parse(String(init?.body)).messages
+  return new Response(JSON.stringify({
+    choices: [{ message: { content: "Final answer." } }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  }), { status: 200, headers: { "content-type": "application/json" } })
+}
+
+const hook = agents.compactor({
+  maxTokens: 100,
+  flushToMemory: true,
+  summarize: (older) => `summarized ${older.length} older turns`,
+})
+
+const client = createClient({ baseUrl: "http://stub", style: "openai", model: "m", fetch: canned, hooks: { beforeLLM: hook } })
+const tk = await createToolkit({ builtins: false })
+
+const res = await client.run("what's next?", { toolkit: tk, history })
+
+assert.equal(res.text, "Final answer.")
+// What the PROVIDER actually saw: system, summary, flush reminder, then the new prompt.
+assert.equal(sentMessages[0].role, "system")
+assert.match(sentMessages[1].content, /^\[Summary of earlier conversation\]/)
+assert.match(sentMessages[2].content, /save it with the memory tool/)
+assert.equal(sentMessages.at(-1).content, "what's next?")
+
+await tk.close()
+console.log("ok: compacted to", sentMessages.length, "messages before the LLM call")
 ```
+
+## Options
+
+| Option | Type | What it does |
+|---|---|---|
+| `maxTokens` | `number` | Compact only when the estimate exceeds this; at/below ⇒ no-op. **Required.** |
+| `keepTail` | `number` | Keep at least this many tokens of the most recent tail. Default `maxTokens / 2`. |
+| `summarize` | `(older: Message[]) => Promise<string> \| string` | Produces the summary. MAY call an LLM — the library never calls one on your behalf. **Required.** |
+| `countTokens` | `(messages: Message[]) => number` | Token estimator. Default `ceil(chars/4)` summed over messages — an estimate, not a real tokenizer. |
+| `flushToMemory` | `boolean` | Inject a pre-compact reminder to persist durable facts via the §7E `memory` tool. Default `false`. |
 
 ## The same call in the other five ports
 
@@ -67,4 +188,6 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- _TODO: related entry points_
+- [`createClient`](/api/javascript/client/create/) — `hooks.beforeLLM` is where a bare client wires this in.
+- [`agents.Agent`](/api/javascript/runtime/agent/) — `AgentSpec.hooks` wires this per agent, so two agents in one runtime can carry different budgets.
+- [`memoryTool`](/api/javascript/persona/memory-tool/) — What `flushToMemory` tells the model to write to before the head is summarized.

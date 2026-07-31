@@ -8,49 +8,220 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Agents/Home.cs">Agents/Home.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+namespace Toolnexus.Agents;
+
+public static class Home
+{
+    public static Agent FromDir(string dir, FromDirOptions? opts = null);
+}
+
+public sealed class FromDirOptions
+{
+    public string? Does { get; set; }     // routing description; default "persona agent from <dir>"
+    public string? Name { get; set; }     // agent name; default the directory's base name
+    public string? Model { get; set; }    // default "inherit"
+    public List<ITool>? Tools { get; set; } // extra tools beyond the memory builtin
+    public bool Memory { get; set; } = true; // set false to omit the memory tool (read-only persona)
+}
 ```
 
-Point at an agent home directory and get a configured agent back.
+The directory **is** the agent (SPEC §7E). `FromDir` calls
+[`Home.ComposeSoul`](/api/csharp/persona/compose-soul/) on `dir` to build the frozen system-prompt
+snapshot, wires [`Home.MemoryTool`](/api/csharp/persona/memory-tool/) over the same directory
+(unless `Memory = false`), and returns a plain [`Agent`](/api/csharp/runtime/agent/) — `RunAsync`
+it like any agent, or hand it to `Home.StartAgent` for a heartbeat.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+You keep a persona's identity in files on disk — `SOUL.md` for voice, `AGENTS.md` for operating
+instructions, `MEMORY.md` for what it has learned — and want one call that turns that folder into
+a runnable `Agent` with its durable-notes tool already attached. This is the on-ramp for every
+long-lived persona: a support bot, a research assistant, anything that should remember things
+across sessions without you hand-wiring `AgentSpec` yourself.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for a hand-built AgentSpec when the defaults don't fit">
+`FromDir` picks sensible defaults — the directory's base name, `Model = "inherit"`, the memory
+tool on. If you need a `Team` (sub-agent delegation), a `Budget`, or a `WaitFor` override, build an
+`AgentSpec` directly and pass `Soul = Home.ComposeSoul(dir).Soul` yourself. `FromDir` is the
+convention-over-configuration front door, not the only door.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+using Toolnexus.Agents;
+
+var dir = Directory.CreateTempSubdirectory("toolnexus-home-").FullName;
+File.WriteAllText(Path.Combine(dir, "SOUL.md"), "You are Kavi, a terse research assistant.");
+
+var kavi = Home.FromDir(dir);
+
+var llm = new MockLlm(_ => Task.FromResult(MockLlm.Text("hi from Kavi")));
+var rtOpts = new RuntimeOptions { Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock" };
+
+var result = await kavi.RunAsync(rtOpts, "say hi");
+
+if (result.Status != "done") throw new Exception(result.Status);
+if (result.Text != "hi from Kavi") throw new Exception(result.Text);
+if (kavi.Name != Path.GetFileName(dir)) throw new Exception(kavi.Name); // default name = directory base name
+
+Console.WriteLine($"ok: {kavi.Name} -> {result.Text}");
+
+sealed class MockLlm : System.Net.Http.HttpMessageHandler
+{
+    readonly Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> _respond;
+    public MockLlm(Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> respond) => _respond = respond;
+    protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+        System.Net.Http.HttpRequestMessage request, CancellationToken ct) => _respond(request);
+
+    public static System.Net.Http.HttpResponseMessage Text(string content) => Json(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        choices = new[] { new { message = new { role = "assistant", content } } },
+        usage = new { prompt_tokens = 5, completion_tokens = 3, total_tokens = 8 },
+    }));
+
+    public static System.Net.Http.HttpResponseMessage ToolCall(string id, string name, object args) => Json(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        choices = new[]
+        {
+            new { message = new { role = "assistant", content = (string?)null,
+                tool_calls = new[] { new { id, type = "function", function = new { name, arguments = System.Text.Json.JsonSerializer.Serialize(args) } } } } },
+        },
+        usage = new { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+    }));
+
+    static System.Net.Http.HttpResponseMessage Json(string body) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json"),
+    };
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — the memory tool is wired in by default
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using System.Linq;
+using Toolnexus;
+using Toolnexus.Agents;
+
+var dir = Directory.CreateTempSubdirectory("toolnexus-home-").FullName;
+File.WriteAllText(Path.Combine(dir, "SOUL.md"), "You are Kavi.");
+
+var kavi = Home.FromDir(dir); // Memory defaults to true — the `memory` tool is auto-attached
+
+if (kavi.Spec.Uses is null || !kavi.Spec.Uses.Any(t => t.Name == "memory"))
+    throw new Exception("expected the memory tool to be included by default");
+
+var calls = 0;
+var llm = new MockLlm(_ =>
+{
+    calls++;
+    return Task.FromResult(calls == 1
+        ? MockLlm.ToolCall("c1", "memory", new { action = "add", text = "the user prefers terse replies" })
+        : MockLlm.Text("noted"));
+});
+var rtOpts = new RuntimeOptions { Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock" };
+
+var result = await kavi.RunAsync(rtOpts, "remember that I like short answers");
+
+if (result.Status != "done") throw new Exception(result.Status);
+if (result.Text != "noted") throw new Exception(result.Text);
+
+// The memory tool writes straight to disk — MEMORY.md now carries the entry.
+var memoryFile = Path.Combine(dir, "MEMORY.md");
+if (!File.Exists(memoryFile)) throw new Exception("MEMORY.md was not written");
+if (!File.ReadAllText(memoryFile).Contains("the user prefers terse replies")) throw new Exception("entry missing");
+
+Console.WriteLine($"ok: {result.Text} (wrote {new FileInfo(memoryFile).Length} bytes to MEMORY.md)");
+
+sealed class MockLlm : System.Net.Http.HttpMessageHandler
+{
+    readonly Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> _respond;
+    public MockLlm(Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> respond) => _respond = respond;
+    protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+        System.Net.Http.HttpRequestMessage request, CancellationToken ct) => _respond(request);
+
+    public static System.Net.Http.HttpResponseMessage Text(string content) => Json(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        choices = new[] { new { message = new { role = "assistant", content } } },
+        usage = new { prompt_tokens = 5, completion_tokens = 3, total_tokens = 8 },
+    }));
+
+    public static System.Net.Http.HttpResponseMessage ToolCall(string id, string name, object args) => Json(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        choices = new[]
+        {
+            new { message = new { role = "assistant", content = (string?)null,
+                tool_calls = new[] { new { id, type = "function", function = new { name, arguments = System.Text.Json.JsonSerializer.Serialize(args) } } } } },
+        },
+        usage = new { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+    }));
+
+    static System.Net.Http.HttpResponseMessage Json(string body) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json"),
+    };
+}
 ```
 
-### 3. TODO — the full surface
+### 3. Full surface — every `FromDirOptions` field
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using System.Linq;
+using Toolnexus;
+using Toolnexus.Agents;
+
+var dir = Directory.CreateTempSubdirectory("toolnexus-home-").FullName;
+File.WriteAllText(Path.Combine(dir, "SOUL.md"), "You are a base identity.");
+
+var extra = NativeTool.Of("ping", "replies pong",
+    new Dictionary<string, object?> { ["type"] = "object", ["properties"] = new Dictionary<string, object?>() },
+    (IDictionary<string, object?> _) => "pong");
+
+var agent = Home.FromDir(dir, new Home.FromDirOptions
+{
+    Does = "a fully configured persona",
+    Name = "custom-name",
+    Model = "gpt-4o-mini",
+    Tools = new List<ITool> { extra },
+    Memory = false, // opt out of the memory builtin — a read-only persona
+});
+
+if (agent.Name != "custom-name") throw new Exception(agent.Name);
+if (agent.Spec.Does != "a fully configured persona") throw new Exception(agent.Spec.Does);
+if (agent.Spec.Model != "gpt-4o-mini") throw new Exception(agent.Spec.Model);
+if (agent.Spec.Uses is null || agent.Spec.Uses.Count != 1 || agent.Spec.Uses[0].Name != "ping")
+    throw new Exception("expected exactly the extra tool, no memory tool");
+if (agent.Spec.Soul is null || !agent.Spec.Soul.Contains("You are a base identity."))
+    throw new Exception(agent.Spec.Soul);
+
+Console.WriteLine($"ok: {agent.Name} does '{agent.Spec.Does}' with tools [{string.Join(",", agent.Spec.Uses.Select(t => t.Name))}]");
 ```
+
+<Aside type="caution">
+`Memory = false` is the only way to get a read-only persona — otherwise `FromDir` always attaches
+the `memory` tool, even if none of the bootstrap files mention it. If a persona should never write
+to its own directory (a shared, read-only identity), set it explicitly.
+</Aside>
+
+## Fields (`FromDirOptions`)
+
+| Field | Type | What it is |
+|---|---|---|
+| `Does` | `string?` | Routing description; defaults to `"persona agent from <dir>"`. |
+| `Name` | `string?` | Agent name; defaults to the directory's base name. |
+| `Model` | `string?` | Model id; defaults to `"inherit"` (the runtime's default). |
+| `Tools` | `List<ITool>?` | Extra tools beyond the memory builtin. |
+| `Memory` | `bool` | Set `false` to omit the `memory` tool (a read-only persona). Default `true`. |
 
 ## The same call in the other five ports
 
@@ -69,3 +240,4 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 - [`Home.ComposeSoul`](/api/csharp/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.
 - [`Home.MemoryTool`](/api/csharp/persona/memory-tool/) — The opt-in built-in that lets a persona write durable notes to its own home.
+- [`Agent`](/api/csharp/runtime/agent/) — What `FromDir` returns: its own toolkit, prompt, and budget, runnable standalone or as a tool.

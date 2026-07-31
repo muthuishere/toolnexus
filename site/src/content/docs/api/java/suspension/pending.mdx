@@ -1,56 +1,175 @@
 ---
-title: "Request.pending"
+title: "ToolResult.pending"
 description: "Return a Pending from a tool to park the run until someone answers. — Java."
 sidebar:
-  label: "Request.pending"
+  label: "ToolResult.pending"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/ToolResult.java">ToolResult.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public static ToolResult pending(Request request)
 ```
 
-Return a Pending from a tool to park the run until someone answers.
+Return this from a `Tool.execute` when the call can't finish in one shot and needs an
+out-of-band, asynchronous resolution — a human approves something, uploads a file, or answers a
+question. `pending` wraps the given `Request` into a `ToolResult` whose `metadata.pending` carries
+it: `isError` is `true` (a parked call did not produce a usable answer) and `output` is a
+human-readable fallback (`request.prompt()` plus the URL, if present). If `request.id()` is empty,
+`pending` generates one — the correlation key a later `Answer` must echo. The signature of
+`execute` never changes; a suspension rides the ordinary return type.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Any time a tool's real work can't complete synchronously inside one `execute` call — it needs a
+human in the loop, a login, an approval, a piece of missing information. Return
+`ToolResult.pending(new Request(...))` instead of blocking the thread or throwing; the client loop
+either resolves it transparently (a `waitFor` is configured) or halts the run with
+`status:"pending"` so a durable host can resolve it later, possibly in another process.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="pending for a general Request, authRequired for the login-shaped case">
+`pending` takes an arbitrary `Request` — any `kind` (`"approval"`, `"input"`, a custom vocabulary
+entry), any `data`. Reach for [`ToolResult.authRequired(url)`](/api/java/suspension/auth-required/)
+when the specific shape is "log in at this URL" — it's sugar over `pending` that fills in
+`kind:"authorization"` for you. Use `pending` directly whenever the suspension isn't a login.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — park a tool call with a generated id
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.Request;
+import io.github.muthuishere.toolnexus.ToolResult;
+
+public class Example {
+    public static void main(String[] args) {
+        ToolResult res = ToolResult.pending(new Request("", "input", "Which environment?"));
+
+        if (!res.isError()) throw new AssertionError("a parked call is not a success");
+        if (!res.output().equals("Which environment?")) throw new AssertionError(res.output());
+
+        Request req = ToolResult.pendingOf(res);
+        if (req == null) throw new AssertionError("expected a Request back");
+        if (!req.kind().equals("input")) throw new AssertionError(req.kind());
+        if (req.id() == null || req.id().isEmpty()) throw new AssertionError("an id must be generated");
+
+        System.out.println("ok: " + req.kind() + " id=" + req.id());
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — a tool that suspends on the first call, then succeeds
 
-{/* TODO:example2 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+public class Example {
+    public static void main(String[] args) {
+        AtomicBoolean approved = new AtomicBoolean(false);
+
+        Tool payTool = new Tool() {
+            @Override public String name() { return "make_payment"; }
+            @Override public String description() { return "Send a payment. Requires approval first."; }
+            @Override public Map<String, Object> inputSchema() {
+                return Map.of("type", "object", "properties", Map.of("amount", Map.of("type", "number")),
+                        "required", java.util.List.of("amount"));
+            }
+            @Override public String source() { return "custom"; }
+            @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
+                if (!approved.get()) {
+                    return ToolResult.pending(new Request("", "approval",
+                            "Approve payment of " + args.get("amount") + "?"));
+                }
+                return ToolResult.ok("paid " + args.get("amount"));
+            }
+        };
+
+        ToolResult first = payTool.execute(Map.of("amount", 500), null);
+        Request req = ToolResult.pendingOf(first);
+        if (req == null || !req.kind().equals("approval")) throw new AssertionError(first);
+
+        // out-of-band: someone approves it
+        approved.set(true);
+        ToolResult second = payTool.execute(Map.of("amount", 500), null);
+        if (second.isError() || !second.output().equals("paid 500")) throw new AssertionError(second.output());
+
+        System.out.println("ok: " + first.output() + " -> " + second.output());
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — a suspension driven through the real client loop
 
-{/* TODO:example3 */}
-```java
-// TODO
+Without a `waitFor`, `LlmClient.run` doesn't hang — it halts with `status:"pending"` and hands back
+the `Request`, so a durable host can resolve it later. See
+[`waitFor`](/api/java/suspension/wait-for/) for the in-process resolution path.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            ex.getRequestBody().readAllBytes();
+            byte[] b = ("{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":[{\"id\":\"c1\","
+                    + "\"type\":\"function\",\"function\":{\"name\":\"approve_refund\",\"arguments\":\"{}\"}}]}}]}")
+                    .getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+
+        Tool refund = new Tool() {
+            @Override public String name() { return "approve_refund"; }
+            @Override public String description() { return "Refund a customer. Needs manager approval."; }
+            @Override public java.util.Map<String, Object> inputSchema() {
+                return java.util.Map.of("type", "object", "properties", java.util.Map.of());
+            }
+            @Override public String source() { return "custom"; }
+            @Override public ToolResult execute(java.util.Map<String, Object> args, ToolContext ctx) {
+                return ToolResult.pending(new Request("", "approval", "Approve the refund?"));
+            }
+        };
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(refund))) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort())
+                    .style("openai").model("test-model").apiKey("test-key")); // no waitFor
+
+            LlmClient.RunResult res = client.run("please refund order 42", tk);
+
+            if (!"pending".equals(res.status)) throw new AssertionError(res.status);
+            if (res.pending == null || !res.pending.kind().equals("approval")) throw new AssertionError(res.pending);
+
+            System.out.println("ok: status=" + res.status + " kind=" + res.pending.kind());
+        } finally {
+            server.stop(0);
+        }
+    }
+}
 ```
+
+## Members
+
+| Member | Type | What it is |
+|---|---|---|
+| `pending(request)` | `ToolResult` | A suspension: `isError:true`, `metadata.pending = request` (id filled in if empty). |
+| `output()` | `String` | `request.prompt()` plus `\n` + `url`, if present. |
 
 ## The same call in the other five ports
 
@@ -62,12 +181,19 @@ _TODO: name the alternative and when to prefer it._
 | C# | `Suspension.Pending` | [→](/api/csharp/suspension/pending/) |
 | Elixir | _not shipped in this port_ |  |
 
+<Aside type="note" title="Verified symbol — lives on ToolResult, not Request">
+Java puts `pending`/`authRequired`/`pendingOf` as static methods on
+[`ToolResult`](https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/ToolResult.java),
+not on `Request` (`Request` is the plain, byte-identical wire record). JavaScript, Python and Go
+expose the equivalent as free functions; Elixir ships only the reader.
+</Aside>
+
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Request.authRequired`](/api/java/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`ToolResult.authRequired`](/api/java/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
 - [`LlmClient.waitFor`](/api/java/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
-- [`Request.pendingOf`](/api/java/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
-- [`LlmClient.resume`](/api/java/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.
+- [`ToolResult.pendingOf`](/api/java/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`ToolResult`](/api/java/types/tool-result/) — The result envelope a suspension rides on.

@@ -19,8 +19,25 @@ Return a Pending from a tool to park the run until someone answers.
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Build the suspension shape by hand: return a `%Toolnexus.ToolResult{}` whose `metadata` map
+carries a `:pending` key holding a `%Toolnexus.Request{id:, kind: "input", prompt:}`. The `id` is
+the correlation key a resolver (`:wait_for` or `Toolnexus.Agents.Runtime.resume/2`) echoes back
+in its `Answer`, so generate one you can look up later (a UUID, a database primary key). The wire
+shape is byte-identical to what every other port's `pending/1` producer builds — only the
+convenience constructor is missing:
+
+```elixir
+%Toolnexus.ToolResult{
+  output: "Which environment?",
+  is_error: true,
+  metadata: %{pending: %Toolnexus.Request{id: "pnd-1", kind: "input", prompt: "Which environment?"}}
+}
+```
+
+`Toolnexus.ToolResult.pending?/1` reads it back — see
+[`Toolnexus.ToolResult`](/api/elixir/types/tool-result/#3-the-reserved-key--metadatapending-is-a-suspension)
+for a full worked example, and [`:wait_for`](/api/elixir/suspension/wait-for/) for the whole
+suspend/resolve/retry cycle.
 
 ## The same capability in the other ports
 
@@ -35,4 +52,4 @@ _TODO: the closest thing this port does offer, and how to get the same outcome._
 ## See also
 
 - [`Toolnexus.Client.create`](/api/elixir/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
-- [`Toolnexus.Client.resume`](/api/elixir/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.
+- [`Toolnexus.Agents.Runtime.resume`](/api/elixir/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.

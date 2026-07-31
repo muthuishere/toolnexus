@@ -19,8 +19,24 @@ Declare a tool the host executes, not the library: the call rides out on the sus
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Relay exists for exactly one posture: a **proxy** that owns no execution at all — every tool call,
+even a plain function call, is surfaced to the host and run there, with toolnexus doing nothing
+but wire-format translation. Two ordinary C# mechanisms get you close to that outcome today,
+depending on which half of "proxy" you actually need:
+
+- **The caller executes tools itself, and owns the conversation.** This is the standard OpenAI
+  function-calling posture relay is a stand-in for. Use
+  [`LlmClient.TranslateAsync`](/api/csharp/translate/translate/) (SPEC §11): declare a `Toolkit`
+  or raw `tools` array, get back the model's `ToolCalls` completely undeclared-and-unexecuted, and
+  run them however you like on your side. No suspension involved at all.
+- **toolnexus owns the conversation, but one specific call needs the host to answer it.** Return
+  [`ToolResult.Pending`](/api/csharp/suspension/pending/) from that tool and resolve it via
+  [`LlmClient.WaitFor`](/api/csharp/suspension/wait-for/) — the same primitive relay is built on
+  (SPEC §10 opening: "relay is a use of the suspension primitive, exactly as auth is"), just scoped
+  to one tool instead of every call in a turn.
+
+Neither reproduces relay's specific "all N calls in one turn ride a single suspension, in OpenAI
+`tool_calls` shape" contract — if you need that exact shape, it's Go-only for now.
 
 ## The same capability in the other ports
 
@@ -34,7 +50,8 @@ _TODO: the closest thing this port does offer, and how to get the same outcome._
 
 ## See also
 
-- [`Suspension.Pending`](/api/csharp/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
-- [`Suspension.AuthRequired`](/api/csharp/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`ToolResult.Pending`](/api/csharp/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`ToolResult.AuthRequired`](/api/csharp/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
 - [`LlmClient.WaitFor`](/api/csharp/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
-- [`Suspension.PendingOf`](/api/csharp/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`ToolResult.PendingOf`](/api/csharp/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`LlmClient.TranslateAsync`](/api/csharp/translate/translate/) — The closest shipped C# mechanism: pure translation, no toolnexus-owned execution at all.

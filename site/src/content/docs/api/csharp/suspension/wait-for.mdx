@@ -8,49 +8,298 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/LlmClient.cs">LlmClient.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public sealed class Options
+{
+    // §10 Suspension resolver — the ONE host slot.
+    public Func<Request, Task<Answer>>? WaitFor { get; set; }
+
+    public Options WithWaitFor(Func<Request, Task<Answer>> v) { WaitFor = v; return this; }
+}
 ```
 
-The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+The one host-configurable slot in the whole suspension mechanism. When a tool call returns a
+[`Pending`](/api/csharp/suspension/pending/) result, the loop calls `WaitFor(request)`. On
+`answer.Ok == true` it re-executes the same tool once with the resolution attached
+(`ToolContext.Answer`); on `false` it feeds back an error `ToolResult` and the run continues. Its
+interior is unconstrained — open a browser and poll, post a link to a channel and wait, forward
+the request over A2A to another agent. When `WaitFor` is `null`, a run never hangs: it halts and
+returns a `RunResult` with `Status = "pending"` and the `Request`, so a durable host can resolve it
+out-of-band and continue later, possibly in a different process.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Set `WaitFor` whenever you want suspensions resolved **inline**, in the same process, before
+`RunAsync` returns — a CLI that prompts interactively, a script that polls an approval queue with
+a timeout. Leave it unset when you want the **durable** path: persist the returned
+`RunResult.Pending`, resolve it however long that takes (minutes, days), and resume separately.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for Hooks.BeforeTool when you want to intercept BEFORE a suspension exists">
+`WaitFor` only fires once a tool has already returned `Pending`. If you want to short-circuit a
+call before it runs at all — deny it outright, or raise your own suspension without touching the
+tool's code — use [`LlmClient.Hooks.BeforeTool`](/api/csharp/client/hooks/) instead; a guard-raised
+suspension there is treated identically to one the tool produced itself.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — resolve inline, the loop never surfaces `"pending"`
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+using var stub = new Stub(ctx =>
+{
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":"hello, no tools needed"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}
+    """);
+});
+
+var waitForCalls = 0;
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "openai", Model = "gpt-4o-mini", ApiKey = "test-key",
+    WaitFor = request => { waitForCalls++; return Task.FromResult(new Answer { Id = request.Id, Ok = true }); },
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+var result = await client.RunAsync("say hello", tk);
+
+if (result.Status != "done") throw new Exception(result.Status);
+if (waitForCalls != 0) throw new Exception("WaitFor must not be called when nothing suspends");
+
+Console.WriteLine($"ok: {result.Text} (WaitFor invoked {waitForCalls} times)");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — no `WaitFor`, the run halts as `"pending"` instead of hanging
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+using var stub = new Stub(ctx =>
+{
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"approve_purchase","arguments":"{\"item\":\"gpu\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}
+    """);
+});
+
+var approve = NativeTool.Of("approve_purchase", "Requests spend approval", null,
+    (IDictionary<string, object?> a, ToolContext? ctx) => ctx?.Answer != null
+        ? (object)$"approved: {a["item"]}"
+        : (object)ToolResult.Pending(new Request { Kind = "approval", Prompt = $"Approve purchase of {a["item"]}?" }));
+
+// No WaitFor configured — this client is a "durable" host: it does NOT try to resolve suspensions
+// itself, it just reports them.
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "openai", Model = "gpt-4o-mini", ApiKey = "test-key",
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = new List<ITool> { approve } });
+var result = await client.RunAsync("buy a gpu", tk);
+
+if (result.Status != "pending") throw new Exception($"status: {result.Status}"); // never hangs
+if (result.Pending is null) throw new Exception("expected the Request that parked the run");
+if (result.Pending.Kind != "approval") throw new Exception(result.Pending.Kind);
+
+// The Request is plain data — persist it (a file, a queue, a row) and resolve it whenever, however.
+Console.WriteLine($"ok: status={result.Status}, waiting on: {result.Pending.Prompt}");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. Full surface — a `WaitFor` that never resolves the SAME request twice
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+var httpCalls = 0;
+using var stub = new Stub(ctx =>
+{
+    httpCalls++;
+    Stub.Json(ctx, 200, httpCalls == 1
+        ? """{"id":"c1","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"flaky_approve","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"""
+        : """{"id":"c2","choices":[{"message":{"role":"assistant","content":"gave up after one retry"},"finish_reason":"stop"}],"usage":{"prompt_tokens":15,"completion_tokens":4,"total_tokens":19}}""");
+});
+
+// A deliberately BROKEN tool: even on the resumed retry (ctx.Answer set) it suspends again.
+var flaky = NativeTool.Of("flaky_approve", "always re-suspends, even after resolution", null,
+    (IDictionary<string, object?> _, ToolContext? _) => (object)ToolResult.Pending(new Request { Kind = "approval", Prompt = "approve?" }));
+
+var waitForCalls = 0;
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "openai", Model = "gpt-4o-mini", ApiKey = "test-key",
+    WaitFor = request => { waitForCalls++; return Task.FromResult(new Answer { Id = request.Id, Ok = true }); },
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = new List<ITool> { flaky } });
+var result = await client.RunAsync("approve this", tk);
+
+// The loop rule: WaitFor is called AT MOST ONCE per suspension. A retry that still suspends
+// becomes an "unresolved: <prompt>" error fed back to the model — it never loops forever.
+if (waitForCalls != 1) throw new Exception($"expected exactly 1 WaitFor call, got {waitForCalls}");
+if (result.Status != "done") throw new Exception(result.Status);
+if (!result.ToolCalls[0].Output.Contains("unresolved")) throw new Exception(result.ToolCalls[0].Output);
+
+Console.WriteLine($"ok: WaitFor called {waitForCalls}x, tool result: {result.ToolCalls[0].Output}");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
+
+<Aside type="caution">
+Named `WaitFor`, never `Await` — `await` is a reserved word in C#. And it is genuinely `Task`-typed
+async, not a blocking call: don't wrap a synchronous prompt in `.Result`/`.Wait()` inside it, or
+you risk deadlocking the client's own async call chain.
+</Aside>
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `WaitFor` | `Func<Request, Task<Answer>>?` | Called once per suspension. `null` ⇒ the run halts with `Status = "pending"` instead of resolving inline. |
 
 ## The same call in the other five ports
 
@@ -67,7 +316,7 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Suspension.Pending`](/api/csharp/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
-- [`Suspension.AuthRequired`](/api/csharp/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
-- [`Suspension.PendingOf`](/api/csharp/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
-- [`LlmClient.ResumeAsync`](/api/csharp/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.
+- [`ToolResult.Pending`](/api/csharp/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`ToolResult.AuthRequired`](/api/csharp/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`ToolResult.PendingOf`](/api/csharp/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`LlmClient.Hooks`](/api/csharp/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

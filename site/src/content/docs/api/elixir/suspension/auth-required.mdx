@@ -19,8 +19,28 @@ The auth-shaped suspension: hand back a URL, resume once the user has granted ac
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Build the auth-shaped suspension by hand: a `%Toolnexus.ToolResult{}` whose `metadata.pending`
+carries a `%Toolnexus.Request{kind: "authorization"}` with a `:url` instead of expecting typed
+input:
+
+```elixir
+%Toolnexus.ToolResult{
+  output: "Log in",
+  is_error: true,
+  metadata: %{
+    pending: %Toolnexus.Request{
+      id: "pnd-2",
+      kind: "authorization",
+      prompt: "Log in",
+      url: "https://example.com/login"
+    }
+  }
+}
+```
+
+Same wire shape as every other port's `authRequired/1`, same `id` correlation discipline as
+[`pending`](/api/elixir/suspension/pending/) — only the constructor is missing, not the behavior.
+`Toolnexus.ToolResult.pending?/1` reads either shape back identically.
 
 ## The same capability in the other ports
 
@@ -35,4 +55,4 @@ _TODO: the closest thing this port does offer, and how to get the same outcome._
 ## See also
 
 - [`Toolnexus.Client.create`](/api/elixir/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
-- [`Toolnexus.Client.resume`](/api/elixir/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.
+- [`Toolnexus.Agents.Runtime.resume`](/api/elixir/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.

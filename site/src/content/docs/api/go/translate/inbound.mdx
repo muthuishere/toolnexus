@@ -19,8 +19,19 @@ Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-res
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Go's `openAIMessagesToAnthropic` (`golang/translate.go:283`) does exactly what the exported
+symbol does in the other five ports — it's not missing, it's just not part of the public API.
+The Go port deliberately keeps the raw inbound converter and its siblings
+(`openAIToolsToAnthropic`, `openAIToolChoiceToAnthropic`) unexported, because the port's stance
+is that a caller should never need to hand-assemble a provider-native payload: point
+[`Translate`](/api/go/translate/translate/) at `StyleAnthropic` and it runs the same conversion
+internally, on your behalf, with retries, request-param merging and the `llm` observability
+event all wired in — see `translate/translate` example 3 for the system-hoisting and
+`tool_use`/`tool_result` conversion in action against a live (stubbed) Anthropic-style
+endpoint. If you need the *converted messages themselves* rather than a completed response —
+say, to hand them to a different Anthropic SDK client — there is no exported escape hatch in Go
+today; that would be a new, deliberate addition to the public API, not a gap in feature
+parity.
 
 ## The same capability in the other ports
 

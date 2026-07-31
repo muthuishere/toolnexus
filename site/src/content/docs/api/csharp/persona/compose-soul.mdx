@@ -8,49 +8,136 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Agents/Home.cs">Agents/Home.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+namespace Toolnexus.Agents;
+
+public static class Home
+{
+    public static readonly IReadOnlyList<string> BootstrapOrder; // AGENTS, SOUL, IDENTITY, USER, TOOLS, HEARTBEAT, MEMORY.md
+    public const int MaxFileBytes = 2 * 1024 * 1024;
+
+    public static (string Soul, List<string> Found) ComposeSoul(string dir);
+}
 ```
 
-Build a persona's system prompt from its home directory: identity, memory, skills.
+Reads a persona's bootstrap files off disk — `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`,
+`TOOLS.md`, `HEARTBEAT.md`, `MEMORY.md`, **in that order** — and joins the ones that exist into
+one soul string, each as a `## <filename>` section. Absent files are silently skipped. Each file
+is capped at 2 MB, measured in UTF-8 **bytes**; a larger file is truncated (at a rune boundary, so
+no multibyte character is split) with a trailing notice — the file on disk is never touched.
+
+This is the primitive [`Home.FromDir`](/api/csharp/persona/from-dir/) is built on: `FromDir` calls
+`ComposeSoul` once and hands the result to `AgentSpec.Soul` as the frozen system-prompt snapshot.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+You're building your own persona wiring — a bespoke `AgentSpec`, a variant of `FromDir` with
+different tool assembly — and want the *identity-file → soul-string* half of §7E without the rest
+of `FromDir`'s defaults (memory tool, model, `Does`). It's also the right thing to call again
+**at the start of a new session**, since the composed soul is a frozen snapshot: a `memory` tool
+write mid-session updates disk, not the string already sitting in a live prompt.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for FromDir when you just want a runnable Agent">
+`ComposeSoul` returns a string and a list of filenames — nothing else. If you want a ready-to-run
+[`Agent`](/api/csharp/runtime/agent/) (soul wired into `AgentSpec.Soul`, the `memory` tool
+attached, a name derived from the directory), skip straight to
+[`Home.FromDir`](/api/csharp/persona/from-dir/), which calls `ComposeSoul` internally. Reach for
+`ComposeSoul` directly only when you need the soul text on its own — inspecting it, feeding it
+into a hand-built `AgentSpec`, or diffing it across sessions.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — one file
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus.Agents;
+
+var dir = Directory.CreateTempSubdirectory("toolnexus-soul-").FullName;
+File.WriteAllText(Path.Combine(dir, "SOUL.md"), "You are Kavi, a terse research assistant.");
+
+var (soul, found) = Home.ComposeSoul(dir);
+
+if (found.Count != 1 || found[0] != "SOUL.md") throw new Exception($"found: {string.Join(",", found)}");
+if (!soul.Contains("## SOUL.md")) throw new Exception(soul);
+if (!soul.Contains("You are Kavi")) throw new Exception(soul);
+
+Console.WriteLine($"ok: {found[0]} -> {soul.Length} chars");
 ```
 
-### 2. TODO — the realistic case
+### 2. Bootstrap order wins over write order, absent files are skipped
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using System.Linq;
+using Toolnexus.Agents;
+
+var dir = Directory.CreateTempSubdirectory("toolnexus-soul-").FullName;
+// Written to disk out of order — ComposeSoul must still emit them in BootstrapOrder.
+File.WriteAllText(Path.Combine(dir, "MEMORY.md"), "- learned the user prefers terse replies");
+File.WriteAllText(Path.Combine(dir, "AGENTS.md"), "Always answer in one sentence.");
+File.WriteAllText(Path.Combine(dir, "IDENTITY.md"), "Kavi, a research assistant.");
+// SOUL.md, USER.md, TOOLS.md, HEARTBEAT.md are absent — skipped, not an error.
+
+var (soul, found) = Home.ComposeSoul(dir);
+
+if (!found.SequenceEqual(new[] { "AGENTS.md", "IDENTITY.md", "MEMORY.md" }))
+    throw new Exception($"order: {string.Join(",", found)}");
+
+var agentsAt = soul.IndexOf("## AGENTS.md", StringComparison.Ordinal);
+var identityAt = soul.IndexOf("## IDENTITY.md", StringComparison.Ordinal);
+var memoryAt = soul.IndexOf("## MEMORY.md", StringComparison.Ordinal);
+if (!(agentsAt < identityAt && identityAt < memoryAt)) throw new Exception("bootstrap order violated");
+
+Console.WriteLine($"ok: {string.Join(" -> ", found)}");
 ```
 
-### 3. TODO — the full surface
+### 3. Full surface — the 2 MB byte cap, truncated without touching disk
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using System.Linq;
+using System.Text;
+using Toolnexus.Agents;
+
+var dir = Directory.CreateTempSubdirectory("toolnexus-soul-").FullName;
+// One byte over the cap — written WITHOUT a BOM so byte length == char length (all-ASCII).
+var oversized = new string('a', Home.MaxFileBytes + 1);
+File.WriteAllText(Path.Combine(dir, "TOOLS.md"), oversized, new UTF8Encoding(false));
+File.WriteAllText(Path.Combine(dir, "SOUL.md"), "short and under the cap");
+
+var (soul, found) = Home.ComposeSoul(dir);
+
+if (!found.SequenceEqual(new[] { "SOUL.md", "TOOLS.md" })) throw new Exception(string.Join(",", found));
+if (!soul.Contains("[truncated: exceeds 2 MB bootstrap cap]")) throw new Exception("expected truncation notice");
+// The cap only bounds the composed SOUL — the file on disk is left exactly as written.
+if (new FileInfo(Path.Combine(dir, "TOOLS.md")).Length != Home.MaxFileBytes + 1)
+    throw new Exception("disk file must be untouched by the cap");
+
+Console.WriteLine($"ok: soul is {soul.Length} chars; on-disk TOOLS.md stays {oversized.Length + 1} bytes");
 ```
+
+<Aside type="caution">
+The 2 MB cap is measured in UTF-8 **bytes**, not `string.Length` (UTF-16 chars). A file dense in
+multibyte characters (e.g. Tamil, emoji) hits the cap well before 2M chars — and truncation backs
+off any dangling continuation byte so it never splits a rune mid-character.
+</Aside>
+
+## Parameters
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `dir` | `string` | The persona's home directory to read bootstrap files from. |
+
+## Returns
+
+| Field | Type | What it is |
+|---|---|---|
+| `Soul` | `string` | The composed system prompt: present files only, in `BootstrapOrder`, each as a `## <file>` section. |
+| `Found` | `List<string>` | Which bootstrap filenames were actually present, in `BootstrapOrder`. |
 
 ## The same call in the other five ports
 

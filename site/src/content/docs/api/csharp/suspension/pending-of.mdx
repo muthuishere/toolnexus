@@ -1,56 +1,257 @@
 ---
-title: "Suspension.PendingOf"
+title: "ToolResult.PendingOf"
 description: "Detect that a RunResult is parked rather than finished, and get the Request that parked it. — C#."
 sidebar:
-  label: "Suspension.PendingOf"
+  label: "ToolResult.PendingOf"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/ToolResult.cs">ToolResult.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public sealed record ToolResult(string Output, bool IsError, IDictionary<string, object?>? Metadata = null)
+{
+    public static Request? PendingOf(ToolResult? result);
+}
 ```
 
-Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+<Aside type="note" title="Not `Suspension.PendingOf`">
+This port puts the §10 reader directly on **`ToolResult`** — there is no separate `Suspension`
+class in C#. Java does the same; JavaScript, Python and Go expose a free function
+(`pendingOf`/`pending_of`) instead.
+</Aside>
+
+Reads `Metadata["pending"]` back off a `ToolResult` as a typed `Request`, or returns `null` when
+the result is an ordinary success/error. It is the one honest way to ask "is this result actually
+a suspension?" — `IsError` alone can't tell you, because a suspension also sets `IsError = true`.
+`PendingOf` accepts a nullable `ToolResult`, so it's safe to call on a possibly-absent result
+without a separate null check.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Inside a [`Hooks.BeforeTool`/`AfterTool`](/api/csharp/client/hooks/) callback, or any code that
+inspects a `ToolResult` before the client loop's own suspension handling runs — logging, metrics,
+a custom retry policy. The loop itself already uses `PendingOf` internally to decide whether a
+result should trigger `WaitFor`; reach for it yourself whenever you're building similar logic on
+top of a raw `ToolResult`.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for RunResult.Pending once the run has already returned">
+`PendingOf` reads a suspension off a single **tool call's** `ToolResult` — useful mid-loop, in a
+hook. Once `RunAsync` has returned, the run-level answer is already sitting on
+`RunResult.Pending` (non-null exactly when `RunResult.Status == "pending"`) — no need to dig back
+into `Metadata` yourself at that point.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — success, error, and suspension side by side
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+var ok = ToolResult.Ok("done");
+var err = ToolResult.Error("not found");
+var suspended = ToolResult.Pending(new Request { Kind = "input", Prompt = "which environment?" });
+
+if (ToolResult.PendingOf(ok) is not null) throw new Exception("an ordinary success is not a suspension");
+if (ToolResult.PendingOf(err) is not null) throw new Exception("an ordinary error is not a suspension");
+var req = ToolResult.PendingOf(suspended);
+if (req is null || req.Kind != "input") throw new Exception("expected the suspension's Request back");
+
+// Safe on null, too — no separate has-value check needed.
+if (ToolResult.PendingOf(null) is not null) throw new Exception("null in, null out");
+
+Console.WriteLine($"ok: ok={ToolResult.PendingOf(ok)}, err={ToolResult.PendingOf(err)}, suspended={req.Kind}");
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — an `AfterTool` hook that tells suspensions from real failures
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+using var stub = new Stub(ctx =>
+{
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"approve_purchase","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}
+    """);
+});
+
+var approve = NativeTool.Of("approve_purchase", "requests approval", null,
+    (IDictionary<string, object?> _, ToolContext? _) => (object)ToolResult.Pending(new Request { Kind = "approval", Prompt = "approve?" }));
+
+var sawSuspension = false;
+var sawFailure = false;
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "openai", Model = "gpt-4o-mini", ApiKey = "test-key",
+    Hooks = new LlmClient.Hooks
+    {
+        AfterTool = ev =>
+        {
+            // Distinguish "parked, waiting on the world" from "actually broke" — IsError is true
+            // on BOTH, so PendingOf is the only reliable check.
+            if (ToolResult.PendingOf(ev.Result) is not null) sawSuspension = true;
+            else if (ev.Result.IsError) sawFailure = true;
+            return null;
+        },
+    },
+    // No WaitFor here — this run is expected to halt as "pending", not resolve inline.
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = new List<ITool> { approve } });
+var result = await client.RunAsync("buy a gpu", tk);
+
+if (result.Status != "pending") throw new Exception(result.Status);
+// AfterTool is NOT called for a suspension (SPEC §10) — only PendingOf inside the loop itself sees it.
+if (sawSuspension) throw new Exception("AfterTool must not fire on a suspended call");
+if (sawFailure) throw new Exception("a suspension must never be classified as a failure");
+
+Console.WriteLine($"ok: status={result.Status}, AfterTool saw neither a suspension nor a failure");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. Full surface — reading a suspension straight off `RunResult.Pending`
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+using var stub = new Stub(ctx =>
+{
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_calendar","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":8,"completion_tokens":4,"total_tokens":12}}
+    """);
+});
+
+var calendar = NativeTool.Of("read_calendar", "reads events", null,
+    (IDictionary<string, object?> _, ToolContext? _) => (object)ToolResult.AuthRequired("https://accounts.example.com/authorize"));
+
+var client = LlmClient.Create(new LlmClient.Options { BaseUrl = stub.BaseUrl, Style = "openai", Model = "gpt-4o-mini", ApiKey = "test-key" });
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = new List<ITool> { calendar } });
+
+var result = await client.RunAsync("what's on my calendar?", tk);
+
+// RunResult already surfaces the Request directly — no need to dig back through Metadata here.
+if (result.Status != "pending") throw new Exception(result.Status);
+if (result.Pending is null) throw new Exception("expected RunResult.Pending to be set");
+if (result.Pending.Kind != "authorization") throw new Exception(result.Pending.Kind);
+if (result.Pending.Url != "https://accounts.example.com/authorize") throw new Exception(result.Pending.Url);
+
+Console.WriteLine($"ok: parked on {result.Pending.Kind} at {result.Pending.Url}");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
+
+<Aside type="caution">
+Don't need example 2's stub in your own code just to call `PendingOf` — it's a pure, synchronous
+reader. The stub/client machinery above exists only to show it wired into a real hook, where it
+matters most.
+</Aside>
+
+## Parameters
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `result` | `ToolResult?` | The result to inspect. `null` is accepted and returns `null`. |
+
+## Returns
+
+`Request?` — the suspension's request when `result.Metadata["pending"]` is present, otherwise `null`.
 
 ## The same call in the other five ports
 
@@ -67,7 +268,7 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Suspension.Pending`](/api/csharp/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
-- [`Suspension.AuthRequired`](/api/csharp/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`ToolResult.Pending`](/api/csharp/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`ToolResult.AuthRequired`](/api/csharp/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
 - [`LlmClient.WaitFor`](/api/csharp/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
-- [`LlmClient.ResumeAsync`](/api/csharp/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.
+- [`ToolResult`](/api/csharp/types/tool-result/) — The result envelope this rides on.
