@@ -1,56 +1,173 @@
 ---
-title: "Request.pendingOf"
+title: "ToolResult.pendingOf"
 description: "Detect that a RunResult is parked rather than finished, and get the Request that parked it. — Java."
 sidebar:
-  label: "Request.pendingOf"
+  label: "ToolResult.pendingOf"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/ToolResult.java">ToolResult.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public static Request pendingOf(ToolResult result)
 ```
 
-Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+Reads the suspension back off a `ToolResult`: returns the `Request` when `result.metadata()`
+carries a `pending` entry of that type, `null` otherwise (including when `result` itself is
+`null`). This is the reader half of [`pending`](/api/java/suspension/pending/)/
+[`authRequired`](/api/java/suspension/auth-required/) — the one place code should ask "is this a
+suspension?" rather than inspecting `metadata` by hand. Because a suspension also sets `isError`
+true, `pendingOf` is what distinguishes a parked call from a genuine failure — don't read
+`isError()` alone as "the tool broke".
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Anywhere you're inspecting a `ToolResult` (or a halted `RunResult`, whose transcript carries the
+first suspension's placeholder) and need to tell a suspension apart from an ordinary error — a
+`beforeTool`/`afterTool` hook classifying results, a durable host deciding whether to persist a
+`RunResult.pending` request, or a test asserting a tool suspended for the right reason.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="pendingOf, not isError() alone">
+`isError()` is `true` on both a real failure and a suspension — that's deliberate (a parked call
+did not produce a usable answer), but it means `isError()` by itself can't distinguish the two.
+`pendingOf(result) != null` is the one correct check. The client loop follows the same rule
+internally: a suspended tool call's observability event carries `isError:false` + `pending:true`,
+and `afterTool` never runs on the suspension itself — only once it resolves.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — null on an ordinary result, non-null on a suspension
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.Request;
+import io.github.muthuishere.toolnexus.ToolResult;
+
+public class Example {
+    public static void main(String[] args) {
+        ToolResult ordinary = ToolResult.ok("done");
+        if (ToolResult.pendingOf(ordinary) != null) throw new AssertionError("an ordinary result is not pending");
+
+        ToolResult failed = ToolResult.error("not found");
+        if (ToolResult.pendingOf(failed) != null) throw new AssertionError("a real error is not pending either");
+
+        ToolResult suspended = ToolResult.pending(new Request("", "input", "Which environment?"));
+        Request req = ToolResult.pendingOf(suspended);
+        if (req == null) throw new AssertionError("expected the Request back");
+        if (!req.kind().equals("input")) throw new AssertionError(req.kind());
+
+        System.out.println("ok: ordinary=null, failed=null, suspended=" + req.kind());
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — distinguishing a suspension from a real error in a hook
 
-{/* TODO:example2 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+public class Example {
+    public static void main(String[] args) {
+        List<String> classifications = new CopyOnWriteArrayList<>();
+
+        LlmClient.Hooks hooks = new LlmClient.Hooks().afterTool(ev -> {
+            ToolResult r = ev.result();
+            if (ToolResult.pendingOf(r) != null) {
+                classifications.add("suspended");
+            } else if (r.isError()) {
+                classifications.add("failed");
+            } else {
+                classifications.add("ok");
+            }
+            return null;
+        });
+
+        // Exercise the classification logic directly against three representative results —
+        // afterTool would see the same three shapes in a real run.
+        List<ToolResult> results = List.of(
+                ToolResult.ok("42"),
+                ToolResult.error("boom"),
+                ToolResult.pending(new Request("", "approval", "Approve?")));
+        for (ToolResult r : results) {
+            hooks.afterTool.apply(new LlmClient.AfterToolEvent("t", Map.of(), r, "c1", 0));
+        }
+
+        if (!classifications.equals(List.of("ok", "failed", "suspended"))) {
+            throw new AssertionError(classifications);
+        }
+
+        System.out.println("ok: " + classifications);
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — reading the halted request back off a durable RunResult
 
-{/* TODO:example3 */}
-```java
-// TODO
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            ex.getRequestBody().readAllBytes();
+            byte[] b = ("{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":[{\"id\":\"c1\","
+                    + "\"type\":\"function\",\"function\":{\"name\":\"approve_refund\",\"arguments\":\"{}\"}}]}}]}")
+                    .getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+
+        Tool refund = new Tool() {
+            @Override public String name() { return "approve_refund"; }
+            @Override public String description() { return "Refund a customer. Needs approval."; }
+            @Override public java.util.Map<String, Object> inputSchema() {
+                return java.util.Map.of("type", "object", "properties", java.util.Map.of());
+            }
+            @Override public String source() { return "custom"; }
+            @Override public ToolResult execute(java.util.Map<String, Object> args, ToolContext ctx) {
+                return ToolResult.pending(new Request("", "approval", "Approve the refund?"));
+            }
+        };
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(refund))) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort())
+                    .style("openai").model("test-model").apiKey("test-key")); // no waitFor
+
+            LlmClient.RunResult res = client.run("please refund order 42", tk);
+
+            if (!"pending".equals(res.status)) throw new AssertionError(res.status);
+            // RunResult.pending IS the Request pendingOf would have read off the halted tool call.
+            if (res.pending == null || !res.pending.kind().equals("approval")) throw new AssertionError(res.pending);
+
+            System.out.println("ok: " + res.status + " kind=" + res.pending.kind());
+        } finally {
+            server.stop(0);
+        }
+    }
+}
 ```
+
+## Members
+
+| Member | Type | What it is |
+|---|---|---|
+| `pendingOf(result)` | `Request` | The suspension's `Request`, or `null` when `result` is `null`/not a suspension. |
 
 ## The same call in the other five ports
 
@@ -62,12 +179,17 @@ _TODO: name the alternative and when to prefer it._
 | C# | `Suspension.PendingOf` | [→](/api/csharp/suspension/pending-of/) |
 | Elixir | _not shipped in this port_ |  |
 
+<Aside type="note" title="Verified symbol — lives on ToolResult, not Request">
+Java puts `pendingOf` (and `pending`/`authRequired`) as static methods on
+[`ToolResult`](https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/ToolResult.java),
+not on `Request`.
+</Aside>
+
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Request.pending`](/api/java/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
-- [`Request.authRequired`](/api/java/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`ToolResult.pending`](/api/java/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`ToolResult.authRequired`](/api/java/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
 - [`LlmClient.waitFor`](/api/java/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
-- [`LlmClient.resume`](/api/java/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.

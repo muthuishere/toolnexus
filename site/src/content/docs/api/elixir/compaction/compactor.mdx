@@ -8,49 +8,184 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7F</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7F</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/agents/compaction.ex">elixir/lib/toolnexus/agents/compaction.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec compactor(keyword()) :: (map() -> %{messages: [map()]} | nil)
+def compactor(opts)
+
+# opts:
+#   :max_tokens    — required; compact only when the estimate exceeds this (at/below ⇒ no-op)
+#   :summarize     — required; (older :: [map] -> String.t()) — MAY call an LLM, your choice
+#   :keep_tail     — default div(max_tokens, 2)
+#   :count_tokens  — default estimate_tokens/1 (ceil(byte_size(json)/4) summed over messages)
+#   :flush_to_memory — default false; inject a pre-compact reminder to save via the memory tool
 ```
 
-Summarise older turns when the transcript grows, so a long-lived agent stays inside its context window.
+`compactor/1` builds a `before_llm` hook (§8) — the same seam `Toolnexus.Client.create/1` takes
+under `:hooks`. Below `max_tokens` it returns `nil` and the loop's transcript is untouched —
+byte-identical to a run with no compactor. Above it, it replaces the working transcript with
+`[leading system message (verbatim), summary system message, (flush reminder?), …tail]`, where
+`tail` is the largest **user-boundary** slice that fits `keep_tail` (falling back to the most
+recent user turn if none fits) — so a `tool` message is never orphaned from the `assistant` turn
+carrying its `tool_call_id`.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **A long-lived agent's transcript keeps growing** — a persona with a heartbeat, a coding
+  agent working through many turns — and you need it to stay inside the model's context window
+  without losing the thread.
+- **You want summarization on your own terms** — `:summarize` is a plain function; call an LLM
+  from it, or don't. `compactor/1` never makes a model call on your behalf.
+- **You want compaction integrated into the existing loop**, not a second code path — it rides
+  `before_llm`, the same hook `RunResult.messages` and the `ConversationStore` already see.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="It's a hook, not a loop change">
+There is no separate "compacting client" — `compactor/1` returns an ordinary `before_llm`
+function. Wire it into `Toolnexus.Client.create(hooks: %{before_llm: Compaction.compactor(...)})`
+(or an agent's own `:hooks`, which replaces the runtime-wide value for that agent) and the loop
+behaves exactly as it always did, except the transcript it sends can now be a summary + tail.
+Skip the compactor entirely and nothing here changes shape — the hook is opt-in.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — under budget is a no-op
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.Agents.Compaction
+
+hook = Compaction.compactor(max_tokens: 10_000, summarize: fn _older -> "should never run" end)
+
+messages = [
+  %{"role" => "system", "content" => "You are terse."},
+  %{"role" => "user", "content" => "hi"},
+  %{"role" => "assistant", "content" => "hello"}
+]
+
+result = hook.(%{messages: messages, tools: [], model: "gpt-x", turn: 1})
+
+true = result == nil
+IO.puts("ok: #{length(messages)} messages, well under budget, hook is a no-op")
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — over budget: summarize the head, keep a user-boundary tail
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.Agents.Compaction
+
+# A count_tokens override keeps the example deterministic: 1 "token" per message.
+count = fn msgs -> length(msgs) end
+
+hook =
+  Compaction.compactor(
+    max_tokens: 4,
+    keep_tail: 2,
+    count_tokens: count,
+    summarize: fn older -> "#{length(older)} earlier turn(s) summarized" end
+  )
+
+messages = [
+  %{"role" => "system", "content" => "You are terse."},
+  %{"role" => "user", "content" => "turn 1"},
+  %{"role" => "assistant", "content" => "reply 1"},
+  %{"role" => "user", "content" => "turn 2"},
+  %{"role" => "assistant", "content" => "reply 2"},
+  %{"role" => "user", "content" => "turn 3"},
+  %{"role" => "assistant", "content" => "reply 3"}
+]
+
+%{messages: compacted} = hook.(%{messages: messages, tools: [], model: "gpt-x", turn: 5})
+
+# leading system message survives verbatim
+[%{"role" => "system", "content" => "You are terse."} | rest] = compacted
+[summary | tail] = rest
+true = String.starts_with?(summary["content"], "[Summary of earlier conversation]\n")
+# the tail starts at a "user" boundary — no tool result is ever orphaned from its call
+true = hd(tail)["role"] == "user"
+true = List.last(tail) == %{"role" => "assistant", "content" => "reply 3"}
+
+IO.puts("ok: compacted #{length(messages)} messages -> #{length(compacted)} (system + summary + #{length(tail)}-message tail)")
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — `flush_to_memory`, wired into a real `Client.run`
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+`http_options: [plug: ...]` stubs the wire call in-process — no network, no real API key — same
+pattern as [`Client.run`](/api/elixir/client/run/). The compactor rides `hooks.before_llm`, so
+the second LLM call in this run receives the already-compacted transcript.
+
+```elixir test
+alias Toolnexus.Client
+alias Toolnexus.Agents.Compaction
+
+count = fn msgs -> length(msgs) end
+
+hook =
+  Compaction.compactor(
+    max_tokens: 3,
+    keep_tail: 1,
+    count_tokens: count,
+    flush_to_memory: true,
+    summarize: fn older -> "#{length(older)} turn(s), summarized" end
+  )
+
+{:ok, seen} = Agent.start_link(fn -> [] end)
+
+plug = fn conn ->
+  {:ok, raw, conn} = Plug.Conn.read_body(conn)
+  body = Jason.decode!(raw)
+  Agent.update(seen, fn s -> s ++ [body["messages"]] end)
+
+  resp = %{
+    "choices" => [%{"message" => %{"role" => "assistant", "content" => "got it"}}],
+    "usage" => %{"prompt_tokens" => 2, "completion_tokens" => 1, "total_tokens" => 3}
+  }
+
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "openai",
+    model: "gpt-x",
+    api_key: "test-key",
+    hooks: %{before_llm: hook},
+    http_options: [plug: plug]
+  )
+
+# Prime a long-ish history so the SECOND run/4 call is already over budget.
+history = [
+  %{"role" => "system", "content" => "be brief"},
+  %{"role" => "user", "content" => "turn 1"},
+  %{"role" => "assistant", "content" => "reply 1"},
+  %{"role" => "user", "content" => "turn 2"},
+  %{"role" => "assistant", "content" => "reply 2"}
+]
+
+result = Client.run(client, "turn 3", [], history: history)
+true = result.status == "done"
+
+[sent] = Agent.get(seen, & &1)
+# the summary + flush reminder replaced the older turns before this call went out
+true = Enum.any?(sent, &String.starts_with?(&1["content"] || "", "[Summary of earlier conversation]"))
+true = Enum.any?(sent, &(&1["content"] == "Before continuing: if anything from earlier is worth keeping, save it with the memory tool now — the earlier transcript is about to be summarized."))
+
+IO.puts("ok: compactor ran inside a real Client.run — #{length(sent)} messages sent on the compacted turn")
 ```
+
+## Options
+
+| Option | Type | Default | What it is |
+|---|---|---|---|
+| `:max_tokens` | `pos_integer()` | — (required) | Compact only when the estimate exceeds this. |
+| `:summarize` | `([map] -> String.t())` | — (required) | Produces the summary text. May call an LLM; the library never does on its own. |
+| `:keep_tail` | `pos_integer()` | `div(max_tokens, 2)` | Minimum tokens of recent tail to keep. |
+| `:count_tokens` | `([map] -> non_neg_integer())` | `estimate_tokens/1` | Token estimator (`ceil(byte_size(json)/4)` summed), overridable for exactness. |
+| `:flush_to_memory` | `boolean()` | `false` | Inject a system reminder to persist facts via the memory tool before summarizing. |
 
 ## The same call in the other five ports
 
@@ -67,4 +202,6 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- _TODO: related entry points_
+- [`Toolnexus.Client.create`](/api/elixir/client/hooks/) — the `:hooks` option this rides (`before_llm`).
+- [`Toolnexus.Agents.Home.memory_tool`](/api/elixir/persona/memory-tool/) — the builtin `flush_to_memory` asks the model to use before its context is summarized.
+- [`Toolnexus.Client.run`](/api/elixir/client/run/) — the loop this hook plugs into.

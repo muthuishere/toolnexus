@@ -8,49 +8,129 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7e-agent-home--personas-source-agent-persona-surface">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/agents/home.ts">js/src/agents/home.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function memoryTool(dir: string): Tool
 ```
 
-The opt-in built-in that lets a persona write durable notes to its own home.
+Builds the `memory` tool — one tool, three actions (`add`, `replace`, `remove`) over two files in
+`dir`: `MEMORY.md` (`target: "self"`, the default — the agent's own durable notes) and `USER.md`
+(`target: "user"` — its model of the user). It is `source: "native"` under the hood (built with
+[`defineTool`](/api/javascript/native/define-tool/)), and it is **not** one of the default
+[builtins](/api/javascript/toolkit/create/) — it exists only where a persona wires it in, either
+via [`fromDir`](/api/javascript/persona/from-dir/) (on by default) or by adding
+`memoryTool(dir)` to `uses.tools` yourself.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Wire `memoryTool` in whenever a long-lived agent needs to remember things across sessions without
+you writing the file I/O by hand — "the user prefers metric units," "last week's incident was a
+DNS misconfiguration," anything worth carrying forward. Every action writes straight to disk; there
+is no in-memory-only mode.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use fromDir instead of calling memoryTool directly, most of the time">
+[`fromDir`](/api/javascript/persona/from-dir/) already wires `memoryTool(dir)` over the same
+directory it reads [`composeSoul`](/api/javascript/persona/compose-soul/) from — call `memoryTool`
+directly only when you are assembling `uses.tools` by hand (a `read-only: false` override, a
+non-`fromDir` agent that still wants durable notes) rather than going through `fromDir`.
 </Aside>
+
+The tool deliberately does **not** touch the running session — the description string handed to
+the model says so, and the mechanics back it up: a write lands on disk immediately, but the
+composed `soul` is a frozen snapshot for the whole run (§7E), so the change is visible only from
+the **next** session onward. That is what keeps a long-lived persona cache-stable: the system
+prompt never mutates mid-conversation just because a tool call happened.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. `add` — append an entry to `MEMORY.md`
 
-{/* TODO:example1 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { agents } from "toolnexus"
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "persona-"))
+const memory = agents.memoryTool(dir)
+
+assert.equal(memory.name, "memory")
+assert.equal(memory.source, "native")
+assert.deepEqual(memory.inputSchema.properties?.action.enum, ["add", "replace", "remove"])
+
+const res = await memory.execute({ action: "add", text: "prefers metric units" })
+
+assert.equal(res.isError, false)
+assert.match(fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8"), /prefers metric units/)
+
+console.log("ok:", res.output)
 ```
 
-### 2. TODO — the realistic case
+### 2. `replace` and `remove` — a missing substring is a loud error, never a silent no-op
 
-{/* TODO:example2 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { agents } from "toolnexus"
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "persona-"))
+const memory = agents.memoryTool(dir)
+
+await memory.execute({ action: "add", text: "prefers metric units" })
+
+const replaced = await memory.execute({ action: "replace", text: "prefers metric units", with: "prefers SI units" })
+assert.equal(replaced.isError, false)
+assert.match(fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8"), /prefers SI units/)
+
+// The substring is no longer there — replace/remove on a miss is a LOUD isError, not a no-op.
+const missed = await memory.execute({ action: "remove", text: "prefers metric units" })
+assert.equal(missed.isError, true)
+assert.equal(missed.output, "not found: prefers metric units")
+
+console.log("ok:", replaced.output, "|", missed.output)
 ```
 
-### 3. TODO — the full surface
+### 3. `target: "user"` writes `USER.md` instead of `MEMORY.md`
 
-{/* TODO:example3 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { agents } from "toolnexus"
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "persona-"))
+const memory = agents.memoryTool(dir)
+
+const self = await memory.execute({ action: "add", text: "shipped the v2 migration" })
+const user = await memory.execute({ action: "add", text: "likes terse status updates", target: "user" })
+
+assert.match(fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8"), /shipped the v2 migration/)
+assert.match(fs.readFileSync(path.join(dir, "USER.md"), "utf8"), /likes terse status updates/)
+// Both report the SAME session-boundary contract — the write lands now, loads next session.
+assert.match(self.output, /loads next session/)
+assert.match(user.output, /loads next session/)
+
+console.log("ok:", self.output, "|", user.output)
 ```
+
+## Options
+
+The tool's own `inputSchema` — what the model fills in on a call:
+
+| Field | Type | What it does |
+|---|---|---|
+| `action` | `"add" \| "replace" \| "remove"` | Required. Which mutation to apply. |
+| `target` | `"self" \| "user"` | `self` → `MEMORY.md` (default). `user` → `USER.md`. |
+| `text` | `string` | Required. For `add`: the entry. For `replace`/`remove`: the existing substring to match. |
+| `with` | `string` | For `replace`: the replacement text. |
 
 ## The same call in the other five ports
 
@@ -68,4 +148,5 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 ## See also
 
 - [`composeSoul`](/api/javascript/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.
-- [`fromDir`](/api/javascript/persona/from-dir/) — Point at an agent home directory and get a configured agent back.
+- [`fromDir`](/api/javascript/persona/from-dir/) — Point at an agent home directory and get a configured agent back; wires this tool by default.
+- [`defineTool`](/api/javascript/native/define-tool/) — What `memoryTool` is built with.

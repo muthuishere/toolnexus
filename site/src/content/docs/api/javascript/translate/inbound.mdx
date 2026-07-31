@@ -8,49 +8,126 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#11-single-turn-translation--translate">SPEC §11</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/translate.ts">js/src/translate.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function openAIMessagesToAnthropic(messages: any[]): { messages: any[]; system: string }
 ```
 
-Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong.
+Converts an OpenAI `messages` array into Anthropic-native content blocks — the inbound conversion
+[`client.translate`](/api/javascript/translate/translate/) uses internally on the Anthropic path,
+exported standalone because it is useful on its own whenever you hold an OpenAI-shaped transcript
+and need to hand it to an Anthropic-shaped call by some other route.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for this the moment you're converting a transcript by hand instead of going through
+[`translate`](/api/javascript/translate/translate/) — feeding an OpenAI-format history into a raw
+Anthropic Messages API call, building a transcript viewer that needs to render both shapes, or
+testing that your own tool-result bookkeeping survives the round trip. `translate` calls this for
+you on `style: "anthropic"`; you only need it directly when `translate` itself doesn't fit.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Don't just flatten content to text and lose the tool structure">
+A naive converter that does `{ role, content: contentText(m) }` per message silently drops an
+assistant turn's `tool_calls` and a `tool`-role result's `tool_call_id` — multi-turn tool use
+cannot survive that, regardless of what runs afterward. This function exists specifically because
+that bug is easy to write and easy to miss until a second tool call breaks. Reach for
+[`contentText`](/api/javascript/translate/translate/) alone only when you genuinely want plain text
+and are throwing the tool structure away on purpose.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. A basic round trip — system hoisted out, tool call and result paired up
 
-{/* TODO:example1 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import { openAIMessagesToAnthropic } from "toolnexus"
+
+const { messages, system } = openAIMessagesToAnthropic([
+  { role: "system", content: "Be terse." },
+  { role: "user", content: "weather in paris?" },
+  { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "get_weather", arguments: '{"city":"Paris"}' } }] },
+  { role: "tool", tool_call_id: "c1", content: "sunny" },
+])
+
+assert.equal(system, "Be terse.") // system HOISTED out — Anthropic takes it separately
+assert.equal(messages[0].content, "weather in paris?")
+assert.deepEqual(messages[1].content[0], { type: "tool_use", id: "c1", name: "get_weather", input: { city: "Paris" } }) // arguments re-PARSED to an object
+assert.deepEqual(messages[2].content[0], { type: "tool_result", content: "sunny", tool_use_id: "c1" })
+
+console.log("ok:", system, "|", messages.length, "messages")
 ```
 
-### 2. TODO — the realistic case
+### 2. The part a flattening translator gets wrong — consecutive tool results MERGE into one turn
 
-{/* TODO:example2 */}
-```ts
-// TODO
+Two tool calls in the same assistant turn produce two separate `tool`-role messages on the OpenAI
+wire. Anthropic expects ONE result-bearing user turn answering the preceding assistant turn — not
+two — so consecutive tool results merge.
+
+```ts test
+import assert from "node:assert"
+import { openAIMessagesToAnthropic } from "toolnexus"
+
+const { messages } = openAIMessagesToAnthropic([
+  { role: "user", content: "weather and time in tokyo?" },
+  { role: "assistant", content: null, tool_calls: [
+    { id: "c1", type: "function", function: { name: "get_weather", arguments: '{"city":"Tokyo"}' } },
+    { id: "c2", type: "function", function: { name: "get_time", arguments: '{"city":"Tokyo"}' } },
+  ] },
+  { role: "tool", tool_call_id: "c1", content: "sunny" },
+  { role: "tool", tool_call_id: "c2", content: "09:00" },
+])
+
+// user, assistant(2 tool_use blocks), ONE merged user turn — NOT two separate user turns.
+assert.equal(messages.length, 3)
+assert.equal(messages[1].content.length, 2)
+assert.equal(messages[2].role, "user")
+assert.equal(messages[2].content.length, 2)
+assert.deepEqual(messages[2].content.map((b: any) => b.tool_use_id), ["c1", "c2"])
+
+console.log("ok: 2 tool_calls -> 1 merged result turn, not 2")
 ```
 
-### 3. TODO — the full surface
+### 3. `content` array flattening, `developer` hoisting, and the companion converters
 
-{/* TODO:example3 */}
-```ts
-// TODO
+A `content` given as an array of parts is flattened to text; `developer` messages hoist alongside
+`system`. `openAIToolsToAnthropic`/`openAIToolChoiceToAnthropic` live in the same file and cover
+the declaration side of the same OpenAI→Anthropic conversion.
+
+```ts test
+import assert from "node:assert"
+import { openAIMessagesToAnthropic, openAIToolsToAnthropic, openAIToolChoiceToAnthropic } from "toolnexus"
+
+const { messages, system } = openAIMessagesToAnthropic([
+  { role: "developer", content: "Follow house style." },
+  { role: "user", content: [{ type: "text", text: "hello " }, { type: "text", text: "there" }] },
+])
+assert.equal(system, "Follow house style.") // developer hoists exactly like system
+assert.equal(messages[0].content, "hello there") // parts array flattened to plain text
+
+const tools = openAIToolsToAnthropic([
+  { type: "function", function: { name: "get_weather", description: "d", parameters: { type: "object", properties: {} } } },
+])
+assert.equal(tools[0].name, "get_weather")
+assert.deepEqual(tools[0].input_schema, { type: "object", properties: {} })
+
+const choice = openAIToolChoiceToAnthropic("required")
+assert.deepEqual(choice, { type: "any" }) // OpenAI "required"/"any" -> Anthropic {type:"any"}
+
+console.log("ok:", system, "|", tools[0].name, "|", choice)
 ```
+
+## Signature
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `messages` | `any[]` | An OpenAI `messages` array — plain user/assistant/system/developer/tool entries. |
+| returns `.messages` | `any[]` | Anthropic-native messages: `tool_use`/`tool_result` content blocks, tool results merged. |
+| returns `.system` | `string` | `system`/`developer` messages hoisted out and joined. |
 
 ## The same call in the other five ports
 
@@ -62,9 +139,15 @@ _TODO: name the alternative and when to prefer it._
 | C# | `Translate.OpenAIMessagesToAnthropic` | [→](/api/csharp/translate/inbound/) |
 | Elixir | `Toolnexus.Translate.openai_messages_to_anthropic` | [→](/api/elixir/translate/inbound/) |
 
+<Aside type="note" title="Go keeps this unexported">
+Go's inbound conversion (`golang/translate.go:283`) exists but is unexported — reachable only
+through `Translate` itself, not called directly. The other five ports export it standalone, as
+this page does.
+</Aside>
+
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`translate`](/api/javascript/translate/translate/) — Declare a toolkit to a provider and translate one request/response without executing anything or keeping state.
+- [`translate`](/api/javascript/translate/translate/) — Uses this internally on the Anthropic path; most callers want that instead of calling this directly.

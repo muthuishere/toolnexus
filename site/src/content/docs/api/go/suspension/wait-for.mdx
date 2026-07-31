@@ -8,49 +8,249 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/client.go">golang/client.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+type ClientOptions struct {
+	// ...
+	WaitFor func(Request) (Answer, error)
+}
 ```
 
-The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+`WaitFor` is the one host slot for resolving a suspension: `data → data`, blocking (Go has no
+`await`), on `ClientOptions`. When a tool call returns `Pending(request)`, the loop calls
+`c.opts.WaitFor(request)`. Its interior is entirely unconstrained — open a browser and poll,
+message a Slack channel and poll, write a file and watch it, forward the request over A2A to
+another agent. Whatever it does, it returns an `Answer`, and the loop takes it from there.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Set `WaitFor` whenever you want suspensions resolved **in-process** — the run blocks inside
+`Run`/`Stream`/`Ask` until the human or system answers, then continues automatically. This is
+the simplest posture: state lives on the live process, no persistence needed. Leave `WaitFor`
+unset when you want the **durable** posture instead — the run halts with
+`RunResult.Status == "pending"`, and you resume it later, possibly in another process, with
+[`Client.Resume`](/api/go/suspension/resume/) (`RunWithAnswer`/`AskWithAnswer`).
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Durable across a process boundary? Skip WaitFor">
+`WaitFor` is a blocking call inside a single `Run` — it can't survive a process restart, and it
+holds a goroutine parked while it waits. If the resolution might take minutes/hours/days, or
+the run needs to persist across a redeploy, don't set `WaitFor` at all: let the run halt with
+`status:"pending"`, persist `RunResult.Pending` and `RunResult.Messages` yourself, and resume
+later via [`Client.Resume`](/api/go/suspension/resume/) — same wire data (`Request`/`Answer`),
+different delivery mechanism.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — WaitFor resolves a suspension inline
 
-{/* TODO:example1 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"ask","arguments":"{}"}}]}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"got it"}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`))
+	}))
+	defer srv.Close()
+
+	ask := toolnexus.Tool{
+		Name: "ask", Description: "asks something", InputSchema: toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+		Source: toolnexus.SourceCustom,
+		Execute: func(_ map[string]any, ctx *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			if ctx != nil && ctx.Answer != nil {
+				return toolnexus.ToolResult{Output: "resolved"}, nil
+			}
+			return toolnexus.Pending(toolnexus.Request{Kind: "input", Prompt: "confirm?"}), nil
+		},
+	}
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: []toolnexus.Tool{ask}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "gpt-4o-mini", APIKey: "test-key",
+		WaitFor: func(req toolnexus.Request) (toolnexus.Answer, error) {
+			return toolnexus.Answer{ID: req.ID, Ok: true}, nil
+		},
+	})
+
+	res, err := client.Run(context.Background(), "please ask", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if res.Status != "done" || res.Text != "got it" {
+		log.Fatalf("unexpected: %+v", res)
+	}
+
+	fmt.Println("ok:", res.Text)
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — no `WaitFor` set: the run halts durably instead
 
-{/* TODO:example2 */}
-```go
-// TODO
+Omitting `WaitFor` entirely is the other, equally valid posture: the run does not hang or
+error — it comes back with `Status: "pending"` and the `Request` for you to resolve out of
+band.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"ask","arguments":"{}"}}]}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`))
+	}))
+	defer srv.Close()
+
+	ask := toolnexus.Tool{
+		Name: "ask", Description: "asks something", InputSchema: toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+		Source: toolnexus.SourceCustom,
+		Execute: func(_ map[string]any, _ *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			return toolnexus.Pending(toolnexus.Request{Kind: "input", Prompt: "confirm?"}), nil
+		},
+	}
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: []toolnexus.Tool{ask}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	// No WaitFor configured.
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "gpt-4o-mini", APIKey: "test-key",
+	})
+
+	res, err := client.Run(context.Background(), "please ask", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if res.Status != "pending" || res.Pending == nil {
+		log.Fatalf("expected a durable pending halt, got status=%q pending=%v", res.Status, res.Pending)
+	}
+	if res.Pending.Prompt != "confirm?" {
+		log.Fatalf("unexpected pending request: %+v", res.Pending)
+	}
+
+	fmt.Println("ok: halted durably with", res.Pending.Kind, "-", res.Pending.Prompt)
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — declined vs granted, and the loop rule on retry
 
-{/* TODO:example3 */}
-```go
-// TODO
+`Answer.Ok == false` feeds back a `"declined/expired: <prompt>"` error result and the model
+decides what to do next — the run does not abort.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"delete_record","arguments":"{}"}}]}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"understood, not deleting"}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`))
+	}))
+	defer srv.Close()
+
+	del := toolnexus.Tool{
+		Name: "delete_record", Description: "deletes a record", InputSchema: toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+		Source: toolnexus.SourceCustom,
+		Execute: func(_ map[string]any, ctx *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			if ctx != nil && ctx.Answer != nil {
+				return toolnexus.ToolResult{Output: "deleted"}, nil
+			}
+			return toolnexus.Pending(toolnexus.Request{Kind: "approval", Prompt: "delete this record?"}), nil
+		},
+	}
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: []toolnexus.Tool{del}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "gpt-4o-mini", APIKey: "test-key",
+		WaitFor: func(req toolnexus.Request) (toolnexus.Answer, error) {
+			return toolnexus.Answer{ID: req.ID, Ok: false, Reason: "declined"}, nil
+		},
+	})
+
+	res, err := client.Run(context.Background(), "delete the record", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if res.Status != "done" {
+		log.Fatalf("a decline continues the loop, not aborts it: %+v", res)
+	}
+	if !strings.Contains(res.ToolCalls[0].Output, "declined") {
+		log.Fatalf("expected the declined error text fed back, got %q", res.ToolCalls[0].Output)
+	}
+	if !res.ToolCalls[0].IsError {
+		log.Fatal("a declined resolution is an error tool_result")
+	}
+
+	fmt.Println("ok:", res.Text)
+}
 ```
+
+## The loop rule
+
+| `WaitFor` | `Answer.Ok` | What happens |
+|---|---|---|
+| configured | `true` | Retries the same tool once with `ctx.Answer` set. Still-suspended retry ⇒ error `"unresolved: <prompt>"`, never loops forever. |
+| configured | `false` | Feeds back error `"declined/expired: <prompt>"`. The loop continues; the model decides. |
+| not configured | — | The run halts: `RunResult.Status == "pending"`, `RunResult.Pending` set. Resume later via [`Client.Resume`](/api/go/suspension/resume/). |
 
 ## The same call in the other five ports
 

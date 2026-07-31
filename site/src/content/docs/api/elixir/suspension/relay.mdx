@@ -19,8 +19,13 @@ Declare a tool the host executes, not the library: the call rides out on the sus
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+There is no declaration-only relay tool in Elixir today — every tool the loop knows about is
+executable in-process. The closest available shape is an ordinary tool whose `execute` itself
+returns a §10 suspension (`metadata.pending`, see [`pending`](/api/elixir/suspension/pending/)):
+the model still calls it like a normal tool, but the call "rides out" as a `Request` for the host
+to answer, exactly as a relay declaration would — the difference is Elixir's version always runs
+*some* code locally first (even if that code's only job is to raise the suspension), where a true
+relay tool is declared but never invoked by the library at all.
 
 ## The same capability in the other ports
 
@@ -35,4 +40,4 @@ _TODO: the closest thing this port does offer, and how to get the same outcome._
 ## See also
 
 - [`Toolnexus.Client.create`](/api/elixir/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
-- [`Toolnexus.Client.resume`](/api/elixir/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.
+- [`Toolnexus.Agents.Runtime.resume`](/api/elixir/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.

@@ -72,7 +72,7 @@ using Toolnexus.Agents;
 var llm = new MockLlm(_ => Task.FromResult(MockLlm.Text("hello from the sub-agent")));
 
 var greeter = new Agent("greeter", new AgentSpec { Does = "says hello" });
-var rtOpts = new RuntimeOptions { Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock" };
+var rtOpts = new RuntimeOptions { ApiKey = "test-key", Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock" };
 
 var result = await greeter.RunAsync(rtOpts, "say hi");
 
@@ -144,7 +144,7 @@ var mathTutor = new Toolnexus.Agents.Agent("math-tutor", new AgentSpec
     Soul = "You are a terse math tutor.",
     Uses = new List<ITool> { add },
 });
-var rtOpts = new RuntimeOptions { Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock" };
+var rtOpts = new RuntimeOptions { ApiKey = "test-key", Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock" };
 
 var result = await mathTutor.RunAsync(rtOpts, "what is 2 + 3?");
 
@@ -197,7 +197,7 @@ var subLlm = new MockLlm(_ =>
     subCalls++;
     return Task.FromResult(MockLlm.Text("Chennai: 31C, humid"));
 });
-var subRtOpts = new RuntimeOptions { Handler = subLlm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock" };
+var subRtOpts = new RuntimeOptions { ApiKey = "test-key", Handler = subLlm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock" };
 
 var weatherAgent = new Agent("weather", new AgentSpec { Does = "reports the weather for a city" });
 var weatherTool = weatherAgent.AsTool(subRtOpts); // an Agent, dropped into ExtraTools like any ITool

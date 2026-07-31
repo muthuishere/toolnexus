@@ -77,6 +77,7 @@ var llm = new MockLlm(_ =>
 
 var rt = new AgentRuntime(new RuntimeOptions
 {
+    ApiKey = "test-key",
     Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
     Registry = new Dictionary<string, AgentDef>
     {
@@ -127,6 +128,7 @@ var llm = new MockLlm(_ => throw new Exception("should never be called — budge
 
 var rt = new AgentRuntime(new RuntimeOptions
 {
+    ApiKey = "test-key",
     Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
     Registry = new Dictionary<string, AgentDef>
     {
@@ -162,6 +164,7 @@ using Toolnexus.Agents;
 var llm = new MockLlm(_ => Task.FromResult(MockLlm.Text("filed")));
 var rt = new AgentRuntime(new RuntimeOptions
 {
+    ApiKey = "test-key",
     Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
     Registry = new Dictionary<string, AgentDef>
     {

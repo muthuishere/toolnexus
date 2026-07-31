@@ -12,15 +12,36 @@ import { Aside } from '@astrojs/starlight/components';
 </p>
 
 <Aside type="caution" title="Not available in Python">
-Go-only today (golang/relay.go). SPEC §10 addendum landed as a Go preview; the other five ports do not ship a relay tool yet.
+Go-only today (`golang/relay.go`). SPEC §10's relay addendum landed as a **Go preview, not
+part of the §0 conformance contract** — `js`, `python`, `java`, `csharp` and `elixir` do not
+implement a relay tool yet (tracked in `openspec/changes/add-tool-relay-mode/tasks.md`).
+Verified against `python/src/toolnexus/`: no `relay_tool`/`RelayTool` constructor and no
+`kind="tool_call"` suspension shape exist in this port.
 </Aside>
 
-Declare a tool the host executes, not the library: the call rides out on the suspension.
+Declare a tool the host executes, not the library: the call rides out on the suspension. A
+relay tool carries a schema but no host-side behavior — the model emits a call, the call
+surfaces to the host as a `kind:"tool_call"` suspension carrying `data.calls`, the *host*
+executes it, and the host's output feeds back as that call's result. This is what lets a port
+act as a pure translator/proxy while still supporting standard function calling, where the
+**client** owns execution.
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+If you're building a proxy in Python and want the caller to own tool execution rather than
+toolnexus, reach for [`translate`](/api/python/translate/translate/) (SPEC §11) instead:
+declare your toolkit to the provider, get back exactly one turn's tool calls in OpenAI shape
+(`TranslateResult.tool_calls`), and execute them yourself — no suspension, no loop, no state
+kept between calls. SPEC's own guidance (ADR-0011) is explicit about this: translation is the
+right mechanism for a pass-through posture; relay is for proxy-managed memory, which is a
+narrower Go-only use case today.
+
+If you specifically need the suspend/resume *mechanics* relay rides on — parking a run and
+resuming it with an out-of-band answer — that primitive itself is fully available in Python
+via [`pending`](/api/python/suspension/pending/) / [`WaitFor`](/api/python/suspension/wait-for/):
+write your own tool that returns `pending(kind="tool_call", data={"calls": [...]})` and a
+`wait_for` that executes the calls and returns an `Answer` — you get the same shape relay
+would give you, just without the built-in constructor and collision guard Go ships.
 
 ## The same capability in the other ports
 
@@ -35,6 +56,5 @@ _TODO: the closest thing this port does offer, and how to get the same outcome._
 ## See also
 
 - [`pending`](/api/python/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
-- [`auth_required`](/api/python/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
 - [`WaitFor`](/api/python/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
-- [`pending_of`](/api/python/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`translate`](/api/python/translate/translate/) — The recommended Python mechanism for a pass-through/proxy posture.

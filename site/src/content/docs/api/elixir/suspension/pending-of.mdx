@@ -19,8 +19,21 @@ Detect that a RunResult is parked rather than finished, and get the Request that
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Two calls cover it. `Toolnexus.ToolResult.pending?/1` tells you a **result** is a suspension;
+matching `metadata.pending` directly gets you the `Request`:
+
+```elixir
+alias Toolnexus.{ToolResult, Request}
+
+case result do
+  %ToolResult{metadata: %{pending: %Request{} = req}} -> req
+  _ -> nil
+end
+```
+
+At the `RunResult` level, `Toolnexus.Client.run/4` already surfaces this without a helper:
+`result.status == "pending"` and `result.pending` is the `Request` directly (no reader call
+needed — see [`Client.run`](/api/elixir/client/run/#runresult-shape)).
 
 ## The same capability in the other ports
 
@@ -35,4 +48,4 @@ _TODO: the closest thing this port does offer, and how to get the same outcome._
 ## See also
 
 - [`Toolnexus.Client.create`](/api/elixir/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
-- [`Toolnexus.Client.resume`](/api/elixir/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.
+- [`Toolnexus.Agents.Runtime.resume`](/api/elixir/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.

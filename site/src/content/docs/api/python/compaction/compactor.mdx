@@ -8,49 +8,234 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7F</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7F</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/agents/compaction.py">python/src/toolnexus/agents/compaction.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+def compactor(
+    *,
+    max_tokens: int,
+    summarize: Callable[[list[dict]], str | Awaitable[str]],
+    keep_tail: int | None = None,             # default max_tokens // 2
+    count_tokens: Callable[[list[dict]], int] | None = None,  # default estimate_tokens
+    flush_to_memory: bool = False,
+) -> Callable[[dict], Awaitable[dict | None]]   # a before_llm hook
 ```
 
-Summarise older turns when the transcript grows, so a long-lived agent stays inside its context window.
+Builds a `before_llm` [hook](/api/python/client/hooks/) that keeps a long-lived transcript
+under budget: below `max_tokens` it is a byte-identical no-op (returns `None`); above it, it
+summarizes the older messages via `summarize` and keeps a recent tail, always splitting at a
+`user`-turn boundary so a `tool` result is never orphaned from the `assistant` message that
+called it. It rides the existing `before_llm` seam (§8) — nothing new runs in the loop, the
+hook just replaces `ev["messages"]`.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- You're running a persona or agent across many turns (a heartbeat-driven §7E persona, a
+  long support conversation) and the transcript will eventually exceed the model's context
+  window if left to grow unbounded.
+- You want summarization to be **opt-in and explicit** — SPEC §7F guarantees the library
+  never calls an LLM on your behalf; `summarize` is your function, sync or async, and you
+  decide whether it calls a model, a rule-based squisher, or a canned string.
+- You want the summarized-vs-kept split to be safe by construction (tool-pair integrity,
+  a preserved system prompt) rather than something you have to get right yourself.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for a smaller max_turns or a fresh conversation when compaction is overkill">
+`compactor` is for genuinely long-lived transcripts where losing the history would lose
+useful context. If a run's length is bounded (a single `Client.run` call, a short-lived
+sub-agent), `max_turns` alone is usually enough — compaction adds a `summarize` call
+(potentially an LLM round trip) you don't need for a run that's over in a handful of turns.
 </Aside>
+
+Absent a `compactor`, every run is byte-identical to today — this is purely additive. Wire it
+onto a bare `Client` via `hooks={"before_llm": compactor(...)}`, or onto a §7D agent run via
+the runtime's or an `AgentDef`'s `hooks` (per-agent, so two agents in one runtime can carry
+different budgets).
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — under budget is a no-op
 
-{/* TODO:example1 */}
-```python
-// TODO
+```python test
+import asyncio
+
+from toolnexus.agents import compactor
+
+
+async def main():
+    hook = compactor(max_tokens=100_000, summarize=lambda older: "unused")
+
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello!"},
+    ]
+    result = await hook({"messages": messages})
+
+    assert result is None  # byte-identical no-op — under max_tokens, nothing changes
+
+    print("ok: no-op below max_tokens")
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — compacts, keeps the tail tool-pair-safe
 
-{/* TODO:example2 */}
-```python
-// TODO
+```python test
+import asyncio
+
+from toolnexus.agents import compactor
+
+
+async def main():
+    def summarize(older):
+        return f"user asked about {len(older)} earlier things"
+
+    hook = compactor(max_tokens=20, keep_tail=10, summarize=summarize)
+
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "what's the weather in Chennai"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "weather", "arguments": "{}"}}
+        ]},
+        {"role": "tool", "tool_call_id": "c1", "content": "sunny"},
+        {"role": "assistant", "content": "it's sunny"},
+        {"role": "user", "content": "and tomorrow?"},
+        {"role": "assistant", "content": "also sunny"},
+    ]
+    result = await hook({"messages": messages})
+
+    assert result is not None  # over max_tokens -> compacted
+    compacted = result["messages"]
+
+    # The leading system message survives untouched, verbatim, first.
+    assert compacted[0] == messages[0]
+    # A summary system message follows it.
+    assert compacted[1]["role"] == "system"
+    assert "[Summary of earlier conversation]" in compacted[1]["content"]
+    # The kept tail starts at a user turn — never mid tool-call/tool-result pair.
+    assert compacted[2]["role"] == "user"
+
+    print("ok:", compacted[1]["content"])
+
+
+asyncio.run(main())
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — wired live through `Client.run`, plus `flush_to_memory`
 
-{/* TODO:example3 */}
-```python
-// TODO
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit
+from toolnexus.agents import compactor
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+async def main():
+    seen = {"messages": None}
+
+    def echo(body):
+        seen["messages"] = body["messages"]
+        return {
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    # A tiny max_tokens forces compaction on the very first call, alongside a
+    # flush-to-memory reminder injected right before the summary.
+    hook = compactor(
+        max_tokens=15,
+        keep_tail=8,
+        summarize=lambda older: "prior turns summarized",
+        flush_to_memory=True,
+    )
+
+    tk = await create_toolkit()
+    try:
+        with StubServer(echo) as srv:
+            client = create_client(
+                base_url=srv.base_url, style="openai", model="test-model", api_key="test-key",
+                system_prompt="You are terse.",
+                hooks={"before_llm": hook},
+            )
+            history = [
+                {"role": "user", "content": "first question, quite a lot of words here"},
+                {"role": "assistant", "content": "first answer, also quite a lot of words here"},
+                {"role": "user", "content": "second question, more words to pad this out further"},
+                {"role": "assistant", "content": "second answer, more words to pad this out further"},
+            ]
+            result = await client.run("third question", tk, history=history)
+
+        assert result.status == "done"
+        sent = seen["messages"]
+        # The compactor ran inside the real loop: the request the stub actually
+        # received carries the summary, not the full raw history.
+        assert any("[Summary of earlier conversation]" in (m.get("content") or "") for m in sent)
+        assert any("save it with the memory tool now" in (m.get("content") or "") for m in sent)
+
+        print("ok:", result.text, "| compacted request had", len(sent), "messages")
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
 ```
+
+## `compactor(**opts)` fields
+
+| Option | Type | Meaning |
+|---|---|---|
+| `max_tokens` | `int` | Compact only when the estimate exceeds this; at/below ⇒ no-op. |
+| `summarize` | `(older) -> str \| Awaitable[str]` | Produces the summary. MAY call an LLM — the library never does on your behalf. |
+| `keep_tail` | `int \| None` | Keep at least this many tokens of the most recent tail. Default `max_tokens // 2`. |
+| `count_tokens` | `(messages) -> int \| None` | Token estimator. Default [`estimate_tokens`](https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/agents/compaction.py) (`ceil(chars/4)`, an estimate, not a real tokenizer). |
+| `flush_to_memory` | `bool` | Inject a pre-compact system reminder to persist durable facts via the §7E `memory` tool. Default off. |
 
 ## The same call in the other five ports
 
@@ -67,4 +252,6 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- _TODO: related entry points_
+- [`Hooks`](/api/python/client/hooks/) — The `before_llm`/`after_llm`/`before_tool`/`after_tool` seams a compactor rides.
+- [`Client.run`](/api/python/client/run/) — The loop that applies a `before_llm` message rewrite by replacing the working transcript.
+- [`memory_tool`](/api/python/persona/memory-tool/) — What `flush_to_memory`'s reminder points the model at.

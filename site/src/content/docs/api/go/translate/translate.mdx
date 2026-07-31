@@ -8,49 +8,245 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a>
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/translate.go">golang/translate.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+type TranslateRequest struct {
+	Messages   []any    // OpenAI `messages`, verbatim — incl. assistant tool_calls, tool results
+	Tools      []any    // OpenAI `tools`, verbatim — declaration-only, never executed
+	Toolkit    *Toolkit // an ordinary toolkit, DECLARED, never executed
+	ToolChoice any      // OpenAI `tool_choice`, verbatim
+	System     string   // overrides the system prompt
+	MaxTokens  int      // 0 ⇒ per-provider default
+}
+
+type TranslateResult struct {
+	Text         string
+	ToolCalls    []TranslatedToolCall // {ID, Name, Arguments string}
+	FinishReason string               // "stop" | "tool_calls" | "length" | "content_filter"
+	Usage        Usage
+	Model        string
+	Raw          map[string]any
+}
+
+func (c *Client) Translate(ctx context.Context, req TranslateRequest) (TranslateResult, error)
 ```
 
-Declare a toolkit to a provider and translate one request/response without executing anything or keeping state.
+`Translate` is toolnexus used purely as a wire-format translator: OpenAI-shaped messages and
+tools go in, exactly **one** provider call happens (`StyleOpenAI` is near-passthrough,
+`StyleAnthropic` does real inbound/outbound translation), and an OpenAI-shaped result comes
+back. No tool executes, nothing suspends, no conversation is remembered — every call is
+self-contained, so a caller can run it statelessly and horizontally scale it. It's the inbound
+half of the §5 adapters: `ToOpenAI`/`ToAnthropic`/`ToGemini` send a toolkit's declarations
+*out*; `Translate` reads the provider's tool calls back *in*.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `Translate` when the **caller** owns the conversation and executes tools itself — the
+standard OpenAI function-calling posture, where every request carries the full history
+including prior tool results, and the caller dispatches whatever `ToolCalls` come back. This is
+the shape of a stateless HTTP proxy: no state between turns, `c.opts.Style` picks the upstream
+provider, and the caller never builds provider-native payloads by hand.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Want toolnexus to own the loop and execute tools?">
+`Translate` never executes anything — a `Toolkit` you pass in is declared to the provider and
+nothing more. When you want the tool calls actually *run*, with retries, multi-turn looping and
+suspension all handled for you, use [`Client.Run`](/api/go/client/run/) /
+[`Client.Ask`](/api/go/client/store/) instead. If you want the loop AND caller-owned execution
+for one specific tool, that's [`RelayTool`](/api/go/suspension/relay/) + `RunWithAnswer` — a
+third posture between the two.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — no tools, one OpenAI-style round trip
 
-{/* TODO:example1 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Paris"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`))
+	}))
+	defer srv.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "gpt-4o-mini", APIKey: "test-key"})
+
+	res, err := client.Translate(context.Background(), toolnexus.TranslateRequest{
+		Messages: []any{map[string]any{"role": "user", "content": "capital of France?"}},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if res.Text != "Paris" || res.FinishReason != "stop" || len(res.ToolCalls) != 0 {
+		log.Fatalf("unexpected: %+v", res)
+	}
+
+	fmt.Println("ok:", res.Text)
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — tool calls come back, nothing executes
 
-{/* TODO:example2 */}
-```go
-// TODO
+The model asks for a tool; `Translate` hands the calls straight back to the caller, who owns
+execution — no `Tool.Execute` in this codebase ever runs.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	ran := false
+	add := toolnexus.NativeTool(
+		"add", "add two numbers",
+		toolnexus.JSONSchema{"type": "object", "properties": map[string]any{
+			"a": map[string]any{"type": "number"}, "b": map[string]any{"type": "number"},
+		}},
+		func(_ context.Context, _ map[string]any) (string, error) {
+			ran = true
+			return "5", nil
+		},
+	)
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false, ExtraTools: []toolnexus.Tool{add}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"add","arguments":"{\"a\":2,\"b\":3}"}}]}}],"usage":{"prompt_tokens":8,"completion_tokens":6,"total_tokens":14}}`))
+	}))
+	defer srv.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "gpt-4o-mini", APIKey: "test-key"})
+
+	// Toolkit declares "add" to the provider — nothing runs, even though it's the
+	// toolkit's real Execute.
+	res, err := client.Translate(context.Background(), toolnexus.TranslateRequest{
+		Messages: []any{map[string]any{"role": "user", "content": "what is 2+3?"}},
+		Toolkit:  tk,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if res.FinishReason != "tool_calls" || len(res.ToolCalls) != 1 {
+		log.Fatalf("unexpected: %+v", res)
+	}
+	if res.ToolCalls[0].Name != "add" || res.ToolCalls[0].Arguments != `{"a":2,"b":3}` {
+		log.Fatalf("unexpected tool call: %+v", res.ToolCalls[0])
+	}
+	if ran {
+		log.Fatal("Translate must never execute a tool, even one declared via a real Toolkit")
+	}
+
+	fmt.Println("ok:", res.ToolCalls[0].Name, "declared via Toolkit, arguments:", res.ToolCalls[0].Arguments, "- never executed")
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — Anthropic upstream doing real inbound translation
 
-{/* TODO:example3 */}
-```go
-// TODO
+Against an Anthropic-style upstream, `Translate` performs the real inbound conversion — OpenAI
+`tool_calls`/`tool` messages become native `tool_use`/`tool_result` content blocks, and a prior
+`system` message is hoisted into Anthropic's separate `system` field.
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	var lastBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"got it"}],"stop_reason":"end_turn","usage":{"input_tokens":6,"output_tokens":2}}`))
+	}))
+	defer srv.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleAnthropic, Model: "claude-x", APIKey: "test-key"})
+
+	res, err := client.Translate(context.Background(), toolnexus.TranslateRequest{
+		Messages: []any{
+			map[string]any{"role": "system", "content": "You are terse."},
+			map[string]any{"role": "user", "content": "call echo with hi"},
+			map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+				map[string]any{"id": "c1", "type": "function", "function": map[string]any{"name": "echo", "arguments": `{"text":"hi"}`}},
+			}},
+			map[string]any{"role": "tool", "tool_call_id": "c1", "content": "hi"},
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if res.Text != "got it" || res.FinishReason != "stop" {
+		log.Fatalf("unexpected: %+v", res)
+	}
+
+	var sent map[string]any
+	if err := json.Unmarshal(lastBody, &sent); err != nil {
+		log.Fatal(err)
+	}
+	if sent["system"] != "You are terse." {
+		log.Fatalf("expected the system message hoisted into Anthropic's system field, got %v", sent["system"])
+	}
+	raw, _ := json.Marshal(sent["messages"])
+	for _, want := range []string{`"tool_use"`, `"tool_result"`, `"tool_use_id":"c1"`} {
+		if !strings.Contains(string(raw), want) {
+			log.Fatalf("expected native content blocks in the translated messages, missing %s: %s", want, raw)
+		}
+	}
+
+	fmt.Println("ok:", res.Text, "- system hoisted, tool_calls became tool_use/tool_result blocks")
+}
 ```
+
+## Behavior
+
+| Aspect | Detail |
+|---|---|
+| One call, no loop | Exactly one provider call per `Translate`, ever — no retries beyond the shared resilience policy, no re-execution. |
+| Nothing executes | `Toolkit`/`Tools` are declaration-only inputs; there is no execution path in this entry point at all. |
+| `Tools` + `Toolkit` compose | Toolkit declarations come first, then `Tools`. |
+| `arguments` | Always a JSON **string** on the way out — the OpenAI wire form — even when a caller supplied it as an object on the way in. |
+| `finishReason` | A turn emitting any tool call is always `"tool_calls"`, regardless of the provider's own stop reason. |
+| Hooks | `BeforeLLM`/`AfterLLM` each fire exactly once. Tool hooks never fire — no tool runs. |
+| Shared infrastructure | Retries/backoff, request-param merging, and the `llm` observability event are the same as the agent loop's. |
 
 ## The same call in the other five ports
 
@@ -67,4 +263,6 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- _TODO: related entry points_
+- [`Client.Run`](/api/go/client/run/) — The stateful agent loop that executes tools, for when the caller does NOT want to own execution.
+- [`RelayTool`](/api/go/suspension/relay/) — The middle ground: toolnexus owns the loop, the caller owns one tool's execution.
+- _translate/inbound_ — Go keeps the raw inbound converter unexported; reachable only through `Translate` itself.

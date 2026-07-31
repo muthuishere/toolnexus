@@ -8,49 +8,211 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/types.py">python/src/toolnexus/types.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+def pending(
+    *,
+    kind: str,
+    prompt: str,
+    id: str | None = None,
+    url: str | None = None,
+    data: dict[str, Any] | None = None,
+    expiresAt: str | None = None,   # RFC3339; wire key, not snake_case
+) -> ToolResult
 ```
 
-Return a Pending from a tool to park the run until someone answers.
+The one producer of a §10 suspension: builds a `ToolResult` whose `metadata["pending"]` is a
+`Request` — `is_error=True`, `output` a human-readable fallback (`prompt`, plus `url` if set).
+Return it from `Tool.execute` any time a tool cannot finish in one shot and needs an
+out-of-band answer — a human approves something, uploads a file, picks from a list. `kind` is
+an open vocabulary (`"approval"`, `"input"`, ...); `"authorization"` has its own sugar,
+[`auth_required`](/api/python/suspension/auth-required/).
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- Your tool needs a yes/no from a human before it can proceed (`kind="approval"`) — "OK to
+  deploy to prod?", "confirm this refund".
+- Your tool needs a piece of data only a human has (`kind="input"`) — "which environment?",
+  "what's the customer's order number?".
+- You're building a new suspension shape the built-ins don't cover. `pending` is the general
+  form; every other producer (`auth_required`, the built-in `question` tool) is sugar over it.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for auth_required for the login case">
+`auth_required(url)` is `pending(kind="authorization", url=url)` with a sensible default
+prompt — reach for it directly when the suspension IS a login/consent redirect. Use `pending`
+itself for everything else, or when you want to set `data`/`expiresAt`/a stable `id` yourself.
+</Aside>
+
+<Aside type="caution">
+`pending` returns `is_error=True`. That is deliberate — a parked call has not produced an
+answer yet. Never treat `is_error` alone as "the tool broke"; check
+[`pending_of`](/api/python/suspension/pending-of/) to tell a genuine failure from a suspension.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — a bare `Request`, with a generated `id`
 
-{/* TODO:example1 */}
-```python
-// TODO
+```python test
+from toolnexus import pending, pending_of
+
+res = pending(kind="approval", prompt="OK to deploy to prod?")
+
+assert res.is_error is True
+req = pending_of(res)
+assert req is not None
+assert req.kind == "approval"
+assert req.prompt == "OK to deploy to prod?"
+assert req.id  # generated for you — the correlation key a later Answer must echo
+assert req.url is None
+assert res.output == "OK to deploy to prod?"  # the human-readable fallback
+
+print("ok:", req.id[:4], "...", req.kind)
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — `data`, `expiresAt`, and a caller-supplied `id`
 
-{/* TODO:example2 */}
-```python
-// TODO
+```python test
+from toolnexus import pending, pending_of
+
+res = pending(
+    kind="input",
+    prompt="Which region should this ship to?",
+    id="req-region-42",           # stable, caller-chosen correlation key
+    data={"choices": ["eu-west-1", "us-east-1", "ap-south-1"]},
+    expiresAt="2026-12-31T23:59:59Z",
+)
+
+req = pending_of(res)
+assert req.id == "req-region-42"  # your id is used verbatim, not overwritten
+assert req.data == {"choices": ["eu-west-1", "us-east-1", "ap-south-1"]}
+assert req.expiresAt == "2026-12-31T23:59:59Z"
+
+print("ok:", req.id, "|", req.data["choices"])
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — a tool that suspends, then answers on the retry
 
-{/* TODO:example3 */}
-```python
-// TODO
+`ctx.answer` is present only on the retry the loop performs after a `wait_for` resolves the
+`Request` — the SAME tool, same args, called again. A tool reads `ctx.answer.data` when the
+resolution *is* the payload (`kind="input"`/`"approval"`), exactly as here.
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import Answer, ToolResult, create_client, create_toolkit, define_tool, pending
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+async def approve_deploy(args=None, ctx=None):
+    if ctx is not None and ctx.answer is not None and ctx.answer.ok:
+        approver = (ctx.answer.data or {}).get("approver", "unknown")
+        return ToolResult(output=f"deployed (approved by {approver})", is_error=False)
+    return pending(kind="approval", prompt="OK to deploy to prod?")
+
+
+def tool_call_reply(body):
+    if not any(m.get("role") == "tool" for m in body["messages"]):
+        return {
+            "choices": [{
+                "message": {
+                    "role": "assistant", "content": None,
+                    "tool_calls": [{"id": "c1", "type": "function",
+                                     "function": {"name": "deploy", "arguments": "{}"}}],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {"prompt_tokens": 8, "completion_tokens": 3, "total_tokens": 11},
+        }
+    return {
+        "choices": [{"message": {"role": "assistant", "content": "done"}}],
+        "usage": {"prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5},
+    }
+
+
+async def main():
+    tk = await create_toolkit()
+    tk.register(define_tool(approve_deploy, name="deploy", description="Deploy to prod."))
+    try:
+
+        async def wait_for(request):
+            assert request.kind == "approval"
+            return Answer(id=request.id, ok=True, data={"approver": "muthu"})
+
+        with StubServer(tool_call_reply) as srv:
+            client = create_client(
+                base_url=srv.base_url, style="openai", model="test-model", api_key="test-key",
+                wait_for=wait_for,
+            )
+            result = await client.run("deploy the latest build", tk)
+
+        assert result.status == "done"
+        assert result.text == "done"
+        assert result.tool_calls[0]["output"] == "deployed (approved by muthu)"
+
+        print("ok:", result.tool_calls[0]["output"])
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
 ```
+
+## `Request` fields (the wire shape `pending` builds)
+
+| Field | Type | What it is |
+|---|---|---|
+| `id` | `str` | Unique per suspension — the correlation key an `Answer` echoes. Generated if omitted. |
+| `kind` | `str` | Open vocabulary: `"authorization"`, `"approval"`, `"input"`, ... |
+| `prompt` | `str` | What is being asked, in human words. |
+| `url` | `str \| None` | Present when the action happens at a link. |
+| `data` | `dict \| None` | Kind-specific extra (choices, a JSON-Schema for the expected answer, ...). |
+| `expiresAt` | `str \| None` | RFC3339; the request is stale after this. Wire key — camelCase even in Python. |
 
 ## The same call in the other five ports
 
@@ -60,7 +222,7 @@ _TODO: name the alternative and when to prefer it._
 | Go | `Pending` | [→](/api/go/suspension/pending/) |
 | Java | `Request.pending` | [→](/api/java/suspension/pending/) |
 | C# | `Suspension.Pending` | [→](/api/csharp/suspension/pending/) |
-| Elixir | _not shipped in this port_ |  |
+| Elixir | _not shipped in this port_ — construct `%ToolResult{metadata: %{pending: %Request{}}}` by hand. |  |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
@@ -70,4 +232,4 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 - [`auth_required`](/api/python/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
 - [`WaitFor`](/api/python/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
 - [`pending_of`](/api/python/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
-- [`Client.resume`](/api/python/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.
+- [`ToolResult`](/api/python/types/tool-result/) — The result envelope every tool returns; `metadata["pending"]` is the reserved suspension key.

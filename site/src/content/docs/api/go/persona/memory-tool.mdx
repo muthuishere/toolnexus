@@ -8,49 +8,212 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a>
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang/agents</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/agents/home.go">golang/agents/home.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+func MemoryTool(dir string) tn.Tool
 ```
 
-The opt-in built-in that lets a persona write durable notes to its own home.
+`MemoryTool` returns a single `memory` tool with three actions — `add`, `replace`, `remove` —
+over two files in `dir`: `MEMORY.md` (`target: "self"`, the default) and `USER.md`
+(`target: "user"`). Every action **writes to disk** immediately. A `replace`/`remove` whose
+`text` substring is not found in the target file is a loud `IsError: true`. Crucially, writing
+does **not** change the current session's soul — it takes effect at the **start of the next
+session**, when [`ComposeSoul`](/api/go/persona/compose-soul/) re-reads the directory. This is
+the frozen-snapshot rule that keeps a long-lived persona cache-stable within a run.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `MemoryTool` directly when you're assembling a persona's tool list by hand (via
+[`agents.New`](/api/go/runtime/agent/) rather than [`FromDir`](/api/go/persona/from-dir/)) and
+want the same file-backed memory builtin `FromDir` wires automatically. It's also the tool to
+point at when writing a `HEARTBEAT.md` that asks the agent to persist facts — "fold notes into
+`MEMORY.md` via the memory tool" is the entire recipe behind dream/consolidation patterns.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Not one of the §4A default builtins">
+`memory` is deliberately **not** included in a plain `CreateToolkit`'s default tool set — it
+only exists for a home-wired persona, because it needs a directory to write to. If you want a
+persona but no durable memory (a read-only agent), use [`FromDir`](/api/go/persona/from-dir/)
+with `Memory: &false` rather than wiring `MemoryTool` and then trying to suppress it — there is
+no separate "off" flag on the tool itself, only on whether it's added.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — add an entry, read it back from disk
 
-{/* TODO:example1 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func main() {
+	dir, err := os.MkdirTemp("", "memtool-*")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	mem := agents.MemoryTool(dir)
+	if mem.Name != "memory" {
+		log.Fatalf("expected tool name memory, got %q", mem.Name)
+	}
+
+	res, err := mem.Execute(map[string]any{"action": "add", "text": "prefers metric units"}, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if res.IsError {
+		log.Fatalf("unexpected error: %s", res.Output)
+	}
+
+	onDisk, err := os.ReadFile(filepath.Join(dir, "MEMORY.md"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if got := string(onDisk); got != "- prefers metric units\n" {
+		log.Fatalf("unexpected MEMORY.md contents: %q", got)
+	}
+
+	fmt.Println("ok:", res.Output)
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — replace, remove, and the loud miss
 
-{/* TODO:example2 */}
-```go
-// TODO
+`replace`/`remove` on text that isn't present is a real `IsError`, not a silent no-op — the
+model sees the miss and can retry with the right substring.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func main() {
+	dir, err := os.MkdirTemp("", "memtool-*")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	mem := agents.MemoryTool(dir)
+
+	if _, err := mem.Execute(map[string]any{"action": "add", "text": "timezone: UTC"}, nil); err != nil {
+		log.Fatal(err)
+	}
+	replaced, err := mem.Execute(map[string]any{"action": "replace", "text": "UTC", "with": "IST"}, nil)
+	if err != nil || replaced.IsError {
+		log.Fatalf("unexpected replace failure: %+v err=%v", replaced, err)
+	}
+	onDisk, _ := os.ReadFile(filepath.Join(dir, "MEMORY.md"))
+	if got := string(onDisk); got != "- timezone: IST\n" {
+		log.Fatalf("unexpected MEMORY.md after replace: %q", got)
+	}
+
+	miss, err := mem.Execute(map[string]any{"action": "remove", "text": "nonexistent phrase"}, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if !miss.IsError {
+		log.Fatal("expected a loud IsError on a remove miss")
+	}
+
+	fmt.Println("ok: replace ->", string(onDisk), "| miss ->", miss.Output)
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — `target: "user"` writes USER.md, and next-session-only semantics
 
-{/* TODO:example3 */}
-```go
-// TODO
+Writing memory during a run does not retroactively change that run's soul — a fresh
+`ComposeSoul` call (the next session) is what picks it up. This example writes memory mid-run,
+then shows `ComposeSoul` only sees it on a subsequent read.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func main() {
+	dir, err := os.MkdirTemp("", "memtool-*")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	if err := os.WriteFile(filepath.Join(dir, "SOUL.md"), []byte("You are Kip."), 0o644); err != nil {
+		log.Fatal(err)
+	}
+
+	// Session 1: compose the soul BEFORE any memory write — MEMORY.md does not exist yet.
+	soulBefore, foundBefore := agents.ComposeSoul(dir)
+	for _, f := range foundBefore {
+		if f == "MEMORY.md" {
+			log.Fatal("MEMORY.md should not exist before any write")
+		}
+	}
+
+	mem := agents.MemoryTool(dir)
+	if _, err := mem.Execute(map[string]any{"action": "add", "target": "user", "text": "name is Muthu"}, nil); err != nil {
+		log.Fatal(err)
+	}
+	if _, err := mem.Execute(map[string]any{"action": "add", "text": "always reply tersely"}, nil); err != nil {
+		log.Fatal(err)
+	}
+
+	// The write does NOT retroactively change soulBefore — it's a frozen snapshot.
+	if strings.Contains(soulBefore, "MEMORY.md") {
+		log.Fatal("session-1 soul must not gain a MEMORY.md section after a later write")
+	}
+
+	userOnDisk, _ := os.ReadFile(filepath.Join(dir, "USER.md"))
+	if string(userOnDisk) != "- name is Muthu\n" {
+		log.Fatalf("unexpected USER.md: %q", userOnDisk)
+	}
+
+	// Session 2: composing again (a fresh ComposeSoul call) picks up both new files.
+	soulAfter, foundAfter := agents.ComposeSoul(dir)
+	if len(foundAfter) != 3 { // SOUL.md, USER.md, MEMORY.md
+		log.Fatalf("expected 3 sections next session, got %v", foundAfter)
+	}
+	if !strings.Contains(soulAfter, "always reply tersely") || !strings.Contains(soulAfter, "name is Muthu") {
+		log.Fatal("expected both memory writes to surface in the next session's composed soul")
+	}
+
+	fmt.Println("ok: memory writes land on disk immediately, load next session:", foundAfter)
+}
 ```
+
+## Actions
+
+| `action` | Effect | Target file (`target`) |
+|---|---|---|
+| `add` | Appends `"- <text>\n"` to the file. | `self` ⇒ `MEMORY.md` (default); `user` ⇒ `USER.md` |
+| `replace` | Swaps the first occurrence of `text` with `with`. `IsError` if `text` is absent. | same |
+| `remove` | Deletes the first occurrence of `text`. `IsError` if `text` is absent. | same |
 
 ## The same call in the other five ports
 
@@ -68,4 +231,4 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 ## See also
 
 - [`ComposeSoul`](/api/go/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.
-- [`FromDir`](/api/go/persona/from-dir/) — Point at an agent home directory and get a configured agent back.
+- [`FromDir`](/api/go/persona/from-dir/) — Point at an agent home directory and get a configured agent back — wires this tool for you.

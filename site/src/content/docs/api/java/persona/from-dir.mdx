@@ -1,56 +1,222 @@
 ---
-title: "A2A.agentFromDir"
+title: "Home.agentFromDir"
 description: "Point at an agent home directory and get a configured agent back. — Java."
 sidebar:
-  label: "A2A.agentFromDir"
+  label: "Home.agentFromDir"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/agents/Agents.java">agents/Agents.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public static Agents.Agent agentFromDir(Path dir, Agents.AgentSpec overrides)
 ```
 
-Point at an agent home directory and get a configured agent back.
+Level 2 of the §7D/§7E surface: the directory IS the agent. Calls
+[`composeSoul`](/api/java/persona/compose-soul/) over `dir` to build the system prompt at session
+start (a frozen snapshot), then wires the file-backed [`memoryTool`](/api/java/persona/memory-tool/)
+over the same directory — unless `overrides.memory(false)` opts out for a read-only persona. Any
+`overrides.tools` you supply are preserved; the memory tool is appended, not swapped in. The
+returned value is an ordinary [`Agents.Agent`](/api/java/runtime/agent/) — `.run(...)` and
+`.asTool(...)` work exactly as on any other agent.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Whenever a persona's identity should live in files instead of Java strings — a support agent whose
+voice lives in `SOUL.md`, a coordinator whose `AGENTS.md` states its operating rules, a long-lived
+assistant that accumulates facts in `MEMORY.md` across sessions. `agentFromDir` is the one call
+that turns "a folder of Markdown" into a runnable `Agent`.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="agentFromDir for a persona, agent(name, spec) for a scripted subtask">
+Reach for `agentFromDir` when the identity itself is durable and file-backed — you want to edit
+`SOUL.md` in an editor, not a Java string literal, and you want the persona to remember things
+across runs via the `memory` tool. Use the plain [`Agents.agent(name, spec)`](/api/java/runtime/agent/)
+constructor when the prompt is short, inline, and doesn't need a home directory or durable memory —
+most one-shot delegated subtasks.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — a one-file persona answering with its own soul
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.agents.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Path dir = Files.createTempDirectory("ava-home");
+        Files.writeString(dir.resolve("SOUL.md"), "You are Ava, a calm support assistant.");
+
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            ex.getRequestBody().readAllBytes();
+            byte[] b = "{\"choices\":[{\"message\":{\"content\":\"Hi, I'm Ava.\"}}]}".getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        llm.start();
+
+        try {
+            Agents.Agent ava = Agents.agentFromDir(dir, new Agents.AgentSpec().model("test-model"));
+
+            RuntimeOptions rtOpts = new RuntimeOptions()
+                    .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                    .apiKey("test-key");
+
+            TaskResult r = ava.run(rtOpts, "who are you?");
+
+            if (!"done".equals(r.status())) throw new AssertionError(r.status());
+            if (!r.text().equals("Hi, I'm Ava.")) throw new AssertionError(r.text());
+
+            System.out.println("ok: " + r.text());
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — the memory tool is wired in automatically
 
-{/* TODO:example2 */}
-```java
-// TODO
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.Tool;
+import io.github.muthuishere.toolnexus.agents.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Path dir = Files.createTempDirectory("ava-home");
+        Files.writeString(dir.resolve("SOUL.md"), "You are Ava.");
+        Files.writeString(dir.resolve("MEMORY.md"), "- Onboarded 2026-07.");
+
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            ex.getRequestBody().readAllBytes();
+            byte[] b = "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}".getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        llm.start();
+
+        try {
+            Agents.Agent ava = Agents.agentFromDir(dir, new Agents.AgentSpec().model("test-model"));
+
+            // agentFromDir appended the file-backed `memory` tool to this agent's toolkit view —
+            // no separate wiring call needed.
+            boolean hasMemoryTool = ava.spec.tools != null
+                    && ava.spec.tools.stream().map(Tool::name).anyMatch("memory"::equals);
+            if (!hasMemoryTool) throw new AssertionError("expected the memory tool to be wired in");
+
+            // A read-only persona opts OUT with memory(false) — no memory tool at all.
+            Agents.Agent readOnly = Agents.agentFromDir(dir,
+                    new Agents.AgentSpec().model("test-model").memory(false));
+            boolean readOnlyHasMemory = readOnly.spec.tools != null
+                    && readOnly.spec.tools.stream().map(Tool::name).anyMatch("memory"::equals);
+            if (readOnlyHasMemory) throw new AssertionError("memory(false) must omit the tool");
+
+            System.out.println("ok: memory wired=" + hasMemoryTool + ", opted out=" + !readOnlyHasMemory);
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — the composed soul reaches the model, and the frozen-snapshot rule
 
-{/* TODO:example3 */}
-```java
-// TODO
+A `memory` write lands on disk immediately, but the *live* session's system prompt was already
+frozen at session start — the next `agentFromDir` call re-reads the files and picks it up.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.Json;
+import io.github.muthuishere.toolnexus.agents.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Path dir = Files.createTempDirectory("ava-home");
+        Files.writeString(dir.resolve("SOUL.md"), "You are Ava.");
+        Files.writeString(dir.resolve("USER.md"), "The user is Muthu.");
+
+        // Turn 1: the model reads back the injected soul sections so the test can assert on them.
+        // Turn 2 (a second, fresh session): the model reports whatever USER.md carries NOW.
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                Map<String, Object> req = Json.toMap(body);
+                List<Object> msgs = (List<Object>) req.get("messages");
+                String system = String.valueOf(((Map<?, ?>) msgs.get(0)).get("content"));
+                String content = "sections present: " + system.contains("## SOUL.md")
+                        + "," + system.contains("## USER.md") + " | " + system.contains("Muthu");
+                String json = "{\"choices\":[{\"message\":{\"content\":" + Json.stringify(content) + "}}]}";
+                byte[] b = json.getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+
+        try {
+            RuntimeOptions rtOpts = new RuntimeOptions()
+                    .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                    .apiKey("test-key");
+
+            Agents.Agent ava = Agents.agentFromDir(dir, new Agents.AgentSpec().model("test-model"));
+            TaskResult r = ava.run(rtOpts, "introspect your prompt");
+
+            if (!r.text().equals("sections present: true,true | true")) throw new AssertionError(r.text());
+
+            // Edit USER.md directly (simulating a memory write that already landed on disk) —
+            // a FRESH agentFromDir call re-reads it into a new frozen snapshot.
+            Files.writeString(dir.resolve("USER.md"), "The user is Muthu, prefers Tamil replies.");
+            Agents.Agent ava2 = Agents.agentFromDir(dir, new Agents.AgentSpec().model("test-model"));
+            TaskResult r2 = ava2.run(rtOpts, "introspect your prompt");
+            if (!r2.text().contains("true")) throw new AssertionError(r2.text());
+
+            System.out.println("ok: " + r.text());
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
 ```
+
+## Fields and overloads
+
+| Member | Type | What it is |
+|---|---|---|
+| `agentFromDir(dir, overrides)` | `Agent` | Composes the soul from `dir`, wires the memory tool (unless opted out), returns an `Agent`. |
+| `AgentSpec.name` | `String` | Optional override; defaults to the directory's file name. |
+| `AgentSpec.memory` | `Boolean` | `false` omits the memory tool (read-only persona). `null`/`true` ⇒ wired in. |
+| `AgentSpec.tools` | `List<Tool>` | Preserved and extended with the memory tool, not replaced. |
+| `Agent.run(rtOpts, prompt)` | `TaskResult` | One-shot: build a runtime, run to completion, tear down. |
 
 ## The same call in the other five ports
 
@@ -62,10 +228,18 @@ _TODO: name the alternative and when to prefer it._
 | C# | `Home.FromDir` | [→](/api/csharp/persona/from-dir/) |
 | Elixir | `Toolnexus.Agents.Home.from_dir` | [→](/api/elixir/persona/from-dir/) |
 
+<Aside type="note" title="Verified symbol">
+The real Java symbol is `Agents.agentFromDir` (a static method on
+[`io.github.muthuishere.toolnexus.agents.Agents`](https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/agents/Agents.java)) —
+not `A2A.agentFromDir`. Java's `A2A` class is the §7A/§7B outbound/inbound A2A-agent surface and
+has no persona methods.
+</Aside>
+
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Home.composeSoul`](/api/java/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.
-- [`Home.memoryTool`](/api/java/persona/memory-tool/) — The opt-in built-in that lets a persona write durable notes to its own home.
+- [`Agents.composeSoul`](/api/java/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.
+- [`Agents.memoryTool`](/api/java/persona/memory-tool/) — The opt-in built-in that lets a persona write durable notes to its own home.
+- [`agents.Agent`](/api/java/runtime/agent/) — What `run`/`asTool` compile down to.

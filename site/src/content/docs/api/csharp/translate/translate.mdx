@@ -1,56 +1,342 @@
 ---
-title: "Translate.Run"
+title: "LlmClient.TranslateAsync"
 description: "Declare a toolkit to a provider and translate one request/response without executing anything or keeping state. — C#."
 sidebar:
-  label: "Translate.Run"
+  label: "LlmClient.TranslateAsync"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/LlmClient.cs">LlmClient.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+// On LlmClient:
+public Task<Translate.Result> TranslateAsync(Translate.Request request, CancellationToken cancellationToken = default);
+
+// On the static Translate class (Translate.cs):
+public static class Translate
+{
+    public sealed class Request
+    {
+        public List<object?> Messages { get; set; } = new();     // OpenAI `messages`, verbatim
+        public List<object?>? Tools { get; set; }                // OpenAI `tools`, verbatim — declared, never executed
+        public Toolkit? Toolkit { get; set; }                     // an ordinary toolkit — declared, never executed
+        public object? ToolChoice { get; set; }                   // OpenAI `tool_choice`, verbatim
+        public string? System { get; set; }                       // overrides the system prompt
+        public int MaxTokens { get; set; }                        // 0 ⇒ per-provider default
+    }
+
+    public sealed class Result
+    {
+        public string Text { get; set; } = "";
+        public List<ToolCall> ToolCalls { get; set; } = new();
+        public string FinishReason { get; set; } = "stop";        // "stop" | "tool_calls" | "length" | "content_filter"
+        public LlmClient.Usage Usage { get; set; } = new();
+        public string Model { get; set; } = "";
+        public IDictionary<string, object?>? Raw { get; set; }
+    }
+
+    public sealed record ToolCall(string Id, string Name, string Arguments); // Arguments: JSON STRING, the OpenAI wire form
+}
 ```
 
-Declare a toolkit to a provider and translate one request/response without executing anything or keeping state.
+`TranslateAsync` is toolnexus used as a **pure wire-format translator**: OpenAI shapes in, exactly
+**one** provider call, OpenAI shapes out. No agent loop, no tool execution, no conversation state
+— every call is self-contained, so it's safe to run statelessly and concurrently. It's the
+**inbound** half of the §5 adapters: `Toolkit.ToOpenAI`/`ToAnthropic` send declarations *out*,
+`TranslateAsync` reads the provider's tool calls back *in*. A `Toolkit` (or raw `Tools`) on the
+request is **declared and never executed** — there is no execution path in this entry point at
+all, so there's no `Builtins:false` discipline to remember.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+The **caller** owns the conversation and executes tools itself — the standard OpenAI
+function-calling posture, where every request already carries the full history including prior
+tool results. You want toolnexus for one thing only: translating that request to whichever
+provider's native wire format (Anthropic, say) and translating the response straight back to
+OpenAI shape, without adopting the agent loop's conversation ownership.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for RunAsync when toolnexus should own the conversation">
+`TranslateAsync` never executes a tool and never keeps history — you resend the whole transcript
+every call, exactly like calling the provider directly. If you want toolnexus to run the
+tool-calling loop itself — execute tools, feed results back, repeat until done — use
+[`LlmClient.RunAsync`](/api/csharp/client/run/) instead. Need the loop AND a caller-owned
+execution posture at once? That's the Go-only relay-tool + `RunWithAnswer` combination
+(SPEC §10 addendum) — see [suspension/relay](/api/csharp/suspension/relay/).
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — OpenAI in, OpenAI out, no tools involved
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+using var stub = new Stub(ctx =>
+{
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":"2 + 2 = 4"},"finish_reason":"stop"}],"usage":{"prompt_tokens":6,"completion_tokens":4,"total_tokens":10}}
+    """);
+});
+
+var client = LlmClient.Create(new LlmClient.Options { BaseUrl = stub.BaseUrl, Style = "openai", Model = "gpt-4o-mini", ApiKey = "test-key" });
+
+var result = await client.TranslateAsync(new Translate.Request
+{
+    Messages = new List<object?> { new Dictionary<string, object?> { ["role"] = "user", ["content"] = "what's 2 + 2?" } },
+});
+
+if (result.FinishReason != "stop") throw new Exception(result.FinishReason);
+if (result.Text != "2 + 2 = 4") throw new Exception(result.Text);
+if (result.ToolCalls.Count != 0) throw new Exception("no tools declared, none should be called");
+
+Console.WriteLine($"ok: {result.Text} (usage={result.Usage.TotalTokens})");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — a declared `Toolkit` against an Anthropic-style upstream
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+var receivedBody = "";
+using var stub = new Stub(ctx =>
+{
+    using var reader = new StreamReader(ctx.Request.InputStream);
+    receivedBody = reader.ReadToEnd();
+    Stub.Json(ctx, 200, """
+    {"id":"m1","model":"claude-3-5-sonnet","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"city":"Chennai"}}],"usage":{"input_tokens":20,"output_tokens":8}}
+    """);
+});
+
+var weather = NativeTool.Of("get_weather", "current weather for a city",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["city"] = new Dictionary<string, object?> { ["type"] = "string" } },
+    },
+    (IDictionary<string, object?> _) => "unused — TranslateAsync never executes this");
+
+var client = LlmClient.Create(new LlmClient.Options { BaseUrl = stub.BaseUrl, Style = "anthropic", Model = "claude-3-5-sonnet", ApiKey = "test-key" });
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false, ExtraTools = new List<ITool> { weather } });
+
+var result = await client.TranslateAsync(new Translate.Request
+{
+    Messages = new List<object?> { new Dictionary<string, object?> { ["role"] = "user", ["content"] = "how's the weather in Chennai?" } },
+    Toolkit = tk,
+});
+
+// A turn emitting any tool call is ALWAYS "tool_calls" to the OpenAI-shaped caller — the raw
+// Anthropic stop_reason ("tool_use") never leaks through.
+if (result.FinishReason != "tool_calls") throw new Exception(result.FinishReason);
+if (result.ToolCalls.Count != 1 || result.ToolCalls[0].Name != "get_weather") throw new Exception("expected the declared tool call back");
+if (result.ToolCalls[0].Arguments != "{\"city\":\"Chennai\"}") throw new Exception(result.ToolCalls[0].Arguments); // JSON STRING, the OpenAI wire form
+if (!receivedBody.Contains("get_weather")) throw new Exception("toolkit must have been DECLARED to the provider");
+
+Console.WriteLine($"ok: {result.ToolCalls[0].Name}({result.ToolCalls[0].Arguments}) finish={result.FinishReason}");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. Full surface — `ToolChoice`, a `System` override, and `MaxTokens`
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+var receivedBody = "";
+using var stub = new Stub(ctx =>
+{
+    using var reader = new StreamReader(ctx.Request.InputStream);
+    receivedBody = reader.ReadToEnd();
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":"terse, as instructed"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":3,"total_tokens":12}}
+    """);
+});
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "openai", Model = "gpt-4o-mini", ApiKey = "test-key",
+    SystemPrompt = "the client's own default system prompt — expect this to be OVERRIDDEN below",
+});
+
+var result = await client.TranslateAsync(new Translate.Request
+{
+    Messages = new List<object?>
+    {
+        new Dictionary<string, object?> { ["role"] = "user", ["content"] = "reply briefly" },
+    },
+    System = "You always answer in exactly three words.", // overrides Options.SystemPrompt for this ONE call
+    ToolChoice = "none",
+    MaxTokens = 64,
+});
+
+if (result.Text != "terse, as instructed") throw new Exception(result.Text);
+if (result.Model != "gpt-4o-mini") throw new Exception(result.Model);
+if (!receivedBody.Contains("You always answer in exactly three words.")) throw new Exception("request.System must win");
+if (receivedBody.Contains("the client's own default")) throw new Exception("the client-level SystemPrompt must be overridden, not merged");
+if (!receivedBody.Contains("\"max_tokens\":64")) throw new Exception(receivedBody);
+
+Console.WriteLine($"ok: {result.Text} (model={result.Model})");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
+
+<Aside type="caution">
+`Hooks.BeforeLLM`/`AfterLLM` fire exactly once around a `TranslateAsync` call — but **tool hooks
+never fire**, because no tool ever runs here. If your `Hooks.BeforeTool`/`AfterTool` do anything
+load-bearing (auditing, veto), remember they are silently absent on this path.
+</Aside>
+
+## Fields (`Translate.Request`)
+
+| Field | Type | What it is |
+|---|---|---|
+| `Messages` | `List<object?>` | OpenAI `messages`, verbatim — including assistant `tool_calls` and `tool`-role results. |
+| `Tools` | `List<object?>?` | OpenAI `tools`, verbatim. Declared, never executed. |
+| `Toolkit` | `Toolkit?` | An ordinary toolkit, declared via the §5 adapters. Composes with `Tools` — toolkit declarations come first. |
+| `ToolChoice` | `object?` | OpenAI `tool_choice`, verbatim. `null` omits it. |
+| `System` | `string?` | Overrides the system prompt for this call only. `null` uses any `system` message already in `Messages`, or `Options.SystemPrompt`. |
+| `MaxTokens` | `int` | Overrides the per-provider default. `0` uses the default. |
 
 ## The same call in the other five ports
 
@@ -67,4 +353,6 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Translate.OpenAIMessagesToAnthropic`](/api/csharp/translate/inbound/) — Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong.
+- [`Translate.OpenAIMessagesToAnthropic`](/api/csharp/translate/inbound/) — The inbound conversion `TranslateAsync` uses internally for an Anthropic-style upstream.
+- [`LlmClient.RunAsync`](/api/csharp/client/run/) — The agent loop this bypasses: use it when toolnexus should own the conversation and execute tools itself.
+- [`suspension/relay`](/api/csharp/suspension/relay/) — The Go-only mechanism for "toolnexus owns the loop, but the host executes every call."

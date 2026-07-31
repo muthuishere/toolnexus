@@ -8,49 +8,139 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#10-suspension--pending--waitfor">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/types.ts">js/src/types.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function pendingOf(result: ToolResult): Request | undefined
 ```
 
-Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+The read side of [`pending`](/api/javascript/suspension/pending/): given any `ToolResult`, return
+the `Request` riding on `metadata.pending` if there is one, `undefined` otherwise. It is a plain
+type guard — `(result.metadata as { pending?: Request } | undefined)?.pending` — with no I/O and
+no dependency on the client loop. This page goes beyond the basic reflection example already on
+[`ToolResult`](/api/javascript/types/tool-result/) to show where `pendingOf` is genuinely useful,
+and one place it is **not**: a durable halt's `RunResult.toolCalls[]` entries.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `pendingOf` whenever you hold a `ToolResult` from *outside* the built-in client loop and
+need to branch on "did this suspend, or did it actually answer" — your own orchestration calling
+`toolkit.execute(...)` directly, a `beforeTool`/`afterTool` hook inspecting a result, a test
+asserting a tool's suspending branch fired. `isError: true` alone cannot tell you this (§10): a
+suspension and an ordinary failure both set it.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Check RunResult.status/.pending instead after a client.run()">
+The client loop already surfaces a suspension for you: `res.status === "pending"` and
+`res.pending` (a `Request`, not a `ToolResult`) are set directly on the `RunResult` — no
+`pendingOf` call needed there. Reach for `pendingOf` when you're working with a raw `ToolResult`
+yourself, not a `RunResult` the loop already unpacked.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The basic check — suspension vs. an ordinary result
 
-{/* TODO:example1 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import { pending, pendingOf } from "toolnexus"
+
+const suspended = pending({ kind: "input", prompt: "Which environment?" })
+const ordinary = { output: "done", isError: false }
+
+assert.ok(pendingOf(suspended))
+assert.equal(pendingOf(suspended)?.kind, "input")
+assert.equal(pendingOf(ordinary), undefined)
+
+console.log("ok:", pendingOf(suspended)?.kind, "|", pendingOf(ordinary))
 ```
 
-### 2. TODO — the realistic case
+### 2. Driving your own orchestration — call `toolkit.execute` directly, branch with `pendingOf`
 
-{/* TODO:example2 */}
-```ts
-// TODO
+This bypasses `createClient` entirely — useful when you're building a custom loop (or, as here,
+just testing a tool's suspending branch) and need the same suspend/resolve pattern the built-in
+loop uses internally.
+
+```ts test
+import assert from "node:assert"
+import { createToolkit, defineTool, pending, pendingOf } from "toolnexus"
+
+const approve = defineTool({
+  name: "approve",
+  description: "Requires a human's yes before proceeding",
+  inputSchema: { type: "object", properties: {} },
+  run: (_args, ctx) => (ctx?.answer ? "approved" : pending({ kind: "approval", prompt: "Approve?" })),
+})
+const tk = await createToolkit({ builtins: false, extraTools: [approve] })
+
+const first = await tk.execute("approve", {})
+const req = pendingOf(first)
+assert.ok(req, "the first call suspends")
+
+// Resolve it yourself and retry with Context.answer — exactly what the client loop does for you.
+const second = await tk.execute("approve", {}, { answer: { id: req!.id, ok: true } })
+assert.equal(pendingOf(second), undefined, "the retry is an ordinary result")
+assert.equal(second.output, "approved")
+
+await tk.close()
+console.log("ok:", req?.kind, "->", second.output)
 ```
 
-### 3. TODO — the full surface
+### 3. The surprise: a durable halt's `toolCalls[]` entry does NOT carry `metadata.pending`
 
-{/* TODO:example3 */}
-```ts
-// TODO
+`RunResult.pending` is the durable Request — read it there. The matching `toolCalls[]` record's
+`metadata` is **not** a copy of it: on the no-`waitFor` halt path the loop replaces the tool's
+result with a fresh `{ output, isError }` before recording it, precisely so a caller does not
+reconstruct request state from two different places. `pendingOf` on that record correctly returns
+`undefined` — it isn't a bug in `pendingOf`, it's a reason to always prefer `RunResult.pending`.
+
+```ts test
+import assert from "node:assert"
+import { createClient, createToolkit, defineTool, pending, pendingOf } from "toolnexus"
+
+const deleteDb = defineTool({
+  name: "delete_database",
+  description: "Destructive — needs approval",
+  inputSchema: { type: "object", properties: {} },
+  run: () => "deleted", // never reached in this example; the hook guards it first
+})
+
+const canned: typeof fetch = async () =>
+  new Response(JSON.stringify({
+    choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "delete_database", arguments: "{}" } }] } }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  }), { status: 200, headers: { "content-type": "application/json" } })
+
+const client = createClient({
+  apiKey: "test-key",
+  baseUrl: "http://stub", style: "openai", model: "m", fetch: canned,
+  hooks: {
+    // A guard-raised suspension (§10): short-circuit with a Pending instead of running the tool.
+    beforeTool: async ({ name }) =>
+      name === "delete_database" ? { result: pending({ kind: "approval", prompt: `Approve destructive call: ${name}?` }) } : undefined,
+  },
+})
+const tk = await createToolkit({ builtins: false, extraTools: [deleteDb] })
+
+const res = await client.run("delete it", { toolkit: tk })
+
+assert.equal(res.status, "pending")
+assert.equal(pendingOf(res.toolCalls[0]), undefined) // NOT here — metadata was replaced on halt
+assert.ok(res.pending) // the real Request is HERE
+assert.equal(res.pending?.prompt, "Approve destructive call: delete_database?")
+
+await tk.close()
+console.log("ok: toolCalls[0] carries no pending; RunResult.pending does:", res.pending?.prompt)
 ```
+
+## Signature
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `result` | `ToolResult` | Any tool result — from `toolkit.execute`, a hook, or a fixture. |
+| returns | `Request \| undefined` | The suspension, if `result.metadata.pending` is set. |
 
 ## The same call in the other five ports
 
@@ -70,4 +160,4 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 - [`pending`](/api/javascript/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
 - [`authRequired`](/api/javascript/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
 - [`waitFor`](/api/javascript/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
-- [`Client.resume`](/api/javascript/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.
+- [`ToolResult`](/api/javascript/types/tool-result/) — The basic `metadata.pending` reflection example lives here.

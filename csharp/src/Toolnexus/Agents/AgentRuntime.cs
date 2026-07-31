@@ -665,8 +665,22 @@ public sealed class AgentRuntime
             var key = $"{agentName}:{prompt}";
             // Reattachment by task key is the ONLY idempotency mechanism — including
             // closed-but-settled children (no completion cache, SPEC §7D durable resume).
+            // Check-then-spawn must be ATOMIC: SPEC §7D lets one turn issue several parallel
+            // task calls, so two calls with the identical key can run this tool concurrently.
+            // Spawn() is synchronous and takes the same `_sync` lock (reentrant on this thread),
+            // so holding `_sync` across the check AND the spawn+TaskKey stamp closes the window
+            // where a second call could observe "no existing child yet" and double-spawn.
             Handle? existing;
-            lock (_sync) existing = parent.ChildList.FirstOrDefault(c => c.TaskKey == key);
+            SpawnResult? spawnResult = null;
+            lock (_sync)
+            {
+                existing = parent.ChildList.FirstOrDefault(c => c.TaskKey == key);
+                if (existing == null)
+                {
+                    spawnResult = Spawn(parent, agentName);
+                    if (spawnResult.Handle != null) spawnResult.Handle.TaskKey = key;
+                }
+            }
             AgentResult r;
             Handle child;
             if (existing != null)
@@ -677,10 +691,8 @@ public sealed class AgentRuntime
             }
             else
             {
-                var spawned = Spawn(parent, agentName);
-                if (spawned.Error != null) return ToolResult.Error(spawned.Error);
-                child = spawned.Handle!;
-                child.TaskKey = key;
+                if (spawnResult!.Error != null) return ToolResult.Error(spawnResult.Error);
+                child = spawnResult.Handle!;
                 var wait = WaitAsync(child); // register BEFORE wake (no completion race)
                 Wake(child, prompt);
                 r = await wait.ConfigureAwait(false);

@@ -63,6 +63,7 @@ var llm = new MockLlm(req =>
 
 var rt = new AgentRuntime(new RuntimeOptions
 {
+    ApiKey = "test-key",
     Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
     Registry = new Dictionary<string, AgentDef>
     {
@@ -147,6 +148,7 @@ var llm = new MockLlm(req =>
 
 var rt = new AgentRuntime(new RuntimeOptions
 {
+    ApiKey = "test-key",
     Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "coordinator-model",
     Registry = new Dictionary<string, AgentDef>
     {
@@ -213,6 +215,7 @@ var llm = new MockLlm(req =>
 
 var rt = new AgentRuntime(new RuntimeOptions
 {
+    ApiKey = "test-key",
     Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
     Registry = new Dictionary<string, AgentDef>
     {

@@ -8,49 +8,155 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#10-suspension--pending--waitfor">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/types.ts">js/src/types.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function pending(request: Omit<Request, "id"> & { id?: string }): ToolResult
+
+interface Request {
+  id: string
+  kind: string          // "authorization" | "approval" | "input" | ... (open vocabulary)
+  prompt: string
+  url?: string
+  data?: Record<string, unknown>
+  expiresAt?: string
+}
 ```
 
-Return a Pending from a tool to park the run until someone answers.
+Builds the suspension shape: a `ToolResult` with `isError: true` and `metadata.pending` set to a
+`Request`. This page covers the mechanics [`ToolResult`](/api/javascript/types/tool-result/) only
+introduces — the id, the loop's retry rule, and how concurrent suspensions in one turn resolve.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Call `pending(...)` from inside a tool's `execute`/`run` whenever the call cannot finish in one
+shot — it needs a human to approve something, type a value, or complete a login somewhere else.
+It is *not* an error path in the exception sense: the run parks, a host resolves the `Request`, and
+the **same tool call retries once** with the resolution attached. Login is just the
+`kind: "authorization"` case ([`authRequired`](/api/javascript/suspension/auth-required/) is sugar
+for exactly that); `pending` is the general primitive underneath it.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Throw or return isError:true directly when nothing external can help">
+`pending` is for "someone or something outside this call must act before I can answer." If the
+failure is just wrong — a bad argument, a 404, a validation error — return an ordinary
+`{ output, isError: true }` (see [`ToolResult`](/api/javascript/types/tool-result/)) so the model
+can retry with different input. Reserve `pending` for the out-of-band case; using it for an
+ordinary error makes a caller wait on a `waitFor` that will never resolve anything.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The shape — `id` generated for you, `output` is the human-readable fallback
 
-{/* TODO:example1 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import { pending } from "toolnexus"
+
+const res = pending({ kind: "input", prompt: "Which environment — staging or prod?" })
+
+assert.equal(res.isError, true) // a parked call did not produce an answer
+assert.ok(res.metadata?.pending, "the Request rides on metadata.pending")
+const req = res.metadata!.pending as any
+assert.equal(req.kind, "input")
+assert.ok(req.id.startsWith("pnd-"), "an id is generated when you don't supply one")
+assert.equal(res.output, req.prompt) // output falls back to prompt (+\n+url when a url is set)
+
+console.log("ok:", req.id, "|", res.output)
 ```
 
-### 2. TODO — the realistic case
+### 2. `waitFor` resolves it — the loop retries the SAME tool call once, with `ctx.answer`
 
-{/* TODO:example2 */}
-```ts
-// TODO
+This runs the real client loop against a stubbed fetch (no network) so the retry-with-answer
+mechanism actually fires.
+
+```ts test
+import assert from "node:assert"
+import { createClient, createToolkit, defineTool, pending } from "toolnexus"
+
+let authed = false
+const getBalance = defineTool({
+  name: "get_balance",
+  description: "Return the account balance. Requires login first.",
+  inputSchema: { type: "object", properties: {} },
+  run: (_args, ctx) => {
+    if (!authed) return pending({ kind: "authorization", prompt: "Log in first", url: "https://example.com/login" })
+    return `balance: $500 (via answer ${ctx?.answer?.id})`
+  },
+})
+
+const canned: typeof fetch = async (_url, init) => {
+  const body = JSON.parse(String((init as any).body))
+  const sawToolResult = body.messages.some((m: any) => m.role === "tool")
+  const message = sawToolResult
+    ? { role: "assistant", content: "Your balance is $500." }
+    : { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "get_balance", arguments: "{}" } }] }
+  return new Response(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } })
+}
+
+const client = createClient({
+  apiKey: "test-key",
+  baseUrl: "http://stub", style: "openai", model: "m", fetch: canned,
+  waitFor: async (request) => { authed = true; return { id: request.id, ok: true } }, // the world changed out-of-band
+})
+
+const tk = await createToolkit({ builtins: false, extraTools: [getBalance] })
+const res = await client.run("what is my balance?", { toolkit: tk })
+
+assert.equal(res.status, "done")
+assert.match(res.toolCalls[0].output, /balance: \$500/) // the RETRY's result, not the pending one
+
+await tk.close()
+console.log("ok:", res.text)
 ```
 
-### 3. TODO — the full surface
+### 3. No `waitFor` → durable halt; two suspending calls in one turn surface only the first
 
-{/* TODO:example3 */}
-```ts
-// TODO
+Absent a `waitFor`, `run()` never hangs: it returns `{ status: "pending", pending }` immediately.
+When **several** tool calls suspend in the same turn, the loop halts on the first in tool-call
+order — the second call's placeholder never enters the transcript (it re-suspends on resume).
+
+```ts test
+import assert from "node:assert"
+import { createClient, createToolkit, defineTool, pending } from "toolnexus"
+
+const a = defineTool({ name: "a", description: "d", inputSchema: { type: "object", properties: {} }, run: () => pending({ kind: "approval", prompt: "approve a" }) })
+const b = defineTool({ name: "b", description: "d", inputSchema: { type: "object", properties: {} }, run: () => pending({ kind: "approval", prompt: "approve b" }) })
+
+const canned: typeof fetch = async () =>
+  new Response(JSON.stringify({
+    choices: [{ message: { content: null, tool_calls: [
+      { id: "c-a", type: "function", function: { name: "a", arguments: "{}" } },
+      { id: "c-b", type: "function", function: { name: "b", arguments: "{}" } },
+    ] } }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  }), { status: 200, headers: { "content-type": "application/json" } })
+
+const client = createClient({ apiKey: "test-key", baseUrl: "http://stub", style: "openai", model: "m", fetch: canned }) // no waitFor
+const tk = await createToolkit({ builtins: false, extraTools: [a, b] })
+
+const res = await client.run("do a and b", { toolkit: tk })
+
+assert.equal(res.status, "pending")
+assert.equal(res.pending?.prompt, "approve a") // deterministic: first in tool-call order
+assert.deepEqual(res.toolCalls.map((c) => c.name), ["a"]) // "b" never entered the transcript
+
+await tk.close()
+console.log("ok:", res.status, "|", res.pending?.prompt)
 ```
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `id` | `string` | The correlation key. Auto-generated (`pnd-<time>-<seq>`) if you don't supply one. |
+| `kind` | `string` | Open vocabulary — `"authorization"`, `"approval"`, `"input"`, or anything you define. |
+| `prompt` | `string` | What is being asked, in human words. Also becomes `ToolResult.output` (plus `\n<url>` when set). |
+| `url` | `string?` | Present when the action happens at a link (the `authorization` convention). |
+| `data` | `object?` | Kind-specific extra payload — choices, a form schema, anything. |
+| `expiresAt` | `string?` | RFC3339; the request is stale after this. |
 
 ## The same call in the other five ports
 
@@ -70,4 +176,4 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 - [`authRequired`](/api/javascript/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
 - [`waitFor`](/api/javascript/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
 - [`pendingOf`](/api/javascript/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
-- [`Client.resume`](/api/javascript/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.
+- [`ToolResult`](/api/javascript/types/tool-result/) — The envelope `pending` builds; read that page for the basic `metadata.pending` shape.
