@@ -8,49 +8,237 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/client.go">golang/client.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+func (c *Client) Run(ctx context.Context, prompt string, tk *Toolkit) (RunResult, error)
 ```
 
-Send a prompt, let the loop call tools until the model stops, get a RunResult.
+One turn of the agent loop, run to completion. `Run` posts `prompt` to the model, and for every
+tool call the model asks for it executes the tool against `tk`, feeds the result back, and repeats
+— up to `MaxTurns` — until the model stops calling tools or the loop is capped. It returns a single
+`RunResult` once the whole thing is over; there is no partial output along the way.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `Run` for request/response work: a CLI command, a backend endpoint, a batch job — any
+place where you want the finished answer and don't need to show text as it streams in, and don't
+need the exchange remembered for a later turn.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Streaming UI or multi-turn memory? Look elsewhere first">
+Want text on screen as the model produces it, or a live handle on tool calls as they happen? Use
+[`Client.Stream`](/api/go/client/stream/) — same loop, events on a channel instead of one final
+value. Want the exchange remembered automatically so the next call continues the same transcript?
+Use [`Conversation`](/api/go/client/conversation/) (in-process) or `Client.Ask` with an id (backed
+by a [`ConversationStore`](/api/go/client/store/)) — both call `RunWithHistory` under the hood, the
+same unexported machinery `Run` uses with no prior history. `Run` itself is stateless: call it twice
+and the model sees two unrelated prompts.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+All three examples point `CreateClient` at a local `httptest.Server` standing in for the LLM
+endpoint — no network call, no real API key. `Run` speaks whatever an OpenAI- or Anthropic-shaped
+`/chat/completions` / `/v1/messages` endpoint speaks; the stub only needs to shape its JSON to match.
 
-{/* TODO:example1 */}
-```go
-// TODO
+### 1. The smallest useful call — a plain text answer
+
+No tools, one round trip: the model answers directly and the loop stops.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Paris"}}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer srv.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "gpt-4o-mini", APIKey: "test-key",
+	})
+
+	res, err := client.Run(context.Background(), "capital of France?", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if res.Text != "Paris" || res.Status != "done" || res.Turns != 1 {
+		log.Fatalf("unexpected: %+v", res)
+	}
+
+	fmt.Println("ok:", res.Text)
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — a tool call in the loop
 
-{/* TODO:example2 */}
-```go
-// TODO
+The model asks for `add`, the loop executes it, feeds the result back, and the model answers on the
+second turn. This is the shape of nearly every real agent call.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 1 {
+			// Turn 1: the model wants to call add(a=2,b=3).
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"add","arguments":"{\"a\":2,\"b\":3}"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":8,"total_tokens":18}}`))
+			return
+		}
+		// Turn 2: the model has the tool result and answers.
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"5"}}],"usage":{"prompt_tokens":12,"completion_tokens":1,"total_tokens":13}}`))
+	}))
+	defer srv.Close()
+
+	add := toolnexus.NativeTool(
+		"add", "add two numbers",
+		toolnexus.JSONSchema{"type": "object", "properties": map[string]any{
+			"a": map[string]any{"type": "number"}, "b": map[string]any{"type": "number"},
+		}},
+		func(_ context.Context, args map[string]any) (string, error) {
+			a, _ := args["a"].(float64)
+			b, _ := args["b"].(float64)
+			return fmt.Sprintf("%v", a+b), nil
+		},
+	)
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: []toolnexus.Tool{add}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "gpt-4o-mini", APIKey: "test-key",
+	})
+
+	res, err := client.Run(context.Background(), "what is 2+3?", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if res.Text != "5" || res.Turns != 2 || res.ToolCallCount != 1 {
+		log.Fatalf("unexpected: %+v", res)
+	}
+	if res.ToolCalls[0].Name != "add" || res.ToolCalls[0].Output != "5" {
+		log.Fatalf("unexpected tool call record: %+v", res.ToolCalls[0])
+	}
+
+	fmt.Println("ok:", res.Text, "in", res.Turns, "turns")
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — options and the whole `RunResult`
 
-{/* TODO:example3 */}
-```go
-// TODO
+`SystemPrompt` is prepended to the toolkit's skills prompt; `MaxTurns` caps the loop and, when hit
+mid-tool-call with no final answer, the run comes back loudly as `"incomplete"` rather than silently
+`"done"`.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	// The model NEVER stops calling the tool — used to exercise the MaxTurns cap.
+	loop := toolnexus.NativeTool(
+		"ping", "ping",
+		toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+		func(_ context.Context, _ map[string]any) (string, error) { return "pong", nil },
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"ping","arguments":"{}"}}]}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`))
+	}))
+	defer srv.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: []toolnexus.Tool{loop}, Builtins: false})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL:      srv.URL,
+		Style:        toolnexus.StyleOpenAI,
+		Model:        "gpt-4o-mini",
+		APIKey:       "test-key",
+		SystemPrompt: "Be terse.",
+		MaxTurns:     2, // hit the cap while the model is still mid tool-call
+	})
+
+	res, err := client.Run(context.Background(), "keep pinging", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if res.Status != "incomplete" || res.Limit != "maxTurns" {
+		log.Fatalf("expected incomplete/maxTurns, got status=%q limit=%q", res.Status, res.Limit)
+	}
+	if res.Turns != 2 || res.ToolCallCount != 2 || res.Model != "gpt-4o-mini" {
+		log.Fatalf("unexpected: %+v", res)
+	}
+	// Partial work is preserved even on a loud stop.
+	if len(res.Messages) == 0 || res.Usage.TotalTokens == 0 {
+		log.Fatalf("expected partial transcript + usage to survive: %+v", res)
+	}
+
+	fmt.Println("ok: stopped at", res.Limit, "after", res.Turns, "turns,", res.ToolCallCount, "tool calls")
+}
 ```
+
+## RunResult fields
+
+| Field | Type | What it holds |
+|---|---|---|
+| `Text` | `string` | The model's final answer text (`""` on an incomplete run with no text yet). |
+| `Messages` | `[]any` | The full transcript — system/user/assistant/tool messages, provider-native shape. |
+| `ToolCalls` | `[]ToolCall` | One record per tool call: `Name`, `Args`, `Output`, `IsError`, `Metadata`. |
+| `ToolCallCount` | `int` | `len(ToolCalls)`. |
+| `Turns` | `int` | Number of LLM round trips this run took. |
+| `Usage` | `Usage` | `PromptTokens` / `CompletionTokens` / `TotalTokens`, summed across every turn. |
+| `Model` | `string` | The model used. |
+| `Status` | `string` | `"done"` normally; `"pending"` iff a tool suspended with no `WaitFor` configured (§10); `"incomplete"` iff `MaxTurns` was hit while the model was still emitting tool calls. |
+| `Limit` | `string` | Set (`"maxTurns"`) only when `Status == "incomplete"`. |
+| `Pending` | `*Request` | Set only when `Status == "pending"`. |
 
 ## The same call in the other five ports
 

@@ -8,49 +8,330 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/LlmClient.cs">LlmClient.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public interface IConversationStore
+{
+    Task<List<object?>?> GetAsync(string id);
+    Task SaveAsync(string id, List<object?> messages);
+}
+
+public sealed class InMemoryConversationStore : IConversationStore { /* default */ }
 ```
 
-Swap in-memory history for your own store so a conversation survives a process restart.
+Where [`AskAsync`](/api/csharp/client/create/) and [`StreamAsync`](/api/csharp/client/stream/)
+remember a conversation by `id`: `GetAsync` loads a transcript before a turn runs (`null` ⇒ no
+prior history — start fresh), `SaveAsync` persists the updated transcript after. `LlmClient.Create`
+uses `InMemoryConversationStore` — a `ConcurrentDictionary` scoped to the client's own
+lifetime — unless `Options.Store` supplies your own. `client.ConversationStore()` returns whichever
+one is active, so a caller can read/write it directly without keeping a shadow copy.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+A conversation needs to outlive the process (a chat that survives a restart or deploy), or several
+processes/instances need to share one thread by `id` (a horizontally-scaled API in front of one
+Postgres/Redis-backed store). Implement `IConversationStore` against whatever you already run —
+a file, a database, Redis — and hand it to `Options.Store`.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for Conversation when the process itself is the lifetime">
+If nothing needs the transcript to survive past this process, or to be looked up by id from
+somewhere else, [`LlmClient.Conversation`](/api/csharp/client/conversation/) is the same
+in-process bookkeeping with zero store to implement. `IConversationStore` earns its keep the moment
+"restart-safe" or "shared across instances" becomes a real requirement.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The default — `InMemoryConversationStore`, read back directly
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+using var stub = new Stub(ctx =>
+{
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":"got it"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}
+    """);
+});
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+await client.AskAsync("remember: I like tea", tk, id: "user-42");
+
+// No custom Store was supplied — the client fell back to InMemoryConversationStore, and
+// ConversationStore() hands back that exact instance.
+var store = client.ConversationStore();
+var saved = await store.GetAsync("user-42");
+
+if (saved == null || saved.Count == 0) throw new Exception("expected a saved transcript for user-42");
+if (await store.GetAsync("nobody") != null) throw new Exception("unknown id must return null");
+
+Console.WriteLine($"ok: {saved.Count} messages saved for user-42");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. A custom store — a plain file per conversation id
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using Toolnexus;
+
+using var stub = new Stub(ctx =>
+{
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":"saved to disk"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}
+    """);
+});
+
+var dir = Path.Combine(Path.GetTempPath(), "toolnexus-docs-store-" + Guid.NewGuid());
+Directory.CreateDirectory(dir);
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+    Store = new FileConversationStore(dir),
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+var result = await client.AskAsync("remember: deadline is Friday", tk, id: "thread-7");
+
+var path = Path.Combine(dir, "thread-7.json");
+if (!File.Exists(path)) throw new Exception($"expected {path} to exist");
+if (result.Text != "saved to disk") throw new Exception(result.Text);
+
+Console.WriteLine($"ok: {Path.GetFileName(path)} written by a custom IConversationStore");
+Directory.Delete(dir, recursive: true);
+
+sealed class FileConversationStore : IConversationStore
+{
+    readonly string _dir;
+    public FileConversationStore(string dir) => _dir = dir;
+
+    string PathFor(string id) => Path.Combine(_dir, $"{id}.json");
+
+    public async Task<List<object?>?> GetAsync(string id)
+    {
+        var path = PathFor(id);
+        if (!File.Exists(path)) return null;
+        var json = await File.ReadAllTextAsync(path);
+        return JsonSerializer.Deserialize<List<object?>>(json);
+    }
+
+    public async Task SaveAsync(string id, List<object?> messages)
+        => await File.WriteAllTextAsync(PathFor(id), JsonSerializer.Serialize(messages));
+}
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. Full surface — two client instances sharing one store, continuing across a "restart"
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+var turn = 0;
+using var stub = new Stub(ctx =>
+{
+    turn++;
+    var text = turn == 1 ? "hi, first client" : "still remember you, second client";
+    var body = """
+    {"id":"cN","choices":[{"message":{"role":"assistant","content":"TEXT"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}
+    """.Replace("cN", "c" + turn).Replace("TEXT", text);
+    Stub.Json(ctx, 200, body);
+});
+
+// One store instance, shared by two DIFFERENT LlmClient instances — simulating a process
+// restart where a new client is built but the store (a real db/file/Redis) persists.
+var shared = new InMemoryConversationStore();
+
+var clientA = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "openai", Model = "gpt-4o-mini", ApiKey = "test-key", Store = shared,
+});
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+var r1 = await clientA.AskAsync("I'm here", tk, id: "durable-thread");
+
+var clientB = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "openai", Model = "gpt-4o-mini", ApiKey = "test-key", Store = shared,
+});
+var r2 = await clientB.AskAsync("are you still there?", tk, id: "durable-thread");
+
+if (r1.Text != "hi, first client") throw new Exception(r1.Text);
+if (r2.Text != "still remember you, second client") throw new Exception(r2.Text);
+
+// clientB picked up clientA's transcript through the shared store, not through in-process state.
+if (clientA.ConversationStore() != clientB.ConversationStore()) throw new Exception("expected the same store instance");
+var transcript = await shared.GetAsync("durable-thread");
+if (transcript == null || transcript.Count < 4) throw new Exception($"expected an accumulated transcript, got {transcript?.Count}");
+
+Console.WriteLine($"ok: {r1.Text} | {r2.Text} | {transcript.Count} messages total");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
+
+<Aside type="caution">
+`IConversationStore` is only consulted by `id`-based calls (`AskAsync`/`StreamAsync` with `id` set).
+`RunAsync` and `LlmClient.Conversation` never touch it — they either take history explicitly or
+keep it in a private field.
+</Aside>
+
+## Members
+
+| Member | Type | What it is |
+|---|---|---|
+| `GetAsync(id)` | `Task<List<object?>?>` | Return the stored transcript for `id`, or `null` if none. |
+| `SaveAsync(id, messages)` | `Task` | Persist the (updated) transcript for `id`. |
 
 ## The same call in the other five ports
 

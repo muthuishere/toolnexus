@@ -8,49 +8,233 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/client.go">golang/client.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+type ConversationStore interface {
+	Get(id string) ([]any, error)
+	Save(id string, messages []any) error
+}
+
+func NewInMemoryConversationStore() *InMemoryConversationStore
 ```
 
-Swap in-memory history for your own store so a conversation survives a process restart.
+`ConversationStore` is where `Client.Ask(ctx, prompt, tk, id)` remembers a transcript by id — two
+methods, `Get` (returns `nil` when `id` has no stored history yet) and `Save`. `CreateClient` uses
+`NewInMemoryConversationStore()` when `ClientOptions.Store` is left `nil`; supply your own
+implementation to persist conversations across process restarts (a file, Redis, a database table).
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+The default (in-memory) store is right for anything that lives inside one process's lifetime — a
+CLI session, a short-lived worker. Reach for a custom `ConversationStore` when the id arrives with a
+request (a web handler keyed by user id, an A2A peer keyed by `contextId`) and the transcript must
+survive the process restarting, or be shared across processes.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="In-process only, and don't need a lookup key? Use Conversation">
+If you already hold a Go value for the session's lifetime and don't need it keyed by an id that
+arrives per request, [`Conversation`](/api/go/client/conversation/) is simpler — it doesn't touch
+`ConversationStore` at all, it just keeps `Messages` as a field. Reach for `ConversationStore` (via
+`Client.Ask`/`AskStream`/`StreamWithID`) specifically for the "keyed by id, needs to persist" case.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+Examples 2 and 3 point `CreateClient` at a local `httptest.Server` — no real network call, no real
+API key. The stub server echoes back the number of messages it received, so a growing count proves
+history round-tripped through the store.
 
-{/* TODO:example1 */}
-```go
-// TODO
+### 1. The smallest useful call — `Get`/`Save` roundtrip
+
+`NewInMemoryConversationStore` works standalone too — it's just the interface.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	store := toolnexus.NewInMemoryConversationStore()
+
+	// Nothing stored yet ⇒ nil, no error.
+	got, err := store.Get("u1")
+	if err != nil || got != nil {
+		log.Fatalf("expected (nil, nil) for an unknown id, got (%v, %v)", got, err)
+	}
+
+	if err := store.Save("u1", []any{map[string]any{"role": "user", "content": "hi"}}); err != nil {
+		log.Fatal(err)
+	}
+	got, err = store.Get("u1")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(got) != 1 {
+		log.Fatalf("expected 1 stored message, got %d", len(got))
+	}
+
+	fmt.Println("ok: roundtripped", len(got), "message(s)")
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — `Client.Ask` remembers by id through the default store
 
-{/* TODO:example2 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []any `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": fmt.Sprint(len(body.Messages))}}},
+		})
+	}))
+	defer srv.Close()
+
+	// No skills/system prompt, so the count is exactly the turns.
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "test-key"})
+	ctx := context.Background()
+
+	first, err := client.Ask(ctx, "first", tk, "c1")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if first.Text != "1" {
+		log.Fatalf("first turn: text = %q, want 1", first.Text)
+	}
+	second, err := client.Ask(ctx, "second", tk, "c1")
+	if err != nil {
+		log.Fatal(err)
+	}
+	// user(first) + assistant(1) + user(second) = 3 messages remembered via the store.
+	if second.Text != "3" {
+		log.Fatalf("same id remembers: text = %q, want 3", second.Text)
+	}
+
+	fmt.Println("ok:", first.Text, "->", second.Text)
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — a custom store, plugged in via `ClientOptions.Store`
 
-{/* TODO:example3 */}
-```go
-// TODO
+Implement the two-method interface yourself for a file/db-backed store; `Client.ConversationStore()`
+returns whatever instance is in effect (the one you supplied, or the default) so callers never need
+a shadow copy.
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+// fileLikeStore stands in for a durable store (file/db/Redis) — same two methods.
+type fileLikeStore struct {
+	mu      sync.Mutex
+	calls   []string
+	backing map[string][]any
+}
+
+func (s *fileLikeStore) Get(id string) ([]any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, "get:"+id)
+	return s.backing[id], nil
+}
+
+func (s *fileLikeStore) Save(id string, messages []any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, "save:"+id)
+	s.backing[id] = messages
+	return nil
+}
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "ack"}}},
+		})
+	}))
+	defer srv.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	store := &fileLikeStore{backing: map[string][]any{}}
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "test-key", Store: store,
+	})
+
+	// The instance you get back is the exact one you supplied.
+	if client.ConversationStore() != toolnexus.ConversationStore(store) {
+		log.Fatal("ConversationStore() should return the supplied instance")
+	}
+
+	if _, err := client.Ask(context.Background(), "hi", tk, "u1"); err != nil {
+		log.Fatal(err)
+	}
+	if len(store.calls) != 2 || store.calls[0] != "get:u1" || store.calls[1] != "save:u1" {
+		log.Fatalf("custom store calls = %v, want [get:u1 save:u1]", store.calls)
+	}
+	if _, ok := store.backing["u1"]; !ok {
+		log.Fatal("custom store did not persist the transcript for u1")
+	}
+
+	fmt.Println("ok: custom store calls =", store.calls)
+}
 ```
+
+## ConversationStore surface
+
+| Member | What it does |
+|---|---|
+| `Get(id string) ([]any, error)` | Returns the stored transcript for `id`, or `nil` (no error) when none exists. |
+| `Save(id string, messages []any) error` | Persists the (updated) transcript for `id`. |
+| `NewInMemoryConversationStore() *InMemoryConversationStore` | The default provider — process-lifetime memory, safe for concurrent use, copies on get/save so callers can't mutate stored slices. |
+| `ClientOptions.Store ConversationStore` | Supply your own implementation here; `nil` ⇒ the in-memory default. |
+| `Client.ConversationStore() ConversationStore` | Returns whichever instance is in effect — the supplied one, or the default the client created. |
 
 ## The same call in the other five ports
 
@@ -70,4 +254,4 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 - [`CreateClient`](/api/go/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
 - [`Client.Run`](/api/go/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
 - [`Client.Stream`](/api/go/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
-- [`Hooks`](/api/go/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+- [`Conversation`](/api/go/client/conversation/) — The in-process alternative when you don't need a lookup key or durability.

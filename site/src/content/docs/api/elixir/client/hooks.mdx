@@ -8,49 +8,267 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/client.ex">elixir/lib/toolnexus/client.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+Toolnexus.Client.create(hooks: %{
+  before_llm: (%{messages: [map()], tools: [map()], model: String.t(), turn: non_neg_integer()} -> map() | nil),
+  after_llm:  (%{response: map(), model: String.t(), turn: non_neg_integer()} -> any()),
+  before_tool: (%{name: String.t(), args: map(), id: String.t(), turn: non_neg_integer()} -> map() | nil),
+  after_tool:  (%{name: String.t(), args: map(), result: Toolnexus.ToolResult.t(), id: String.t(), turn: non_neg_integer()} -> map() | nil)
+})
 ```
 
-Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+There is no separate `Hooks` type — `hooks` is a plain map of up to four 1-arity functions passed
+to [`Toolnexus.Client.create/1`](/api/elixir/client/create/). All four are optional; an absent key
+behaves as a no-op. Every hook must be **1-arity** — a wrong-arity function raises `ArgumentError`
+immediately rather than silently never firing.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **Guardrails** — deny a dangerous tool call in `before_tool` before it ever runs.
+- **Context compaction** — `before_llm` can replace `messages`/`tools` for the rest of the run
+  (trim history, drop tools the model doesn't need this turn).
+- **Cost / audit logging** — `after_llm` sees the raw provider response (it carries `usage`) on
+  every turn; log it, don't rewrite it.
+- **Redaction** — `after_tool` can replace a tool's `result` before it enters the transcript, so
+  a secret a tool returned never reaches the model or your logs.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for on_metric when you only want to observe">
+Hooks can **mutate and short-circuit**; [`:on_metric`](/api/elixir/client/metrics/) is
+observe-only and pre-shaped into per-call events (`llm`, `tool`, `run`). If all you want is
+"log every tool call with its duration", `:on_metric` is less code and cannot accidentally change
+behavior. Reach for hooks when you need to actually change what happens — deny, rewrite, redact.
 </Aside>
+
+Hooks and `:on_metric` reach the client identically whether set directly on `create/1` or
+forwarded by the §7D agent runtime — nothing is renamed, dropped, or reordered on that path.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. `before_tool` — deny a tool call before it runs
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+Returning `%{result: %ToolResult{}}` short-circuits the tool: `execute` never runs, and the
+returned result is what the model sees instead.
+
+```elixir test
+alias Toolnexus.{Client, Context, Tool, ToolResult}
+
+deleted = fn -> raise "should never run" end
+
+delete_all =
+  %Tool{
+    name: "delete_all",
+    description: "Deletes everything",
+    input_schema: %{"type" => "object", "properties" => %{}},
+    source: "native",
+    execute: fn _args, %Context{} -> deleted.() end
+  }
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+
+  resp = %{
+    "choices" => [
+      %{
+        "message" => %{
+          "role" => "assistant",
+          "content" => nil,
+          "tool_calls" => [%{"id" => "c1", "type" => "function", "function" => %{"name" => "delete_all", "arguments" => "{}"}}]
+        }
+      }
+    ],
+    "usage" => %{"prompt_tokens" => 3, "completion_tokens" => 2, "total_tokens" => 5}
+  }
+
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "openai",
+    model: "gpt-x",
+    api_key: "test-key",
+    http_options: [plug: plug],
+    # a second turn would loop forever asking for the same tool, so cap it low —
+    # the assertion below only needs the FIRST turn's denial.
+    max_turns: 1,
+    hooks: %{
+      before_tool: fn %{name: "delete_all"} ->
+        %{result: ToolResult.error("denied: destructive tools are disabled")}
+      end
+    }
+  )
+
+result = Client.run(client, "delete everything", [delete_all])
+
+true = result.status == "incomplete"
+[call] = result.tool_calls
+true = call.name == "delete_all"
+true = call.is_error
+true = call.output == "denied: destructive tools are disabled"
+
+IO.puts("ok: #{call.output}")
 ```
 
-### 2. TODO — the realistic case
+### 2. `before_llm` — context compaction (rewrite messages and tools mid-run)
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+Returning `%{messages: ..., tools: ...}` replaces the working transcript/tool list **for the
+rest of the run** — the canonical use is trimming history or hiding tools the model doesn't need
+this turn. The plug below echoes back what it actually received, so we can see the rewrite land
+on the wire.
+
+```elixir test
+alias Toolnexus.{Client, Context, Tool}
+
+noisy_tool = %Tool{
+  name: "noisy",
+  description: "A tool we want hidden after turn 0",
+  input_schema: %{"type" => "object", "properties" => %{}},
+  source: "native",
+  execute: fn _args, %Context{} -> "noise" end
+}
+
+keep_tool = %Tool{
+  name: "keep",
+  description: "A tool that should still reach the model",
+  input_schema: %{"type" => "object", "properties" => %{}},
+  source: "native",
+  execute: fn _args, %Context{} -> "kept" end
+}
+
+{:ok, seen} = Agent.start_link(fn -> [] end)
+
+plug = fn conn ->
+  {:ok, raw, conn} = Plug.Conn.read_body(conn)
+  body = Jason.decode!(raw)
+  Agent.update(seen, fn s -> s ++ [body] end)
+
+  resp = %{
+    "choices" => [%{"message" => %{"role" => "assistant", "content" => "done"}}],
+    "usage" => %{"prompt_tokens" => 2, "completion_tokens" => 1, "total_tokens" => 3}
+  }
+
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "openai",
+    model: "gpt-x",
+    api_key: "test-key",
+    http_options: [plug: plug],
+    hooks: %{
+      before_llm: fn %{tools: tools} ->
+        # drop "noisy" from what the model is shown this turn
+        %{tools: Enum.reject(tools, &(&1["function"]["name"] == "noisy"))}
+      end
+    }
+  )
+
+_result = Client.run(client, "hi", [noisy_tool, keep_tool])
+
+[sent] = Agent.get(seen, & &1)
+true = length(sent["tools"]) == 1
+true = hd(sent["tools"])["function"]["name"] == "keep"
+
+IO.puts("ok: before_llm dropped 1 of 2 tools before they hit the wire")
 ```
 
-### 3. TODO — the full surface
+### 3. `after_llm` + `after_tool` — audit the raw response, redact a tool's output
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+`after_llm` is observe-only (its return value is ignored) but sees the **raw provider payload**,
+including `usage`. `after_tool` can transform a result before it joins the transcript.
+
+```elixir test
+alias Toolnexus.{Client, Context, Tool, ToolResult}
+
+secret_tool = %Tool{
+  name: "whoami",
+  description: "Returns account info",
+  input_schema: %{"type" => "object", "properties" => %{}},
+  source: "native",
+  execute: fn _args, %Context{} -> ToolResult.ok("api_key=sk-super-secret-value") end
+}
+
+{:ok, audit} = Agent.start_link(fn -> [] end)
+{:ok, calls} = Agent.start_link(fn -> 0 end)
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  n = Agent.get_and_update(calls, fn c -> {c + 1, c + 1} end)
+
+  resp =
+    if n == 1 do
+      %{
+        "choices" => [
+          %{
+            "message" => %{
+              "role" => "assistant",
+              "content" => nil,
+              "tool_calls" => [%{"id" => "c1", "type" => "function", "function" => %{"name" => "whoami", "arguments" => "{}"}}]
+            }
+          }
+        ],
+        "usage" => %{"prompt_tokens" => 4, "completion_tokens" => 2, "total_tokens" => 6}
+      }
+    else
+      %{
+        "choices" => [%{"message" => %{"role" => "assistant", "content" => "ok, redacted"}}],
+        "usage" => %{"prompt_tokens" => 3, "completion_tokens" => 2, "total_tokens" => 5}
+      }
+    end
+
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "openai",
+    model: "gpt-x",
+    api_key: "test-key",
+    http_options: [plug: plug],
+    hooks: %{
+      after_llm: fn %{response: response, turn: turn} ->
+        Agent.update(audit, fn a -> a ++ [{turn, response["usage"]["total_tokens"]}] end)
+      end,
+      after_tool: fn %{name: "whoami", result: %ToolResult{} = r} ->
+        %{result: %ToolResult{r | output: "api_key=[REDACTED]"}}
+      end
+    }
+  )
+
+result = Client.run(client, "who am I?", [secret_tool])
+
+true = result.text == "ok, redacted"
+[call] = result.tool_calls
+true = call.output == "api_key=[REDACTED]"
+
+audited = Agent.get(audit, & &1)
+true = audited == [{0, 6}, {1, 5}]
+
+IO.puts("ok: redacted output=#{call.output}, audited #{length(audited)} llm call(s)")
 ```
+
+<Aside type="caution" title="Wrong arity fails loudly">
+A `hooks.before_llm`/etc that is not a 1-arity function raises `ArgumentError` the first time
+the loop tries to call it — it never silently falls through to "hook absent" behavior.
+</Aside>
+
+## Hook shapes
+
+| Hook | Receives | Return to act on it | Effect |
+|---|---|---|---|
+| `:before_llm` | `%{messages, tools, model, turn}` | `%{messages: ..., tools: ...}` | Replaces the working transcript/tool list for the rest of the run. |
+| `:after_llm` | `%{response, model, turn}` | (ignored) | Observe the raw provider payload — logging, cost, tracing. |
+| `:before_tool` | `%{name, args, id, turn}` | `%{result: %ToolResult{}}` or `%{args: map()}` | Short-circuits the tool (deny/cache/dry-run), or rewrites its arguments. |
+| `:after_tool` | `%{name, args, result, id, turn}` | `%{result: %ToolResult{}}` | Transforms the result (redact, annotate) before it joins the transcript. |
 
 ## The same call in the other five ports
 
@@ -67,7 +285,7 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Toolnexus.Client.create`](/api/elixir/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
-- [`Toolnexus.Client.run`](/api/elixir/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
-- [`Toolnexus.Client.stream`](/api/elixir/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
-- [`Toolnexus.Client conversation`](/api/elixir/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.
+- [`Toolnexus.Client.create`](/api/elixir/client/create/) — the unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Toolnexus.Client.run`](/api/elixir/client/run/) — send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Toolnexus.Client.metrics`](/api/elixir/client/metrics/) — observe-only per-call events, pre-shaped, no mutation.
+- [`Toolnexus.Client.resilience`](/api/elixir/client/resilience/) — `:on_error` — the other host-classification seam, scoped to LLM failures.

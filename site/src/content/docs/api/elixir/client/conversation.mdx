@@ -8,49 +8,166 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/client.ex">elixir/lib/toolnexus/client.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+# low-level, stateless primitive — you carry the transcript
+@spec run(Toolnexus.Client.t(), String.t(), term(), keyword()) :: Toolnexus.Client.RunResult.t()
+def run(client, prompt, toolkit, opts \\ [])   # opts: history: [map()]
+
+# durable, id-keyed primitive — the client carries the transcript via a ConversationStore
+@spec ask(Toolnexus.Client.t(), String.t(), term(), keyword() | String.t()) :: Toolnexus.Client.RunResult.t()
+def ask(client, prompt, toolkit, opts \\ [])   # opts: id: String.t(), on_text: (String.t() -> any())
 ```
 
-Keep a transcript across turns so the model remembers what it already did.
+There is no `Client.conversation/1` object in the Elixir port — the other five ports wrap
+multi-turn memory as a stateful `Conversation` value; here it collapses to two functions you
+already have. `run/4`'s `history:` option is the stateless primitive (you hold the transcript);
+`ask/4` is the stateful, id-keyed one built on top of it and a
+[`ConversationStore`](/api/elixir/client/store/) (you hold only an id).
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **One turn, then you're done with the transcript** — plain `run/4`, no `history:` needed.
+- **You already have `RunResult.messages` from a previous call and want to continue it once** —
+  `run(client, next_prompt, toolkit, history: prior.messages)`. No store, no id.
+- **A conversation keyed by something durable** — a user id, a chat thread id, an A2A
+  `contextId` — `ask(client, prompt, toolkit, id: id)`. The client loads that id's transcript,
+  runs, and saves the update back, every time.
+- **You want text streamed to a callback but still need the final `RunResult`** — `ask/4`'s
+  `:on_text` option; the block-style alternative to consuming `stream/4`'s iterator yourself.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for stream/4 directly when you're building an iterator consumer">
+`ask/4` with `:on_text` internally calls [`stream/4`](/api/elixir/client/stream/) and reduces its
+events down to a callback + a final `RunResult` — convenient when your caller wants "push me
+deltas" rather than "give me something to iterate". If you want the raw event stream (tool-call
+visibility, `pending` events, `usage`), consume `stream/4` yourself instead.
 </Aside>
+
+`ask/4` and `run/4` behave identically for `openai` and `anthropic` style — the store never sees
+provider-specific shape, only whatever `RunResult.messages` already is.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — `ask/4` with no `:id` is just `run/4`
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+Without an id, `ask/4` is a stateless one-shot — the store is never touched.
+
+```elixir test
+alias Toolnexus.Client
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  resp = %{"choices" => [%{"message" => %{"role" => "assistant", "content" => "hello"}}], "usage" => %{"prompt_tokens" => 2, "completion_tokens" => 1, "total_tokens" => 3}}
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client = Client.create(base_url: "http://localhost", style: "openai", model: "gpt-x", api_key: "test-key", http_options: [plug: plug])
+
+via_ask = Client.ask(client, "hi", [])
+via_run = Client.run(client, "hi", [])
+
+true = via_ask.text == via_run.text
+true = via_ask.text == "hello"
+
+# Nothing was saved — no id was given.
+store = Client.conversation_store(client)
+true = Toolnexus.Client.InMemoryConversationStore.get(store, "hi") == nil
+
+IO.puts("ok: ask/4 with no :id == run/4 (#{via_ask.text})")
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — `ask/4` with `:id`, the durable path
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+The second `ask/4` for the same id continues the conversation: its request carries turn one's
+messages plus the new prompt, with no `history:` passed by hand.
+
+```elixir test
+alias Toolnexus.Client
+
+{:ok, bodies} = Agent.start_link(fn -> [] end)
+{:ok, calls} = Agent.start_link(fn -> 0 end)
+
+plug = fn conn ->
+  {:ok, raw, conn} = Plug.Conn.read_body(conn)
+  body = Jason.decode!(raw)
+  Agent.update(bodies, fn b -> b ++ [body] end)
+  n = Agent.get_and_update(calls, fn c -> {c + 1, c + 1} end)
+
+  text = if n == 1, do: "42, got it", else: "you said 42"
+  resp = %{"choices" => [%{"message" => %{"role" => "assistant", "content" => text}}], "usage" => %{"prompt_tokens" => 3, "completion_tokens" => 2, "total_tokens" => 5}}
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client = Client.create(base_url: "http://localhost", style: "openai", model: "gpt-x", api_key: "test-key", http_options: [plug: plug])
+
+first = Client.ask(client, "remember 42", [], id: "thread-1")
+true = first.text == "42, got it"
+
+second = Client.ask(client, "what did I say?", [], "thread-1")
+true = second.text == "you said 42"
+
+[_first_body, second_body] = Agent.get(bodies, & &1)
+true = length(second_body["messages"]) == 3
+true = List.last(second_body["messages"]) == %{"role" => "user", "content" => "what did I say?"}
+
+IO.puts("ok: turn 2 saw #{length(second_body["messages"])} messages from turn 1's transcript")
 ```
 
-### 3. TODO — the full surface
+<Aside type="note" title="A bare string id works too">
+`ask(client, prompt, toolkit, "thread-1")` is shorthand for `id: "thread-1"` — both forms above
+are used deliberately to show they're equivalent.
+</Aside>
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+### 3. The full surface — `:on_text` streams deltas but still returns a `RunResult`
+
+`on_text` makes `ask/4` internally stream, forwarding each text delta to your callback, while the
+return value stays the ordinary final `RunResult` — the return type never changes based on
+whether you streamed.
+
+```elixir test
+alias Toolnexus.Client
+
+sse = """
+data: {"choices":[{"delta":{"content":"The "}}]}
+
+data: {"choices":[{"delta":{"content":"answer is 9."}}]}
+
+data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":4,"completion_tokens":3,"total_tokens":7}}
+
+data: [DONE]
+
+"""
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  conn |> Plug.Conn.put_resp_content_type("text/event-stream") |> Plug.Conn.send_resp(200, sse)
+end
+
+client = Client.create(base_url: "http://localhost", style: "openai", model: "gpt-x", api_key: "test-key", http_options: [plug: plug])
+
+{:ok, deltas} = Agent.start_link(fn -> [] end)
+on_text = fn delta -> Agent.update(deltas, fn d -> d ++ [delta] end) end
+
+result = Client.ask(client, "what is 4+5?", [], on_text: on_text)
+
+true = Agent.get(deltas, & &1) == ["The ", "answer is 9."]
+true = result.text == "The answer is 9."
+true = result.status == "done"
+
+IO.puts("ok: streamed #{length(Agent.get(deltas, & &1))} delta(s), returned final text #{inspect(result.text)}")
 ```
+
+## Options
+
+| Where | Option | What it does |
+|---|---|---|
+| `run/4` | `:history` | A prior `RunResult.messages` to continue. Stateless — you carry it. |
+| `ask/4` | `:id` | Loads that id's transcript from the client's store, runs, saves the update back. Omit ⇒ stateless, identical to `run/4`. |
+| `ask/4` | `:on_text` | `(delta :: String.t() -> any())`, invoked per text delta while `ask/4` streams internally. Omit ⇒ non-streaming. Return value is still a `RunResult`. |
 
 ## The same call in the other five ports
 
@@ -62,12 +179,15 @@ _TODO: name the alternative and when to prefer it._
 | Java | `LlmClient.Conversation` | [→](/api/java/client/conversation/) |
 | C# | `LlmClient.Conversation` | [→](/api/csharp/client/conversation/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
+Behavior is identical across ports by contract — same `examples/` fixtures, same output. Where
+the other ports expose a stateful `Conversation` value wrapping `send`/`messages`/`reset`, Elixir
+exposes the same semantics as `run/4` (`history:`) + `ask/4` (`id:`) — no wrapper object, same
+underlying loop and store.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Toolnexus.Client.create`](/api/elixir/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
-- [`Toolnexus.Client.run`](/api/elixir/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
-- [`Toolnexus.Client.stream`](/api/elixir/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
-- [`Toolnexus.Client.create`](/api/elixir/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+- [`Toolnexus.Client.run`](/api/elixir/client/run/) — the stateless loop `ask/4` is built on.
+- [`Toolnexus.Client.stream`](/api/elixir/client/stream/) — the iterator `ask/4`'s `:on_text` consumes internally.
+- [`Toolnexus.Client.InMemoryConversationStore`](/api/elixir/client/store/) — the default store, and how to swap in your own.
+- [`Toolnexus.Client.create`](/api/elixir/client/create/) — `:store` is set here.

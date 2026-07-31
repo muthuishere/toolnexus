@@ -8,49 +8,225 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/LlmClient.java">LlmClient.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public RunResult run(String prompt, Toolkit toolkit)
+public RunResult run(String prompt, Toolkit toolkit, List<Object> history)
+public RunResult run(String prompt, Toolkit toolkit, List<Object> history, CancelToken cancel)
 ```
 
-Send a prompt, let the loop call tools until the model stops, get a RunResult.
+Sends one prompt through the whole agent loop: build the request, call the model, execute any
+tool calls it asks for (in parallel, per turn), feed the results back, and repeat — until the
+model stops calling tools or `maxTurns` is hit. Returns a single `RunResult`: final text, every
+tool call made, aggregated token usage, and a `status` (`"done"` / `"pending"` / `"incomplete"`).
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+The default entry point. Reach for `run` whenever you want the finished answer and don't need
+incremental events while the loop is working — a backend endpoint, a batch job, a CLI command
+that just needs the result.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for stream() when the caller is watching live">
+`run` blocks until the whole loop finishes, then hands back one `RunResult`. If a human or a UI
+is watching the turn happen — text appearing token by token, "calling tool X" — use
+[`LlmClient.stream`](/api/java/client/stream/) instead: same loop, same final `RunResult`,
+plus incremental events as they occur. Don't reach for `stream` just to get the final answer —
+`run` is the simpler, still-correct way to do that.
 </Aside>
+
+The 3-arg overload accepts an explicit `history` transcript to continue a prior conversation —
+what [`LlmClient.Conversation`](/api/java/client/conversation/) does for you under the hood. The
+4-arg overload adds a `CancelToken` for cooperative external cancellation — see
+[`LlmClient.ErrorInfo`](/api/java/client/resilience/) for the full resilience story (retries,
+deadlines, cancellation).
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — one prompt, no tools
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        // A hermetic stub standing in for an OpenAI-shaped endpoint — no network, no real key.
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            byte[] body = ("{\"choices\":[{\"message\":{\"content\":\"Chennai is warm today.\"}}],"
+                    + "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":6,\"total_tokens\":16}}")
+                    .getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, body.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(body); }
+        });
+        server.start();
+        int port = server.getAddress().getPort();
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + port)
+                    .style("openai")
+                    .model("test-model")
+                    .apiKey("test-key"));
+
+            LlmClient.RunResult res = client.run("What's the weather in Chennai?", tk);
+
+            if (!"done".equals(res.status)) throw new AssertionError(res.status);
+            if (!res.text.equals("Chennai is warm today.")) throw new AssertionError(res.text);
+            if (res.turns != 1) throw new AssertionError(res.turns);
+            if (res.usage.totalTokens != 16) throw new AssertionError(res.usage.totalTokens);
+
+            System.out.println("ok: " + res.text);
+        } finally {
+            server.stop(0);
+        }
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — a tool call in the loop
 
-{/* TODO:example2 */}
-```java
-// TODO
+The model asks for a tool, the loop runs it and feeds the result back, then a second round trip
+produces the final answer. `RunResult.toolCalls` records exactly what happened.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        AtomicInteger hits = new AtomicInteger(0);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            int n = hits.incrementAndGet();
+            String body = n == 1
+                    ? "{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\","
+                      + "\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Chennai\\\"}\"}}]},"
+                      + "\"finish_reason\":\"tool_calls\"}]}"
+                    : "{\"choices\":[{\"message\":{\"content\":\"It is sunny in Chennai.\"}}]}";
+            byte[] b = body.getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        int port = server.getAddress().getPort();
+
+        Tool weather = NativeTool.of(
+                "get_weather", "Current weather for a city",
+                Map.of("type", "object", "properties", Map.of("city", Map.of("type", "string")),
+                       "required", java.util.List.of("city")),
+                (Map<String, Object> a) -> "sunny in " + a.get("city"));
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().extraTools(weather))) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + port)
+                    .style("openai")
+                    .model("test-model")
+                    .apiKey("test-key"));
+
+            LlmClient.RunResult res = client.run("What's the weather in Chennai?", tk);
+
+            if (res.toolCallCount != 1) throw new AssertionError(res.toolCallCount);
+            LlmClient.ToolCall call = res.toolCalls.get(0);
+            if (!call.name.equals("get_weather")) throw new AssertionError(call.name);
+            if (!call.output.equals("sunny in Chennai")) throw new AssertionError(call.output);
+            if (res.turns != 2) throw new AssertionError(res.turns);
+            if (!res.text.equals("It is sunny in Chennai.")) throw new AssertionError(res.text);
+
+            System.out.println("ok: " + call.name + " -> " + call.output + " -> " + res.text);
+        } finally {
+            server.stop(0);
+        }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — continuing a transcript, and a `CancelToken`
 
-{/* TODO:example3 */}
-```java
-// TODO
+The 3-arg overload continues an explicit `history` (the same mechanism `Conversation`/`ask(id)`
+build on); the 4-arg overload also accepts a `CancelToken` — `null` behaves exactly like the
+plain overload.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        AtomicInteger hits = new AtomicInteger(0);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            int n = hits.incrementAndGet();
+            String text = n == 1 ? "First answer." : "Second answer, remembering the first.";
+            byte[] body = ("{\"choices\":[{\"message\":{\"content\":\"" + text + "\"}}],"
+                    + "\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3,\"total_tokens\":8}}")
+                    .getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, body.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(body); }
+        });
+        server.start();
+        int port = server.getAddress().getPort();
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + port)
+                    .style("openai")
+                    .model("test-model")
+                    .apiKey("test-key")
+                    .maxTurns(5));
+
+            LlmClient.RunResult first = client.run("What's 2+2?", tk);
+            if (!first.text.equals("First answer.")) throw new AssertionError(first.text);
+
+            // Continue the SAME transcript explicitly, plus a CancelToken (unused here — null
+            // would behave identically). A real caller would cancel() it from another thread.
+            LlmClient.CancelToken cancel = new LlmClient.CancelToken();
+            LlmClient.RunResult second = client.run("And double it?", tk, first.messages, cancel);
+
+            if (!second.text.equals("Second answer, remembering the first.")) throw new AssertionError(second.text);
+            if (second.messages.size() <= first.messages.size()) throw new AssertionError("history should grow");
+            if (!"test-model".equals(second.model)) throw new AssertionError(second.model);
+            if (hits.get() != 2) throw new AssertionError(hits.get());
+
+            System.out.println("ok: " + first.text + " | " + second.text);
+        } finally {
+            server.stop(0);
+        }
+    }
+}
 ```
+
+## Fields and overloads
+
+| Member | Type | What it is |
+|---|---|---|
+| `run(prompt, toolkit)` | `RunResult` | Stateless: one prompt, no prior history. |
+| `run(prompt, toolkit, history)` | `RunResult` | Continue a transcript — `history` non-empty means the system prompt is NOT re-added. |
+| `run(prompt, toolkit, history, cancel)` | `RunResult` | Also accepts a `CancelToken` for external cooperative cancellation. `null` cancel ⇒ identical to the 3-arg overload. |
+| `RunResult.status` | `String` | `"done"` normally; `"pending"` iff a tool suspended with no `waitFor` configured (§10); `"incomplete"` iff `maxTurns` was hit while the model still wanted to call tools. |
+| `RunResult.toolCalls` / `toolCallCount` | `List<ToolCall>` / `int` | Every tool call made, with output, error flag, and metadata. |
+| `RunResult.turns` | `int` | Number of LLM round trips. |
+| `RunResult.usage` | `Usage` | Aggregated token counts across every turn. |
+| `RunResult.pending` | `Request` | Non-null iff `status == "pending"` — the unresolved suspension to resume later. |
 
 ## The same call in the other five ports
 

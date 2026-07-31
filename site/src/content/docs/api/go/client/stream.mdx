@@ -8,49 +8,285 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/client.go">golang/client.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+func (c *Client) Stream(ctx context.Context, prompt string, tk *Toolkit) (<-chan StreamEvent, error)
 ```
 
-The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+The same agent loop as [`Client.Run`](/api/go/client/run/), but observed live: a goroutine drives the
+loop against the LLM's streaming endpoint and pushes a `StreamEvent` onto the returned channel for
+every text delta, tool call, tool result, and usage update, closing the channel with a terminal
+`"done"` (carrying the full `RunResult`) or `"error"` event.
+
+<Aside type="note" title="Errors are a channel event, not a second return">
+`Stream` itself only errors on setup (e.g. a `ConversationStore.Get` failure when streaming with an
+id). Once the channel is open, any failure mid-run — including context cancellation or a timeout —
+arrives as a `StreamEvent{Type: "error", Err: …}` and the channel closes right after. Always range
+over the channel to completion; don't just check the initial `error` return.
+</Aside>
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `Stream` when you're driving a UI or terminal that should show the model's answer as it's
+produced, or when a caller wants a live hook on tool calls (a progress spinner, a "calling
+`search`…" line) rather than waiting for the whole run to finish.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Don't need live output? Run is simpler">
+[`Client.Run`](/api/go/client/run/) is the same loop with one blocking call and one return value —
+reach for it whenever you just want the finished answer. Reach for `Stream` only when something
+downstream actually consumes events as they arrive; if you'd just drain the channel into a string
+anyway, `Run` does that for you with less code. `Client.Ask` also has a streaming variant —
+`AskStream(ctx, prompt, tk, id, onText)` — for the common case of "stream text, but still return one
+`RunResult` and remember the conversation."
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+Each example serves canned Server-Sent Events from a local `httptest.Server` — no real network call,
+no real API key. `StreamEvent.Type` is one of `"text"`, `"tool_call"`, `"tool_result"`, `"usage"`,
+`"pending"`, `"done"`, `"error"`; only the fields relevant to that `Type` are populated.
 
-{/* TODO:example1 */}
-```go
-// TODO
+### 1. The smallest useful call — text deltas only
+
+No tool calls: the SSE stream is a run of `content` deltas terminated by `[DONE]`.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		write := func(s string) { _, _ = w.Write([]byte(s)); fl.Flush() }
+		write(`data: {"choices":[{"delta":{"content":"Bon"}}]}` + "\n\n")
+		write(`data: {"choices":[{"delta":{"content":"jour"}}]}` + "\n\n")
+		write(`data: {"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}` + "\n\n")
+		write("data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "gpt-4o-mini", APIKey: "test-key",
+	})
+
+	ch, err := client.Stream(context.Background(), "say hi in French", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var text strings.Builder
+	for ev := range ch {
+		switch ev.Type {
+		case "text":
+			text.WriteString(ev.Delta)
+		case "error":
+			log.Fatalf("stream error: %v", ev.Err)
+		}
+	}
+	if text.String() != "Bonjour" {
+		log.Fatalf("assembled text = %q, want Bonjour", text.String())
+	}
+
+	fmt.Println("ok:", text.String())
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — a streamed tool call, then a streamed answer
 
-{/* TODO:example2 */}
-```go
-// TODO
+OpenAI-style streaming assembles a tool call's `name`/`arguments` across multiple deltas (keyed by
+`index`) before the loop can execute it. Turn 2 then streams the final text.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync/atomic"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	echo := toolnexus.NativeTool(
+		"echo", "echo n",
+		toolnexus.JSONSchema{"type": "object", "properties": map[string]any{"n": map[string]any{"type": "number"}}},
+		func(_ context.Context, args map[string]any) (string, error) {
+			return strconv.FormatFloat(args["n"].(float64), 'f', -1, 64), nil
+		},
+	)
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: []toolnexus.Tool{echo}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	var turn int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		write := func(s string) { _, _ = w.Write([]byte(s)); fl.Flush() }
+		if atomic.AddInt32(&turn, 1) == 1 {
+			// Tool-call args arrive split across two chunks — the client assembles them.
+			write(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c0","function":{"name":"echo","arguments":"{\"n\":"}}]}}]}` + "\n\n")
+			write(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"7}"}}]}}]}` + "\n\n")
+			write("data: [DONE]\n\n")
+			return
+		}
+		write(`data: {"choices":[{"delta":{"content":"seven"}}]}` + "\n\n")
+		write("data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "gpt-4o-mini", APIKey: "test-key",
+	})
+
+	ch, err := client.Stream(context.Background(), "echo 7", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var text strings.Builder
+	var sawCall, sawResult bool
+	for ev := range ch {
+		switch ev.Type {
+		case "text":
+			text.WriteString(ev.Delta)
+		case "tool_call":
+			sawCall = true
+			if ev.Name != "echo" || ev.Args["n"].(float64) != 7 {
+				log.Fatalf("unexpected tool_call event: %+v", ev)
+			}
+		case "tool_result":
+			sawResult = true
+			if ev.Output != "7" {
+				log.Fatalf("unexpected tool_result event: %+v", ev)
+			}
+		case "error":
+			log.Fatalf("stream error: %v", ev.Err)
+		}
+	}
+	if !sawCall || !sawResult || text.String() != "seven" {
+		log.Fatalf("sawCall=%v sawResult=%v text=%q", sawCall, sawResult, text.String())
+	}
+
+	fmt.Println("ok:", text.String())
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — every event type, Anthropic style
 
-{/* TODO:example3 */}
-```go
-// TODO
+Same interface, a different wire format: Anthropic streams `content_block_start` /
+`content_block_delta` / `message_delta` SSE events. `Stream` normalizes both providers to the same
+`StreamEvent` union, so downstream code never branches on `Style`.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		write := func(s string) { _, _ = w.Write([]byte(s)); fl.Flush() }
+		write(`data: {"type":"message_start","message":{"usage":{"input_tokens":0,"output_tokens":0}}}` + "\n\n")
+		write(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}` + "\n\n")
+		write(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Namaste"}}` + "\n\n")
+		write(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":6,"output_tokens":3}}` + "\n\n")
+	}))
+	defer srv.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleAnthropic, Model: "claude-3-5-haiku-20241022", APIKey: "test-key",
+	})
+
+	ch, err := client.Stream(context.Background(), "say hi in Hindi", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var text string
+	var usageSeen, doneSeen bool
+	var done *toolnexus.RunResult
+	for ev := range ch {
+		switch ev.Type {
+		case "text":
+			text += ev.Delta
+		case "usage":
+			usageSeen = true
+		case "done":
+			doneSeen = true
+			done = ev.Result
+		case "error":
+			log.Fatalf("stream error: %v", ev.Err)
+		}
+	}
+	if !usageSeen || !doneSeen || done == nil {
+		log.Fatalf("usageSeen=%v doneSeen=%v done=%v", usageSeen, doneSeen, done)
+	}
+	if text != "Namaste" || done.Text != "Namaste" || done.Usage.TotalTokens != 9 {
+		log.Fatalf("unexpected result: text=%q done=%+v", text, done)
+	}
+
+	fmt.Println("ok:", done.Text, "usage:", done.Usage.TotalTokens)
+}
 ```
+
+## StreamEvent fields
+
+| Field | Populated on | What it holds |
+|---|---|---|
+| `Type` | always | `"text"` \| `"tool_call"` \| `"tool_result"` \| `"usage"` \| `"pending"` \| `"done"` \| `"error"`. |
+| `Delta` | `"text"` | The incremental assistant text. |
+| `Name`, `ID` | `"tool_call"`, `"tool_result"` | Tool name and provider call id. |
+| `Args` | `"tool_call"` | Parsed tool arguments, assembled from any split chunks. |
+| `Output`, `IsError` | `"tool_result"` | The executed tool's result. |
+| `Usage` | `"usage"`, `"done"` | Aggregated token usage so far. |
+| `Result` | `"done"` | The final `RunResult` — same shape `Client.Run` returns. |
+| `Request` | `"pending"` | A §10 suspension, emitted before `WaitFor` runs so a UI can push the link live. |
+| `Err` | `"error"` | The terminal error; the channel closes right after. |
 
 ## The same call in the other five ports
 

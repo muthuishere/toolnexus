@@ -8,49 +8,351 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/LlmClient.cs">LlmClient.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public Task<RunResult> StreamAsync(string prompt, Toolkit toolkit, Action<StreamEvent> onEvent,
+    string? id = null, CancellationToken cancellationToken = default)
 ```
 
-The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+The same agent loop as [`RunAsync`](/api/csharp/client/run/), but `onEvent` is called live as the
+turn unfolds: a `StreamEvent` per text delta (`StreamKind.Text`), per tool call issued
+(`StreamKind.ToolCall`), per tool result (`StreamKind.ToolResult`), per usage update
+(`StreamKind.Usage`), per §10 suspension (`StreamKind.Pending`), and finally one
+`StreamKind.Done` carrying the same `RunResult` that `StreamAsync` returns. With an `id`, the
+transcript is loaded from the client's `IConversationStore` before streaming and saved back once
+the run terminates — the same statefulness as `AskAsync`, but with live events.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+The caller needs to react as the model works — render tokens into a chat UI, show a spinner while
+a tool runs, or push a §10 `Pending` request to a channel the instant it appears (before `WaitFor`
+even runs). Anywhere the final answer alone isn't enough.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for RunAsync when you only need the final answer">
+`StreamAsync` costs you an `Action<StreamEvent>` callback and SSE parsing on every call; if nothing
+downstream cares about intermediate tokens or tool-call timing, [`RunAsync`](/api/csharp/client/run/)
+returns the identical `RunResult` with less code to write.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — collect text deltas
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+using var stub = new Stub(ctx =>
+{
+    Stub.Sse(ctx, new[]
+    {
+        """{"choices":[{"delta":{"content":"Hel"}}]}""",
+        """{"choices":[{"delta":{"content":"lo!"}}]}""",
+        """{"choices":[{"delta":{}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}""",
+        "[DONE]",
+    });
+});
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+
+var deltas = new List<string>();
+var result = await client.StreamAsync("say hello", tk, ev =>
+{
+    if (ev.Type == LlmClient.StreamKind.Text && ev.Delta != null) deltas.Add(ev.Delta);
+});
+
+if (string.Concat(deltas) != "Hello!") throw new Exception(string.Concat(deltas));
+if (result.Status != "done" || result.Text != "Hello!") throw new Exception(result.Text);
+
+Console.WriteLine($"ok: {string.Concat(deltas)}");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Sse(HttpListenerContext ctx, IEnumerable<string> dataLines)
+    {
+        ctx.Response.StatusCode = 200;
+        ctx.Response.ContentType = "text/event-stream";
+        ctx.Response.SendChunked = true;
+        using var writer = new StreamWriter(ctx.Response.OutputStream, Encoding.UTF8) { AutoFlush = true };
+        foreach (var d in dataLines) writer.Write($"data: {d}\n\n");
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. A streamed tool call, then a streamed final answer
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+var calls = 0;
+using var stub = new Stub(ctx =>
+{
+    calls++;
+    if (calls == 1)
+    {
+        // Turn 1: the tool call arrives as accumulating deltas keyed by index.
+        Stub.Sse(ctx, new[]
+        {
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"add","arguments":""}}]}}]}""",
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"a\":2,\"b\":3}"}}]}}]}""",
+            """{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}""",
+            "[DONE]",
+        });
+    }
+    else
+    {
+        // Turn 2: the model reads the tool result and streams the final text.
+        Stub.Sse(ctx, new[]
+        {
+            """{"choices":[{"delta":{"content":"2 + 3 = 5"}}]}""",
+            """{"choices":[{"delta":{}}],"usage":{"prompt_tokens":15,"completion_tokens":6,"total_tokens":21}}""",
+            "[DONE]",
+        });
+    }
+});
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+});
+
+var add = NativeTool.Of(
+    "add", "Add two integers",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?>
+        {
+            ["a"] = new Dictionary<string, object?> { ["type"] = "integer" },
+            ["b"] = new Dictionary<string, object?> { ["type"] = "integer" },
+        },
+    },
+    (IDictionary<string, object?> a) => (Convert.ToInt32(a["a"]) + Convert.ToInt32(a["b"])).ToString());
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = new List<ITool> { add } });
+
+var toolCallSeen = false;
+var toolResultSeen = false;
+var result = await client.StreamAsync("what is 2 + 3?", tk, ev =>
+{
+    if (ev.Type == LlmClient.StreamKind.ToolCall && ev.Name == "add") toolCallSeen = true;
+    if (ev.Type == LlmClient.StreamKind.ToolResult && ev.Output == "5") toolResultSeen = true;
+});
+
+if (!toolCallSeen) throw new Exception("expected a ToolCall event for 'add'");
+if (!toolResultSeen) throw new Exception("expected a ToolResult event with output '5'");
+if (result.Status != "done" || result.Text != "2 + 3 = 5") throw new Exception(result.Text);
+
+Console.WriteLine($"ok: {result.Text} (toolCall={toolCallSeen}, toolResult={toolResultSeen})");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Sse(HttpListenerContext ctx, IEnumerable<string> dataLines)
+    {
+        ctx.Response.StatusCode = 200;
+        ctx.Response.ContentType = "text/event-stream";
+        ctx.Response.SendChunked = true;
+        using var writer = new StreamWriter(ctx.Response.OutputStream, Encoding.UTF8) { AutoFlush = true };
+        foreach (var d in dataLines) writer.Write($"data: {d}\n\n");
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. Full surface — every StreamEvent kind, plus `id` for stateful streaming
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+using var stub = new Stub(ctx =>
+{
+    Stub.Sse(ctx, new[]
+    {
+        """{"choices":[{"delta":{"content":"noted"}}]}""",
+        """{"choices":[{"delta":{}}],"usage":{"prompt_tokens":8,"completion_tokens":1,"total_tokens":9}}""",
+        "[DONE]",
+    });
+});
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+
+var kinds = new List<LlmClient.StreamKind>();
+LlmClient.RunResult? doneResult = null;
+var result = await client.StreamAsync("remember this", tk, ev =>
+{
+    kinds.Add(ev.Type);
+    if (ev.Type == LlmClient.StreamKind.Done) doneResult = ev.Result;
+}, id: "thread-1");
+
+// Text, Usage and Done all fire; Usage carries the running totals, Done carries the RunResult.
+if (!kinds.Contains(LlmClient.StreamKind.Text)) throw new Exception("missing Text event");
+if (!kinds.Contains(LlmClient.StreamKind.Usage)) throw new Exception("missing Usage event");
+if (!kinds.Contains(LlmClient.StreamKind.Done)) throw new Exception("missing Done event");
+if (doneResult?.Text != "noted") throw new Exception(doneResult?.Text);
+
+// With `id`, the transcript is now durable in the client's ConversationStore — the next
+// StreamAsync/RunAsync call with the same id continues it.
+var store = client.ConversationStore();
+var saved = await store.GetAsync("thread-1");
+if (saved == null || saved.Count == 0) throw new Exception("expected the transcript to be persisted");
+
+Console.WriteLine($"ok: kinds={string.Join(",", kinds.Distinct())} | saved={saved.Count} messages");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Sse(HttpListenerContext ctx, IEnumerable<string> dataLines)
+    {
+        ctx.Response.StatusCode = 200;
+        ctx.Response.ContentType = "text/event-stream";
+        ctx.Response.SendChunked = true;
+        using var writer = new StreamWriter(ctx.Response.OutputStream, Encoding.UTF8) { AutoFlush = true };
+        foreach (var d in dataLines) writer.Write($"data: {d}\n\n");
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
+
+<Aside type="caution">
+An SSE-shaped stub must send `data: {...}` lines terminated by a blank line, and a final
+`data: [DONE]` — `LlmClient` reads the wire raw, line by line, exactly as a real OpenAI/Anthropic
+endpoint sends it. A `StreamKind.Pending` event (§10 suspension) fires **before** `Options.WaitFor`
+runs, so a host can push the link/prompt to a channel immediately rather than after resolution.
+</Aside>
+
+## Parameters
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `prompt` | `string` | The user turn to send. |
+| `toolkit` | `Toolkit` | Tools available to the model this run. |
+| `onEvent` | `Action<StreamEvent>` | Called synchronously for every event: `Text`, `ToolCall`, `ToolResult`, `Usage`, `Pending`, `Done`. |
+| `id` | `string?` | Conversation id. Set ⇒ load history from `IConversationStore` before streaming, save after. `null` ⇒ stateless. |
+| `cancellationToken` | `CancellationToken` | External cancellation — surfaces as `OperationCanceledException`, distinct from a `TimeoutMs` deadline (`RunTimeoutException`). |
 
 ## The same call in the other five ports
 
