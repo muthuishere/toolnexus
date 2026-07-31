@@ -114,6 +114,7 @@ const canned: typeof fetch = async () =>
   }), { status: 200, headers: { "content-type": "application/json" } })
 
 const client = createClient({
+  apiKey: "test-key",
   baseUrl: "http://stub", style: "openai", model: "m", fetch: canned,
   hooks: {
     // A guard-raised suspension (§10): short-circuit with a Pending instead of running the tool.

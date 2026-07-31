@@ -99,6 +99,7 @@ const canned: typeof fetch = async (_url, init) => {
 
 const seenUrls: string[] = []
 const client = createClient({
+  apiKey: "test-key",
   baseUrl: "http://stub", style: "openai", model: "m", fetch: canned,
   waitFor: async (request) => {
     seenUrls.push(request.url!) // in real life: open a browser, or message a channel
@@ -137,7 +138,7 @@ const canned: typeof fetch = async () =>
     usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
   }), { status: 200, headers: { "content-type": "application/json" } })
 
-const client = createClient({ baseUrl: "http://stub", style: "openai", model: "m", fetch: canned }) // no waitFor
+const client = createClient({ apiKey: "test-key", baseUrl: "http://stub", style: "openai", model: "m", fetch: canned }) // no waitFor
 const tk = await createToolkit({ builtins: false, extraTools: [getBalance] })
 
 const res = await client.run("what is my balance?", { toolkit: tk })

@@ -83,7 +83,7 @@ const canned: typeof fetch = async () =>
     usage: { prompt_tokens: 8, completion_tokens: 4, total_tokens: 12 },
   }), { status: 200, headers: { "content-type": "application/json" } })
 
-const client = createClient({ baseUrl: "http://stub", style: "openai", model: "m", fetch: canned })
+const client = createClient({ apiKey: "test-key", baseUrl: "http://stub", style: "openai", model: "m", fetch: canned })
 
 const res = await client.translate({
   messages: [{ role: "user", content: "weather in paris?" }],
@@ -121,7 +121,7 @@ const canned: typeof fetch = async (_url, init) => {
   }), { status: 200, headers: { "content-type": "application/json" } })
 }
 
-const client = createClient({ baseUrl: "http://stub", style: "openai", model: "m", fetch: canned })
+const client = createClient({ apiKey: "test-key", baseUrl: "http://stub", style: "openai", model: "m", fetch: canned })
 const res = await client.translate({ messages: [{ role: "user", content: "weather in paris?" }], toolkit: tk })
 
 assert.equal(executed, false) // NEVER runs — translate only declares
@@ -150,7 +150,7 @@ const canned: typeof fetch = async (_url, init) => {
   }), { status: 200, headers: { "content-type": "application/json" } })
 }
 
-const client = createClient({ baseUrl: "http://stub", style: "anthropic", model: "claude-x", fetch: canned })
+const client = createClient({ apiKey: "test-key", baseUrl: "http://stub", style: "anthropic", model: "claude-x", fetch: canned })
 const res = await client.translate({
   messages: [{ role: "user", content: "weather in tokyo?" }],
   toolkit: tk,

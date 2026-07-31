@@ -66,7 +66,7 @@ File.WriteAllText(Path.Combine(dir, "SOUL.md"), "You are Kavi, a terse research 
 var kavi = Home.FromDir(dir);
 
 var llm = new MockLlm(_ => Task.FromResult(MockLlm.Text("hi from Kavi")));
-var rtOpts = new RuntimeOptions { Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock" };
+var rtOpts = new RuntimeOptions { ApiKey = "test-key", Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock" };
 
 var result = await kavi.RunAsync(rtOpts, "say hi");
 
@@ -129,7 +129,7 @@ var llm = new MockLlm(_ =>
         ? MockLlm.ToolCall("c1", "memory", new { action = "add", text = "the user prefers terse replies" })
         : MockLlm.Text("noted"));
 });
-var rtOpts = new RuntimeOptions { Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock" };
+var rtOpts = new RuntimeOptions { ApiKey = "test-key", Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock" };
 
 var result = await kavi.RunAsync(rtOpts, "remember that I like short answers");
 

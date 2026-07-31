@@ -82,6 +82,7 @@ var chargeCard = NativeTool.Of("charge_card", "charge the card", null,
 
 var rt = new AgentRuntime(new RuntimeOptions
 {
+    ApiKey = "test-key",
     Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
     Registry = new Dictionary<string, AgentDef>
     {
@@ -159,6 +160,7 @@ var chargeCard = NativeTool.Of("charge_card", "charge the card", null,
 
 var rt = new AgentRuntime(new RuntimeOptions
 {
+    ApiKey = "test-key",
     Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
     Registry = new Dictionary<string, AgentDef>
     {
@@ -236,6 +238,7 @@ var chargeCard = NativeTool.Of("charge_card", "charge the card", null,
 
 var rt = new AgentRuntime(new RuntimeOptions
 {
+    ApiKey = "test-key",
     Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
     Registry = new Dictionary<string, AgentDef>
     {

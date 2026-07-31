@@ -147,7 +147,7 @@ const hook = agents.compactor({
   summarize: (older) => `summarized ${older.length} older turns`,
 })
 
-const client = createClient({ baseUrl: "http://stub", style: "openai", model: "m", fetch: canned, hooks: { beforeLLM: hook } })
+const client = createClient({ apiKey: "test-key", baseUrl: "http://stub", style: "openai", model: "m", fetch: canned, hooks: { beforeLLM: hook } })
 const tk = await createToolkit({ builtins: false })
 
 const res = await client.run("what's next?", { toolkit: tk, history })

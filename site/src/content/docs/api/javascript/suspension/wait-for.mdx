@@ -70,6 +70,7 @@ const canned: typeof fetch = async (_url, init) => {
 }
 
 const client = createClient({
+  apiKey: "test-key",
   baseUrl: "http://stub", style: "openai", model: "m", fetch: canned,
   waitFor: async (request) => { authed = true; return { id: request.id, ok: true } },
 })
@@ -107,6 +108,7 @@ const canned: typeof fetch = async (_url, init) => {
 }
 
 const client = createClient({
+  apiKey: "test-key",
   baseUrl: "http://stub", style: "openai", model: "m", fetch: canned,
   waitFor: async (request) => ({ id: request.id, ok: true, data: { env: "staging" } }), // e.g. read from a Slack reply
 })
@@ -149,6 +151,7 @@ const canned: typeof fetch = async () => {
 }
 
 const client = createClient({
+  apiKey: "test-key",
   baseUrl: "http://stub", style: "openai", model: "m", fetch: canned,
   waitFor: async (request) => ({ id: request.id, ok: true }), // always approves — the tool re-suspends anyway
 })

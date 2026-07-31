@@ -65,6 +65,7 @@ using Toolnexus.Agents;
 var llm = new MockLlm(_ => Task.FromResult(MockLlm.Text("done")));
 var rt = new AgentRuntime(new RuntimeOptions
 {
+    ApiKey = "test-key",
     Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
     Registry = new Dictionary<string, AgentDef> { ["worker"] = new() { Name = "worker", Does = "does work" } },
 });
@@ -113,6 +114,7 @@ var llm = new MockLlm(async req =>
 });
 var rt = new AgentRuntime(new RuntimeOptions
 {
+    ApiKey = "test-key",
     Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
     Registry = new Dictionary<string, AgentDef> { ["watcher"] = new() { Name = "watcher", Does = "watches events" } },
 });
@@ -163,6 +165,7 @@ using Toolnexus.Agents;
 var llm = new MockLlm(_ => Task.FromResult(MockLlm.Text("ok")));
 var rt = new AgentRuntime(new RuntimeOptions
 {
+    ApiKey = "test-key",
     Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
     Registry = new Dictionary<string, AgentDef>
     {
