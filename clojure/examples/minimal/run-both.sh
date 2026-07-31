@@ -14,7 +14,7 @@ bad()  { printf '  \033[31m%s\033[0m\n' "$1"; }
 fail=0
 
 bold "== build (cljgo)"
-{ cljgo build && (cd aot-test && cljgo build); } >/dev/null 2>&1 || { bad "cljgo build FAILED"; exit 1; }
+cljgo build >/dev/null 2>&1 || { bad "cljgo build FAILED"; exit 1; }
 
 bold "== app"
 clojure -M -m app.main 2>/dev/null | grep '^{' | tail -1 > "$OUT/jvm.json"
@@ -45,7 +45,7 @@ run_suite() {  # $1 = label, rest = command
   case "$line" in tests=0*) bad "$label: zero tests collected"; fail=1 ;; esac
 }
 run_suite "jvm         " clojure -M -m app.test-main
-run_suite "cljgo/aot   " ./aot-test/minimal-test
+run_suite "cljgo/aot   " ./minimal-test
 run_suite "cljgo/interp" cljgo run src/run_tests.cljc
 
 echo
