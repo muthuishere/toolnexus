@@ -1,6 +1,6 @@
 ---
 title: "ToAnthropic"
-description: "Render the toolkit as Anthropic tool-use schema. — Go."
+description: "Render any tool list as Anthropic tool-use schema. Go."
 sidebar:
   label: "ToAnthropic"
 ---
@@ -8,49 +8,242 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a>
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/adapters.go">golang/adapters.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+func ToAnthropic(tools []Tool) []any
 ```
 
-Render the toolkit as Anthropic tool-use schema.
+Turns a `[]Tool` into the `tools` array an Anthropic Messages request expects. Anthropic's shape is
+the flattest of the three: no `type` wrapper and no `function` nesting — each entry is just a name,
+a description and an `input_schema`.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When you drive the Anthropic Messages API yourself — the official SDK, a raw `POST /v1/messages`,
+Bedrock or Vertex — and need the schema block for the request body. Reach for it whenever you have
+tools from toolnexus and a Claude-shaped endpoint on the other end.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use CreateClient instead if you want the loop too">
+[`CreateClient`](/api/go/client/create/) picks the adapter from its style option and runs the whole
+tool-calling loop — request, tool dispatch, result feedback, next turn. Prefer it *instead* of this
+unless you already own a loop and want toolnexus purely for tool aggregation; `ToAnthropic` is the
+schema half only.
 </Aside>
+
+`tk.ToAnthropic()` on a [`Toolkit`](/api/go/toolkit/create/) is this same function applied to that
+toolkit's tools. Use the method when you hold a toolkit, the free function when you hold a slice.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. One tool to Anthropic schema
 
-{/* TODO:example1 */}
-```go
-// TODO
+Note the key: `input_schema`, snake-cased, at the top level of each entry.
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	weather := toolnexus.NativeTool(
+		"get_weather",
+		"Current weather for a city",
+		toolnexus.JSONSchema{
+			"type":       "object",
+			"properties": map[string]any{"city": map[string]any{"type": "string"}},
+			"required":   []string{"city"},
+		},
+		func(ctx context.Context, args map[string]any) (string, error) {
+			return fmt.Sprintf("sunny in %v", args["city"]), nil
+		},
+	)
+
+	schema := toolnexus.ToAnthropic([]toolnexus.Tool{weather})
+	if len(schema) != 1 {
+		log.Fatalf("expected 1 entry, got %d", len(schema))
+	}
+
+	b, _ := json.Marshal(schema[0])
+	var got map[string]any
+	_ = json.Unmarshal(b, &got)
+
+	// Flat: no {"type":"function","function":{...}} wrapper.
+	if _, wrapped := got["function"]; wrapped {
+		log.Fatalf("anthropic entries are flat, got %v", got)
+	}
+	if got["name"] != "get_weather" || got["description"] != "Current weather for a city" {
+		log.Fatalf("unexpected entry: %v", got)
+	}
+	if _, ok := got["input_schema"].(map[string]any); !ok {
+		log.Fatalf("expected an input_schema object, got %v", got["input_schema"])
+	}
+
+	fmt.Println("ok:", got["name"])
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. Feeding it straight into a Messages request body
 
-{/* TODO:example2 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	mk := func(name, desc string) toolnexus.Tool {
+		return toolnexus.NativeTool(name, desc,
+			toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+			func(ctx context.Context, args map[string]any) (string, error) { return name, nil },
+		)
+	}
+
+	tools := []toolnexus.Tool{mk("search", "Search the docs"), mk("ping", "Health check")}
+
+	body := map[string]any{
+		"model":      "claude-sonnet-4-5",
+		"max_tokens": 1024,
+		"messages":   []any{map[string]any{"role": "user", "content": "search for adapters"}},
+		"tools":      toolnexus.ToAnthropic(tools),
+	}
+
+	// The whole body marshals with encoding/json — no custom marshaller needed.
+	b, err := json.Marshal(body)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var got map[string]any
+	_ = json.Unmarshal(b, &got)
+	entries := got["tools"].([]any)
+	if len(entries) != 2 {
+		log.Fatalf("expected 2 tools, got %d", len(entries))
+	}
+
+	// Order is preserved.
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.(map[string]any)["name"].(string))
+	}
+	if names[0] != "search" || names[1] != "ping" {
+		log.Fatalf("order not preserved: %v", names)
+	}
+
+	fmt.Println("ok:", names)
+}
 ```
 
-### 3. TODO — the full surface
+### 3. Round-tripping a `tool_use` block back to the tool
 
-{/* TODO:example3 */}
-```go
-// TODO
+Schema out, `tool_use` in. Anthropic hands `input` back as a JSON **object**, not a string — the one
+real difference from OpenAI at the call site.
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	weather := toolnexus.NativeTool(
+		"get_weather",
+		"Current weather for a city",
+		toolnexus.JSONSchema{
+			"type":       "object",
+			"properties": map[string]any{"city": map[string]any{"type": "string"}},
+			"required":   []string{"city"},
+		},
+		func(ctx context.Context, args map[string]any) (string, error) {
+			return fmt.Sprintf("sunny in %v", args["city"]), nil
+		},
+	)
+	tools := []toolnexus.Tool{weather}
+
+	// A content block as Claude would return it.
+	raw := `{"type":"tool_use","id":"toolu_01","name":"get_weather","input":{"city":"Chennai"}}`
+	var block struct {
+		ID    string         `json:"id"`
+		Name  string         `json:"name"`
+		Input map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal([]byte(raw), &block); err != nil {
+		log.Fatal(err)
+	}
+
+	var called *toolnexus.Tool
+	for i := range tools {
+		if tools[i].Name == block.Name {
+			called = &tools[i]
+			break
+		}
+	}
+	if called == nil {
+		log.Fatal("the advertised name should resolve back to the tool")
+	}
+
+	res, err := called.Execute(block.Input, nil)
+	if err != nil || res.Output != "sunny in Chennai" || res.IsError {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+
+	// The result goes back as a tool_result block keyed by tool_use_id.
+	reply := map[string]any{
+		"type":        "tool_result",
+		"tool_use_id": block.ID,
+		"content":     res.Output,
+		"is_error":    res.IsError,
+	}
+	if reply["tool_use_id"] != "toolu_01" {
+		log.Fatalf("unexpected reply: %v", reply)
+	}
+
+	// An empty tool list is valid — it just means "no tools this turn".
+	if len(toolnexus.ToAnthropic(nil)) != 0 {
+		log.Fatal("expected an empty slice for no tools")
+	}
+
+	fmt.Println("ok:", block.Name, "->", res.Output)
+}
 ```
+
+<Aside type="caution">
+Anthropic's `input` is already an object. Do **not** `json.Unmarshal` a string the way you would for
+OpenAI's `arguments` — hand `block.Input` to `Execute` directly.
+</Aside>
+
+## Shape
+
+| Path | From | Notes |
+|---|---|---|
+| `[].name` | `Tool.Name` | What the `tool_use` block calls back with. |
+| `[].description` | `Tool.Description` | |
+| `[].input_schema` | `Tool.InputSchema` | Renamed — `inputSchema` → `input_schema`. |
+
+Each entry is the exported struct `AnthropicTool`, so you can type-assert it if you prefer that to
+marshalling. There is no `type` field and no nesting.
 
 ## The same call in the other five ports
 
@@ -62,10 +255,11 @@ _TODO: name the alternative and when to prefer it._
 | C# | `Adapters.ToAnthropic` | [→](/api/csharp/adapters/anthropic/) |
 | Elixir | `Toolnexus.Adapters.to_anthropic` | [→](/api/elixir/adapters/anthropic/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Output is byte-identical across ports for the same tools — that is a §0 conformance obligation.
 
 ## See also
 
-- [`ToOpenAI`](/api/go/adapters/openai/) — Render the toolkit as OpenAI function-calling schema.
-- [`ToGemini`](/api/go/adapters/gemini/) — Render the toolkit as Gemini function-declaration schema.
+- [`ToOpenAI`](/api/go/adapters/openai/) · [`ToGemini`](/api/go/adapters/gemini/)
+- [`CreateToolkit`](/api/go/toolkit/create/) — `tk.ToAnthropic()` is this, applied to the toolkit
+- [`CreateClient`](/api/go/client/create/) — calls the adapter for you
+- [`Tool`](/api/go/types/tool/) — the input type

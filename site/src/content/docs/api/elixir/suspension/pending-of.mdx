@@ -1,8 +1,8 @@
 ---
-title: "Toolnexus.Request.pending_of"
+title: "pendingOf — read a suspension off a result"
 description: "Detect that a RunResult is parked rather than finished, and get the Request that parked it. — Elixir."
 sidebar:
-  label: "Toolnexus.Request.pending_of"
+  label: "suspension / pending-of"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -11,48 +11,18 @@ import { Aside } from '@astrojs/starlight/components';
 <strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
 </p>
 
-```elixir
-{/* TODO:signature */}
-```
+<Aside type="caution" title="Not available in Elixir">
+Elixir has no pending_of/1; match on result.metadata or use ToolResult.pending?/1.
+</Aside>
 
 Detect that a RunResult is parked rather than finished, and get the Request that parked it.
 
-## When to use it
-
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
-
-## Why this and not the alternative
+## What to use instead
 
 {/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
-</Aside>
+_TODO: the closest thing this port does offer, and how to get the same outcome._
 
-## Examples
-
-### 1. TODO — the smallest useful call
-
-{/* TODO:example1 */}
-```elixir
-// TODO
-```
-
-### 2. TODO — the realistic case
-
-{/* TODO:example2 */}
-```elixir
-// TODO
-```
-
-### 3. TODO — the full surface
-
-{/* TODO:example3 */}
-```elixir
-// TODO
-```
-
-## The same call in the other five ports
+## The same capability in the other ports
 
 | Port | Symbol | |
 |---|---|---|
@@ -62,12 +32,7 @@ _TODO: name the alternative and when to prefer it._
 | Java | `Request.pendingOf` | [→](/api/java/suspension/pending-of/) |
 | C# | `Suspension.PendingOf` | [→](/api/csharp/suspension/pending-of/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
-- [`Toolnexus.Request.pending`](/api/elixir/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
-- [`Toolnexus.Request.auth_required`](/api/elixir/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
-- [`Toolnexus.Client wait_for`](/api/elixir/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`Toolnexus.Client.create`](/api/elixir/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
 - [`Toolnexus.Client.resume`](/api/elixir/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.

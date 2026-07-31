@@ -1,6 +1,6 @@
 ---
 title: "NativeTool"
-description: "Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call. — Go."
+description: "Wrap a plain Go function with a name, description and schema — the shortest path from code you have to a tool the LLM can call. Go."
 sidebar:
   label: "NativeTool"
 ---
@@ -8,49 +8,278 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/native.go">golang/native.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+func NativeTool(
+	name, description string,
+	inputSchema JSONSchema,
+	fn func(ctx context.Context, args map[string]any) (string, error),
+) Tool
 ```
 
-Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.
+The shortest path from a function you already have to a tool a model can call. You supply four
+things — a name, a description, a JSON-Schema object, and the function — and get back a
+[`Tool`](/api/go/types/tool/) with `Source: "native"`, ready to register on a toolkit or hand to an
+adapter.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Whenever the capability is *your own code*: a database query, a pricing calculation, an internal RPC,
+a feature flag lookup. This is the workhorse of the library — most tools in a real agent are native
+ones, with MCP and skills filling in around them.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use NativeToolReflect when the args are a struct">
+[`NativeToolReflect`](/api/go/native/reflect/) derives the JSON schema from a Go struct's `json`
+tags and decodes the model's args into that struct before your function runs — no hand-written
+schema, no `map[string]any` type assertions. Prefer it *instead* of `NativeTool` whenever your inputs
+have a fixed shape. Stay with `NativeTool` when the args are genuinely dynamic, when you need a
+schema construct reflection cannot express (enums, `minimum`, `oneOf`), or when the tool takes no
+input at all.
 </Aside>
+
+Hand-building the [`Tool`](/api/go/types/tool/) struct yourself is the other alternative — reach for
+that only when you are generating many tools from data, since `NativeTool` already fills in `Source`
+and the error handling for you.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. A function and four arguments
 
-{/* TODO:example1 */}
-```go
-// TODO
+`fn` returns `(string, error)`. That is the entire contract.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	upper := toolnexus.NativeTool(
+		"shout",
+		"Uppercase the given text",
+		toolnexus.JSONSchema{
+			"type":       "object",
+			"properties": map[string]any{"text": map[string]any{"type": "string"}},
+			"required":   []string{"text"},
+		},
+		func(ctx context.Context, args map[string]any) (string, error) {
+			text, _ := args["text"].(string)
+			return strings.ToUpper(text), nil
+		},
+	)
+
+	if upper.Name != "shout" || upper.Source != toolnexus.SourceNative {
+		log.Fatalf("unexpected tool: %+v", upper)
+	}
+
+	res, err := upper.Execute(map[string]any{"text": "hello"}, nil)
+	if err != nil || res.IsError || res.Output != "HELLO" {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+
+	fmt.Println("ok:", res.Output)
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. Returning an error, and the schema-less case
 
-{/* TODO:example2 */}
-```go
-// TODO
+A returned `error` is **not** a Go failure the caller must handle — it becomes model-facing output
+with `IsError: true`, so the model can read the message and correct itself. And a `nil` schema means
+"takes no arguments".
+
+```go test
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"time"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	lookup := toolnexus.NativeTool(
+		"get_order",
+		"Look up an order by id",
+		toolnexus.JSONSchema{
+			"type":       "object",
+			"properties": map[string]any{"id": map[string]any{"type": "string"}},
+			"required":   []string{"id"},
+		},
+		func(ctx context.Context, args map[string]any) (string, error) {
+			id, _ := args["id"].(string)
+			if id != "A-1" {
+				return "", errors.New("no such order: " + id)
+			}
+			return "order A-1: shipped", nil
+		},
+	)
+
+	ok, err := lookup.Execute(map[string]any{"id": "A-1"}, nil)
+	if err != nil || ok.IsError || ok.Output != "order A-1: shipped" {
+		log.Fatalf("unexpected: %+v %v", ok, err)
+	}
+
+	// The error message becomes the OUTPUT. Execute itself returns a nil error.
+	bad, err := lookup.Execute(map[string]any{"id": "Z-9"}, nil)
+	if err != nil {
+		log.Fatalf("Execute should not surface the error: %v", err)
+	}
+	if !bad.IsError || bad.Output != "no such order: Z-9" {
+		log.Fatalf("unexpected error result: %+v", bad)
+	}
+
+	// nil schema ⇒ {"type":"object","properties":{},"additionalProperties":false}.
+	now := toolnexus.NativeTool("now", "Current server time", nil,
+		func(ctx context.Context, args map[string]any) (string, error) {
+			return time.Now().UTC().Format(time.RFC3339), nil
+		},
+	)
+	if now.InputSchema["type"] != "object" {
+		log.Fatalf("unexpected default schema: %v", now.InputSchema)
+	}
+	if now.InputSchema["additionalProperties"] != false {
+		log.Fatalf("expected additionalProperties:false, got %v", now.InputSchema)
+	}
+	// nil args are normalised to an empty map before fn runs.
+	res, err := now.Execute(nil, nil)
+	if err != nil || res.IsError || res.Output == "" {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+
+	fmt.Println("ok:", ok.Output, "| error path:", bad.Output)
+}
 ```
 
-### 3. TODO — the full surface
+<Aside type="caution" title="Args are untyped JSON">
+Numbers arrive as `float64`, not `int` — they came through `encoding/json`. Type-assert with the
+two-value form (`v, ok := args["n"].(float64)`) and return an error rather than panicking, or use
+[`NativeToolReflect`](/api/go/native/reflect/) and let the decoder do it.
+</Aside>
 
-{/* TODO:example3 */}
-```go
-// TODO
+### 3. Context, cancellation, and registering on a toolkit
+
+The `ctx` your function receives comes from the [`ToolContext`](/api/go/types/context/) the loop
+passes in — honour it for anything slow.
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	slow := toolnexus.NativeTool(
+		"fetch_report",
+		"Generate a report for a region",
+		toolnexus.JSONSchema{
+			"type": "object",
+			"properties": map[string]any{
+				"region": map[string]any{
+					"type":        "string",
+					"enum":        []string{"emea", "apac"},
+					"description": "Which region to report on",
+				},
+			},
+			"required":             []string{"region"},
+			"additionalProperties": false,
+		},
+		func(ctx context.Context, args map[string]any) (string, error) {
+			// Bail out the moment the caller gives up.
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("report for %v", args["region"]), nil
+		},
+	)
+
+	// No ToolContext at all: fn still gets a usable context.Background().
+	res, err := slow.Execute(map[string]any{"region": "apac"}, nil)
+	if err != nil || res.Output != "report for apac" {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+
+	// A cancelled context surfaces as an error RESULT, not a returned error.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	stopped, err := slow.Execute(
+		map[string]any{"region": "emea"},
+		&toolnexus.ToolContext{Ctx: cancelled},
+	)
+	if err != nil || !stopped.IsError || stopped.Output != "context canceled" {
+		log.Fatalf("unexpected cancellation: %+v %v", stopped, err)
+	}
+
+	// Register it on a toolkit alongside every other source. Builtins are ON by
+	// default — turn them off so this toolkit holds only our tool.
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{
+		ExtraTools: []toolnexus.Tool{slow},
+		Builtins:   false,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	if _, ok := tk.Get("fetch_report"); !ok {
+		log.Fatal("expected the tool on the toolkit")
+	}
+	out, err := tk.Execute(context.Background(), "fetch_report", map[string]any{"region": "emea"})
+	if err != nil || out.Output != "report for emea" {
+		log.Fatalf("unexpected: %+v %v", out, err)
+	}
+
+	// The schema you wrote is what the model sees, enum and all.
+	if len(tk.Tools()) != 1 {
+		log.Fatalf("expected only our tool, got %d", len(tk.Tools()))
+	}
+	b, _ := json.Marshal(toolnexus.ToOpenAI(tk.Tools())[0])
+	var got map[string]any
+	_ = json.Unmarshal(b, &got)
+	params := got["function"].(map[string]any)["parameters"].(map[string]any)
+	props := params["properties"].(map[string]any)["region"].(map[string]any)
+	if len(props["enum"].([]any)) != 2 {
+		log.Fatalf("enum did not survive: %v", props)
+	}
+
+	fmt.Println("ok:", res.Output, "| cancelled:", stopped.Output)
+}
 ```
+
+## Arguments
+
+| Argument | Type | What it is |
+|---|---|---|
+| `name` | `string` | The name the model calls. Must match `[a-zA-Z0-9_-]` — run untrusted names through `Sanitize`. |
+| `description` | `string` | What the model reads to decide whether to call it. This is prompt engineering, not a code comment. |
+| `inputSchema` | `JSONSchema` | A JSON-Schema **object** (`map[string]any`). `nil` ⇒ `{"type":"object","properties":{},"additionalProperties":false}`. |
+| `fn` | `func(context.Context, map[string]any) (string, error)` | Your code. `ctx` is never nil; `args` is never nil. |
+
+Return mapping:
+
+| `fn` returns | Resulting `ToolResult` |
+|---|---|
+| `("text", nil)` | `{Output: "text", IsError: false}` |
+| `("", err)` | `{Output: err.Error(), IsError: true}` — and `Execute`'s own error stays `nil` |
 
 ## The same call in the other five ports
 
@@ -60,11 +289,13 @@ _TODO: name the alternative and when to prefer it._
 | Python | `define_tool` | [→](/api/python/native/define-tool/) |
 | Java | `NativeTool.of` | [→](/api/java/native/define-tool/) |
 | C# | `NativeTool.Of` | [→](/api/csharp/native/define-tool/) |
-| Elixir | `Toolnexus.Native.define` | [→](/api/elixir/native/define-tool/) |
+| Elixir | `Toolnexus.Native.define_tool` | [→](/api/elixir/native/define-tool/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Same four inputs, same result mapping, same emitted schema in every port.
 
 ## See also
 
-- [`NativeToolReflect`](/api/go/native/reflect/) — Derive the schema from the function signature or annotation instead of writing it by hand.
+- [`NativeToolReflect`](/api/go/native/reflect/) — derive the schema from a struct instead
+- [`Tool`](/api/go/types/tool/) — what you get back
+- [`ToolContext`](/api/go/types/context/) — where `ctx` comes from
+- [`CreateToolkit`](/api/go/toolkit/create/) — register it via `ExtraTools`

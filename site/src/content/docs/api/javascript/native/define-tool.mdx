@@ -8,49 +8,190 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/native.ts">js/src/native.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function defineTool(opts: {
+  name: string
+  description: string
+  inputSchema?: JSONSchema
+  source?: ToolSource
+  run: (args: Record<string, unknown>, ctx?: ToolContext) => unknown | Promise<unknown>
+}): Tool
 ```
 
-Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.
+Wraps one function as a [`Tool`](/api/javascript/types/tool/). You supply the three things a model
+needs — a name, a description, a schema — and a `run` that does the work; `defineTool` handles the
+rest of the contract: awaiting the result, stringifying it, and turning a thrown exception into
+`isError: true` instead of an escaped crash.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Whenever the capability already lives in your codebase. A database query, a pricing calculation, an
+internal SDK call, a feature flag lookup — anything you would otherwise have to stand an MCP server
+in front of just to let the model reach it. This is the cheapest tool source there is: no process,
+no transport, no config file.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use the @tool decorator instead when you have many methods">
+[`tool`](/api/javascript/native/reflect/) marks a method as a tool inline and
+[`collectTools`](/api/javascript/native/collect/) sweeps them off an object in one call — better
+when a whole class is your tool surface. `defineTool` is better for one-off functions, for tools
+built from data, and anywhere you want the schema visible right next to the call.
 </Aside>
+
+Do not hand-write the `Tool` interface for an ordinary function: `defineTool` sets
+`source: "native"`, defaults the schema, and gives you the error contract for free.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. A function the model can call
 
-{/* TODO:example1 */}
-```ts
-// TODO
+`inputSchema` is optional; omit it for a tool that takes nothing.
+
+```ts test
+import assert from "node:assert"
+import { defineTool } from "toolnexus"
+
+const greet = defineTool({
+  name: "greet",
+  description: "Greet someone by name",
+  inputSchema: {
+    type: "object",
+    properties: { name: { type: "string" } },
+    required: ["name"],
+  },
+  run: async ({ name }) => `Hello, ${name}!`,
+})
+
+// It is an ordinary Tool — nothing registered, nothing subclassed.
+assert.equal(greet.name, "greet")
+assert.equal(greet.source, "native")
+
+const res = await greet.execute({ name: "Muthu" })
+assert.equal(res.output, "Hello, Muthu!")
+assert.equal(res.isError, false)
+
+// No schema? You get an empty object schema, which is valid for every provider.
+const ping = defineTool({ name: "ping", description: "Health check", run: () => "pong" })
+assert.deepEqual(ping.inputSchema, { type: "object", properties: {}, additionalProperties: false })
+assert.equal((await ping.execute({})).output, "pong")
+
+console.log("ok:", res.output)
 ```
 
-### 2. TODO — the realistic case
+### 2. Return values, and failure without throwing
 
-{/* TODO:example2 */}
-```ts
-// TODO
+`run` may return anything. A string is used as-is; anything else is `JSON.stringify`d. A throw is
+caught and reported as a tool error, so the model sees the message and can correct itself rather
+than the loop dying.
+
+```ts test
+import assert from "node:assert"
+import { defineTool } from "toolnexus"
+
+const lookup = defineTool({
+  name: "lookup_order",
+  description: "Fetch an order by id",
+  inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  run: async ({ id }) => {
+    if (id === "missing") throw new Error(`no such order: ${id}`)
+    // An object is serialised for you — no JSON.stringify at the call site.
+    return { id, total: 42.5, status: "shipped" }
+  },
+})
+
+const ok = await lookup.execute({ id: "A-1" })
+assert.equal(ok.isError, false)
+assert.deepEqual(JSON.parse(ok.output), { id: "A-1", total: 42.5, status: "shipped" })
+
+// A throw becomes isError: true with the message as output. The loop survives.
+const bad = await lookup.execute({ id: "missing" })
+assert.equal(bad.isError, true)
+assert.equal(bad.output, "no such order: missing")
+
+// Sync run functions are fine too — the return value is awaited either way.
+const now = defineTool({ name: "two", description: "Return two", run: () => 2 })
+assert.equal((await now.execute({})).output, "2")
+
+console.log("ok:", ok.output, "| error path:", bad.output)
 ```
 
-### 3. TODO — the full surface
+<Aside type="caution">
+`run` receiving `undefined` args is normalised to `{}`, so destructuring never blows up — but
+nothing **validates** args against `inputSchema`. The schema tells the model what to send; it is
+not a runtime guard. Check what you depend on.
+</Aside>
 
-{/* TODO:example3 */}
-```ts
-// TODO
+### 3. The full surface — ToolResult passthrough, ctx, and a custom source
+
+Return a full `ToolResult` when you want to control `isError` yourself or attach `metadata`.
+`ctx` carries the loop's cancellation signal and timeout budget. `source` overrides the default
+label, which is how you keep a generated family of tools distinguishable in `tk.tools()`.
+
+```ts test
+import assert from "node:assert"
+import { defineTool } from "toolnexus"
+
+const search = defineTool({
+  name: "search_index",
+  description: "Search the internal index",
+  inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] },
+  // Any other ToolSource value: "custom", "http", "builtin"...
+  source: "custom",
+  run: async ({ q }, ctx) => {
+    // ctx is optional — always guard it.
+    if (ctx?.signal?.aborted) return { output: "cancelled", isError: true }
+    if (String(q).length < 2) {
+      // A returned object with BOTH output and isError is passed through verbatim.
+      return { output: "query too short", isError: true, metadata: { code: "E_SHORT" } }
+    }
+    return { output: `2 hits for ${q}`, isError: false, metadata: { hits: 2, budgetMs: ctx?.timeout } }
+  },
+})
+
+assert.equal(search.source, "custom")
+
+const hit = await search.execute({ q: "adapters" }, { timeout: 5000 })
+assert.equal(hit.output, "2 hits for adapters")
+assert.equal(hit.metadata?.hits, 2)
+assert.equal(hit.metadata?.budgetMs, 5000)
+
+// Passthrough: your isError and metadata survive untouched.
+const short = await search.execute({ q: "a" })
+assert.equal(short.isError, true)
+assert.equal(short.metadata?.code, "E_SHORT")
+
+// Cancellation via ctx.signal.
+const ac = new AbortController()
+ac.abort()
+const stopped = await search.execute({ q: "adapters" }, { signal: ac.signal })
+assert.equal(stopped.output, "cancelled")
+assert.equal(stopped.isError, true)
+
+console.log("ok:", hit.output, "|", short.output, "|", stopped.output)
 ```
+
+## Options
+
+| Option | Type | Required | What it does |
+|---|---|---|---|
+| `name` | `string` | yes | What the model calls. Must match `[a-zA-Z0-9_-]` — run untrusted names through `sanitize`. |
+| `description` | `string` | yes | What the model reads to decide whether to call it. This is prompt engineering, not a comment. |
+| `inputSchema` | `JSONSchema` | no | Defaults to `{ type: "object", properties: {}, additionalProperties: false }`. |
+| `source` | `ToolSource` | no | Defaults to `"native"`. Any of `mcp`, `skill`, `builtin`, `native`, `http`, `a2a`, `custom`. |
+| `run` | `(args, ctx?) => unknown` | yes | The work. Sync or async. |
+
+How `run`'s return value becomes a `ToolResult`:
+
+| `run` returns | Result |
+|---|---|
+| a `string` | `{ output: <string>, isError: false }` |
+| an object with **both** `output` and `isError` | passed through unchanged, `metadata` included |
+| anything else (object, number, array, `undefined`) | `{ output: JSON.stringify(value), isError: false }` |
+| throws | `{ output: <error message>, isError: true }` |
 
 ## The same call in the other five ports
 
@@ -60,12 +201,18 @@ _TODO: name the alternative and when to prefer it._
 | Go | `NativeTool` | [→](/api/go/native/define-tool/) |
 | Java | `NativeTool.of` | [→](/api/java/native/define-tool/) |
 | C# | `NativeTool.Of` | [→](/api/csharp/native/define-tool/) |
-| Elixir | `Toolnexus.Native.define` | [→](/api/elixir/native/define-tool/) |
+| Elixir | `Toolnexus.Native.define_tool` | [→](/api/elixir/native/define-tool/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+<Aside type="note" title="Same contract, each language's error convention">
+JavaScript catches a thrown `Error`; Go's tool function returns an `error` that is folded into
+`isError`; Java and C# catch exceptions. In all six, a failing native tool reports `isError` — it
+never blows up the loop.
+</Aside>
 
 ## See also
 
-- [`tool`](/api/javascript/native/reflect/) — Derive the schema from the function signature or annotation instead of writing it by hand.
-- [`collectTools`](/api/javascript/native/collect/) — Sweep a module or class and collect every function marked as a tool.
+- [`tool`](/api/javascript/native/reflect/) — the decorator form, for a class of methods
+- [`collectTools`](/api/javascript/native/collect/) — gather decorated functions off an object
+- [`Tool`](/api/javascript/types/tool/) — what this builds
+- [`httpTool`](/api/javascript/http/tool/) — the same idea for a remote endpoint
+- [`createToolkit`](/api/javascript/toolkit/create/) — pass these in via `extraTools`

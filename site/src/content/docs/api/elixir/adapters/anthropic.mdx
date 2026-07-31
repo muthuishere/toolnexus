@@ -1,56 +1,190 @@
 ---
-title: "Toolnexus.Adapters.to_anthropic"
-description: "Render the toolkit as Anthropic tool-use schema. — Elixir."
+title: Toolnexus.Adapters.to_anthropic
+description: Render any tool list as Anthropic tool-use schema. Elixir.
 sidebar:
-  label: "Toolnexus.Adapters.to_anthropic"
+  label: Adapters.to_anthropic
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/adapters.ex">elixir/lib/toolnexus/adapters.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec to_anthropic([Toolnexus.Tool.t()]) :: [map()]
+def to_anthropic(tools)
 ```
 
-Render the toolkit as Anthropic tool-use schema.
+Turns a list of tools into the `tools` array the Anthropic Messages API expects. It is the flattest
+of the three adapters — no wrapper object, and `input_schema` keeps its name.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When you are calling `POST /v1/messages` yourself (Anthropic API, Bedrock, Vertex) and need schema
+for the request body. Reach for it whenever you own the loop and want toolnexus only for tool
+*aggregation* — MCP servers, skills, HTTP endpoints and native functions arriving as one list.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Skip this entirely if you use Toolnexus.Client">
+[`Toolnexus.Client.create`](/api/elixir/client/create/) picks the adapter from its style option and
+runs the whole tool-calling loop — schema, dispatch, result feedback, retries. Reach for
+`to_anthropic` **instead** only when you already have your own loop and want nothing but the schema.
 </Aside>
+
+`Toolnexus.Toolkit.to_anthropic/1` takes a toolkit and delegates straight here with its tools — use
+that when you have a toolkit, and this when you have a bare list.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. One tool to Anthropic schema
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+Keys in the emitted maps are **strings**, not atoms — this is wire data headed for JSON.
+
+```elixir test
+alias Toolnexus.{Adapters, Native}
+
+weather =
+  Native.define_tool(%{
+    name: "get_weather",
+    description: "Current weather for a city",
+    input_schema: %{
+      "type" => "object",
+      "properties" => %{"city" => %{"type" => "string"}},
+      "required" => ["city"]
+    },
+    execute: fn args, _ctx -> "sunny in #{args["city"]}" end
+  })
+
+[entry] = Adapters.to_anthropic([weather])
+
+# Flat — three keys, no "function" wrapper (unlike OpenAI).
+true = entry |> Map.keys() |> Enum.sort() == ["description", "input_schema", "name"]
+true = entry["name"] == "get_weather"
+true = entry["description"] == "Current weather for a city"
+true = entry["input_schema"]["required"] == ["city"]
+
+IO.puts("ok: #{entry["name"]}")
 ```
 
-### 2. TODO — the realistic case
+`input_schema` is passed through **verbatim** — the very map that is on the tool. Anthropic is the
+one provider whose key name already matches toolnexus's own.
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+### 2. Feeding it straight into a Messages request body
+
+The output is plain maps and lists, so `Jason.encode!/1` handles it with no custom encoder.
+
+```elixir test
+alias Toolnexus.{Adapters, Native}
+
+mk = fn name, desc ->
+  Native.define_tool(%{
+    name: name,
+    description: desc,
+    input_schema: %{"type" => "object", "properties" => %{}},
+    execute: fn _args, _ctx -> name end
+  })
+end
+
+tools = [mk.("search", "Search the docs"), mk.("ping", "Health check")]
+
+body = %{
+  "model" => "claude-sonnet-4-5",
+  "max_tokens" => 1024,
+  "messages" => [%{"role" => "user", "content" => "search for adapters"}],
+  "tools" => Adapters.to_anthropic(tools)
+}
+
+# Order is preserved — the adapter is a plain Enum.map/2.
+names = Enum.map(body["tools"], & &1["name"])
+true = names == ["search", "ping"]
+
+json = Jason.encode!(body)
+true = String.contains?(json, ~s("input_schema"))
+
+# The key comes from the environment, never a literal in your source.
+{"x-api-key", key} = {"x-api-key", System.get_env("ANTHROPIC_API_KEY") || "YOUR_KEY_HERE"}
+true = is_binary(key)
+
+IO.puts("ok: #{Enum.join(names, ", ")}")
 ```
 
-### 3. TODO — the full surface
+### 3. Round-tripping a `tool_use` block back to the tool
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+Schema out, tool call in. Unlike OpenAI, Anthropic hands you `input` as a **real map** — there is no
+`Jason.decode!/1` step.
+
+```elixir test
+alias Toolnexus.{Adapters, Context, Native}
+
+weather =
+  Native.define_tool(%{
+    name: "get_weather",
+    description: "Current weather for a city",
+    input_schema: %{
+      "type" => "object",
+      "properties" => %{"city" => %{"type" => "string"}},
+      "required" => ["city"]
+    },
+    execute: fn args, _ctx ->
+      if args["city"] == "", do: raise("city is required"), else: "sunny in #{args["city"]}"
+    end
+  })
+
+tools = [weather]
+1 = length(Adapters.to_anthropic(tools))
+
+# A content block exactly as the model returns it.
+block = %{
+  "type" => "tool_use",
+  "id" => "toolu_01",
+  "name" => "get_weather",
+  "input" => %{"city" => "Chennai"}
+}
+
+called = Enum.find(tools, &(&1.name == block["name"]))
+true = called != nil
+
+res = called.execute.(block["input"], %Context{})
+false = res.is_error
+true = res.output == "sunny in Chennai"
+
+# What you append to the conversation for the next turn.
+result_block = %{
+  "type" => "tool_result",
+  "tool_use_id" => block["id"],
+  "content" => res.output,
+  "is_error" => res.is_error
+}
+
+true = result_block["tool_use_id"] == "toolu_01"
+
+# Failure is data, not an exception — it maps onto tool_result.is_error.
+bad = called.execute.(%{"city" => ""}, %Context{})
+true = bad.is_error
+true = bad.output == "city is required"
+
+# An empty tool list emits an empty array — no wrapper, unlike Gemini.
+[] = Adapters.to_anthropic([])
+
+IO.puts("ok: #{block["name"]} -> #{res.output}")
 ```
+
+<Aside type="caution">
+A failing tool does **not** raise out of `execute`. It returns `is_error: true`, which you copy onto
+the `tool_result` block so the model reads the failure text and can correct itself next turn.
+</Aside>
+
+## Shape
+
+| Path | From | Notes |
+|---|---|---|
+| `[]["name"]` | `Tool.name` | What the model calls back with, in `tool_use.name`. |
+| `[]["description"]` | `Tool.description` | What the model reads to decide whether to call it. |
+| `[]["input_schema"]` | `Tool.input_schema` | Passed through unchanged — same key name, no renaming. |
+
+There is no `"type"` key and no nesting: an Anthropic tool entry has exactly these three keys.
 
 ## The same call in the other five ports
 
@@ -62,10 +196,11 @@ _TODO: name the alternative and when to prefer it._
 | Java | `Adapters.toAnthropic` | [→](/api/java/adapters/anthropic/) |
 | C# | `Adapters.ToAnthropic` | [→](/api/csharp/adapters/anthropic/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Output is byte-identical across ports for the same tools — that is a §0 conformance obligation.
 
 ## See also
 
-- [`Toolnexus.Adapters.to_openai`](/api/elixir/adapters/openai/) — Render the toolkit as OpenAI function-calling schema.
-- [`Toolnexus.Adapters.to_gemini`](/api/elixir/adapters/gemini/) — Render the toolkit as Gemini function-declaration schema.
+- [`Adapters.to_openai`](/api/elixir/adapters/openai/) · [`Adapters.to_gemini`](/api/elixir/adapters/gemini/)
+- [`Toolnexus.create_toolkit`](/api/elixir/toolkit/create/) — `Toolkit.to_anthropic/1` delegates here
+- [`Toolnexus.Client.create`](/api/elixir/client/create/) — calls the adapter for you
+- [`Toolnexus.Tool`](/api/elixir/types/tool/) — where `name`, `description` and `input_schema` come from

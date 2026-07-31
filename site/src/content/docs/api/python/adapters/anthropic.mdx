@@ -1,56 +1,180 @@
 ---
-title: "to_anthropic"
-description: "Render the toolkit as Anthropic tool-use schema. — Python."
+title: to_anthropic
+description: Render any tool list as Anthropic tool-use schema. Python.
 sidebar:
-  label: "to_anthropic"
+  label: to_anthropic
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/adapters.py">python/src/toolnexus/adapters.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+def to_anthropic(tools: list[Tool]) -> list[dict[str, Any]]
 ```
 
-Render the toolkit as Anthropic tool-use schema.
+Turns a `list[Tool]` into the `tools` array the Anthropic Messages API expects. It is the flattest
+of the three adapters: Anthropic's tool schema is almost exactly toolnexus' own `Tool`, so the
+mapping copies three fields and renames nothing.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When you are calling `POST /v1/messages` yourself — with the `anthropic` SDK, over `httpx`, or
+through a Bedrock/Vertex gateway that speaks the Anthropic wire format — and need the value to put
+in the request's `tools` field.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Skip this entirely if you use create_client">
+[`create_client`](/api/python/client/create/) with `style="anthropic"` calls this adapter for you
+*and* runs the whole loop — schema out, `tool_use` blocks in, `tool_result` blocks back. Prefer it
+instead whenever toolnexus is allowed to make the LLM call. Reach for `to_anthropic` only when you
+already own the loop and want toolnexus purely for tool *aggregation*.
 </Aside>
+
+`tk.to_anthropic()` on a [`Toolkit`](/api/python/toolkit/create/) is this same function applied to
+that toolkit's tools — use the method when you have a toolkit, the free function when you have a
+bare list (a filtered subset, a hand-built list, one tool).
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. One tool to Anthropic schema
 
-{/* TODO:example1 */}
-```python
-// TODO
+Note what does **not** happen: no `{"type": "function"}` wrapper, and `input_schema` keeps its name.
+
+```python test
+from toolnexus import to_anthropic, define_tool
+
+
+def get_weather(city: str) -> str:
+    """Current weather for a city."""
+    return f"sunny in {city}"
+
+
+weather = define_tool(get_weather, name="get_weather", description="Current weather for a city")
+
+schema = to_anthropic([weather])
+
+assert len(schema) == 1
+# Three keys, flat — nothing nested under "function".
+assert sorted(schema[0].keys()) == ["description", "input_schema", "name"]
+assert schema[0]["name"] == "get_weather"
+assert schema[0]["description"] == "Current weather for a city"
+# The key stays `input_schema`, exactly as on Tool — unlike OpenAI's `parameters`.
+assert schema[0]["input_schema"]["properties"]["city"] == {"type": "string"}
+
+print("ok:", schema[0]["name"])
 ```
 
-### 2. TODO — the realistic case
+### 2. Feeding it straight into a Messages request body
 
-{/* TODO:example2 */}
-```python
-// TODO
+The output is plain dicts, designed to drop into `tools` verbatim alongside `system` and `messages`.
+
+```python test
+import json
+from toolnexus import to_anthropic, define_tool
+
+
+def search(q: str) -> str:
+    """Search the docs."""
+    return f"results for {q}"
+
+
+def ping() -> str:
+    """Health check."""
+    return "pong"
+
+
+tools = [
+    define_tool(search, name="search", description="Search the docs"),
+    define_tool(ping, name="ping", description="Health check"),
+]
+
+body = {
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "search for adapters"}],
+    "tools": to_anthropic(tools),
+}
+
+# Order is preserved, one entry per tool.
+assert [t["name"] for t in body["tools"]] == ["search", "ping"]
+# A no-argument tool still carries a valid object schema — Anthropic rejects a bare {}.
+assert body["tools"][1]["input_schema"]["type"] == "object"
+assert body["tools"][1]["input_schema"]["properties"] == {}
+# Plain JSON — serializes with no custom encoder.
+assert len(json.dumps(body)) > 0
+
+print("ok:", ", ".join(t["name"] for t in body["tools"]))
 ```
 
-### 3. TODO — the full surface
+### 3. Round-tripping a `tool_use` block back to the tool
 
-{/* TODO:example3 */}
-```python
-// TODO
+Schema out, `tool_use` in. Anthropic sends `input` as a **real object**, so unlike OpenAI there is
+nothing to `json.loads` — hand it to `execute` as-is.
+
+```python test
+import asyncio
+from toolnexus import to_anthropic, define_tool
+
+
+def get_weather(city: str) -> str:
+    """Current weather for a city."""
+    return f"sunny in {city}"
+
+
+tools = [define_tool(get_weather, name="get_weather", description="Current weather for a city")]
+schema = to_anthropic(tools)
+
+# What a model would send back for that schema.
+block = {
+    "type": "tool_use",
+    "id": "toolu_01",
+    "name": "get_weather",
+    "input": {"city": "Chennai"},
+}
+
+
+async def main():
+    called = next(t for t in tools if t.name == block["name"])
+    # `input` is already a dict — no parsing step.
+    res = await called.execute(block["input"])
+    assert res.is_error is False
+
+    # What you send back on the next turn.
+    tool_result = {
+        "type": "tool_result",
+        "tool_use_id": block["id"],
+        "content": res.output,
+        "is_error": res.is_error,
+    }
+    assert tool_result["content"] == "sunny in Chennai"
+    assert tool_result["is_error"] is False
+
+    # An empty tool list is valid — it just means "no tools this turn".
+    assert to_anthropic([]) == []
+
+    print("ok:", schema[0]["name"], "->", tool_result["content"])
+
+
+asyncio.run(main())
 ```
+
+<Aside type="caution">
+The `tool_result` block keys the response by `tool_use_id`, not by tool name. Carry the `id` from
+the `tool_use` block through your loop — the name alone is ambiguous when the model issues two
+parallel calls to the same tool.
+</Aside>
+
+## Shape
+
+| Path | From | Notes |
+|---|---|---|
+| `[]["name"]` | `Tool.name` | What the model calls back with, in `tool_use.name`. |
+| `[]["description"]` | `Tool.description` | What the model reads to decide whether to call it. |
+| `[]["input_schema"]` | `Tool.input_schema` | Copied under the same key — no rename. |
 
 ## The same call in the other five ports
 
@@ -62,10 +186,10 @@ _TODO: name the alternative and when to prefer it._
 | C# | `Adapters.ToAnthropic` | [→](/api/csharp/adapters/anthropic/) |
 | Elixir | `Toolnexus.Adapters.to_anthropic` | [→](/api/elixir/adapters/anthropic/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Output is byte-identical across ports for the same tools — that is a §0 conformance obligation.
 
 ## See also
 
-- [`to_openai`](/api/python/adapters/openai/) — Render the toolkit as OpenAI function-calling schema.
-- [`to_gemini`](/api/python/adapters/gemini/) — Render the toolkit as Gemini function-declaration schema.
+- [`to_openai`](/api/python/adapters/openai/) · [`to_gemini`](/api/python/adapters/gemini/)
+- [`create_toolkit`](/api/python/toolkit/create/) — `tk.to_anthropic()` is this, applied to the toolkit
+- [`create_client`](/api/python/client/create/) — calls the adapter for you

@@ -1,56 +1,170 @@
 ---
-title: "to_gemini"
-description: "Render the toolkit as Gemini function-declaration schema. — Python."
+title: to_gemini
+description: Render any tool list as Gemini function-declaration schema. Python.
 sidebar:
-  label: "to_gemini"
+  label: to_gemini
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/adapters.py">python/src/toolnexus/adapters.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+def to_gemini(tools: list[Tool]) -> list[dict[str, Any]]
 ```
 
-Render the toolkit as Gemini function-declaration schema.
+Turns a `list[Tool]` into the `tools` array a Gemini `generateContent` call expects. Gemini nests
+differently from the other two providers: **one** entry containing a `functionDeclarations` list,
+not one entry per tool. The return type is still a list because that is the shape of Gemini's
+`tools` field.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When you are driving Gemini yourself — `google-genai`, the Vertex AI endpoint, or raw HTTP against
+`v1beta/models/…:generateContent` — and need the `tools` value for the request body.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Skip this entirely if you use create_client">
+[`create_client`](/api/python/client/create/) with `style="gemini"` calls this adapter for you and
+runs the whole tool-calling loop, including the `functionCall` → `functionResponse` round trip that
+Gemini requires. Prefer it instead unless you already own the loop and want toolnexus only for tool
+*aggregation*.
 </Aside>
+
+`tk.to_gemini()` on a [`Toolkit`](/api/python/toolkit/create/) is this same function applied to that
+toolkit's tools — the method when you have a toolkit, the free function when you have a bare list.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. One tool to Gemini schema
 
-{/* TODO:example1 */}
-```python
-// TODO
+The extra layer is the whole story: `[{ "functionDeclarations": [...] }]`.
+
+```python test
+from toolnexus import to_gemini, define_tool
+
+
+def get_weather(city: str) -> str:
+    """Current weather for a city."""
+    return f"sunny in {city}"
+
+
+weather = define_tool(get_weather, name="get_weather", description="Current weather for a city")
+
+schema = to_gemini([weather])
+
+# ONE entry, whatever the number of tools.
+assert len(schema) == 1
+assert list(schema[0].keys()) == ["functionDeclarations"]
+
+decls = schema[0]["functionDeclarations"]
+assert len(decls) == 1
+assert decls[0]["name"] == "get_weather"
+assert decls[0]["description"] == "Current weather for a city"
+# `input_schema` is renamed to `parameters`, as in the OpenAI adapter.
+assert decls[0]["parameters"]["properties"]["city"] == {"type": "string"}
+
+print("ok:", decls[0]["name"])
 ```
 
-### 2. TODO — the realistic case
+### 2. Many tools, still one entry — into a request body
 
-{/* TODO:example2 */}
-```python
-// TODO
+```python test
+import json
+from toolnexus import to_gemini, define_tool
+
+
+def search(q: str) -> str:
+    """Search the docs."""
+    return f"results for {q}"
+
+
+def ping() -> str:
+    """Health check."""
+    return "pong"
+
+
+tools = [
+    define_tool(search, name="search", description="Search the docs"),
+    define_tool(ping, name="ping", description="Health check"),
+]
+
+body = {
+    "contents": [{"role": "user", "parts": [{"text": "search for adapters"}]}],
+    "tools": to_gemini(tools),
+}
+
+# Two tools, still a single `tools` entry — they collapse into functionDeclarations.
+assert len(body["tools"]) == 1
+decls = body["tools"][0]["functionDeclarations"]
+assert [d["name"] for d in decls] == ["search", "ping"]
+# Plain JSON — serializes with no custom encoder.
+assert len(json.dumps(body)) > 0
+
+print("ok:", ", ".join(d["name"] for d in decls))
 ```
 
-### 3. TODO — the full surface
+### 3. Round-tripping a `functionCall` back to the tool
 
-{/* TODO:example3 */}
-```python
-// TODO
+Gemini returns `functionCall.args` as a **real object** (like Anthropic, unlike OpenAI), and expects
+a `functionResponse` part back, keyed by tool **name**.
+
+```python test
+import asyncio
+from toolnexus import to_gemini, define_tool
+
+
+def get_weather(city: str) -> str:
+    """Current weather for a city."""
+    return f"sunny in {city}"
+
+
+tools = [define_tool(get_weather, name="get_weather", description="Current weather for a city")]
+schema = to_gemini(tools)
+
+# What a model would send back for that schema.
+part = {"functionCall": {"name": "get_weather", "args": {"city": "Chennai"}}}
+
+
+async def main():
+    call = part["functionCall"]
+    called = next(t for t in tools if t.name == call["name"])
+    res = await called.execute(call["args"])
+    assert res.is_error is False
+
+    # What you send back on the next turn — matched by name, not by an id.
+    response_part = {
+        "functionResponse": {"name": call["name"], "response": {"output": res.output}}
+    }
+    assert response_part["functionResponse"]["response"]["output"] == "sunny in Chennai"
+
+    # An empty tool list still produces the wrapper, with no declarations inside.
+    assert to_gemini([]) == [{"functionDeclarations": []}]
+
+    print("ok:", schema[0]["functionDeclarations"][0]["name"], "->", res.output)
+
+
+asyncio.run(main())
 ```
+
+<Aside type="caution">
+`to_gemini([])` is **not** `[]` — it is `[{"functionDeclarations": []}]`. The other two adapters
+return an empty list for no tools. If your code branches on "did I get any tools", check the
+declarations, and omit `tools` from the request body entirely when there are none.
+</Aside>
+
+## Shape
+
+| Path | From | Notes |
+|---|---|---|
+| `[0]` | — | Always exactly one entry, whatever the tool count. |
+| `[0]["functionDeclarations"]` | the tool list | One declaration per tool, in order. |
+| `…[]["name"]` | `Tool.name` | What comes back in `functionCall.name`. |
+| `…[]["description"]` | `Tool.description` | |
+| `…[]["parameters"]` | `Tool.input_schema` | Renamed — `input_schema` → `parameters`. |
 
 ## The same call in the other five ports
 
@@ -62,10 +176,11 @@ _TODO: name the alternative and when to prefer it._
 | C# | `Adapters.ToGemini` | [→](/api/csharp/adapters/gemini/) |
 | Elixir | `Toolnexus.Adapters.to_gemini` | [→](/api/elixir/adapters/gemini/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Output is byte-identical across ports for the same tools — including the single-wrapper shape for an
+empty list. That is a §0 conformance obligation.
 
 ## See also
 
-- [`to_openai`](/api/python/adapters/openai/) — Render the toolkit as OpenAI function-calling schema.
-- [`to_anthropic`](/api/python/adapters/anthropic/) — Render the toolkit as Anthropic tool-use schema.
+- [`to_openai`](/api/python/adapters/openai/) · [`to_anthropic`](/api/python/adapters/anthropic/)
+- [`create_toolkit`](/api/python/toolkit/create/) — `tk.to_gemini()` is this, applied to the toolkit
+- [`create_client`](/api/python/client/create/) — calls the adapter for you

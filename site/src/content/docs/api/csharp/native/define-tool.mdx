@@ -1,56 +1,200 @@
 ---
-title: "NativeTool.Of"
-description: "Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call. — C#."
+title: NativeTool.Of
+description: Wrap a plain function as a tool — name, description, JSON Schema, done. C#.
 sidebar:
-  label: "NativeTool.Of"
+  label: NativeTool.Of
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/NativeTool.cs">NativeTool.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+// synchronous, ignores the context
+public static NativeTool Of(string name, string description, IDictionary<string, object?>? inputSchema,
+    Func<IDictionary<string, object?>, object?> fn)
+
+// synchronous, receives the context
+public static NativeTool Of(string name, string description, IDictionary<string, object?>? inputSchema,
+    Func<IDictionary<string, object?>, ToolContext?, object?> fn)
+
+// asynchronous
+public static NativeTool OfAsync(string name, string description, IDictionary<string, object?>? inputSchema,
+    Func<IDictionary<string, object?>, ToolContext?, Task<object?>> fn)
 ```
 
-Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.
+The shortest path from code you already have to a tool the model can call. Give it a name, a
+description, a JSON-Schema object and a function; you get back an [`ITool`](/api/csharp/types/tool/)
+with `Source` set to `"native"`, indistinguishable from an MCP tool as far as the LLM is concerned.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+For anything that is *your* logic rather than someone else's server: a database lookup, a
+calculation, a call into an internal service, a lookup in a dictionary you have in memory. It is
+also the fastest way to add one tool to a toolkit that is otherwise all MCP and skills.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use [ToolMethod] + Tools.Collect when you have many">
+Writing the schema by hand is right for one or two tools and tedious for ten.
+[`ToolMethodAttribute`](/api/csharp/native/reflect/) derives the schema from the method signature,
+and [`Tools.Collect`](/api/csharp/native/collect/) sweeps a whole class of them in one call. Go the
+other way — implement [`ITool`](/api/csharp/types/tool/) directly — only when you are generating
+tools from data and need control over the type itself.
 </Aside>
+
+`NativeTool` is a sealed class with a private constructor; `Of` / `OfAsync` are the only way in.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. A function with a schema
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+var add = NativeTool.Of(
+    "add",
+    "Add two numbers",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?>
+        {
+            ["a"] = new Dictionary<string, object?> { ["type"] = "number" },
+            ["b"] = new Dictionary<string, object?> { ["type"] = "number" },
+        },
+        ["required"] = new[] { "a", "b" },
+    },
+    // The explicit parameter type picks the no-context overload.
+    (IDictionary<string, object?> a) => (Convert.ToDouble(a["a"]) + Convert.ToDouble(a["b"])).ToString());
+
+if (add.Name != "add") throw new Exception(add.Name);
+if (add.Source != "native") throw new Exception(add.Source);
+
+var res = await add.ExecuteAsync(new Dictionary<string, object?> { ["a"] = 2, ["b"] = 3 });
+if (res.IsError || res.Output != "5") throw new Exception(res.Output);
+
+Console.WriteLine($"ok: {add.Name} -> {res.Output}");
 ```
 
-### 2. TODO — the realistic case
+<Aside type="caution" title="Annotate the lambda parameter">
+`Of` is overloaded on the delegate type, so a bare `a => …` is ambiguous and will not compile.
+Write `(IDictionary<string, object?> a) => …` for the simple form, or
+`(IDictionary<string, object?> a, ToolContext? c) => …` when you want the context.
+</Aside>
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+Arguments arrive as whatever your JSON layer produced — `long`, `double`, `string`,
+`JsonElement`. Convert defensively (`Convert.ToDouble`, `?.ToString()`) rather than casting.
+
+### 2. Return values, failure, and no arguments at all
+
+The return value is coerced: a `string` becomes the output verbatim, a `ToolResult` is passed
+through untouched, `null` becomes `""`, and anything else is JSON-serialized. A **thrown exception
+becomes an error result** — it never escapes to your loop.
+
+```csharp test
+using Toolnexus;
+
+// A non-string return is JSON-serialized for you.
+var reading = NativeTool.Of("reading", "Latest sensor reading", null,
+    (IDictionary<string, object?> a) => new Dictionary<string, object?> { ["celsius"] = 21.5, ["ok"] = true });
+
+var r1 = await reading.ExecuteAsync(new Dictionary<string, object?>());
+if (r1.IsError || r1.Output != """{"celsius":21.5,"ok":true}""") throw new Exception(r1.Output);
+
+// Passing null for the schema gives the canonical empty-object schema.
+if (reading.InputSchema["type"] as string != "object") throw new Exception("type");
+if (reading.InputSchema["additionalProperties"] is not false) throw new Exception("additionalProperties");
+
+// Return a ToolResult when you want metadata, or a deliberate error.
+var lookup = NativeTool.Of("lookup", "Look a user up by id", null,
+    (IDictionary<string, object?> a) => a["id"] as string == "42"
+        ? ToolResult.Ok("Ada", new Dictionary<string, object?> { ["title"] = "user 42" })
+        : ToolResult.Error("no such user"));
+
+var hit = await lookup.ExecuteAsync(new Dictionary<string, object?> { ["id"] = "42" });
+if (hit.Metadata?["title"] as string != "user 42") throw new Exception("metadata");
+
+var missing = await lookup.ExecuteAsync(new Dictionary<string, object?> { ["id"] = "7" });
+if (!missing.IsError || missing.Output != "no such user") throw new Exception(missing.Output);
+
+// A throw is caught and turned into an error result — the model sees the message and can retry.
+var risky = NativeTool.Of("risky", "Throws on purpose", null,
+    (IDictionary<string, object?> a) => throw new InvalidOperationException("upstream is down"));
+
+var boom = await risky.ExecuteAsync(new Dictionary<string, object?>());
+if (!boom.IsError || boom.Output != "upstream is down") throw new Exception(boom.Output);
+
+Console.WriteLine($"ok: {r1.Output} | {hit.Output} | {boom.Output}");
 ```
 
-### 3. TODO — the full surface
+### 3. Async work, the context, and secrets
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+`OfAsync` for anything that awaits. The `ToolContext` is nullable and carries a timeout and a
+cancellation token — honour them for long work.
+
+```csharp test
+using Toolnexus;
+
+// Real credentials are read from the environment at call time and never logged or
+// baked into the tool. YOUR_KEY_HERE is a placeholder, not a key.
+Environment.SetEnvironmentVariable("DOCS_DEMO_TOKEN", "YOUR_KEY_HERE");
+
+var fetchReport = NativeTool.OfAsync(
+    "fetch_report",
+    "Fetch a report by id",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["id"] = new Dictionary<string, object?> { ["type"] = "string" } },
+        ["required"] = new[] { "id" },
+    },
+    async (a, ctx) =>
+    {
+        var token = Environment.GetEnvironmentVariable("DOCS_DEMO_TOKEN");
+        if (string.IsNullOrEmpty(token)) return ToolResult.Error("DOCS_DEMO_TOKEN is not set");
+
+        // Cooperative cancellation: the loop can stop a slow tool.
+        await Task.Delay(1, ctx?.CancellationToken ?? default);
+        if (ctx?.IsCancelled == true) return ToolResult.Error("cancelled");
+
+        return $"report {a["id"]} (authenticated)";
+    });
+
+var ok = await fetchReport.ExecuteAsync(new Dictionary<string, object?> { ["id"] = "q3" }, new ToolContext(timeoutMs: 5_000));
+if (ok.IsError || ok.Output != "report q3 (authenticated)") throw new Exception(ok.Output);
+if (ok.Output.Contains("YOUR_KEY_HERE")) throw new Exception("never echo a credential back to the model");
+
+// The context overload of Of() covers the synchronous case.
+var whoami = NativeTool.Of("whoami", "Report the deadline the caller imposed", null,
+    (IDictionary<string, object?> a, ToolContext? ctx) => $"timeout={ctx?.TimeoutMs?.ToString() ?? "none"}");
+
+var withCtx = await whoami.ExecuteAsync(new Dictionary<string, object?>(), new ToolContext(timeoutMs: 1_500));
+if (withCtx.Output != "timeout=1500") throw new Exception(withCtx.Output);
+
+// ctx is optional — callers may omit it entirely.
+var noCtx = await whoami.ExecuteAsync(new Dictionary<string, object?>());
+if (noCtx.Output != "timeout=none") throw new Exception(noCtx.Output);
+
+// A native tool goes into a toolkit alongside every other source, via ExtraTools.
+// (The toolkit also carries the built-in tools by default, so don't assert on a count.)
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = new List<ITool> { fetchReport, whoami } });
+if (tk.Get("fetch_report") == null || tk.Get("whoami") == null)
+    throw new Exception($"toolkit: {string.Join(",", tk.Tools().Select(t => t.Name))}");
+
+Console.WriteLine($"ok: {ok.Output} | {withCtx.Output} | toolkit has {tk.Tools().Count} tools");
 ```
+
+## Parameters
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `name` | `string` | What the model calls. Must match `[a-zA-Z0-9_-]` — see `Tools.Sanitize`. |
+| `description` | `string` | What the model reads to decide whether to call it. Write it for the model. |
+| `inputSchema` | `IDictionary<string, object?>?` | A JSON-Schema **object**. `null` ⇒ `{"type":"object","properties":{},"additionalProperties":false}`. |
+| `fn` | delegate | Your function. Return `string`, `ToolResult`, `null`, or anything JSON-serializable. |
 
 ## The same call in the other five ports
 
@@ -60,12 +204,14 @@ _TODO: name the alternative and when to prefer it._
 | Python | `define_tool` | [→](/api/python/native/define-tool/) |
 | Go | `NativeTool` | [→](/api/go/native/define-tool/) |
 | Java | `NativeTool.of` | [→](/api/java/native/define-tool/) |
-| Elixir | `Toolnexus.Native.define` | [→](/api/elixir/native/define-tool/) |
+| Elixir | `Toolnexus.Native.define_tool` | [→](/api/elixir/native/define-tool/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Return-value coercion and the throw-becomes-error rule are identical in every port — a §0
+conformance obligation.
 
 ## See also
 
-- [`ToolMethodAttribute`](/api/csharp/native/reflect/) — Derive the schema from the function signature or annotation instead of writing it by hand.
-- [`Tools.Collect`](/api/csharp/native/collect/) — Sweep a module or class and collect every function marked as a tool.
+- [`ToolMethodAttribute`](/api/csharp/native/reflect/) — derive the schema from the method signature
+- [`Tools.Collect`](/api/csharp/native/collect/) — sweep a class for annotated methods
+- [`ITool`](/api/csharp/types/tool/) · [`ToolResult`](/api/csharp/types/tool-result/) · [`ToolContext`](/api/csharp/types/context/)
+- [`HttpTool.Of`](/api/csharp/http/tool/) — the same idea when the logic is a REST call

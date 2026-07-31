@@ -1,56 +1,195 @@
 ---
-title: "SkillSource.Load"
-description: "Glob a skills directory and expose one skill tool with progressive disclosure. — C#."
+title: SkillSource.Load
+description: Discover every SKILL.md under one or more directories and expose a single skill tool with progressive disclosure. C#.
 sidebar:
-  label: "SkillSource.Load"
+  label: SkillSource.Load
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/SkillSource.cs">SkillSource.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public static SkillSource Load(params string[] dirs)
+public static SkillSource Load(IEnumerable<string> dirs)
 ```
 
-Glob a skills directory and expose one skill tool with progressive disclosure.
+Walks each directory for `**/SKILL.md`, parses the YAML frontmatter of every file it finds, and
+returns a `SkillSource` carrying two things you care about: `Skills` (the catalog) and `Tool` (one
+`ITool` named `skill`).
+
+That single tool is the whole point. Instead of exposing twenty tools, you expose **one**, plus a
+short catalog in the system prompt. The model calls `skill` with a name, and only then does the
+full instruction body enter the conversation — progressive disclosure.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When your skills live on disk in the standard `SKILL.md` layout and you want all of them, exactly
+as written. This is the ordinary path: point it at a folder, hand `source.Tool` to your toolkit,
+and put `source.Prompt()` in the system prompt.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use LoadWith when skills are not just 'every file in a folder'">
+`Load` is the thin sugar: it forwards to
+[`SkillSource.LoadWith`](/api/csharp/skills/load-with/) with only `Dirs` set. Prefer `LoadWith`
+when you need skills supplied **as data** rather than from disk, a per-agent **allowlist**, or a
+different **sample limit** for the `<skill_files>` block. And when you want to know what was
+*rejected* — a malformed header, a missing name — use
+[`SkillSource.ListSkills`](/api/csharp/skills/list/), which reports skip reasons that `Load`
+silently swallows.
 </Aside>
+
+`Load` is **synchronous** — there is no `Async` suffix, because discovery is a directory walk and
+nothing else. No process is spawned and no network call is made.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Load the shared fixture and look at the catalog
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+This is `examples/skills`, the fixture every port is tested against.
+
+```csharp test
+using Toolnexus;
+
+// TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+var repo = Environment.GetEnvironmentVariable("TOOLNEXUS_REPO") ?? ".";
+var dir = Path.Combine(repo, "examples", "skills");
+
+var skills = SkillSource.Load(dir);
+
+if (!skills.Skills.ContainsKey("hello-world"))
+    throw new Exception($"expected hello-world, got: {string.Join(",", skills.Skills.Keys)}");
+
+var info = skills.Skills["hello-world"];
+if (info.Description == null || !info.Description.StartsWith("A tiny example skill"))
+    throw new Exception($"description: {info.Description}");
+if (info.Origin != "fs") throw new Exception($"origin: {info.Origin}");
+if (!info.Location.EndsWith("SKILL.md")) throw new Exception($"location: {info.Location}");
+
+// One tool for all skills, regardless of how many were discovered.
+if (skills.Tool.Name != "skill") throw new Exception($"tool name: {skills.Tool.Name}");
+if (skills.Tool.Source != "skill") throw new Exception($"tool source: {skills.Tool.Source}");
+
+Console.WriteLine($"ok: {string.Join(", ", skills.Skills.Keys)} -> tool '{skills.Tool.Name}'");
 ```
 
-### 2. TODO — the realistic case
+`Location` is the absolute path of the `SKILL.md` itself, and `Content` is the body **below** the
+frontmatter. A directory that does not exist is not an error — it logs a warning to stderr and
+contributes nothing.
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+### 2. Calling the `skill` tool — what the model actually receives
+
+```csharp test
+using Toolnexus;
+
+var repo = Environment.GetEnvironmentVariable("TOOLNEXUS_REPO") ?? ".";
+var skills = SkillSource.Load(Path.Combine(repo, "examples", "skills"));
+
+var res = await skills.Tool.ExecuteAsync(new Dictionary<string, object?> { ["name"] = "hello-world" });
+if (res.IsError) throw new Exception(res.Output);
+
+// The output envelope is byte-identical in every port.
+if (!res.Output.StartsWith("<skill_content name=\"hello-world\">")) throw new Exception("open tag");
+if (!res.Output.Contains("# Skill: hello-world")) throw new Exception("heading");
+if (!res.Output.Contains("Base directory for this skill: file://")) throw new Exception("base directory");
+if (!res.Output.Contains("<skill_files>") || !res.Output.Contains("greet.sh")) throw new Exception("sampled files");
+if (!res.Output.EndsWith("</skill_content>")) throw new Exception("close tag");
+
+// Metadata carries the skill name and its directory.
+if (res.Metadata?["name"] as string != "hello-world") throw new Exception("metadata name");
+
+// An unknown name is a tool ERROR, not an exception — the model reads it and retries.
+var miss = await skills.Tool.ExecuteAsync(new Dictionary<string, object?> { ["name"] = "nope" });
+if (!miss.IsError) throw new Exception("expected IsError");
+if (!miss.Output.Contains("Available skills: hello-world")) throw new Exception(miss.Output);
+
+Console.WriteLine($"ok: {res.Output.Length} chars | miss: {miss.Output}");
 ```
 
-### 3. TODO — the full surface
+<Aside type="caution">
+The `<skill_files>` list is **sampled**, not exhaustive — the first 10 sibling files by default,
+in filesystem walk order. It is a hint so the model knows what is nearby; never treat it as a
+complete directory listing. Pass `SampleLimit` via
+[`LoadWith`](/api/csharp/skills/load-with/) to raise the cap, or `-1` to omit the block entirely.
+</Aside>
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+### 3. Several roots, the prompt catalog, and duplicate handling
+
+Roots are scanned in the order given, and the **first** definition of a name wins.
+
+```csharp test
+using Toolnexus;
+
+var repo = Environment.GetEnvironmentVariable("TOOLNEXUS_REPO") ?? ".";
+var shared = Path.Combine(repo, "examples", "skills");
+
+// A second root, created for this example only.
+var extra = Path.Combine(Path.GetTempPath(), "tn-skills-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(Path.Combine(extra, "audit-log"));
+File.WriteAllText(Path.Combine(extra, "audit-log", "SKILL.md"), """
+---
+name: audit-log
+description: Read and summarise the deployment audit log.
+---
+
+# Audit log
+
+Read `entries.jsonl` in this skill's base directory and summarise the last 20 lines.
+""");
+File.WriteAllText(Path.Combine(extra, "audit-log", "entries.jsonl"), "{\"at\":\"2026-07-31\"}\n");
+
+try
+{
+    // params overload — one argument per root, scanned left to right.
+    // A missing root just warns on stderr; it is not fatal.
+    var skills = SkillSource.Load(shared, extra, Path.Combine(extra, "does-not-exist"));
+
+    var names = skills.Skills.Keys.OrderBy(k => k, StringComparer.Ordinal).ToList();
+    if (names.Count != 2 || names[0] != "audit-log" || names[1] != "hello-world")
+        throw new Exception($"names: {string.Join(",", names)}");
+
+    // Prompt() is the catalog you paste into the system prompt: preamble + one line per skill,
+    // ordinal-sorted by name. It carries descriptions only — never the bodies.
+    var prompt = skills.Prompt();
+    if (!prompt.StartsWith("Skills provide specialized instructions")) throw new Exception("preamble");
+    if (!prompt.Contains("## Available Skills")) throw new Exception("heading");
+    if (prompt.IndexOf("**audit-log**", StringComparison.Ordinal) > prompt.IndexOf("**hello-world**", StringComparison.Ordinal))
+        throw new Exception("expected ordinal ordering");
+    if (prompt.Contains("Read `entries.jsonl`")) throw new Exception("bodies must stay out of the catalog");
+
+    // Both skills answer through the one tool.
+    var res = await skills.Tool.ExecuteAsync(new Dictionary<string, object?> { ["name"] = "audit-log" });
+    if (res.IsError || !res.Output.Contains("entries.jsonl")) throw new Exception(res.Output);
+
+    // No skills at all is still a valid source — the catalog says so in words.
+    var none = SkillSource.Load(Array.Empty<string>());
+    if (none.Prompt() != "No skills are currently available.") throw new Exception(none.Prompt());
+
+    Console.WriteLine($"ok: {string.Join(", ", names)} | prompt {prompt.Length} chars");
+}
+finally
+{
+    Directory.Delete(extra, recursive: true);
+}
 ```
+
+## What you get back
+
+| Member | Type | What it is |
+|---|---|---|
+| `Skills` | `IReadOnlyDictionary<string, SkillInfo>` | The catalog, keyed by skill name. |
+| `Tool` | `ITool` | The single `skill` tool. Add it to your toolkit. |
+| `Prompt()` | `string` | Markdown catalog for the system prompt — names + descriptions only. |
+
+`SkillInfo` fields: `Name`, `Description`, `Location` (absolute path to `SKILL.md`), `Content`
+(body below the frontmatter), `Origin` (`"fs"` here), `Resources`, `Base`.
+
+Discovery rules: `node_modules` and `.git` are skipped, symlinks are followed with cycle
+detection, a file whose frontmatter has no `name` is dropped, and a duplicate name keeps the first
+one seen and warns.
 
 ## The same call in the other five ports
 
@@ -62,10 +201,12 @@ _TODO: name the alternative and when to prefer it._
 | Java | `SkillSource.load` | [→](/api/java/skills/load/) |
 | Elixir | `Toolnexus.Skill.load` | [→](/api/elixir/skills/load/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+The `skill` tool's output is byte-identical across ports for the same directory — a §0 conformance
+obligation.
 
 ## See also
 
-- [`SkillSource.LoadWith`](/api/csharp/skills/load-with/) — Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist.
-- [`SkillSource.ListSkills`](/api/csharp/skills/list/) — Enumerate discovered skills and, crucially, the ones that were skipped and why.
+- [`SkillSource.LoadWith`](/api/csharp/skills/load-with/) — skills as data, allowlists, sample limits
+- [`SkillSource.ListSkills`](/api/csharp/skills/list/) — inventory *and* the reasons files were skipped
+- [`Toolkit.CreateAsync`](/api/csharp/toolkit/create/) — takes skill directories directly
+- [`ITool`](/api/csharp/types/tool/) — what `Tool` is

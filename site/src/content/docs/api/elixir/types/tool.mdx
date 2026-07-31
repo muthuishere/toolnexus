@@ -31,7 +31,7 @@ list, and that is what you `Enum.map` and pass to an adapter.
 
 Construct one directly when you are writing a **new tool source** — something producing tools from
 a shape toolnexus doesn't already cover. For a single ordinary function, use
-[`Toolnexus.Native.define/1`](/api/elixir/native/define-tool/) instead.
+[`Toolnexus.Native.define_tool/1`](/api/elixir/native/define-tool/) instead.
 
 ## Why this and not the alternative
 
@@ -193,5 +193,5 @@ true.
 
 - [`Toolnexus.ToolResult`](/api/elixir/types/tool-result/) — what `execute` returns
 - [`Toolnexus.Context`](/api/elixir/types/context/) — what `execute` receives
-- [`Toolnexus.Native.define`](/api/elixir/native/define-tool/) — build a tool from a function
+- [`Toolnexus.Native.define_tool`](/api/elixir/native/define-tool/) — build a tool from a function
 - [`Toolnexus.create_toolkit`](/api/elixir/toolkit/create/) — aggregate tools from every source

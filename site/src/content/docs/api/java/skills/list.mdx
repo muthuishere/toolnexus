@@ -8,49 +8,192 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/SkillSource.java">SkillSource.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public static SkillInventory listSkills(SkillSource.LoadOptions opts)
 ```
 
-Enumerate discovered skills and, crucially, the ones that were skipped and why.
+Runs the same discovery [`load`](/api/java/skills/load/) runs — the same roots, the same
+`SkillDef` data, the same frontmatter parsing — but wires **no tool**. You get back the skills that
+parsed *and* a typed list of the candidates that did not, each with a reason.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+For anything that has to *report* on skills rather than call them: a CLI `skills list`, a startup
+health check, a validator in CI, an admin screen, or the code that authors an allowlist.
+
+It is also the debugging answer to "why is my skill not showing up". `load` drops a bad `SKILL.md`
+silently (a stderr warning at most); `listSkills` names the file and the reason.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use load when you want to run skills, not describe them">
+[`SkillSource.load`](/api/java/skills/load/) (and
+[`loadWith`](/api/java/skills/load-with/)) build the `skill` tool and are what you pass to an LLM.
+Reach for `listSkills` **instead** when nothing is going to be executed — it never constructs a
+tool, so it is the right call in a validator or an inventory command.
 </Aside>
+
+Two things separate it from reading `load(...).skills()`:
+
+- **It reports skips.** `skills()` shows only survivors; the inventory shows the casualties too.
+- **It is unfiltered.** The `filter` in `LoadOptions` is deliberately *not* applied, because the
+  inventory is what you use to author that allowlist in the first place.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. What is in a directory
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.*;
+
+public class Example {
+    public static void main(String[] args) {
+        SkillSource.SkillInventory inv = SkillSource.listSkills(
+            new SkillSource.LoadOptions().dirs("examples/skills"));
+
+        if (inv.skills.size() != 1) throw new AssertionError("skills: " + inv.skills.size());
+        if (!inv.skipped.isEmpty()) throw new AssertionError("skipped: " + inv.skipped.size());
+
+        SkillSource.SkillInfo s = inv.skills.get(0);
+        if (!s.name.equals("hello-world")) throw new AssertionError(s.name);
+        if (s.description == null) throw new AssertionError("expected a description");
+        if (!s.location.endsWith("SKILL.md")) throw new AssertionError(s.location);
+        if (!s.origin.equals("fs")) throw new AssertionError(s.origin);
+
+        System.out.println("ok: " + s.name + " @ " + s.origin);
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+`skills` and `skipped` are plain public fields on `SkillInventory`, not accessor methods.
 
-{/* TODO:example2 */}
-```java
-// TODO
+### 2. Why a skill did not load
+
+The reason codes are what make this worth calling — they turn a silent drop into a message a human
+can act on.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+public class Example {
+    static void skill(Path root, String dir, String body) throws Exception {
+        Path d = root.resolve(dir);
+        Files.createDirectories(d);
+        Files.writeString(d.resolve("SKILL.md"), body);
+    }
+
+    public static void main(String[] args) throws Exception {
+        Path root = Files.createTempDirectory("tn-skills");
+
+        skill(root, "good", "---\nname: good\ndescription: A fine skill\n---\nBody.\n");
+        // No `name:` in the frontmatter — nothing to call it by.
+        skill(root, "nameless", "---\ndescription: Forgot the name\n---\nBody.\n");
+        // Fences present, YAML broken.
+        skill(root, "broken", "---\nname: [unterminated\n---\nBody.\n");
+
+        SkillSource.SkillInventory inv = SkillSource.listSkills(
+            new SkillSource.LoadOptions().dirs(root.toString()));
+
+        if (inv.skills.size() != 1) throw new AssertionError("skills: " + inv.skills.size());
+        if (inv.skipped.size() != 2) throw new AssertionError("skipped: " + inv.skipped.size());
+
+        Map<String, String> byReason = new LinkedHashMap<>();
+        for (SkillSource.SkillSkip sk : inv.skipped) byReason.put(sk.reason, sk.location);
+
+        if (!byReason.containsKey(SkillSource.SkillSkip.MISSING_NAME)) throw new AssertionError(byReason.keySet());
+        if (!byReason.containsKey(SkillSource.SkillSkip.MALFORMED)) throw new AssertionError(byReason.keySet());
+        // The location is the exact file to go fix.
+        if (!byReason.get(SkillSource.SkillSkip.MISSING_NAME).endsWith("SKILL.md")) {
+            throw new AssertionError(byReason.get(SkillSource.SkillSkip.MISSING_NAME));
+        }
+
+        System.out.println("ok: 1 loaded, skipped " + byReason.keySet());
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. Every source at once, and the unfiltered guarantee
 
-{/* TODO:example3 */}
-```java
-// TODO
+`LoadOptions` is shared with `loadWith`, so the inventory can span directories and in-memory
+`SkillDef`s. Directories are collected first, so a data skill colliding with a disk skill is the one
+reported as `duplicate-name`.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        SkillSource.LoadOptions opts = new SkillSource.LoadOptions()
+            .dirs("examples/skills")
+            .skills(List.of(
+                new SkillSource.SkillDef("db-backup", "Back the database up", "Run pg_dump."),
+                // Collides with the on-disk hello-world: first wins, this one is skipped.
+                new SkillSource.SkillDef("hello-world", "A shadow", "Never reached."),
+                // No name at all.
+                new SkillSource.SkillDef("", "Anonymous", "Nope.")))
+            // Deliberately ignored by listSkills — the inventory is how you AUTHOR this.
+            .filter(Map.of("db-backup", true))
+            .sampleLimit(3);
+
+        SkillSource.SkillInventory inv = SkillSource.listSkills(opts);
+
+        List<String> names = inv.skills.stream().map(s -> s.name).toList();
+        if (!names.equals(List.of("hello-world", "db-backup"))) throw new AssertionError(names);
+
+        List<String> reasons = inv.skipped.stream().map(sk -> sk.reason).sorted().toList();
+        if (!reasons.equals(List.of(SkillSource.SkillSkip.DUPLICATE_NAME, SkillSource.SkillSkip.MISSING_NAME))) {
+            throw new AssertionError(reasons);
+        }
+
+        // Data skills carry a logical base instead of a filesystem path.
+        SkillSource.SkillInfo data = inv.skills.get(1);
+        if (!data.origin.equals("logical")) throw new AssertionError(data.origin);
+        if (!data.base.equals("skill://db-backup/")) throw new AssertionError(data.base);
+
+        // Contrast: loadWith APPLIES the same filter, so it keeps only db-backup.
+        SkillSource filtered = SkillSource.loadWith(opts);
+        if (!filtered.skills().keySet().equals(java.util.Set.of("db-backup"))) {
+            throw new AssertionError(filtered.skills().keySet());
+        }
+
+        System.out.println("ok: " + names + " | skipped " + reasons);
+    }
+}
 ```
+
+## `LoadOptions` (input)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `dirs` | `List<String>` | Roots walked for `**/SKILL.md`. Fluent: `.dirs("a", "b")` or `.dirs(List.of(...))`. A missing root warns on stderr and contributes nothing. |
+| `skills` | `List<SkillDef>` | Skills supplied as data — never touch disk. |
+| `filter` | `Map<String, Boolean>` | Per-agent allowlist. **Ignored by `listSkills`**; honored by `loadWith`. |
+| `sampleLimit` | `int` | `0` ⇒ default 10, `n>0` ⇒ cap, `-1` ⇒ omit `<skill_files>`. Affects the tool's output, not the inventory. |
+
+## `SkillInventory` (output)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `skills` | `List<SkillInfo>` | Everything that parsed, in discovery order (dirs, then data). |
+| `skipped` | `List<SkillSkip>` | Everything that did not, with `location` + `reason`. |
+
+### `SkillSkip.reason` values
+
+| Constant | Value | Cause |
+|---|---|---|
+| `SkillSkip.MISSING_NAME` | `missing-name` | No `name:` in the frontmatter, or an empty `SkillDef` name. |
+| `SkillSkip.MALFORMED` | `malformed-frontmatter` | Fences present, YAML unparseable. |
+| `SkillSkip.DUPLICATE_NAME` | `duplicate-name` | A skill with that name was already collected — first wins. |
+| `SkillSkip.UNREADABLE` | `unreadable` | The `SKILL.md` could not be read (permissions, broken link). |
 
 ## The same call in the other five ports
 
@@ -62,10 +205,11 @@ _TODO: name the alternative and when to prefer it._
 | C# | `SkillSource.ListSkills` | [→](/api/csharp/skills/list/) |
 | Elixir | `Toolnexus.Skill.list` | [→](/api/elixir/skills/list/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+The reason strings are part of the contract — `missing-name`, `malformed-frontmatter`,
+`duplicate-name`, `unreadable` are identical in every port.
 
 ## See also
 
-- [`SkillSource.load`](/api/java/skills/load/) — Glob a skills directory and expose one skill tool with progressive disclosure.
-- [`SkillSource.loadWith`](/api/java/skills/load-with/) — Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist.
+- [`SkillSource.load`](/api/java/skills/load/) — the same discovery, with the `skill` tool wired
+- [`SkillSource.loadWith`](/api/java/skills/load-with/) — same options, and the filter is applied
+- [`Toolkit.create`](/api/java/toolkit/create/) — `skillsFilter(...)` is the allowlist this inventory authors

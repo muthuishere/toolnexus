@@ -1,6 +1,6 @@
 ---
 title: "ListSkills"
-description: "Enumerate discovered skills and, crucially, the ones that were skipped and why. — Go."
+description: "Enumerate discovered skills and, crucially, the ones that were skipped and why. Go."
 sidebar:
   label: "ListSkills"
 ---
@@ -8,49 +8,266 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a>
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/skill.go">golang/skill.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+func ListSkills(opts LoadSkillsOptions) *SkillInventory
+
+type SkillInventory struct {
+	Skills  []SkillInfo
+	Skipped []SkillSkip
+}
+
+type SkillSkip struct {
+	Location string
+	Reason   SkillSkipReason
+}
 ```
 
-Enumerate discovered skills and, crucially, the ones that were skipped and why.
+Runs exactly the discovery and validation pass [`LoadSkills`](/api/go/skills/load/) runs, but builds
+**no tool** — it hands you the parsed skills *and* a typed list of every candidate that did not
+become a skill, with the reason. It is the answer to "I dropped a `SKILL.md` in and nothing showed
+up."
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **Debugging a skill that will not load.** `Skipped` names the file and tells you whether the
+  frontmatter was malformed, the `name` was missing, the file was unreadable, or the name collided.
+- **Authoring an allowlist.** The inventory is deliberately **unfiltered**, so you can list
+  everything, then choose what a given agent gets via `LoadSkillsOptions.Filter`.
+- **A CI check or a `skills doctor` command** — fail the build when a skill directory contains a
+  broken `SKILL.md`.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use LoadSkills / LoadSkillsWith when you want the tool">
+[`LoadSkillsWith`](/api/go/skills/load-with/) takes the same `LoadSkillsOptions` and returns a
+`SkillSource` with the live `skill` tool — reach for it *instead* whenever you intend to actually
+serve the skills to a model. `ListSkills` deliberately gives you no tool and no filtering; it is a
+read-only inspection pass, so use it only to report on skills rather than to run them.
+</Aside>
+
+<Aside type="caution" title="Filter is ignored here — on purpose">
+`LoadSkillsOptions.Filter` has no effect on the inventory. The whole point is to see everything so
+you can *write* the filter. `Skills` is also an unordered slice — sort it before printing.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Inventory the shared fixture
 
-{/* TODO:example1 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	// TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+	dir := filepath.Join(os.Getenv("TOOLNEXUS_REPO"), "examples", "skills")
+
+	inv := toolnexus.ListSkills(toolnexus.LoadSkillsOptions{Dirs: []string{dir}})
+
+	if len(inv.Skills) != 1 || inv.Skills[0].Name != "hello-world" {
+		log.Fatalf("unexpected inventory: %+v", inv.Skills)
+	}
+	// A clean directory skips nothing.
+	if len(inv.Skipped) != 0 {
+		log.Fatalf("expected no skips, got %+v", inv.Skipped)
+	}
+
+	fmt.Println("ok:", inv.Skills[0].Name, "| skipped:", len(inv.Skipped))
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The reason a `SKILL.md` did not load
 
-{/* TODO:example2 */}
-```go
-// TODO
+Four typed reasons, and this is how each one shows up.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func write(dir, name, body string) {
+	full := filepath.Join(dir, name)
+	if err := os.MkdirAll(full, 0o755); err != nil {
+		log.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(full, "SKILL.md"), []byte(body), 0o644); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func main() {
+	root, err := os.MkdirTemp("", "skills")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+
+	write(root, "good", "---\nname: good\ndescription: Fine.\n---\n\nBody.\n")
+	// Fences present, YAML invalid — an unterminated quoted scalar.
+	write(root, "broken", "---\nname: \"oops\n---\n\nBody.\n")
+	// Parses, but has no name — nothing to call it by.
+	write(root, "unnamed", "---\ndescription: No name here.\n---\n\nBody.\n")
+
+	inv := toolnexus.ListSkills(toolnexus.LoadSkillsOptions{Dirs: []string{root}})
+
+	if len(inv.Skills) != 1 || inv.Skills[0].Name != "good" {
+		log.Fatalf("expected only 'good', got %+v", inv.Skills)
+	}
+
+	reasons := map[toolnexus.SkillSkipReason]string{}
+	for _, s := range inv.Skipped {
+		reasons[s.Reason] = s.Location
+	}
+	if _, ok := reasons[toolnexus.SkipMalformed]; !ok {
+		log.Fatalf("expected a malformed-frontmatter skip, got %+v", inv.Skipped)
+	}
+	if _, ok := reasons[toolnexus.SkipMissingName]; !ok {
+		log.Fatalf("expected a missing-name skip, got %+v", inv.Skipped)
+	}
+	// Reasons are typed constants with stable string values.
+	if string(toolnexus.SkipMalformed) != "malformed-frontmatter" {
+		log.Fatal("skip reason values are part of the contract")
+	}
+
+	fmt.Println("ok: 1 skill,", len(inv.Skipped), "skips")
+}
 ```
 
-### 3. TODO — the full surface
+<Aside type="caution">
+A file with **no** frontmatter fences at all is not "malformed" — it parses to an empty header and
+is skipped as `missing-name`. `malformed-frontmatter` means the fences were there and the YAML
+inside them failed to parse.
+</Aside>
 
-{/* TODO:example3 */}
-```go
-// TODO
+### 3. Every source, duplicate detection, and authoring the allowlist
+
+Directories and data skills go into the same inventory, and the second skill to claim a name is
+reported as `duplicate-name` — first one wins.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"sort"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	repo := os.Getenv("TOOLNEXUS_REPO") // docs-runner detail
+	shared := filepath.Join(repo, "examples", "skills")
+
+	opts := toolnexus.LoadSkillsOptions{
+		Dirs: []string{shared},
+		Skills: []toolnexus.SkillDef{
+			{
+				Name:        "deploy",
+				Description: "Ship the service to prod.",
+				Content:     "Run the taskfile.",
+				Resources:   []string{"skill://deploy/checklist.md"},
+			},
+			// Collides with the fixture on disk — dirs are collected first, so this loses.
+			{Name: "hello-world", Description: "A shadow.", Content: "Ignored."},
+			// No name at all.
+			{Description: "Anonymous.", Content: "Ignored."},
+		},
+		// Filter is accepted but has NO effect on the inventory.
+		Filter: map[string]bool{"deploy": true},
+	}
+
+	inv := toolnexus.ListSkills(opts)
+
+	var names []string
+	for _, s := range inv.Skills {
+		names = append(names, s.Name)
+	}
+	sort.Strings(names)
+	if len(names) != 2 || names[0] != "deploy" || names[1] != "hello-world" {
+		log.Fatalf("unfiltered inventory expected, got %v", names)
+	}
+
+	var dup, missing int
+	for _, s := range inv.Skipped {
+		switch s.Reason {
+		case toolnexus.SkipDuplicateName:
+			dup++
+		case toolnexus.SkipMissingName:
+			missing++
+		}
+	}
+	if dup != 1 || missing != 1 {
+		log.Fatalf("expected 1 duplicate + 1 missing-name, got %+v", inv.Skipped)
+	}
+
+	// The fixture on disk won: hello-world is still the fs-sourced one.
+	for _, s := range inv.Skills {
+		if s.Name == "hello-world" && s.Origin != "fs" {
+			log.Fatalf("first source should win, got origin %q", s.Origin)
+		}
+		if s.Name == "deploy" && s.Origin != "logical" {
+			log.Fatalf("data skills are logical, got %q", s.Origin)
+		}
+	}
+
+	// Now author the allowlist from what you actually found, and load for real.
+	allow := map[string]bool{}
+	for _, s := range inv.Skills {
+		allow[s.Name] = s.Name == "deploy"
+	}
+	src := toolnexus.LoadSkillsWith(toolnexus.LoadSkillsOptions{
+		Dirs:   opts.Dirs,
+		Skills: opts.Skills,
+		Filter: allow,
+	})
+	if len(src.Skills) != 1 {
+		log.Fatalf("expected the filter to narrow to 1, got %v", src.Skills)
+	}
+
+	fmt.Println("ok:", names, "| skipped:", len(inv.Skipped))
+}
 ```
+
+## Options and results
+
+`LoadSkillsOptions` — the same struct [`LoadSkillsWith`](/api/go/skills/load-with/) takes:
+
+| Field | Type | Effect on `ListSkills` |
+|---|---|---|
+| `Dirs` | `[]string` | Roots walked for `**/SKILL.md`. A missing root logs and contributes nothing. |
+| `Skills` | `[]SkillDef` | Skills supplied as data. Collected **after** `Dirs`, so directories win a name clash. |
+| `Filter` | `map[string]bool` | **Ignored** — the inventory is always unfiltered. |
+| `SampleLimit` | `int` | **Ignored** — no tool is built, so nothing is sampled. |
+
+`SkillSkipReason` — the typed values in `Skipped`:
+
+| Constant | Value | Means |
+|---|---|---|
+| `SkipMissingName` | `missing-name` | Frontmatter parsed but carried no `name` (including "no frontmatter at all"). |
+| `SkipMalformed` | `malformed-frontmatter` | `---` fences present, YAML inside failed to parse. |
+| `SkipDuplicateName` | `duplicate-name` | Another candidate already claimed that name; the first one is kept. |
+| `SkipUnreadable` | `unreadable` | The `SKILL.md` could not be read (permissions, broken link). |
 
 ## The same call in the other five ports
 
@@ -62,10 +279,11 @@ _TODO: name the alternative and when to prefer it._
 | C# | `SkillSource.ListSkills` | [→](/api/csharp/skills/list/) |
 | Elixir | `Toolnexus.Skill.list` | [→](/api/elixir/skills/list/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+The skip-reason strings are part of the cross-language contract — same fixture, same reasons,
+everywhere.
 
 ## See also
 
-- [`LoadSkills`](/api/go/skills/load/) — Glob a skills directory and expose one skill tool with progressive disclosure.
-- [`LoadSkillsWith`](/api/go/skills/load-with/) — Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist.
+- [`LoadSkills`](/api/go/skills/load/) — discover and build the `skill` tool
+- [`LoadSkillsWith`](/api/go/skills/load-with/) — data skills, allowlists, sample caps
+- [`CreateToolkit`](/api/go/toolkit/create/) — wires the skill source into a toolkit

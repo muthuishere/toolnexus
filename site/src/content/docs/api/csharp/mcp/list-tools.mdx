@@ -69,5 +69,5 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 - [`McpSource.LoadAsync`](/api/csharp/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
 - [`McpSource.LoadAsync`](/api/csharp/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
-- [`McpSource.ParseMcpConfig`](/api/csharp/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
+- [`McpSource.ParseConfig`](/api/csharp/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
 - [`McpSource.ElicitationToRequest`](/api/csharp/mcp/elicitation/) — Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.

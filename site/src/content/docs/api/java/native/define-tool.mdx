@@ -8,49 +8,195 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/NativeTool.java">NativeTool.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public static NativeTool of(String name, String description, Map<String, Object> inputSchema,
+                            Function<Map<String, Object>, Object> fn)
+
+public static NativeTool of(String name, String description, Map<String, Object> inputSchema,
+                            BiFunction<Map<String, Object>, ToolContext, Object> fn)
 ```
 
-Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.
+Wraps a lambda as a `Tool` with `source()` = `"native"`. Two overloads, picked by arity: take just
+the args, or take the args and the [`ToolContext`](/api/java/types/context/).
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Whenever the thing the model should be able to do is already a method you have — a repository
+lookup, a price calculation, a call into your service layer. This is the shortest path from that
+method to something an LLM can call, and it needs no MCP server, no HTTP hop, no annotations.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Prefer the @Tool annotation when you have many methods on one class">
+[`Tools.fromObject`](/api/java/native/collect/) sweeps an object for `@Tool`-annotated methods and
+derives each schema from the signature — far less ceremony **instead** of `NativeTool.of` once you
+are past two or three tools on the same class. Use `NativeTool.of` when the tool is a closure over
+local state, is built from data at runtime, or is a one-off.
 </Aside>
+
+Against implementing [`Tool`](/api/java/types/tool/) by hand: `Tool` has five members and is not a
+functional interface, so a bare lambda cannot satisfy it. `NativeTool.of` is that boilerplate,
+already written — plus the two things people forget: a thrown exception becomes an **error result**
+rather than escaping the loop, and a non-`String` return is JSON-encoded for you.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. One function, one tool
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Tool greet = NativeTool.of(
+            "greet",
+            "Greet someone by name",
+            Map.of("type", "object",
+                   "properties", Map.of("name", Map.of("type", "string")),
+                   "required", List.of("name")),
+            (Map<String, Object> a) -> "Hello, " + a.get("name") + "!"
+        );
+
+        if (!greet.source().equals("native")) throw new AssertionError(greet.source());
+
+        ToolResult res = greet.execute(Map.of("name", "Muthu"), new ToolContext());
+        if (res.isError() || !res.output().equals("Hello, Muthu!")) throw new AssertionError(res.output());
+
+        System.out.println("ok: " + res.output());
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+Annotate the lambda parameter (`(Map<String, Object> a) -> …`) so Java picks the single-argument
+overload — a bare `a -> …` is ambiguous between the two `of` signatures.
 
-{/* TODO:example2 */}
-```java
-// TODO
+### 2. Returning objects, and failing safely
+
+Return a `String` and it becomes the output verbatim. Return anything else and it is JSON-encoded.
+Throw, and you get an error result — the loop survives and the model sees the message.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Tool lookup = NativeTool.of(
+            "lookup_order",
+            "Fetch an order by id",
+            Map.of("type", "object",
+                   "properties", Map.of("id", Map.of("type", "string")),
+                   "required", List.of("id")),
+            (Map<String, Object> a) -> {
+                String id = String.valueOf(a.get("id"));
+                if (!id.equals("A1")) throw new IllegalArgumentException("no such order: " + id);
+                Map<String, Object> order = new LinkedHashMap<>();
+                order.put("id", id);
+                order.put("total", 42);
+                return order; // not a String — JSON-encoded on the way out
+            }
+        );
+
+        ToolResult ok = lookup.execute(Map.of("id", "A1"), new ToolContext());
+        if (ok.isError()) throw new AssertionError(ok.output());
+        if (!ok.output().contains("\"total\"")) throw new AssertionError(ok.output());
+
+        // A thrown exception NEVER escapes — it lands as an error result.
+        ToolResult bad = lookup.execute(Map.of("id", "Z9"), new ToolContext());
+        if (!bad.isError()) throw new AssertionError("expected isError");
+        if (!bad.output().equals("no such order: Z9")) throw new AssertionError(bad.output());
+
+        System.out.println("ok: " + ok.output() + " | error path: " + bad.output());
+    }
+}
 ```
 
-### 3. TODO — the full surface
+<Aside type="caution">
+Only the exception **message** reaches the model. Do not put connection strings, tokens or PII in
+the messages of exceptions a tool can throw.
+</Aside>
 
-{/* TODO:example3 */}
-```java
-// TODO
+### 3. The context overload, metadata, and a null schema
+
+The two-argument overload receives the `ToolContext`, which is where cancellation and the per-call
+timeout live. Return a `ToolResult` yourself when you want to control `isError` or attach metadata.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+import java.util.function.BiFunction;
+
+public class Example {
+    public static void main(String[] args) {
+        BiFunction<Map<String, Object>, ToolContext, Object> body = (a, ctx) -> {
+            // ctx may be null on a direct call — always guard it.
+            if (ctx != null && ctx.isCancelled()) return ToolResult.error("cancelled");
+            long n = ((Number) a.get("n")).longValue();
+            if (n < 0) return ToolResult.error("n must be >= 0");
+            return ToolResult.ok(String.valueOf(n * 2), Map.of("title", "double", "input", n));
+        };
+
+        Tool doubler = NativeTool.of(
+            "double",
+            "Double a number",
+            Map.of("type", "object",
+                   "properties", Map.of("n", Map.of("type", "integer")),
+                   "required", List.of("n")),
+            body
+        );
+
+        ToolResult res = doubler.execute(Map.of("n", 21), new ToolContext());
+        if (!res.output().equals("42")) throw new AssertionError(res.output());
+        if (!res.metadata().get("title").equals("double")) throw new AssertionError("metadata");
+
+        // Cancellation is cooperative — the tool decides what to do about it.
+        ToolContext cancelled = new ToolContext();
+        cancelled.cancel();
+        if (!doubler.execute(Map.of("n", 1), cancelled).isError()) throw new AssertionError("expected cancel");
+
+        // A null schema falls back to the empty-object schema; null args become {}.
+        Tool now = NativeTool.of("now", "Server time", null, (Map<String, Object> a) -> "2026-01-01");
+        if (!now.inputSchema().get("type").equals("object")) throw new AssertionError("schema type");
+        if (!now.inputSchema().get("additionalProperties").equals(false)) throw new AssertionError("schema strictness");
+        if (!now.execute(null, null).output().equals("2026-01-01")) throw new AssertionError("null args");
+
+        // Ready for any adapter.
+        List<Map<String, Object>> schema = Adapters.toOpenAI(List.of(doubler, now));
+        if (schema.size() != 2) throw new AssertionError("adapter");
+
+        System.out.println("ok: " + res.output() + ", " + now.execute(null, null).output());
+    }
+}
 ```
+
+## Parameters
+
+| Parameter | Type | Meaning |
+|---|---|---|
+| `name` | `String` | The name the model calls. Must match `[a-zA-Z0-9_-]` — `Tool.sanitize` if it is derived from data. |
+| `description` | `String` | What the model reads to decide whether to call it. |
+| `inputSchema` | `Map<String, Object>` | JSON-Schema object. **Null** ⇒ `{"type":"object","properties":{},"additionalProperties":false}`. |
+| `fn` | `Function` \| `BiFunction` | The body. One arg ⇒ args only; two ⇒ args + `ToolContext`. |
+
+### What `fn` may return
+
+| Return | Becomes |
+|---|---|
+| `String` | `ToolResult.ok(value)` |
+| `ToolResult` | passed through unchanged — your `isError` and metadata survive |
+| anything else | `ToolResult.ok(json(value))` |
+| *throws* | `ToolResult.error(message)` — the cause's message when the exception is wrapped |
+
+`source()` is always `"native"`, and `args` is never null inside `fn` — a null map is replaced with
+an empty one.
 
 ## The same call in the other five ports
 
@@ -60,12 +206,14 @@ _TODO: name the alternative and when to prefer it._
 | Python | `define_tool` | [→](/api/python/native/define-tool/) |
 | Go | `NativeTool` | [→](/api/go/native/define-tool/) |
 | C# | `NativeTool.Of` | [→](/api/csharp/native/define-tool/) |
-| Elixir | `Toolnexus.Native.define` | [→](/api/elixir/native/define-tool/) |
+| Elixir | `Toolnexus.Native.define_tool` | [→](/api/elixir/native/define-tool/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Same contract everywhere: source `native`, string-or-value return, thrown errors captured as error
+results.
 
 ## See also
 
-- [`@Tool annotation`](/api/java/native/reflect/) — Derive the schema from the function signature or annotation instead of writing it by hand.
-- [`Tools.collect`](/api/java/native/collect/) — Sweep a module or class and collect every function marked as a tool.
+- [`Tools.fromObject`](/api/java/native/collect/) — sweep a class for `@Tool` methods instead
+- [`@Tool` annotation](/api/java/native/reflect/) — derive the schema from the signature
+- [`Tool`](/api/java/types/tool/) — the interface this implements
+- [`Toolkit.create`](/api/java/toolkit/create/) — pass these via `extraTools(...)`
