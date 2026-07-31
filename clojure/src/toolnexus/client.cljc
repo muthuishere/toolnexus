@@ -31,6 +31,7 @@
             [koine.env :as env]
             [koine.http :as http]
             [koine.json :as json]
+            [koine.process :as proc]
             [koine.time :as ktime]
             [toolnexus.adapter :as adapter]
             [toolnexus.tool :as tool]))
@@ -270,13 +271,33 @@
 ;; here; see the report.
 
 (defn- execute-calls
-  "§8 — the tool calls of one turn, in parallel via `future`/`deref`, with the
-  results in CALL ORDER regardless of completion order. Order is not cosmetic:
-  a scrambled transcript pairs the wrong result with the wrong tool_call_id and
-  the model never sees a crash, only a lie."
+  "§8 — the tool calls of one turn, in parallel, with the results in CALL ORDER
+  regardless of completion order. Order is not cosmetic: a scrambled transcript
+  pairs the wrong result with the wrong tool_call_id and the model never sees a
+  crash, only a lie.
+
+  `koine.process/run-async!` + a promise, NOT `future`. This is library code
+  running inside somebody else's process, and Clojure's future pool threads are
+  non-daemon with a 60-second keep-alive — one tool call would hold a consumer's
+  program open for a minute after it finished. `(shutdown-agents)` is the fix
+  for an APPLICATION that owns its process (our test runner calls it); a library
+  may never decide when its host program exits. run-async! is a daemon thread on
+  the JVM and a goroutine on cljgo. The promise is how a fire-and-forget
+  primitive gives a value back — run-async! discards its fn's return.
+
+  A tool that throws must not park the deref forever, so the body is wrapped:
+  tool/execute already converts a throw into an isError result, and the catch
+  here covers the residue."
   [toolkit calls]
   (->> calls
-       (mapv (fn [c] (future (assoc c :result (tool/execute toolkit (:name c) (:args c))))))
+       (mapv (fn [c]
+               (let [p (promise)]
+                 (proc/run-async!
+                  (fn [] (deliver p (assoc c :result
+                                           (try (tool/execute toolkit (:name c) (:args c))
+                                                (catch Throwable e
+                                                  (tool/failure (or (ex-message e) (str e)))))))))
+                 p)))
        (mapv deref)))
 
 (defn- emit! [on-event ev] (when on-event (on-event ev)) nil)

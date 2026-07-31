@@ -33,6 +33,7 @@
   (:require [clojure.string :as str]
             [koine.fs :as fs]
             [koine.json :as json]
+            [koine.process :as proc]
             [koine.server :as server]
             [toolnexus.tool :as tool]))
 
@@ -210,7 +211,10 @@
                              (str/join " "))
                 task    {:id task-id :status {:state "submitted"}}]
             (store-save store task)
-            (future (fulfil! store task-id text run-fn on-task))
+            ;; run-async!, not `future` — see execute-calls in client.cljc.
+            ;; A server is the worst place for the non-daemon pool: one thread
+            ;; per A2A task, each keeping the host process alive after shutdown.
+            (proc/run-async! (fn [] (fulfil! store task-id text run-fn on-task)))
             ;; §7B: return it IMMEDIATELY, in the submitted state.
             {:jsonrpc "2.0" :id id :result task})
 

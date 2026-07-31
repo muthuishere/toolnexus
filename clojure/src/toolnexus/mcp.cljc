@@ -182,7 +182,12 @@
   including one parked on a peer that will never speak again, once `kill!` has
   closed that peer's stdout."
   [child state]
-  (future
+  ;; run-async!, not `future` — see execute-calls in client.cljc. A reader loop
+  ;; is exactly the case koine documents: library code, one non-daemon pool
+  ;; thread per connected MCP server, each holding the consumer's process open
+  ;; for the pool's 60s keep-alive after the program is done.
+  (proc/run-async!
+   (fn []
     (loop []
       (let [line (try (proc/read-line! child) (catch Throwable _ nil))]
         (if (nil? line)
@@ -202,7 +207,7 @@
                                  (if (contains? (:pending s) (:id msg))
                                    (assoc-in s [:inbox (:id msg)] msg)
                                    (update s :unmatched inc)))))))
-            (if (:closed? @state) nil (recur))))))))
+            (if (:closed? @state) nil (recur)))))))))
 
 (defn- await-response!
   "Poll for this id's response until it lands, the transport closes, or the
