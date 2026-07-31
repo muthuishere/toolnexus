@@ -90,3 +90,23 @@ fixtures — never a Clojure-specific copy.
 State the question, the verdict, the exact numbers, and **what you did not
 cover**. If something failed, say so with the error. A spike that reports
 success it did not measure is worse than no spike.
+
+## Rule 3, sharpened (measured 2026-07-31)
+
+Non-negotiable #3 said "never shadow a `clojure.core` name." The surface is
+**bigger on cljgo than on the JVM**, and that is the dangerous part:
+
+```
+(resolve 'clojure.core/ok)   ; cljgo => #=(var clojure.core/ok)   JVM => nil
+(resolve 'clojure.core/err)  ; cljgo => #=(var clojure.core/err)  JVM => nil
+```
+
+`toolnexus.tool` shipped `ok`/`err` for exactly this long before it was caught,
+because **the JVM never warns**. Check a name on BOTH hosts before you take it:
+
+```clojure
+(resolve 'clojure.core/<name>)   ; must be nil on cljgo AND on the JVM
+```
+
+`clojure.core/await` (banned in §10) exists on both, so it announces itself.
+`ok`/`err` exist on only one, so they do not. The second kind is worse.

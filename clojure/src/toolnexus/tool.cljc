@@ -22,17 +22,24 @@
    :source      (or source "custom")
    :execute     execute})
 
-(defn ok
-  "A successful ToolResult (SPEC §0.1)."
-  ([output] (ok output nil))
+(defn success
+  "A successful ToolResult (SPEC §0.1).
+
+  NOT named `ok`: cljgo's clojure.core HAS `ok` and `err` (the JVM's does not),
+  so `(defn ok ...)` shadows a core name on one host only — measured 2026-07-31.
+  It warns today; per cljgo's static interop scan a bare core-shaped symbol can
+  reject the WHOLE namespace, and a hazard that fires on one host and not the
+  other is the exact thing this port exists to avoid."
+  ([output] (success output nil))
   ([output metadata]
    (cond-> {:output (str output) :isError false}
      metadata (assoc :metadata metadata))))
 
-(defn err
+(defn failure
   "A failed ToolResult. Note a tool ERROR is a VALUE handed back to the model,
-  not a thrown exception — the model is meant to see it and try again."
-  ([output] (err output nil))
+  not a thrown exception — the model is meant to see it and try again.
+  NOT named `err`, for the reason given on `success`."
+  ([output] (failure output nil))
   ([output metadata]
    (cond-> {:output (str output) :isError true}
      metadata (assoc :metadata metadata))))
@@ -73,5 +80,5 @@
        ;; `Throwable` is a bare symbol, not a java.* class name, so cljgo
        ;; accepts it. This is what lets §0.8 be written once for both hosts.
        (catch Throwable e
-         (err (or (ex-message e) (str e)))))
-     (err (str "unknown tool: " name)))))
+         (failure (or (ex-message e) (str e)))))
+     (failure (str "unknown tool: " name)))))
