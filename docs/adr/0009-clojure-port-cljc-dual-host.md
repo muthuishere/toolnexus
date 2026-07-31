@@ -340,21 +340,39 @@ Writing one file for four hosts surfaced five traps, each now encoded as a rule:
 | S4 | `clojure.core` parity probe (22 vars) | Decision 2 | ✅ passed (22/22) |
 | S5 | JSON encode/decode identical on all hosts | Decision 2a/2b | ✅ passed (9/9 × 4 hosts) |
 | S6 | HTTP POST both hosts against a local server | seam 1 | ☐ |
-| S7 | streaming stdio subprocess, both hosts | seam 2 | ✅ JVM passes; **cljgo gap CLOSED upstream 2026-07-30** (cljgo ADR 0104, commit `4423d12`) — pending a cljgo release |
+| S7 | streaming stdio subprocess, both hosts | seam 2 | ✅ passed on both — see S15 |
 | S14 | Glojure + let-go run the same `.cljc` | Decision 6 | ✅ passed |
-| S8 | skills discovery: `**/SKILL.md` glob + frontmatter | seam 3 | ☐ |
+| S8 | skills discovery: `**/SKILL.md` glob + frontmatter | seam 3 | ✅ passed — see S15 |
 | S9 | `clojure.test` suite runs identically on both hosts | Decision 4 | ☐ |
 | S10 | parallel tool calls via `future`/`promise` | §8 loop | ☐ |
-| S11 | real MCP handshake against `examples/mcp.json` | §2 | ☐ |
-| S12 | `cljgo build` AOT-compiles a program requiring the port | cljgo release path | ☐ |
-| S13 | Clojars publish dry-run + cljgo git-coord consumption | Decision 5 | ☐ |
+| S11 | real MCP handshake against `examples/mcp.json` | §2 | ✅ **passed** — see S15 |
+| S12 | `cljgo build` AOT-compiles a program requiring the port | cljgo release path | ✅ passed — see S15 |
+| S13 | Clojars publish dry-run + cljgo git-coord consumption | Decision 5 | ✅ moot — koine 0.4.1 is on Clojars and cljgo resolves Clojars (its ADR 0095); one coordinate, both hosts |
+| S15 | **SPEC §0 vertical slice, one `.cljc`, byte-identical on both hosts** | Decisions 1–3, seams 2–3, §0.2–0.7 | ✅ **passed 2026-07-31** (`clojure/spikes/s15-spec0-slice`) |
 
-S5, S7 and S11 are the ones that can still kill or reshape this design. S5 passed. S7 did
-fail on cljgo as expected, that failure became the specification for cljgo work item 1,
-and **the fix has since landed upstream** (cljgo ADR 0104, commit `4423d12`, 2026-07-30) —
-so no seam capability is now known to be unreachable on either host. **S11 (a real MCP
-handshake against `examples/mcp.json`) is the last spike that can still reshape this
-design**, and it is untouched.
+S5, S7 and S11 were the ones that could still kill or reshape this design. **All three have
+now passed.** S7 did fail on cljgo as expected, that failure became the specification for
+cljgo work item 1, the fix landed upstream (cljgo ADR 0104 → shipped as ADR 0109), and koine
+`0.4.1` ships it from Clojars.
+
+**S15 subsumes S7, S8, S11 and S12 in a single measurement** and is the strongest evidence
+this ADR has. One 295-line `.cljc` — **zero reader conditionals, zero `java.*`, zero Go
+interop** — implements §0.2 sanitize/naming, §0.3 `mcp.json` parsing with `${ENV}` header
+expansion, §0.4 a live MCP stdio session (`initialize` → `notifications/initialized` →
+`tools/list` → `tools/call`, skipping interleaved notifications), §0.5/§0.6 skill discovery
+and the byte-exact `skill` output, and §0.7 all three schema adapters — against the **shared**
+`examples/` fixtures the other six ports run. Clojure (JVM), a `cljgo build` AOT binary and
+`cljgo run` interpreted all emit the same 2730 bytes.
+
+This settles Decision 3 more strongly than it was written: the port's own source needs **no**
+reader conditional, not merely few. It also retires the concern that JVM-first meant cljgo
+would be discovered late — both hosts are green from the first line of real code.
+
+S15 found one cljgo trap worth carrying into CI: **`cljgo run <file>` does not call `-main`.**
+It evaluates top-level forms and exits 0 having printed nothing, which is indistinguishable
+from a program that ran successfully and had nothing to say. Together with the `cljgo test`
+behaviour koine reported (zero `.cljc` tests collected, `Ran 0 tests`, exit 0), the rule for
+this port is: **on cljgo, assert on output, never on the exit code.**
 
 Note that Decision 4 (JVM-first) means none of the cljgo work was ever a release gate; it
 is recorded here because the measurements were the specification cljgo built against.
