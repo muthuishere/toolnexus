@@ -1,8 +1,8 @@
 ---
-title: "McpSource.parseMcpConfig"
+title: "parseMcpConfig — validate an mcp.json"
 description: "Parse and validate config without connecting — the fast fail for a malformed or misspelled server block. — Java."
 sidebar:
-  label: "McpSource.parseMcpConfig"
+  label: "mcp / parse-config"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -11,59 +11,26 @@ import { Aside } from '@astrojs/starlight/components';
 <strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
 </p>
 
-```java
-{/* TODO:signature */}
-```
+<Aside type="caution" title="Not available in Java">
+Java keeps parseConfig package-private (McpSource.java:141) — there is no public config parser. C# exposes it as McpSource.ParseConfig, not ParseMcpConfig.
+</Aside>
 
 Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
 
-## When to use it
-
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
-
-## Why this and not the alternative
+## What to use instead
 
 {/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
-</Aside>
+_TODO: the closest thing this port does offer, and how to get the same outcome._
 
-## Examples
-
-### 1. TODO — the smallest useful call
-
-{/* TODO:example1 */}
-```java
-// TODO
-```
-
-### 2. TODO — the realistic case
-
-{/* TODO:example2 */}
-```java
-// TODO
-```
-
-### 3. TODO — the full surface
-
-{/* TODO:example3 */}
-```java
-// TODO
-```
-
-## The same call in the other five ports
+## The same capability in the other ports
 
 | Port | Symbol | |
 |---|---|---|
 | JavaScript | `parseMcpConfig` | [→](/api/javascript/mcp/parse-config/) |
 | Python | `parse_mcp_config` | [→](/api/python/mcp/parse-config/) |
 | Go | `ParseMcpConfig` | [→](/api/go/mcp/parse-config/) |
-| C# | `McpSource.ParseMcpConfig` | [→](/api/csharp/mcp/parse-config/) |
+| C# | `McpSource.ParseConfig` | [→](/api/csharp/mcp/parse-config/) |
 | Elixir | `Toolnexus.Mcp.parse_config` | [→](/api/elixir/mcp/parse-config/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 

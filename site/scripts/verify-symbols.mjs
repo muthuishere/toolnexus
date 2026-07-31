@@ -37,9 +37,10 @@ function identifiersOf(symbol) {
 		.replace(/\s+(annotation|attribute|option|options|tool|task tool|conversation|hooks|budget|relay|task_store)$/i, "")
 		.trim()
 	const parts = cleaned.split(".").filter(Boolean)
-	const last = parts[parts.length - 1]
-	// For dotted names try the last segment, and also the penultimate (the owning type).
-	return parts.length > 1 ? [last, parts[parts.length - 2]] : [last]
+	// ALWAYS require the final segment — the member being claimed. Matching only the
+	// owning type (e.g. "McpSource" existing while "parseMcpConfig" does not) is exactly
+	// the false positive this check exists to catch.
+	return [parts[parts.length - 1]]
 }
 
 function grepCount(dir, ext, ident) {

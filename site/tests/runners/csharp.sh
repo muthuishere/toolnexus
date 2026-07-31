@@ -47,7 +47,7 @@ for f in "$SNIPPETS"/*.cs; do
   </ItemGroup>
 </Project>
 EOF
-	if out=$(cd "$proj" && dotnet run --nologo -v q 2>&1); then
+	if out=$(cd "$proj" && TOOLNEXUS_REPO="$REPO_ROOT" dotnet run --nologo -v q 2>&1); then
 		pass=$((pass + 1))
 		printf '  \033[32mPASS\033[0m %-40s %s\n' "$name" "$(echo "$out" | tail -1)"
 	else
