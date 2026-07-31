@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# S15 — run the SAME src/toolnexus/slice.cljc on both supported hosts and prove
+# S16 — run the SAME src/toolnexus/loopslice.cljc on both supported hosts and prove
 # the reports are byte-identical.
 #
 # cljgo is run BOTH ways on purpose: interpreted (`cljgo run`) and as an AOT
@@ -15,11 +15,11 @@ OUT=$(mktemp -d)
 bold() { printf '\033[1m%s\033[0m\n' "$1"; }
 
 bold "== Clojure (JVM)"
-clojure -M -m toolnexus.slice > "$OUT/jvm.json"  || { echo "JVM run FAILED"; exit 1; }
+clojure -M -m toolnexus.loopslice > "$OUT/jvm.json"  || { echo "JVM run FAILED"; exit 1; }
 
 bold "== cljgo (AOT binary)"
 cljgo build >/dev/null 2>&1 || { echo "cljgo build FAILED"; exit 1; }
-"$(cljgo which slice 2>/dev/null || echo ./slice)" > "$OUT/cljgo-aot.json" 2>/dev/null \
+"$(cljgo which loopslice 2>/dev/null || echo ./loopslice)" > "$OUT/cljgo-aot.json" 2>/dev/null \
   || cljgo build run 2>/dev/null | tail -1 > "$OUT/cljgo-aot.json"
 
 bold "== cljgo (interpreted)"
