@@ -1,0 +1,7 @@
+;; The Clojure port on cljgo. The SAME koine artifact from Clojars.
+;;
+;; ONE `exe` per build file: two `exe` calls in one build corrupt the second
+;; binary when the entries share a namespace (cljgo #169).
+(defn build [b]
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.6.0"})
+  (install b (exe b {:name "toolnexus-test" :main "src/toolnexus/test_main.cljc"})))
