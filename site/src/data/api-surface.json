@@ -141,10 +141,11 @@
         "javascript": "parseMcpConfig",
         "python": "parse_mcp_config",
         "golang": "ParseMcpConfig",
-        "java": "McpSource.parseMcpConfig",
-        "csharp": "McpSource.ParseMcpConfig",
+        "java": null,
+        "csharp": "McpSource.ParseConfig",
         "elixir": "Toolnexus.Mcp.parse_config"
-      }
+      },
+      "parityNote": "Java keeps parseConfig package-private (McpSource.java:141) — there is no public config parser. C# exposes it as McpSource.ParseConfig, not ParseMcpConfig."
     },
     {
       "id": "mcp/elicitation",
@@ -226,7 +227,7 @@
         "golang": "NativeTool",
         "java": "NativeTool.of",
         "csharp": "NativeTool.Of",
-        "elixir": "Toolnexus.Native.define"
+        "elixir": "Toolnexus.Native.define_tool"
       },
       "sources": [
         "js/examples/advanced.ts",
@@ -247,8 +248,9 @@
         "golang": "NativeToolReflect",
         "java": "@Tool annotation",
         "csharp": "ToolMethodAttribute",
-        "elixir": "Toolnexus.Native.reflect"
-      }
+        "elixir": null
+      },
+      "parityNote": "Elixir has no reflection-based tool builder; use Toolnexus.Native.define_tool/1 with an explicit input_schema."
     },
     {
       "id": "native/collect",
@@ -296,8 +298,9 @@
         "golang": "SelectBuiltins",
         "java": "BuiltinTools.select",
         "csharp": "BuiltinTools.Select",
-        "elixir": "Toolnexus.Builtin.select"
-      }
+        "elixir": "Toolnexus.Builtin.load"
+      },
+      "parityNote": "Elixir selects built-ins via Toolnexus.Builtin.load/1 (a config map), not a named select function."
     },
     {
       "id": "builtins/create",
@@ -434,14 +437,15 @@
         "golang": "Hooks",
         "java": "LlmClient.Hooks",
         "csharp": "LlmClient.Hooks",
-        "elixir": "Toolnexus.Client hooks option"
+        "elixir": "Toolnexus.Client.create"
       },
       "sources": [
         "js/examples/hooks.ts",
         "python/examples/hooks.py",
         "golang/examples/hooks",
         "examples/agent-hooks"
-      ]
+      ],
+      "parityNote": "Elixir has no separate Hooks type — pass a :hooks map (:before_llm, :after_llm, :before_tool, :after_tool) to Toolnexus.Client.create/1."
     },
     {
       "id": "client/conversation",
@@ -509,8 +513,9 @@
         "golang": "ErrorInfo",
         "java": "LlmClient.ErrorInfo",
         "csharp": "LlmClient.ErrorInfo",
-        "elixir": "Toolnexus.Client error options"
-      }
+        "elixir": "Toolnexus.Client.create"
+      },
+      "parityNote": "Elixir configures retries/timeout as options on Toolnexus.Client.create/1 rather than a distinct error-classifier type."
     },
     {
       "id": "agents/agent",
@@ -807,11 +812,12 @@
         "golang": "Pending",
         "java": "Request.pending",
         "csharp": "Suspension.Pending",
-        "elixir": "Toolnexus.Request.pending"
+        "elixir": null
       },
       "sources": [
         "js/examples/pending.ts"
-      ]
+      ],
+      "parityNote": "Elixir ships no pending/1 producer — construct %ToolResult{metadata: %{pending: %Request{}}} directly. Only the reader, ToolResult.pending?/1, exists."
     },
     {
       "id": "suspension/auth-required",
@@ -826,8 +832,9 @@
         "golang": "AuthRequired",
         "java": "Request.authRequired",
         "csharp": "Suspension.AuthRequired",
-        "elixir": "Toolnexus.Request.auth_required"
-      }
+        "elixir": null
+      },
+      "parityNote": "Elixir ships no auth_required/pending producer helpers — build %ToolResult{metadata: %{pending: %Request{}}} by hand. Only the reader, ToolResult.pending?/1, exists."
     },
     {
       "id": "suspension/wait-for",
@@ -842,8 +849,9 @@
         "golang": "WaitFor",
         "java": "LlmClient.waitFor",
         "csharp": "LlmClient.WaitFor",
-        "elixir": "Toolnexus.Client wait_for"
-      }
+        "elixir": "Toolnexus.Client.create"
+      },
+      "parityNote": "Elixir passes :wait_for as an option to Toolnexus.Client.create/1 rather than exposing a WaitFor type."
     },
     {
       "id": "suspension/pending-of",
@@ -858,8 +866,9 @@
         "golang": "PendingOf",
         "java": "Request.pendingOf",
         "csharp": "Suspension.PendingOf",
-        "elixir": "Toolnexus.Request.pending_of"
-      }
+        "elixir": null
+      },
+      "parityNote": "Elixir has no pending_of/1; match on result.metadata or use ToolResult.pending?/1."
     },
     {
       "id": "suspension/resume",

@@ -31,7 +31,7 @@ failed_names=()
 for f in "$SNIPPETS"/*.py; do
 	[ -e "$f" ] || continue
 	name="$(basename "$f" .py)"
-	if out=$("$VENV/bin/python" "$f" 2>&1); then
+	if out=$(cd "$REPO_ROOT" && "$VENV/bin/python" "$f" 2>&1); then
 		pass=$((pass + 1))
 		printf '  \033[32mPASS\033[0m %-40s %s\n' "$name" "$(echo "$out" | tail -1)"
 	else

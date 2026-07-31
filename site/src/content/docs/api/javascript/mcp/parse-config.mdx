@@ -1,56 +1,185 @@
 ---
-title: "parseMcpConfig"
-description: "Parse and validate config without connecting — the fast fail for a malformed or misspelled server block. — JavaScript."
+title: parseMcpConfig
+description: Parse and validate an mcp.json without connecting to anything — the fast fail for a malformed or misspelled server block. JavaScript.
 sidebar:
-  label: "parseMcpConfig"
+  label: parseMcpConfig
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/mcp.ts">js/src/mcp.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function parseMcpConfig(input: string | object): McpConfig
 ```
 
-Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
+Reads MCP server configuration and normalises it into a flat map of server name → config. It
+**connects to nothing** — no child processes, no HTTP. That is the whole point: it is the cheap,
+synchronous check you can run before paying for [`loadMcp`](/api/javascript/mcp/load/).
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **Validate at startup or in a test**, so a typo in `mcp.json` fails immediately rather than
+  halfway through connecting to five servers.
+- **Inspect or modify config before loading** — filter servers by environment, inject a header,
+  disable one in CI.
+- **Accept config from somewhere other than a file** — a database, an env var, an API response.
 
-## Why this and not the alternative
+## Why this and not just calling loadMcp
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="loadMcp already parses — use this when you need the config itself">
+[`loadMcp`](/api/javascript/mcp/load/) calls `parseMcpConfig` internally, so you do not need to
+call it first in the ordinary path. Reach for it when you want the *config as data*: to check it,
+change it, or report on it without launching anything.
 </Aside>
+
+The normalising is the real work. It accepts a **path**, a **raw object**, or an object wrapped
+under `mcpServers`, `servers`, or `mcp` — three spellings in the wild — and returns one shape.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Parse the shared fixture from disk
 
-{/* TODO:example1 */}
-```ts
-// TODO
+This is `examples/mcp.json`, the fixture every port is tested against.
+
+```ts test
+import assert from "node:assert"
+import { parseMcpConfig } from "toolnexus"
+
+// A path is read and JSON-parsed for you.
+const config = parseMcpConfig("examples/mcp.json")
+
+// The `mcpServers` wrapper is unwrapped — you get the servers directly.
+assert.deepEqual(Object.keys(config).sort(), ["everything", "example-remote"])
+
+const local = config["everything"]
+assert.equal(local.type, "local")
+assert.deepEqual(local.command, ["npx", "-y", "@modelcontextprotocol/server-everything"])
+assert.equal(local.timeout, 30000)
+
+const remote = config["example-remote"]
+assert.equal(remote.type, "remote")
+assert.equal(remote.url, "https://example.com/mcp")
+// Disabled servers are still returned — parsing does not filter.
+assert.equal(remote.enabled, false)
+
+console.log("ok:", Object.keys(config).join(", "))
 ```
 
-### 2. TODO — the realistic case
+<Aside type="caution">
+Parsing does **not** drop disabled servers. `enabled: false` is preserved in the returned config
+and is honoured later, by `loadMcp`. If you are counting servers, count the enabled ones yourself.
+</Aside>
 
-{/* TODO:example2 */}
-```ts
-// TODO
+### 2. Three wrapper spellings, one result
+
+`mcpServers`, `servers` and `mcp` all mean the same thing. A bare map works too.
+
+```ts test
+import assert from "node:assert"
+import { parseMcpConfig } from "toolnexus"
+
+const server = { type: "local", command: ["echo", "hi"] }
+
+const wrapped = parseMcpConfig({ mcpServers: { a: server } })
+const alt = parseMcpConfig({ servers: { a: server } })
+const short = parseMcpConfig({ mcp: { a: server } })
+const bare = parseMcpConfig({ a: server })
+
+// All four normalise to the same flat map.
+for (const c of [wrapped, alt, short, bare]) {
+  assert.deepEqual(Object.keys(c), ["a"])
+  assert.deepEqual(c["a"].command, ["echo", "hi"])
+}
+
+// Sibling top-level config keys are NOT mistaken for servers in the bare form.
+const mixed = parseMcpConfig({ a: server, builtins: false, agents: [], a2a: {} })
+assert.deepEqual(Object.keys(mixed), ["a"])
+
+console.log("ok: 4 spellings ->", Object.keys(wrapped).join(","))
 ```
 
-### 3. TODO — the full surface
+That last assertion matters: in the bare form, `builtins`, `agents`, `a2a` and `mcpServer` are
+stripped, because a single config file often carries all of them side by side.
 
-{/* TODO:example3 */}
-```ts
-// TODO
+### 3. Validate before loading, and fail loudly
+
+The pattern this function exists for — check the config, then decide whether to connect.
+
+```ts test
+import assert from "node:assert"
+import { parseMcpConfig } from "toolnexus"
+
+function validate(input: object): { enabled: string[]; problems: string[] } {
+  const config = parseMcpConfig(input)
+  const enabled: string[] = []
+  const problems: string[] = []
+
+  for (const [name, cfg] of Object.entries(config)) {
+    // Disabled either way round: `enabled: false` or `disabled: true`.
+    const off = (cfg as any).disabled === true || (cfg as any).enabled === false
+    if (off) continue
+    enabled.push(name)
+
+    const c = cfg as any
+    if (c.type === "remote") {
+      if (!c.url) problems.push(`${name}: remote server without a url`)
+    } else if (!Array.isArray(c.command) || c.command.length === 0) {
+      problems.push(`${name}: local server without a command`)
+    }
+  }
+  return { enabled, problems }
+}
+
+const good = validate({
+  mcpServers: {
+    ok_local: { type: "local", command: ["npx", "server"] },
+    ok_remote: { type: "remote", url: "https://example.com/mcp" },
+    off: { type: "local", command: ["x"], enabled: false },
+  },
+})
+assert.deepEqual(good.enabled, ["ok_local", "ok_remote"])
+assert.deepEqual(good.problems, [])
+
+const bad = validate({
+  mcpServers: {
+    broken_remote: { type: "remote" },
+    broken_local: { type: "local", command: [] },
+  },
+})
+assert.equal(bad.problems.length, 2)
+
+// Malformed JSON throws rather than returning a half-config.
+assert.throws(() => parseMcpConfig("does-not-exist.json"))
+
+console.log("ok:", good.enabled.join(","), "| problems:", bad.problems.length)
 ```
+
+## Accepted input
+
+| Input | Behaviour |
+|---|---|
+| `"./mcp.json"` | Read from disk and `JSON.parse`d. Throws if missing or malformed. |
+| `{ mcpServers: {...} }` | Unwrapped. |
+| `{ servers: {...} }` | Unwrapped — alternate spelling. |
+| `{ mcp: {...} }` | Unwrapped — alternate spelling. |
+| `{ myserver: {...} }` | Bare map. `builtins` / `agents` / `a2a` / `mcpServer` siblings are stripped. |
+
+## Server config
+
+| Field | Applies to | What it is |
+|---|---|---|
+| `type` | both | `"local"` or `"remote"`. |
+| `command` | local | Argv array, e.g. `["npx", "-y", "server"]`. |
+| `environment` / `env` | local | Extra environment for the child process. |
+| `cwd` | local | Working directory for the child. |
+| `url` | remote | Streamable-HTTP endpoint. |
+| `headers` | remote | `${ENV_VAR}` values expand at call time and are never logged. |
+| `enabled` / `disabled` | both | Preserved by parsing; honoured by `loadMcp`. |
+| `timeout` | both | Per-server connect/call budget in ms. |
+| `tools` | both | Per-server allowlist keyed on the **original** tool name. |
 
 ## The same call in the other five ports
 
@@ -62,12 +191,13 @@ _TODO: name the alternative and when to prefer it._
 | C# | `McpSource.ParseMcpConfig` | [→](/api/csharp/mcp/parse-config/) |
 | Elixir | `Toolnexus.Mcp.parse_config` | [→](/api/elixir/mcp/parse-config/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+<Aside type="note" title="Go returns an error, the others throw">
+`ParseMcpConfig` in Go returns `(McpConfig, error)`. JavaScript, Python, Java and C# raise, and
+Elixir raises from `Jason.decode!` / `File.read!`. Same contract, each language's convention.
+</Aside>
 
 ## See also
 
-- [`loadMcp`](/api/javascript/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
-- [`loadMcp`](/api/javascript/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
-- [`listMcpTools`](/api/javascript/mcp/list-tools/) — List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
-- [`elicitationToRequest`](/api/javascript/mcp/elicitation/) — Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.
+- [`loadMcp`](/api/javascript/mcp/load/) — parse *and* connect
+- [`listMcpTools`](/api/javascript/mcp/list-tools/) — what each server would expose
+- [`createToolkit`](/api/javascript/toolkit/create/) — takes `mcpConfig` in exactly these forms

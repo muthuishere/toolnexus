@@ -53,7 +53,7 @@ for f in "$SNIPPETS"/*.java; do
 	mkdir -p "$rundir"
 	# Single-file source mode needs the filename to match the public class.
 	cp "$f" "$rundir/Example.java"
-	if out=$(cd "$rundir" && java -cp "$CP" Example.java 2>&1); then
+	if out=$(cd "$REPO_ROOT" && java -cp "$CP" "$rundir/Example.java" 2>&1); then
 		pass=$((pass + 1))
 		printf '  \033[32mPASS\033[0m %-40s %s\n' "$name" "$(echo "$out" | tail -1)"
 	else
