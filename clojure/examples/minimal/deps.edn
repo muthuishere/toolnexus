@@ -1,0 +1,8 @@
+;; Clojure (JVM). koine from Clojars.
+;; NOTE: one source root only. cljgo has no configurable source path — it
+;; resolves namespaces under src/ relative to the entry file — so a test/ tree
+;; is invisible to `cljgo run` and `cljgo build`. In a dual-host project the
+;; tests live beside the code.
+{:paths ["src"]
+ :deps  {org.clojure/clojure           {:mvn/version "1.12.5"}
+         net.clojars.muthuishere/koine {:mvn/version "0.5.0"}}}

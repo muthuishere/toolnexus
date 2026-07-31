@@ -1,0 +1,5 @@
+;; The AOT test binary, in its own build file — see the note in ../build.cljgo
+;; about two `exe` calls in one build.
+(defn build [b]
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.5.0"})
+  (install b (exe b {:name "minimal-test" :main "../src/app/test_main.cljc"})))

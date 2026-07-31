@@ -1,0 +1,16 @@
+;; cljgo. The SAME koine artifact from Clojars — cljgo resolves Maven deps as of
+;; its ADR 0095, so there is no git coordinate and no vendored copy.
+;;
+;;   cljgo build        build the app binary
+;;   cljgo build run    ...and run it
+;;
+;; ONE `exe` per build file, deliberately. Two `exe` calls in one `build` fn
+;; produce a corrupt SECOND binary regardless of order — measured 2026-07-31 on
+;; cljgo 0.1.0-dev: app-then-test gave a test binary with 5 errors, test-then-app
+;; gave an app binary that died on `cannot call unbound var #'app.core/report`.
+;; The AOT test binary is therefore built from `aot-test/build.cljgo`.
+(defn build [b]
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.5.0"})
+  (let [app (exe b {:name "minimal" :main "src/app/main.cljg"})]
+    (install b app)
+    (run b app)))

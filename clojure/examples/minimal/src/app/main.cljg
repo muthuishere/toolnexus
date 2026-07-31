@@ -1,0 +1,11 @@
+;; The CLJGO entry file. A `.cljg` — cljgo picks this and the JVM never sees it.
+;;
+;;   cljgo build run
+;;
+;; Same require, same shared namespace. Only the entry point is host-specific,
+;; and it is host-specific by FILE EXTENSION rather than by a reader conditional.
+(ns app.main
+  (:require [app.core :as core]))
+
+(defn -main [& _]
+  (println (core/report "/tmp/koine-minimal-cljgo.txt")))
