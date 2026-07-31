@@ -1,0 +1,72 @@
+---
+title: "Agent"
+description: "Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent. — C#."
+sidebar:
+  label: "Agent"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+</p>
+
+```csharp
+{/* TODO:signature */}
+```
+
+Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+
+## When to use it
+
+{/* TODO:when */}
+_TODO: the situation this entry point is for._
+
+## Why this and not the alternative
+
+{/* TODO:why */}
+<Aside type="tip" title="TODO: when NOT to use it">
+_TODO: name the alternative and when to prefer it._
+</Aside>
+
+## Examples
+
+### 1. TODO — the smallest useful call
+
+{/* TODO:example1 */}
+```csharp
+// TODO
+```
+
+### 2. TODO — the realistic case
+
+{/* TODO:example2 */}
+```csharp
+// TODO
+```
+
+### 3. TODO — the full surface
+
+{/* TODO:example3 */}
+```csharp
+// TODO
+```
+
+## The same call in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `agents.Agent` | [→](/api/javascript/runtime/agent/) |
+| Python | `Agent` | [→](/api/python/runtime/agent/) |
+| Go | `agents.New` | [→](/api/go/runtime/agent/) |
+| Java | `agents.Agent` | [→](/api/java/runtime/agent/) |
+| Elixir | `Toolnexus.Agents` | [→](/api/elixir/runtime/agent/) |
+
+Behavior is identical across ports by contract — same `examples/` fixtures, same output.
+See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## See also
+
+- [`AgentRuntime`](/api/csharp/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`Handle`](/api/csharp/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`AgentTypes.Budget`](/api/csharp/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

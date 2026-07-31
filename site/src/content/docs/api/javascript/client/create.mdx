@@ -1,0 +1,193 @@
+---
+title: createClient
+description: The built-in tool-calling loop — system prompt, skills injection, parallel and chained tool calls, retries, memory, hooks and metrics. JavaScript.
+sidebar:
+  label: createClient
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#8-unified-llm-client-the-host-loop">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/client.ts">js/src/client.ts</a>
+</p>
+
+```ts
+function createClient(opts: ClientOptions): Client
+```
+
+The host loop. Give it a provider endpoint and a `Toolkit`, and it runs the whole tool-calling
+cycle: build the system prompt, inject the skill catalog, call the model, execute the tool calls it
+asks for — in parallel where the model requested parallel — feed results back, and repeat until the
+model stops asking.
+
+## When to use it
+
+Use `createClient` when you want **an agent**, not just tool schema. It is the difference between
+"I have a list of tools" and "something is running".
+
+It is vendor-neutral by construction: `style` selects the wire format (OpenAI-shaped or
+Anthropic-shaped) and `baseUrl` points anywhere — OpenAI, Anthropic, OpenRouter, a local Ollama, or
+your own gateway. The toolkit does not change.
+
+## Why this and not your own loop
+
+<Aside type="tip" title="Write your own loop instead when you already have one">
+If you have an existing agent framework, you probably want the toolkit and the adapters, not this.
+`tk.toOpenAI()` gives you schema for your loop, and `tk.execute(name, args)` runs a call. That
+combination is a perfectly good integration and skips this page entirely.
+</Aside>
+
+Prefer `createClient` when you would otherwise have to hand-write:
+
+- **Parallel and chained tool calls.** The model can request several calls in one turn and then
+  more based on the results. Getting the transcript shape right across both providers is fiddly.
+- **Suspension (§10).** A tool returning `Pending` parks the run. With `waitFor` set, the client
+  resolves and retries. Without it, `run()` returns `{ status: "pending" }` so a durable host can
+  resume later — same contract either way.
+- **Retries and deadlines.** Transient 429/5xx handling, exponential backoff with jitter, and a
+  whole-run timeout that aborts the in-flight request.
+- **Memory.** `ask(prompt, { id })` keeps a transcript across turns.
+- **Hooks and metrics.** Lifecycle interception and one metric event per model and tool call.
+
+## Examples
+
+### 1. One turn against a toolkit
+
+```ts
+import { createToolkit, createClient } from "toolnexus"
+
+const tk = await createToolkit({ skillsDir: "./examples/skills" })
+
+const client = createClient({
+  baseUrl: "https://api.openai.com/v1",
+  style: "openai",
+  model: "gpt-4o-mini",
+  apiKey: process.env.OPENAI_API_KEY,
+})
+
+const res = await client.run("Say hello using the hello-world skill.", { toolkit: tk })
+console.log(res.output)
+
+await tk.close()
+```
+
+<Aside type="caution">
+`apiKey` is read from the environment. Never write a real key into source, config or an example —
+reference it as `process.env.*` at the point of use.
+</Aside>
+
+### 2. Multi-turn memory and streaming
+
+`ask` remembers by conversation `id`; `stream` yields text deltas and tool-call events as they
+happen. This mirrors `js/examples/streaming.ts` and `js/examples/memory.ts`.
+
+```ts
+const client = createClient({
+  baseUrl: "https://openrouter.ai/api/v1",
+  style: "openai",
+  model: "anthropic/claude-sonnet-4",
+  apiKey: process.env.OPENROUTER_API_KEY,
+  systemPrompt: "You are a terse assistant.",
+  maxTurns: 10,
+})
+
+// Remembers across calls — same id, same transcript.
+await client.ask("My name is Muthu.", { toolkit: tk, id: "conv-1" })
+const res = await client.ask("What is my name?", { toolkit: tk, id: "conv-1" })
+console.log(res.output) // knows the answer
+
+// Streaming: text deltas plus tool-call events.
+for await (const ev of client.stream("Summarise the repo.", { toolkit: tk, id: "conv-1" })) {
+  if (ev.type === "text") process.stdout.write(ev.delta)
+  if (ev.type === "tool_call") console.log("\n[calling]", ev.name)
+}
+```
+
+### 3. The full surface — hooks, metrics, resilience, suspension
+
+```ts
+const client = createClient({
+  baseUrl: "https://api.anthropic.com/v1",
+  style: "anthropic",
+  model: "claude-sonnet-4",
+  apiKey: process.env.ANTHROPIC_API_KEY,
+
+  // Resilience.
+  retries: 3,
+  retryBaseMs: 500,          // exponential + jitter
+  timeoutMs: 120_000,        // whole-run deadline, aborts the in-flight request
+
+  // Durable memory instead of process-lifetime in-memory.
+  store: myPostgresConversationStore,
+
+  // Lifecycle middleware — audit, redact, veto, rewrite.
+  hooks: {
+    beforeTool: async ({ name, args }) => {
+      if (name === "bash") return { veto: "shell disabled in prod" }
+      console.log("[tool]", name, args)
+    },
+    afterTool: async ({ name, result }) => console.log("[done]", name, result.output?.length),
+  },
+
+  // One event per model call, per tool call, per run.
+  onMetric: (ev) => statsd.timing(`toolnexus.${ev.event}`, ev.durationMs),
+
+  // §10 — a tool returned Pending; resolve it and the loop retries the tool.
+  waitFor: async (request) => ({ kind: "input", value: await askOnSlack(request) }),
+
+  // Provider-specific escape hatches (§8 Gap 1/2).
+  requestParams: { max_tokens: 8192 },      // wins on collision
+  bodyTransform: (body) => ({ ...body, metadata: { tenant: "acme" } }),
+  fetch: myProxiedFetch,                    // LLM path only, retries included
+})
+```
+
+## Options
+
+| Option | Type | What it does |
+|---|---|---|
+| `baseUrl` | `string` | Provider endpoint. **Required.** |
+| `style` | `ClientStyle` | Wire format — OpenAI-shaped or Anthropic-shaped. **Required.** |
+| `model` | `string` | Model id. **Required.** |
+| `apiKey` | `string` | Read from the environment; never hard-code it. |
+| `headers` | `Record<string, string>` | Extra request headers. |
+| `systemPrompt` | `string` | Prepended; the skill catalog is injected alongside it. |
+| `maxTurns` | `number` | Cap on loop iterations. |
+| `hooks` | `Hooks` | Lifecycle middleware around model and tool calls. |
+| `retries` | `number` | Transient-error retries. Default `2`. |
+| `retryBaseMs` | `number` | Base backoff, exponential + jitter. Default `500`. |
+| `timeoutMs` | `number` | Whole-run deadline; aborts the in-flight request. |
+| `store` | `ConversationStore` | Conversation provider for `ask(prompt, { id })`. Default in-memory. |
+| `onMetric` | `(ev: MetricEvent) => void` | Metric sink. No cost when unset. |
+| `waitFor` | `(req: Request) => Promise<Answer>` | §10 suspension resolver. Omit ⇒ `run()` returns `status:"pending"`. |
+| `requestParams` | `Record<string, unknown>` | Merged into every body; **wins** on collision. `messages`/`tools`/`stream` forbidden. |
+| `bodyTransform` | `(body) => body` | Rewrite the assembled body just before marshal. |
+| `fetch` | `typeof fetch` | HTTP transport for the LLM path only. |
+
+## What you get back
+
+| Method | Returns | |
+|---|---|---|
+| `run(prompt, ctx)` | `Promise<RunResult>` | One turn; loops until the model stops. |
+| `ask(prompt, ctx)` | `Promise<RunResult>` | Like `run`, but remembers by `ctx.id`. |
+| `stream(prompt, ctx)` | `AsyncGenerator<StreamEvent>` | Text deltas and tool-call events. |
+| `conversation(ctx)` | `Conversation` | An explicit multi-turn handle. |
+| `translate(req)` | `Promise<TranslateResult>` | §11 single turn — declares tools, executes nothing. |
+| `conversationStore()` | `ConversationStore` | The store in use. |
+| `metrics()` | `string` | Rendered metrics snapshot. |
+
+## The same call in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| Python | `create_client` | [→](/api/python/client/create/) |
+| Go | `CreateClient` | [→](/api/go/client/create/) |
+| Java | `LlmClient.create` | [→](/api/java/client/create/) |
+| C# | `LlmClient.Create` | [→](/api/csharp/client/create/) |
+| Elixir | `Toolnexus.Client.create` | [→](/api/elixir/client/create/) |
+
+## See also
+
+- [`createToolkit`](/api/javascript/toolkit/create/) — what the client runs against
+- [`Hooks`](/api/javascript/client/hooks/) · [`Conversation`](/api/javascript/client/conversation/) · [`onMetric`](/api/javascript/client/metrics/)
+- [`pending`](/api/javascript/suspension/pending/) — suspend a run and ask a human

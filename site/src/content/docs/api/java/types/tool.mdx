@@ -1,0 +1,225 @@
+---
+title: Tool
+description: The uniform interface every tool source collapses to — name, description, JSON-Schema parameters, execute. Java.
+sidebar:
+  label: Tool
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/Tool.java">Tool.java</a>
+</p>
+
+```java
+public interface Tool {
+    String name();
+    String description();
+    Map<String, Object> inputSchema();
+    String source();
+    ToolResult execute(Map<String, Object> args, ToolContext ctx);
+
+    static String sanitize(String value);
+}
+```
+
+The one interface. An MCP server tool, an agent skill, a built-in shell tool, a remote A2A agent, an
+HTTP endpoint and a plain method of your own are all *the same thing* to an LLM — a named,
+described, schema'd callable. `Tool` is that thing, and every source produces it.
+
+## When to use it
+
+You mostly **receive** `Tool`s rather than implement them: `tk.tools()` hands you a `List<Tool>`,
+and that is what you stream, filter, and pass to an adapter.
+
+Implement it directly when you are writing a **new tool source** — something producing tools from a
+shape toolnexus doesn't already cover. For a single ordinary method, use
+[`NativeTool.of`](/api/java/native/define-tool/) or the `@Tool` annotation instead.
+
+## Why an interface and not a record
+
+<Aside type="tip" title="Implement it with a lambda-friendly shape, or use NativeTool">
+Because it is an interface with five members it is not a functional interface — you cannot write it
+as a bare lambda. For one-off tools that is friction, which is exactly why
+[`NativeTool.of`](/api/java/native/define-tool/) exists. Implement `Tool` yourself when you are
+generating many tools from data and want full control over each member.
+</Aside>
+
+`execute` returns `ToolResult` **directly** — no `Optional`, no checked exception, no future. A
+failed tool reports `isError()`, it does not throw. Throwing escapes the loop and ends the run.
+
+## Examples
+
+### 1. The smallest possible tool
+
+An anonymous class is the most direct implementation.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Tool echo = new Tool() {
+            public String name() { return "echo"; }
+            public String description() { return "Return whatever it is given"; }
+            public Map<String, Object> inputSchema() {
+                return Map.of(
+                    "type", "object",
+                    "properties", Map.of("text", Map.of("type", "string")),
+                    "required", java.util.List.of("text")
+                );
+            }
+            public String source() { return "custom"; }
+            public ToolResult execute(Map<String, Object> a, ToolContext ctx) {
+                return ToolResult.ok(String.valueOf(a.get("text")));
+            }
+        };
+
+        ToolResult res = echo.execute(Map.of("text", "hello"), new ToolContext());
+        if (!res.output().equals("hello") || res.isError()) {
+            throw new AssertionError("unexpected: " + res.output());
+        }
+        System.out.println("ok: " + res.output());
+    }
+}
+```
+
+`source()` is not free-form — it is one of `mcp`, `skill`, `builtin`, `a2a`, `native`, `http`,
+`custom`. Use `custom` for tools you implement yourself.
+
+### 2. Reporting failure, and carrying metadata
+
+A tool that fails does **not** throw — it returns an error result. `ToolResult.ok` and
+`ToolResult.error` are the shorthand, each with an optional metadata overload.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Tool divide = new Tool() {
+            public String name() { return "divide"; }
+            public String description() { return "Divide two numbers"; }
+            public Map<String, Object> inputSchema() {
+                return Map.of(
+                    "type", "object",
+                    "properties", Map.of("a", Map.of("type", "number"), "b", Map.of("type", "number")),
+                    "required", List.of("a", "b")
+                );
+            }
+            public String source() { return "custom"; }
+            public ToolResult execute(Map<String, Object> a, ToolContext ctx) {
+                double x = ((Number) a.get("a")).doubleValue();
+                double y = ((Number) a.get("b")).doubleValue();
+                if (y == 0) {
+                    // The model sees this text and can correct itself on the next turn.
+                    return ToolResult.error("Cannot divide by zero");
+                }
+                return ToolResult.ok(
+                    String.valueOf(x / y),
+                    Map.of("title", "divide", "operands", List.of(x, y))
+                );
+            }
+        };
+
+        ToolResult ok = divide.execute(Map.of("a", 10, "b", 4), new ToolContext());
+        if (!ok.output().equals("2.5")) throw new AssertionError("got " + ok.output());
+        if (!ok.metadata().get("operands").equals(List.of(10.0, 4.0))) {
+            throw new AssertionError("metadata: " + ok.metadata());
+        }
+
+        ToolResult bad = divide.execute(Map.of("a", 1, "b", 0), new ToolContext());
+        if (!bad.isError()) throw new AssertionError("expected isError");
+
+        System.out.println("ok: " + ok.output() + " | error path: " + bad.output());
+    }
+}
+```
+
+### 3. A generated tool source — the real reason this interface is public
+
+Producing many tools from data is where you implement `Tool` directly. `Tool.sanitize` makes each
+name schema-safe.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    record Endpoint(String key, String path) {}
+
+    public static void main(String[] args) {
+        List<Endpoint> endpoints = List.of(
+            new Endpoint("get user", "/users/:id"),
+            new Endpoint("list orders", "/orders")
+        );
+
+        List<Tool> tools = new ArrayList<>();
+        for (Endpoint e : endpoints) {
+            tools.add(new Tool() {
+                // Names must match [a-zA-Z0-9_-]; sanitize does exactly that.
+                public String name() { return Tool.sanitize(e.key()); }
+                public String description() { return "Call " + e.path(); }
+                public Map<String, Object> inputSchema() {
+                    return Map.of("type", "object",
+                                  "properties", Map.of("id", Map.of("type", "string")));
+                }
+                public String source() { return "custom"; }
+                public ToolResult execute(Map<String, Object> a, ToolContext ctx) {
+                    // ctx may be null on a direct call — always guard it.
+                    if (ctx != null && ctx.isCancelled()) return ToolResult.error("cancelled");
+                    return ToolResult.ok(e.path() + " <- " + a.get("id"));
+                }
+            });
+        }
+
+        if (!tools.get(0).name().equals("get_user") || !tools.get(1).name().equals("list_orders")) {
+            throw new AssertionError("names: " + tools.get(0).name() + "," + tools.get(1).name());
+        }
+
+        ToolResult res = tools.get(0).execute(Map.of("id", "42"), new ToolContext());
+        if (!res.output().equals("/users/:id <- 42")) throw new AssertionError(res.output());
+
+        System.out.println("ok: " + tools.get(0).name() + ", " + tools.get(1).name());
+    }
+}
+```
+
+## Members
+
+| Member | Returns | What it is |
+|---|---|---|
+| `name()` | `String` | The name the model calls. Must match `[a-zA-Z0-9_-]`. |
+| `description()` | `String` | What the model reads to decide whether to call it. |
+| `inputSchema()` | `Map<String, Object>` | A JSON-Schema **object** as a plain map. |
+| `source()` | `String` | One of `mcp`, `skill`, `builtin`, `a2a`, `native`, `http`, `custom`. |
+| `execute(args, ctx)` | `ToolResult` | Runs the tool. `ctx` may be **null** on a direct call. |
+| `Tool.sanitize(v)` | `String` | Static. Replaces everything outside `[a-zA-Z0-9_-]` with `_`. |
+
+## The same type in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `Tool` | [→](/api/javascript/types/tool/) |
+| Python | `Tool` | [→](/api/python/types/tool/) |
+| Go | `Tool` | [→](/api/go/types/tool/) |
+| C# | `ITool` | [→](/api/csharp/types/tool/) |
+| Elixir | `Toolnexus.Tool` | [→](/api/elixir/types/tool/) |
+
+<Aside type="note" title="Shape differs, behavior does not">
+Java returns `ToolResult` directly; JavaScript returns a `Promise`, Go returns
+`(ToolResult, error)`. Each port uses its own convention — the contract is the same: a failed tool
+reports `isError`, it does not blow up the loop.
+</Aside>
+
+## See also
+
+- [`ToolResult`](/api/java/types/tool-result/) — what `execute` returns
+- [`ToolContext`](/api/java/types/context/) — what `execute` receives
+- [`NativeTool.of`](/api/java/native/define-tool/) — build a `Tool` from a method
+- [`Toolkit.create`](/api/java/toolkit/create/) — aggregate tools from every source

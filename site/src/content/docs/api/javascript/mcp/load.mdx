@@ -1,0 +1,73 @@
+---
+title: "loadMcp"
+description: "Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool. — JavaScript."
+sidebar:
+  label: "loadMcp"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+</p>
+
+```ts
+{/* TODO:signature */}
+```
+
+Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+
+## When to use it
+
+{/* TODO:when */}
+_TODO: the situation this entry point is for._
+
+## Why this and not the alternative
+
+{/* TODO:why */}
+<Aside type="tip" title="TODO: when NOT to use it">
+_TODO: name the alternative and when to prefer it._
+</Aside>
+
+## Examples
+
+### 1. TODO — the smallest useful call
+
+{/* TODO:example1 */}
+```ts
+// TODO
+```
+
+### 2. TODO — the realistic case
+
+{/* TODO:example2 */}
+```ts
+// TODO
+```
+
+### 3. TODO — the full surface
+
+{/* TODO:example3 */}
+```ts
+// TODO
+```
+
+## The same call in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| Python | `load_mcp` | [→](/api/python/mcp/load/) |
+| Go | `LoadMcp` | [→](/api/go/mcp/load/) |
+| Java | `McpSource.load` | [→](/api/java/mcp/load/) |
+| C# | `McpSource.LoadAsync` | [→](/api/csharp/mcp/load/) |
+| Elixir | `Toolnexus.Mcp.load` | [→](/api/elixir/mcp/load/) |
+
+Behavior is identical across ports by contract — same `examples/` fixtures, same output.
+See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## See also
+
+- [`loadMcp`](/api/javascript/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+- [`listMcpTools`](/api/javascript/mcp/list-tools/) — List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+- [`parseMcpConfig`](/api/javascript/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
+- [`elicitationToRequest`](/api/javascript/mcp/elicitation/) — Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.

@@ -1,0 +1,40 @@
+---
+title: "The task tool — model-facing delegation"
+description: "The opt-in tool that lets the model itself spawn a teammate. Default OFF. — C#."
+sidebar:
+  label: "runtime / task-tool"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+</p>
+
+<Aside type="caution" title="Not available in C#">
+Only JS exposes a constructible task tool symbol; elsewhere it is the `task` builtin, toggled on the runtime.
+</Aside>
+
+The opt-in tool that lets the model itself spawn a teammate. Default OFF.
+
+## What to use instead
+
+{/* TODO:why */}
+_TODO: the closest thing this port does offer, and how to get the same outcome._
+
+## The same capability in the other ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `agents.taskTool` | [→](/api/javascript/runtime/task-tool/) |
+| Python | _not shipped in this port_ |  |
+| Go | _not shipped in this port_ |  |
+| Java | _not shipped in this port_ |  |
+| Elixir | _not shipped in this port_ |  |
+
+## See also
+
+- [`Agent`](/api/csharp/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`AgentRuntime`](/api/csharp/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`Handle`](/api/csharp/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`AgentTypes.Budget`](/api/csharp/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

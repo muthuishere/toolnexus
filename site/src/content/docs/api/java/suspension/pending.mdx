@@ -1,0 +1,73 @@
+---
+title: "Request.pending"
+description: "Return a Pending from a tool to park the run until someone answers. — Java."
+sidebar:
+  label: "Request.pending"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+```java
+{/* TODO:signature */}
+```
+
+Return a Pending from a tool to park the run until someone answers.
+
+## When to use it
+
+{/* TODO:when */}
+_TODO: the situation this entry point is for._
+
+## Why this and not the alternative
+
+{/* TODO:why */}
+<Aside type="tip" title="TODO: when NOT to use it">
+_TODO: name the alternative and when to prefer it._
+</Aside>
+
+## Examples
+
+### 1. TODO — the smallest useful call
+
+{/* TODO:example1 */}
+```java
+// TODO
+```
+
+### 2. TODO — the realistic case
+
+{/* TODO:example2 */}
+```java
+// TODO
+```
+
+### 3. TODO — the full surface
+
+{/* TODO:example3 */}
+```java
+// TODO
+```
+
+## The same call in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `pending` | [→](/api/javascript/suspension/pending/) |
+| Python | `pending` | [→](/api/python/suspension/pending/) |
+| Go | `Pending` | [→](/api/go/suspension/pending/) |
+| C# | `Suspension.Pending` | [→](/api/csharp/suspension/pending/) |
+| Elixir | `Toolnexus.Request.pending` | [→](/api/elixir/suspension/pending/) |
+
+Behavior is identical across ports by contract — same `examples/` fixtures, same output.
+See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## See also
+
+- [`Request.authRequired`](/api/java/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`LlmClient.waitFor`](/api/java/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`Request.pendingOf`](/api/java/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`LlmClient.resume`](/api/java/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.

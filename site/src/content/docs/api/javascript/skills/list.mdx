@@ -1,0 +1,71 @@
+---
+title: "listSkills"
+description: "Enumerate discovered skills and, crucially, the ones that were skipped and why. — JavaScript."
+sidebar:
+  label: "listSkills"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a>
+</p>
+
+```ts
+{/* TODO:signature */}
+```
+
+Enumerate discovered skills and, crucially, the ones that were skipped and why.
+
+## When to use it
+
+{/* TODO:when */}
+_TODO: the situation this entry point is for._
+
+## Why this and not the alternative
+
+{/* TODO:why */}
+<Aside type="tip" title="TODO: when NOT to use it">
+_TODO: name the alternative and when to prefer it._
+</Aside>
+
+## Examples
+
+### 1. TODO — the smallest useful call
+
+{/* TODO:example1 */}
+```ts
+// TODO
+```
+
+### 2. TODO — the realistic case
+
+{/* TODO:example2 */}
+```ts
+// TODO
+```
+
+### 3. TODO — the full surface
+
+{/* TODO:example3 */}
+```ts
+// TODO
+```
+
+## The same call in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| Python | `list_skills` | [→](/api/python/skills/list/) |
+| Go | `ListSkills` | [→](/api/go/skills/list/) |
+| Java | `SkillSource.listSkills` | [→](/api/java/skills/list/) |
+| C# | `SkillSource.ListSkills` | [→](/api/csharp/skills/list/) |
+| Elixir | `Toolnexus.Skill.list` | [→](/api/elixir/skills/list/) |
+
+Behavior is identical across ports by contract — same `examples/` fixtures, same output.
+See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## See also
+
+- [`loadSkills`](/api/javascript/skills/load/) — Glob a skills directory and expose one skill tool with progressive disclosure.
+- [`loadSkills`](/api/javascript/skills/load-with/) — Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist.

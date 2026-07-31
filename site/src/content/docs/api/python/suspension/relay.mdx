@@ -1,0 +1,40 @@
+---
+title: "Relay tools — declaration-only"
+description: "Declare a tool the host executes, not the library: the call rides out on the suspension. — Python."
+sidebar:
+  label: "suspension / relay"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+<Aside type="caution" title="Not available in Python">
+Go-only today (golang/relay.go). SPEC §10 addendum landed as a Go preview; the other five ports do not ship a relay tool yet.
+</Aside>
+
+Declare a tool the host executes, not the library: the call rides out on the suspension.
+
+## What to use instead
+
+{/* TODO:why */}
+_TODO: the closest thing this port does offer, and how to get the same outcome._
+
+## The same capability in the other ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | _not shipped in this port_ |  |
+| Go | `RelayTool` | [→](/api/go/suspension/relay/) |
+| Java | _not shipped in this port_ |  |
+| C# | _not shipped in this port_ |  |
+| Elixir | _not shipped in this port_ |  |
+
+## See also
+
+- [`pending`](/api/python/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`auth_required`](/api/python/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`WaitFor`](/api/python/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`pending_of`](/api/python/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.

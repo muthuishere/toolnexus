@@ -1,0 +1,38 @@
+---
+title: "collectTools — gather decorated functions"
+description: "Sweep a module or class and collect every function marked as a tool. — Elixir."
+sidebar:
+  label: "native / collect"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
+</p>
+
+<Aside type="caution" title="Not available in Elixir">
+JS/Java/C# expose an explicit collector; Python, Go and Elixir have no equivalent public symbol.
+</Aside>
+
+Sweep a module or class and collect every function marked as a tool.
+
+## What to use instead
+
+{/* TODO:why */}
+_TODO: the closest thing this port does offer, and how to get the same outcome._
+
+## The same capability in the other ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `collectTools` | [→](/api/javascript/native/collect/) |
+| Python | _not shipped in this port_ |  |
+| Go | _not shipped in this port_ |  |
+| Java | `Tools.collect` | [→](/api/java/native/collect/) |
+| C# | `Tools.Collect` | [→](/api/csharp/native/collect/) |
+
+## See also
+
+- [`Toolnexus.Native.define`](/api/elixir/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.
+- [`Toolnexus.Native.reflect`](/api/elixir/native/reflect/) — Derive the schema from the function signature or annotation instead of writing it by hand.

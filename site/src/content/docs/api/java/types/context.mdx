@@ -1,0 +1,228 @@
+---
+title: ToolContext
+description: The per-call context handed to execute — a cancellation token, a timeout in milliseconds, and the answer that resolves a suspension. Java.
+sidebar:
+  label: ToolContext
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/ToolContext.java">ToolContext.java</a>
+</p>
+
+```java
+public final class ToolContext {
+    public ToolContext();
+    public ToolContext(Long timeoutMs);
+    public ToolContext(Long timeoutMs, AtomicBoolean cancelled);
+    public ToolContext(Long timeoutMs, AtomicBoolean cancelled, Answer answer);
+
+    public Long timeoutMs();
+    public boolean isCancelled();
+    public void cancel();
+    public AtomicBoolean cancellationToken();
+    public Answer answer();
+}
+```
+
+The second argument to `execute`. It carries the three things a tool needs to be a good citizen: a
+cancellation token, a deadline, and — on a resumed call — the answer to a question it previously
+asked.
+
+## When to use it
+
+Read `ctx` when your tool does anything **slow or interactive**:
+
+- **`isCancelled()`** — long work that should stop when the run is cancelled.
+- **`timeoutMs()`** — the caller's deadline for this specific call, in **milliseconds**.
+- **`answer()`** — you returned a suspension on a previous attempt and the host has now resolved it.
+
+A pure, fast, local computation can ignore `ctx` entirely.
+
+## Why a class with a mutable token
+
+<Aside type="caution" title="Guard for null, and prefer isCancelled() over the raw token">
+`ctx` may be **null** when a tool is called directly rather than through the loop. Write
+`ctx != null && ctx.isCancelled()`. `isCancelled()` already handles an absent token internally, so
+reach for `cancellationToken()` only when you need to hand the `AtomicBoolean` to something else.
+</Aside>
+
+The token is an `AtomicBoolean` rather than a `Future` or an interrupt because a tool may spawn work
+that outlives a single thread, and cooperative checking is the one mechanism that works everywhere.
+`cancel()` is on the context so a *tool* can also cancel its own subtree.
+
+## Examples
+
+### 1. Respecting cancellation
+
+Check before starting work and between steps. A cancelled tool returns an error *result* promptly
+rather than throwing.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+public class Example {
+    static ToolResult crunch(int steps, ToolContext ctx) {
+        int done = 0;
+        for (int i = 0; i < steps; i++) {
+            // Null-guard: ctx is absent on a direct call.
+            if (ctx != null && ctx.isCancelled()) {
+                return ToolResult.error("cancelled after " + done + " step(s)");
+            }
+            done++;
+        }
+        return ToolResult.ok("completed " + done + " step(s)");
+    }
+
+    public static void main(String[] args) {
+        // No context at all — the tool still runs.
+        ToolResult plain = crunch(3, null);
+        if (!plain.output().equals("completed 3 step(s)")) throw new AssertionError(plain.output());
+
+        // Cancelled before it starts.
+        AtomicBoolean token = new AtomicBoolean(true);
+        ToolResult stopped = crunch(3, new ToolContext(null, token));
+        if (!stopped.isError() || !stopped.output().equals("cancelled after 0 step(s)")) {
+            throw new AssertionError(stopped.output());
+        }
+
+        // A tool can cancel its own subtree through the context.
+        ToolContext live = new ToolContext();
+        if (live.isCancelled()) throw new AssertionError("should start live");
+        live.cancel();
+        if (!live.isCancelled()) throw new AssertionError("cancel() should flip it");
+
+        System.out.println("ok: " + plain.output() + " | " + stopped.output());
+    }
+}
+```
+
+### 2. Honouring the caller's timeout
+
+`timeoutMs()` is a **`Long`** — it may be `null`, meaning "not set". Fall back to your own default
+rather than unboxing blindly.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+
+public class Example {
+    static ToolResult fetchish(String url, ToolContext ctx) {
+        // null means unset — use your own default. Unboxing a null Long throws.
+        long budget = (ctx != null && ctx.timeoutMs() != null) ? ctx.timeoutMs() : 30_000L;
+
+        if (budget < 100) {
+            return ToolResult.error("budget " + budget + "ms is too small to try");
+        }
+        return ToolResult.ok("fetched " + url + " within " + budget + "ms");
+    }
+
+    public static void main(String[] args) {
+        ToolResult generous = fetchish("/a", new ToolContext(5000L));
+        if (!generous.output().equals("fetched /a within 5000ms")) throw new AssertionError(generous.output());
+
+        ToolResult stingy = fetchish("/a", new ToolContext(10L));
+        if (!stingy.isError()) throw new AssertionError("expected the tiny budget to be refused");
+
+        ToolResult defaulted = fetchish("/a", new ToolContext());
+        if (!defaulted.output().contains("30000ms")) throw new AssertionError(defaulted.output());
+
+        ToolResult noCtx = fetchish("/a", null);
+        if (!noCtx.output().contains("30000ms")) throw new AssertionError(noCtx.output());
+
+        System.out.println("ok: " + generous.output() + " | " + stingy.output());
+    }
+}
+```
+
+### 3. `answer()` — the second half of a suspension
+
+This is the field that makes the human-in-the-loop contract work. On the first call the tool
+returns a `pending`. The host resolves it, then calls the **same tool again** with the answer set.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Map;
+
+public class Example {
+    static ToolResult deploy(ToolContext ctx) {
+        Answer answer = ctx == null ? null : ctx.answer();
+
+        // Second pass: the host resolved the question and handed the answer back.
+        if (answer != null) {
+            if (!answer.ok()) {
+                String reason = answer.reason() == null ? "no reason" : answer.reason();
+                return ToolResult.error("declined: " + reason);
+            }
+            Object env = answer.data() == null ? null : answer.data().get("env");
+            return ToolResult.ok("deployed to " + (env == null ? "unknown" : env));
+        }
+
+        // First pass: park the run and ask.
+        return ToolResult.pending(new Request("", "input", "Which environment?"));
+    }
+
+    public static void main(String[] args) {
+        // First pass — a suspension, not an answer.
+        ToolResult first = deploy(null);
+        Request req = ToolResult.pendingOf(first);
+        if (req == null || !req.kind().equals("input")) throw new AssertionError("expected a suspension");
+
+        // Second pass — the host supplies the resolution, echoing the request id.
+        ToolContext resumed = new ToolContext(null, null,
+            new Answer(req.id(), true, Map.of("env", "staging")));
+        ToolResult second = deploy(resumed);
+        if (second.isError() || !second.output().equals("deployed to staging")) {
+            throw new AssertionError(second.output());
+        }
+
+        // A refusal is a normal outcome, not a crash.
+        ToolContext declined = new ToolContext(null, null,
+            new Answer(req.id(), false, null, "declined"));
+        ToolResult refused = deploy(declined);
+        if (!refused.isError()) throw new AssertionError("expected an error result");
+
+        System.out.println("ok: " + second.output() + " | " + refused.output());
+    }
+}
+```
+
+<Aside type="note" title="Read answer.data() only when the answer IS the payload">
+For `kind:"input"` the value you asked for lives in `answer.data()`. For `kind:"authorization"` the
+world changed out-of-band — the session is simply valid now — so you re-run the real work and
+ignore `data()`.
+</Aside>
+
+## Members
+
+| Member | Returns | What it is |
+|---|---|---|
+| `timeoutMs()` | `Long` | This call's budget in **milliseconds**. May be `null` — do not unbox blindly. |
+| `isCancelled()` | `boolean` | Whether the run has been cancelled. Safe when no token was supplied. |
+| `cancel()` | `void` | Cancels from inside a tool. |
+| `cancellationToken()` | `AtomicBoolean` | The raw token, to hand to work you spawn. |
+| `answer()` | `Answer` | Present **only** on a post-`waitFor` retry. |
+
+## The same type in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `ToolContext` | [→](/api/javascript/types/context/) |
+| Python | `ToolContext` | [→](/api/python/types/context/) |
+| Go | `ToolContext` | [→](/api/go/types/context/) |
+| C# | `ToolContext` | [→](/api/csharp/types/context/) |
+| Elixir | `Toolnexus.Context` | [→](/api/elixir/types/context/) |
+
+<Aside type="note" title="Two real differences">
+Cancellation follows each language's convention: Java uses an `AtomicBoolean`, JavaScript an
+`AbortSignal`, Go a `context.Context`. And the timeout is **milliseconds** in Java, JavaScript and
+Go, but **seconds** in Python.
+</Aside>
+
+## See also
+
+- [`Tool`](/api/java/types/tool/) — what receives this
+- [`ToolResult`](/api/java/types/tool-result/) — what `execute` returns
+- [`Request.pending`](/api/java/suspension/pending/) — ask a question mid-call

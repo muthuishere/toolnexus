@@ -1,0 +1,71 @@
+---
+title: "collectTools"
+description: "Sweep a module or class and collect every function marked as a tool. — JavaScript."
+sidebar:
+  label: "collectTools"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
+</p>
+
+```ts
+{/* TODO:signature */}
+```
+
+Sweep a module or class and collect every function marked as a tool.
+
+## When to use it
+
+{/* TODO:when */}
+_TODO: the situation this entry point is for._
+
+## Why this and not the alternative
+
+{/* TODO:why */}
+<Aside type="tip" title="TODO: when NOT to use it">
+_TODO: name the alternative and when to prefer it._
+</Aside>
+
+## Examples
+
+### 1. TODO — the smallest useful call
+
+{/* TODO:example1 */}
+```ts
+// TODO
+```
+
+### 2. TODO — the realistic case
+
+{/* TODO:example2 */}
+```ts
+// TODO
+```
+
+### 3. TODO — the full surface
+
+{/* TODO:example3 */}
+```ts
+// TODO
+```
+
+## The same call in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| Python | _not shipped in this port_ |  |
+| Go | _not shipped in this port_ |  |
+| Java | `Tools.collect` | [→](/api/java/native/collect/) |
+| C# | `Tools.Collect` | [→](/api/csharp/native/collect/) |
+| Elixir | _not shipped in this port_ |  |
+
+Behavior is identical across ports by contract — same `examples/` fixtures, same output.
+See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## See also
+
+- [`defineTool`](/api/javascript/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.
+- [`tool`](/api/javascript/native/reflect/) — Derive the schema from the function signature or annotation instead of writing it by hand.

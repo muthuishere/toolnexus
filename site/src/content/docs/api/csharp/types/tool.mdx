@@ -1,0 +1,223 @@
+---
+title: ITool
+description: The uniform interface every tool source collapses to — name, description, JSON-Schema parameters, ExecuteAsync. C#.
+sidebar:
+  label: ITool
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/ITool.cs">ITool.cs</a>
+</p>
+
+```csharp
+public interface ITool
+{
+    string Name { get; }
+    string Description { get; }
+    IDictionary<string, object?> InputSchema { get; }
+    string Source { get; }
+
+    Task<ToolResult> ExecuteAsync(IDictionary<string, object?> args, ToolContext? ctx = null);
+}
+```
+
+The one interface. An MCP server tool, an agent skill, a built-in shell tool, a remote A2A agent, an
+HTTP endpoint and a plain method of your own are all *the same thing* to an LLM — a named,
+described, schema'd callable. `ITool` is that thing, and every source produces it.
+
+## When to use it
+
+You mostly **receive** tools rather than implement them: `tk.Tools()` hands you a list, and that is
+what you filter and pass to an adapter.
+
+Implement it directly when you are writing a **new tool source** — something producing tools from a
+shape toolnexus doesn't already cover. For a single ordinary method, use
+[`NativeTool.Of`](/api/csharp/native/define-tool/) or the `[ToolMethod]` attribute instead.
+
+## Why an interface, and why `ctx` is optional
+
+<Aside type="tip" title="Use NativeTool for one-off tools">
+Implementing four properties and a method to wrap one function is a lot of ceremony.
+[`NativeTool.Of`](/api/csharp/native/define-tool/) does it for you and sets `Source` to `"native"`.
+Implement `ITool` yourself when you are generating many tools from data.
+</Aside>
+
+`ExecuteAsync` takes `ToolContext? ctx = null` — the parameter has a default, so callers may omit it
+entirely. Inside your implementation always treat it as nullable.
+
+## Examples
+
+### 1. The smallest possible tool
+
+```csharp test
+using Toolnexus;
+
+var echo = new EchoTool();
+
+var res = await echo.ExecuteAsync(new Dictionary<string, object?> { ["text"] = "hello" });
+if (res.Output != "hello" || res.IsError) throw new Exception($"unexpected: {res.Output}");
+
+Console.WriteLine($"ok: {res.Output}");
+
+sealed class EchoTool : ITool
+{
+    public string Name => "echo";
+    public string Description => "Return whatever it is given";
+    public string Source => "custom";
+
+    public IDictionary<string, object?> InputSchema => new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["text"] = new Dictionary<string, object?> { ["type"] = "string" } },
+        ["required"] = new[] { "text" },
+    };
+
+    public Task<ToolResult> ExecuteAsync(IDictionary<string, object?> args, ToolContext? ctx = null)
+        => Task.FromResult(ToolResult.Ok(args["text"]?.ToString() ?? ""));
+}
+```
+
+`Source` is not free-form — it is one of `mcp`, `skill`, `native`, `http`, `a2a`, `custom`. Use
+`custom` for tools you implement yourself.
+
+### 2. Reporting failure, and carrying metadata
+
+A tool that fails does **not** throw — it returns an error result. `ToolResult.Ok` and
+`ToolResult.Error` are the shorthand, each taking optional metadata.
+
+```csharp test
+using Toolnexus;
+
+var divide = new DivideTool();
+
+var ok = await divide.ExecuteAsync(new Dictionary<string, object?> { ["a"] = 10.0, ["b"] = 4.0 });
+if (ok.Output != "2.5") throw new Exception($"got {ok.Output}");
+if (ok.Metadata?["title"] as string != "divide") throw new Exception("metadata");
+
+var bad = await divide.ExecuteAsync(new Dictionary<string, object?> { ["a"] = 1.0, ["b"] = 0.0 });
+if (!bad.IsError) throw new Exception("expected IsError");
+
+Console.WriteLine($"ok: {ok.Output} | error path: {bad.Output}");
+
+sealed class DivideTool : ITool
+{
+    public string Name => "divide";
+    public string Description => "Divide two numbers";
+    public string Source => "custom";
+
+    public IDictionary<string, object?> InputSchema => new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?>
+        {
+            ["a"] = new Dictionary<string, object?> { ["type"] = "number" },
+            ["b"] = new Dictionary<string, object?> { ["type"] = "number" },
+        },
+        ["required"] = new[] { "a", "b" },
+    };
+
+    public Task<ToolResult> ExecuteAsync(IDictionary<string, object?> args, ToolContext? ctx = null)
+    {
+        var a = Convert.ToDouble(args["a"]);
+        var b = Convert.ToDouble(args["b"]);
+
+        if (b == 0)
+        {
+            // The model sees this text and can correct itself on the next turn.
+            return Task.FromResult(ToolResult.Error("Cannot divide by zero"));
+        }
+
+        return Task.FromResult(ToolResult.Ok(
+            (a / b).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            new Dictionary<string, object?> { ["title"] = "divide", ["operands"] = new[] { a, b } }));
+    }
+}
+```
+
+### 3. A generated tool source — the real reason this interface is public
+
+Producing many tools from data is where you implement `ITool` directly. `Tools.Sanitize` makes each
+name schema-safe.
+
+```csharp test
+using Toolnexus;
+
+var endpoints = new[]
+{
+    ("get user", "/users/:id"),
+    ("list orders", "/orders"),
+};
+
+var tools = endpoints.Select(e => new EndpointTool(e.Item1, e.Item2)).ToList();
+
+if (tools[0].Name != "get_user" || tools[1].Name != "list_orders")
+    throw new Exception($"names: {tools[0].Name},{tools[1].Name}");
+
+var res = await tools[0].ExecuteAsync(new Dictionary<string, object?> { ["id"] = "42" });
+if (res.Output != "/users/:id <- 42") throw new Exception(res.Output);
+
+Console.WriteLine($"ok: {string.Join(", ", tools.Select(t => t.Name))}");
+
+sealed class EndpointTool : ITool
+{
+    private readonly string _path;
+
+    public EndpointTool(string key, string path)
+    {
+        // Names must match [a-zA-Z0-9_-]; Sanitize does exactly that.
+        Name = Tools.Sanitize(key);
+        _path = path;
+    }
+
+    public string Name { get; }
+    public string Description => $"Call {_path}";
+    public string Source => "custom";
+
+    public IDictionary<string, object?> InputSchema => new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["id"] = new Dictionary<string, object?> { ["type"] = "string" } },
+    };
+
+    public Task<ToolResult> ExecuteAsync(IDictionary<string, object?> args, ToolContext? ctx = null)
+    {
+        // ctx is nullable — always guard it.
+        if (ctx?.IsCancelled == true) return Task.FromResult(ToolResult.Error("cancelled"));
+        return Task.FromResult(ToolResult.Ok($"{_path} <- {args["id"]}"));
+    }
+}
+```
+
+## Members
+
+| Member | Type | What it is |
+|---|---|---|
+| `Name` | `string` | The name the model calls. Must match `[a-zA-Z0-9_-]`. |
+| `Description` | `string` | What the model reads to decide whether to call it. |
+| `InputSchema` | `IDictionary<string, object?>` | A JSON-Schema **object** as a plain dictionary. |
+| `Source` | `string` | One of `mcp`, `skill`, `native`, `http`, `a2a`, `custom`. |
+| `ExecuteAsync(args, ctx?)` | `Task<ToolResult>` | Runs the tool. `ctx` defaults to `null`. |
+
+## The same type in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `Tool` | [→](/api/javascript/types/tool/) |
+| Python | `Tool` | [→](/api/python/types/tool/) |
+| Go | `Tool` | [→](/api/go/types/tool/) |
+| Java | `Tool` | [→](/api/java/types/tool/) |
+| Elixir | `Toolnexus.Tool` | [→](/api/elixir/types/tool/) |
+
+<Aside type="note" title="C# is the only port that prefixes the I">
+The type is `ITool` here, following .NET naming, and `ExecuteAsync` carries the `Async` suffix. Both
+are naming conventions only — the contract is identical to the other five ports.
+</Aside>
+
+## See also
+
+- [`ToolResult`](/api/csharp/types/tool-result/) — what `ExecuteAsync` returns
+- [`ToolContext`](/api/csharp/types/context/) — what `ExecuteAsync` receives
+- [`NativeTool.Of`](/api/csharp/native/define-tool/) — build a tool from a method
+- [`Toolkit.CreateAsync`](/api/csharp/toolkit/create/) — aggregate tools from every source

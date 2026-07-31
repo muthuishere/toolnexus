@@ -1,0 +1,73 @@
+---
+title: "pending"
+description: "Return a Pending from a tool to park the run until someone answers. — JavaScript."
+sidebar:
+  label: "pending"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+```ts
+{/* TODO:signature */}
+```
+
+Return a Pending from a tool to park the run until someone answers.
+
+## When to use it
+
+{/* TODO:when */}
+_TODO: the situation this entry point is for._
+
+## Why this and not the alternative
+
+{/* TODO:why */}
+<Aside type="tip" title="TODO: when NOT to use it">
+_TODO: name the alternative and when to prefer it._
+</Aside>
+
+## Examples
+
+### 1. TODO — the smallest useful call
+
+{/* TODO:example1 */}
+```ts
+// TODO
+```
+
+### 2. TODO — the realistic case
+
+{/* TODO:example2 */}
+```ts
+// TODO
+```
+
+### 3. TODO — the full surface
+
+{/* TODO:example3 */}
+```ts
+// TODO
+```
+
+## The same call in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| Python | `pending` | [→](/api/python/suspension/pending/) |
+| Go | `Pending` | [→](/api/go/suspension/pending/) |
+| Java | `Request.pending` | [→](/api/java/suspension/pending/) |
+| C# | `Suspension.Pending` | [→](/api/csharp/suspension/pending/) |
+| Elixir | `Toolnexus.Request.pending` | [→](/api/elixir/suspension/pending/) |
+
+Behavior is identical across ports by contract — same `examples/` fixtures, same output.
+See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## See also
+
+- [`authRequired`](/api/javascript/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`waitFor`](/api/javascript/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`pendingOf`](/api/javascript/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`Client.resume`](/api/javascript/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.

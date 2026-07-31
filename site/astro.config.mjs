@@ -2,6 +2,7 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightLlmsTxt from 'starlight-llms-txt';
+import { apiReferenceSidebar } from './scripts/lib/sidebar.mjs';
 
 // Project GitHub Pages: https://muthuishere.github.io/toolnexus
 // https://astro.build/config
@@ -97,18 +98,7 @@ export default defineConfig({
 						{ label: 'Observability & metrics', slug: 'observability' },
 					],
 				},
-				{
-					label: 'API Reference',
-					items: [
-						{ label: 'All languages — the surface', slug: 'api' },
-						{ label: 'JavaScript', slug: 'api/javascript' },
-						{ label: 'Python', slug: 'api/python' },
-						{ label: 'Go', slug: 'api/go' },
-						{ label: 'Java', slug: 'api/java' },
-						{ label: 'C#', slug: 'api/csharp' },
-							{ label: 'Elixir', slug: 'api/elixir' },
-					],
-				},
+				apiReferenceSidebar(),
 				{
 					label: 'Reference',
 					items: [

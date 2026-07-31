@@ -1,0 +1,73 @@
+---
+title: "LlmClient.ErrorInfo"
+description: "Classify an LLM error into retry / fail, bound a run with a deadline, and cancel cleanly. — C#."
+sidebar:
+  label: "LlmClient.ErrorInfo"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```csharp
+{/* TODO:signature */}
+```
+
+Classify an LLM error into retry / fail, bound a run with a deadline, and cancel cleanly.
+
+## When to use it
+
+{/* TODO:when */}
+_TODO: the situation this entry point is for._
+
+## Why this and not the alternative
+
+{/* TODO:why */}
+<Aside type="tip" title="TODO: when NOT to use it">
+_TODO: name the alternative and when to prefer it._
+</Aside>
+
+## Examples
+
+### 1. TODO — the smallest useful call
+
+{/* TODO:example1 */}
+```csharp
+// TODO
+```
+
+### 2. TODO — the realistic case
+
+{/* TODO:example2 */}
+```csharp
+// TODO
+```
+
+### 3. TODO — the full surface
+
+{/* TODO:example3 */}
+```csharp
+// TODO
+```
+
+## The same call in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `ErrorInfo` | [→](/api/javascript/client/resilience/) |
+| Python | `ErrorClassifier` | [→](/api/python/client/resilience/) |
+| Go | `ErrorInfo` | [→](/api/go/client/resilience/) |
+| Java | `LlmClient.ErrorInfo` | [→](/api/java/client/resilience/) |
+| Elixir | `Toolnexus.Client error options` | [→](/api/elixir/client/resilience/) |
+
+Behavior is identical across ports by contract — same `examples/` fixtures, same output.
+See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## See also
+
+- [`LlmClient.Create`](/api/csharp/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`LlmClient.RunAsync`](/api/csharp/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`LlmClient.StreamAsync`](/api/csharp/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`LlmClient.Hooks`](/api/csharp/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

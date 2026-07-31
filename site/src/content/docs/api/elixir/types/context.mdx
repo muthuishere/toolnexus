@@ -1,0 +1,216 @@
+---
+title: Toolnexus.Context
+description: The per-call context handed to every tool — identity, cancellation, a timeout, and the answer that resolves a suspension. Elixir.
+sidebar:
+  label: Toolnexus.Context
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/types.ex">elixir/lib/toolnexus/types.ex</a>
+</p>
+
+```elixir
+defmodule Toolnexus.Context do
+  defstruct [:session_id, :message_id, :agent, :call_id, :extra, :answer, :timeout, :signal]
+end
+```
+
+The second argument to every tool's `execute`. Elixir's context is **wider than the other ports'** —
+alongside the shared §1 trio (`signal`, `timeout`, `answer`) it carries call identity:
+`session_id`, `message_id`, `agent` and `call_id`.
+
+## When to use it
+
+- **`answer`** — you returned a suspension on a previous attempt and the host has now resolved it.
+- **`timeout`** — the caller's deadline for this specific call.
+- **`signal`** — a `reference()` or `pid()` for cancellation.
+- **`session_id` / `message_id` / `agent` / `call_id`** — correlate a tool call with the
+  conversation and agent that produced it. This is what makes per-call logging and tracing possible
+  without threading your own state through every tool.
+- **`extra`** — host-supplied state you put there yourself.
+
+## Why it is always passed
+
+<Aside type="tip" title="No nil-guards needed">
+Unlike JavaScript and Go, where `ctx` is optional and may be absent entirely, the Elixir loop
+**always** passes a `%Context{}`. You can pattern-match fields directly. Individual fields still
+default to `nil`, so match on those — but the struct itself is always there.
+</Aside>
+
+That difference matters when porting: code moved from Elixir to Go needs nil-guards added; code
+moved the other way can drop them.
+
+## Examples
+
+### 1. Reading call identity
+
+The identity fields are the reason to look at `ctx` even in a tool that does no I/O.
+
+```elixir test
+alias Toolnexus.{Tool, ToolResult, Context}
+
+whoami = %Tool{
+  name: "whoami",
+  description: "Report the call's identity",
+  input_schema: %{"type" => "object"},
+  source: "custom",
+  execute: fn _args, ctx ->
+    # Every field defaults to nil — match defensively even though ctx itself is always present.
+    agent = ctx.agent || "anonymous"
+    session = ctx.session_id || "no-session"
+    ToolResult.ok("#{agent}@#{session}")
+  end
+}
+
+# A bare context is valid.
+plain = whoami.execute.(%{}, %Context{})
+true = plain.output == "anonymous@no-session"
+
+# The loop fills these in for real calls.
+identified = whoami.execute.(%{}, %Context{agent: "researcher", session_id: "s-42", call_id: "c-1"})
+true = identified.output == "researcher@s-42"
+
+IO.puts("ok: #{plain.output} | #{identified.output}")
+```
+
+### 2. Honouring cancellation and the caller's timeout
+
+`timeout` is a `non_neg_integer()`; `nil` means "not set", so fall back to your own default rather
+than treating it as zero.
+
+```elixir test
+alias Toolnexus.{Tool, ToolResult, Context}
+
+fetchish = %Tool{
+  name: "fetchish",
+  description: "Pretend to fetch, bounded by the caller's timeout",
+  input_schema: %{"type" => "object"},
+  source: "custom",
+  execute: fn args, ctx ->
+    # nil means unset — use your own default.
+    budget = ctx.timeout || 30_000
+
+    cond do
+      # signal is a reference() or pid(); treat a dead pid as cancelled.
+      is_pid(ctx.signal) and not Process.alive?(ctx.signal) ->
+        ToolResult.error("cancelled")
+
+      budget < 100 ->
+        ToolResult.error("budget #{budget}ms is too small to try")
+
+      true ->
+        ToolResult.ok("fetched #{args["url"]} within #{budget}ms")
+    end
+  end
+}
+
+generous = fetchish.execute.(%{"url" => "/a"}, %Context{timeout: 5000})
+true = generous.output == "fetched /a within 5000ms"
+
+stingy = fetchish.execute.(%{"url" => "/a"}, %Context{timeout: 10})
+true = stingy.is_error
+
+defaulted = fetchish.execute.(%{"url" => "/a"}, %Context{})
+true = String.contains?(defaulted.output, "30000ms")
+
+# A pid that has already exited reads as cancelled.
+dead = spawn(fn -> :ok end)
+Process.sleep(10)
+cancelled = fetchish.execute.(%{"url" => "/a"}, %Context{signal: dead})
+true = cancelled.is_error
+
+IO.puts("ok: #{generous.output} | #{stingy.output}")
+```
+
+### 3. `answer` — the second half of a suspension
+
+This is the field that makes the human-in-the-loop contract work. On the first call the tool
+returns a suspension. The host resolves it, then calls the **same tool again** with `ctx.answer`
+set. The tool branches on whether the answer is there.
+
+```elixir test
+alias Toolnexus.{Tool, ToolResult, Context, Request, Answer}
+
+deploy = %Tool{
+  name: "deploy",
+  description: "Deploy, asking which environment first",
+  input_schema: %{"type" => "object"},
+  source: "custom",
+  execute: fn _args, ctx ->
+    case ctx.answer do
+      # First pass: park the run and ask.
+      nil ->
+        req = %Request{id: "pnd-deploy-1", kind: "input", prompt: "Which environment?"}
+        %ToolResult{output: req.prompt, is_error: true, metadata: %{pending: req}}
+
+      # Second pass: the host resolved the question and handed the answer back.
+      %Answer{ok: false} = a ->
+        ToolResult.error("declined: #{a.reason || "no reason"}")
+
+      %Answer{ok: true} = a ->
+        env = (a.data || %{})["env"] || "unknown"
+        ToolResult.ok("deployed to #{env}")
+    end
+  end
+}
+
+# First pass — a suspension, not an answer.
+first = deploy.execute.(%{}, %Context{})
+true = ToolResult.pending?(first)
+%{pending: req} = first.metadata
+true = req.kind == "input"
+
+# Second pass — the host supplies the resolution, echoing the request id.
+second = deploy.execute.(%{}, %Context{answer: %Answer{id: req.id, ok: true, data: %{"env" => "staging"}}})
+false = second.is_error
+true = second.output == "deployed to staging"
+
+# A refusal is a normal outcome, not a crash.
+refused = deploy.execute.(%{}, %Context{answer: %Answer{id: req.id, ok: false, reason: "declined"}})
+true = refused.is_error
+
+IO.puts("ok: #{second.output} | #{refused.output}")
+```
+
+<Aside type="note" title="Read answer.data only when the answer IS the payload">
+For `kind: "input"` the value you asked for lives in `answer.data`. For `kind: "authorization"` the
+world changed out-of-band — the session is simply valid now — so you re-run the real work and
+ignore `data`.
+</Aside>
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `session_id` | `String.t() \| nil` | The conversation this call belongs to. |
+| `message_id` | `String.t() \| nil` | The message that triggered it. |
+| `agent` | `String.t() \| nil` | Which agent is calling — useful with sub-agents. |
+| `call_id` | `String.t() \| nil` | This specific tool call. |
+| `extra` | `map() \| nil` | Host-supplied state. |
+| `answer` | `Answer.t() \| nil` | Present **only** on a post-`wait_for` re-execution. |
+| `timeout` | `non_neg_integer() \| nil` | This call's budget in ms. `nil` means unset. |
+| `signal` | `reference() \| pid() \| nil` | Cancellation. |
+
+## The same type in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `ToolContext` | [→](/api/javascript/types/context/) |
+| Python | `ToolContext` | [→](/api/python/types/context/) |
+| Go | `ToolContext` | [→](/api/go/types/context/) |
+| Java | `ToolContext` | [→](/api/java/types/context/) |
+| C# | `ToolContext` | [→](/api/csharp/types/context/) |
+
+<Aside type="note" title="Elixir carries more than the others">
+The §1 contract pins `signal`, `timeout` and `answer` — every port has those. Elixir adds the four
+identity fields on top. Code relying on `session_id` or `agent` will not port directly to
+JavaScript or Go, which do not carry them on the context.
+</Aside>
+
+## See also
+
+- [`Toolnexus.Tool`](/api/elixir/types/tool/) — what receives this
+- [`Toolnexus.ToolResult`](/api/elixir/types/tool-result/) — what `execute` returns
+- [`Toolnexus.Client`](/api/elixir/client/create/) — the loop that fills these fields in
