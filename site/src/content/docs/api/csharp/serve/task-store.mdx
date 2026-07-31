@@ -1,0 +1,72 @@
+---
+title: "A2AServer.FileTaskStore"
+description: "Persist inbound A2A tasks so a suspended request survives a restart. — C#."
+sidebar:
+  label: "A2AServer.FileTaskStore"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a>
+</p>
+
+```csharp
+{/* TODO:signature */}
+```
+
+Persist inbound A2A tasks so a suspended request survives a restart.
+
+## When to use it
+
+{/* TODO:when */}
+_TODO: the situation this entry point is for._
+
+## Why this and not the alternative
+
+{/* TODO:why */}
+<Aside type="tip" title="TODO: when NOT to use it">
+_TODO: name the alternative and when to prefer it._
+</Aside>
+
+## Examples
+
+### 1. TODO — the smallest useful call
+
+{/* TODO:example1 */}
+```csharp
+// TODO
+```
+
+### 2. TODO — the realistic case
+
+{/* TODO:example2 */}
+```csharp
+// TODO
+```
+
+### 3. TODO — the full surface
+
+{/* TODO:example3 */}
+```csharp
+// TODO
+```
+
+## The same call in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `FileTaskStore` | [→](/api/javascript/serve/task-store/) |
+| Python | `FileTaskStore` | [→](/api/python/serve/task-store/) |
+| Go | `NewFileTaskStore` | [→](/api/go/serve/task-store/) |
+| Java | `A2AServer.FileTaskStore` | [→](/api/java/serve/task-store/) |
+| Elixir | `Toolnexus.Serve task_store` | [→](/api/elixir/serve/task-store/) |
+
+Behavior is identical across ports by contract — same `examples/` fixtures, same output.
+See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## See also
+
+- [`A2AServer.Start`](/api/csharp/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+- [`A2AServer.BuildAgentCard`](/api/csharp/serve/agent-card/) — Construct the Agent Card that advertises your name, skills and endpoint.
+- [`McpServe.Build`](/api/csharp/serve/mcp/) — The inbound MCP profile: any MCP client can call your tools.

@@ -1,0 +1,163 @@
+---
+title: ToolResult
+description: The result envelope every tool returns — output text, an error flag, and optional metadata that can carry a suspension. JavaScript.
+sidebar:
+  label: ToolResult
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/types.ts">js/src/types.ts</a>
+</p>
+
+```ts
+interface ToolResult {
+  output: string
+  isError: boolean
+  metadata?: Record<string, unknown>
+}
+```
+
+What every `execute` returns. Three fields, and the whole tool-calling loop is built on them:
+`output` is the text handed back to the model, `isError` says whether the call failed, and
+`metadata` is free-form — except for one reserved key that turns a result into a suspension.
+
+## When to use it
+
+Every time you write a tool. It is the return type of
+[`Tool.execute`](/api/javascript/types/tool/), so you construct one on every code path — success,
+failure, and everything in between.
+
+## Why an error flag and not an exception
+
+<Aside type="tip" title="Throwing is for bugs, isError is for outcomes">
+A thrown exception escapes the loop and ends the run. `isError: true` is *fed back to the model as
+the tool's result*, so it can read "file not found", pick a different path, and carry on. Use the
+flag for anything the model could plausibly recover from; let genuine programming errors throw.
+</Aside>
+
+`output` is always a `string` — it is what the model reads. Serialize structured data yourself
+(`JSON.stringify`) rather than expecting the loop to do it, so you control exactly what the model
+sees.
+
+## Examples
+
+### 1. Success and failure on the same tool
+
+```ts test
+import assert from "node:assert"
+import type { ToolResult } from "toolnexus"
+
+function readConfig(key: string): ToolResult {
+  const config: Record<string, string> = { region: "eu-west-1" }
+  if (!(key in config)) {
+    // Recoverable: the model can read this and try another key.
+    return { output: `No such config key: ${key}`, isError: true }
+  }
+  return { output: config[key], isError: false }
+}
+
+const found = readConfig("region")
+assert.equal(found.output, "eu-west-1")
+assert.equal(found.isError, false)
+
+const missing = readConfig("nope")
+assert.equal(missing.isError, true)
+console.log("ok:", found.output, "|", missing.output)
+```
+
+### 2. Structured output and metadata
+
+`output` must be a string, so serialize deliberately. `metadata` rides alongside for *your* code —
+the model never sees it, which makes it the right place for bookkeeping.
+
+```ts test
+import assert from "node:assert"
+import type { ToolResult } from "toolnexus"
+
+function search(q: string): ToolResult {
+  const hits = [
+    { id: 1, title: "Getting started" },
+    { id: 2, title: "Advanced usage" },
+  ]
+  return {
+    // The model reads this. Make it legible, not just valid.
+    output: hits.map((h) => `#${h.id} ${h.title}`).join("\n"),
+    isError: false,
+    // Your code reads this. The model never sees it.
+    metadata: { title: `search: ${q}`, count: hits.length, ids: hits.map((h) => h.id) },
+  }
+}
+
+const res = search("usage")
+assert.equal(res.metadata?.count, 2)
+assert.deepEqual(res.metadata?.ids, [1, 2])
+assert.ok(res.output.includes("Advanced usage"))
+console.log("ok:", res.metadata?.title)
+```
+
+### 3. The reserved key — `metadata.pending` is a suspension
+
+`metadata` is free-form with one exception. A `pending` key holding a `Request` means "this tool
+cannot finish until something out-of-band happens" — the loop parks the run instead of returning.
+You rarely write this by hand; [`pending`](/api/javascript/suspension/pending/) builds it for you.
+
+```ts test
+import assert from "node:assert"
+import { pending, authRequired, pendingOf } from "toolnexus"
+
+// pending() returns a ToolResult carrying metadata.pending = Request.
+const res = pending({ kind: "input", prompt: "Which environment?" })
+
+assert.equal(res.isError, true) // a parked call is not a success
+const req = pendingOf(res)
+assert.ok(req, "pendingOf reads the suspension back off the result")
+assert.equal(req?.kind, "input")
+assert.equal(req?.prompt, "Which environment?")
+assert.ok(req?.id, "an id is generated as the correlation key")
+
+// authRequired is sugar for the login case.
+const auth = authRequired("https://example.com/login")
+assert.equal(pendingOf(auth)?.kind, "authorization")
+assert.equal(pendingOf(auth)?.url, "https://example.com/login")
+
+// An ordinary result has no suspension.
+assert.equal(pendingOf({ output: "done", isError: false }), undefined)
+
+console.log("ok:", req?.kind, "|", pendingOf(auth)?.kind)
+```
+
+<Aside type="caution">
+A suspension sets `isError: true`. That is deliberate — a parked call has not produced an answer.
+Do not treat `isError` alone as "the tool broke"; check
+[`pendingOf`](/api/javascript/suspension/pending-of/) when suspension is in play.
+</Aside>
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `output` | `string` | The text handed to the model. Always a string — serialize structured data yourself. |
+| `isError` | `boolean` | Whether the call failed. Fed back to the model, not thrown. |
+| `metadata` | `Record<string, unknown>` | Free-form, for your code. **Reserved:** `pending` holds a §10 `Request`. |
+
+## The same type in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| Python | `ToolResult` | [→](/api/python/types/tool-result/) |
+| Go | `ToolResult` | [→](/api/go/types/tool-result/) |
+| Java | `ToolResult` | [→](/api/java/types/tool-result/) |
+| C# | `ToolResult` | [→](/api/csharp/types/tool-result/) |
+| Elixir | `Toolnexus.ToolResult` | [→](/api/elixir/types/tool-result/) |
+
+The field names are pinned across ports because they serialize over the wire and cross agent
+boundaries — `isError` stays camelCase even in Python and Go.
+
+## See also
+
+- [`Tool`](/api/javascript/types/tool/) — what returns this
+- [`ToolContext`](/api/javascript/types/context/) — what `execute` receives
+- [`pending`](/api/javascript/suspension/pending/) — build a suspending result
+- [`pendingOf`](/api/javascript/suspension/pending-of/) — read a suspension back off a result

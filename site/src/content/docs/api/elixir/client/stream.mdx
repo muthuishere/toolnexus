@@ -1,0 +1,73 @@
+---
+title: "Toolnexus.Client.stream"
+description: "The streaming loop: text deltas, tool-call events, and suspension events as they happen. — Elixir."
+sidebar:
+  label: "Toolnexus.Client.stream"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```elixir
+{/* TODO:signature */}
+```
+
+The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+
+## When to use it
+
+{/* TODO:when */}
+_TODO: the situation this entry point is for._
+
+## Why this and not the alternative
+
+{/* TODO:why */}
+<Aside type="tip" title="TODO: when NOT to use it">
+_TODO: name the alternative and when to prefer it._
+</Aside>
+
+## Examples
+
+### 1. TODO — the smallest useful call
+
+{/* TODO:example1 */}
+```elixir
+// TODO
+```
+
+### 2. TODO — the realistic case
+
+{/* TODO:example2 */}
+```elixir
+// TODO
+```
+
+### 3. TODO — the full surface
+
+{/* TODO:example3 */}
+```elixir
+// TODO
+```
+
+## The same call in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `Client.stream` | [→](/api/javascript/client/stream/) |
+| Python | `Client.stream` | [→](/api/python/client/stream/) |
+| Go | `Client.Stream` | [→](/api/go/client/stream/) |
+| Java | `LlmClient.stream` | [→](/api/java/client/stream/) |
+| C# | `LlmClient.StreamAsync` | [→](/api/csharp/client/stream/) |
+
+Behavior is identical across ports by contract — same `examples/` fixtures, same output.
+See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## See also
+
+- [`Toolnexus.Client.create`](/api/elixir/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Toolnexus.Client.run`](/api/elixir/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Toolnexus.Client hooks option`](/api/elixir/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+- [`Toolnexus.Client conversation`](/api/elixir/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.

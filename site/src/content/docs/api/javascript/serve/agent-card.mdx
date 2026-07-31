@@ -1,0 +1,72 @@
+---
+title: "buildAgentCard"
+description: "Construct the Agent Card that advertises your name, skills and endpoint. — JavaScript."
+sidebar:
+  label: "buildAgentCard"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a>
+</p>
+
+```ts
+{/* TODO:signature */}
+```
+
+Construct the Agent Card that advertises your name, skills and endpoint.
+
+## When to use it
+
+{/* TODO:when */}
+_TODO: the situation this entry point is for._
+
+## Why this and not the alternative
+
+{/* TODO:why */}
+<Aside type="tip" title="TODO: when NOT to use it">
+_TODO: name the alternative and when to prefer it._
+</Aside>
+
+## Examples
+
+### 1. TODO — the smallest useful call
+
+{/* TODO:example1 */}
+```ts
+// TODO
+```
+
+### 2. TODO — the realistic case
+
+{/* TODO:example2 */}
+```ts
+// TODO
+```
+
+### 3. TODO — the full surface
+
+{/* TODO:example3 */}
+```ts
+// TODO
+```
+
+## The same call in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| Python | `build_agent_card` | [→](/api/python/serve/agent-card/) |
+| Go | `BuildAgentCard` | [→](/api/go/serve/agent-card/) |
+| Java | `A2AServer.buildAgentCard` | [→](/api/java/serve/agent-card/) |
+| C# | `A2AServer.BuildAgentCard` | [→](/api/csharp/serve/agent-card/) |
+| Elixir | `Toolnexus.Serve.build_agent_card` | [→](/api/elixir/serve/agent-card/) |
+
+Behavior is identical across ports by contract — same `examples/` fixtures, same output.
+See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## See also
+
+- [`startA2AServer`](/api/javascript/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+- [`FileTaskStore`](/api/javascript/serve/task-store/) — Persist inbound A2A tasks so a suspended request survives a restart.
+- [`buildMcpServer`](/api/javascript/serve/mcp/) — The inbound MCP profile: any MCP client can call your tools.

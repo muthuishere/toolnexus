@@ -1,0 +1,37 @@
+---
+title: "Inbound translation — transcripts across providers"
+description: "Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong. — Go."
+sidebar:
+  label: "translate / inbound"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a>
+</p>
+
+<Aside type="caution" title="Not available in Go">
+Go keeps openAIMessagesToAnthropic unexported (golang/translate.go:283) — inbound translation is reachable only through Translate.
+</Aside>
+
+Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong.
+
+## What to use instead
+
+{/* TODO:why */}
+_TODO: the closest thing this port does offer, and how to get the same outcome._
+
+## The same capability in the other ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `openAIMessagesToAnthropic` | [→](/api/javascript/translate/inbound/) |
+| Python | `openai_messages_to_anthropic` | [→](/api/python/translate/inbound/) |
+| Java | `Translate.openAIMessagesToAnthropic` | [→](/api/java/translate/inbound/) |
+| C# | `Translate.OpenAIMessagesToAnthropic` | [→](/api/csharp/translate/inbound/) |
+| Elixir | `Toolnexus.Translate.openai_messages_to_anthropic` | [→](/api/elixir/translate/inbound/) |
+
+## See also
+
+- [`Translate`](/api/go/translate/translate/) — Declare a toolkit to a provider and translate one request/response without executing anything or keeping state.

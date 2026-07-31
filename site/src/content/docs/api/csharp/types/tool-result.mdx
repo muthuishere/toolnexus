@@ -1,0 +1,181 @@
+---
+title: ToolResult
+description: The result envelope every tool returns — output text, an error flag, and optional metadata that can carry a suspension. C#.
+sidebar:
+  label: ToolResult
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/ToolResult.cs">ToolResult.cs</a>
+</p>
+
+```csharp
+public sealed record ToolResult(string Output, bool IsError, IDictionary<string, object?>? Metadata = null)
+{
+    public static ToolResult Ok(string output, IDictionary<string, object?>? metadata = null);
+    public static ToolResult Error(string output, IDictionary<string, object?>? metadata = null);
+    public static ToolResult Pending(Request request);
+    public static ToolResult AuthRequired(string url, string prompt = "Authorization required to continue");
+    public static Request? PendingOf(ToolResult? result);
+}
+```
+
+What every `ExecuteAsync` returns. Three fields, and the whole tool-calling loop is built on them:
+`Output` is the text handed back to the model, `IsError` says whether the call failed, and
+`Metadata` is free-form — except for one reserved key that turns a result into a suspension.
+
+It is a `record`, so it is immutable and gives you value equality and `with` expressions for free.
+
+## When to use it
+
+Every time you write a tool. It is the return type of
+[`ITool.ExecuteAsync`](/api/csharp/types/tool/), so you construct one on every code path.
+
+## Why the static factories rather than the constructor
+
+<Aside type="tip" title="Prefer Ok / Error over new ToolResult(…)">
+`ToolResult.Ok(output)` and `ToolResult.Error(output)` say what you mean and cannot get the boolean
+backwards. Both take optional metadata. Use the positional record constructor only when the error
+flag is itself computed.
+</Aside>
+
+A tool that fails does **not** throw — it returns `Error(...)`. The loop feeds that text back to the
+model as the tool result, so it can read "file not found", pick another path, and carry on. Throwing
+escapes the loop and ends the run.
+
+`Output` is normalised: a `null` becomes `""`, so it is always safe to read.
+
+## Examples
+
+### 1. Success and failure on the same tool
+
+```csharp test
+using Toolnexus;
+
+var config = new Dictionary<string, string> { ["region"] = "eu-west-1" };
+
+ToolResult ReadConfig(string key) =>
+    config.TryGetValue(key, out var v)
+        ? ToolResult.Ok(v)
+        // Recoverable: the model can read this and try another key.
+        : ToolResult.Error($"No such config key: {key}");
+
+var found = ReadConfig("region");
+if (found.Output != "eu-west-1" || found.IsError) throw new Exception($"unexpected: {found.Output}");
+
+var missing = ReadConfig("nope");
+if (!missing.IsError) throw new Exception("expected IsError");
+
+Console.WriteLine($"ok: {found.Output} | {missing.Output}");
+```
+
+### 2. Structured output and metadata
+
+`Output` must be a string, so serialize deliberately. `Metadata` rides alongside for *your* code —
+the model never sees it, which makes it the right place for bookkeeping.
+
+```csharp test
+using Toolnexus;
+
+var hits = new[] { (Id: 1, Title: "Getting started"), (Id: 2, Title: "Advanced usage") };
+
+var res = ToolResult.Ok(
+    // The model reads this. Make it legible, not just valid.
+    string.Join("\n", hits.Select(h => $"#{h.Id} {h.Title}")),
+    // Your code reads this. The model never sees it.
+    new Dictionary<string, object?>
+    {
+        ["title"] = "search: usage",
+        ["count"] = hits.Length,
+        ["ids"] = hits.Select(h => h.Id).ToArray(),
+    });
+
+if (Convert.ToInt32(res.Metadata!["count"]) != 2) throw new Exception("count");
+if (!res.Output.Contains("Advanced usage")) throw new Exception("output");
+
+// It is a record: value equality and `with` come for free.
+var asError = res with { IsError = true };
+if (!asError.IsError || asError.Output != res.Output) throw new Exception("with-expression");
+
+Console.WriteLine($"ok: {res.Metadata["title"]}");
+```
+
+### 3. The reserved key — `Metadata["pending"]` is a suspension
+
+`Metadata` is free-form with one exception. A `pending` key holding a `Request` means "this tool
+cannot finish until something out-of-band happens" — the loop parks the run instead of returning.
+The producer and reader helpers are **static methods on `ToolResult`**.
+
+```csharp test
+using Toolnexus;
+
+// Pending() returns a ToolResult carrying Metadata["pending"] = Request.
+// An empty Id is filled in for you — it is the correlation key.
+var res = ToolResult.Pending(new Request { Kind = "input", Prompt = "Which environment?" });
+
+if (!res.IsError) throw new Exception("a parked call is not a success");
+
+var req = ToolResult.PendingOf(res);
+if (req is null) throw new Exception("PendingOf should read the suspension back");
+if (req.Kind != "input") throw new Exception($"kind: {req.Kind}");
+if (req.Prompt != "Which environment?") throw new Exception("prompt");
+if (string.IsNullOrEmpty(req.Id)) throw new Exception("an id is generated");
+
+// AuthRequired is sugar for the login case; the prompt has a default.
+var auth = ToolResult.AuthRequired("https://example.com/login");
+var authReq = ToolResult.PendingOf(auth)!;
+if (authReq.Kind != "authorization") throw new Exception("auth kind");
+if (authReq.Url != "https://example.com/login") throw new Exception("auth url");
+
+// An ordinary result has no suspension.
+if (ToolResult.PendingOf(ToolResult.Ok("done")) is not null) throw new Exception("expected none");
+
+Console.WriteLine($"ok: {req.Kind} | {authReq.Kind}");
+```
+
+<Aside type="caution">
+A suspension sets `IsError` to true. That is deliberate — a parked call has not produced an answer.
+Do not treat `IsError` alone as "the tool broke"; check `ToolResult.PendingOf(result)` when
+suspension is in play.
+</Aside>
+
+## Members
+
+| Member | Type | What it is |
+|---|---|---|
+| `Output` | `string` | The text handed to the model. `null` is normalised to `""`. |
+| `IsError` | `bool` | Whether the call failed. Fed back to the model, not thrown. |
+| `Metadata` | `IDictionary<string, object?>?` | Free-form, may be null. **Reserved:** `pending` holds a §10 `Request`. |
+
+## Static factories
+
+| Method | What it does |
+|---|---|
+| `Ok(output, metadata?)` | A success result. |
+| `Error(output, metadata?)` | A failure result the model can recover from. |
+| `Pending(request)` | A §10 suspension. Generates an `Id` when the request has none. |
+| `AuthRequired(url, prompt?)` | Sugar for `Kind:"authorization"` at a login URL. |
+| `PendingOf(result)` | Reads the `Request` back off a result, or `null`. |
+
+## The same type in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `ToolResult` | [→](/api/javascript/types/tool-result/) |
+| Python | `ToolResult` | [→](/api/python/types/tool-result/) |
+| Go | `ToolResult` | [→](/api/go/types/tool-result/) |
+| Java | `ToolResult` | [→](/api/java/types/tool-result/) |
+| Elixir | `Toolnexus.ToolResult` | [→](/api/elixir/types/tool-result/) |
+
+<Aside type="note" title="Where the helpers live differs by port">
+C# and Java put `Pending` / `AuthRequired` / `PendingOf` on **`ToolResult`**. JavaScript, Python and
+Go expose them as free functions. Elixir ships only the reader (`ToolResult.pending?/1`).
+</Aside>
+
+## See also
+
+- [`ITool`](/api/csharp/types/tool/) — what returns this
+- [`ToolContext`](/api/csharp/types/context/) — what `ExecuteAsync` receives
+- [`Suspension.Pending`](/api/csharp/suspension/pending/) — the suspension entry point

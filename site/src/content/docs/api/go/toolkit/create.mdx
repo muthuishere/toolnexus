@@ -1,0 +1,166 @@
+---
+title: CreateToolkit
+description: Collapse MCP servers, agent skills, built-ins, remote A2A agents and your own functions into one Tool list — Go.
+sidebar:
+  label: CreateToolkit
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#4-toolkit-aggregator">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/toolkit.go">golang/toolkit.go</a>
+</p>
+
+```go
+func CreateToolkit(ctx context.Context, opts Options) (*Toolkit, error)
+```
+
+The aggregator. Every tool source — MCP servers, `SKILL.md` folders, the built-in file/shell tools,
+remote A2A agents, and your own Go functions — collapses into one flat `[]Tool` behind this call.
+
+<Aside type="note" title="Go takes a context, not a signal">
+Unlike the JS port, `Options` has no cancellation field. The `ctx` argument bounds the whole load:
+cancel it and connects abort promptly without leaking child processes. This is the idiomatic Go
+shape of the same §2 guarantee.
+</Aside>
+
+## When to use it
+
+Reach for `CreateToolkit` when you have **more than one source of tools** and want the model to see
+one list. An `mcp.json` plus a `skills/` folder is already two sources.
+
+It is also the only route to the provider adapters — `tk.ToOpenAI()`, `tk.ToAnthropic()` and
+`tk.ToGemini()` are methods on `*Toolkit`.
+
+## Why this and not the alternative
+
+`LoadMcp` and `LoadSkills` each return tools on their own. With exactly one source and your own
+loop, calling the source directly is less indirection.
+
+Prefer `CreateToolkit` when: you have two or more sources (name collisions are resolved here, once,
+by documented precedence); you want provider schema; you have MCP servers (they are live child
+processes — `tk.Close()` owns their shutdown); or you want `tk.Serve()`.
+
+## Examples
+
+### 1. Skills only — the smallest useful toolkit
+
+```go
+ctx := context.Background()
+tk, err := toolnexus.CreateToolkit(ctx, toolnexus.Options{
+	SkillsDir: []string{"./examples/skills"},
+})
+if err != nil {
+	log.Fatal(err)
+}
+defer tk.Close()
+
+res, err := tk.Execute(ctx, "skill", map[string]any{"name": "hello-world"})
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(res.Output)
+```
+
+### 2. MCP servers and skills together
+
+This is `golang/examples/basic/main.go`, run against the shared `examples/` fixtures — the same
+fixtures every port is tested on.
+
+```go
+ctx := context.Background()
+tk, err := toolnexus.CreateToolkit(ctx, toolnexus.Options{
+	McpConfig: filepath.Join(root, "mcp.json"),
+	SkillsDir: []string{filepath.Join(root, "skills")},
+})
+if err != nil {
+	log.Fatal(err)
+}
+defer tk.Close()
+
+// Per-server connection status.
+fmt.Printf("MCP status: %v\n", tk.McpStatus())
+
+// One flat list; Source says where each tool came from.
+for _, t := range tk.Tools() {
+	fmt.Printf("%s (%s)\n", t.Name, t.Source)
+}
+
+// The skill catalog, ready for a system prompt.
+fmt.Println(tk.SkillsPrompt())
+
+// Provider schema, straight off the toolkit.
+b, _ := json.MarshalIndent(tk.ToOpenAI(), "", "  ")
+fmt.Println(string(b))
+```
+
+MCP tools arrive namespaced as `server_tool`, so two servers exposing `search` don't collide.
+
+### 3. The full surface
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+
+tk, err := toolnexus.CreateToolkit(ctx, toolnexus.Options{
+	McpConfig: "./mcp.json",
+	SkillsDir: []string{"./skills", "./team-skills"},
+
+	// Skills as data — no filesystem involved (§3, S1).
+	Skills: []toolnexus.SkillDef{{Name: "deploy", Description: "Ship a release", Content: "…"}},
+	SkillProvider: func(ctx context.Context) ([]toolnexus.SkillDef, error) {
+		return fetchSkillsFromDB(ctx)
+	},
+
+	// Narrow what this agent may see (§3, S2).
+	SkillsFilter:  map[string]bool{"deploy": true},
+	DisableSkills: []string{"dangerous-migration"},
+
+	// Drop tools by FINAL exposed name, after aggregation.
+	DisableTools: []string{"github_delete_repo"},
+
+	Builtins:   false, // no file/shell tools for this agent
+	ExtraTools: []toolnexus.Tool{weatherTool},
+
+	// An MCP server may now elicit input from the human mid-call (§10).
+	WaitFor: func(req toolnexus.Request) (toolnexus.Answer, error) {
+		return promptTheUser(req)
+	},
+})
+```
+
+<Aside type="caution">
+A `SkillProvider` failure is **isolated** — the other skill sources still load. Don't rely on a
+provider error to fail the build.
+</Aside>
+
+## Options
+
+| Field | Type | What it does |
+|---|---|---|
+| `McpConfig` | `any` | Path, raw JSON bytes, an `McpConfig`, or a parsed map. Nil skips MCP. |
+| `SkillsDir` | `[]string` | Skill roots. Empty skips skill loading. |
+| `Skills` | `[]SkillDef` | Skills supplied as data. |
+| `SkillProvider` | `func(context.Context) ([]SkillDef, error)` | Lazy provider, resolved once. Failure is isolated. |
+| `SkillsFilter` | `map[string]bool` | Per-agent skill allowlist. |
+| `SkillSampleLimit` | `int` | `0` ⇒ 10, `n` ⇒ cap, `-1` ⇒ omit `<skill_files>`. |
+| `DisableTools` | `[]string` | Drop by final exposed name, after aggregation. |
+| `DisableSkills` | `[]string` | Drop skills by name. |
+| `ExtraTools` | `[]Tool` | Your own tools. |
+| `Builtins` | `any` | `nil` ⇒ on, or a `bool` / `BuiltinsConfig`. |
+| `Agents` | `[]Agent` | Remote A2A peers; a top-level `agents` block is merged in too. |
+| `WaitFor` | `func(Request) (Answer, error)` | Host resolver for MCP elicitation (§10). |
+
+## The same call in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `createToolkit` | [→](/api/javascript/toolkit/create/) |
+| Python | `create_toolkit` | [→](/api/python/toolkit/create/) |
+| Java | `Toolkit.create` | [→](/api/java/toolkit/create/) |
+| C# | `Toolkit.CreateAsync` | [→](/api/csharp/toolkit/create/) |
+| Elixir | `Toolnexus.create_toolkit` | [→](/api/elixir/toolkit/create/) |
+
+## See also
+
+- [`LoadMcp`](/api/go/mcp/load/) · [`LoadSkills`](/api/go/skills/load/) · [`CreateClient`](/api/go/client/create/)

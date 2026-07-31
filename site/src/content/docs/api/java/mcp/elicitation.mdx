@@ -1,0 +1,73 @@
+---
+title: "McpSource.elicitationToRequest"
+description: "Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back. — Java."
+sidebar:
+  label: "McpSource.elicitationToRequest"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+</p>
+
+```java
+{/* TODO:signature */}
+```
+
+Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.
+
+## When to use it
+
+{/* TODO:when */}
+_TODO: the situation this entry point is for._
+
+## Why this and not the alternative
+
+{/* TODO:why */}
+<Aside type="tip" title="TODO: when NOT to use it">
+_TODO: name the alternative and when to prefer it._
+</Aside>
+
+## Examples
+
+### 1. TODO — the smallest useful call
+
+{/* TODO:example1 */}
+```java
+// TODO
+```
+
+### 2. TODO — the realistic case
+
+{/* TODO:example2 */}
+```java
+// TODO
+```
+
+### 3. TODO — the full surface
+
+{/* TODO:example3 */}
+```java
+// TODO
+```
+
+## The same call in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `elicitationToRequest` | [→](/api/javascript/mcp/elicitation/) |
+| Python | `elicitation_to_request` | [→](/api/python/mcp/elicitation/) |
+| Go | `ElicitationToRequest` | [→](/api/go/mcp/elicitation/) |
+| C# | `McpSource.ElicitationToRequest` | [→](/api/csharp/mcp/elicitation/) |
+| Elixir | `Toolnexus.Mcp.elicitation_to_request` | [→](/api/elixir/mcp/elicitation/) |
+
+Behavior is identical across ports by contract — same `examples/` fixtures, same output.
+See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## See also
+
+- [`McpSource.load`](/api/java/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+- [`McpSource.loadWith`](/api/java/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+- [`McpSource.listMcpTools`](/api/java/mcp/list-tools/) — List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+- [`McpSource.parseMcpConfig`](/api/java/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.

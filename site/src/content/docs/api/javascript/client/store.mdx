@@ -1,0 +1,73 @@
+---
+title: "InMemoryConversationStore"
+description: "Swap in-memory history for your own store so a conversation survives a process restart. — JavaScript."
+sidebar:
+  label: "InMemoryConversationStore"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```ts
+{/* TODO:signature */}
+```
+
+Swap in-memory history for your own store so a conversation survives a process restart.
+
+## When to use it
+
+{/* TODO:when */}
+_TODO: the situation this entry point is for._
+
+## Why this and not the alternative
+
+{/* TODO:why */}
+<Aside type="tip" title="TODO: when NOT to use it">
+_TODO: name the alternative and when to prefer it._
+</Aside>
+
+## Examples
+
+### 1. TODO — the smallest useful call
+
+{/* TODO:example1 */}
+```ts
+// TODO
+```
+
+### 2. TODO — the realistic case
+
+{/* TODO:example2 */}
+```ts
+// TODO
+```
+
+### 3. TODO — the full surface
+
+{/* TODO:example3 */}
+```ts
+// TODO
+```
+
+## The same call in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| Python | `InMemoryConversationStore` | [→](/api/python/client/store/) |
+| Go | `NewInMemoryConversationStore` | [→](/api/go/client/store/) |
+| Java | `LlmClient.ConversationStore` | [→](/api/java/client/store/) |
+| C# | `LlmClient.IConversationStore` | [→](/api/csharp/client/store/) |
+| Elixir | `Toolnexus.Client.InMemoryConversationStore` | [→](/api/elixir/client/store/) |
+
+Behavior is identical across ports by contract — same `examples/` fixtures, same output.
+See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## See also
+
+- [`createClient`](/api/javascript/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.run`](/api/javascript/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Client.stream`](/api/javascript/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Hooks`](/api/javascript/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

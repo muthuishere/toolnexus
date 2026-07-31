@@ -1,0 +1,176 @@
+---
+title: Toolnexus.ToolResult
+description: The result envelope every tool returns — output text, an error flag, and optional metadata that can carry a suspension. Elixir.
+sidebar:
+  label: Toolnexus.ToolResult
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/types.ex">elixir/lib/toolnexus/types.ex</a>
+</p>
+
+```elixir
+defmodule Toolnexus.ToolResult do
+  defstruct output: "", is_error: false, metadata: nil
+end
+```
+
+What every `execute` returns. Three fields, and the whole tool-calling loop is built on them:
+`output` is the text handed back to the model, `is_error` says whether the call failed, and
+`metadata` is free-form — except for one reserved key that turns a result into a suspension.
+
+Unlike `Toolnexus.Tool`, nothing here is enforced: every field has a default, so `%ToolResult{}` is
+valid and means "empty success".
+
+## When to use it
+
+Every time you write a tool. It is the return type of
+[`Toolnexus.Tool`](/api/elixir/types/tool/)'s `execute`, so you construct one on every code path.
+
+## Why an error flag and not a raise
+
+<Aside type="tip" title="Raising is for bugs, is_error is for outcomes">
+A raised exception escapes the loop and ends the run. `is_error: true` is *fed back to the model as
+the tool's result*, so it can read "file not found", pick a different path, and carry on. Use the
+flag for anything the model could plausibly recover from; let genuine programming errors raise.
+</Aside>
+
+`output` is always a `String.t()` — it is what the model reads. Serialize structured data yourself
+(`Jason.encode!/1`) rather than expecting the loop to do it.
+
+## Examples
+
+### 1. Success and failure, with the shorthand constructors
+
+`ok/1` and `error/1` cover the two ordinary cases without writing the struct out.
+
+```elixir test
+alias Toolnexus.ToolResult
+
+config = %{"region" => "eu-west-1"}
+
+read_config = fn key ->
+  case Map.fetch(config, key) do
+    # Recoverable: the model can read this and try another key.
+    :error -> ToolResult.error("No such config key: #{key}")
+    {:ok, v} -> ToolResult.ok(v)
+  end
+end
+
+found = read_config.("region")
+true = found.output == "eu-west-1"
+false = found.is_error
+
+missing = read_config.("nope")
+true = missing.is_error
+
+IO.puts("ok: #{found.output} | #{missing.output}")
+```
+
+### 2. Structured output and metadata
+
+`output` must be a string, so serialize deliberately. `metadata` rides alongside for *your* code —
+the model never sees it, which makes it the right place for bookkeeping.
+
+```elixir test
+alias Toolnexus.ToolResult
+
+search = fn q ->
+  hits = [%{id: 1, title: "Getting started"}, %{id: 2, title: "Advanced usage"}]
+
+  %ToolResult{
+    # The model reads this. Make it legible, not just valid.
+    output: Enum.map_join(hits, "\n", fn h -> "##{h.id} #{h.title}" end),
+    is_error: false,
+    # Your code reads this. The model never sees it.
+    metadata: %{title: "search: #{q}", count: length(hits), ids: Enum.map(hits, & &1.id)}
+  }
+end
+
+res = search.("usage")
+true = res.metadata.count == 2
+true = res.metadata.ids == [1, 2]
+true = String.contains?(res.output, "Advanced usage")
+
+IO.puts("ok: #{res.metadata.title}")
+```
+
+### 3. The reserved key — `metadata.pending` is a suspension
+
+`metadata` is free-form with one exception. A `:pending` key holding a `%Toolnexus.Request{}` means
+"this tool cannot finish until something out-of-band happens" — the loop parks the run instead of
+returning. `ToolResult.pending?/1` is how you detect it.
+
+```elixir test
+alias Toolnexus.{ToolResult, Request}
+
+# A suspension is a ToolResult whose metadata carries a Request.
+req = %Request{id: "pnd-1", kind: "input", prompt: "Which environment?"}
+res = %ToolResult{output: req.prompt, is_error: true, metadata: %{pending: req}}
+
+# A parked call is not a success.
+true = res.is_error
+true = ToolResult.pending?(res)
+
+# Read the request back off the result by matching the metadata.
+%{pending: %Request{} = got} = res.metadata
+true = got.kind == "input"
+true = got.prompt == "Which environment?"
+true = got.id == "pnd-1"
+
+# The authorization shape carries a URL instead of expecting typed input.
+auth_req = %Request{id: "pnd-2", kind: "authorization", prompt: "Log in", url: "https://example.com/login"}
+auth = %ToolResult{output: auth_req.prompt, is_error: true, metadata: %{pending: auth_req}}
+true = ToolResult.pending?(auth)
+true = auth.metadata.pending.url == "https://example.com/login"
+
+# An ordinary result has no suspension.
+false = ToolResult.pending?(ToolResult.ok("done"))
+
+IO.puts("ok: #{got.kind} | #{auth_req.kind}")
+```
+
+<Aside type="caution" title="Elixir builds suspensions by hand">
+The other ports ship producer helpers (`pending()`, `authRequired()`) and a reader (`pendingOf()`).
+Elixir currently exposes only the **reader** side, `ToolResult.pending?/1` — you construct the
+`%ToolResult{metadata: %{pending: %Request{}}}` shape yourself, including the `id`, which is the
+correlation key the host echoes back in the `Answer`. The wire shape is identical to every other
+port; only the convenience constructors are missing.
+</Aside>
+
+## Fields
+
+| Field | Type | Default | What it is |
+|---|---|---|---|
+| `output` | `String.t()` | `""` | The text handed to the model. Serialize structured data yourself. |
+| `is_error` | `boolean()` | `false` | Whether the call failed. Fed back to the model, not raised. |
+| `metadata` | `map() \| nil` | `nil` | Free-form, for your code. **Reserved:** `:pending` holds a §10 `Request`. |
+
+## Functions
+
+| Function | What it does |
+|---|---|
+| `ToolResult.ok/1` | A success result with the given text. |
+| `ToolResult.error/1` | An error result with the given text. |
+| `ToolResult.pending?/1` | True when `metadata.pending` holds a `%Request{}` — i.e. this is a §10 suspension. |
+
+## The same type in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `ToolResult` | [→](/api/javascript/types/tool-result/) |
+| Python | `ToolResult` | [→](/api/python/types/tool-result/) |
+| Go | `ToolResult` | [→](/api/go/types/tool-result/) |
+| Java | `ToolResult` | [→](/api/java/types/tool-result/) |
+| C# | `ToolResult` | [→](/api/csharp/types/tool-result/) |
+
+The struct field is `expires_at` in Elixir, but it serializes as `expiresAt` — the §10 wire keys are
+pinned across every port because they cross process and language boundaries unchanged.
+
+## See also
+
+- [`Toolnexus.Tool`](/api/elixir/types/tool/) — what returns this
+- [`Toolnexus.Context`](/api/elixir/types/context/) — what `execute` receives
+- [`Toolnexus.Request`](/api/elixir/suspension/pending/) — the suspension request shape

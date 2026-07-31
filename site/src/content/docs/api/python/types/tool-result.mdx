@@ -1,0 +1,166 @@
+---
+title: ToolResult
+description: The result envelope every tool returns — output text, an error flag, and optional metadata that can carry a suspension. Python.
+sidebar:
+  label: ToolResult
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/types.py">python/src/toolnexus/types.py</a>
+</p>
+
+```python
+@dataclass
+class ToolResult:
+    output: str
+    is_error: bool
+    metadata: Optional[dict[str, Any]] = None
+```
+
+What every `execute` returns. Three fields, and the whole tool-calling loop is built on them:
+`output` is the text handed back to the model, `is_error` says whether the call failed, and
+`metadata` is free-form — except for one reserved key that turns a result into a suspension.
+
+## When to use it
+
+Every time you write a tool. It is the return type of [`Tool.execute`](/api/python/types/tool/), so
+you construct one on every code path — success, failure, and everything in between.
+
+## Why an error flag and not an exception
+
+<Aside type="tip" title="Raising is for bugs, is_error is for outcomes">
+A raised exception escapes the loop and ends the run. `is_error=True` is *fed back to the model as
+the tool's result*, so it can read "file not found", pick a different path, and carry on. Use the
+flag for anything the model could plausibly recover from; let genuine programming errors raise.
+</Aside>
+
+`output` is always a `str` — it is what the model reads. Serialize structured data yourself
+(`json.dumps`) rather than expecting the loop to do it, so you control exactly what the model sees.
+
+## Examples
+
+### 1. Success and failure on the same tool
+
+```python test
+from toolnexus import ToolResult
+
+CONFIG = {"region": "eu-west-1"}
+
+
+def read_config(key: str) -> ToolResult:
+    if key not in CONFIG:
+        # Recoverable: the model can read this and try another key.
+        return ToolResult(output=f"No such config key: {key}", is_error=True)
+    return ToolResult(output=CONFIG[key], is_error=False)
+
+
+found = read_config("region")
+assert found.output == "eu-west-1"
+assert found.is_error is False
+
+missing = read_config("nope")
+assert missing.is_error is True
+
+print("ok:", found.output, "|", missing.output)
+```
+
+### 2. Structured output and metadata
+
+`output` must be a string, so serialize deliberately. `metadata` rides alongside for *your* code —
+the model never sees it, which makes it the right place for bookkeeping.
+
+```python test
+from toolnexus import ToolResult
+
+
+def search(q: str) -> ToolResult:
+    hits = [
+        {"id": 1, "title": "Getting started"},
+        {"id": 2, "title": "Advanced usage"},
+    ]
+    return ToolResult(
+        # The model reads this. Make it legible, not just valid.
+        output="\n".join(f"#{h['id']} {h['title']}" for h in hits),
+        is_error=False,
+        # Your code reads this. The model never sees it.
+        metadata={"title": f"search: {q}", "count": len(hits), "ids": [h["id"] for h in hits]},
+    )
+
+
+res = search("usage")
+assert res.metadata["count"] == 2
+assert res.metadata["ids"] == [1, 2]
+assert "Advanced usage" in res.output
+
+print("ok:", res.metadata["title"])
+```
+
+### 3. The reserved key — `metadata["pending"]` is a suspension
+
+`metadata` is free-form with one exception. A `pending` key holding a `Request` means "this tool
+cannot finish until something out-of-band happens" — the loop parks the run instead of returning.
+You rarely write this by hand; [`pending`](/api/python/suspension/pending/) builds it for you.
+
+```python test
+from toolnexus import pending, auth_required, pending_of
+
+# pending() returns a ToolResult carrying metadata["pending"] = Request.
+res = pending(kind="input", prompt="Which environment?")
+
+assert res.is_error is True  # a parked call is not a success
+req = pending_of(res)
+assert req is not None, "pending_of reads the suspension back off the result"
+assert req.kind == "input"
+assert req.prompt == "Which environment?"
+assert req.id, "an id is generated as the correlation key"
+
+# auth_required is sugar for the login case.
+auth = auth_required("https://example.com/login")
+assert pending_of(auth).kind == "authorization"
+assert pending_of(auth).url == "https://example.com/login"
+
+# An ordinary result has no suspension.
+from toolnexus import ToolResult
+assert pending_of(ToolResult(output="done", is_error=False)) is None
+
+print("ok:", req.kind, "|", pending_of(auth).kind)
+```
+
+<Aside type="caution">
+A suspension sets `is_error=True`. That is deliberate — a parked call has not produced an answer.
+Do not treat `is_error` alone as "the tool broke"; check
+[`pending_of`](/api/python/suspension/pending-of/) when suspension is in play.
+</Aside>
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `output` | `str` | The text handed to the model. Always a string — serialize structured data yourself. |
+| `is_error` | `bool` | Whether the call failed. Fed back to the model, not raised. |
+| `metadata` | `dict[str, Any] \| None` | Free-form, for your code. **Reserved:** `pending` holds a §10 `Request`. |
+
+## The same type in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `ToolResult` | [→](/api/javascript/types/tool-result/) |
+| Go | `ToolResult` | [→](/api/go/types/tool-result/) |
+| Java | `ToolResult` | [→](/api/java/types/tool-result/) |
+| C# | `ToolResult` | [→](/api/csharp/types/tool-result/) |
+| Elixir | `Toolnexus.ToolResult` | [→](/api/elixir/types/tool-result/) |
+
+<Aside type="note" title="snake_case here, camelCase on the wire">
+Python uses `is_error` because `ToolResult` is local API. The §10 `Request`/`Answer` types keep
+camelCase keys (`expiresAt`) even in Python — those serialize and cross language boundaries
+unchanged.
+</Aside>
+
+## See also
+
+- [`Tool`](/api/python/types/tool/) — what returns this
+- [`ToolContext`](/api/python/types/context/) — what `execute` receives
+- [`pending`](/api/python/suspension/pending/) — build a suspending result
+- [`pending_of`](/api/python/suspension/pending-of/) — read a suspension back off a result

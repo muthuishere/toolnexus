@@ -1,0 +1,73 @@
+---
+title: "WaitFor"
+description: "The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract. — Go."
+sidebar:
+  label: "WaitFor"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+```go
+{/* TODO:signature */}
+```
+
+The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+
+## When to use it
+
+{/* TODO:when */}
+_TODO: the situation this entry point is for._
+
+## Why this and not the alternative
+
+{/* TODO:why */}
+<Aside type="tip" title="TODO: when NOT to use it">
+_TODO: name the alternative and when to prefer it._
+</Aside>
+
+## Examples
+
+### 1. TODO — the smallest useful call
+
+{/* TODO:example1 */}
+```go
+// TODO
+```
+
+### 2. TODO — the realistic case
+
+{/* TODO:example2 */}
+```go
+// TODO
+```
+
+### 3. TODO — the full surface
+
+{/* TODO:example3 */}
+```go
+// TODO
+```
+
+## The same call in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `waitFor` | [→](/api/javascript/suspension/wait-for/) |
+| Python | `WaitFor` | [→](/api/python/suspension/wait-for/) |
+| Java | `LlmClient.waitFor` | [→](/api/java/suspension/wait-for/) |
+| C# | `LlmClient.WaitFor` | [→](/api/csharp/suspension/wait-for/) |
+| Elixir | `Toolnexus.Client wait_for` | [→](/api/elixir/suspension/wait-for/) |
+
+Behavior is identical across ports by contract — same `examples/` fixtures, same output.
+See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## See also
+
+- [`Pending`](/api/go/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`AuthRequired`](/api/go/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`PendingOf`](/api/go/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`Client.Resume`](/api/go/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.

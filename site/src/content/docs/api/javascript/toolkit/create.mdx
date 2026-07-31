@@ -1,0 +1,203 @@
+---
+title: createToolkit
+description: Collapse MCP servers, agent skills, built-ins, remote A2A agents and your own functions into one Tool list — JavaScript.
+sidebar:
+  label: createToolkit
+---
+
+import { Aside, Code, Tabs, TabItem } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#4-toolkit-aggregator">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/toolkit.ts">js/src/toolkit.ts</a>
+</p>
+
+```ts
+function createToolkit(opts: ToolkitOptions): Promise<Toolkit>
+```
+
+The aggregator. Every tool source in toolnexus — MCP servers, `SKILL.md` folders, the built-in
+file/shell tools, remote A2A agents, and plain functions of your own — collapses into one flat
+`Tool[]` behind this call.
+
+## When to use it
+
+Reach for `createToolkit` when you have **more than one source of tools** and want the LLM to see
+them as one list. That is almost always: an `mcp.json` plus a `skills/` folder is already two
+sources, and the moment you add a function of your own it is three.
+
+It is also the only thing that gives you the provider adapters. `tk.toOpenAI()`, `tk.toAnthropic()`
+and `tk.toGemini()` are methods on the returned `Toolkit`, so if you need schema in a provider's
+format, you go through here.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use a source directly instead when there is only one">
+`loadMcp()` and `loadSkills()` each return a `Tool[]` on their own. If you have exactly one source
+and you are handing the tools to your own loop, calling the source directly is less indirection —
+you skip the aggregator and the `close()` lifecycle that comes with it.
+</Aside>
+
+Prefer `createToolkit` the moment any of these is true:
+
+- **You have two or more sources.** Name collisions across sources are resolved here, once, by a
+  documented precedence — doing it yourself is the bug.
+- **You want provider schema.** The adapters live on `Toolkit`.
+- **You have MCP servers.** They are live child processes and HTTP connections; `Toolkit` owns
+  their lifecycle and `tk.close()` shuts them all down. Calling `loadMcp` yourself means owning that.
+- **You want to serve.** `tk.serve()` exposes the whole toolkit as an A2A agent or an MCP server.
+
+`Toolkit.create(opts)` is the same function as a static method — identical behavior, pick whichever
+reads better at the call site.
+
+## Examples
+
+### 1. Skills only — the smallest useful toolkit
+
+No MCP servers, no config file. Point at a folder of `SKILL.md` files and you have a working
+toolkit with one `skill` tool that does progressive disclosure.
+
+```ts
+import { createToolkit } from "toolnexus"
+
+const tk = await createToolkit({
+  skillsDir: "./examples/skills",
+})
+
+console.log(tk.tools().map((t) => t.name))
+// [ 'skill' ]
+
+// Progressive disclosure: the catalog is in the system prompt, the body loads on demand.
+const res = await tk.execute("skill", { name: "hello-world" })
+console.log(res.output)
+
+await tk.close()
+```
+
+<Aside type="caution">
+Always `await tk.close()`. Even with no MCP servers it is the documented lifecycle, and adding a
+server later turns a missing `close()` into a leaked child process.
+</Aside>
+
+### 2. MCP servers and skills together
+
+This is `js/examples/basic.ts` — the shared fixture example, run against `examples/mcp.json` and
+`examples/skills/`. Two sources, one tool list.
+
+```ts
+import { createToolkit } from "toolnexus"
+
+const tk = await createToolkit({
+  mcpConfig: new URL("../../examples/mcp.json", import.meta.url).pathname,
+  skillsDir: new URL("../../examples/skills", import.meta.url).pathname,
+})
+
+// Per-server connection status — which servers came up, which failed.
+console.log("MCP status:", tk.mcpStatus())
+
+// One flat list; `source` tells you where each tool came from.
+console.log("Tools:", tk.tools().map((t) => `${t.name} (${t.source})`))
+
+// The skill catalog, ready to paste into a system prompt.
+console.log(tk.skillsPrompt())
+
+// Provider schema, straight off the toolkit.
+console.log(JSON.stringify(tk.toOpenAI().slice(0, 2), null, 2))
+
+await tk.close()
+```
+
+MCP tools arrive namespaced as `server_tool`, so two servers exposing `search` don't collide.
+
+### 3. The full surface — data skills, filters, your own tools
+
+Everything `ToolkitOptions` carries. Skills as data instead of files, a per-agent allowlist, a
+drop-list applied after aggregation, built-ins off, and a `waitFor` so a connected MCP server can
+ask the human a question mid-call.
+
+```ts
+import { createToolkit, defineTool } from "toolnexus"
+
+const tk = await createToolkit({
+  mcpConfig: "./mcp.json",
+  skillsDir: ["./skills", "./team-skills"],
+
+  // Skills as data — no filesystem involved (§3, S1).
+  skills: [{ name: "deploy", description: "Ship a release", content: "…" }],
+  skillProvider: async () => fetchSkillsFromDb(),   // resolved once, at build
+
+  // Narrow what this particular agent may see (§3, S2).
+  skillsFilter: { deploy: true },
+  disableSkills: ["dangerous-migration"],
+
+  // Drop tools by their FINAL exposed name, after aggregation.
+  disableTools: ["github_delete_repo"],
+
+  builtins: false,                  // no file/shell tools for this agent
+  extraTools: [
+    defineTool({
+      name: "get_weather",
+      description: "Current weather for a city",
+      parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+      execute: async ({ city }) => ({ output: `sunny in ${city}` }),
+    }),
+  ],
+
+  // An MCP server may now elicit input from the human mid-call (§10).
+  waitFor: async (request) => ({ kind: "input", value: await promptTheUser(request) }),
+
+  signal: AbortSignal.timeout(30_000),   // bound the whole load (§2, Gap 3)
+})
+```
+
+## Options
+
+| Option | Type | What it does |
+|---|---|---|
+| `mcpConfig` | `string \| object` | Path to an `mcp.json`, or the parsed object. |
+| `skillsDir` | `string \| string[]` | One or more folders globbed for `**/SKILL.md`. |
+| `skills` | `SkillDef[]` | Skills supplied as data, bypassing the filesystem. |
+| `skillProvider` | `() => SkillDef[] \| Promise<SkillDef[]>` | Lazy provider, resolved **once** at build. |
+| `skillsFilter` | `Record<string, boolean>` | Per-agent skill allowlist, keyed on name. |
+| `disableSkills` | `string[]` | Drop skills by name — sugar over a `false` in `skillsFilter`. |
+| `disableTools` | `string[]` | Drop tools by **final exposed name**, applied after aggregation. |
+| `skillSampleLimit` | `number` | Sibling-file sample cap: `0` ⇒ 10, `n` ⇒ cap, `-1` ⇒ omit. |
+| `extraTools` | `Tool[]` | Your own tools, merged into the list. |
+| `builtins` | `BuiltinsConfig` | Built-in tools. **On by default**; `false` turns them off. |
+| `agents` | `Agent[]` | Remote A2A agents — each advertised skill becomes a tool. |
+| `waitFor` | `(req: Request) => Promise<Answer>` | Host resolver for MCP elicitation (§10). Omit ⇒ not advertised. |
+| `signal` | `AbortSignal` | Bounds the whole MCP load; aborts promptly if it fires. |
+
+## What you get back
+
+| Method | Returns | |
+|---|---|---|
+| `tools()` | `Tool[]` | The flat aggregated list. |
+| `get(name)` | `Tool \| undefined` | One tool by exposed name. |
+| `execute(name, args, ctx?)` | `Promise<ToolResult>` | Call a tool directly. |
+| `register(...tools)` | `this` | Add tools after construction. |
+| `addAgent(agentOrCardUrl, opts?)` | `Promise<this>` | Attach a remote A2A peer. |
+| `skillsPrompt()` | `string` | The skill catalog for your system prompt. |
+| `mcpStatus()` | `Record<string, McpStatus>` | Per-server connection state. |
+| `toOpenAI()` / `toAnthropic()` / `toGemini()` | schema | Provider tool schema. |
+| `serve(addr, opts)` | `Promise<ServeHandle>` | Expose this toolkit as an A2A agent or MCP server. |
+| `close()` | `Promise<void>` | Shut down every MCP server. **Always call it.** |
+
+## The same call in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| Python | `create_toolkit` | [→](/api/python/toolkit/create/) |
+| Go | `CreateToolkit` | [→](/api/go/toolkit/create/) |
+| Java | `Toolkit.create` | [→](/api/java/toolkit/create/) |
+| C# | `Toolkit.CreateAsync` | [→](/api/csharp/toolkit/create/) |
+| Elixir | `Toolnexus.create_toolkit` | [→](/api/elixir/toolkit/create/) |
+
+Behavior is identical across ports by contract — same `examples/` fixtures, same output. See
+[SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## See also
+
+- [`loadMcp`](/api/javascript/mcp/load/) — the MCP source on its own
+- [`loadSkills`](/api/javascript/skills/load/) — the skill source on its own
+- [`createClient`](/api/javascript/client/create/) — the loop that drives a toolkit
+- [`defineTool`](/api/javascript/native/define-tool/) — your own functions as tools

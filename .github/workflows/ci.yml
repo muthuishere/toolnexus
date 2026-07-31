@@ -112,3 +112,41 @@ jobs:
       - run: mix deps.get
       - run: mix compile --warnings-as-errors
       - run: mix coveralls   # runs the suite + enforces minimum_coverage 95 (coveralls.json)
+
+  docs-examples:
+    name: Docs examples (all six ports)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every toolchain, because each documented example is compiled AND executed
+      # against its own port. Hermetic: no network, no live LLM.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.17"
+          otp-version: "27"
+
+      # Build the ports the runners link against.
+      - run: npm install && npm run build
+        working-directory: js
+      - run: ./gradlew jar --no-daemon
+        working-directory: java
+
+      - name: Extract and run every documented example
+        run: bash site/tests/run-all.sh

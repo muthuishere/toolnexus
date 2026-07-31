@@ -32,3 +32,8 @@ inprogress.md
 
 # private launch/marketing drafts (not for the public repo)
 marketing/
+
+# docs example harness scratch
+site/tests/.work/
+site/tests/snippets/
+erl_crash.dump

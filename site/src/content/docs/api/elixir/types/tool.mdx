@@ -1,0 +1,197 @@
+---
+title: Toolnexus.Tool
+description: The uniform shape every tool source collapses to — name, description, JSON-Schema parameters, execute. Elixir.
+sidebar:
+  label: Toolnexus.Tool
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/types.ex">elixir/lib/toolnexus/types.ex</a>
+</p>
+
+```elixir
+defmodule Toolnexus.Tool do
+  @enforce_keys [:name, :description, :input_schema, :source, :execute]
+  defstruct [:name, :description, :input_schema, :source, :execute]
+
+  # execute is (args :: map, ctx :: Toolnexus.Context.t()) -> Toolnexus.ToolResult.t()
+end
+```
+
+The one struct. An MCP server tool, an agent skill, a built-in shell tool, a remote A2A agent, an
+HTTP endpoint and a plain function of your own are all *the same thing* to an LLM — a named,
+described, schema'd callable. `Toolnexus.Tool` is that thing, and every source produces it.
+
+## When to use it
+
+You mostly **receive** tools rather than construct them: `Toolnexus.Toolkit.tools/1` hands you a
+list, and that is what you `Enum.map` and pass to an adapter.
+
+Construct one directly when you are writing a **new tool source** — something producing tools from
+a shape toolnexus doesn't already cover. For a single ordinary function, use
+[`Toolnexus.Native.define/1`](/api/elixir/native/define-tool/) instead.
+
+## Why this and not the alternative
+
+<Aside type="caution" title="All five keys are enforced">
+`@enforce_keys` covers every field, so a struct missing `:source` or `:execute` raises at
+construction rather than failing later inside the loop. That is deliberate — there is no partially
+valid tool.
+</Aside>
+
+`execute` is an arity-2 function, `(args, ctx)`. Unlike JavaScript and Go, **`ctx` is not
+optional** — the loop always passes a `%Toolnexus.Context{}`, so you can pattern-match on it
+directly without nil-guards.
+
+## Examples
+
+### 1. The smallest possible tool
+
+```elixir test
+alias Toolnexus.{Tool, ToolResult, Context}
+
+echo = %Tool{
+  name: "echo",
+  description: "Return whatever it is given",
+  input_schema: %{
+    "type" => "object",
+    "properties" => %{"text" => %{"type" => "string"}},
+    "required" => ["text"]
+  },
+  source: "custom",
+  execute: fn args, _ctx ->
+    %ToolResult{output: to_string(args["text"]), is_error: false}
+  end
+}
+
+res = echo.execute.(%{"text" => "hello"}, %Context{})
+
+^res = %ToolResult{output: "hello", is_error: false, metadata: nil}
+true = res.output == "hello"
+false = res.is_error
+
+IO.puts("ok: #{res.output}")
+```
+
+`source` is not free-form — it is one of `"mcp"`, `"skill"`, `"native"`, `"http"`, `"builtin"`,
+`"a2a"`, `"custom"`. Use `"custom"` for tools you construct yourself.
+
+### 2. Reporting failure, and carrying metadata
+
+A tool that fails does **not** raise — it returns `is_error: true`. The loop feeds that text back to
+the model, so it can react. `ToolResult.ok/1` and `ToolResult.error/1` are the shorthand.
+
+```elixir test
+alias Toolnexus.{Tool, ToolResult, Context}
+
+divide = %Tool{
+  name: "divide",
+  description: "Divide two numbers",
+  input_schema: %{
+    "type" => "object",
+    "properties" => %{"a" => %{"type" => "number"}, "b" => %{"type" => "number"}},
+    "required" => ["a", "b"]
+  },
+  source: "custom",
+  execute: fn args, _ctx ->
+    a = args["a"] / 1
+    b = args["b"] / 1
+
+    if b == 0 do
+      # The model sees this text and can correct itself on the next turn.
+      ToolResult.error("Cannot divide by zero")
+    else
+      %ToolResult{
+        output: to_string(a / b),
+        is_error: false,
+        metadata: %{title: "divide", operands: [a, b]}
+      }
+    end
+  end
+}
+
+ok = divide.execute.(%{"a" => 10, "b" => 4}, %Context{})
+true = ok.output == "2.5"
+true = ok.metadata.operands == [10.0, 4.0]
+
+bad = divide.execute.(%{"a" => 1, "b" => 0}, %Context{})
+true = bad.is_error
+
+IO.puts("ok: #{ok.output} | error path: #{bad.output}")
+```
+
+### 3. A generated tool source — the real reason this struct is public
+
+Producing many tools from data is where you build the struct directly. `Tool.sanitize/1` makes each
+name schema-safe.
+
+```elixir test
+alias Toolnexus.{Tool, ToolResult, Context}
+
+endpoints = [
+  %{key: "get user", path: "/users/:id"},
+  %{key: "list orders", path: "/orders"}
+]
+
+tools =
+  Enum.map(endpoints, fn e ->
+    %Tool{
+      # Names must match [a-zA-Z0-9_-]; sanitize/1 does exactly that.
+      name: Tool.sanitize(e.key),
+      description: "Call #{e.path}",
+      input_schema: %{"type" => "object", "properties" => %{"id" => %{"type" => "string"}}},
+      source: "custom",
+      execute: fn args, _ctx ->
+        ToolResult.ok("#{e.path} <- #{args["id"]}")
+      end
+    }
+  end)
+
+true = Enum.map(tools, & &1.name) == ["get_user", "list_orders"]
+
+res = hd(tools).execute.(%{"id" => "42"}, %Context{})
+true = res.output == "/users/:id <- 42"
+
+IO.puts("ok: #{Enum.map_join(tools, ", ", & &1.name)}")
+```
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `name` | `String.t()` | The name the model calls. Must match `[a-zA-Z0-9_-]` — run it through `Tool.sanitize/1`. |
+| `description` | `String.t()` | What the model reads to decide whether to call it. |
+| `input_schema` | `map()` | A JSON-Schema **object**, string-keyed. |
+| `source` | `String.t()` | One of `mcp`, `skill`, `native`, `http`, `builtin`, `a2a`, `custom`. |
+| `execute` | `(map(), Context.t() -> ToolResult.t())` | Arity-2 function. `ctx` is **always** passed. |
+
+## Functions
+
+| Function | What it does |
+|---|---|
+| `Toolnexus.Tool.sanitize/1` | Replaces every character outside `[a-zA-Z0-9_-]` with `_` (SPEC §0.2). |
+
+## The same type in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `Tool` | [→](/api/javascript/types/tool/) |
+| Python | `Tool` | [→](/api/python/types/tool/) |
+| Go | `Tool` | [→](/api/go/types/tool/) |
+| Java | `Tool` | [→](/api/java/types/tool/) |
+| C# | `ITool` | [→](/api/csharp/types/tool/) |
+
+<Aside type="note" title="One real difference">
+Elixir always passes a context; JavaScript and Go make it optional and may pass nothing. Code
+written against the Elixir port can pattern-match `ctx` without a nil-guard — the reverse is not
+true.
+</Aside>
+
+## See also
+
+- [`Toolnexus.ToolResult`](/api/elixir/types/tool-result/) — what `execute` returns
+- [`Toolnexus.Context`](/api/elixir/types/context/) — what `execute` receives
+- [`Toolnexus.Native.define`](/api/elixir/native/define-tool/) — build a tool from a function
+- [`Toolnexus.create_toolkit`](/api/elixir/toolkit/create/) — aggregate tools from every source

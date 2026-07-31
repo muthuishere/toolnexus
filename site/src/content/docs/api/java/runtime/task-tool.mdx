@@ -1,0 +1,40 @@
+---
+title: "The task tool — model-facing delegation"
+description: "The opt-in tool that lets the model itself spawn a teammate. Default OFF. — Java."
+sidebar:
+  label: "runtime / task-tool"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+</p>
+
+<Aside type="caution" title="Not available in Java">
+Only JS exposes a constructible task tool symbol; elsewhere it is the `task` builtin, toggled on the runtime.
+</Aside>
+
+The opt-in tool that lets the model itself spawn a teammate. Default OFF.
+
+## What to use instead
+
+{/* TODO:why */}
+_TODO: the closest thing this port does offer, and how to get the same outcome._
+
+## The same capability in the other ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `agents.taskTool` | [→](/api/javascript/runtime/task-tool/) |
+| Python | _not shipped in this port_ |  |
+| Go | _not shipped in this port_ |  |
+| C# | _not shipped in this port_ |  |
+| Elixir | _not shipped in this port_ |  |
+
+## See also
+
+- [`agents.Agent`](/api/java/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`agents.Runtime`](/api/java/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`agents.Handle`](/api/java/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`agents.Budget`](/api/java/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

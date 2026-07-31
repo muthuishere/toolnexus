@@ -1,0 +1,72 @@
+---
+title: "NewRuntime"
+description: "The six host verbs that drive sub-agents, plus the read-only list and inspect views. — Go."
+sidebar:
+  label: "NewRuntime"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+</p>
+
+```go
+{/* TODO:signature */}
+```
+
+The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+
+## When to use it
+
+{/* TODO:when */}
+_TODO: the situation this entry point is for._
+
+## Why this and not the alternative
+
+{/* TODO:why */}
+<Aside type="tip" title="TODO: when NOT to use it">
+_TODO: name the alternative and when to prefer it._
+</Aside>
+
+## Examples
+
+### 1. TODO — the smallest useful call
+
+{/* TODO:example1 */}
+```go
+// TODO
+```
+
+### 2. TODO — the realistic case
+
+{/* TODO:example2 */}
+```go
+// TODO
+```
+
+### 3. TODO — the full surface
+
+{/* TODO:example3 */}
+```go
+// TODO
+```
+
+## The same call in the other five ports
+
+| Port | Symbol | |
+|---|---|---|
+| JavaScript | `agents.AgentRuntime` | [→](/api/javascript/runtime/runtime/) |
+| Python | `AgentRuntime` | [→](/api/python/runtime/runtime/) |
+| Java | `agents.Runtime` | [→](/api/java/runtime/runtime/) |
+| C# | `AgentRuntime` | [→](/api/csharp/runtime/runtime/) |
+| Elixir | `Toolnexus.Agents.Runtime` | [→](/api/elixir/runtime/runtime/) |
+
+Behavior is identical across ports by contract — same `examples/` fixtures, same output.
+See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## See also
+
+- [`agents.New`](/api/go/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`agents.Handle`](/api/go/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`agents.Budget`](/api/go/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
