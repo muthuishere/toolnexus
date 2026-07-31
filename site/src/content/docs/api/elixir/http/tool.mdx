@@ -1,56 +1,270 @@
 ---
-title: "Toolnexus.Http.tool"
-description: "Turn an HTTP endpoint into a tool: URL, method, headers with ${ENV} expansion, and a schema. — Elixir."
+title: Toolnexus.Http.tool
+description: Turn an HTTP endpoint into a tool — URL placeholders, querystring, body encoding, and headers with environment expansion. Elixir.
 sidebar:
-  label: "Toolnexus.Http.tool"
+  label: Http.tool
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/http.ex">elixir/lib/toolnexus/http.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec tool(keyword() | map()) :: Toolnexus.Tool.t()
+def tool(opts)
 ```
 
-Turn an HTTP endpoint into a tool: URL, method, headers with $\{ENV\} expansion, and a schema.
+Declares a remote HTTP endpoint as a uniform [`Toolnexus.Tool`](/api/elixir/types/tool/). You give it
+a method, a URL and a schema; it turns the model's arguments into a real request — substituting URL
+placeholders, building the querystring, encoding the body — and turns the response back into tool
+output.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **A REST API you do not control** and that has no MCP server — a payments API, an internal
+  microservice, a status endpoint.
+- **Turning an existing service into agent capability without writing a client**, when the whole
+  integration is "call this URL with these arguments".
+- **Keeping credentials out of your code**: header values expand `${ENV_VAR}` from the environment
+  at call time and are never logged.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use define_tool when the call needs real logic">
+[`Toolnexus.Native.define_tool/1`](/api/elixir/native/define-tool/) is the right choice as soon as you
+need pagination, retries with judgement, response reshaping, or two calls chained together — write
+the `Req` call yourself inside `execute`. Reach for `Http.tool/1` **instead** when the mapping from
+arguments to one request is declarative, because then this is the whole integration.
 </Aside>
+
+If the service already speaks MCP, prefer [`Toolnexus.Mcp.load/1`](/api/elixir/mcp/load/) — you get
+its own tool names, descriptions and schemas rather than hand-writing them.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Declaring an endpoint — no request is made until the model calls it
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+`tool/1` is pure construction: it builds a `%Tool{}` and touches the network only inside `execute`.
+That makes the declaration itself trivially testable.
+
+```elixir test
+alias Toolnexus.Http
+
+status =
+  Http.tool(%{
+    name: "service_status",
+    description: "Current status of the platform",
+    method: "GET",
+    url: "https://status.example.invalid/api/v2/status.json"
+  })
+
+true = status.name == "service_status"
+true = status.description == "Current status of the platform"
+# The source tag is always "http" — it is not configurable.
+true = status.source == "http"
+
+# No :input_schema given ⇒ the empty object schema, right for a no-argument tool.
+true =
+  status.input_schema == %{
+    "type" => "object",
+    "properties" => %{},
+    "additionalProperties" => false
+  }
+
+# It is an ordinary Tool, so the adapters accept it unchanged.
+[entry] = Toolnexus.Adapters.to_anthropic([status])
+true = entry["name"] == "service_status"
+
+IO.puts("ok: declared #{status.name} (#{status.source}), no request made")
 ```
 
-### 2. TODO — the realistic case
+<Aside type="note" title="Method is normalised, and accepts an atom">
+`:method` is run through `to_string/1` and upcased, so `"get"`, `"GET"` and `:get` are the same
+thing. `:url` and `:method` are required — a missing one raises `KeyError` at declaration time, not
+at call time.
+</Aside>
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+### 2. Path placeholders and the querystring
+
+`{placeholder}` segments in the URL are filled from the arguments and **consumed**. On a `GET`, every
+remaining argument becomes a querystring parameter, sorted by name so the URL is deterministic.
+
+The `:req_options` below is an internal escape hatch used here to keep this page hermetic — it
+serves the request from an in-process plug instead of the network. Leave it out in real code.
+
+```elixir test
+alias Toolnexus.{Context, Http}
+
+issues =
+  Http.tool(%{
+    name: "list_issues",
+    description: "List issues on a repository",
+    method: :get,
+    url: "https://api.example.invalid/repos/{owner}/{repo}/issues",
+    input_schema: %{
+      "type" => "object",
+      "properties" => %{
+        "owner" => %{"type" => "string"},
+        "repo" => %{"type" => "string"},
+        "state" => %{"type" => "string", "enum" => ["open", "closed"]}
+      },
+      "required" => ["owner", "repo"]
+    },
+    # Test-only: answer in-process rather than over the wire.
+    req_options: [
+      plug: fn conn ->
+        Plug.Conn.send_resp(conn, 200, Jason.encode!(%{path: conn.request_path, qs: conn.query_string}))
+      end
+    ]
+  })
+
+res =
+  issues.execute.(
+    %{"owner" => "muthuishere", "repo" => "toolnexus", "state" => "open", "labels" => "bug"},
+    %Context{}
+  )
+
+false = res.is_error
+echo = Jason.decode!(res.output)
+
+# owner/repo were consumed by the URL.
+true = echo["path"] == "/repos/muthuishere/toolnexus/issues"
+# Everything left over became query params — sorted, so this is stable.
+true = echo["qs"] == "labels=bug&state=open"
+
+# The HTTP status rides along in metadata.
+true = res.metadata.status == 200
+
+IO.puts("ok: #{echo["path"]}?#{echo["qs"]}")
 ```
 
-### 3. TODO — the full surface
+<Aside type="caution">
+Arguments the model invents that are not in your schema are still sent — as extra query params on a
+`GET`, or extra body keys otherwise. Set `"additionalProperties" => false` in `:input_schema` if the
+upstream API is strict about unknown fields.
+</Aside>
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+### 3. The full surface — a POST body, a secret header, failure, and `:result_mode`
+
+Header values expand `${ENV_VAR}` at **call** time, so rotating a token needs no redeploy and the
+value never appears in your source or in a log line.
+
+```elixir test
+alias Toolnexus.{Context, Http}
+
+# An obvious fake — a real deployment would already have this in the environment.
+System.put_env("TOOLNEXUS_DOCS_TOKEN", "YOUR_KEY_HERE")
+
+echo_plug = fn status ->
+  fn conn ->
+    {:ok, body, conn} = Plug.Conn.read_body(conn)
+    auth = conn |> Plug.Conn.get_req_header("authorization") |> List.first()
+    ctype = conn |> Plug.Conn.get_req_header("content-type") |> List.first()
+
+    Plug.Conn.send_resp(
+      conn,
+      status,
+      Jason.encode!(%{method: conn.method, body: body, auth: auth, ctype: ctype})
+    )
+  end
+end
+
+send_message =
+  Http.tool(%{
+    name: "send_message",
+    description: "Post a message to a channel",
+    method: "POST",
+    url: "https://api.example.invalid/channels/{channel}/messages",
+    headers: %{"Authorization" => "Bearer ${TOOLNEXUS_DOCS_TOKEN}"},
+    query: ["dry_run"],
+    body: "json",
+    result_mode: "status+text",
+    timeout: 5_000,
+    input_schema: %{
+      "type" => "object",
+      "properties" => %{
+        "channel" => %{"type" => "string"},
+        "text" => %{"type" => "string"},
+        "dry_run" => %{"type" => "string"}
+      },
+      "required" => ["channel", "text"],
+      "additionalProperties" => false
+    },
+    req_options: [plug: echo_plug.(200)]
+  })
+
+res =
+  send_message.execute.(
+    %{"channel" => "general", "text" => "shipped", "dry_run" => "1"},
+    %Context{}
+  )
+
+false = res.is_error
+
+# result_mode "status+text" prefixes the status and a newline.
+["200", payload] = String.split(res.output, "\n", parts: 2)
+echo = Jason.decode!(payload)
+
+true = echo["method"] == "POST"
+# channel went into the path, dry_run into the query, so only `text` is left for the body.
+true = Jason.decode!(echo["body"]) == %{"text" => "shipped"}
+# Content-Type is filled in for you when you do not set it.
+true = echo["ctype"] == "application/json"
+# The ${ENV_VAR} was expanded at call time.
+true = echo["auth"] == "Bearer YOUR_KEY_HERE"
+
+# A non-2xx response is a tool ERROR, not a raise — the model reads the text and can react.
+failing = Http.tool(%{
+  name: "send_message",
+  description: "Post a message to a channel",
+  method: "POST",
+  url: "https://api.example.invalid/channels/{channel}/messages",
+  req_options: [plug: echo_plug.(422)]
+})
+
+bad = failing.execute.(%{"channel" => "general", "text" => "shipped"}, %Context{})
+true = bad.is_error
+true = String.starts_with?(bad.output, "HTTP 422: ")
+true = bad.metadata.status == 422
+
+System.delete_env("TOOLNEXUS_DOCS_TOKEN")
+
+IO.puts("ok: 200 status+text, header expanded, 422 -> is_error")
 ```
+
+## Options
+
+Accepts a **map or a keyword list**.
+
+| Option | Required | Default | What it does |
+|---|---|---|---|
+| `:name` | yes | — | The name the model calls. |
+| `:description` | yes | — | What the model reads to decide whether to call it. |
+| `:method` | yes | — | Upcased string or atom: `:get`, `"post"`, `"PATCH"`… |
+| `:url` | yes | — | May contain `{placeholder}` segments, filled from args and URL-encoded. |
+| `:headers` | no | `%{}` | Name → value. Values expand `${ENV_VAR}` at call time; expanded values are never logged. |
+| `:query` | no | `[]` | Argument names to send as querystring instead of body. On `GET`, *all* remaining args go to the query regardless. |
+| `:body` | no | `"json"` | `"json"`, `"form"`, or `"raw"` (sends the `body` argument verbatim). Ignored on `GET` / `HEAD`. |
+| `:input_schema` | no | empty object schema | JSON-Schema object, string-keyed. |
+| `:timeout` | no | `30_000` | Receive timeout in milliseconds. |
+| `:result_mode` | no | `"text"` | `"text"` (body), `"json"` (re-encoded JSON, falling back to the raw text), or `"status+text"`. |
+| `:req_options` | no | `[]` | Internal — extra `Req.new/1` options, e.g. `plug:` in tests. Not part of the cross-port contract. |
+
+### How arguments are routed
+
+1. `{placeholder}` names in the URL, URL-encoded and **removed** from the argument map.
+2. Names listed in `:query` — or, on a `GET`, everything remaining — become querystring pairs, sorted by name.
+3. Whatever is still left becomes the body on non-`GET`/`HEAD` requests, per `:body`.
+
+### What comes back
+
+| Case | `output` | `is_error` | `metadata` |
+|---|---|---|---|
+| 2xx | Per `:result_mode` | `false` | `%{status: status}` |
+| non-2xx | `"HTTP <status>: <body>"` | `true` | `%{status: status}` |
+| transport failure | The exception message | `true` | `nil` |
 
 ## The same call in the other five ports
 
@@ -62,9 +276,12 @@ _TODO: name the alternative and when to prefer it._
 | Java | `HttpTool.of` | [→](/api/java/http/tool/) |
 | C# | `HttpTool.Of` | [→](/api/csharp/http/tool/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Argument routing, encoding and the error string are byte-identical across ports — the Elixir port
+mirrors `js/src/http.ts` down to `encodeURIComponent` semantics for placeholders.
 
 ## See also
 
-- _TODO: related entry points_
+- [`Toolnexus.Native.define_tool`](/api/elixir/native/define-tool/) — when one declarative request is not enough
+- [`Toolnexus.Mcp.load`](/api/elixir/mcp/load/) — prefer this when the service already speaks MCP
+- [`Toolnexus.create_toolkit`](/api/elixir/toolkit/create/) — pass these in as `:tools`
+- [`Toolnexus.Tool`](/api/elixir/types/tool/) · [`Toolnexus.ToolResult`](/api/elixir/types/tool-result/)

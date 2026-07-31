@@ -8,49 +8,174 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/adapters.ts">js/src/adapters.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function toAnthropic(tools: Tool[]): {
+  name: string
+  description: string
+  input_schema: JSONSchema
+}[]
 ```
 
-Render the toolkit as Anthropic tool-use schema.
+Turns a `Tool[]` into the `tools` array an Anthropic Messages request expects. Anthropic's shape is
+the flattest of the three providers — no wrapper object, no nesting; each tool is one plain record
+whose only rename is `inputSchema` → `input_schema`.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When you are calling the Anthropic Messages API yourself — with `@anthropic-ai/sdk`, a raw
+`fetch`, or through Bedrock / Vertex — and need schema to put in the request body. Anything that
+speaks the Messages API takes this array verbatim.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use createClient instead if you want the loop too">
+[`createClient`](/api/javascript/client/create/) picks the adapter from its `style` option and runs
+the whole tool-calling loop — schema out, `tool_use` blocks in, `tool_result` blocks back, repeat.
+Prefer `createClient` unless you already own the loop; reach for `toAnthropic` when you only want
+toolnexus for tool *aggregation* and the request stays yours to build.
 </Aside>
+
+`tk.toAnthropic()` on a [`Toolkit`](/api/javascript/toolkit/create/) is this same function applied
+to that toolkit's tools — use the method when you have a toolkit, the free function when you have a
+bare array (a filtered subset, a hand-picked pair, one tool for a narrow turn).
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. One tool to Anthropic schema
 
-{/* TODO:example1 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import { toAnthropic, defineTool } from "toolnexus"
+
+const weather = defineTool({
+  name: "get_weather",
+  description: "Current weather for a city",
+  inputSchema: {
+    type: "object",
+    properties: { city: { type: "string" } },
+    required: ["city"],
+  },
+  run: async ({ city }) => `sunny in ${city}`,
+})
+
+const schema = toAnthropic([weather])
+
+assert.equal(schema.length, 1)
+assert.equal(schema[0].name, "get_weather")
+assert.equal(schema[0].description, "Current weather for a city")
+// The ONLY rename: inputSchema -> input_schema. No { type: "function" } wrapper.
+assert.deepEqual(schema[0].input_schema.required, ["city"])
+assert.equal((schema[0] as any).function, undefined)
+
+console.log("ok:", schema[0].name)
 ```
 
-### 2. TODO — the realistic case
+Compare with [`toOpenAI`](/api/javascript/adapters/openai/), which nests the same three fields
+under `{ type: "function", function: {...} }`. Same information, different envelope — that is the
+entire job of an adapter.
 
-{/* TODO:example2 */}
-```ts
-// TODO
+### 2. Feeding it straight into a Messages request body
+
+The output drops into `tools` untouched. Nothing else in the body needs transforming.
+
+```ts test
+import assert from "node:assert"
+import { toAnthropic, defineTool } from "toolnexus"
+
+const tools = [
+  defineTool({
+    name: "search",
+    description: "Search the docs",
+    inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] },
+    run: async ({ q }) => `results for ${q}`,
+  }),
+  defineTool({
+    name: "ping",
+    description: "Health check",
+    inputSchema: { type: "object", properties: {} },
+    run: async () => "pong",
+  }),
+]
+
+const body = {
+  model: "claude-sonnet-4-5",
+  max_tokens: 1024,
+  messages: [{ role: "user", content: "search for adapters" }],
+  tools: toAnthropic(tools),
+}
+
+// Order is preserved, one entry per tool.
+assert.equal(body.tools.length, 2)
+assert.deepEqual(body.tools.map((t) => t.name), ["search", "ping"])
+// Plain JSON — no classes, no cycles, safe to serialise.
+assert.ok(JSON.stringify(body).length > 0)
+
+console.log("ok:", body.tools.map((t) => t.name).join(", "))
 ```
 
-### 3. TODO — the full surface
+### 3. Round-tripping a `tool_use` block back to the tool
 
-{/* TODO:example3 */}
-```ts
-// TODO
+Schema out, tool call in. Anthropic returns a `tool_use` content block whose `name` is the same
+`name` you advertised and whose `input` is already a **parsed object** — no `JSON.parse` step.
+
+```ts test
+import assert from "node:assert"
+import { toAnthropic, defineTool } from "toolnexus"
+
+const weather = defineTool({
+  name: "get_weather",
+  description: "Current weather for a city",
+  inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+  run: async ({ city }) => `sunny in ${city}`,
+})
+
+const tools = [weather]
+const schema = toAnthropic(tools)
+
+// What a model would send back for that schema.
+const block = { type: "tool_use", id: "toolu_1", name: "get_weather", input: { city: "Chennai" } }
+
+const called = tools.find((t) => t.name === block.name)
+assert.ok(called, "the advertised name resolves back to the tool")
+
+const res = await called.execute(block.input)
+assert.equal(res.output, "sunny in Chennai")
+assert.equal(res.isError, false)
+
+// The block you send on the next turn.
+const toolResult = {
+  type: "tool_result",
+  tool_use_id: block.id,
+  content: res.output,
+  is_error: res.isError,
+}
+assert.equal(toolResult.tool_use_id, "toolu_1")
+
+// An empty tool list is valid — it just means "no tools this turn".
+assert.deepEqual(toAnthropic([]), [])
+
+console.log("ok:", schema[0].name, "->", res.output)
 ```
+
+<Aside type="caution">
+Anthropic delivers `input` as an **object**; OpenAI delivers `arguments` as a **JSON string**. If
+you are porting a loop from one provider to the other, that is the line that bites — `execute`
+always wants a real object.
+</Aside>
+
+## Shape
+
+| Path | From | Notes |
+|---|---|---|
+| `[].name` | `Tool.name` | What the model calls back with in a `tool_use` block. |
+| `[].description` | `Tool.description` | What the model reads to decide whether to call it. |
+| `[].input_schema` | `Tool.inputSchema` | Renamed — `inputSchema` → `input_schema`. |
+
+There is no envelope key and no `type` discriminator: an Anthropic tool entry has exactly these
+three fields, and the input array's order is preserved one-for-one.
 
 ## The same call in the other five ports
 
@@ -62,10 +187,11 @@ _TODO: name the alternative and when to prefer it._
 | C# | `Adapters.ToAnthropic` | [→](/api/csharp/adapters/anthropic/) |
 | Elixir | `Toolnexus.Adapters.to_anthropic` | [→](/api/elixir/adapters/anthropic/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Output is byte-identical across ports for the same tools — that is a §0 conformance obligation.
 
 ## See also
 
-- [`toOpenAI`](/api/javascript/adapters/openai/) — Render the toolkit as OpenAI function-calling schema.
-- [`toGemini`](/api/javascript/adapters/gemini/) — Render the toolkit as Gemini function-declaration schema.
+- [`toOpenAI`](/api/javascript/adapters/openai/) · [`toGemini`](/api/javascript/adapters/gemini/)
+- [`createToolkit`](/api/javascript/toolkit/create/) — `tk.toAnthropic()` is this, applied to the toolkit
+- [`createClient`](/api/javascript/client/create/) — calls the adapter for you
+- [`Tool`](/api/javascript/types/tool/) — the input shape every adapter reads

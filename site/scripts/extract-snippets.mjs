@@ -47,8 +47,15 @@ function fencedBlocks(src) {
 	return out
 }
 
-// Start clean so a deleted example never lingers as a passing test.
-if (fs.existsSync(outRoot)) fs.rmSync(outRoot, { recursive: true })
+// Start clean so a deleted example never lingers as a passing test. With --lang,
+// wipe ONLY that port's tree so several language runs can proceed in parallel
+// without clobbering each other.
+if (only) {
+	const dir = path.join(outRoot, only)
+	if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true })
+} else if (fs.existsSync(outRoot)) {
+	fs.rmSync(outRoot, { recursive: true })
+}
 
 const counts = {}
 const manifestOut = []
@@ -74,7 +81,10 @@ for (const lang of manifest.langs) {
 }
 
 fs.mkdirSync(outRoot, { recursive: true })
-fs.writeFileSync(path.join(outRoot, "index.json"), JSON.stringify(manifestOut, null, 2) + "\n")
+fs.writeFileSync(
+	path.join(outRoot, only ? `index.${only}.json` : "index.json"),
+	JSON.stringify(manifestOut, null, 2) + "\n",
+)
 
 for (const [lang, n] of Object.entries(counts)) console.log(`${LANGS[lang].label.padEnd(11)} ${n} snippet(s)`)
 console.log(`total: ${manifestOut.length}`)

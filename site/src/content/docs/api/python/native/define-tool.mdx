@@ -1,56 +1,244 @@
 ---
-title: "define_tool"
-description: "Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call. — Python."
+title: define_tool
+description: Wrap a plain function as a tool — name, description and JSON-Schema inferred from the signature. Python.
 sidebar:
-  label: "define_tool"
+  label: define_tool
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/native.py">python/src/toolnexus/native.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+def define_tool(
+    fn: Callable[..., Any] | None = None,
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    input_schema: JSONSchema | None = None,
+    source: str = "native",
+) -> Tool | Callable[[Callable[..., Any]], Tool]
 ```
 
-Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.
+The shortest path from a function you already have to a tool the model can call. Pass a function,
+get a [`Tool`](/api/python/types/tool/) — the name comes from `__name__`, the description from the
+first docstring line, and the JSON-Schema from the type hints. Called with no `fn`, it returns a
+decorator instead.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Whenever the capability lives in your own process: a database query, an internal HTTP client you
+already configured, a calculation, a feature flag lookup. Anything that is a Python function is one
+call away from being a tool.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use the @tool decorator when you are writing the function anyway">
+[`tool`](/api/python/native/reflect/) is the same machinery in decorator form —
+`@tool` above a `def` and the decorated name *becomes* the `Tool`. Prefer it instead for functions
+you are authoring right now. `define_tool` is for wrapping functions you did not write, or did not
+write for this purpose: a library function, a method, a lambda, something in a loop.
 </Aside>
+
+Building the [`Tool`](/api/python/types/tool/) dataclass by hand is the other alternative — correct,
+but you then own the schema, the `ToolResult` wrapping and the exception handling that this function
+does for you. Do that only when you are generating tools from data rather than from functions.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. A function in, a tool out
 
-{/* TODO:example1 */}
-```python
-// TODO
+Nothing is declared twice. The docstring is the description; the hints are the schema.
+
+```python test
+import asyncio
+from toolnexus import define_tool
+
+
+def add(a: int, b: int) -> str:
+    """Add two numbers."""
+    return str(a + b)
+
+
+calc = define_tool(add)
+
+# Name from __name__, description from the first docstring line.
+assert calc.name == "add"
+assert calc.description == "Add two numbers."
+assert calc.source == "native"
+
+# Schema inferred: int/float → "number", and no default ⇒ required.
+assert calc.input_schema == {
+    "type": "object",
+    "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+    "additionalProperties": False,
+    "required": ["a", "b"],
+}
+
+
+async def main():
+    res = await calc.execute({"a": 2, "b": 3})
+    assert res.output == "5"
+    assert res.is_error is False
+    print("ok:", calc.name, "->", res.output)
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+<Aside type="caution">
+`int` and `float` both map to JSON-Schema `"number"` — there is no `"integer"`. Models will happily
+send `2.5` for a parameter you annotated `int`; validate inside the function if it matters.
+</Aside>
 
-{/* TODO:example2 */}
-```python
-// TODO
+### 2. Overrides, defaults, and errors as results
+
+Explicit `name` / `description` beat inference — use them when the Python name is not the name you
+want the model to see. Parameters with defaults drop out of `required`. And a raised exception is
+**caught** and returned as `is_error=True`, so a bad call teaches the model instead of killing the
+loop.
+
+```python test
+import asyncio
+from toolnexus import define_tool
+
+ORDERS = {"A-1": "shipped", "A-2": "pending"}
+
+
+def _lookup(order_id: str, verbose: bool = False) -> str:
+    if order_id not in ORDERS:
+        raise KeyError(f"no such order: {order_id}")
+    status = ORDERS[order_id]
+    return f"{order_id}: {status}" if verbose else status
+
+
+order_status = define_tool(
+    _lookup,
+    name="order_status",
+    description="Look up the delivery status of an order by its id.",
+)
+
+# The private helper's name never reaches the model.
+assert order_status.name == "order_status"
+assert order_status.description.startswith("Look up the delivery status")
+# `verbose` has a default, so it is optional; bool → "boolean".
+assert order_status.input_schema["required"] == ["order_id"]
+assert order_status.input_schema["properties"]["verbose"] == {"type": "boolean"}
+
+
+async def main():
+    ok = await order_status.execute({"order_id": "A-1", "verbose": True})
+    assert ok.output == "A-1: shipped"
+    assert ok.is_error is False
+
+    # The KeyError became a tool error, not a traceback out of the loop.
+    bad = await order_status.execute({"order_id": "ZZZ"})
+    assert bad.is_error is True
+    assert "no such order: ZZZ" in bad.output
+
+    print("ok:", ok.output, "| error path:", bad.output)
+
+
+asyncio.run(main())
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — async, `ctx`, rich returns, a hand-written schema
 
-{/* TODO:example3 */}
-```python
-// TODO
+`async def` is awaited directly; a plain `def` is pushed to a thread so it cannot block the loop. A
+`ctx` (or `context`) parameter receives the [`ToolContext`](/api/python/types/context/) and is
+excluded from the schema. Returning a non-`str` JSON-encodes it; returning a `ToolResult` passes
+straight through.
+
+```python test
+import asyncio
+import json
+from toolnexus import define_tool, to_openai, ToolContext, ToolResult
+
+
+async def fetch_rows(table: str, limit: int = 10, ctx=None) -> dict:
+    """Read rows from a table."""
+    budget = ctx.timeout if ctx is not None and ctx.timeout is not None else None
+    return {"table": table, "limit": limit, "budget": budget}
+
+
+def audit(action: str) -> ToolResult:
+    """Record an audit entry."""
+    # A full ToolResult passes through untouched — metadata and all.
+    return ToolResult(output=f"logged {action}", is_error=False, metadata={"action": action})
+
+
+rows = define_tool(fetch_rows)
+# An explicit input_schema wins over inference — say more than the hints can.
+logger = define_tool(
+    audit,
+    input_schema={
+        "type": "object",
+        "properties": {"action": {"type": "string", "enum": ["create", "delete"]}},
+        "required": ["action"],
+        "additionalProperties": False,
+    },
+)
+
+# `ctx` is a runtime channel, never advertised to the model.
+assert "ctx" not in rows.input_schema["properties"]
+assert sorted(rows.input_schema["properties"]) == ["limit", "table"]
+assert logger.input_schema["properties"]["action"]["enum"] == ["create", "delete"]
+
+# Native tools feed the adapters like any other tool.
+schema = to_openai([rows, logger])
+assert [s["function"]["name"] for s in schema] == ["fetch_rows", "audit"]
+
+
+async def main():
+    res = await rows.execute({"table": "orders"}, ToolContext(timeout=5.0))
+    # A dict return is json.dumps'd — output is always a string.
+    assert json.loads(res.output) == {"table": "orders", "limit": 10, "budget": 5.0}
+
+    logged = await logger.execute({"action": "create"})
+    assert logged.output == "logged create"
+    assert logged.metadata == {"action": "create"}
+
+    print("ok:", res.output, "|", logged.output)
+
+
+asyncio.run(main())
 ```
+
+## Options
+
+| Option | Type | What it does |
+|---|---|---|
+| `fn` | `Callable \| None` | The function to wrap. Omit it to get a decorator back. `async def` and plain `def` both work. |
+| `name` | `str \| None` | Overrides `fn.__name__`. Must match `[a-zA-Z0-9_-]` — run untrusted names through [`sanitize`](/api/python/types/tool/). |
+| `description` | `str \| None` | Overrides the first docstring line. Empty string when there is neither. |
+| `input_schema` | `JSONSchema \| None` | Overrides inference entirely — use it for enums, formats, descriptions per property. |
+| `source` | `str` | The `Tool.source` tag. Defaults to `"native"`; change it only when you are re-labelling a generated source. |
+
+## Inference rules
+
+| Signature | Schema |
+|---|---|
+| `str` | `{"type": "string"}` |
+| `int`, `float` | `{"type": "number"}` |
+| `bool` | `{"type": "boolean"}` |
+| `list`, `tuple`, `set` | `{"type": "array"}` |
+| `dict` | `{"type": "object"}` |
+| `Optional[T]` / `T \| None` | Unwrapped to `T` |
+| unannotated / unknown | `{}` — any value |
+| no default | added to `required` |
+| `ctx`, `context`, `self`, `cls` | excluded from the schema |
+| `*args`, `**kwargs` | excluded from the schema |
+
+## Return handling
+
+| The function returns | The tool returns |
+|---|---|
+| `str` | `ToolResult(output=<str>, is_error=False)` |
+| `ToolResult` | passed through unchanged |
+| anything else | `ToolResult(output=json.dumps(value), is_error=False)` |
+| raises | `ToolResult(output=str(exc), is_error=True)` |
 
 ## The same call in the other five ports
 
@@ -60,11 +248,17 @@ _TODO: name the alternative and when to prefer it._
 | Go | `NativeTool` | [→](/api/go/native/define-tool/) |
 | Java | `NativeTool.of` | [→](/api/java/native/define-tool/) |
 | C# | `NativeTool.Of` | [→](/api/csharp/native/define-tool/) |
-| Elixir | `Toolnexus.Native.define` | [→](/api/elixir/native/define-tool/) |
+| Elixir | `Toolnexus.Native.define_tool` | [→](/api/elixir/native/define-tool/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+<Aside type="note" title="Inference is Python's idiom, not the contract">
+Schema *inference from type hints* is what Python (and JS) can do naturally; the statically typed
+ports take the schema more explicitly. What §0 pins is the resulting `Tool` — same name, same
+description, same JSON-Schema, same `ToolResult` behavior — not how you got there.
+</Aside>
 
 ## See also
 
-- [`tool`](/api/python/native/reflect/) — Derive the schema from the function signature or annotation instead of writing it by hand.
+- [`tool`](/api/python/native/reflect/) — the decorator form of exactly this
+- [`Tool`](/api/python/types/tool/) — what you get back
+- [`ToolResult`](/api/python/types/tool-result/) · [`ToolContext`](/api/python/types/context/)
+- [`create_toolkit`](/api/python/toolkit/create/) — pass these in via `extra_tools`

@@ -40,11 +40,41 @@ internal sealed class StubServer : IDisposable
     public int Port { get; }
     public string BaseUrl => $"http://127.0.0.1:{Port}";
 
+    /// <summary>
+    /// Serialises "pick a free port" + "bind it". FreePort releases the probe socket before
+    /// HttpListener claims the port, so without this lock two StubServers constructed in
+    /// parallel (xUnit runs collections concurrently) can be handed the SAME port. When that
+    /// happened, one test's client reached another test's handler — which is how
+    /// RunLevelTimeoutAborts intermittently saw an instant response instead of its 800ms stall.
+    /// </summary>
+    private static readonly object PortGate = new();
+
     public StubServer(Action<HttpListenerContext> handler)
     {
-        Port = FreePort();
-        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
-        _listener.Start();
+        lock (PortGate)
+        {
+            // Retry: the probe port can still be taken by something outside this process
+            // between release and bind, so treat a failed bind as "try another port".
+            HttpListenerException? last = null;
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                var candidate = FreePort();
+                _listener.Prefixes.Clear();
+                _listener.Prefixes.Add($"http://127.0.0.1:{candidate}/");
+                try
+                {
+                    _listener.Start();
+                    Port = candidate;
+                    last = null;
+                    break;
+                }
+                catch (HttpListenerException e)
+                {
+                    last = e;
+                }
+            }
+            if (last != null) throw last;
+        }
         _ = Task.Run(async () =>
         {
             while (!_cts.IsCancellationRequested)

@@ -1,56 +1,336 @@
 ---
-title: "HttpTool.Of"
-description: "Turn an HTTP endpoint into a tool: URL, method, headers with ${ENV} expansion, and a schema. — C#."
+title: HttpTool.Of
+description: Declare a REST endpoint as a tool — URL placeholders, query args, JSON or form bodies, and ${ENV} headers. C#.
 sidebar:
-  label: "HttpTool.Of"
+  label: HttpTool.Of
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/HttpTool.cs">HttpTool.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public static HttpTool Of(HttpTool.Options opts)
 ```
 
-Turn an HTTP endpoint into a tool: URL, method, headers with $\{ENV\} expansion, and a schema.
+Declares an HTTP endpoint as an [`ITool`](/api/csharp/types/tool/) with `Source` set to `"http"`.
+The model's arguments become URL placeholders, query parameters or a request body according to the
+options, the response body becomes the tool output, and a non-2xx status becomes a tool error.
+
+No `HttpClient` of your own, no request-building code, no per-endpoint wrapper class — the
+endpoint becomes a tool by description.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When the capability you want to expose is already a REST call: an internal microservice, a public
+JSON API, a webhook, an admin endpoint. Declaring it beats writing a `NativeTool` around
+`HttpClient`, because argument routing and error mapping are handled for you.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use NativeTool.Of when the call needs real logic">
+[`NativeTool.Of`](/api/csharp/native/define-tool/) is the right choice the moment you need to
+reshape the response, paginate, sign a request, retry with backoff, or call two endpoints and
+combine them. `HttpTool` deliberately does one request and hands back the body verbatim. And if the
+remote side already speaks MCP, use [`McpSource.LoadAsync`](/api/csharp/mcp/load/) instead — you
+get its whole tool list, described by the server, rather than one endpoint you described yourself.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. A GET endpoint, arguments as query parameters
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+For `GET` (and `HEAD`), **every** leftover argument goes to the query string — you do not need to
+list them in `Query`.
+
+```csharp test
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using Toolnexus;
+
+static int FreePort()
+{
+    var probe = new TcpListener(IPAddress.Loopback, 0);
+    probe.Start();
+    var p = ((IPEndPoint)probe.LocalEndpoint).Port;
+    probe.Stop();
+    return p;
+}
+
+// A throwaway loopback server so this example is hermetic — no public network.
+var port = FreePort();
+var server = new HttpListener();
+server.Prefixes.Add($"http://127.0.0.1:{port}/");
+server.Start();
+
+var serving = Task.Run(async () =>
+{
+    var c = await server.GetContextAsync();
+    var body = Encoding.UTF8.GetBytes($$"""{"seen":"{{c.Request.Url!.PathAndQuery}}"}""");
+    c.Response.StatusCode = 200;
+    c.Response.ContentType = "application/json";
+    c.Response.ContentLength64 = body.Length;
+    await c.Response.OutputStream.WriteAsync(body);
+    c.Response.Close();
+});
+
+try
+{
+    var search = HttpTool.Of(new HttpTool.Options
+    {
+        Name = "search_docs",
+        Description = "Search the documentation index",
+        Method = "GET",
+        Url = $"http://127.0.0.1:{port}/search",
+        InputSchema = new Dictionary<string, object?>
+        {
+            ["type"] = "object",
+            ["properties"] = new Dictionary<string, object?> { ["q"] = new Dictionary<string, object?> { ["type"] = "string" } },
+            ["required"] = new[] { "q" },
+        },
+    });
+
+    if (search.Source != "http") throw new Exception(search.Source);
+
+    var res = await search.ExecuteAsync(new Dictionary<string, object?> { ["q"] = "http tool" });
+    if (res.IsError) throw new Exception(res.Output);
+    // Values are URL-encoded on the way out.
+    if (!res.Output.Contains("/search?q=http%20tool")) throw new Exception(res.Output);
+
+    // Metadata always carries the HTTP status.
+    if (Convert.ToInt32(res.Metadata?["status"]) != 200) throw new Exception("status metadata");
+
+    await serving;
+    Console.WriteLine($"ok: {res.Output}");
+}
+finally
+{
+    server.Stop();
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. A POST with a URL placeholder, a JSON body and an `${ENV}` header
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+`{placeholder}` segments in the URL are filled from the arguments and **consumed** — they do not
+also appear in the body. Whatever is left becomes the JSON body.
+
+```csharp test
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using Toolnexus;
+
+static int FreePort()
+{
+    var probe = new TcpListener(IPAddress.Loopback, 0);
+    probe.Start();
+    var p = ((IPEndPoint)probe.LocalEndpoint).Port;
+    probe.Stop();
+    return p;
+}
+
+var port = FreePort();
+var server = new HttpListener();
+server.Prefixes.Add($"http://127.0.0.1:{port}/");
+server.Start();
+
+string seenPath = "", seenAuth = "", seenBody = "", seenType = "";
+var serving = Task.Run(async () =>
+{
+    var c = await server.GetContextAsync();
+    seenPath = c.Request.Url!.PathAndQuery;
+    seenAuth = c.Request.Headers["Authorization"] ?? "";
+    seenType = c.Request.ContentType ?? "";
+    using (var reader = new StreamReader(c.Request.InputStream, Encoding.UTF8)) seenBody = await reader.ReadToEndAsync();
+
+    var body = Encoding.UTF8.GetBytes("""{"ok":true}""");
+    c.Response.StatusCode = 201;
+    c.Response.ContentLength64 = body.Length;
+    await c.Response.OutputStream.WriteAsync(body);
+    c.Response.Close();
+});
+
+// The token is read from the environment at CALL time and never appears in the tool
+// definition. YOUR_KEY_HERE is an obvious placeholder, not a credential.
+Environment.SetEnvironmentVariable("DOCS_DEMO_TOKEN", "YOUR_KEY_HERE");
+
+try
+{
+    var comment = HttpTool.Of(new HttpTool.Options
+    {
+        Name = "add_comment",
+        Description = "Add a comment to an issue",
+        Method = "POST",
+        Url = $"http://127.0.0.1:{port}/issues/{{issue}}/comments",
+        Headers = new Dictionary<string, string> { ["Authorization"] = "Bearer ${DOCS_DEMO_TOKEN}" },
+        Body = "json",
+        InputSchema = new Dictionary<string, object?>
+        {
+            ["type"] = "object",
+            ["properties"] = new Dictionary<string, object?>
+            {
+                ["issue"] = new Dictionary<string, object?> { ["type"] = "string" },
+                ["text"] = new Dictionary<string, object?> { ["type"] = "string" },
+            },
+            ["required"] = new[] { "issue", "text" },
+        },
+    });
+
+    var res = await comment.ExecuteAsync(new Dictionary<string, object?>
+    {
+        ["issue"] = "42",
+        ["text"] = "looks good",
+    });
+
+    if (res.IsError) throw new Exception(res.Output);
+    if (res.Output != """{"ok":true}""") throw new Exception(res.Output);
+    if (Convert.ToInt32(res.Metadata?["status"]) != 201) throw new Exception("status");
+
+    await serving;
+
+    // `issue` was consumed by the URL; only `text` survived into the body.
+    if (seenPath != "/issues/42/comments") throw new Exception(seenPath);
+    if (seenBody != """{"text":"looks good"}""") throw new Exception(seenBody);
+    if (seenType != "application/json") throw new Exception(seenType);
+    // ${DOCS_DEMO_TOKEN} was expanded from the environment.
+    if (seenAuth != "Bearer YOUR_KEY_HERE") throw new Exception("header expansion");
+
+    Console.WriteLine($"ok: {seenPath} <- {seenBody}");
+}
+finally
+{
+    server.Stop();
+}
 ```
 
-### 3. TODO — the full surface
+<Aside type="caution" title="Header values are use-only">
+`${VAR}` is expanded from the process environment on every call, so rotating a key needs no code
+change — and the literal value never lives in your config, your repo, or a log line. An unset
+variable expands to the **empty string**, not an error: check for a 401 rather than assuming the
+header was populated.
+</Aside>
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+### 3. Failures, explicit `Query` on a POST, and `ResultMode`
+
+A non-2xx response is a tool **error** whose output is `HTTP <status>: <body>` — the model reads
+it and can correct itself. Network failures and timeouts land the same way.
+
+```csharp test
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using Toolnexus;
+
+static int FreePort()
+{
+    var probe = new TcpListener(IPAddress.Loopback, 0);
+    probe.Start();
+    var p = ((IPEndPoint)probe.LocalEndpoint).Port;
+    probe.Stop();
+    return p;
+}
+
+var port = FreePort();
+var server = new HttpListener();
+server.Prefixes.Add($"http://127.0.0.1:{port}/");
+server.Start();
+
+var seenPaths = new List<string>();
+var seenBodies = new List<string>();
+var serving = Task.Run(async () =>
+{
+    for (var i = 0; i < 2; i++)
+    {
+        var c = await server.GetContextAsync();
+        seenPaths.Add(c.Request.Url!.PathAndQuery);
+        using (var reader = new StreamReader(c.Request.InputStream, Encoding.UTF8))
+            seenBodies.Add(await reader.ReadToEndAsync());
+
+        var notFound = c.Request.Url!.AbsolutePath.StartsWith("/missing");
+        var body = Encoding.UTF8.GetBytes(notFound ? """{"error":"no such record"}""" : """{"id":9,"state":"queued"}""");
+        c.Response.StatusCode = notFound ? 404 : 200;
+        c.Response.ContentLength64 = body.Length;
+        await c.Response.OutputStream.WriteAsync(body);
+        c.Response.Close();
+    }
+});
+
+try
+{
+    // Query names are routed to the querystring even on a POST; the rest becomes the body.
+    var enqueue = HttpTool.Of(new HttpTool.Options
+    {
+        Name = "enqueue_job",
+        Description = "Enqueue a background job",
+        Method = "POST",
+        Url = $"http://127.0.0.1:{port}/jobs",
+        Query = new List<string> { "priority" },
+        Body = "json",
+        ResultMode = "status+text",
+        Timeout = 5_000,
+    });
+
+    var ok = await enqueue.ExecuteAsync(new Dictionary<string, object?>
+    {
+        ["priority"] = "high",
+        ["kind"] = "reindex",
+    });
+    if (ok.IsError) throw new Exception(ok.Output);
+    // ResultMode "status+text" prefixes the status code and a newline.
+    if (ok.Output != "200\n{\"id\":9,\"state\":\"queued\"}") throw new Exception(ok.Output);
+
+    var missing = HttpTool.Of(new HttpTool.Options
+    {
+        Name = "get_record",
+        Description = "Fetch a record",
+        Method = "GET",
+        Url = $"http://127.0.0.1:{port}/missing",
+    });
+
+    var bad = await missing.ExecuteAsync(new Dictionary<string, object?>());
+    if (!bad.IsError) throw new Exception("expected IsError");
+    if (bad.Output != """HTTP 404: {"error":"no such record"}""") throw new Exception(bad.Output);
+    // The status is on the metadata of the error result too.
+    if (Convert.ToInt32(bad.Metadata?["status"]) != 404) throw new Exception("status metadata");
+
+    await serving;
+    if (seenPaths[0] != "/jobs?priority=high") throw new Exception(seenPaths[0]);
+    if (seenBodies[0] != """{"kind":"reindex"}""") throw new Exception(seenBodies[0]);
+
+    Console.WriteLine($"ok: {seenPaths[0]} | error: {bad.Output}");
+}
+finally
+{
+    server.Stop();
+}
 ```
+
+<Aside type="note">
+A `ToolContext.TimeoutMs` supplied by the caller **overrides** `Options.Timeout`, which itself
+defaults to 30 000 ms. A timeout or a DNS failure returns an error result carrying the exception
+message — `HttpTool` never throws out of `ExecuteAsync`.
+</Aside>
+
+## Options
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `Name` | `string` | `""` | Tool name the model calls. Must match `[a-zA-Z0-9_-]`. |
+| `Description` | `string` | `""` | What the model reads to decide whether to call it. |
+| `Method` | `string` | `"GET"` | Upper-cased internally, so `"post"` works. |
+| `Url` | `string` | `""` | May contain `{placeholder}` segments filled from the arguments. |
+| `Headers` | `IDictionary<string, string>?` | `null` | Values expand `${ENV_VAR}` at call time; never logged. |
+| `Query` | `List<string>?` | `null` | Argument names routed to the querystring. Ignored for GET — everything goes there anyway. |
+| `Body` | `string?` | `"json"` | `"json"`, `"form"`, or `"raw"` (sends the `body` argument verbatim). |
+| `InputSchema` | `IDictionary<string, object?>?` | empty object | The JSON Schema the model sees. |
+| `Timeout` | `long?` | `30000` | Milliseconds. Overridden by `ToolContext.TimeoutMs`. |
+| `ResultMode` | `string?` | text | `"json"` re-serializes the parsed body; `"status+text"` prefixes `"<status>\n"`. |
+
+Argument routing, in order: URL placeholders first, then query names (or everything, for GET), and
+whatever remains becomes the body. `GET` and `HEAD` never send a body.
 
 ## The same call in the other five ports
 
@@ -62,9 +342,12 @@ _TODO: name the alternative and when to prefer it._
 | Java | `HttpTool.of` | [→](/api/java/http/tool/) |
 | Elixir | `Toolnexus.Http.tool` | [→](/api/elixir/http/tool/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Argument routing, `${ENV}` expansion and the `HTTP <status>: <body>` error string are identical in
+every port — a §0 conformance obligation.
 
 ## See also
 
-- _TODO: related entry points_
+- [`NativeTool.Of`](/api/csharp/native/define-tool/) — when the call needs logic around it
+- [`McpSource.LoadAsync`](/api/csharp/mcp/load/) — when the remote side already speaks MCP
+- [`Toolkit.CreateAsync`](/api/csharp/toolkit/create/) — register the tool alongside every other source
+- [`ITool`](/api/csharp/types/tool/) · [`ToolResult`](/api/csharp/types/tool-result/) · [`ToolContext`](/api/csharp/types/context/)

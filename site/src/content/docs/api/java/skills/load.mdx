@@ -8,49 +8,164 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/SkillSource.java">SkillSource.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public static SkillSource load(String... dirs)
+public static SkillSource load(List<String> dirs)
 ```
 
-Glob a skills directory and expose one skill tool with progressive disclosure.
+Walks one or more roots for `**/SKILL.md`, parses each file's YAML frontmatter, and hands back a
+`SkillSource` carrying the parsed skills plus **one** `skill` tool. That single tool is the whole
+point: the model sees a short catalog in the system prompt and pulls a skill's full instructions
+only when it decides to — progressive disclosure.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When your skills live on disk as directories of Markdown and you want the `skill` tool as a
+standalone `Tool` — to hand to an adapter, register on an existing list, or inspect in a test.
+
+You also use it for the **system prompt**: `src.prompt()` renders the catalog the model reads to
+know a skill exists at all. Without it, the `skill` tool is invisible in practice.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Prefer Toolkit.create when skills are one source among several">
+[`Toolkit.create`](/api/java/toolkit/create/) takes `skillsDir(...)` and does exactly this
+internally, merging the resulting `skill` tool with MCP servers, native tools and the rest, and
+exposing the same catalog as `tk.skillsPrompt()`. Reach for `SkillSource.load` **instead** when
+skills are the *only* source you want, or when you need the parsed `SkillInfo` map directly.
 </Aside>
+
+For skills that are **not on disk** — rows from a database, a tenant's config, an allowlist per
+agent — use [`SkillSource.loadWith`](/api/java/skills/load-with/), which accepts `SkillDef` data and
+a filter. `load` is the thin sugar over it for the directory case.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Load a directory and inspect the catalog
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.*;
+
+public class Example {
+    public static void main(String[] args) {
+        SkillSource src = SkillSource.load("examples/skills");
+
+        if (!src.skills().containsKey("hello-world")) {
+            throw new AssertionError("expected hello-world, got " + src.skills().keySet());
+        }
+
+        // The catalog that goes into the system prompt.
+        String prompt = src.prompt();
+        if (!prompt.contains("## Available Skills")) throw new AssertionError(prompt);
+        if (!prompt.contains("**hello-world**")) throw new AssertionError(prompt);
+
+        // Exactly one tool, whatever the skill count.
+        Tool tool = src.tool();
+        if (!tool.name().equals("skill")) throw new AssertionError(tool.name());
+        if (!tool.source().equals("skill")) throw new AssertionError(tool.source());
+
+        System.out.println("ok: " + src.skills().keySet());
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+The name comes from the frontmatter `name:`, not the folder. A `SKILL.md` with no `name` is skipped
+(see [`listSkills`](/api/java/skills/list/) to find out why).
 
-{/* TODO:example2 */}
-```java
-// TODO
+### 2. Calling the `skill` tool — what the model actually receives
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        SkillSource src = SkillSource.load("examples/skills");
+        Tool skill = src.tool();
+
+        ToolResult res = skill.execute(Map.of("name", "hello-world"), new ToolContext());
+        if (res.isError()) throw new AssertionError(res.output());
+
+        String out = res.output();
+        // Byte-exact envelope — SPEC §3 pins these lines across all six ports.
+        if (!out.startsWith("<skill_content name=\"hello-world\">")) throw new AssertionError(out);
+        if (!out.contains("# Skill: hello-world")) throw new AssertionError(out);
+        if (!out.contains("Base directory for this skill: file://")) throw new AssertionError(out);
+        if (!out.contains("<skill_files>")) throw new AssertionError(out);
+        if (!out.endsWith("</skill_content>")) throw new AssertionError(out);
+
+        // Metadata carries the resolved on-disk directory.
+        if (!res.metadata().get("name").equals("hello-world")) throw new AssertionError("meta name");
+        if (res.metadata().get("dir") == null) throw new AssertionError("meta dir");
+
+        System.out.println("ok: loaded " + res.metadata().get("name"));
+    }
+}
 ```
 
-### 3. TODO — the full surface
+The base directory is emitted as a `file://` URL so relative paths inside the skill body
+(`scripts/greet.sh`) resolve for whatever reads them next.
 
-{/* TODO:example3 */}
-```java
-// TODO
+### 3. Several roots, an unknown skill, and wiring into an adapter
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        // Roots are merged, first-wins on a duplicate name. A missing root warns
+        // on stderr and contributes nothing — it is not fatal.
+        SkillSource src = SkillSource.load(List.of("examples/skills", "examples/skills-that-do-not-exist"));
+
+        if (src.skills().size() != 1) throw new AssertionError("skills: " + src.skills().keySet());
+
+        // An unknown name is a tool ERROR, not an exception — the model can retry
+        // from the list of available names in the message.
+        ToolResult miss = src.tool().execute(Map.of("name", "nope"), new ToolContext());
+        if (!miss.isError()) throw new AssertionError("expected isError");
+        if (!miss.output().contains("Available skills: hello-world")) throw new AssertionError(miss.output());
+
+        // The skill tool is an ordinary Tool — adapters take it like any other.
+        List<Map<String, Object>> schema = Adapters.toOpenAI(List.of(src.tool()));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> fn = (Map<String, Object>) schema.get(0).get("function");
+        if (!fn.get("name").equals("skill")) throw new AssertionError(fn.get("name"));
+
+        // The description is a fixed, byte-identical constant across all six ports.
+        if (!src.tool().description().equals(SkillSource.SKILL_TOOL_DESCRIPTION)) {
+            throw new AssertionError("description drifted");
+        }
+
+        System.out.println("ok: " + src.skills().keySet() + " + graceful miss");
+    }
+}
 ```
+
+## Members of the returned `SkillSource`
+
+| Member | Returns | What it is |
+|---|---|---|
+| `skills()` | `Map<String, SkillInfo>` | Discovered skills, keyed by frontmatter `name`, insertion-ordered. |
+| `tool()` | `Tool` | The single `skill` tool (source `skill`). |
+| `prompt()` | `String` | Markdown catalog for the system prompt; `"No skills are currently available."` when none has a description. |
+| `SkillSource.SKILL_TOOL_DESCRIPTION` | `String` | Static constant — the `skill` tool's description, byte-identical across ports. |
+| `SkillSource.SKILLS_PROMPT_PREAMBLE` | `String` | Static constant — the two-line preamble `prompt()` opens with. |
+
+### `SkillInfo` fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `name` | `String` | Frontmatter `name`. Required — a file without it is skipped. |
+| `description` | `String` | Frontmatter `description`. May be **null**; undescribed skills are omitted from `prompt()`. |
+| `location` | `String` | Absolute path to the `SKILL.md`. |
+| `content` | `String` | Everything after the frontmatter fence. |
+| `origin` | `String` | `"fs"` for directory-sourced skills; `"logical"` only via `loadWith` data skills. |
+| `resources` / `base` | `List<String>` / `String` | Null for directory-sourced skills — they sample siblings from disk instead. |
 
 ## The same call in the other five ports
 
@@ -62,10 +177,12 @@ _TODO: name the alternative and when to prefer it._
 | C# | `SkillSource.Load` | [→](/api/csharp/skills/load/) |
 | Elixir | `Toolnexus.Skill.load` | [→](/api/elixir/skills/load/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Run any port against the shared `examples/skills` fixture and the `skill` tool's output matches
+byte for byte — that is a §0 conformance obligation.
 
 ## See also
 
-- [`SkillSource.loadWith`](/api/java/skills/load-with/) — Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist.
-- [`SkillSource.listSkills`](/api/java/skills/list/) — Enumerate discovered skills and, crucially, the ones that were skipped and why.
+- [`SkillSource.loadWith`](/api/java/skills/load-with/) — skills as data, per-agent allowlist, sample cap
+- [`SkillSource.listSkills`](/api/java/skills/list/) — what was discovered, and what was skipped and why
+- [`Toolkit.create`](/api/java/toolkit/create/) — `skillsDir(...)` does this for you
+- [`Tool`](/api/java/types/tool/) — what `tool()` hands back

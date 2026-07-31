@@ -8,49 +8,322 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7</a>
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/http.go">golang/http.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+func HTTPTool(opts HTTPToolOptions) Tool
 ```
 
-Turn an HTTP endpoint into a tool: URL, method, headers with $\{ENV\} expansion, and a schema.
+Declares a REST endpoint as a [`Tool`](/api/go/types/tool/) — no client code, no handler function.
+You describe the URL, the method, the headers and the input schema; toolnexus routes the model's
+arguments into path placeholders, querystring or body, makes the call, and turns the response into a
+`ToolResult` with `Source: "http"`.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **You already have an API** and want the model to call it without writing a Go client per endpoint.
+- **The service is not yours** — a public REST API, a partner webhook, an internal microservice — and
+  an MCP server for it does not exist.
+- **Credentials live in the environment.** Header values expand `` `${ENV_VAR}` `` at call time and are
+  never logged, so the key stays out of your config and out of your prompts.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use NativeTool when the call needs logic">
+[`NativeTool`](/api/go/native/define-tool/) hands you a function with a real HTTP client, and is the
+one to reach for *instead* of this the moment the call stops being a single request: pagination,
+retries with backoff, an OAuth refresh, response reshaping, several calls behind one tool, or an
+error taxonomy the model should read. `HTTPTool` deliberately covers only the declarative case — one
+request in, its body out.
 </Aside>
+
+If the remote service already speaks MCP, prefer [`LoadMcp`](/api/go/mcp/load/): you get every one of
+its tools with descriptions and schemas already written, instead of declaring each endpoint by hand.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. A GET with a path placeholder
 
-{/* TODO:example1 */}
-```go
-// TODO
+`{name}` in the URL is filled from the args — and **consumed**, so it is not also sent as a query
+parameter.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	// A local test server — the docs examples never touch the public internet.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "hello %s", r.URL.Path[len("/greet/"):])
+	}))
+	defer srv.Close()
+
+	greet := toolnexus.HTTPTool(toolnexus.HTTPToolOptions{
+		Name:        "greet",
+		Description: "Greet someone by name",
+		Method:      "GET",
+		URL:         srv.URL + "/greet/{name}",
+		InputSchema: toolnexus.JSONSchema{
+			"type":       "object",
+			"properties": map[string]any{"name": map[string]any{"type": "string"}},
+			"required":   []string{"name"},
+		},
+	})
+
+	if greet.Source != toolnexus.SourceHTTP {
+		log.Fatalf("unexpected source: %s", greet.Source)
+	}
+
+	res, err := greet.Execute(map[string]any{"name": "muthu"}, nil)
+	if err != nil || res.IsError || res.Output != "hello muthu" {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+	// Metadata always carries the status code.
+	if res.Metadata["status"] != 200 {
+		log.Fatalf("unexpected metadata: %v", res.Metadata)
+	}
+
+	fmt.Println("ok:", res.Output)
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. A POST with a JSON body and an env-backed header
 
-{/* TODO:example2 */}
-```go
-// TODO
+Everything left over after placeholders and querystring becomes the body. `Content-Type` is filled in
+for you unless you set it.
+
+```go test
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"os"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	var gotAuth, gotType, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotType = r.Header.Get("Content-Type")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"tkt-7","status":"open"}`)
+	}))
+	defer srv.Close()
+
+	// The value lives in the environment, never in the config or the prompt.
+	os.Setenv("DEMO_API_KEY", "YOUR_KEY_HERE")
+
+	create := toolnexus.HTTPTool(toolnexus.HTTPToolOptions{
+		Name:        "create_ticket",
+		Description: "Open a support ticket",
+		Method:      "POST",
+		URL:         srv.URL + "/tickets",
+		Headers:     map[string]string{"Authorization": "Bearer ${DEMO_API_KEY}"},
+		InputSchema: toolnexus.JSONSchema{
+			"type": "object",
+			"properties": map[string]any{
+				"title": map[string]any{"type": "string"},
+				"body":  map[string]any{"type": "string"},
+			},
+			"required": []string{"title"},
+		},
+	})
+
+	res, err := create.Execute(map[string]any{"title": "Broken login", "body": "500 on submit"}, nil)
+	if err != nil || res.IsError {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+
+	if gotAuth != "Bearer YOUR_KEY_HERE" {
+		log.Fatalf("header did not expand: %q", gotAuth)
+	}
+	if gotType != "application/json" {
+		log.Fatalf("expected a json content type, got %q", gotType)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal([]byte(gotBody), &sent); err != nil {
+		log.Fatal(err)
+	}
+	if sent["title"] != "Broken login" || sent["body"] != "500 on submit" {
+		log.Fatalf("unexpected body: %v", sent)
+	}
+
+	// ResultMode defaults to "text": the response body, verbatim.
+	if res.Output != `{"id":"tkt-7","status":"open"}` {
+		log.Fatalf("unexpected output: %s", res.Output)
+	}
+
+	fmt.Println("ok:", res.Output)
+}
 ```
 
-### 3. TODO — the full surface
+<Aside type="caution" title="Never write the key itself">
+`Headers` values are the only place a credential appears, and they expand from `os.Getenv` at call
+time — the expanded value is never logged. Write `` `Bearer ${MY_API_KEY}` `` in your config, and keep
+the actual key in the environment.
+</Aside>
 
-{/* TODO:example3 */}
-```go
-// TODO
+### 3. The full surface — query routing, form bodies, result modes and failures
+
+```go test
+package main
+
+import (
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"time"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/search"):
+			// `page` was declared in Query, so it rides in the querystring.
+			b, _ := io.ReadAll(r.Body)
+			fmt.Fprintf(w, `{"q":%q,"page":%q,"body":%q}`,
+				r.URL.Query().Get("q"), r.URL.Query().Get("page"), string(b))
+		case r.URL.Path == "/form":
+			_ = r.ParseForm()
+			fmt.Fprintf(w, "name=%s", r.PostForm.Get("name"))
+		case r.URL.Path == "/missing":
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, "no such thing")
+		case r.URL.Path == "/slow":
+			time.Sleep(300 * time.Millisecond)
+			fmt.Fprint(w, "eventually")
+		}
+	}))
+	defer srv.Close()
+
+	// Query names ride in the querystring even on a POST; the rest is the body.
+	search := toolnexus.HTTPTool(toolnexus.HTTPToolOptions{
+		Name:        "search",
+		Description: "Search the catalog",
+		Method:      "POST",
+		URL:         srv.URL + "/search",
+		Query:       []string{"q", "page"},
+		ResultMode:  "json",
+		InputSchema: toolnexus.JSONSchema{
+			"type": "object",
+			"properties": map[string]any{
+				"q":      map[string]any{"type": "string"},
+				"page":   map[string]any{"type": "number"},
+				"filter": map[string]any{"type": "string"},
+			},
+			"required": []string{"q"},
+		},
+	})
+	res, err := search.Execute(map[string]any{"q": "adapters", "page": 2, "filter": "docs"}, nil)
+	if err != nil || res.IsError {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+	if !strings.Contains(res.Output, `"q":"adapters"`) || !strings.Contains(res.Output, `"page":"2"`) {
+		log.Fatalf("query routing failed: %s", res.Output)
+	}
+	if !strings.Contains(res.Output, `filter`) {
+		log.Fatalf("expected the leftover arg in the body: %s", res.Output)
+	}
+
+	// Body: "form" urlencodes the leftover args instead of sending JSON.
+	form := toolnexus.HTTPTool(toolnexus.HTTPToolOptions{
+		Name:   "submit",
+		Method: "POST",
+		URL:    srv.URL + "/form",
+		Body:   "form",
+	})
+	fres, err := form.Execute(map[string]any{"name": "muthu"}, nil)
+	if err != nil || fres.Output != "name=muthu" {
+		log.Fatalf("unexpected form result: %+v %v", fres, err)
+	}
+
+	// A non-2xx is an error RESULT the model can read, not a returned error.
+	missing := toolnexus.HTTPTool(toolnexus.HTTPToolOptions{
+		Name:       "missing",
+		Method:     "GET",
+		URL:        srv.URL + "/missing",
+		ResultMode: "status+text",
+	})
+	mres, err := missing.Execute(nil, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// Note: the failure shape wins over ResultMode.
+	if !mres.IsError || mres.Output != "HTTP 404: no such thing" || mres.Metadata["status"] != 404 {
+		log.Fatalf("unexpected failure result: %+v", mres)
+	}
+
+	// Timeout: opts.Timeout is milliseconds; a ToolContext.Timeout overrides it.
+	slow := toolnexus.HTTPTool(toolnexus.HTTPToolOptions{
+		Name:    "slow",
+		Method:  "GET",
+		URL:     srv.URL + "/slow",
+		Timeout: 50,
+	})
+	sres, err := slow.Execute(nil, nil)
+	if err != nil || !sres.IsError || !strings.Contains(sres.Output, "deadline exceeded") {
+		log.Fatalf("expected a timeout result, got %+v %v", sres, err)
+	}
+	// Same tool, longer budget from the call site.
+	sres2, err := slow.Execute(nil, &toolnexus.ToolContext{Timeout: 5000})
+	if err != nil || sres2.IsError || sres2.Output != "eventually" {
+		log.Fatalf("unexpected override result: %+v %v", sres2, err)
+	}
+
+	fmt.Println("ok:", fres.Output, "|", mres.Output, "| override:", sres2.Output)
+}
 ```
+
+## Options
+
+`HTTPToolOptions`:
+
+| Field | Type | What it does |
+|---|---|---|
+| `Name` | `string` | The tool name the model calls. |
+| `Description` | `string` | What the model reads to decide whether to call it. |
+| `Method` | `string` | Upper-cased for you. Empty ⇒ `GET`. |
+| `URL` | `string` | May contain `{placeholder}` segments, filled and consumed from args, path-escaped. |
+| `Headers` | `map[string]string` | Static headers. `` `${ENV_VAR}` `` in a value expands from `os.Getenv` at call time and is never logged. |
+| `Query` | `[]string` | Arg names to send as querystring instead of in the body. On `GET`, **all** args go to the querystring regardless. |
+| `Body` | `string` | `"json"` (default), `"form"`, or `"raw"` (sends the `body` arg verbatim). Ignored for `GET`/`HEAD`. |
+| `InputSchema` | `JSONSchema` | The args the model supplies. `nil` ⇒ empty object schema. |
+| `Timeout` | `int` | Milliseconds. `0` ⇒ 30000. A non-zero `ToolContext.Timeout` overrides it. |
+| `ResultMode` | `string` | `"text"` (default, body verbatim), `"json"` (parse + re-encode), `"status+text"` (`"<code>\n<body>"`). |
+
+Result mapping:
+
+| Response | `ToolResult` |
+|---|---|
+| 2xx | `{Output: <per ResultMode>, IsError: false, Metadata: {"status": <code>}}` |
+| non-2xx | `{Output: "HTTP <code>: <body>", IsError: true, Metadata: {"status": <code>}}` |
+| transport error / timeout | `{Output: <error text>, IsError: true}` — `Execute`'s own error stays `nil` |
+
+Argument routing, in order: URL placeholders first (consumed), then querystring (`Query` names, or
+everything on a `GET`), then whatever is left becomes the body.
 
 ## The same call in the other five ports
 
@@ -62,9 +335,12 @@ _TODO: name the alternative and when to prefer it._
 | C# | `HttpTool.Of` | [→](/api/csharp/http/tool/) |
 | Elixir | `Toolnexus.Http.tool` | [→](/api/elixir/http/tool/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Same routing rules, same result modes, same `` `${ENV_VAR}` `` expansion in every port.
 
 ## See also
 
-- _TODO: related entry points_
+- [`NativeTool`](/api/go/native/define-tool/) — when the call needs real logic
+- [`LoadMcp`](/api/go/mcp/load/) — prefer this when the service already speaks MCP
+- [`Tool`](/api/go/types/tool/) — what you get back
+- [`ToolContext`](/api/go/types/context/) — where the timeout override comes from
+- [`CreateToolkit`](/api/go/toolkit/create/) — register it via `ExtraTools`

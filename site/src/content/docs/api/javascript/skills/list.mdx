@@ -8,49 +8,171 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/skill.ts">js/src/skill.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function listSkills(input: string | string[] | LoadSkillsOptions): SkillInventory
+
+interface SkillInventory {
+  skills: SkillInfo[]
+  skipped: { location: string; reason: SkillSkipReason }[]
+}
 ```
 
-Enumerate discovered skills and, crucially, the ones that were skipped and why.
+Runs exactly the same discovery as [`loadSkills`](/api/javascript/skills/load/) — same inputs, same
+parser, same dedupe — but builds no tool and returns a flat **inventory** instead. Its real value is
+the second field: every candidate that did *not* become a skill, with a typed reason.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **Debugging "why isn't my skill showing up?"** — the answer is a row in `skipped`.
+- **A startup or CI check** that a skills tree is well-formed, before an agent silently runs with
+  three of its five playbooks missing.
+- **Authoring an allowlist** — you need the real skill names before you can write a `filter`, and
+  the inventory is deliberately *unfiltered* so it shows you everything there is to choose from.
+- **Rendering a UI** — a settings page listing available skills and flagging broken ones.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use loadSkills when you want the tool">
+[`loadSkills`](/api/javascript/skills/load/) is the one you call in an agent: it returns the
+`skill` tool and the system-prompt catalog, and quietly drops bad candidates. `listSkills` returns
+no tool at all. Use it for validation and tooling; use `loadSkills` for running.
 </Aside>
+
+The two differ in one more way that matters: `loadSkills` applies `filter`, `listSkills` **ignores
+it**. That is on purpose — an inventory you use to *write* the allowlist must not already be
+narrowed by it.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. What is in the shared fixture directory
 
-{/* TODO:example1 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import { listSkills } from "toolnexus"
+
+const inv = listSkills("examples/skills")
+
+// An ARRAY of skills, not the name-keyed map loadSkills returns.
+assert.equal(inv.skills.length, 1)
+assert.equal(inv.skills[0].name, "hello-world")
+assert.ok(inv.skills[0].description?.startsWith("A tiny example skill."))
+// `location` is the SKILL.md path itself for on-disk skills.
+assert.ok(inv.skills[0].location.endsWith("examples/skills/hello-world/SKILL.md"))
+assert.equal(inv.skills[0].origin, "fs")
+// The body is already parsed out of the frontmatter.
+assert.ok(inv.skills[0].content.includes("# Hello World Skill"))
+
+// A clean tree skips nothing.
+assert.deepEqual(inv.skipped, [])
+
+console.log("ok:", inv.skills.length, "skill(s),", inv.skipped.length, "skipped")
 ```
 
-### 2. TODO — the realistic case
+<Aside type="caution">
+A missing directory is not a skip — it is a warning and an empty inventory. `skipped` records
+candidates that were *found and rejected*, not paths that were never there.
+</Aside>
 
-{/* TODO:example2 */}
-```ts
-// TODO
+### 2. Reading the skip reasons
+
+Here the fixture directory is combined with three data skills, two of which are bad. Each one lands
+in `skipped` with the reason it was rejected.
+
+```ts test
+import assert from "node:assert"
+import { listSkills } from "toolnexus"
+
+const inv = listSkills({
+  dirs: ["examples/skills"],
+  skills: [
+    // Same name as the fixture skill — dirs are collected first, so this one loses.
+    { name: "hello-world", content: "a second hello" },
+    // No name at all.
+    { name: "", content: "orphan" },
+    // Fine.
+    { name: "refund-policy", description: "How to process a refund", content: "steps" },
+  ],
+})
+
+assert.deepEqual(inv.skills.map((s) => s.name), ["hello-world", "refund-policy"])
+
+// Skips are reported in candidate order, each with a typed reason.
+assert.deepEqual(inv.skipped, [
+  { location: "skill://hello-world/", reason: "duplicate-name" },
+  { location: "skill://", reason: "missing-name" },
+])
+
+// Dedupe is FIRST-WINS: the surviving hello-world is the on-disk one.
+const kept = inv.skills.find((s) => s.name === "hello-world")
+assert.equal(kept?.origin, "fs")
+
+console.log("ok: kept", inv.skills.map((s) => s.name).join(","), "| skipped", inv.skipped.map((s) => s.reason).join(","))
 ```
 
-### 3. TODO — the full surface
+The four reasons are `missing-name`, `malformed-frontmatter`, `duplicate-name` and `unreadable` —
+one per way a `SKILL.md` can fail to become a skill.
 
-{/* TODO:example3 */}
-```ts
-// TODO
+### 3. A startup gate, and authoring an allowlist from the inventory
+
+The full pattern: fail loudly on a broken tree, then use the real names to build the `filter` you
+hand to `loadSkills`.
+
+```ts test
+import assert from "node:assert"
+import { listSkills, loadSkills } from "toolnexus"
+
+function audit(dirs: string[]): { names: string[]; problems: string[] } {
+  const inv = listSkills({ dirs })
+  return {
+    names: inv.skills.map((s) => s.name).sort(),
+    problems: inv.skipped.map((s) => `${s.reason}: ${s.location}`),
+  }
+}
+
+const report = audit(["examples/skills"])
+assert.deepEqual(report.names, ["hello-world"])
+assert.deepEqual(report.problems, [])
+
+// The inventory is UNFILTERED — a filter in the options is ignored here on purpose,
+// so you can see every name that exists while writing the allowlist.
+const unfiltered = listSkills({ dirs: ["examples/skills"], filter: { nothing: true } })
+assert.deepEqual(unfiltered.skills.map((s) => s.name), ["hello-world"])
+
+// ...then apply that allowlist where it counts.
+const allowed = Object.fromEntries(report.names.map((n) => [n, true]))
+const source = loadSkills({ dirs: ["examples/skills"], filter: allowed })
+assert.deepEqual(Object.keys(source.skills), report.names)
+
+// A skill described in the inventory is a skill described in the catalog.
+assert.ok(source.prompt().includes("- **hello-world**:"))
+
+// Undescribed skills are still real skills — they just never reach the catalog.
+const undescribed = loadSkills({ skills: [{ name: "quiet", content: "body" }] })
+assert.deepEqual(Object.keys(undescribed.skills), ["quiet"])
+assert.equal(undescribed.prompt(), "No skills are currently available.")
+
+console.log("ok: audited", report.names.join(","), "| problems:", report.problems.length)
 ```
+
+## Inventory shape
+
+| Field | Type | What it is |
+|---|---|---|
+| `skills` | `SkillInfo[]` | Everything that parsed, in discovery order (dirs first, then data defs). Unfiltered. |
+| `skills[].name` | `string` | The frontmatter `name:` — the value the `skill` tool is called with. |
+| `skills[].description` | `string \| undefined` | The frontmatter `description:`. Undefined ⇒ absent from `prompt()`. |
+| `skills[].location` | `string` | Absolute `SKILL.md` path for on-disk skills; the logical base for data skills. |
+| `skills[].content` | `string` | The body after the frontmatter. |
+| `skills[].origin` | `"fs" \| "logical"` | Where it came from. |
+| `skipped` | `SkillSkip[]` | Rejected candidates, in candidate order. |
+| `skipped[].location` | `string` | The path (or logical base) that was rejected. |
+| `skipped[].reason` | `SkillSkipReason` | `missing-name` · `malformed-frontmatter` · `duplicate-name` · `unreadable`. |
+
+`listSkills` takes exactly the inputs `loadSkills` does — a path, an array of paths, or a
+`LoadSkillsOptions` object — except that `filter` and `sampleLimit` have no effect.
 
 ## The same call in the other five ports
 
@@ -62,10 +184,10 @@ _TODO: name the alternative and when to prefer it._
 | C# | `SkillSource.ListSkills` | [→](/api/csharp/skills/list/) |
 | Elixir | `Toolnexus.Skill.list` | [→](/api/elixir/skills/list/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Same discovery, same dedupe, same four skip reasons in every port — a §0 conformance obligation.
 
 ## See also
 
-- [`loadSkills`](/api/javascript/skills/load/) — Glob a skills directory and expose one skill tool with progressive disclosure.
-- [`loadSkills`](/api/javascript/skills/load-with/) — Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist.
+- [`loadSkills`](/api/javascript/skills/load/) — same discovery, but it builds the `skill` tool
+- [`loadSkills` with data and filters](/api/javascript/skills/load-with/) — the allowlist this inventory helps you write
+- [`createToolkit`](/api/javascript/toolkit/create/) — where `skillsDir` ends up in a real agent

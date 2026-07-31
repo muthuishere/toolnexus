@@ -1,8 +1,8 @@
 ---
-title: "Toolnexus.Client wait_for"
+title: "Toolnexus.Client.create"
 description: "The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract. — Elixir."
 sidebar:
-  label: "Toolnexus.Client wait_for"
+  label: "Toolnexus.Client.create"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -67,7 +67,4 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Toolnexus.Request.pending`](/api/elixir/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
-- [`Toolnexus.Request.auth_required`](/api/elixir/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
-- [`Toolnexus.Request.pending_of`](/api/elixir/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
 - [`Toolnexus.Client.resume`](/api/elixir/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.

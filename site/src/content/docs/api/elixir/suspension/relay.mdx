@@ -34,7 +34,5 @@ _TODO: the closest thing this port does offer, and how to get the same outcome._
 
 ## See also
 
-- [`Toolnexus.Request.pending`](/api/elixir/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
-- [`Toolnexus.Request.auth_required`](/api/elixir/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
-- [`Toolnexus.Client wait_for`](/api/elixir/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
-- [`Toolnexus.Request.pending_of`](/api/elixir/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`Toolnexus.Client.create`](/api/elixir/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`Toolnexus.Client.resume`](/api/elixir/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.

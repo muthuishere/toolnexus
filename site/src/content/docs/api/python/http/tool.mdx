@@ -1,56 +1,312 @@
 ---
-title: "http_tool"
-description: "Turn an HTTP endpoint into a tool: URL, method, headers with ${ENV} expansion, and a schema. — Python."
+title: http_tool
+description: Turn a REST endpoint into a tool — URL placeholders, env-expanded headers, and a schema. Python.
 sidebar:
-  label: "http_tool"
+  label: http_tool
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/http.py">python/src/toolnexus/http.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+def http_tool(
+    *,
+    name: str,
+    description: str,
+    method: str,
+    url: str,
+    headers: dict[str, str] | None = None,
+    query: list[str] | None = None,
+    body: str = "json",          # "json" | "form" | "raw"
+    input_schema: JSONSchema | None = None,
+    timeout: float | None = None,  # seconds; default 30.0
+    result_mode: str = "text",     # "text" | "json" | "status+text"
+) -> Tool
 ```
 
-Turn an HTTP endpoint into a tool: URL, method, headers with $\{ENV\} expansion, and a schema.
+Declares an HTTP endpoint as a [`Tool`](/api/python/types/tool/), keyword arguments only. The
+model's arguments are routed for you: `{placeholders}` in the URL are substituted and consumed,
+what remains becomes the querystring (for `GET`) or the request body, and the response comes back as
+a `ToolResult`. Built on `urllib` — no extra dependency — and the blocking call runs in a thread, so
+it cooperates with the async loop.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+For a REST API you want the model to reach that has no MCP server: an internal microservice, a
+partner API, a status page, your own backend. One declaration per endpoint, no client code.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use define_tool when the call needs real logic">
+[`define_tool`](/api/python/native/define-tool/) around your own `httpx`/`requests` code is the
+better choice the moment the call needs anything `http_tool` does not declare: pagination, retries
+with backoff, OAuth refresh, response reshaping, or a request body that isn't just "the arguments".
+Prefer `http_tool` for the flat case — one request, one response — and drop to `define_tool` as soon
+as there is a second step.
 </Aside>
+
+For a server that already speaks MCP, use [`load_mcp`](/api/python/mcp/load/) instead: you get every
+tool it exposes, with schemas it authored, rather than one endpoint you described by hand.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. One GET endpoint
 
-{/* TODO:example1 */}
-```python
-// TODO
+The server here is a throwaway on `127.0.0.1` so the example is self-contained; in real use `url` is
+your service.
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from toolnexus import http_tool
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"path": self.path}).encode())
+
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+port = server.server_address[1]
+threading.Thread(target=server.serve_forever, daemon=True).start()
+
+status = http_tool(
+    name="service_status",
+    description="Read the current service status.",
+    method="GET",
+    url=f"http://127.0.0.1:{port}/status",
+)
+
+# It is an ordinary Tool, tagged with its source.
+assert status.name == "service_status"
+assert status.source == "http"
+# No input_schema given ⇒ a valid, empty object schema.
+assert status.input_schema == {"type": "object", "properties": {}, "additionalProperties": False}
+
+
+async def main():
+    res = await status.execute({})
+    assert res.is_error is False
+    # Default result_mode="text" — the body verbatim.
+    assert json.loads(res.output) == {"path": "/status"}
+    # The HTTP status is always on the metadata.
+    assert res.metadata["status"] == 200
+    server.shutdown()
+    print("ok:", res.output)
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+### 2. Path placeholders, env-expanded headers, and a schema
 
-{/* TODO:example2 */}
-```python
-// TODO
+The realistic shape: the model supplies `id` and `expand`; `{id}` fills the path and is consumed,
+the leftover argument becomes the querystring, and the API key is read from the environment at call
+time — never written down and never logged.
+
+```python test
+import asyncio
+import json
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from toolnexus import http_tool
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        payload = {"path": self.path, "authorized": bool(self.headers.get("Authorization"))}
+        self.wfile.write(json.dumps(payload).encode())
+
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+port = server.server_address[1]
+threading.Thread(target=server.serve_forever, daemon=True).start()
+
+# In production this is already in the environment; set here only to make the example run.
+os.environ.setdefault("DOCS_API_KEY", "YOUR_KEY_HERE")
+
+get_user = http_tool(
+    name="get_user",
+    description="Fetch a user by id.",
+    method="GET",
+    url=f"http://127.0.0.1:{port}/users/{{id}}",
+    # ${ENV_VAR} is expanded from os.environ at call time, and never logged.
+    headers={"Authorization": "Bearer ${DOCS_API_KEY}"},
+    input_schema={
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "The user id"},
+            "expand": {"type": "string", "description": "Comma-separated relations"},
+        },
+        "required": ["id"],
+        "additionalProperties": False,
+    },
+    result_mode="json",
+)
+
+# The schema you wrote is the schema the model sees — placeholders are not inferred.
+assert get_user.input_schema["required"] == ["id"]
+# The literal ${...} is stored, not the value — nothing secret lives on the Tool.
+assert "YOUR_KEY_HERE" not in json.dumps(get_user.input_schema)
+
+
+async def main():
+    res = await get_user.execute({"id": "42", "expand": "orders"})
+    assert res.is_error is False
+
+    got = json.loads(res.output)
+    # {id} was substituted and consumed; `expand` fell through to the querystring.
+    assert got["path"] == "/users/42?expand=orders"
+    # The header arrived expanded.
+    assert got["authorized"] is True
+
+    server.shutdown()
+    print("ok:", got["path"])
+
+
+asyncio.run(main())
 ```
 
-### 3. TODO — the full surface
+<Aside type="caution">
+For `GET`, **every** leftover argument becomes a query parameter — `query` is only needed for other
+methods, where it splits arguments between the querystring and the body. Substituted placeholders
+are removed first, so they never appear twice.
+</Aside>
 
-{/* TODO:example3 */}
-```python
-// TODO
+### 3. The full surface — POST bodies, result modes, failures, timeouts
+
+A non-2xx response is a **tool error**, not an exception: the model sees `HTTP <code>: <body>` and
+can react. `ToolContext.timeout` overrides the per-tool `timeout`, which overrides the 30-second
+default.
+
+```python test
+import asyncio
+import json
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from toolnexus import http_tool, ToolContext, HTTP_DEFAULT_TIMEOUT
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        if self.path.startswith("/slow"):
+            time.sleep(2.0)
+        self.send_response(404)
+        self.end_headers()
+        self.wfile.write(b'{"error":"no such thing"}')
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length).decode()
+        self.send_response(201)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(
+            json.dumps({"path": self.path, "ct": self.headers.get("Content-Type"), "body": raw}).encode()
+        )
+
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+port = server.server_address[1]
+threading.Thread(target=server.serve_forever, daemon=True).start()
+base = f"http://127.0.0.1:{port}"
+
+assert HTTP_DEFAULT_TIMEOUT == 30.0
+
+create_ticket = http_tool(
+    name="create_ticket",
+    description="Open a support ticket.",
+    method="POST",
+    url=base + "/projects/{project}/tickets",
+    # `priority` goes in the querystring; everything left over becomes the JSON body.
+    query=["priority"],
+    body="json",
+    result_mode="status+text",
+    timeout=5.0,
+)
+
+missing = http_tool(name="missing", description="Always 404s.", method="GET", url=base + "/missing")
+slow = http_tool(name="slow", description="Never answers in time.", method="GET", url=base + "/slow")
+
+
+async def main():
+    res = await create_ticket.execute(
+        {"project": "acme", "priority": "high", "title": "Broken login", "severity": 2}
+    )
+    assert res.is_error is False
+
+    # result_mode="status+text" prefixes the status line.
+    status_line, payload = res.output.split("\n", 1)
+    assert status_line == "201"
+    echoed = json.loads(payload)
+    assert echoed["path"] == "/projects/acme/tickets?priority=high"
+    # Content-Type is set for you; the remaining args are the body.
+    assert echoed["ct"] == "application/json"
+    assert json.loads(echoed["body"]) == {"title": "Broken login", "severity": 2}
+
+    # A 404 is a tool error the model can read, not a raised exception.
+    err = await missing.execute({})
+    assert err.is_error is True
+    assert err.output.startswith("HTTP 404: ")
+    assert err.metadata["status"] == 404
+
+    # ctx.timeout (seconds) wins over the tool's own timeout.
+    started = time.monotonic()
+    slow_res = await slow.execute({}, ToolContext(timeout=0.3))
+    assert slow_res.is_error is True
+    assert time.monotonic() - started < 1.5
+
+    server.shutdown()
+    print("ok:", status_line, "|", err.output[:13], "| timeout ->", slow_res.is_error)
+
+
+asyncio.run(main())
 ```
+
+## Options
+
+| Option | Type | What it does |
+|---|---|---|
+| `name` | `str` | The tool name the model calls. Required. |
+| `description` | `str` | What the model reads to decide whether to call it. Required. |
+| `method` | `str` | Any HTTP verb; upper-cased for you. |
+| `url` | `str` | May contain `{placeholder}` segments filled from the arguments and URL-encoded. |
+| `headers` | `dict[str, str] \| None` | Static headers. `${ENV_VAR}` in a value expands from `os.environ` at call time; a missing variable expands to `""`. Never logged. |
+| `query` | `list[str] \| None` | Argument names to send as querystring instead of body. Ignored for `GET`, where everything left over is querystring already. |
+| `body` | `str` | `"json"` (default, sets `Content-Type: application/json`), `"form"` (urlencoded), or `"raw"` (sends the `body` argument as-is). Unused for `GET`/`HEAD`. |
+| `input_schema` | `JSONSchema \| None` | What the model sees. Defaults to an empty object schema — supply one, or the model has nothing to fill in. |
+| `timeout` | `float \| None` | **Seconds** (JS uses milliseconds). Defaults to `HTTP_DEFAULT_TIMEOUT` = `30.0`. |
+| `result_mode` | `str` | `"text"` (body verbatim), `"json"` (re-serialized; non-JSON falls back to the raw text), or `"status+text"` (`"<status>\n<body>"`). |
+
+## Result
+
+| Case | `output` | `is_error` | `metadata` |
+|---|---|---|---|
+| 2xx | per `result_mode` | `False` | `{"status": <code>}` |
+| non-2xx | `"HTTP <code>: <body>"` | `True` | `{"status": <code>}` |
+| transport failure / timeout | the exception message | `True` | — |
 
 ## The same call in the other five ports
 
@@ -62,9 +318,15 @@ _TODO: name the alternative and when to prefer it._
 | C# | `HttpTool.Of` | [→](/api/csharp/http/tool/) |
 | Elixir | `Toolnexus.Http.tool` | [→](/api/elixir/http/tool/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+<Aside type="note" title="Timeouts are seconds here, milliseconds in JS">
+Routing, body encoding, result modes and the error shape are identical across ports. The one local
+difference is the unit of `timeout`: Python uses seconds because that is what `urllib` and
+`asyncio` use; JavaScript uses milliseconds for the same reason.
+</Aside>
 
 ## See also
 
-- _TODO: related entry points_
+- [`define_tool`](/api/python/native/define-tool/) — when the call needs real logic
+- [`load_mcp`](/api/python/mcp/load/) — when the service already speaks MCP
+- [`Tool`](/api/python/types/tool/) · [`ToolContext`](/api/python/types/context/) — what you get and what `execute` receives
+- [`create_toolkit`](/api/python/toolkit/create/) — pass these in via `extra_tools`

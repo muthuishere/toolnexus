@@ -1,56 +1,209 @@
 ---
-title: "SkillSource.ListSkills"
-description: "Enumerate discovered skills and, crucially, the ones that were skipped and why. — C#."
+title: SkillSource.ListSkills
+description: Inventory every discovered skill — and, crucially, the candidates that were skipped and why. C#.
 sidebar:
-  label: "SkillSource.ListSkills"
+  label: SkillSource.ListSkills
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/SkillSource.cs">SkillSource.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public static SkillInventory ListSkills(SkillSource.LoadOptions opts)
 ```
 
-Enumerate discovered skills and, crucially, the ones that were skipped and why.
+Runs exactly the same discovery as [`Load`](/api/csharp/skills/load/) — the same directory walk,
+the same frontmatter parse, the same duplicate handling — but instead of building a `skill` tool it
+hands back a **report**: the skills it accepted, and a typed list of the candidates it rejected
+with the reason for each.
+
+`Load` throws none of that away quietly-but-visibly; it writes a line to stderr and moves on.
+`ListSkills` gives you the same information as data you can assert on.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **A skill silently isn't there.** You wrote a `SKILL.md`, the model never sees it, and nothing
+  obviously failed. `Skipped` tells you it was `missing-name` or `malformed-frontmatter`.
+- **Validate in CI.** Fail the build when any candidate under `skills/` was skipped.
+- **Author an allowlist.** The inventory is deliberately **unfiltered**, so it is the right input
+  for building the `Filter` map you then pass to [`LoadWith`](/api/csharp/skills/load-with/).
+- **Show a picker.** Render the available skills in a UI without wiring a toolkit.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use Load when you just want the tool">
+[`SkillSource.Load`](/api/csharp/skills/load/) is what you ship — it returns the `skill` tool ready
+to register. `ListSkills` builds **no tool at all**; it is for diagnosis, validation and UI. Note
+also that it takes only a `LoadOptions` object — there is no directory-varargs shortcut, so even
+the simplest call sets `Dirs`.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Inventory the shared fixture
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+// TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+var repo = Environment.GetEnvironmentVariable("TOOLNEXUS_REPO") ?? ".";
+
+var inv = SkillSource.ListSkills(new SkillSource.LoadOptions
+{
+    Dirs = new[] { Path.Combine(repo, "examples", "skills") },
+});
+
+if (inv.Skills.Count != 1) throw new Exception($"expected 1 skill, got {inv.Skills.Count}");
+if (inv.Skills[0].Name != "hello-world") throw new Exception(inv.Skills[0].Name);
+if (inv.Skipped.Count != 0)
+    throw new Exception($"clean fixture should skip nothing: {string.Join(",", inv.Skipped.Select(s => s.Reason))}");
+
+Console.WriteLine($"ok: {inv.Skills[0].Name} | skipped {inv.Skipped.Count}");
 ```
 
-### 2. TODO — the realistic case
+`Skills` is a **list** of `SkillInfo`, not a dictionary — unlike `SkillSource.Skills` on a loaded
+source. Order follows discovery order, so sort it yourself if you are printing it.
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+### 2. The reason a skill went missing
+
+Three candidate files, one of which is fine.
+
+```csharp test
+using Toolnexus;
+
+var root = Path.Combine(Path.GetTempPath(), "tn-inv-" + Guid.NewGuid().ToString("N"));
+
+void Skill(string folder, string body)
+{
+    Directory.CreateDirectory(Path.Combine(root, folder));
+    File.WriteAllText(Path.Combine(root, folder, "SKILL.md"), body);
+}
+
+Skill("good", """
+---
+name: good
+description: A perfectly ordinary skill.
+---
+
+Do the thing.
+""");
+
+// Frontmatter parses, but there is no `name:` — nothing to call the skill by.
+Skill("nameless", """
+---
+description: I forgot to name myself.
+---
+
+Do the thing.
+""");
+
+// Fences are present but the YAML inside them does not parse.
+Skill("broken", "---\nname: \"unterminated\ndescription: nope\n---\n\nDo the thing.\n");
+
+try
+{
+    var inv = SkillSource.ListSkills(new SkillSource.LoadOptions { Dirs = new[] { root } });
+
+    if (inv.Skills.Count != 1 || inv.Skills[0].Name != "good")
+        throw new Exception($"skills: {string.Join(",", inv.Skills.Select(s => s.Name))}");
+
+    var reasons = inv.Skipped.Select(s => s.Reason).OrderBy(r => r, StringComparer.Ordinal).ToList();
+    if (reasons.Count != 2) throw new Exception($"skipped: {string.Join(",", reasons)}");
+    if (reasons[0] != SkillSource.SkillSkip.Malformed) throw new Exception(reasons[0]);
+    if (reasons[1] != SkillSource.SkillSkip.MissingName) throw new Exception(reasons[1]);
+
+    // Every skip carries the absolute path of the offending file, so you can print it.
+    if (!inv.Skipped.All(s => s.Location.EndsWith("SKILL.md"))) throw new Exception("location");
+
+    Console.WriteLine($"ok: kept {inv.Skills[0].Name} | skipped {string.Join(", ", reasons)}");
+}
+finally
+{
+    Directory.Delete(root, recursive: true);
+}
 ```
 
-### 3. TODO — the full surface
+<Aside type="caution" title="A body with no frontmatter at all is not 'malformed'">
+`malformed-frontmatter` means the `---` fences were there and the YAML inside them failed to parse.
+A `SKILL.md` with no fences parses fine, has no `name`, and is reported as `missing-name`. The
+distinction is deliberate — it points at the actual mistake.
+</Aside>
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+### 3. Full surface — disk plus data, and authoring an allowlist
+
+`ListSkills` accepts the same `LoadOptions` as `LoadWith`, including skills supplied as data. Use
+the inventory to build the `Filter` and hand it straight back to `LoadWith`.
+
+```csharp test
+using Toolnexus;
+
+var repo = Environment.GetEnvironmentVariable("TOOLNEXUS_REPO") ?? ".";
+
+var opts = new SkillSource.LoadOptions
+{
+    Dirs = new[] { Path.Combine(repo, "examples", "skills") },
+    Skills = new[]
+    {
+        new SkillSource.SkillDef("triage", "Triage an inbound bug report.", "1. Reproduce.\n2. Label.",
+            new[] { "rubric.md" }),
+        // Same name as the on-disk fixture — disk wins, this one is reported as a duplicate.
+        new SkillSource.SkillDef("hello-world", "A clashing definition.", "..."),
+        // No name at all — rejected the same way a nameless file is.
+        new SkillSource.SkillDef("", "Anonymous.", "..."),
+    },
+};
+
+var inv = SkillSource.ListSkills(opts);
+
+var kept = inv.Skills.Select(s => s.Name).OrderBy(n => n, StringComparer.Ordinal).ToList();
+if (kept.Count != 2 || kept[0] != "hello-world" || kept[1] != "triage")
+    throw new Exception($"kept: {string.Join(",", kept)}");
+
+var reasons = inv.Skipped.Select(s => s.Reason).OrderBy(r => r, StringComparer.Ordinal).ToList();
+if (reasons.Count != 2) throw new Exception($"skipped: {string.Join(",", reasons)}");
+if (reasons[0] != SkillSource.SkillSkip.DuplicateName) throw new Exception(reasons[0]);
+if (reasons[1] != SkillSource.SkillSkip.MissingName) throw new Exception(reasons[1]);
+
+// Data-sourced skills get a logical base instead of a file:// path.
+var triage = inv.Skills.First(s => s.Name == "triage");
+if (triage.Origin != "logical") throw new Exception(triage.Origin);
+if (triage.Location != "skill://triage/") throw new Exception(triage.Location);
+
+// The inventory is UNFILTERED, which is what makes it a good allowlist source.
+opts.Filter = inv.Skills.ToDictionary(s => s.Name, s => s.Name == "triage");
+var narrowed = SkillSource.LoadWith(opts);
+if (narrowed.Skills.Count != 1 || !narrowed.Skills.ContainsKey("triage"))
+    throw new Exception($"filtered: {string.Join(",", narrowed.Skills.Keys)}");
+
+// The inventory itself does not change — re-listing still sees everything.
+if (SkillSource.ListSkills(opts).Skills.Count != 2) throw new Exception("inventory must ignore Filter");
+
+Console.WriteLine($"ok: kept {string.Join(",", kept)} | skipped {string.Join(",", reasons)} | agent sees triage");
 ```
+
+## What you get back
+
+`SkillInventory` has two members:
+
+| Member | Type | What it is |
+|---|---|---|
+| `Skills` | `IReadOnlyList<SkillInfo>` | Accepted skills, unfiltered, in discovery order. |
+| `Skipped` | `IReadOnlyList<SkillSkip>` | Rejected candidates — `Location` + `Reason`. |
+
+`SkillSkip.Reason` is one of four constants:
+
+| Constant | Value | Cause |
+|---|---|---|
+| `SkillSkip.MissingName` | `missing-name` | Frontmatter parsed but has no `name`. |
+| `SkillSkip.Malformed` | `malformed-frontmatter` | `---` fences present, YAML inside failed to parse. |
+| `SkillSkip.DuplicateName` | `duplicate-name` | An earlier candidate already claimed that name. |
+| `SkillSkip.Unreadable` | `unreadable` | The file could not be read (permissions, broken link). |
+
+`LoadOptions` is shared with `LoadWith`: `Dirs`, `Skills`, `Filter`, `SampleLimit`. `Filter` and
+`SampleLimit` are **ignored** here — the inventory is always the complete picture.
 
 ## The same call in the other five ports
 
@@ -62,10 +215,10 @@ _TODO: name the alternative and when to prefer it._
 | Java | `SkillSource.listSkills` | [→](/api/java/skills/list/) |
 | Elixir | `Toolnexus.Skill.list` | [→](/api/elixir/skills/list/) |
 
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Skip reasons are the same four strings in every port — a §0 conformance obligation.
 
 ## See also
 
-- [`SkillSource.Load`](/api/csharp/skills/load/) — Glob a skills directory and expose one skill tool with progressive disclosure.
-- [`SkillSource.LoadWith`](/api/csharp/skills/load-with/) — Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist.
+- [`SkillSource.Load`](/api/csharp/skills/load/) — the same discovery, returning the `skill` tool
+- [`SkillSource.LoadWith`](/api/csharp/skills/load-with/) — takes the same `LoadOptions`, applies `Filter`
+- [`Toolkit.CreateAsync`](/api/csharp/toolkit/create/) — where the resulting tool ends up
