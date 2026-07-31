@@ -1,56 +1,196 @@
 ---
-title: "Toolnexus.Agents"
+title: "Toolnexus.Agents.agent"
 description: "Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent. — Elixir."
 sidebar:
-  label: "Toolnexus.Agents"
+  label: "Toolnexus.Agents.agent"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/agents.ex">elixir/lib/toolnexus/agents.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec agent(String.t(), keyword() | map()) :: Toolnexus.Agents.AgentDef.t()
+def agent(name, spec)
+
+# spec: :does (required — routing description), :uses (%{tools: [...]}),
+#       :soul | :soul_file (system prompt inline or from a file),
+#       :team ([agent/2] this agent may delegate to — recursion is opt-in),
+#       :budget (%{max_turns, max_tokens, max_tool_calls, max_wall_ms,
+#                  max_children, max_concurrent, max_depth}),
+#       :model (default "inherit" — the runtime's llm.model),
+#       :wait_for (§10 interpreter — (Request.t() -> Answer.t())),
+#       :on_spawn / :on_close, :hooks / :on_metric (§8 seams, per-agent)
+
+@spec run(AgentDef.t(), keyword() | map(), String.t()) :: map()
+def run(a, rt_opts, prompt)
+# one-shot: build a runtime, run to completion, tear down.
+# rt_opts are Toolnexus.Agents.Runtime options (:transport, :llm, ...).
+
+@spec as_tool(AgentDef.t(), keyword() | map()) :: Toolnexus.Tool.t()
+def as_tool(a, rt_opts)
+# the bridge: an Agent IS a Tool — drop it into the classic client/toolkit API.
 ```
 
-Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+The Level-1 surface over the agent runtime: one axiom, **an Agent is a Tool** — (system prompt ×
+a filtered toolkit view × the §8 client loop), invocable uniformly. `agent/2` is the one new noun;
+`run/3` (one-shot, tear itself down) and `as_tool/2` (the bridge into the classic API) are how you
+actually use a definition. Everything compiles down to the six [`Runtime`](/api/elixir/runtime/runtime/)
+verbs — `agent/2` never spawns a process by itself.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **You want a sub-agent with its own system prompt, tools, and budget**, callable by a parent
+  agent's `task` tool, or run directly to completion.
+- **Delegation without hand-rolling the runtime** — declare a `:team` and the parent gets a `task`
+  tool scoped to exactly that team; children never inherit delegation unless their own definition
+  also declares a team (recursion is opt-in).
+- **Dropping an agent into the classic toolkit/client API** — `as_tool/2` turns any `AgentDef` into
+  a plain `Toolnexus.Tool`, so `Toolnexus.Client.run/4` can call it like any other tool.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for Runtime directly when you need the six verbs">
+`run/3` is intentionally one-shot: spawn, wake, wait, and (unless it durably suspends) tear the
+runtime down. When you need long-lived handles — posting to an idle agent later, listing every
+spawned handle, interrupting one mid-turn — build a
+[`Toolnexus.Agents.Runtime`](/api/elixir/runtime/runtime/) yourself and drive the six verbs
+directly; `Agents.registry/2` turns an `AgentDef` + its team graph into the `:registry` option
+`Runtime.new/1` expects.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — `agent/2` builds a definition, no I/O
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.Agents
+
+explore = Agents.agent("explore", does: "read-only research")
+coder = Agents.agent("coder", does: "implements changes", team: [explore], budget: %{max_tokens: 10_000})
+
+true = explore.name == "explore"
+true = explore.spec[:does] == "read-only research"
+true = coder.spec[:team] == [explore]
+
+# registry/2 is the transitive closure of the team graph — pure data, no process spawned
+reg = Agents.registry(coder)
+true = reg |> Map.keys() |> Enum.sort() == ["coder", "explore"]
+true = reg["coder"][:task_targets] == ["explore"]
+
+IO.puts("ok: #{map_size(reg)} agent(s) in the registry — #{Enum.join(Map.keys(reg), ", ")}")
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — `run/3` one-shot to completion, an in-memory transport
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+The `:transport` option (the same §8 seam `Toolnexus.Client.create` accepts) replaces the LLM HTTP
+call with an in-process function — zero network, zero cost, fully deterministic.
+
+```elixir test
+alias Toolnexus.Agents
+
+mock_transport = fn %{body: body} ->
+  msgs = body["messages"] || []
+  tool_msgs = Enum.filter(msgs, &(&1["role"] == "tool"))
+
+  resp =
+    if tool_msgs == [] do
+      %{
+        "choices" => [%{"message" => %{"role" => "assistant", "content" => nil, "tool_calls" => [
+          %{"id" => "c1", "type" => "function", "function" => %{"name" => "lookup", "arguments" => ~s({"q":"bug"})}}
+        ]}}],
+        "usage" => %{"prompt_tokens" => 5, "completion_tokens" => 3, "total_tokens" => 8}
+      }
+    else
+      %{
+        "choices" => [%{"message" => %{"role" => "assistant", "content" => "bug at line 42"}}],
+        "usage" => %{"prompt_tokens" => 4, "completion_tokens" => 2, "total_tokens" => 6}
+      }
+    end
+
+  {:ok, %{status: 200, headers: %{}, body: resp}}
+end
+
+lookup = Toolnexus.define_tool(%{
+  name: "lookup",
+  description: "look something up",
+  input_schema: %{"type" => "object", "properties" => %{"q" => %{"type" => "string"}}},
+  execute: fn args -> "data(#{args["q"]})" end
+})
+
+explore = Agents.agent("explore", does: "read-only research", uses: %{tools: [lookup]}, model: "m-explore")
+
+r = Agents.run(explore, %{transport: mock_transport}, "find the bug")
+
+true = r.status == "done"
+true = r.text == "bug at line 42"
+false = r.is_error
+true = r.turns == 2
+
+IO.puts("ok: #{r.text} in #{r.turns} turns")
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — `as_tool/2` bridges into the classic client/toolkit API
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.{Agents, Client}
+
+mock_transport = fn %{body: body} ->
+  msgs = body["messages"] || []
+  tool_msgs = Enum.filter(msgs, &(&1["role"] == "tool"))
+
+  resp =
+    case body["model"] do
+      "m-explore" ->
+        %{"choices" => [%{"message" => %{"role" => "assistant", "content" => "bug at line 42"}}], "usage" => %{"prompt_tokens" => 3, "completion_tokens" => 2, "total_tokens" => 5}}
+
+      "m-old-api" ->
+        if tool_msgs == [] do
+          %{
+            "choices" => [%{"message" => %{"role" => "assistant", "content" => nil, "tool_calls" => [
+              %{"id" => "e1", "type" => "function", "function" => %{"name" => "explore", "arguments" => ~s({"prompt":"scan the repo"})}}
+            ]}}],
+            "usage" => %{"prompt_tokens" => 4, "completion_tokens" => 2, "total_tokens" => 6}
+          }
+        else
+          %{
+            "choices" => [%{"message" => %{"role" => "assistant", "content" => "summary: #{hd(tool_msgs)["content"]}"}}],
+            "usage" => %{"prompt_tokens" => 3, "completion_tokens" => 2, "total_tokens" => 5}
+          }
+        end
+    end
+
+  {:ok, %{status: 200, headers: %{}, body: resp}}
+end
+
+explore = Agents.agent("explore", does: "read-only research", model: "m-explore")
+toolkit = [Agents.as_tool(explore, %{transport: mock_transport})]
+
+client = Client.create(base_url: "http://mock.local", style: "openai", model: "m-old-api", api_key: "test", transport: mock_transport)
+
+r = Client.run(client, "scan the repo for bugs", toolkit)
+
+true = r.text =~ "summary:" and r.text =~ "bug at line 42"
+true = hd(r.tool_calls).metadata.agent == "explore"
+
+IO.puts("ok: an Agent, called through the classic client API like any other tool")
 ```
+
+## `AgentDef.spec` fields (Level-1 surface)
+
+| Field | Type | What it is |
+|---|---|---|
+| `:does` | `String.t()` | Required routing description — advertised to a delegating parent's `task` tool. |
+| `:uses` | `%{tools: [Tool.t()]}` | The toolkit view this agent's turns see. |
+| `:soul` / `:soul_file` | `String.t()` | Inline system prompt, or a path to read it from. |
+| `:team` | `[AgentDef.t()]` | Delegation targets — never inherited by children. |
+| `:budget` | `map()` | See [Budgets](/api/elixir/runtime/budgets/). |
+| `:model` | `String.t()` | Default `"inherit"` — resolves to the runtime's `llm.model`. |
+| `:wait_for` | `(Request.t() -> Answer.t())` | §10 interpreter authority for this agent. |
+| `:on_spawn` / `:on_close` | functions | Lifecycle callbacks. |
+| `:hooks` / `:on_metric` | §8 seams | Per-agent — replaces the runtime-wide value, never merged. |
 
 ## The same call in the other five ports
 
@@ -67,6 +207,6 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Toolnexus.Agents.Runtime`](/api/elixir/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
-- [`Toolnexus.Agents.Handle`](/api/elixir/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
-- [`Toolnexus.Agents budget`](/api/elixir/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+- [`Toolnexus.Agents.Runtime`](/api/elixir/runtime/runtime/) — the six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`Toolnexus.Agents.Handle`](/api/elixir/runtime/handle/) — the state machine for one spawned agent: pending, running, suspended, done.
+- [`Toolnexus.Agents budget`](/api/elixir/runtime/budgets/) — cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

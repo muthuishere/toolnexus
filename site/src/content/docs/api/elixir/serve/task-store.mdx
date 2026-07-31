@@ -8,49 +8,212 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/serve.ex">elixir/lib/toolnexus/serve.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+# The pluggable-persistence behaviour every Task read/write goes through:
+defmodule Toolnexus.Serve.TaskStore do
+  @callback get(store :: struct(), id :: String.t()) :: map() | nil
+  @callback save(store :: struct(), task :: map()) :: any()
+end
+
+# Two built-in implementations:
+Toolnexus.Serve.InMemoryTaskStore.new()   # default — lives only for the process lifetime
+Toolnexus.Serve.FileTaskStore.new(dir)    # one <id>.json file per Task, atomic write
+
+# Selector, used by Serve.start/2 opts[:a2a][:store]:
+@spec resolve_store(nil | String.t() | struct()) :: struct()
+def resolve_store(store)
+# nil | "memory" -> InMemoryTaskStore.new()
+# "file:<dir>"   -> FileTaskStore.new(dir)
+# a struct       -> used as-is (your own TaskStore)
 ```
 
-Persist inbound A2A tasks so a suspended request survives a restart.
+There is no single `task_store/1` function — a **TaskStore** is a behaviour
+(`Toolnexus.Serve.TaskStore`) plus `resolve_store/1`, the selector `Toolnexus.Serve.start/2` calls
+on the `a2a.store` option. Every Task read/write inside `serve/3` — the `SendMessage` create,
+the `working`/`completed`/`failed`/`input-required` transitions, every `GetTask` — goes through
+whatever store you configured. The default is in-memory (Tasks vanish on restart); `"file:<dir>"`
+persists one JSON file per Task id with an atomic write (write to `.tmp`, then rename), so a
+suspended (`input-required`) Task genuinely survives a process restart.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **You need a suspended A2A Task to survive a restart** — pass `a2a: %{store: "file:/var/lib/toolnexus/tasks"}`
+  to `Toolkit.serve/3`; every Task, including one parked in `input-required`, is on disk.
+- **Tests, demos, or anything ephemeral** — the default (`nil`/`"memory"`) needs no config and
+  cleans itself up when the process exits.
+- **Your own persistence** (Postgres, Redis, S3) — implement the two-callback
+  `Toolnexus.Serve.TaskStore` behaviour and pass the struct directly as `a2a: %{store: my_store}}`;
+  `resolve_store/1` uses a struct as-is.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="You rarely call resolve_store/1 yourself">
+`Toolnexus.Serve.start/2` calls `resolve_store/1` on `opts[:a2a][:store]` (or `Toolkit.serve/3`'s
+`a2a:` profile) for you. Call it directly only when you want to hand-build a store ahead of time —
+e.g. to seed it, or to hold a reference for out-of-band inspection during a test.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — resolving each selector
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.Serve
+alias Toolnexus.Serve.{FileTaskStore, InMemoryTaskStore}
+
+true = match?(%InMemoryTaskStore{}, Serve.resolve_store(nil))
+true = match?(%InMemoryTaskStore{}, Serve.resolve_store("memory"))
+
+dir = Path.join(System.tmp_dir!(), "toolnexus-docs-tasks-#{System.unique_integer([:positive])}")
+true = match?(%FileTaskStore{dir: ^dir}, Serve.resolve_store("file:" <> dir))
+
+custom = InMemoryTaskStore.new()
+true = Serve.resolve_store(custom) == custom
+
+raised? =
+  try do
+    Serve.resolve_store("redis:somewhere")
+    false
+  rescue
+    ArgumentError -> true
+  end
+
+true = raised?
+File.rm_rf!(dir)
+
+IO.puts("ok: memory, file:<dir>, struct pass-through, unknown raises")
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — a served toolkit's suspended Task survives a "restart"
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.{Client, Native, Request, Serve, Toolkit, Tool, ToolResult}
+
+Application.ensure_all_started(:req)
+
+dir = Path.join(System.tmp_dir!(), "toolnexus-docs-tasks-#{System.unique_integer([:positive])}")
+on_exit = fn -> File.rm_rf!(dir) end
+
+llm_plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+
+  resp = %{
+    "choices" => [
+      %{"message" => %{"role" => "assistant", "content" => nil, "tool_calls" => [
+        %{"id" => "c1", "type" => "function", "function" => %{"name" => "authorize", "arguments" => "{}"}}
+      ]}}
+    ],
+    "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+  }
+
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+llm_client = Client.create(base_url: "http://localhost", style: "openai", model: "m", api_key: "k", http_options: [plug: llm_plug])
+
+authorize_tool = %Tool{
+  name: "authorize",
+  description: "Always suspends for approval",
+  input_schema: %{"type" => "object", "properties" => %{}},
+  source: "native",
+  execute: fn _args, _ctx ->
+    %ToolResult{
+      output: "Authorize me",
+      is_error: true,
+      metadata: %{pending: %Request{id: "r1", kind: "authorization", prompt: "Authorize me"}}
+    }
+  end
+}
+
+{:ok, tk} = Toolnexus.create_toolkit(extra_tools: [authorize_tool], builtins: false)
+handle = Toolkit.serve(tk, "127.0.0.1:0", client: llm_client, a2a: %{store: "file:" <> dir})
+
+send_body = %{
+  "jsonrpc" => "2.0", "id" => "1", "method" => "SendMessage",
+  "params" => %{"message" => %{"role" => "user", "messageId" => "m1", "parts" => [%{"kind" => "text", "text" => "go"}]}}
+}
+
+submit = Req.post!(url: handle.url <> "/", json: send_body, retry: false, decode_body: false)
+%{"result" => %{"id" => task_id}} = Jason.decode!(submit.body)
+
+wait_for_state = fn ->
+  Stream.repeatedly(fn ->
+    get_body = %{"jsonrpc" => "2.0", "id" => "2", "method" => "GetTask", "params" => %{"id" => task_id}}
+    resp = Req.post!(url: handle.url <> "/", json: get_body, retry: false, decode_body: false)
+    %{"result" => task} = Jason.decode!(resp.body)
+    if task["status"]["state"] in ["submitted", "working"], do: (Process.sleep(10) && nil), else: task
+  end)
+  |> Enum.find(&(&1 != nil))
+end
+
+final = wait_for_state.()
+true = final["status"]["state"] == "input-required"
+
+Serve.stop(handle)
+
+# "restart": read the persisted file directly, with no live server at all.
+file = Path.join(dir, Toolnexus.Tool.sanitize(task_id) <> ".json")
+true = File.exists?(file)
+reloaded = Jason.decode!(File.read!(file))
+true = reloaded["status"]["state"] == "input-required"
+
+on_exit.()
+IO.puts("ok: Task #{task_id} survived the server stopping, still input-required on disk")
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — custom TaskStore struct, passed through as-is
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.Serve
+alias Toolnexus.Serve.TaskStore
+
+defmodule DocsCountingTaskStore do
+  @behaviour TaskStore
+  defstruct [:agent]
+
+  def new do
+    {:ok, pid} = Agent.start_link(fn -> %{tasks: %{}, saves: 0} end)
+    %__MODULE__{agent: pid}
+  end
+
+  @impl true
+  def get(%__MODULE__{agent: pid}, id), do: Agent.get(pid, & &1.tasks[id])
+
+  @impl true
+  def save(%__MODULE__{agent: pid}, task) do
+    Agent.update(pid, fn st -> %{st | tasks: Map.put(st.tasks, task["id"], task), saves: st.saves + 1} end)
+  end
+
+  def save_count(%__MODULE__{agent: pid}), do: Agent.get(pid, & &1.saves)
+end
+
+store = DocsCountingTaskStore.new()
+
+# resolve_store/1 hands a struct back unchanged — it IS the store.
+true = Serve.resolve_store(store) == store
+
+DocsCountingTaskStore.save(store, %{"id" => "t1", "status" => %{"state" => "submitted"}})
+DocsCountingTaskStore.save(store, %{"id" => "t1", "status" => %{"state" => "completed"}})
+
+true = DocsCountingTaskStore.get(store, "t1")["status"]["state"] == "completed"
+true = DocsCountingTaskStore.save_count(store) == 2
+true = DocsCountingTaskStore.get(store, "missing") == nil
+
+IO.puts("ok: custom TaskStore behaviour — #{DocsCountingTaskStore.save_count(store)} save(s) recorded")
 ```
+
+## `resolve_store/1` selectors
+
+| Selector | Store | Notes |
+|---|---|---|
+| `nil` | `InMemoryTaskStore` | Default. Tasks live only for the process lifetime. |
+| `"memory"` | `InMemoryTaskStore` | Explicit spelling of the default. |
+| `"file:<dir>"` | `FileTaskStore` | One `<sanitized-id>.json` per Task, atomic write. `dir` is created if missing. |
+| a struct implementing `TaskStore` | that struct | Used as-is — your own persistence. |
+| any other string | — | Raises `ArgumentError`. |
 
 ## The same call in the other five ports
 
@@ -60,13 +223,13 @@ _TODO: name the alternative and when to prefer it._
 | Python | `FileTaskStore` | [→](/api/python/serve/task-store/) |
 | Go | `NewFileTaskStore` | [→](/api/go/serve/task-store/) |
 | Java | `A2AServer.FileTaskStore` | [→](/api/java/serve/task-store/) |
-| C# | `A2AServer.FileTaskStore` | [→](/api/csharp/serve/task-store/) |
+| C# | `FileTaskStore` | [→](/api/csharp/serve/task-store/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Toolnexus.Serve.start`](/api/elixir/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
-- [`Toolnexus.Serve.build_agent_card`](/api/elixir/serve/agent-card/) — Construct the Agent Card that advertises your name, skills and endpoint.
-- [`Toolnexus.McpServe.build`](/api/elixir/serve/mcp/) — The inbound MCP profile: any MCP client can call your tools.
+- [`Toolnexus.Serve.start`](/api/elixir/serve/a2a/) — publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+- [`Toolnexus.Serve.build_agent_card`](/api/elixir/serve/agent-card/) — construct the Agent Card that advertises your name, skills and endpoint.
+- [`Toolnexus.McpServe`](/api/elixir/serve/mcp/) — the inbound MCP profile: any MCP client can call your tools.

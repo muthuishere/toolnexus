@@ -8,49 +8,268 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/agents/runtime.py">python/src/toolnexus/agents/runtime.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+@dataclass
+class Budget:
+    max_turns: int | None = None
+    max_tokens: float | None = None
+    max_tool_calls: float | None = None
+    max_wall_ms: float | None = None
+    max_children: float | None = None
+    max_concurrent: int | None = None
+    max_depth: int | None = None
 ```
 
-Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+A hierarchical cap, carved at `spawn(parent, def_name, budget)` as `min(own, parent's
+remaining)` and re-checked **live** against the whole ancestor chain before every turn
+and every spawn — carve-at-spawn alone would miss what a sibling has already spent
+from the same shared pool. Every dimension is optional; unset means "inherit the
+parent's remaining" for `max_tokens`/`max_tool_calls`, or a runtime default for the
+rest. Money is deliberately excluded — vendor pricing data belongs to the host, not
+the library.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- You want a sub-agent to fail loud (`status:"incomplete"`, the exhausted dimension
+  named) instead of silently running away on tokens, tool calls, or wall-clock.
+- You are building a team and want a coordinator's own budget to cap what its
+  delegates can collectively spend, without hand-tracking usage yourself.
+- You need to bound fan-out — `max_children` per parent, `max_depth` for the whole
+  tree, `max_concurrent` for how many children may run at once.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Unset dimensions inherit, they don't default to zero">
+A `Budget()` with everything `None` is not "no budget" in the zero sense — `max_tokens`
+and `max_tool_calls` inherit the parent's remaining pool (so a child can't outspend
+its parent even with no budget of its own), while `max_turns` (6), `max_concurrent`
+(8), and `max_depth` (3) fall back to runtime defaults. Only `max_wall_ms` and
+`max_children` are truly unbounded when unset.
 </Aside>
+
+Any limit stop is `status:"incomplete"` with the limit named — never a silent `"done"`,
+never a crash. Partial work and the transcript are preserved, so a host can inspect
+`TaskResult.text`, bump the budget, and retry.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+<Aside type="note" title="Hermetic on purpose">
+Every example scripts the LLM with a plain in-process `HttpTransport` stand-in — no
+network, no real LLM.
+</Aside>
 
-{/* TODO:example1 */}
-```python
-// TODO
+### 1. The smallest useful call — `max_turns` exhaustion is loud, not silent
+
+```python test
+import asyncio
+import json
+
+from toolnexus import define_tool
+from toolnexus.agents import AgentDef, AgentRuntime, Budget
+
+
+class ScriptedTransport:
+    def __init__(self, scripts):
+        self._scripts = {k: list(v) for k, v in scripts.items()}
+
+    def post(self, url, headers, payload, timeout):
+        return self._scripts[payload.get("model")].pop(0)
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError
+
+
+def tool_call_reply():
+    return {
+        "choices": [{
+            "message": {"role": "assistant", "content": None,
+                        "tool_calls": [{"id": "c1", "type": "function",
+                                        "function": {"name": "noop", "arguments": "{}"}}]},
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+    }
+
+
+async def main():
+    noop = define_tool(lambda: "x", name="noop", description="never resolves the loop")
+    registry = {
+        "worker": AgentDef(
+            name="worker", description="does work", system_prompt="", model="inherit",
+            tools=[noop], budget=Budget(max_turns=2),
+        ),
+    }
+    rt = AgentRuntime(
+        registry=registry,
+        transport=ScriptedTransport({"stub-model": [tool_call_reply(), tool_call_reply(), tool_call_reply()]}),
+        llm={"base_url": "http://mock.local", "style": "openai", "model": "stub-model", "api_key": "unused"},
+    )
+
+    h = rt.spawn(rt.root, "worker")
+    rt.wake(h, "keep calling tools forever")
+    r = await rt.wait(h)
+
+    assert r.status == "incomplete"
+    assert "maxTurns" in r.text
+    assert r.is_error is True
+    assert h.eff["max_turns"] == 2  # the effective cap this handle carved
+
+    print("ok:", r.status, "|", r.text)
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — `max_tool_calls` pre-check, and the parent carve
 
-{/* TODO:example2 */}
-```python
-// TODO
+`min(own, parent remaining)`: a child's declared budget can only ever be *tighter*
+than what its parent has left, never looser.
+
+```python test
+import asyncio
+
+from toolnexus import define_tool
+from toolnexus.agents import AgentDef, AgentRuntime, Budget
+
+
+class ScriptedTransport:
+    def __init__(self, scripts):
+        self._scripts = {k: list(v) for k, v in scripts.items()}
+
+    def post(self, url, headers, payload, timeout):
+        return self._scripts[payload.get("model")].pop(0)
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError
+
+
+def final_reply(text):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+    }
+
+
+async def main():
+    noop = define_tool(lambda: "x", name="noop", description="a tool call")
+    registry = {
+        "worker": AgentDef(name="worker", description="does work", system_prompt="", model="inherit", tools=[noop]),
+    }
+
+    # A tool call is BUDGETED before the turn runs at all — max_tool_calls=0 means
+    # the turn never even reaches the LLM.
+    rt = AgentRuntime(
+        registry=registry, transport=ScriptedTransport({"stub-model": []}),
+        llm={"base_url": "http://mock.local", "style": "openai", "model": "stub-model", "api_key": "unused"},
+    )
+    h = rt.spawn(rt.root, "worker", budget=Budget(max_tool_calls=0))
+    rt.wake(h, "go")
+    r = await rt.wait(h)
+    assert r.status == "incomplete"
+    assert "toolCalls" in r.text
+    await rt.close(rt.root)
+
+    # The carve: a child's OWN budget is capped by what the parent has left, never
+    # widened by declaring a bigger number.
+    registry2 = {
+        "parent": AgentDef(name="parent", description="p", system_prompt="", model="inherit"),
+        "child": AgentDef(name="child", description="c", system_prompt="", model="inherit"),
+    }
+    rt2 = AgentRuntime(registry=registry2, transport=ScriptedTransport({}), llm={})
+    parent = rt2.spawn(rt2.root, "parent", budget=Budget(max_tokens=100))
+    generous_child = rt2.spawn(parent, "child", budget=Budget(max_tokens=200))  # asks for more than the parent has
+    assert generous_child.pool.tokens == 100  # capped to the parent's remaining, not the child's ask
+    inheriting_child = rt2.spawn(parent, "child")  # declares nothing -> inherits the parent's remaining as-is
+    assert inheriting_child.pool.tokens == 100
+
+    print("ok:", r.status, "|", r.text, "| carved child pool:", generous_child.pool.tokens)
+
+
+asyncio.run(main())
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — the LIVE ancestor walk (carve alone misses sibling spend)
 
-{/* TODO:example3 */}
-```python
-// TODO
+Carving happens once, at spawn time. Spend is checked **live**, against the whole
+ancestor chain, before every turn *and* every spawn — so a sibling that has already
+drained the shared parent pool blocks both a new turn and a brand new spawn under
+that same parent.
+
+```python test
+import asyncio
+
+from toolnexus.agents import AgentDef, AgentRuntime, Budget, SpawnError
+
+
+class ScriptedTransport:
+    def __init__(self, scripts):
+        self._scripts = {k: list(v) for k, v in scripts.items()}
+
+    def post(self, url, headers, payload, timeout):
+        return self._scripts[payload.get("model")].pop(0)
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError
+
+
+def final_reply(text):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+    }
+
+
+async def main():
+    registry = {
+        "parent": AgentDef(name="parent", description="p", system_prompt="", model="inherit"),
+        "child": AgentDef(name="child", description="c", system_prompt="", model="inherit"),
+    }
+    rt = AgentRuntime(
+        registry=registry,
+        transport=ScriptedTransport({"stub-model": [final_reply("child1 done")]}),
+        llm={"base_url": "http://mock.local", "style": "openai", "model": "stub-model", "api_key": "unused"},
+    )
+
+    # A pool sized for exactly one child's spend.
+    parent = rt.spawn(rt.root, "parent", budget=Budget(max_tokens=3))
+
+    first = rt.spawn(parent, "child")
+    rt.wake(first, "go")
+    r1 = await rt.wait(first)
+    assert r1.status == "done"
+    assert parent.pool.tokens == 0  # the shared pool is drained
+
+    # A SECOND spawn under the same parent — carve alone would still show the
+    # parent's DECLARED budget (3); the live walk sees it is actually exhausted.
+    second = rt.spawn(parent, "child")
+    assert isinstance(second, SpawnError)
+    assert "budget exhausted" in second.error
+
+    print("ok:", "first child spent the shared pool; second spawn refused:", second.error)
+
+
+asyncio.run(main())
 ```
+
+## Fields
+
+| Field | Type | Default when unset |
+|---|---|---|
+| `max_turns` | `int \| None` | `6` |
+| `max_tokens` | `float \| None` | Inherits the parent's remaining pool (`inf` at the root). |
+| `max_tool_calls` | `float \| None` | Inherits the parent's remaining pool (`inf` at the root). |
+| `max_wall_ms` | `float \| None` | Unbounded. |
+| `max_children` | `float \| None` | Unbounded. |
+| `max_concurrent` | `int \| None` | `8` |
+| `max_depth` | `int \| None` | `3` |
+
+Exceeding any dimension yields `TaskResult(status="incomplete", is_error=True, text="hit
+<limit> without a final answer")` (turn-time) or a `SpawnError("budget exhausted
+(<limit>); incomplete")` (spawn-time) — the limit name (`"maxTurns"`, `"tokens"`,
+`"toolCalls"`, `"wallMs"`) is always present in the message.
 
 ## The same call in the other five ports
 
@@ -59,7 +278,7 @@ _TODO: name the alternative and when to prefer it._
 | JavaScript | `agents.Budget` | [→](/api/javascript/runtime/budgets/) |
 | Go | `agents.Budget` | [→](/api/go/runtime/budgets/) |
 | Java | `agents.Budget` | [→](/api/java/runtime/budgets/) |
-| C# | `AgentTypes.Budget` | [→](/api/csharp/runtime/budgets/) |
+| C# | `Budget` | [→](/api/csharp/runtime/budgets/) |
 | Elixir | `Toolnexus.Agents budget` | [→](/api/elixir/runtime/budgets/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.

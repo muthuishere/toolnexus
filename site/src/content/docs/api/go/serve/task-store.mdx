@@ -8,48 +8,219 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a>
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/serve.go">golang/serve.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+type TaskStore interface {
+	Get(id string) (*A2ATask, error) // nil, nil ⇒ unknown id (never an error)
+	Save(task A2ATask) error
+}
+
+func NewFileTaskStore(dir string) *FileTaskStore
 ```
 
-Persist inbound A2A tasks so a suspended request survives a restart.
+`FileTaskStore` is one JSON file per Task id, under `dir` (created if missing). Writes are
+atomic — a temp file in the same directory, then an atomic rename — so a concurrent `Get` can never
+observe a half-written Task mid-poll. It implements the same `TaskStore` interface
+[`Toolkit.Serve`](/api/go/serve/a2a/) uses by default (in-memory); swap it in via
+`A2AConfig.Store` to survive a process restart.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `NewFileTaskStore` (or `A2AConfig{Store: "file:<dir>"}`) whenever a served Task might
+outlive the process — a long-running fulfilment, or a §10 suspension where the peer needs to poll
+`GetTask` again after your process restarts.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Short-lived server, or tests? Stay on the in-memory default">
+`A2AConfig.Store` left unset (or `"memory"`) uses `InMemoryTaskStore` — Tasks live only for the
+process lifetime, zero setup. Reach for `NewFileTaskStore` / `"file:<dir>"` specifically for the
+restart-survival guarantee; anywhere durability doesn't matter, the default is simpler and faster.
+A custom `TaskStore` (e.g. backed by a database) is also a first-class `A2AConfig.Store` value —
+`ResolveStore` accepts a `TaskStore` value as-is.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Save a Task, read it back
 
-{/* TODO:example1 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	dir, err := os.MkdirTemp("", "toolnexus-docs-taskstore-1")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	store := toolnexus.NewFileTaskStore(dir)
+	task := toolnexus.A2ATask{ID: "t1", Status: toolnexus.A2ATaskStatus{State: "completed"}}
+	if err := store.Save(task); err != nil {
+		log.Fatal(err)
+	}
+
+	got, err := store.Get("t1")
+	if err != nil || got == nil {
+		log.Fatalf("unexpected: %+v %v", got, err)
+	}
+	if got.Status.State != "completed" {
+		log.Fatalf("unexpected state: %q", got.Status.State)
+	}
+
+	fmt.Println("ok: task", got.ID, "state", got.Status.State)
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. An unknown id is `(nil, nil)`, never an error
 
-{/* TODO:example2 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	dir, err := os.MkdirTemp("", "toolnexus-docs-taskstore-2")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	store := toolnexus.NewFileTaskStore(dir)
+
+	got, err := store.Get("does-not-exist")
+	if err != nil {
+		log.Fatalf("Get on a missing id should not error, got %v", err)
+	}
+	if got != nil {
+		log.Fatalf("expected nil for a missing id, got %+v", got)
+	}
+
+	// Saving again under the same id overwrites (atomic rename — a concurrent
+	// Get during the write always sees the old or the new file, never neither).
+	_ = store.Save(toolnexus.A2ATask{ID: "t1", Status: toolnexus.A2ATaskStatus{State: "working"}})
+	_ = store.Save(toolnexus.A2ATask{ID: "t1", Status: toolnexus.A2ATaskStatus{State: "completed"}})
+	final, _ := store.Get("t1")
+	if final.Status.State != "completed" {
+		log.Fatalf("expected the latest save to win, got %q", final.Status.State)
+	}
+
+	fmt.Println("ok: unknown id →", got, "; overwrite settles at", final.Status.State)
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — wired into `Toolkit.Serve`, then read straight off disk
 
-{/* TODO:example3 */}
-```go
-// TODO
+A Task submitted through a REAL local A2A round trip lands on disk; a second, brand-new
+`FileTaskStore` pointed at the same directory (simulating a process restart) can read it directly.
+
+```go test
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"time"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func mockLLM(reply string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": reply}}},
+			"usage":   map[string]any{"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+		})
+	}))
+}
+
+func main() {
+	llm := mockLLM("done")
+	defer llm.Close()
+
+	dir, err := os.MkdirTemp("", "toolnexus-docs-taskstore-3")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: llm.URL, Style: toolnexus.StyleOpenAI, Model: "x", APIKey: "k"})
+
+	handle, err := tk.Serve("127.0.0.1:0", toolnexus.ServeOptions{
+		Client: client,
+		A2A:    &toolnexus.A2AConfig{Name: "durable-desk", Store: "file:" + dir},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer handle.Stop()
+
+	// Drive a task through the wire protocol directly.
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "SendMessage",
+		"params": map[string]any{"message": map[string]any{"role": "user", "parts": []any{map[string]any{"kind": "text", "text": "go"}}}},
+	})
+	resp, err := http.Post(handle.URL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		log.Fatal(err)
+	}
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+	taskID := out["result"].(map[string]any)["id"].(string)
+
+	// Poll GetTask to completion (bounded), then read the SAME id from a FRESH
+	// FileTaskStore pointed at the same directory — as if the process restarted.
+	for i := 0; i < 200; i++ {
+		gb, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "GetTask", "params": map[string]any{"id": taskID}})
+		gresp, _ := http.Post(handle.URL, "application/json", bytes.NewReader(gb))
+		var gout map[string]any
+		_ = json.NewDecoder(gresp.Body).Decode(&gout)
+		gresp.Body.Close()
+		result, _ := gout["result"].(map[string]any)
+		status, _ := result["status"].(map[string]any)
+		if state, _ := status["state"].(string); state == "completed" {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	reopened := toolnexus.NewFileTaskStore(dir)
+	persisted, err := reopened.Get(taskID)
+	if err != nil || persisted == nil {
+		log.Fatalf("expected the task to survive on disk: %+v %v", persisted, err)
+	}
+
+	fmt.Println("ok: task", taskID, "read back after a simulated restart, state =", persisted.Status.State)
+}
 ```
 
 ## The same call in the other five ports
@@ -59,7 +230,7 @@ _TODO: name the alternative and when to prefer it._
 | JavaScript | `FileTaskStore` | [→](/api/javascript/serve/task-store/) |
 | Python | `FileTaskStore` | [→](/api/python/serve/task-store/) |
 | Java | `A2AServer.FileTaskStore` | [→](/api/java/serve/task-store/) |
-| C# | `A2AServer.FileTaskStore` | [→](/api/csharp/serve/task-store/) |
+| C# | `FileTaskStore` | [→](/api/csharp/serve/task-store/) |
 | Elixir | `Toolnexus.Serve task_store` | [→](/api/elixir/serve/task-store/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
@@ -67,6 +238,6 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`StartAgent`](/api/go/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+- [`Toolkit.Serve`](/api/go/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
 - [`BuildAgentCard`](/api/go/serve/agent-card/) — Construct the Agent Card that advertises your name, skills and endpoint.
 - [`ExposedMcpTools`](/api/go/serve/mcp/) — The inbound MCP profile: any MCP client can call your tools.

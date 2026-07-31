@@ -8,49 +8,212 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/A2AServer.java">A2AServer.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public interface TaskStore {
+    Map<String, Object> get(String id);
+    void save(Map<String, Object> task);
+}
+
+public static final class InMemoryTaskStore implements TaskStore { /* default */ }
+public static final class FileTaskStore implements TaskStore {
+    public FileTaskStore(String dir)
+}
+
+public static TaskStore resolveStore(Object store) // null|"memory" | "file:<dir>" | a TaskStore
 ```
 
-Persist inbound A2A tasks so a suspended request survives a restart.
+Every Task [`A2AServer.start`](/api/java/serve/a2a/) creates — `submitted` → `working` →
+`completed`/`failed` — is read and written through a pluggable `TaskStore`. The default is an
+in-memory map (Tasks live only for the process lifetime); `FileTaskStore` writes one JSON file
+per Task id under a directory, atomically, so a served agent's in-flight or suspended work
+survives a restart.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `FileTaskStore` (via `a2a.store("file:<dir>")`) whenever a served toolkit's Tasks
+should outlive the process — a long poll from a slow peer, or a Task that suspended on
+[§10 `pending`](/api/java/suspension/pending/) and is waiting on a human. For anything else, the
+default in-memory store is fine and needs no configuration. Implement `TaskStore` yourself to
+back Tasks with a database or a distributed cache instead of the filesystem.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="A custom TaskStore is a first-class option, not an escape hatch">
+`A2AConfig.store` accepts `"memory"` (default), `"file:<dir>"`, or **any object implementing
+`TaskStore`** — `resolveStore` uses it as-is. Reach for a custom store when file-per-Task isn't
+the right shape for your deployment (e.g. Tasks belong in the same database as everything else);
+reach for `FileTaskStore` when a directory on disk is all you need.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — save and read back directly
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.nio.file.Files;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        java.nio.file.Path dir = Files.createTempDirectory("toolnexus-task-store");
+        A2AServer.FileTaskStore store = new A2AServer.FileTaskStore(dir.toString());
+
+        Map<String, Object> task = new LinkedHashMap<>();
+        task.put("id", "t1");
+        task.put("status", Map.of("state", "working"));
+        store.save(task);
+
+        Map<String, Object> back = store.get("t1");
+        if (back == null) throw new AssertionError("expected the task back");
+        if (!"working".equals(((Map<?, ?>) back.get("status")).get("state"))) throw new AssertionError(back);
+        if (store.get("nope") != null) throw new AssertionError("unknown id should be null");
+
+        System.out.println("ok: " + back);
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — `resolveStore` selects memory, file, or a custom store
 
-{/* TODO:example2 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.nio.file.Files;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        // null / "memory" ⇒ the default in-memory store.
+        A2AServer.TaskStore mem = A2AServer.resolveStore(null);
+        if (!(mem instanceof A2AServer.InMemoryTaskStore)) throw new AssertionError(mem.getClass());
+        A2AServer.TaskStore mem2 = A2AServer.resolveStore("memory");
+        if (!(mem2 instanceof A2AServer.InMemoryTaskStore)) throw new AssertionError(mem2.getClass());
+
+        // "file:<dir>" ⇒ a FileTaskStore rooted at <dir>.
+        java.nio.file.Path dir = Files.createTempDirectory("toolnexus-task-store");
+        A2AServer.TaskStore file = A2AServer.resolveStore("file:" + dir);
+        if (!(file instanceof A2AServer.FileTaskStore)) throw new AssertionError(file.getClass());
+
+        // any TaskStore object ⇒ used as-is.
+        AtomicInteger saves = new AtomicInteger();
+        Map<String, Map<String, Object>> backing = new ConcurrentHashMap<>();
+        A2AServer.TaskStore custom = new A2AServer.TaskStore() {
+            @Override public Map<String, Object> get(String id) { return backing.get(id); }
+            @Override public void save(Map<String, Object> task) {
+                saves.incrementAndGet();
+                backing.put(String.valueOf(task.get("id")), task);
+            }
+        };
+        A2AServer.TaskStore resolved = A2AServer.resolveStore(custom);
+        if (resolved != custom) throw new AssertionError("custom store used as-is");
+
+        Map<String, Object> t = new LinkedHashMap<>();
+        t.put("id", "t9");
+        t.put("status", Map.of("state", "submitted"));
+        resolved.save(t);
+        if (saves.get() != 1) throw new AssertionError(saves.get());
+
+        System.out.println("ok: memory, file, and a custom store all resolve correctly");
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — wired into `toolkit.serve`, a task persisted on disk
 
-{/* TODO:example3 */}
-```java
-// TODO
+`a2a.store("file:<dir>")` is the ergonomic path — every Task a served toolkit creates lands as
+`<dir>/<id>.json`, readable outside the process.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                ex.getRequestBody().readAllBytes();
+                byte[] b = "{\"choices\":[{\"message\":{\"content\":\"filed\"}}]}".getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+        LlmClient client = LlmClient.create(new LlmClient.Options()
+                .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                .style("openai").model("test-model").apiKey("test-key"));
+
+        Path dir = Files.createTempDirectory("toolnexus-serve-store");
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).skillsDir("examples/skills"))) {
+            A2AServer.A2AConfig a2a = new A2AServer.A2AConfig().name("filing-desk").store("file:" + dir);
+            A2AServer.ServeHandle handle = tk.serve("127.0.0.1:0",
+                    new Toolkit.ServeOptions().client(client).a2a(a2a));
+            try {
+                HttpClient http = HttpClient.newHttpClient();
+                String req = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"SendMessage\",\"params\":"
+                        + "{\"message\":{\"role\":\"user\",\"parts\":[{\"kind\":\"text\",\"text\":\"go\"}]}}}";
+                HttpResponse<String> sent = http.send(
+                        HttpRequest.newBuilder(URI.create(handle.url() + "/"))
+                                .header("Content-Type", "application/json")
+                                .POST(HttpRequest.BodyPublishers.ofString(req))
+                                .build(),
+                        HttpResponse.BodyHandlers.ofString());
+                Map<String, Object> submitted = (Map<String, Object>) Json.toMap(sent.body()).get("result");
+                String id = String.valueOf(submitted.get("id"));
+
+                Path file = dir.resolve(Tool.sanitize(id) + ".json");
+                long deadline = System.currentTimeMillis() + 5000;
+                while (!Files.exists(file)
+                        || !onDiskState(file).equals("completed")) {
+                    if (System.currentTimeMillis() > deadline) throw new AssertionError("task never landed on disk");
+                    Thread.sleep(20);
+                }
+
+                System.out.println("ok: task " + id + " persisted at " + file.getFileName());
+            } finally {
+                handle.stop();
+            }
+        } finally {
+            llm.stop(0);
+        }
+    }
+
+    private static String onDiskState(Path file) throws Exception {
+        Map<String, Object> onDisk = Json.toMap(Files.readString(file));
+        Object status = onDisk.get("status");
+        return status instanceof Map ? String.valueOf(((Map<?, ?>) status).get("state")) : "";
+    }
+}
 ```
+
+## Fields and overloads
+
+| Member | Type | What it is |
+|---|---|---|
+| `TaskStore.get(id)` | `Map<String,Object>` | The current Task, or `null` if unknown. |
+| `TaskStore.save(task)` | `void` | Persist, keyed by `task.get("id")`. |
+| `InMemoryTaskStore` | class | The default — a `ConcurrentHashMap`, process-lifetime only. |
+| `FileTaskStore(dir)` | class | One `<sanitize(id)>.json` file per Task, atomic write (temp file + move). |
+| `resolveStore(store)` | `TaskStore` | `null`/`"memory"` ⇒ in-memory; `"file:<dir>"` ⇒ `FileTaskStore`; a `TaskStore` object ⇒ used as-is. |
+| `A2AConfig.store` | `Object` | Any of the above, passed straight to `resolveStore`. |
 
 ## The same call in the other five ports
 
@@ -59,7 +222,7 @@ _TODO: name the alternative and when to prefer it._
 | JavaScript | `FileTaskStore` | [→](/api/javascript/serve/task-store/) |
 | Python | `FileTaskStore` | [→](/api/python/serve/task-store/) |
 | Go | `NewFileTaskStore` | [→](/api/go/serve/task-store/) |
-| C# | `A2AServer.FileTaskStore` | [→](/api/csharp/serve/task-store/) |
+| C# | `FileTaskStore` | [→](/api/csharp/serve/task-store/) |
 | Elixir | `Toolnexus.Serve task_store` | [→](/api/elixir/serve/task-store/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
@@ -67,6 +230,6 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`A2AServer.start`](/api/java/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
-- [`A2AServer.buildAgentCard`](/api/java/serve/agent-card/) — Construct the Agent Card that advertises your name, skills and endpoint.
-- [`McpServe.build`](/api/java/serve/mcp/) — The inbound MCP profile: any MCP client can call your tools.
+- [`A2AServer.start`](/api/java/serve/a2a/) — reads and writes every Task through the resolved store.
+- [`A2AServer.buildAgentCard`](/api/java/serve/agent-card/) — the other half of what a served agent exposes.
+- [`suspension/pending`](/api/java/suspension/pending/) — why a served Task might need to survive a restart in the first place.

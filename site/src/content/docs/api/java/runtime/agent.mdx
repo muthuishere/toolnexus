@@ -8,49 +8,240 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/agents/Agents.java">agents/Agents.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public static Agents.Agent agent(String name, Agents.AgentSpec spec)
+
+public final class Agent {
+    public TaskResult run(RuntimeOptions rtOpts, String prompt)  // one-shot
+    public Tool asTool(RuntimeOptions rtOpts)                    // the axiom's other direction
+}
 ```
 
-Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+The one new noun the whole sub-agent surface (§7D) is built from: **an Agent is a Tool** —
+a system prompt ("soul") × a filtered toolkit view × the shipped [`LlmClient`](/api/java/client/create/)
+loop, invocable as `{name, description, inputSchema:{prompt}, execute}`. `Agents.agent(name, spec)`
+declares one; `run` executes it directly (one-shot, spawn→wake→wait→close fused); `asTool` bridges
+it back into the classic API's `extraTools` — the axiom's other direction.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Whenever a task is better handled by a separate agent with its own scoped toolkit and prompt than
+by adding more tools to one big agent — a coordinator that delegates focused subtasks to workers
+it can reason about by name. Declare a `team` on the coordinator's `AgentSpec` and the runtime
+auto-registers a `task` tool that lets the model itself delegate (see
+[the task tool](/api/java/runtime/task-tool/)); or call `.run(...)` yourself for scripted,
+non-model-driven delegation.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="One Agent for a scoped subtask, extraTools for a plain function">
+If the work is a single deterministic operation — call an API, read a file — a plain
+[`Tool`](/api/java/types/tool/) via `extraTools` is simpler and cheaper: no LLM round trip. Reach
+for `Agents.agent` when the subtask itself benefits from its own reasoning loop: a different
+system prompt, a narrower toolkit view, its own budget — genuinely delegated judgment, not just
+another function call.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — one agent, run to completion
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.agents.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                ex.getRequestBody().readAllBytes();
+                byte[] b = "{\"choices\":[{\"message\":{\"content\":\"Hello, friend!\"}}]}".getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+
+        try {
+            Agents.Agent greeter = Agents.agent("greeter", new Agents.AgentSpec()
+                    .does("greets people warmly")
+                    .model("test-model"));
+
+            RuntimeOptions rtOpts = new RuntimeOptions()
+                    .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                    .apiKey("test-key");
+
+            TaskResult r = greeter.run(rtOpts, "say hi");
+
+            if (!"done".equals(r.status())) throw new AssertionError(r.status());
+            if (!r.text().equals("Hello, friend!")) throw new AssertionError(r.text());
+
+            System.out.println("ok: " + r.text());
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — the axiom's other direction: `asTool`
 
-{/* TODO:example2 */}
-```java
-// TODO
+Drop the agent straight into a classic `Toolkit`'s `extraTools` and call it exactly like any
+other tool. The tool returns ONLY the agent's final text plus `{agent, turns, totalTokens}`
+metadata — never the agent's internal transcript.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import io.github.muthuishere.toolnexus.agents.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                ex.getRequestBody().readAllBytes();
+                byte[] b = ("{\"choices\":[{\"message\":{\"content\":\"call number QA76\"}}],"
+                        + "\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":3,\"total_tokens\":7}}")
+                        .getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+
+        try {
+            Agents.Agent librarian = Agents.agent("librarian", new Agents.AgentSpec()
+                    .does("looks things up in the catalog")
+                    .model("test-model"));
+
+            RuntimeOptions rtOpts = new RuntimeOptions()
+                    .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                    .apiKey("test-key");
+
+            Tool tool = librarian.asTool(rtOpts);
+            if (!tool.name().equals("librarian")) throw new AssertionError(tool.name());
+            if (!tool.inputSchema().get("required").equals(java.util.List.of("prompt"))) {
+                throw new AssertionError(tool.inputSchema());
+            }
+
+            try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(tool))) {
+                ToolResult r = tk.execute("librarian", Map.of("prompt", "find a book on graphs"));
+
+                if (r.isError() || !r.output().equals("call number QA76")) throw new AssertionError(r.output());
+                if (!"librarian".equals(r.metadata().get("agent"))) throw new AssertionError(r.metadata());
+                if (((Number) r.metadata().get("totalTokens")).longValue() != 7) throw new AssertionError(r.metadata());
+
+                System.out.println("ok: " + r.output());
+            }
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — a team, delegating through a real sub-agent run
 
-{/* TODO:example3 */}
-```java
-// TODO
+Declaring `team(worker)` on the coordinator's spec is the whole wiring model: it is what lets the
+coordinator's own model call `task { agent:"worker", prompt:... }` and get back the worker's
+answer as one tool result, with the worker's own turns and usage rolled up but never mixed into
+the coordinator's transcript.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.Json;
+import io.github.muthuishere.toolnexus.agents.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                Map<String, Object> req = Json.toMap(body);
+                String model = String.valueOf(req.get("model"));
+                List<Object> msgs = (List<Object>) req.get("messages");
+                boolean hasToolResult = msgs.stream().anyMatch(m -> "tool".equals(((Map<?, ?>) m).get("role")));
+
+                String message;
+                if ("m-coordinator".equals(model) && !hasToolResult) {
+                    String taskArgs = Json.stringify(Map.of("agent", "worker", "prompt", "find the root cause"));
+                    message = "{\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\","
+                            + "\"function\":{\"name\":\"task\",\"arguments\":" + Json.stringify(taskArgs) + "}}]}";
+                } else if ("m-coordinator".equals(model)) {
+                    Object toolText = ((Map<?, ?>) msgs.get(msgs.size() - 1)).get("content");
+                    message = "{\"content\":\"synthesis: " + toolText + "\"}";
+                } else { // m-worker
+                    message = "{\"content\":\"root cause found\"}";
+                }
+                byte[] b = ("{\"choices\":[{\"message\":" + message + "}]}").getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+
+        try {
+            Agents.Agent worker = Agents.agent("worker", new Agents.AgentSpec()
+                    .does("investigates a specific issue")
+                    .model("m-worker"));
+            Agents.Agent coordinator = Agents.agent("coordinator", new Agents.AgentSpec()
+                    .does("splits work and delegates")
+                    .model("m-coordinator")
+                    .team(worker));
+
+            RuntimeOptions rtOpts = new RuntimeOptions()
+                    .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                    .apiKey("test-key");
+
+            TaskResult r = coordinator.run(rtOpts, "investigate the outage");
+
+            if (!"done".equals(r.status())) throw new AssertionError(r.status());
+            if (!r.text().equals("synthesis: root cause found")) throw new AssertionError(r.text());
+            // the coordinator itself only ran 2 turns — the worker's turns never leak in.
+            if (r.turns() != 2) throw new AssertionError(r.turns());
+
+            System.out.println("ok: " + r.text());
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
 ```
+
+## Fields and overloads
+
+| Member | Type | What it is |
+|---|---|---|
+| `agent(name, spec)` | `Agent` | The declaration; nothing runs until `.run(...)` or a `task` call. |
+| `AgentSpec.does` | `String` | The routing description a delegating model (or a human reading `task`'s schema) sees. |
+| `AgentSpec.tools` | `List<Tool>` | The scoped toolkit VIEW — scoping is the whole security model. |
+| `AgentSpec.soul` / `.soulFile` | `String` / `Path` | Inline system prompt, or a file read at registry-build time. |
+| `AgentSpec.team` | `Agent...` | `task`-tool targets — listing agents here IS the delegation wiring; empty ⇒ no `task` tool at all. |
+| `AgentSpec.budget` | `Budget` | See [`agents.Budget`](/api/java/runtime/budgets/). |
+| `AgentSpec.model` | `String` | `null` ⇒ `"inherit"` (the runtime's `defaultModel`). |
+| `run(rtOpts, prompt)` | `TaskResult` | One-shot: builds a runtime scoped to this agent's team graph, runs to completion, tears down — unless the run parked `pending`. |
+| `asTool(rtOpts)` | `Tool` | `{prompt}` in, ONLY the final text + `{agent, turns, totalTokens}` metadata out. |
 
 ## The same call in the other five ports
 
@@ -67,6 +258,7 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`agents.Runtime`](/api/java/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
-- [`agents.Handle`](/api/java/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
-- [`agents.Budget`](/api/java/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+- [`agents.Runtime`](/api/java/runtime/runtime/) — the six host verbs `run`/`asTool` compile down to.
+- [`agents.Handle`](/api/java/runtime/handle/) — the live state one spawned Agent becomes.
+- [`agents.Budget`](/api/java/runtime/budgets/) — cap an agent's turns, tokens, tool calls, wall clock, children, and depth.
+- [`runtime/task-tool`](/api/java/runtime/task-tool/) — how a `team` becomes a model-facing delegation tool.

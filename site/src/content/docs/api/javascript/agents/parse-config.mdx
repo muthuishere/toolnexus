@@ -8,49 +8,139 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7a-a2a-agents--outbound-source-a2a">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/a2a.ts">js/src/a2a.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+interface AgentConfig {
+  card: string
+  headers?: Record<string, string>
+  timeout?: number
+  pollEvery?: number
+  enabled?: boolean
+  disabled?: boolean
+}
+type AgentsConfig = Record<string, AgentConfig>
+
+function parseAgentsConfig(block: AgentsConfig | undefined): Agent[]
 ```
 
-Declare remote peers in config the way MCP servers are declared, with precedence rules.
+Parse an `agents` config block — `Record<name, AgentConfig>`, the same shape as an `mcpServers`
+block — into `Agent[]` descriptors, skipping disabled entries. The config **key** is only an
+identifier for humans editing the file; the tool name prefix a peer's skills get comes from the
+fetched card's `name`, not the key.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Use `parseAgentsConfig` when remote peers should be **data**, not code — declared in the same JSON
+file as your `mcpServers`, edited without a redeploy, one block per environment. This is what
+`createToolkit({ mcpConfig })` calls when the parsed config has an `agents` key.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Call agent() directly instead when the peer list is fixed in code">
+If your peers never change at runtime, building `Agent[]` with [`agent()`](/api/javascript/agents/agent/)
+calls is one less layer of indirection — there is no config file to keep in sync. Reach for
+`parseAgentsConfig` the moment "which agents" becomes an operational, not a code, decision.
 </Aside>
+
+The enable/disable precedence matters and is easy to get wrong by hand:
+**`disabled: true` wins over everything, then `enabled: false`, default is enabled** — the exact
+`isEnabled` rule `mcpServers` already uses (§2), so an `agents` block reads the same way once you
+know one.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — one entry, no disables
 
-{/* TODO:example1 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import { parseAgentsConfig } from "toolnexus"
+
+const parsed = parseAgentsConfig({
+  reviewer: { card: "http://127.0.0.1:9/.well-known/agent-card.json" },
+})
+
+assert.equal(parsed.length, 1)
+assert.equal(parsed[0].card, "http://127.0.0.1:9/.well-known/agent-card.json")
+
+console.log("ok:", parsed.length, "agent(s) parsed")
 ```
 
-### 2. TODO — the realistic case
+### 2. A realistic case — mixed headers, timeouts, and one disabled peer
 
-{/* TODO:example2 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import { parseAgentsConfig } from "toolnexus"
+
+const parsed = parseAgentsConfig({
+  reviewer: {
+    card: "http://reviewer.internal/.well-known/agent-card.json",
+    headers: { Authorization: "Bearer ${TN_DOCS_TOKEN}" },
+    timeout: 60_000,
+    pollEvery: 500,
+  },
+  planner: {
+    card: "http://planner.internal/.well-known/agent-card.json",
+    disabled: true, // wound down for now — kept in config, not deleted
+  },
+  archivist: {
+    card: "http://archivist.internal/.well-known/agent-card.json",
+    enabled: true,
+  },
+})
+
+assert.deepEqual(
+  parsed.map((a) => a.card),
+  ["http://reviewer.internal/.well-known/agent-card.json", "http://archivist.internal/.well-known/agent-card.json"],
+  "the disabled planner is skipped; the config key itself never appears on the Agent",
+)
+assert.equal(parsed[0].timeout, 60_000)
+assert.equal(parsed[0].pollEvery, 500)
+
+console.log("ok:", parsed.length, "enabled agent(s)")
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — every precedence combination, plus malformed entries
 
-{/* TODO:example3 */}
-```ts
-// TODO
+`enabled`+`disabled` together: `disabled` always wins. Entries missing a `card`, or that aren't
+objects at all, are skipped rather than throwing — a config file is user input.
+
+```ts test
+import assert from "node:assert"
+import { parseAgentsConfig } from "toolnexus"
+
+const parsed = parseAgentsConfig({
+  a: { card: "http://x/1" },                             // default: enabled
+  b: { card: "http://x/2", disabled: true },              // disabled wins
+  c: { card: "http://x/3", enabled: false },              // enabled:false ⇒ off
+  d: { card: "http://x/4", enabled: true, disabled: true }, // disabled STILL wins over enabled:true
+  e: { headers: { x: "y" } } as any,                       // no `card` ⇒ skipped, not thrown
+})
+
+assert.deepEqual(parsed.map((a) => a.card), ["http://x/1"])
+
+// undefined block ⇒ empty array, never a throw — the "no agents configured" case.
+assert.deepEqual(parseAgentsConfig(undefined), [])
+
+console.log("ok:", parsed.length, "agent(s) survived precedence + malformed-entry filtering")
 ```
+
+## Options
+
+| Field | Type | What it does |
+|---|---|---|
+| `block` | `AgentsConfig \| undefined` | `Record<name, AgentConfig>`, mirroring `mcpServers`. `undefined` ⇒ `[]`. |
+| `block[name].card` | `string` | Agent Card URL. Entries missing this are skipped. |
+| `block[name].headers` | `Record<string, string>` | `${ENV}`-expanding request headers. |
+| `block[name].timeout` / `.pollEvery` | `number` | Same as [`agent()`](/api/javascript/agents/agent/)'s options. |
+| `block[name].enabled` / `.disabled` | `boolean` | MCP `isEnabled` precedence: `disabled:true` wins, then `enabled:false`, default enabled. |
+
+## What you get back
+
+`Agent[]` — ready to hand straight to `createToolkit({ agents })` or `toolkit.addAgent()`, one per
+enabled config entry, in the block's iteration order. Disabled and malformed entries are silently
+dropped, never thrown.
 
 ## The same call in the other five ports
 
@@ -60,7 +150,7 @@ _TODO: name the alternative and when to prefer it._
 | Go | `ParseAgentsConfig` | [→](/api/go/agents/parse-config/) |
 | Java | `A2A.parseAgentsConfig` | [→](/api/java/agents/parse-config/) |
 | C# | `A2A.ParseAgentsConfig` | [→](/api/csharp/agents/parse-config/) |
-| Elixir | `Toolnexus.Agents.parse_config` | [→](/api/elixir/agents/parse-config/) |
+| Elixir | `Toolnexus.A2a.parse_agents_config` | [→](/api/elixir/agents/parse-config/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).

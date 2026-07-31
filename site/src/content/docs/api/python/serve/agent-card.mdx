@@ -8,49 +8,150 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/serve.py">python/src/toolnexus/serve.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+def build_agent_card(
+    cfg: dict[str, Any],
+    skills: list[SkillInfo],
+    url: str,
+) -> dict[str, Any]
 ```
 
-Construct the Agent Card that advertises your name, skills and endpoint.
+Builds the JSON body served at `GET /.well-known/agent-card.json` — a peer's first
+call to any A2A agent. Skills come from the toolkit's `SkillSource` (SKILL.md name +
+description), **never raw tools**, filtered to `cfg["skills"]` when given.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- You want to see or test exactly what card a given `a2a` config + skill set would
+  publish, without spinning up a server.
+- You are composing your own HTTP layer instead of `Toolkit.serve` and need the card
+  JSON to answer the well-known path yourself.
+- You are debugging why a peer's `agent_tools` call sees the wrong skills, name, or
+  `url` — this is the one function that decides all three.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Toolkit.serve calls this for you">
+[`Toolkit.serve`](/api/python/serve/a2a/) builds and serves this same card at the
+well-known path automatically — you only need `build_agent_card` directly when you
+want the JSON in isolation (a test, a custom HTTP layer, a health-check endpoint).
 </Aside>
+
+The function is pure: no I/O, no server, no store. `skills` must already be resolved
+(a toolkit's `SkillSource.skills.values()`, or hand-built `SkillInfo`s for a test) —
+`build_agent_card` never discovers skills itself.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — defaults with no skills
 
-{/* TODO:example1 */}
-```python
-// TODO
+```python test
+from toolnexus.serve import build_agent_card
+
+card = build_agent_card({}, [], "http://127.0.0.1:8080/")
+
+assert card["name"] == "toolnexus-agent"
+assert card["description"] == ""
+assert card["version"] == "0.1.0"
+assert card["protocolVersion"] == "0.3.0"
+assert card["capabilities"] == {"streaming": False, "pushNotifications": False}
+assert card["defaultInputModes"] == ["text"]
+assert card["defaultOutputModes"] == ["text"]
+assert card["skills"] == []
+assert card["url"] == "http://127.0.0.1:8080/"
+assert "provider" not in card  # omitted entirely when not configured
+
+print("ok:", card["name"], card["protocolVersion"])
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — skills advertised, never raw tools
 
-{/* TODO:example2 */}
-```python
-// TODO
+`skills` mirrors a `SkillSource`'s inventory — `id` and `name` both come from the
+skill's own `name`.
+
+```python test
+from toolnexus.skill import SkillInfo
+from toolnexus.serve import build_agent_card
+
+skills = [
+    SkillInfo(name="hello-world", location="/skills/hello-world/SKILL.md",
+              content="...", description="Greets the caller by name."),
+    SkillInfo(name="transcribe", location="/skills/transcribe/SKILL.md",
+              content="...", description="Transcribes an audio file."),
+]
+
+card = build_agent_card(
+    {"name": "video-desk", "description": "Handles video intake."},
+    skills,
+    "http://127.0.0.1:8080/",
+)
+
+assert card["name"] == "video-desk"
+assert card["description"] == "Handles video intake."
+ids = [s["id"] for s in card["skills"]]
+assert ids == ["hello-world", "transcribe"]
+assert card["skills"][0] == {
+    "id": "hello-world", "name": "hello-world", "description": "Greets the caller by name."
+}
+
+print("ok:", card["name"], "->", ids)
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — filtered skills, a `provider` block, custom version
 
-{/* TODO:example3 */}
-```python
-// TODO
+`cfg["skills"]` restricts the advertised set (a toolkit may host more skills than it
+wants a given peer surface to see). `provider` appears only when configured.
+
+```python test
+from toolnexus.skill import SkillInfo
+from toolnexus.serve import build_agent_card
+
+skills = [
+    SkillInfo(name="hello-world", location="/skills/hello-world/SKILL.md", content="..."),
+    SkillInfo(name="internal-only", location="/skills/internal-only/SKILL.md", content="..."),
+]
+
+card = build_agent_card(
+    {
+        "name": "video-desk",
+        "version": "2.3.1",
+        "skills": ["hello-world"],  # "internal-only" is excluded from the card
+        "provider": {"organization": "deemwar", "url": "https://deemwar.com"},
+    },
+    skills,
+    "http://127.0.0.1:8080/",
+)
+
+assert [s["id"] for s in card["skills"]] == ["hello-world"]
+assert card["version"] == "2.3.1"
+assert card["provider"] == {"organization": "deemwar", "url": "https://deemwar.com"}
+# A skill with no description still gets a card entry — description defaults to "".
+assert card["skills"][0]["description"] == ""
+
+print("ok:", card["version"], card["provider"]["organization"])
 ```
+
+## Options
+
+| Parameter | Type | What it does |
+|---|---|---|
+| `cfg` | `dict` | The `A2AConfig` — `name?`, `description?`, `version?`, `provider?`, `skills?: list[str]`, `store?` (unused here). |
+| `skills` | `list[SkillInfo]` | The toolkit's resolved skill inventory. Filtered to `cfg["skills"]` when given; `None`/absent ⇒ all. |
+| `url` | `str` | The JSON-RPC POST endpoint peers should call — the served base URL plus `/`. |
+
+## Returns
+
+| Field | Default when omitted |
+|---|---|
+| `name` | `"toolnexus-agent"` |
+| `description` | `""` |
+| `version` | `"0.1.0"` |
+| `protocolVersion` | `"0.3.0"` (fixed — not configurable) |
+| `capabilities.streaming` | `False` (fixed — no streaming in core) |
+| `provider` | omitted entirely unless `cfg["provider"]` is set |
 
 ## The same call in the other five ports
 

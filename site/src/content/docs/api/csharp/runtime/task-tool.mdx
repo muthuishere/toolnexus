@@ -8,19 +8,282 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Agents/AgentRuntime.cs">Agents/AgentRuntime.cs</a>
 </p>
 
-<Aside type="caution" title="Not available in C#">
-Only JS exposes a constructible task tool symbol; elsewhere it is the `task` builtin, toggled on the runtime.
+```csharp
+task { agent: string, prompt: string } -> string
+```
+
+<Aside type="caution" title="No constructible symbol in C# — it's behavior, not a type">
+Only JS exposes a standalone, constructible `agents.taskTool` value. In every other port — C#
+included — `task` is a tool the runtime **auto-registers** on a handle's toolkit the moment that
+handle's `AgentDef.Team` (or `AgentSpec.Team`) is non-empty: see
+`AgentRuntime.RunTurnBodyAsync`'s `if (h.Def.Team is { Count: > 0 }) toolkit.Register(TaskTool(h));`
+and the private `TaskTool` builder right below it. There is nothing to import or call directly —
+set `Team`, and the model gains the tool.
 </Aside>
 
-The opt-in tool that lets the model itself spawn a teammate. Default OFF.
+`task = spawn → wake → wait → close`, fused into one call. The parent's transcript gains **exactly
+one** tool message per call, however long the child's own run takes — the child runs on a fresh
+transcript, and its usage rolls up into the parent's ledger. The tool's description lists **only**
+the caller's own `Team` (sorted by name, each entry `"<name>: <does>"`); a target outside the team
+is a loud tool error, never silently ignored.
 
-## What to use instead
+## When to use it
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+You want the **model itself** to decide when to delegate — not you, wiring a fixed pipeline of
+`task` tool calls in your own code. Give an `AgentDef`/`AgentSpec` a `Team`, and its model gains a
+`task` tool scoped to exactly that team; nothing else changes about how you build or run the agent.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Team is opt-in, and recursion doesn't leak">
+`Team = null` (the default) means the agent gets **no** `task` tool at all — recursion is
+opt-in, never default. A child only gets its own `task` tool if its *own* def declares a `Team`;
+delegation depth is bounded by each level's explicit choice, plus [`Budget.MaxDepth`](/api/csharp/runtime/budgets/).
+If you want to call a sub-agent from your *own* code instead of letting the model decide, drop it
+in as a plain tool with [`Agent.AsTool`](/api/csharp/runtime/agent/) instead.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — the model delegates, once
+
+```csharp test
+using Toolnexus.Agents;
+
+var llm = new MockLlm(req =>
+{
+    var body = ReadBody(req);
+    if (body.Contains("\"role\":\"tool\""))
+        return Task.FromResult(MockLlm.Text($"coordinator says: {ExtractLastToolContent(body)}"));
+    return Task.FromResult(MockLlm.ToolCall("t1", "task", new { agent = "explorer", prompt = "find the treasure" }));
+});
+
+var rt = new AgentRuntime(new RuntimeOptions
+{
+    Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
+    Registry = new Dictionary<string, AgentDef>
+    {
+        ["coordinator"] = new()
+        {
+            Name = "coordinator", Does = "delegates exploration",
+            Team = new List<string> { "explorer" }, // non-empty Team ⇒ the runtime registers `task`
+        },
+        ["explorer"] = new() { Name = "explorer", Does = "explores and reports back" },
+    },
+});
+
+var h = rt.Spawn(rt.Root, "coordinator").Handle!;
+var wait = rt.WaitAsync(h);
+rt.Wake(h, "find the treasure via the team");
+var result = await wait;
+
+if (result.Status != "done") throw new Exception(result.Status);
+if (!result.Text.Contains("coordinator says:")) throw new Exception(result.Text);
+
+await rt.CloseAsync(rt.Root);
+Console.WriteLine($"ok: {result.Text}");
+
+static string ReadBody(System.Net.Http.HttpRequestMessage req) => req.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+static string ExtractLastToolContent(string body)
+{
+    using var doc = System.Text.Json.JsonDocument.Parse(body);
+    var msgs = doc.RootElement.GetProperty("messages").EnumerateArray().ToList();
+    return msgs.Last(m => m.GetProperty("role").GetString() == "tool").GetProperty("content").GetString() ?? "";
+}
+
+sealed class MockLlm : System.Net.Http.HttpMessageHandler
+{
+    readonly Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> _respond;
+    public MockLlm(Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> respond) => _respond = respond;
+    protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+        System.Net.Http.HttpRequestMessage request, CancellationToken ct) => _respond(request);
+    public static System.Net.Http.HttpResponseMessage Text(string content) => Json(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        choices = new[] { new { message = new { role = "assistant", content } } },
+        usage = new { prompt_tokens = 5, completion_tokens = 3, total_tokens = 8 },
+    }));
+    public static System.Net.Http.HttpResponseMessage ToolCall(string id, string name, object args) => Json(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        choices = new[]
+        {
+            new { message = new { role = "assistant", content = (string?)null,
+                tool_calls = new[] { new { id, type = "function", function = new { name, arguments = System.Text.Json.JsonSerializer.Serialize(args) } } } } },
+        },
+        usage = new { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+    }));
+    static System.Net.Http.HttpResponseMessage Json(string body) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json"),
+    };
+}
+```
+
+### 2. The realistic case — two parallel calls to the same agent+prompt reattach, not duplicate
+
+```csharp test
+using Toolnexus.Agents;
+
+var childRuns = 0;
+var llm = new MockLlm(req =>
+{
+    var body = ReadBody(req);
+    var model = System.Text.Json.JsonDocument.Parse(body).RootElement.GetProperty("model").GetString();
+    if (model == "researcher-model")
+    {
+        childRuns++;
+        return Task.FromResult(MockLlm.Text("42"));
+    }
+    if (body.Contains("\"role\":\"tool\""))
+        return Task.FromResult(MockLlm.Text("got two answers back"));
+    // ONE turn issues TWO parallel task calls for the SAME agent+prompt (SPEC §7D: parallel task
+    // calls in one turn run concurrently; identical key ⇒ reattach to one child, never a duplicate spawn).
+    return Task.FromResult(MockLlm.ToolCalls(
+        ("c1", "task", new { agent = "researcher", prompt = "what is the answer?" }),
+        ("c2", "task", new { agent = "researcher", prompt = "what is the answer?" })));
+});
+
+var rt = new AgentRuntime(new RuntimeOptions
+{
+    Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "coordinator-model",
+    Registry = new Dictionary<string, AgentDef>
+    {
+        ["coordinator"] = new() { Name = "coordinator", Does = "asks twice, by accident", Team = new List<string> { "researcher" } },
+        ["researcher"] = new() { Name = "researcher", Does = "researches an answer", Model = "researcher-model" },
+    },
+});
+
+var h = rt.Spawn(rt.Root, "coordinator").Handle!;
+var wait = rt.WaitAsync(h);
+rt.Wake(h, "ask the researcher, twice");
+var result = await wait;
+
+if (result.Status != "done") throw new Exception(result.Status);
+// Reattachment by task key (agent+prompt) is the ONLY idempotency mechanism — only one child spawned.
+if (h.Children.Count != 1) throw new Exception($"expected 1 reattached child, got {h.Children.Count}");
+if (childRuns != 1) throw new Exception($"expected the researcher model to run exactly once, ran {childRuns} time(s)");
+
+await rt.CloseAsync(rt.Root);
+Console.WriteLine($"ok: {result.Text} (1 child spawned for 2 identical task calls, ran {childRuns} time)");
+
+static string ReadBody(System.Net.Http.HttpRequestMessage req) => req.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+
+sealed class MockLlm : System.Net.Http.HttpMessageHandler
+{
+    readonly Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> _respond;
+    public MockLlm(Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> respond) => _respond = respond;
+    protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+        System.Net.Http.HttpRequestMessage request, CancellationToken ct) => _respond(request);
+    public static System.Net.Http.HttpResponseMessage Text(string content) => Json(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        choices = new[] { new { message = new { role = "assistant", content } } },
+        usage = new { prompt_tokens = 5, completion_tokens = 3, total_tokens = 8 },
+    }));
+    public static System.Net.Http.HttpResponseMessage ToolCalls(params (string id, string name, object args)[] calls) => Json(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        choices = new[]
+        {
+            new { message = new { role = "assistant", content = (string?)null,
+                tool_calls = calls.Select(c => new { id = c.id, type = "function", function = new { name = c.name, arguments = System.Text.Json.JsonSerializer.Serialize(c.args) } }).ToArray() } },
+        },
+        usage = new { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+    }));
+    static System.Net.Http.HttpResponseMessage Json(string body) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json"),
+    };
+}
+```
+
+### 3. Full surface — a target outside the team is a loud, named error
+
+```csharp test
+using Toolnexus.Agents;
+
+var llm = new MockLlm(req =>
+{
+    var body = ReadBody(req);
+    if (body.Contains("\"role\":\"tool\""))
+        return Task.FromResult(MockLlm.Text($"acknowledged: {ExtractLastToolContent(body)}"));
+    // targets an agent that exists in the REGISTRY but not in THIS agent's team.
+    return Task.FromResult(MockLlm.ToolCall("r1", "task", new { agent = "stranger", prompt = "hi" }));
+});
+
+var rt = new AgentRuntime(new RuntimeOptions
+{
+    Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
+    Registry = new Dictionary<string, AgentDef>
+    {
+        ["rogue"] = new() { Name = "rogue", Does = "tries to go off-team", Team = new List<string> { "ally" } },
+        ["ally"] = new() { Name = "ally", Does = "a legitimate teammate" },
+        ["stranger"] = new() { Name = "stranger", Does = "not on rogue's team" },
+    },
+});
+
+var h = rt.Spawn(rt.Root, "rogue").Handle!;
+var wait = rt.WaitAsync(h);
+rt.Wake(h, "try to reach stranger");
+var result = await wait;
+
+if (result.Status != "done") throw new Exception(result.Status);
+if (!result.Text.Contains("not in this agent's team")) throw new Exception(result.Text);
+if (!result.Text.Contains("ally")) throw new Exception("the error should list the actual team");
+if (h.Children.Count != 0) throw new Exception("an out-of-team target must never spawn a child");
+
+await rt.CloseAsync(rt.Root);
+Console.WriteLine($"ok: {result.Text}");
+
+static string ReadBody(System.Net.Http.HttpRequestMessage req) => req.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+static string ExtractLastToolContent(string body)
+{
+    using var doc = System.Text.Json.JsonDocument.Parse(body);
+    var msgs = doc.RootElement.GetProperty("messages").EnumerateArray().ToList();
+    return msgs.Last(m => m.GetProperty("role").GetString() == "tool").GetProperty("content").GetString() ?? "";
+}
+
+sealed class MockLlm : System.Net.Http.HttpMessageHandler
+{
+    readonly Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> _respond;
+    public MockLlm(Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> respond) => _respond = respond;
+    protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+        System.Net.Http.HttpRequestMessage request, CancellationToken ct) => _respond(request);
+    public static System.Net.Http.HttpResponseMessage Text(string content) => Json(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        choices = new[] { new { message = new { role = "assistant", content } } },
+        usage = new { prompt_tokens = 5, completion_tokens = 3, total_tokens = 8 },
+    }));
+    public static System.Net.Http.HttpResponseMessage ToolCall(string id, string name, object args) => Json(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        choices = new[]
+        {
+            new { message = new { role = "assistant", content = (string?)null,
+                tool_calls = new[] { new { id, type = "function", function = new { name, arguments = System.Text.Json.JsonSerializer.Serialize(args) } } } } },
+        },
+        usage = new { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+    }));
+    static System.Net.Http.HttpResponseMessage Json(string body) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json"),
+    };
+}
+```
+
+<Aside type="caution">
+A suspending child agent presents to `task`'s caller as an ordinary §10 suspending tool result — no
+new pending type. If the child's own run halts on out-of-band input, the `task` call returns a
+`Pending` result carrying the child's `Request`, and a re-invoked `task` with the same key
+**reattaches** to the still-suspended child rather than spawning a second one.
+</Aside>
+
+## Shape
+
+| Field | What it is |
+|---|---|
+| `agent` | Must be one of the caller's `Team` names — anything else ⇒ an `isError` result listing the real team, never a spawn. |
+| `prompt` | The task text; together with `agent` this is the **reattachment key** — a repeat call with the same pair reuses the existing child. |
+| Result | `Text` (or `[<status>] <text>` when the child didn't finish `"done"`), `IsError` from the child, `Metadata { agent, turns, totalTokens }`. |
 
 ## The same capability in the other ports
 
@@ -31,6 +294,9 @@ _TODO: the closest thing this port does offer, and how to get the same outcome._
 | Go | _not shipped in this port_ |  |
 | Java | _not shipped in this port_ |  |
 | Elixir | _not shipped in this port_ |  |
+
+Elsewhere (including C#) `task` is behavior — auto-registered whenever `Team` is set — not a
+symbol you import or construct.
 
 ## See also
 

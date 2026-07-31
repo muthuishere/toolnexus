@@ -8,49 +8,196 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7a-a2a-agents--outbound-source-a2a">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/a2a.ts">js/src/a2a.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function agentTools(ag: Agent): Promise<Tool[]>
 ```
 
-Expand a remote agent card into one tool per advertised skill.
+Resolve an `Agent` descriptor to its tools: `GET` the Agent Card, read its `skills[]`, and build
+one `Tool` per skill — `name = sanitize(card.name) + "_" + sanitize(skill.id ?? skill.name)`,
+`source: "a2a"`. This is the exact primitive `createToolkit({ agents })` calls internally, once per
+configured `Agent`.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `agentTools` when you want a peer's tools **without** going through a `Toolkit` — you are
+wiring your own tool list for a hand-rolled loop, or you want to inspect/filter what a peer exposes
+before deciding whether to register any of it.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use createToolkit({ agents }) instead when you have a Toolkit already">
+[`createToolkit`](/api/javascript/toolkit/create/) calls `agentTools` for every entry in its
+`agents` array and merges the results with your other sources, resolving name collisions the same
+way MCP and skills do. Reach for `agentTools` directly only when there is no toolkit in the
+picture, or you need the raw `Tool[]` to filter or wrap before use.
 </Aside>
+
+A failing agent card fetch throws from `agentTools` itself — it is the toolkit layer
+(`createToolkit`) that catches and isolates that failure per agent. Calling `agentTools` directly
+means you own that try/catch.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — one skill, one tool
 
-{/* TODO:example1 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { agent, agentTools } from "toolnexus"
+
+const server = http.createServer((req, res) => {
+  if (req.method === "GET" && req.url === "/.well-known/agent-card.json") {
+    res.writeHead(200, { "content-type": "application/json" })
+    res.end(JSON.stringify({
+      name: "greeter",
+      url: `http://127.0.0.1:${(server.address() as any).port}/`,
+      skills: [{ id: "hello", name: "Hello", description: "Say hello" }],
+    }))
+    return
+  }
+  res.writeHead(404)
+  res.end()
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const tools = await agentTools(agent({ card: `http://127.0.0.1:${port}/.well-known/agent-card.json` }))
+
+assert.equal(tools.length, 1)
+assert.equal(tools[0].name, "greeter_hello")
+assert.equal(tools[0].source, "a2a")
+assert.deepEqual(tools[0].inputSchema.required, ["task"])
+
+server.close()
+console.log("ok:", tools[0].name)
 ```
 
-### 2. TODO — the realistic case
+### 2. A realistic case — several skills, then actually calling one
 
-{/* TODO:example2 */}
-```ts
-// TODO
+Every card skill becomes a tool with the same one-field `{ task: string }` schema; `execute` runs
+the full `SendMessage` → poll `GetTask` cycle and returns the completed artifact text.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { randomUUID } from "node:crypto"
+import { agent, agentTools } from "toolnexus"
+
+const tasks = new Map<string, { polls: number }>()
+const server = http.createServer((req, res) => {
+  if (req.method === "GET" && req.url === "/.well-known/agent-card.json") {
+    res.writeHead(200, { "content-type": "application/json" })
+    res.end(JSON.stringify({
+      name: "research-desk",
+      url: `http://127.0.0.1:${(server.address() as any).port}/`,
+      skills: [
+        { id: "search", name: "Search", description: "Search the web" },
+        { id: "summarize", name: "Summarize", description: "Summarize a document" },
+      ],
+    }))
+    return
+  }
+  let body = ""
+  req.on("data", (c) => (body += c))
+  req.on("end", () => {
+    const rpc = JSON.parse(body)
+    const send = (result: unknown) => {
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result }))
+    }
+    if (rpc.method === "SendMessage") {
+      const id = randomUUID()
+      tasks.set(id, { polls: 0 })
+      send({ id, status: { state: "submitted" } })
+    } else if (rpc.method === "GetTask") {
+      const t = tasks.get(rpc.params.id)!
+      t.polls++
+      if (t.polls < 2) send({ id: rpc.params.id, status: { state: "working" } })
+      else send({ id: rpc.params.id, status: { state: "completed" }, artifacts: [{ parts: [{ kind: "text", text: "3 results found" }] }] })
+    }
+  })
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const tools = await agentTools(agent({ card: `http://127.0.0.1:${port}/.well-known/agent-card.json`, pollEvery: 10 }))
+
+assert.deepEqual(tools.map((t) => t.name).sort(), ["research-desk_search", "research-desk_summarize"])
+
+const searchTool = tools.find((t) => t.name === "research-desk_search")!
+const res = await searchTool.execute({ task: "toolnexus release notes" })
+assert.equal(res.isError, false)
+assert.equal(res.output, "3 results found")
+assert.equal((res.metadata as any).agent, "research-desk")
+
+server.close()
+console.log("ok:", res.output)
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — a failing task and its uniform error shape
 
-{/* TODO:example3 */}
-```ts
-// TODO
+A `failed` terminal task maps to `isError: true` with the status message text appended; the tool
+never throws — every outcome, success or failure, is a `ToolResult`.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { randomUUID } from "node:crypto"
+import { agent, agentTools } from "toolnexus"
+
+const server = http.createServer((req, res) => {
+  if (req.method === "GET" && req.url === "/.well-known/agent-card.json") {
+    res.writeHead(200, { "content-type": "application/json" })
+    res.end(JSON.stringify({
+      name: "flaky",
+      url: `http://127.0.0.1:${(server.address() as any).port}/`,
+      skills: [{ id: "risky", description: "Sometimes fails" }],
+    }))
+    return
+  }
+  let body = ""
+  req.on("data", (c) => (body += c))
+  req.on("end", () => {
+    const rpc = JSON.parse(body)
+    const send = (result: unknown) => {
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result }))
+    }
+    if (rpc.method === "SendMessage") send({ id: randomUUID(), status: { state: "submitted" } })
+    else if (rpc.method === "GetTask")
+      send({ id: rpc.params.id, status: { state: "failed", message: { role: "agent", parts: [{ kind: "text", text: "quota exceeded" }] } } })
+  })
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const [riskyTool] = await agentTools(agent({ card: `http://127.0.0.1:${port}/.well-known/agent-card.json`, pollEvery: 5 }))
+
+const res = await riskyTool.execute({ task: "do the risky thing" })
+assert.equal(res.isError, true)
+assert.match(res.output, /failed/)
+assert.match(res.output, /quota exceeded/, "the status message rides along in the output")
+assert.equal((res.metadata as any).state, "failed")
+
+server.close()
+console.log("ok:", res.output)
 ```
+
+## Options
+
+| Field | Type | What it does |
+|---|---|---|
+| `ag` | `Agent` | The descriptor built by [`agent()`](/api/javascript/agents/agent/), or parsed by [`parseAgentsConfig`](/api/javascript/agents/parse-config/). **Required.** |
+
+## What you get back
+
+`Promise<Tool[]>` — one `Tool` per skill on the resolved Agent Card, each `source: "a2a"`, with
+`inputSchema = { type: "object", properties: { task: { type: "string" } }, required: ["task"] }`.
+Calling `execute` runs the full submit→poll cycle described in
+[SPEC §7A](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## The same call in the other five ports
 
@@ -60,7 +207,7 @@ _TODO: name the alternative and when to prefer it._
 | Go | `AgentTools` | [→](/api/go/agents/agent-tools/) |
 | Java | `A2A.agentTools` | [→](/api/java/agents/agent-tools/) |
 | C# | `A2A.AgentTools` | [→](/api/csharp/agents/agent-tools/) |
-| Elixir | `Toolnexus.Agents.tools` | [→](/api/elixir/agents/agent-tools/) |
+| Elixir | `Toolnexus.A2a.agent_tools` | [→](/api/elixir/agents/agent-tools/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).

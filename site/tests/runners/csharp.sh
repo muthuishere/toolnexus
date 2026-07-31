@@ -47,7 +47,11 @@ for f in "$SNIPPETS"/*.cs; do
   </ItemGroup>
 </Project>
 EOF
-	if out=$(cd "$proj" && TOOLNEXUS_REPO="$REPO_ROOT" dotnet run --nologo -v q 2>&1); then
+	# -nodeReuse:false: without it, MSBuild keeps a shared build-server node alive
+	# across snippets. Two projects touching it in close succession can hit a real
+	# file race (MSB4018/MSB3491 "file in use" / "already exists") even though the
+	# runner is single-threaded — confirmed by an isolated re-run always passing.
+	if out=$(cd "$proj" && TOOLNEXUS_REPO="$REPO_ROOT" dotnet run --nologo -v q -nodeReuse:false 2>&1); then
 		pass=$((pass + 1))
 		printf '  \033[32mPASS\033[0m %-40s %s\n' "$name" "$(echo "$out" | tail -1)"
 	else

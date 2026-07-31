@@ -19,8 +19,45 @@ The opt-in tool that lets the model itself spawn a teammate. Default OFF.
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Python has no separately importable `taskTool` symbol to construct and drop into
+`extra_tools` yourself. The capability still exists — it is the runtime's own `task`
+builtin (`source: "native"`, name `"task"`), and it is **opt-in per agent** via
+[`Agent`](/api/python/runtime/agent/)'s `team` field:
+
+```python
+from toolnexus.agents import agent
+
+explorer = agent("explorer", does="read-only research")
+coder = agent("coder", does="implements changes", team=[explorer])
+```
+
+Listing `team=[explorer]` on `coder` **is** the wiring (SPEC §7D "team scoping"):
+`Agent.registry()` turns it into that `AgentDef`'s `task_targets=["explorer"]`, and
+`AgentRuntime._task_tool(parent)` (internal — never constructed directly) builds a
+`task {agent: string, prompt: string}` tool **only** for handles whose `defn.task_targets`
+is set. `coder`'s model sees one new tool, `task`, whose description lists exactly its
+team (sorted by name, composed from each member's `does`) — never the whole registry.
+Calling `task` with an `agent` outside that list is a uniform error listing the
+allowed names, not a crash.
+
+Three behaviors worth knowing about the builtin, since there is no doc page of its
+own to describe them:
+
+- **Default OFF, per agent** — an `Agent` with no `team` gets no `task` tool at all;
+  a child spawned from a team member gets no delegation either, unless *its own* def
+  also declares a team (recursion is opt-in, never inherited).
+- **Fused verbs** — one `task` call is `spawn → wake → wait → close`, so the parent's
+  transcript gains exactly one tool message per call; the child's own turns and tool
+  calls never leak into the parent's.
+- **Reattachment, not re-spawn** — a re-invoked `task` call with the same
+  `{agent, prompt}` pair (durable-resume replay) reattaches to the existing child by
+  task key instead of spawning a duplicate: settled ⇒ its recorded result, suspended
+  ⇒ its pending Request, running ⇒ awaited.
+
+To exercise the same mechanics directly (no model in the loop), build the
+`AgentDef.task_targets` list yourself and drive `AgentRuntime` — see
+[`AgentRuntime`](/api/python/runtime/runtime/)'s examples for the spawn/wake/wait
+verbs the `task` tool is built from.
 
 ## The same capability in the other ports
 

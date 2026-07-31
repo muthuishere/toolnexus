@@ -8,49 +8,194 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7C</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7C</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/McpServe.cs">McpServe.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public static McpServer BuildMcpServer(
+    ITransport transport, IReadOnlyList<ITool> tools, MCPServeConfig? cfg = null, OnCall? onCall = null)
 ```
 
-The inbound MCP profile: any MCP client can call your tools.
+The inbound mirror of [`A2AServer.Start`](/api/csharp/serve/a2a/) — but where A2A advertises
+**skills** and fulfils a Task through the whole client loop, this advertises the toolkit's
+**unified tools** (every source: mcp · skill · native · http · builtin · a2a) and dispatches each
+`tools/call` straight to `ITool.ExecuteAsync`. There is no `client`, no Task, no `TaskStore` — the
+calling MCP client *is* the LLM host. Built on the official `ModelContextProtocol` SDK's own
+server types (`ITransport`, `McpServer`); `Toolkit.ServeAsync` mounts the streamable-HTTP profile
+(`POST /mcp`) on top of it when `opts.Mcp` (or a top-level `mcpServer` config block) is present.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Turn your toolkit into a **universal MCP gateway**: aggregate N MCP servers, your skills, and your
+own native/HTTP tools behind one `Toolkit`, then re-expose the union as a single MCP server any MCP
+client (Claude Desktop, an IDE, another agent) can call. `BuildMcpServer` is the low-level
+constructor — call it directly when you have your own `ITransport` (e.g. an in-process pipe for
+tests, or your own hosting shell); most apps go through `Toolkit.ServeAsync(addr, new
+Toolkit.ServeOptions { Mcp = ... })`, which wires this to the shared streamable-HTTP endpoint.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="This exposes TOOLS; A2A exposes SKILLS through a Task">
+Pick MCP-inbound when the caller wants direct tool calls with no LLM loop of its own on your side —
+the caller supplies the reasoning. Pick [A2A-inbound](/api/csharp/serve/a2a/) when you want your
+toolkit to run its **own** client loop per request and hand back only the final answer. The two
+profiles are independent and can be mounted on the same `ServeAsync` call — `mcp` and `a2a` are
+both optional and compose.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — an in-process transport pair
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using System.IO.Pipelines;
+using ModelContextProtocol;
+using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
+using Toolnexus;
+
+var echo = NativeTool.Of("echo", "echo back text",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["text"] = new Dictionary<string, object?> { ["type"] = "string" } },
+        ["required"] = new List<object?> { "text" },
+    },
+    (IDictionary<string, object?> a) => a.TryGetValue("text", out var v) ? v?.ToString() ?? "" : "");
+
+var clientToServer = new Pipe();
+var serverToClient = new Pipe();
+var serverTransport = new StreamServerTransport(clientToServer.Reader.AsStream(), serverToClient.Writer.AsStream());
+var server = McpServe.BuildMcpServer(serverTransport, new List<ITool> { echo }, new MCPServeConfig { Name = "gateway" });
+var cts = new CancellationTokenSource();
+var run = server.RunAsync(cts.Token);
+
+var clientTransport = new StreamClientTransport(clientToServer.Writer.AsStream(), serverToClient.Reader.AsStream());
+var client = await McpClient.CreateAsync(clientTransport);
+
+if (client.ServerInfo.Name != "gateway") throw new Exception(client.ServerInfo.Name);
+var tools = await client.ListToolsAsync();
+if (!tools.Any(t => t.Name == "echo")) throw new Exception("expected echo in tools/list");
+
+await client.DisposeAsync();
+cts.Cancel();
+await server.DisposeAsync();
+try { await run; } catch { }
+
+Console.WriteLine($"ok: {client.ServerInfo.Name} advertises {string.Join(",", tools.Select(t => t.Name))}");
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — `tools/call` dispatches straight to `ExecuteAsync`
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using System.IO.Pipelines;
+using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
+using Toolnexus;
+
+var echo = NativeTool.Of("echo", "echo back text",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["text"] = new Dictionary<string, object?> { ["type"] = "string" } },
+        ["required"] = new List<object?> { "text" },
+    },
+    (IDictionary<string, object?> a) => a.TryGetValue("text", out var v) ? v?.ToString() ?? "" : "");
+var boom = NativeTool.Of("boom", "always throws", null,
+    (IDictionary<string, object?> _) => throw new Exception("kaboom"));
+
+var calls = new List<OnCallEvent>();
+var clientToServer = new Pipe();
+var serverToClient = new Pipe();
+var serverTransport = new StreamServerTransport(clientToServer.Reader.AsStream(), serverToClient.Writer.AsStream());
+var server = McpServe.BuildMcpServer(serverTransport, new List<ITool> { echo, boom }, null,
+    ev => { calls.Add(ev); return Task.CompletedTask; });
+var cts = new CancellationTokenSource();
+var run = server.RunAsync(cts.Token);
+var client = await McpClient.CreateAsync(
+    new StreamClientTransport(clientToServer.Writer.AsStream(), serverToClient.Reader.AsStream()));
+
+var ok = await client.CallToolAsync("echo", new Dictionary<string, object?> { ["text"] = "hi" });
+if (ok.IsError == true) throw new Exception("expected success");
+if (((TextContentBlock)ok.Content[0]).Text != "hi") throw new Exception("wrong echo");
+
+// A throwing tool becomes an isError result — never crashes the server.
+var bad = await client.CallToolAsync("boom", new Dictionary<string, object?>());
+if (bad.IsError != true) throw new Exception("expected isError");
+if (!((TextContentBlock)bad.Content[0]).Text.Contains("kaboom")) throw new Exception("expected kaboom in output");
+
+if (calls.Count != 2) throw new Exception($"expected 2 onCall events, got {calls.Count}");
+
+await client.DisposeAsync();
+cts.Cancel();
+await server.DisposeAsync();
+try { await run; } catch { }
+
+Console.WriteLine($"ok: echo succeeded, boom isError=true, onCall saw {calls.Count} calls");
 ```
 
-### 3. TODO — the full surface
+### 3. Full surface — the real streamable-HTTP endpoint via `Toolkit.ServeAsync`
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
+using Toolnexus;
+
+var echo = NativeTool.Of("echo", "echo back text",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["text"] = new Dictionary<string, object?> { ["type"] = "string" } },
+        ["required"] = new List<object?> { "text" },
+    },
+    (IDictionary<string, object?> a) => a.TryGetValue("text", out var v) ? v?.ToString() ?? "" : "");
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Builtins = false,
+    ExtraTools = new List<ITool> { echo },
+});
+
+// mcp.Tools narrows the advertised surface — even though the toolkit only has one tool here,
+// this is the filter a real gateway would use to expose a subset of a much larger toolkit.
+var srv = await tk.ServeAsync("127.0.0.1:0", new Toolkit.ServeOptions
+{
+    Mcp = new MCPServeConfig { Name = "http-gateway", Tools = new[] { "echo" } },
+});
+
+var client = await McpClient.CreateAsync(new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri(srv.Url + "/mcp"),
+    TransportMode = HttpTransportMode.StreamableHttp,
+}));
+
+if (client.ServerInfo.Name != "http-gateway") throw new Exception(client.ServerInfo.Name);
+var res = await client.CallToolAsync("echo", new Dictionary<string, object?> { ["text"] = "over http" });
+var text = ((TextContentBlock)res.Content[0]).Text;
+if (text != "over http") throw new Exception(text);
+
+await client.DisposeAsync();
+await srv.StopAsync();
+Console.WriteLine($"ok: {client.ServerInfo.Name} -> {text}");
 ```
+
+<Aside type="caution">
+`mcp` absent (no `opts.Mcp`, no top-level `mcpServer` config block) mounts no `/mcp` route at all —
+an MCP-only `ServeAsync` call 404s everything else, and an A2A-only call answers `/mcp` with a
+JSON-RPC method-not-found error rather than an MCP result. The two profiles never shadow each
+other.
+</Aside>
+
+## Parameters
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `transport` | `ITransport` | The SDK transport to serve over — an in-process stream pair for tests, or the streamable-HTTP transport `Toolkit.ServeAsync` builds per request. |
+| `tools` | `IReadOnlyList<ITool>` | The tools to expose. Use `McpServe.ExposedMcpTools(tk.Tools(), cfg)` to apply `cfg.Tools` filtering first. |
+| `cfg` | `MCPServeConfig?` | `Name`/`Version` for `initialize`; `Tools` narrows `tools/list` (unknown names ignored, never an error). |
+| `onCall` | `OnCall?` | Fires per inbound `tools/call` with `{name, source, ms, isError}`. Host callback errors are isolated. |
 
 ## The same call in the other five ports
 
@@ -60,7 +205,7 @@ _TODO: name the alternative and when to prefer it._
 | Python | `build_mcp_server` | [→](/api/python/serve/mcp/) |
 | Go | `ExposedMcpTools` | [→](/api/go/serve/mcp/) |
 | Java | `McpServe.build` | [→](/api/java/serve/mcp/) |
-| Elixir | `Toolnexus.McpServe.build` | [→](/api/elixir/serve/mcp/) |
+| Elixir | `Toolnexus.McpServe.exposed_tools` | [→](/api/elixir/serve/mcp/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).

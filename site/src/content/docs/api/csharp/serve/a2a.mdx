@@ -8,49 +8,320 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/A2AServer.cs">A2AServer.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public Task<ServeHandle> ServeAsync(string addr, Toolkit.ServeOptions opts)
 ```
 
-Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+`Toolkit.ServeAsync` is the entry point apps call; under the hood it delegates to
+`A2AServer.StartAsync`, which stands up a minimal HTTP server that — when `opts.A2A` (or a
+top-level `a2a` config block) is present — mounts `GET /.well-known/agent-card.json` (built from
+the toolkit's **skills**, never raw tools) and `POST /` (JSON-RPC 2.0: `SendMessage` submits a
+Task and fulfils it asynchronously via `opts.Client.RunAsync`/`AskAsync`; `GetTask` polls it). This
+is the exact inbound counterpart to [`A2A.Agent`](/api/csharp/agents/agent/) /
+[`A2A.AgentTools`](/api/csharp/agents/agent-tools/) — your toolkit becomes the peer being called.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+You want your own toolkit reachable by any A2A-speaking caller — another toolnexus instance, a
+teammate's agent, or a third-party A2A client — over plain HTTP, with no bespoke wire format to
+maintain. Each of the toolkit's skills becomes one advertised A2A skill; the JSON-RPC fulfilment
+runs the same `client.RunAsync`/`AskAsync` loop a local caller would use.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="a2a absent ⇒ no A2A routes, not an error">
+`ServeAsync` is generic — A2A is opt-in via `opts.A2A`. Omit it (and any top-level `a2a` config
+block) to run a plain HTTP toolkit host that only serves other profiles, e.g.
+[`McpServe`](/api/csharp/serve/mcp/)'s `POST /mcp`; every A2A-specific route 404s. Pass both `A2A`
+and `Mcp` together to serve the same toolkit over two protocols on one port.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — the card, with defaults
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+using var peerLlm = new Stub(ctx => Stub.Json(ctx, 200, """
+{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}
+"""));
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Builtins = false,
+    Skills = new List<SkillSource.SkillDef> { new("greet", "says hello", "Say a friendly hello.") },
+});
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = peerLlm.BaseUrl, Style = "openai", Model = "mock", ApiKey = "k",
+});
+
+var handle = await tk.ServeAsync("127.0.0.1:0", new Toolkit.ServeOptions
+{
+    Client = client,
+    A2A = new A2AConfig(), // all defaults
+});
+
+using var http = new HttpClient();
+var body = await http.GetStringAsync(handle.Url + "/.well-known/agent-card.json");
+var card = Json.ParseObjectLoose(body);
+
+if (card["name"] as string != "toolnexus-agent") throw new Exception(card["name"] as string);
+if (card["protocolVersion"] as string != "0.3.0") throw new Exception(card["protocolVersion"] as string);
+if (card["url"] as string != handle.Url + "/") throw new Exception(card["url"] as string);
+
+await handle.StopAsync();
+Console.WriteLine($"ok: {card["name"]} at {card["url"]}");
+
+sealed class Stub : IDisposable
+{
+    readonly System.Net.HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<System.Net.HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                System.Net.HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(System.Net.HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — a real local round trip through an outbound A2A caller
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+using var peerLlm = new Stub(ctx => Stub.Json(ctx, 200, """
+{"choices":[{"message":{"content":"the weather is sunny"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}
+"""));
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Builtins = false,
+    Skills = new List<SkillSource.SkillDef> { new("weather", "reports the weather", "Report the weather.") },
+});
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = peerLlm.BaseUrl, Style = "openai", Model = "mock", ApiKey = "k",
+});
+
+var handle = await tk.ServeAsync("127.0.0.1:0", new Toolkit.ServeOptions
+{
+    Client = client,
+    A2A = new A2AConfig { Name = "weather-desk" },
+});
+
+// Another toolkit, on the caller side, resolves and calls the served toolkit exactly like any
+// other A2A peer — SendMessage then poll GetTask under the hood.
+var tools = await A2A.AgentTools(new Agent
+{
+    Card = handle.Url + "/.well-known/agent-card.json",
+    PollEvery = 25,
+});
+var tool = tools.Single(t => t.Name == "weather-desk_weather");
+var result = await tool.ExecuteAsync(new Dictionary<string, object?> { ["task"] = "how's the weather?" });
+
+if (result.IsError || result.Output != "the weather is sunny") throw new Exception(result.Output);
+
+await handle.StopAsync();
+Console.WriteLine($"ok: {result.Output}");
+
+sealed class Stub : IDisposable
+{
+    readonly System.Net.HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<System.Net.HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                System.Net.HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(System.Net.HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. Full surface — `onTask` telemetry, and no `A2A` profile ⇒ 404
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+using var peerLlm = new Stub(ctx => Stub.Json(ctx, 200, """
+{"choices":[{"message":{"content":"done"}}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}
+"""));
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Builtins = false,
+    Skills = new List<SkillSource.SkillDef> { new("ping", "says done", "Reply done.") },
+});
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = peerLlm.BaseUrl, Style = "openai", Model = "mock", ApiKey = "k",
+});
+
+var terminalStates = new List<string>();
+var handle = await tk.ServeAsync("127.0.0.1:0", new Toolkit.ServeOptions
+{
+    Client = client,
+    A2A = new A2AConfig { Name = "telemetry-desk" },
+    OnTask = ev =>
+    {
+        terminalStates.Add(ev.State);
+        if (ev.Result is not null && ev.State == "completed" && ev.Result.Usage.TotalTokens != 5)
+            throw new Exception($"expected usage 5, got {ev.Result.Usage.TotalTokens}");
+        return Task.CompletedTask;
+    },
+});
+
+var tools = await A2A.AgentTools(new Agent { Card = handle.Url + "/.well-known/agent-card.json", PollEvery = 25 });
+var result = await tools.Single(t => t.Name == "telemetry-desk_ping")
+    .ExecuteAsync(new Dictionary<string, object?> { ["task"] = "ping" });
+if (result.IsError || result.Output != "done") throw new Exception(result.Output);
+if (!terminalStates.Contains("completed")) throw new Exception($"onTask never saw completed: {string.Join(",", terminalStates)}");
+
+await handle.StopAsync();
+
+// No A2A profile at all ⇒ the card route (and every A2A route) 404s.
+await using var barebones = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false });
+var noA2a = await barebones.ServeAsync("127.0.0.1:0", new Toolkit.ServeOptions { Client = client });
+using var http = new HttpClient();
+var res = await http.GetAsync(noA2a.Url + "/.well-known/agent-card.json");
+if (res.StatusCode != System.Net.HttpStatusCode.NotFound) throw new Exception(res.StatusCode.ToString());
+await noA2a.StopAsync();
+
+Console.WriteLine($"ok: onTask saw {string.Join(",", terminalStates)}; no-A2A-profile 404s");
+
+sealed class Stub : IDisposable
+{
+    readonly System.Net.HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<System.Net.HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                System.Net.HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(System.Net.HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
+
+<Aside type="caution">
+`SendMessage` returns the **submitted** Task immediately — fulfilment (`working` → `completed` |
+`failed`) runs asynchronously in the background. A caller must poll `GetTask` (or use
+[`A2A.AgentTools`](/api/csharp/agents/agent-tools/), which does this for you) rather than expect the
+first response to carry the final answer.
+</Aside>
+
+## Parameters
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `addr` | `string` | `host:port` to bind. `port` 0 (or omitted) picks a free ephemeral port. |
+| `opts.Client` | `LlmClient` | Fulfils each Task via `RunAsync`/`AskAsync` (contextId keyed, so a peer's turns share a conversation). |
+| `opts.A2A` | `A2AConfig?` | Opt-in A2A profile — `null` (and no top-level `a2a` block) ⇒ no A2A routes mounted. |
+| `opts.OnTask` | `OnTask?` | Fires on each Task's terminal state with the `RunResult` telemetry. |
+| `opts.Mcp` / `opts.OnCall` | — | The independent MCP inbound profile — see [`McpServe.Build`](/api/csharp/serve/mcp/). |
 
 ## The same call in the other five ports
 
@@ -58,7 +329,7 @@ _TODO: name the alternative and when to prefer it._
 |---|---|---|
 | JavaScript | `startA2AServer` | [→](/api/javascript/serve/a2a/) |
 | Python | `Toolkit.serve` | [→](/api/python/serve/a2a/) |
-| Go | `StartAgent` | [→](/api/go/serve/a2a/) |
+| Go | `Toolkit.Serve` | [→](/api/go/serve/a2a/) |
 | Java | `A2AServer.start` | [→](/api/java/serve/a2a/) |
 | Elixir | `Toolnexus.Serve.start` | [→](/api/elixir/serve/a2a/) |
 
@@ -70,3 +341,4 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 - [`A2AServer.BuildAgentCard`](/api/csharp/serve/agent-card/) — Construct the Agent Card that advertises your name, skills and endpoint.
 - [`A2AServer.FileTaskStore`](/api/csharp/serve/task-store/) — Persist inbound A2A tasks so a suspended request survives a restart.
 - [`McpServe.Build`](/api/csharp/serve/mcp/) — The inbound MCP profile: any MCP client can call your tools.
+- [`A2A.Agent`](/api/csharp/agents/agent/) — The outbound counterpart: call a served toolkit like this one from another agent.

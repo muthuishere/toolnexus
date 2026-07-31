@@ -1,56 +1,272 @@
 ---
-title: "agents.Budget"
+title: "agents.Budget — hierarchical, live-enforced"
 description: "Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight. — Go."
 sidebar:
-  label: "agents.Budget"
+  label: "runtime / budgets"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang/agents</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/agents/runtime.go">golang/agents/runtime.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+type Budget struct {
+	MaxTurns      int           // LLM round trips per Run (default 6)
+	MaxTokens     int64         // token pool for this subtree
+	MaxToolCalls  int64         // tool-call pool for this subtree
+	MaxWall       time.Duration // wall-clock lifetime from spawn (SPEC field: maxWallMs)
+	MaxChildren   int           // direct children cap (checked at spawn)
+	MaxConcurrent int           // simultaneously running children (default 8)
+	MaxDepth      int           // subtree depth cap (checked at spawn, default 3)
+}
 ```
 
-Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+A `Budget` caps one handle's whole subtree. Pooled fields (`MaxTokens`, `MaxToolCalls`) are
+**carved** at spawn — `effective = min(own, parent's remaining)` — then enforced with a **live**
+walk up the ancestor chain before every turn and every spawn, because carving alone misses spend a
+sibling racked up afterward. Money is deliberately excluded: usage is vendor-neutral (tokens, tool
+calls, turns, wall time); convert cost in your own accounting over the roll-up.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Set a `Budget` on any `agents.Spec` or pass one to `Spawn` whenever a sub-agent's work is
+open-ended and you want a hard, structural ceiling — not a prompt asking it to be frugal. Every
+limit stop is **loud**: `Status: "incomplete"` naming the limit, never a silent `"done"`, never a
+crash — partial work and the transcript are preserved either way.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Want the model to see its own limit and self-regulate?">
+`Budget` is enforced by the RUNTIME — the model never sees it and can't negotiate around it. If you
+want the model aware of a soft limit (so it can wrap up gracefully), say so in the agent's `Soul`;
+`Budget` is the backstop for when it doesn't.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. `MaxTurns` — a model that never stops calling tools
 
-{/* TODO:example1 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+var lookup = tn.Tool{
+	Name: "lookup", Description: "looks something up", Source: tn.SourceCustom,
+	InputSchema: tn.JSONSchema{"type": "object", "properties": map[string]any{}},
+	Execute: func(_ map[string]any, _ *tn.ToolContext) (tn.ToolResult, error) {
+		return tn.ToolResult{Output: "data"}, nil
+	},
+}
+
+// loopLLM ALWAYS wants another tool call — it never produces a final answer.
+type loopLLM struct{}
+
+func (loopLLM) RoundTrip(req *http.Request) (*http.Response, error) {
+	body, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+			map[string]any{"id": "c", "type": "function", "function": map[string]any{"name": "lookup", "arguments": "{}"}},
+		}}}},
+		"usage": map[string]any{"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4},
+	})
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+}
+
+func main() {
+	reg := map[string]agents.Def{
+		"looper": {Name: "looper", Does: "never finishes", Model: "m-loop", Tools: []tn.Tool{lookup}, Budget: &agents.Budget{MaxTurns: 3}},
+	}
+	rt := agents.NewRuntime(agents.Options{Transport: loopLLM{}, Registry: reg})
+
+	h, err := rt.Spawn(rt.Root, "looper", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	rt.Wake(h, "loop forever")
+	r := rt.Wait(h, 0)
+	if r.Status != "incomplete" {
+		log.Fatalf("maxTurns cap must be a LOUD incomplete, not a silent done, got %q", r.Status)
+	}
+
+	fmt.Println("ok: stopped", r.Status, "after", r.Turns, "turns (MaxTurns=3)")
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. `MaxTokens` — carved at spawn, then drained by the live roll-up
 
-{/* TODO:example2 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+type textLLM struct{}
+
+func (textLLM) RoundTrip(req *http.Request) (*http.Response, error) {
+	body, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "ok"}}},
+		"usage":   map[string]any{"prompt_tokens": 20, "completion_tokens": 20, "total_tokens": 40},
+	})
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+}
+
+func main() {
+	reg := map[string]agents.Def{"explore": {Name: "explore", Does: "research", Model: "m-explore"}}
+	rt := agents.NewRuntime(agents.Options{Transport: textLLM{}, Registry: reg})
+
+	// Parent asks for 100; child asks for 500 — effective = min(100, 500) = 100.
+	parent, err := rt.Spawn(rt.Root, "explore", &agents.Budget{MaxTokens: 100})
+	if err != nil {
+		log.Fatal(err)
+	}
+	child, err := rt.Spawn(parent, "explore", &agents.Budget{MaxTokens: 500})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if got := rt.PoolTokens(child); got != 100 {
+		log.Fatalf("carve: expected effective pool 100, got %d", got)
+	}
+
+	rt.Wake(child, "go")
+	rt.Wait(child, 0) // spends 40 tokens
+	if got := rt.PoolTokens(parent); got != 60 {
+		log.Fatalf("the roll-up should drain the PARENT pool too, got %d, want 60", got)
+	}
+
+	fmt.Println("ok: child pool carved to 100; parent pool now", rt.PoolTokens(parent))
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — `MaxToolCalls`, `MaxChildren`, `MaxDepth` all refuse loudly, naming the limit
 
-{/* TODO:example3 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+var lookup = tn.Tool{
+	Name: "lookup", Description: "looks something up", Source: tn.SourceCustom,
+	InputSchema: tn.JSONSchema{"type": "object", "properties": map[string]any{}},
+	Execute: func(_ map[string]any, _ *tn.ToolContext) (tn.ToolResult, error) {
+		return tn.ToolResult{Output: "data"}, nil
+	},
+}
+
+// oneShotLLM calls lookup on the first turn only, then answers.
+type oneShotLLM struct{}
+
+func (oneShotLLM) RoundTrip(req *http.Request) (*http.Response, error) {
+	b, _ := io.ReadAll(req.Body)
+	var parsed struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	_ = json.Unmarshal(b, &parsed)
+	sawToolResult := false
+	for _, m := range parsed.Messages {
+		if m["role"] == "tool" {
+			sawToolResult = true
+		}
+	}
+	var msg map[string]any
+	if !sawToolResult {
+		msg = map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+			map[string]any{"id": "c", "type": "function", "function": map[string]any{"name": "lookup", "arguments": "{}"}},
+		}}
+	} else {
+		msg = map[string]any{"role": "assistant", "content": "done"}
+	}
+	body, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"message": msg}}, "usage": map[string]any{"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}})
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+}
+
+func main() {
+	reg := map[string]agents.Def{
+		"explore": {Name: "explore", Does: "research", Model: "m-explore", Tools: []tn.Tool{lookup}},
+		"peer":    {Name: "peer", Does: "a worker", Model: "m-peer"},
+	}
+	rt := agents.NewRuntime(agents.Options{Transport: oneShotLLM{}, Registry: reg})
+
+	// MaxToolCalls: the pool is spent by the FIRST run; the second refuses.
+	h, _ := rt.Spawn(rt.Root, "explore", &agents.Budget{MaxToolCalls: 1})
+	if r := rt.RunTurn(h, "go"); r.Status != "done" {
+		log.Fatalf("first run (one lookup) should pass, got %q", r.Status)
+	}
+	r2 := rt.RunTurn(h, "go again")
+	if r2.Status != "incomplete" || !strings.Contains(r2.Text, "toolCalls") {
+		log.Fatalf("expected a loud incomplete naming toolCalls, got %q (%s)", r2.Status, r2.Text)
+	}
+
+	// MaxChildren: the third spawn under a 2-child cap is refused, naming the limit.
+	capped, _ := rt.Spawn(rt.Root, "peer", &agents.Budget{MaxChildren: 2})
+	_, _ = rt.Spawn(capped, "peer", nil)
+	_, _ = rt.Spawn(capped, "peer", nil)
+	if _, err := rt.Spawn(capped, "peer", nil); err == nil || !strings.Contains(err.Error(), "maxChildren") {
+		log.Fatalf("expected a maxChildren refusal, got %v", err)
+	}
+
+	// MaxDepth: three spawns deep is fine; a fourth is refused, naming the limit.
+	deep := rt.Root
+	var err error
+	for i := 0; i < 3; i++ {
+		deep, err = rt.Spawn(deep, "peer", nil)
+		if err != nil {
+			log.Fatalf("spawn %d within depth should pass: %v", i, err)
+		}
+	}
+	if _, err = rt.Spawn(deep, "peer", nil); err == nil || !strings.Contains(err.Error(), "maxDepth") {
+		log.Fatalf("expected a maxDepth refusal, got %v", err)
+	}
+
+	fmt.Println("ok: toolCalls, maxChildren, and maxDepth all refused loudly, naming the limit")
+}
 ```
+
+## Fields and defaults
+
+| Field | Type | Default | Checked |
+|---|---|---|---|
+| `MaxTurns` | `int` | 6 | Per turn, inside the client loop. |
+| `MaxTokens` | `int64` | unlimited | Carved at spawn; live ancestor walk before every turn/spawn. |
+| `MaxToolCalls` | `int64` | unlimited | Same carve + live walk as `MaxTokens`. |
+| `MaxWall` | `time.Duration` | unlimited | Live ancestor walk, measured against the runtime `Clock`. |
+| `MaxChildren` | `int` | unlimited | At `Spawn`. |
+| `MaxConcurrent` | `int` | 8 | At `Wake` (the concurrency gate; excess wakes queue FIFO). |
+| `MaxDepth` | `int` | 3 | At `Spawn`. |
+
+Any limit stop ⇒ `TaskResult{Status: "incomplete", ...}` with the limit named in `Text` — never
+silent, never a crash. Turn-level and spawn-level refusals are always immediate; pooled resources
+apply to the WHOLE subtree, not just the handle they were set on.
 
 ## The same call in the other five ports
 
@@ -59,7 +275,7 @@ _TODO: name the alternative and when to prefer it._
 | JavaScript | `agents.Budget` | [→](/api/javascript/runtime/budgets/) |
 | Python | `Budget` | [→](/api/python/runtime/budgets/) |
 | Java | `agents.Budget` | [→](/api/java/runtime/budgets/) |
-| C# | `AgentTypes.Budget` | [→](/api/csharp/runtime/budgets/) |
+| C# | `Budget` | [→](/api/csharp/runtime/budgets/) |
 | Elixir | `Toolnexus.Agents budget` | [→](/api/elixir/runtime/budgets/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.

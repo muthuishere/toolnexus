@@ -8,49 +8,164 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7b-a2a-agents--inbound-serve">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/serve.ts">js/src/serve.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+interface TaskStore {
+  get(id: string): Promise<A2ATask | undefined>
+  save(task: A2ATask): Promise<void>
+}
+
+class InMemoryTaskStore implements TaskStore { /* default — process lifetime only */ }
+class FileTaskStore implements TaskStore {
+  constructor(dir: string)
+}
+
+function resolveStore(store?: TaskStore | "memory" | string): TaskStore
 ```
 
-Persist inbound A2A tasks so a suspended request survives a restart.
+Pluggable persistence for the Tasks a served toolkit creates. Every `SendMessage`/`GetTask` in
+[`startA2AServer`](/api/javascript/serve/a2a/) goes through a `TaskStore` — `InMemoryTaskStore` by
+default (Tasks live only for the process's lifetime), `FileTaskStore` for one JSON file per Task id
+on disk, or your own object implementing the two-method interface (a NATS/JetStream-backed store,
+a Postgres table — anything).
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `FileTaskStore` (or `a2a.store: "file:<dir>"`) the moment a served agent's Tasks need to
+survive a process restart — a peer polling `GetTask` mid-poll when you redeploy should still find
+its Task, not a 404. `InMemoryTaskStore` is fine for local development and anything ephemeral.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Implement the two-method interface instead when file storage doesn't fit">
+`TaskStore` is deliberately two methods — `get`/`save`. Anything that can round-trip a `Task` by
+`id` qualifies: Redis, a database table, a KV store behind your own client. `resolveStore` accepts
+an already-built object as-is, so a custom store plugs into `serve()` the same way `FileTaskStore`
+does.
 </Aside>
+
+Prefer the shipped stores when:
+
+- **`InMemoryTaskStore`** — you don't need durability; it's also what `resolveStore()`/
+  `resolveStore("memory")` gives you with no setup.
+- **`FileTaskStore`** — you want durability with zero infrastructure: one directory, one file per
+  Task id, atomic writes (`.tmp` + rename, so a concurrent `get()` never reads a half-written file).
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — round-trip one Task on disk
 
-{/* TODO:example1 */}
-```ts
-// TODO
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { FileTaskStore } from "toolnexus"
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tn-taskstore-"))
+const store = new FileTaskStore(dir)
+
+await store.save({ id: "abc-123", status: { state: "completed" }, artifacts: [{ parts: [{ kind: "text", text: "hi" }] }] })
+const got = await store.get("abc-123")
+
+assert.equal(got!.status.state, "completed")
+assert.equal((got!.artifacts as any)[0].parts[0].text, "hi")
+assert.ok(fs.existsSync(path.join(dir, "abc-123.json")), "one JSON file per task id")
+assert.equal(await store.get("missing"), undefined)
+
+fs.rmSync(dir, { recursive: true, force: true })
+console.log("ok: round-tripped abc-123")
 ```
 
-### 2. TODO — the realistic case
+### 2. A realistic case — `resolveStore` maps every selector
 
-{/* TODO:example2 */}
-```ts
-// TODO
+`serve()`'s `a2a.store` field accepts the same three shapes `resolveStore` normalizes: omitted/
+`"memory"`, `"file:<dir>"`, or a pre-built object.
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { FileTaskStore, InMemoryTaskStore, resolveStore } from "toolnexus"
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tn-taskstore-"))
+
+assert.ok(resolveStore() instanceof InMemoryTaskStore, "omitted ⇒ in-memory")
+assert.ok(resolveStore("memory") instanceof InMemoryTaskStore)
+assert.ok(resolveStore(`file:${dir}`) instanceof FileTaskStore, "\"file:<dir>\" ⇒ FileTaskStore")
+
+const custom = new InMemoryTaskStore()
+assert.equal(resolveStore(custom), custom, "an already-built store is used as-is")
+
+assert.throws(() => resolveStore("redis:whatever"), /Unknown A2A store/)
+
+fs.rmSync(dir, { recursive: true, force: true })
+console.log("ok: every selector resolved")
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — a served toolkit backed by a host-supplied store
 
-{/* TODO:example3 */}
-```ts
-// TODO
+`serve()` routes every save/get through whatever `TaskStore` you give it — here a small in-memory
+spy proving every write hits the host store, not some hidden default.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, type A2ATask } from "toolnexus"
+
+class SpyStore {
+  saved: string[] = []
+  private map = new Map<string, A2ATask>()
+  async save(t: A2ATask) { this.saved.push(t.status.state); this.map.set(t.id, t) }
+  async get(id: string) { return this.map.get(id) }
+}
+
+const llm = http.createServer((_req, res) => {
+  res.writeHead(200, { "content-type": "application/json" })
+  res.end(JSON.stringify({ choices: [{ message: { content: "DONE" } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+})
+await new Promise<void>((r) => llm.listen(0, "127.0.0.1", r))
+const llmPort = (llm.address() as any).port
+
+const tk = await createToolkit({ builtins: false })
+const client = createClient({ baseUrl: `http://127.0.0.1:${llmPort}`, style: "openai", model: "x", apiKey: "k" })
+const store = new SpyStore()
+const srv = await tk.serve("127.0.0.1:0", { client, a2a: { name: "audited-desk", store } })
+
+try {
+  const send = await fetch(srv.url + "/", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: "1", method: "SendMessage", params: { message: { role: "user", parts: [{ kind: "text", text: "go" }] } } }),
+  }).then((r) => r.json()) as any
+
+  const id = send.result.id
+  for (let i = 0; i < 50 && store.saved.at(-1) !== "completed"; i++) await new Promise((r) => setTimeout(r, 10))
+
+  assert.deepEqual(store.saved, ["submitted", "working", "completed"], "every state transition went through the host store")
+  console.log("ok:", store.saved.join(" → "))
+} finally {
+  await srv.stop()
+  await tk.close()
+  llm.close()
+}
 ```
+
+## Options
+
+| Field | Type | What it does |
+|---|---|---|
+| `new FileTaskStore(dir)` | `dir: string` | Directory to hold one `<sanitized-id>.json` per Task; created if missing. |
+| `resolveStore(store)` | `TaskStore \| "memory" \| string \| undefined` | Normalizes a `serve()` `a2a.store` value into a concrete `TaskStore`. |
+
+## What you get back
+
+`TaskStore` — `{ get(id): Promise<A2ATask | undefined>, save(task): Promise<void> }`. `FileTaskStore`
+writes are atomic (`.tmp` file then rename), so a concurrent `get()` never observes a half-written
+Task mid-poll.
 
 ## The same call in the other five ports
 
@@ -59,7 +174,7 @@ _TODO: name the alternative and when to prefer it._
 | Python | `FileTaskStore` | [→](/api/python/serve/task-store/) |
 | Go | `NewFileTaskStore` | [→](/api/go/serve/task-store/) |
 | Java | `A2AServer.FileTaskStore` | [→](/api/java/serve/task-store/) |
-| C# | `A2AServer.FileTaskStore` | [→](/api/csharp/serve/task-store/) |
+| C# | `FileTaskStore` | [→](/api/csharp/serve/task-store/) |
 | Elixir | `Toolnexus.Serve task_store` | [→](/api/elixir/serve/task-store/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.

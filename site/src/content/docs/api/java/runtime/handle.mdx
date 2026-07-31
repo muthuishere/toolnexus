@@ -8,49 +8,219 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/agents/Handle.java">agents/Handle.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public final class Handle {
+    public enum State { IDLE, RUNNING, SUSPENDED, CLOSED }
+
+    public volatile State state;
+    public final String id;               // deterministic, parent-scoped: "root/coordinator.1/explore.2"
+    public final Deque<InboxItem> inbox;   // agent STATE, never a runtime mailbox
+    public final List<Handle> children;
+    public final int depth;
+    public final AgentDef def;
+    public final Handle parent;
+}
 ```
 
-The state machine for one spawned agent: pending, running, suspended, done.
+The live state of one spawned agent: `{id, def, state, inbox, budget, children}`. States:
+`idle → running → (idle | suspended | closed)`; `suspended → running` **only** via the Answer to
+its pending Request. Ids are deterministic and parent-scoped — never random — so the same
+sequence of `spawn` calls always produces the same tree shape, which is what makes the shared
+`examples/subagent-*` fixtures byte-comparable across all six ports.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+You don't construct a `Handle` — [`AgentRuntime.spawn`](/api/java/runtime/runtime/) returns one.
+Read it to check `state`, inspect `inbox.size()` or `children`, or hold onto `id` for logging and
+dashboards. Handles are **capabilities**: `post`/`wake` what you hold, `waitOn` only what you
+spawned — a handle deliberately isn't a global registry key.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Read the field directly; list() for a whole-tree snapshot">
+`handle.state` is a live `volatile` field — read it any time without a lock, for a quick check.
+For a consistent snapshot of an entire tree (e.g. rendering a dashboard), use
+[`AgentRuntime.list()`](/api/java/runtime/runtime/) instead — it walks every handle under a
+single lock rather than reading fields one at a time while other turns may be transitioning them.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — a fresh handle starts `IDLE`
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.agents.*;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Map<String, AgentDef> registry = Map.of("worker", new AgentDef("worker", "does work", "", "inherit"));
+        AgentRuntime rt = new AgentRuntime(new RuntimeOptions().registry(registry));
+
+        Handle h = rt.spawn(rt.root, "worker").handle();
+
+        if (h.state != Handle.State.IDLE) throw new AssertionError(h.state);
+        if (!h.id.equals("root/worker.1")) throw new AssertionError(h.id);
+        if (h.depth != 1) throw new AssertionError(h.depth);
+        if (h.parent != rt.root) throw new AssertionError("parent should be the runtime root");
+        if (!h.inbox.isEmpty() || !h.children.isEmpty()) throw new AssertionError("fresh handle is empty");
+
+        // Spawning again produces a DIFFERENT, still-deterministic id (parent-scoped counter).
+        Handle h2 = rt.spawn(rt.root, "worker").handle();
+        if (!h2.id.equals("root/worker.2")) throw new AssertionError(h2.id);
+
+        System.out.println("ok: " + h.id + ", " + h2.id);
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — `idle → running → idle` across one wake
 
-{/* TODO:example2 */}
-```java
-// TODO
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.agents.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                ex.getRequestBody().readAllBytes();
+                byte[] b = "{\"choices\":[{\"message\":{\"content\":\"done\"}}]}".getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+
+        try {
+            Map<String, AgentDef> registry = Map.of("worker", new AgentDef("worker", "does work", "", "test-model"));
+            RuntimeOptions rtOpts = new RuntimeOptions()
+                    .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                    .apiKey("test-key")
+                    .registry(registry);
+            AgentRuntime rt = new AgentRuntime(rtOpts);
+            Handle h = rt.spawn(rt.root, "worker").handle();
+
+            var fut = rt.futureResult(h);
+            rt.wake(h, "go");
+            // Between wake() returning and the turn landing, the handle is briefly RUNNING —
+            // the trace records it even though we only observe the settled end state here.
+            TaskResult r = fut.join();
+
+            if (h.state != Handle.State.IDLE) throw new AssertionError("settled done ⇒ back to idle: " + h.state);
+            if (!rt.traceHas("idle→running")) throw new AssertionError(rt.trace());
+            if (!rt.traceHas("running→idle")) throw new AssertionError(rt.trace());
+            if (h.turnsTotal != 1) throw new AssertionError(h.turnsTotal);
+
+            System.out.println("ok: " + h.state + " after " + h.turnsTotal + " turn(s)");
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — `SUSPENDED` on a pending, then resumed
 
-{/* TODO:example3 */}
-```java
-// TODO
+With no `waitFor` interpreter anywhere on the chain, a tool's `pending` result parks the handle
+`SUSPENDED` — durably, burning zero tokens — until [`AgentRuntime.resume`](/api/java/runtime/runtime/)
+delivers an Answer.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import io.github.muthuishere.toolnexus.agents.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                Map<String, Object> req = Json.toMap(body);
+                List<Object> msgs = (List<Object>) req.get("messages");
+                boolean answered = msgs.stream().anyMatch(m -> "tool".equals(((Map<?, ?>) m).get("role")));
+                String message = answered
+                        ? "{\"content\":\"secret retrieved\"}"
+                        : "{\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\","
+                          + "\"function\":{\"name\":\"reveal_secret\",\"arguments\":\"{}\"}}]}";
+                byte[] b = ("{\"choices\":[{\"message\":" + message + "}]}").getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+
+        Tool revealSecret = new Tool() {
+            @Override public String name() { return "reveal_secret"; }
+            @Override public String description() { return "needs human approval"; }
+            @Override public Map<String, Object> inputSchema() { return Map.of("type", "object", "properties", Map.of()); }
+            @Override public String source() { return "custom"; }
+            @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
+                if (ctx != null && ctx.answer() != null && ctx.answer().ok()) return ToolResult.ok("classified data");
+                return ToolResult.pending(new Request(null, "approval", "approve access?"));
+            }
+        };
+
+        try {
+            AgentDef def = new AgentDef("asker", "needs approvals", "", "test-model").tools(List.of(revealSecret));
+            RuntimeOptions rtOpts = new RuntimeOptions()
+                    .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                    .apiKey("test-key")
+                    .registry(Map.of("asker", def));
+            AgentRuntime rt = new AgentRuntime(rtOpts);
+            Handle h = rt.spawn(rt.root, "asker").handle();
+
+            var fut = rt.futureResult(h);
+            rt.wake(h, "get the secret"); // no waitFor anywhere ⇒ durable pending, not inline
+            TaskResult r1 = fut.join();
+
+            if (!"pending".equals(r1.status())) throw new AssertionError(r1.status());
+            if (h.state != Handle.State.SUSPENDED) throw new AssertionError(h.state);
+
+            rt.resume(new Answer(r1.pending().id(), true));
+
+            if (h.state != Handle.State.IDLE) throw new AssertionError("resumed back to idle: " + h.state);
+            if (h.lastResult == null || !h.lastResult.text().equals("secret retrieved")) {
+                throw new AssertionError(h.lastResult);
+            }
+
+            System.out.println("ok: suspended -> resumed -> " + h.lastResult.text());
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
 ```
+
+## Fields and overloads
+
+| Member | Type | What it is |
+|---|---|---|
+| `state` | `volatile State` | `IDLE \| RUNNING \| SUSPENDED \| CLOSED`. Read any time without a lock. |
+| `id` | `String` | Deterministic, parent-scoped: `root/coordinator.1/explore.2`. Never random. |
+| `inbox` | `Deque<InboxItem>` | Agent STATE — persistable, observable — never a language-level mailbox. |
+| `children` | `List<Handle>` | This handle's directly spawned children. |
+| `depth` | `int` | 0 for `root`'s direct children; capped by the effective `maxDepth`. |
+| `def` | `AgentDef` | The registered definition this handle was spawned from. |
+| `parent` | `Handle` | `null` only for `root` itself. |
+| `turnsTotal` / `usageTotal` | `int` / `long` | Cumulative across this handle's own turns (never a child's). |
+| `lastResult` | `TaskResult` | What `waitOn` answers immediately on a settled (idle-with-result or closed) handle. |
 
 ## The same call in the other five ports
 
@@ -67,6 +237,6 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`agents.Agent`](/api/java/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
-- [`agents.Runtime`](/api/java/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
-- [`agents.Budget`](/api/java/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+- [`agents.Runtime`](/api/java/runtime/runtime/) — the six verbs that create and transition handles.
+- [`agents.Agent`](/api/java/runtime/agent/) — the declarative layer one handle instantiates.
+- [`suspension/pending`](/api/java/suspension/pending/) — the §10 contract behind the `SUSPENDED` state.

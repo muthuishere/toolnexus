@@ -8,58 +8,332 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/serve.py">python/src/toolnexus/serve.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+async def serve(
+    self,
+    addr: str,
+    *,
+    client: Client | None = None,
+    a2a: dict[str, Any] | None = None,
+    on_task: Callable[[dict], Any] | None = None,
+    mcp: dict[str, Any] | None = None,
+    on_call: Callable[[dict], Any] | None = None,
+) -> ServeHandle
 ```
 
-Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+Stands up a real HTTP server exposing this `Toolkit`. With an `a2a` profile, it mounts
+`GET /.well-known/agent-card.json` (built from the toolkit's **skills**, via
+[`build_agent_card`](/api/python/serve/agent-card/)) and `POST /` (JSON-RPC 2.0:
+`SendMessage` + `GetTask`, fulfilled asynchronously through `client.run`/`client.ask`).
+With `mcp`, it co-mounts a streamable-HTTP MCP server at `POST /mcp` exposing the
+toolkit's raw tools ([`build_mcp_server`](/api/python/serve/mcp/)). With neither, every
+request 404s.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- You want a genuine A2A peer other agents (including toolnexus's own outbound
+  [`agent`](/api/python/agents/agent/)) can `SendMessage`/`GetTask` against.
+- You want the same toolkit reachable as an MCP server for IDEs/Claude Desktop/other
+  MCP clients, in the same process, on the same port.
+- You want a Task's fulfilment to run through the full client loop — system prompt,
+  tools, retries, memory — not a bare function call.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="a2a and mcp are independent, opt-in profiles">
+Neither is required. Omit both and `serve` still starts a working HTTP server that
+404s everything — useful as a base to layer your own routes on, or as a no-op while
+you wire config. Pass `a2a` to advertise **skills** to A2A peers; pass `mcp` to expose
+**tools** to MCP clients; pass both to serve the same toolkit both ways at once.
 </Aside>
+
+`serve` is the *inbound* half of §7A/§7B/§7C — the toolkit becomes someone else's
+remote agent or MCP server. It never changes what the toolkit does locally; the same
+`Toolkit` still answers `execute()` calls directly in-process.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+<Aside type="note" title="Hermetic on purpose">
+Every example runs a real local A2A round trip: the mock LLM is a local `http.server`
+stub (the [`Client.run`](/api/python/client/run/) pattern), the served toolkit listens
+on an ephemeral `127.0.0.1` port, and the *outbound* [`agent`](/api/python/agents/agent/)
+in a second toolkit calls it over real localhost HTTP — no external network.
+</Aside>
 
-{/* TODO:example1 */}
-```python
-// TODO
+### 1. The smallest useful call — no profile, everything 404s
+
+```python test
+import asyncio
+import urllib.error
+import urllib.request
+
+from toolnexus import create_toolkit
+
+
+async def main():
+    tk = await create_toolkit(builtins=False)
+    srv = await tk.serve("127.0.0.1:0")
+    try:
+        try:
+            urllib.request.urlopen(srv.url + "/.well-known/agent-card.json", timeout=2)
+            status = 200
+        except urllib.error.HTTPError as e:
+            status = e.code
+        assert status == 404  # no `a2a` profile ⇒ no A2A routes mounted
+
+        print("ok:", srv.url, "->", status)
+    finally:
+        await srv.stop()
+        await tk.close()
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — a full A2A round trip, another toolkit as the caller
 
-{/* TODO:example2 */}
-```python
-// TODO
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import agent, create_client, create_toolkit
+
+
+class StubServer:
+    """A local OpenAI-shaped chat-completions endpoint — the served toolkit's mock LLM."""
+
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):  # silence
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def reply(body):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": "TRANSCRIBED"}}],
+        "usage": {"prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5},
+    }
+
+
+async def main():
+    with StubServer(reply) as llm:
+        client = create_client(base_url=llm.base_url, style="openai", model="test-model", api_key="test-key")
+
+        served = await create_toolkit(builtins=False, skills_dir="examples/skills")
+        srv = await served.serve(
+            "127.0.0.1:0", client=client, a2a={"name": "video-desk", "skills": ["hello-world"]}
+        )
+        try:
+            # The caller: an OUTBOUND toolkit whose only tool is the peer's skill.
+            caller = await create_toolkit(
+                builtins=False,
+                agents=[agent(srv.url + "/.well-known/agent-card.json", poll_every=10)],
+            )
+            try:
+                tool = caller.get("video-desk_hello-world")
+                assert tool is not None
+                assert tool.source == "a2a"
+
+                r = await caller.execute("video-desk_hello-world", {"task": "do it"})
+                assert r.is_error is False
+                assert r.output == "TRANSCRIBED"  # submit -> poll -> client.run -> artifact
+                assert r.metadata["state"] == "completed"
+
+                print("ok:", r.output, "|", r.metadata["state"])
+            finally:
+                await caller.close()
+        finally:
+            await srv.stop()
+            await served.close()
+
+
+asyncio.run(main())
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — `on_task` telemetry, `contextId` memory, `mcp` co-mounted
 
-{/* TODO:example3 */}
-```python
-// TODO
+```python test
+import asyncio
+import json
+import threading
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit, define_tool
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+async def _rpc(endpoint: str, method: str, params) -> dict:
+    # Off the event loop (asyncio.to_thread): the server's fulfilment coroutines run
+    # on THIS SAME loop, so a blocking urlopen() call here would deadlock the round trip.
+    def _do():
+        body = json.dumps({"jsonrpc": "2.0", "id": "1", "method": method, "params": params}).encode()
+        req = urllib.request.Request(endpoint, data=body, method="POST", headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read().decode())
+
+    return await asyncio.to_thread(_do)
+
+
+def canned(text: str):
+    def _h(body):
+        return {
+            "choices": [{"message": {"role": "assistant", "content": text}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    return _h
+
+
+async def main():
+    with StubServer(canned("ack")) as llm:
+        client = create_client(base_url=llm.base_url, style="openai", model="test-model", api_key="test-key")
+        tk = await create_toolkit(builtins=False, extra_tools=[
+            define_tool(lambda: "pong", name="ping", description="health check")
+        ])
+
+        events: list[dict] = []
+        calls: list[dict] = []
+        srv = await tk.serve(
+            "127.0.0.1:0",
+            client=client,
+            a2a={"name": "desk"},
+            on_task=lambda ev: events.append(ev),
+            mcp={"name": "desk-mcp"},
+            on_call=lambda ev: calls.append(ev),
+        )
+        try:
+            endpoint = srv.url + "/"
+
+            # contextId keys the served conversation via client.ask's ConversationStore.
+            sent = await _rpc(endpoint, "SendMessage", {
+                "message": {"role": "user", "parts": [{"kind": "text", "text": "hi"}], "contextId": "peer-1"}
+            })
+            tid = sent["result"]["id"]
+            assert sent["result"]["status"]["state"] == "submitted"  # returned immediately
+
+            for _ in range(50):
+                got = await _rpc(endpoint, "GetTask", {"id": tid})
+                state = got["result"]["status"]["state"]
+                if state in ("completed", "failed", "canceled"):
+                    break
+                await asyncio.sleep(0.01)
+            assert state == "completed"
+
+            # on_task fired with the RunResult telemetry.
+            assert events[-1]["state"] == "completed"
+            assert events[-1]["result"].tool_call_count == 0
+
+            print("ok:", state, "| on_task events:", len(events), "| /mcp co-mounted:", srv.url + "/mcp")
+        finally:
+            await srv.stop()
+            await tk.close()
+
+
+asyncio.run(main())
 ```
+
+## Options
+
+| Parameter | Type | What it does |
+|---|---|---|
+| `addr` | `str` | `"host:port"`; `port=0` binds an ephemeral port (read back off `ServeHandle.url`). |
+| `client` | `Client \| None` | Fulfils each Task via `client.run`/`client.ask`. Required when `a2a` is set; unused when it isn't. |
+| `a2a` | `dict \| None` | `{name?, description?, version?, provider?, skills?, store?}`. Absent (and no top-level `a2a` config) ⇒ no A2A routes. |
+| `on_task` | `Callable \| None` | Fires on a Task's terminal state with `{id, task, result, state}` — `result` is the full `RunResult`. |
+| `mcp` | `dict \| None` | `{name?, version?, tools?}`. Absent (and no top-level `mcpServer` config) ⇒ no `/mcp` route. |
+| `on_call` | `Callable \| None` | Fires per inbound MCP `tools/call` — `{name, source, ms, is_error}`. |
+
+## Returns — `ServeHandle`
+
+| Member | Type | What it is |
+|---|---|---|
+| `url` | `str` | The listening base URL, e.g. `http://127.0.0.1:54321`. |
+| `stop()` / `close()` | `async () -> None` | Shuts the server down (`close` aliases `stop`). |
 
 ## The same call in the other five ports
 
 | Port | Symbol | |
 |---|---|---|
 | JavaScript | `startA2AServer` | [→](/api/javascript/serve/a2a/) |
-| Go | `StartAgent` | [→](/api/go/serve/a2a/) |
+| Go | `Toolkit.Serve` | [→](/api/go/serve/a2a/) |
 | Java | `A2AServer.start` | [→](/api/java/serve/a2a/) |
-| C# | `A2AServer.Start` | [→](/api/csharp/serve/a2a/) |
+| C# | `A2AServer.StartAsync` | [→](/api/csharp/serve/a2a/) |
 | Elixir | `Toolnexus.Serve.start` | [→](/api/elixir/serve/a2a/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.

@@ -19,8 +19,15 @@ The opt-in tool that lets the model itself spawn a teammate. Default OFF.
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+There is no constructible `task` tool symbol to import in this port — the `task` tool is a
+**runtime builtin**, assembled automatically by
+[`Toolnexus.Agents.Runtime`](/api/elixir/runtime/runtime/) for any handle whose
+[`AgentDef`](/api/elixir/runtime/agent/) declares a `:team`. Declaring `team: [explore]` on
+`Toolnexus.Agents.agent/2` is the whole opt-in — the parent gets a `task` tool scoped to exactly
+that team (sorted by name, description composed from each teammate's `does`); a child gets no
+`task` tool unless its own definition also declares a team (recursion is opt-in, never inherited).
+There is nothing to construct or toggle beyond that `:team` field — see the delegation example on
+[`Toolnexus.Agents.Runtime`](/api/elixir/runtime/runtime/#examples).
 
 ## The same capability in the other ports
 

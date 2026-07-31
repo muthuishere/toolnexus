@@ -8,49 +8,239 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/agents/AgentRuntime.java">agents/AgentRuntime.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public AgentRuntime(RuntimeOptions opts)
+
+public Spawn spawn(Handle parent, String defName)
+public Ack post(Handle h, InboxItem item)
+public Ack wake(Handle h, String prompt)
+public TaskResult waitOn(Handle h)                 // + waitOn(h, timeoutMs)
+public void interrupt(Handle h)
+public void close(Handle h)                        // + close(h, force, reason)
+public void resume(Answer answer)
+public List<HandleView> list()
 ```
 
-The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+The substrate every `Agents.Agent` runs on: six host verbs (`spawn`, `post`, `wake`, `waitOn`,
+`interrupt`, `close`) plus read-only `list()`. One `AgentRuntime` owns a registry of
+`AgentDef`s, ONE runtime-wide `ConversationStore` (conversation id = handle id), one injectable
+clock, and the handle tree. Scheduling and thread placement are unobservable — conformance is
+judged on the *transition trace* every verb writes, checked against the shared
+`examples/subagent-*` fixtures.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `AgentRuntime` directly when you need control the [`Agents.Agent`](/api/java/runtime/agent/)
+one-shot `.run(...)` doesn't give you — posting unsolicited events into a running agent's inbox,
+interrupting a stuck turn, inspecting the whole handle tree, or keeping a long-lived persona alive
+across many wakes. `Agent.run(...)` builds and tears down a scoped `AgentRuntime` for you on every
+call; construct your own when the runtime itself needs to outlive a single prompt.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Verbs for control, Agent.run for the common case">
+Most delegation never needs the raw verbs — `Agents.agent(...).run(rtOpts, prompt)` or a `team`
+declaration (the [task tool](/api/java/runtime/task-tool/)) covers "spawn, wake, wait, close" in
+one call. Reach for the verbs when you need to `post` a message into a handle *while it's already
+running*, `interrupt` mid-turn, or `list()` an entire tree for a dashboard — none of which a
+one-shot run exposes.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — spawn, wake, wait
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.agents.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                ex.getRequestBody().readAllBytes();
+                byte[] b = "{\"choices\":[{\"message\":{\"content\":\"pong\"}}]}".getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+
+        try {
+            Map<String, AgentDef> registry = Map.of("ponger",
+                    new AgentDef("ponger", "answers pings", "", "test-model"));
+            RuntimeOptions rtOpts = new RuntimeOptions()
+                    .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                    .apiKey("test-key")
+                    .registry(registry);
+            AgentRuntime rt = new AgentRuntime(rtOpts);
+
+            AgentRuntime.Spawn sp = rt.spawn(rt.root, "ponger");
+            if (sp.error() != null) throw new AssertionError(sp.error());
+            Handle h = sp.handle();
+            if (h.state != Handle.State.IDLE) throw new AssertionError(h.state);
+
+            var fut = rt.futureResult(h);
+            rt.wake(h, "ping");
+            TaskResult r = fut.join();
+
+            if (!"done".equals(r.status())) throw new AssertionError(r.status());
+            if (!r.text().equals("pong")) throw new AssertionError(r.text());
+
+            System.out.println("ok: " + h.id + " -> " + r.text());
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — `post` before `wake`, coalesced into one turn
 
-{/* TODO:example2 */}
-```java
-// TODO
+The unsolicited rail: items posted while a handle is idle sit in its inbox until a `wake` drains
+the whole thing as ONE turn — never one turn per post.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.Json;
+import io.github.muthuishere.toolnexus.agents.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                Map<String, Object> req = Json.toMap(body);
+                List<Object> msgs = (List<Object>) req.get("messages");
+                String last = String.valueOf(((Map<?, ?>) msgs.get(msgs.size() - 1)).get("content"));
+                Matcher m = Pattern.compile("^\\d+\\.", Pattern.MULTILINE).matcher(last);
+                int items = 0;
+                while (m.find()) items++;
+                byte[] b = ("{\"choices\":[{\"message\":{\"content\":\"processed " + items + " item(s)\"}}]}")
+                        .getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+
+        try {
+            Map<String, AgentDef> registry = Map.of("peer", new AgentDef("peer", "team member", "", "test-model"));
+            RuntimeOptions rtOpts = new RuntimeOptions()
+                    .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                    .apiKey("test-key")
+                    .registry(registry);
+            AgentRuntime rt = new AgentRuntime(rtOpts);
+            Handle peer = rt.spawn(rt.root, "peer").handle();
+
+            rt.post(peer, new InboxItem("root/coordinator.1", "peer", "update 1"));
+            rt.post(peer, new InboxItem("external", "external", "webhook payload"));
+            var fut = rt.futureResult(peer);
+            rt.wake(peer); // no prompt — drains the inbox alone
+            TaskResult r = fut.join();
+
+            if (r.turns() != 1) throw new AssertionError("one wake = one turn, got " + r.turns());
+            if (!r.text().equals("processed 2 item(s)")) throw new AssertionError(r.text());
+
+            System.out.println("ok: " + r.text());
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — `interrupt` aborts a running turn back to `idle`
 
-{/* TODO:example3 */}
-```java
-// TODO
+`interrupt` is a cooperative cancel, never a kill: the handle lands `idle` again with an
+`"interrupted"` result to any waiter, and its drained inbox items are restored — nothing is lost.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.agents.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        CountDownLatch gate = new CountDownLatch(1); // holds the mock LLM's response open
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                ex.getRequestBody().readAllBytes();
+                gate.await(); // blocks until released — or the client aborts the request first
+                byte[] b = "{\"choices\":[{\"message\":{\"content\":\"too late\"}}]}".getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+
+        try {
+            Map<String, AgentDef> registry = Map.of("slow", new AgentDef("slow", "takes a while", "", "test-model"));
+            RuntimeOptions rtOpts = new RuntimeOptions()
+                    .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                    .apiKey("test-key")
+                    .registry(registry);
+            AgentRuntime rt = new AgentRuntime(rtOpts);
+            Handle h = rt.spawn(rt.root, "slow").handle();
+            rt.post(h, new InboxItem("external", "external", "queued while we wait"));
+
+            var fut = rt.futureResult(h);
+            rt.wake(h, "start the slow thing");
+            Thread.sleep(80); // let the turn actually reach "running"
+            if (h.state != Handle.State.RUNNING) throw new AssertionError(h.state);
+
+            rt.interrupt(h);
+            TaskResult r = fut.join();
+
+            if (!"interrupted".equals(r.status())) throw new AssertionError(r.status());
+            if (h.state != Handle.State.IDLE) throw new AssertionError(h.state);
+            if (h.inbox.isEmpty()) throw new AssertionError("posted item should be restored to the inbox");
+
+            System.out.println("ok: " + r.status() + ", inbox restored (" + h.inbox.size() + " item)");
+        } finally {
+            gate.countDown();
+            llm.stop(0);
+        }
+    }
+}
 ```
+
+## Fields and overloads
+
+| Member | Type | What it is |
+|---|---|---|
+| `spawn(parent, defName)` | `Spawn{handle, error}` | Deterministic parent-scoped id; budget carve; `maxChildren`/`maxDepth` checked here. |
+| `post(h, item)` | `Ack{ok, error}` | Append to the inbox; no transition; bounded — full ⇒ loud synchronous reject. |
+| `wake(h, prompt)` | `Ack` | `idle→running`; turn input = drained inbox (+ `prompt`); over `maxConcurrent` ⇒ FIFO queue. |
+| `waitOn(h)` / `waitOn(h, timeoutMs)` | `TaskResult` | Next-or-last result; a settled handle answers immediately; timeout ⇒ explicit `"timeout"`, child keeps running. |
+| `interrupt(h)` | `void` | Abort the in-flight Run → `idle`, inbox restored. On `suspended` ⇒ cancels the pending Request → `idle`. |
+| `close(h)` / `close(h, force, reason)` | `void` | Graceful, leaf-first; `close(root)` = stop-all. |
+| `resume(answer)` | `void` | Routes an Answer to the deepest suspended handle; cascades upward. |
+| `list()` | `List<HandleView>` | Read-only `{id, state, tokens, inbox}` for every handle in the tree. |
 
 ## The same call in the other five ports
 
@@ -67,6 +257,6 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`agents.Agent`](/api/java/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
-- [`agents.Handle`](/api/java/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
-- [`agents.Budget`](/api/java/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+- [`agents.Agent`](/api/java/runtime/agent/) — the declarative layer built on these verbs.
+- [`agents.Handle`](/api/java/runtime/handle/) — the state machine each verb transitions.
+- [`agents.Budget`](/api/java/runtime/budgets/) — the limits enforced on every `spawn` and `wake`.

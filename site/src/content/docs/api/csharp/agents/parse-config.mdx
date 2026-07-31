@@ -8,49 +8,204 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/A2A.cs">A2A.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public static List<Agent> ParseAgentsConfig(object? block)
 ```
 
-Declare remote peers in config the way MCP servers are declared, with precedence rules.
+Parses an `agents` config block — a map of id → agent config, mirroring the `mcpServers` shape
+(§2) — into a list of [`Agent`](/api/csharp/agents/agent/) descriptors, skipping disabled entries.
+The config **key is only an identifier**; a tool's name prefix always comes from the fetched card's
+own `name`, never from the config key.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+You're loading a shared config file (or a parsed `Dictionary<string, object?>`) that declares
+remote peers the way it declares MCP servers, and want the same `enabled`/`disabled` precedence
+and shape validation `McpSource.ParseConfig` gives you for `mcpServers`. `Toolkit.CreateAsync`
+already calls this for you when a top-level `agents` key is present on `McpConfig` — reach for it
+directly when you want the parsed list before deciding what to do with it.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Parsing never does I/O — building tools does">
+`ParseAgentsConfig` is pure and synchronous: no card is fetched, no server touched. It just
+validates shape and precedence. Pass the result to
+[`A2A.AgentTools`](/api/csharp/agents/agent-tools/) (or `Toolkit.Options.Agents`) to actually
+resolve peers — the same "validate first, connect second" split
+[`McpSource.ParseConfig`](/api/csharp/mcp/parse-config/) uses for `mcpServers`.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — one entry, defaults applied
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+var block = new Dictionary<string, object?>
+{
+    ["oracle"] = new Dictionary<string, object?> { ["card"] = "http://localhost:9/.well-known/agent-card.json" },
+};
+
+var agents = A2A.ParseAgentsConfig(block);
+
+if (agents.Count != 1) throw new Exception($"expected 1 agent, got {agents.Count}");
+if (agents[0].Card != "http://localhost:9/.well-known/agent-card.json") throw new Exception(agents[0].Card);
+// Timeout/PollEvery unset here — the caller (or AgentTools) applies its own defaults.
+if (agents[0].Timeout != null) throw new Exception("expected no explicit timeout");
+
+Console.WriteLine($"ok: {agents[0].Card}");
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — disabled entries skipped, key is not the prefix
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+var block = new Dictionary<string, object?>
+{
+    // The config key "billing_desk" is just an identifier — it never becomes the tool prefix.
+    ["billing_desk"] = new Dictionary<string, object?>
+    {
+        ["card"] = "http://localhost:9/.well-known/agent-card.json",
+        ["headers"] = new Dictionary<string, object?> { ["Authorization"] = "Bearer ${DESK_TOKEN}" },
+        ["timeout"] = 15_000,
+        ["pollEvery"] = 250,
+    },
+    // MCP's isEnabled precedence: disabled:true wins over enabled.
+    ["retired"] = new Dictionary<string, object?>
+    {
+        ["card"] = "http://localhost:9/retired-card.json",
+        ["disabled"] = true,
+    },
+    // enabled:false also skips.
+    ["paused"] = new Dictionary<string, object?>
+    {
+        ["card"] = "http://localhost:9/paused-card.json",
+        ["enabled"] = false,
+    },
+    // No "card" ⇒ not a valid agent entry, silently skipped.
+    ["malformed"] = new Dictionary<string, object?> { ["timeout"] = 1000 },
+};
+
+var agents = A2A.ParseAgentsConfig(block);
+
+if (agents.Count != 1) throw new Exception($"expected 1 agent, got {agents.Count}");
+var a = agents[0];
+if (a.Timeout != 15_000 || a.PollEvery != 250) throw new Exception($"{a.Timeout},{a.PollEvery}");
+// Header VALUES are preserved raw here — ${ENV} expansion happens later, at call time.
+if (a.Headers?["Authorization"] != "Bearer ${DESK_TOKEN}") throw new Exception(a.Headers?["Authorization"]);
+
+Console.WriteLine($"ok: {agents.Count} enabled agent, headers unexpanded until call time");
 ```
 
-### 3. TODO — the full surface
+### 3. Full surface — feeding the parsed list into a live Toolkit
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+
+using var peerLlm = new Stub(ctx => Stub.Json(ctx, 200, """
+{"choices":[{"message":{"content":"reported"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}
+"""));
+
+await using var peer = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Builtins = false,
+    Skills = new List<SkillSource.SkillDef> { new("status", "reports status", "Report status.") },
+});
+var peerClient = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = peerLlm.BaseUrl, Style = "openai", Model = "mock", ApiKey = "k",
+});
+var handle = await peer.ServeAsync("127.0.0.1:0", new Toolkit.ServeOptions
+{
+    Client = peerClient,
+    A2A = new A2AConfig { Name = "monitor" },
+});
+
+// A whole McpConfig-shaped document — mcpServers + a sibling top-level "agents" block, exactly
+// how Toolkit.CreateAsync reads it (McpSource.ParseConfig handles "mcpServers"; A2A.ParseAgentsConfig
+// handles "agents").
+var config = new Dictionary<string, object?>
+{
+    ["mcpServers"] = new Dictionary<string, object?>(),
+    ["agents"] = new Dictionary<string, object?>
+    {
+        ["monitor"] = new Dictionary<string, object?> { ["card"] = handle.Url + "/.well-known/agent-card.json" },
+    },
+};
+
+var parsed = A2A.ParseAgentsConfig(((IDictionary<string, object?>)config)["agents"]);
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false, Agents = parsed });
+
+var tool = tk.Get("monitor_status") ?? throw new Exception("expected monitor_status to be registered");
+var result = await tool.ExecuteAsync(new Dictionary<string, object?> { ["task"] = "how's it going?" });
+if (result.IsError || result.Output != "reported") throw new Exception(result.Output);
+
+await handle.StopAsync();
+Console.WriteLine($"ok: {tool.Name} -> {result.Output}");
+
+sealed class Stub : IDisposable
+{
+    readonly System.Net.HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<System.Net.HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                System.Net.HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(System.Net.HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
 ```
+
+<Aside type="caution">
+`block` that isn't a `IDictionary<string, object?>` (null, a list, a scalar) returns an **empty
+list**, never a throw — matching `McpSource.ParseConfig`'s tolerance for a config document that
+simply has no `agents` key.
+</Aside>
+
+## Parameters
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `block` | `object?` | The `agents` value off a parsed config document — a map of id → `{ card, headers?, timeout?, pollEvery?, enabled?/disabled? }`. Anything else ⇒ empty list. |
 
 ## The same call in the other five ports
 
@@ -60,7 +215,7 @@ _TODO: name the alternative and when to prefer it._
 | Python | `parse_agents_config` | [→](/api/python/agents/parse-config/) |
 | Go | `ParseAgentsConfig` | [→](/api/go/agents/parse-config/) |
 | Java | `A2A.parseAgentsConfig` | [→](/api/java/agents/parse-config/) |
-| Elixir | `Toolnexus.Agents.parse_config` | [→](/api/elixir/agents/parse-config/) |
+| Elixir | `Toolnexus.A2a.parse_agents_config` | [→](/api/elixir/agents/parse-config/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).

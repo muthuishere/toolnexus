@@ -1,56 +1,326 @@
 ---
-title: "agents.New"
+title: "Agent — call a remote A2A peer"
 description: "Point at a remote agent's card and use it exactly like a local tool. — Go."
 sidebar:
-  label: "agents.New"
+  label: "agents / agent"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a>
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/a2a.go">golang/a2a.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+type Agent struct {
+	Card      string            // URL of the peer's Agent Card
+	Headers   map[string]string // static headers; ${ENV_VAR} values expand at call time
+	Timeout   int               // overall poll budget in ms (default 300000)
+	PollEvery int               // interval between GetTask polls in ms (default 1000)
+}
+
+// wire an Agent into a toolkit — every advertised skill becomes a Tool
+toolnexus.CreateToolkit(ctx, toolnexus.Options{Agents: []toolnexus.Agent{ag}})
 ```
 
-Point at a remote agent's card and use it exactly like a local tool.
+`Agent` is a plain descriptor for a remote peer — a URL plus optional auth headers and timing.
+There is no constructor to call: build the struct literal and hand it to
+[`CreateToolkit`](/api/go/toolkit/create/)'s `Options.Agents` (or [`Toolkit.AddAgent`](#the-runtime-form)
+at runtime). The toolkit resolves the card, and every skill the peer advertises shows up as an
+ordinary `Tool` — the model that ends up driving the toolkit cannot tell a remote A2A skill from a
+native function.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `Agent` when another toolnexus toolkit (or any real A2A agent) already does something
+useful, and you want your own toolkit to delegate to it as if it were a local tool — no bespoke
+HTTP client, no bespoke polling loop, just a card URL and optional headers.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Want the raw []Tool slice instead of a toolkit?">
+`Agent` wired through `Options.Agents` merges the peer's tools into a toolkit alongside MCP tools,
+skills, and your own `ExtraTools`. Reach for [`AgentTools`](/api/go/agents/agent-tools/) directly
+when you want to resolve a card into a `[]Tool` yourself — to filter, inspect, or register only
+some of them — without going through `CreateToolkit` at all.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+All three examples stand up a tiny local HTTP server playing a fake A2A peer (`httptest.Server`,
+speaking the JSON-RPC subset `a2a.go` expects) — no external network, no real agent.
 
-{/* TODO:example1 */}
-```go
-// TODO
+### 1. The smallest useful call — one peer, one tool call
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+// startPeer stands up a minimal fake A2A agent: one skill ("greet"), every
+// task completes immediately with a canned answer.
+func startPeer() *httptest.Server {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/.well-known/agent-card.json" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name": "greeter",
+				"url":  srv.URL + "/",
+				"skills": []any{
+					map[string]any{"id": "greet", "name": "Greet", "description": "Say hello"},
+				},
+			})
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var rpc struct {
+			ID     any    `json:"id"`
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(body, &rpc)
+		switch rpc.Method {
+		case "SendMessage":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": rpc.ID,
+				"result": map[string]any{"id": "t1", "status": map[string]any{"state": "submitted"}},
+			})
+		case "GetTask":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": rpc.ID,
+				"result": map[string]any{
+					"id":        "t1",
+					"status":    map[string]any{"state": "completed"},
+					"artifacts": []any{map[string]any{"parts": []any{map[string]any{"kind": "text", "text": "hello!"}}}},
+				},
+			})
+		}
+	}))
+	return srv
+}
+
+func main() {
+	peer := startPeer()
+	defer peer.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{
+		Builtins: false,
+		Agents: []toolnexus.Agent{
+			{Card: peer.URL + "/.well-known/agent-card.json", PollEvery: 5},
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	// The peer's "greet" skill is now an ordinary tool: greeter_greet.
+	if _, ok := tk.Get("greeter_greet"); !ok {
+		log.Fatal("expected greeter_greet in the toolkit")
+	}
+	res, err := tk.Execute(context.Background(), "greeter_greet", map[string]any{"task": "say hi"})
+	if err != nil || res.IsError {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+
+	fmt.Println("ok:", res.Output)
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — auth headers with `${ENV}` expansion
 
-{/* TODO:example2 */}
-```go
-// TODO
+`Headers` values containing `${ENV_VAR}` expand from the process environment at call time and are
+never logged — the same rule `HTTPTool` uses for outbound headers.
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"os"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func startAuthedPeer(seenAuth *string) *httptest.Server {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/.well-known/agent-card.json" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name": "vault", "url": srv.URL + "/",
+				"skills": []any{map[string]any{"id": "read", "name": "Read", "description": "Read a secret"}},
+			})
+			return
+		}
+		*seenAuth = r.Header.Get("Authorization")
+		body, _ := io.ReadAll(r.Body)
+		var rpc struct {
+			ID     any    `json:"id"`
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(body, &rpc)
+		if rpc.Method == "SendMessage" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": rpc.ID,
+				"result": map[string]any{"id": "t1", "status": map[string]any{"state": "submitted"}}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": rpc.ID,
+			"result": map[string]any{"id": "t1", "status": map[string]any{"state": "completed"},
+				"artifacts": []any{map[string]any{"parts": []any{map[string]any{"kind": "text", "text": "secret-value"}}}}}})
+	}))
+	return srv
+}
+
+func main() {
+	var seenAuth string
+	peer := startAuthedPeer(&seenAuth)
+	defer peer.Close()
+
+	// The real key lives only in the environment — never in code.
+	if err := os.Setenv("VAULT_TOKEN", "sk-demo-123"); err != nil {
+		log.Fatal(err)
+	}
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{
+		Builtins: false,
+		Agents: []toolnexus.Agent{{
+			Card:      peer.URL + "/.well-known/agent-card.json",
+			Headers:   map[string]string{"Authorization": "Bearer ${VAULT_TOKEN}"},
+			PollEvery: 5,
+		}},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	res, err := tk.Execute(context.Background(), "vault_read", map[string]any{"task": "read it"})
+	if err != nil || res.IsError || res.Output != "secret-value" {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+	if seenAuth != "Bearer sk-demo-123" {
+		log.Fatalf("expected the header to expand from the env, got %q", seenAuth)
+	}
+
+	fmt.Println("ok: peer saw", seenAuth)
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — a failed task, and the metadata every call carries
 
-{/* TODO:example3 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func startFlakyPeer() *httptest.Server {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/.well-known/agent-card.json" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name": "flaky", "url": srv.URL + "/",
+				"skills": []any{map[string]any{"id": "risky", "name": "Risky", "description": "Sometimes fails"}},
+			})
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var rpc struct {
+			ID     any    `json:"id"`
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(body, &rpc)
+		if rpc.Method == "SendMessage" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": rpc.ID,
+				"result": map[string]any{"id": "t1", "status": map[string]any{"state": "submitted"}}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": rpc.ID,
+			"result": map[string]any{
+				"id":     "t1",
+				"status": map[string]any{"state": "failed", "message": map[string]any{"role": "agent", "parts": []any{map[string]any{"kind": "text", "text": "disk full"}}}},
+			}})
+	}))
+	return srv
+}
+
+func main() {
+	peer := startFlakyPeer()
+	defer peer.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{
+		Builtins: false,
+		Agents: []toolnexus.Agent{{
+			Card:      peer.URL + "/.well-known/agent-card.json",
+			Timeout:   5000,
+			PollEvery: 5,
+		}},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	res, err := tk.Execute(context.Background(), "flaky_risky", map[string]any{"task": "try it"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if !res.IsError {
+		log.Fatal("expected the failed task to surface as an error result")
+	}
+	// Every call — success or failure — carries {agent, taskId, state, polls, ms}.
+	if res.Metadata["agent"] != "flaky" || res.Metadata["state"] != "failed" {
+		log.Fatalf("unexpected metadata: %+v", res.Metadata)
+	}
+	if _, ok := res.Metadata["taskId"].(string); !ok {
+		log.Fatal("expected a taskId in metadata")
+	}
+
+	fmt.Println("ok:", res.Output, "metadata.state =", res.Metadata["state"])
+}
 ```
+
+## Fields
+
+| Field | Type | What it does |
+|---|---|---|
+| `Card` | `string` | URL of the peer's `/.well-known/agent-card.json`. |
+| `Headers` | `map[string]string` | Static request headers; `${ENV_VAR}` values expand at call time, never logged. |
+| `Timeout` | `int` | Overall poll budget in ms; default `300000`. |
+| `PollEvery` | `int` | Interval between `GetTask` polls in ms; default `1000`. |
+
+## The runtime form
+
+`tk.AddAgent(ctx, cardURLOrAgent, opts)` adds a peer to an already-built toolkit, resolving and
+registering its tools immediately — the async counterpart to putting the `Agent` in
+`Options.Agents` at construction time.
 
 ## The same call in the other five ports
 
@@ -60,7 +330,7 @@ _TODO: name the alternative and when to prefer it._
 | Python | `agent` | [→](/api/python/agents/agent/) |
 | Java | `A2A.agent` | [→](/api/java/agents/agent/) |
 | C# | `A2A.Agent` | [→](/api/csharp/agents/agent/) |
-| Elixir | `Toolnexus.Agents.new` | [→](/api/elixir/agents/agent/) |
+| Elixir | `Toolnexus.A2a.agent` | [→](/api/elixir/agents/agent/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
@@ -69,3 +339,4 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 - [`AgentTools`](/api/go/agents/agent-tools/) — Expand a remote agent card into one tool per advertised skill.
 - [`ParseAgentsConfig`](/api/go/agents/parse-config/) — Declare remote peers in config the way MCP servers are declared, with precedence rules.
+- [`agents.New`](/api/go/runtime/agent/) — the LOCAL, in-process counterpart: a sub-agent composed from a toolkit view and a soul, not a remote HTTP peer.

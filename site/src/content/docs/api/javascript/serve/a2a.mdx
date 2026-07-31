@@ -8,58 +8,218 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7b-a2a-agents--inbound-serve">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/serve.ts">js/src/serve.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function startA2AServer(opts: {
+  addr: string
+  a2a?: A2AConfig
+  skills: SkillInfo[]
+  runTask: (text: string, contextId?: string) => Promise<RunResult>
+  onTask?: OnTask
+  mcp?: MCPServeConfig
+  mcpTools?: Tool[]
+  onCall?: OnCall
+}): Promise<ServeHandle>
 ```
 
-Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+Stand up the HTTP server behind `toolkit.serve(addr, opts)` — the low-level function `Toolkit.serve`
+delegates to. When `a2a` is present it mounts `GET /.well-known/agent-card.json` (built from
+`skills` via [`buildAgentCard`](/api/javascript/serve/agent-card/)) and `POST /` for JSON-RPC
+`SendMessage`/`GetTask`; `SendMessage` returns a `submitted` Task immediately and fulfils it
+asynchronously through `runTask` — your bridge into whatever runs the model. When `mcp` is also
+present it co-mounts `POST /mcp` (see [`buildMcpServer`](/api/javascript/serve/mcp/)) on the same
+server. Neither profile present ⇒ every request 404s.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `startA2AServer` directly when you are not going through `Toolkit.serve` — you have your
+own `runTask` (not necessarily a toolnexus `Client.run`/`ask`), or you want the raw server without
+a `Toolkit` wrapping it. Most callers use `toolkit.serve(addr, { client, a2a })` instead, which
+builds `runTask` from `client.run`/`client.ask` and `skills`/`mcpTools` from the toolkit for you.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use toolkit.serve instead when you already have a Toolkit and a Client">
+`toolkit.serve(addr, { client, a2a, mcp })` is `startA2AServer` with `runTask`, `skills` and
+`mcpTools` wired in automatically — including threading the A2A message's `contextId` through
+`client.ask` so a peer's turns are remembered via the client's `ConversationStore`. Call
+`startA2AServer` yourself only when you need to supply `runTask` from something other than a
+toolnexus `Client`.
 </Aside>
+
+Prefer `startA2AServer` directly when:
+
+- `runTask` should do something other than `client.run`/`client.ask` — a queue handoff, a
+  different agent framework entirely, a canned responder for a test double.
+- You want the MCP profile (`mcp`) **without** an A2A profile on the same port — `a2a` is optional,
+  and an MCP-only server 404s every other route.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — a2a absent, everything 404s
 
-{/* TODO:example1 */}
-```ts
-// TODO
+`a2a` and `mcp` are both optional; with neither set, the server still starts and listens, it just
+answers 404 to everything. This is the documented "opt-in" behavior, not a misconfiguration.
+
+```ts test
+import assert from "node:assert"
+import { startA2AServer } from "toolnexus"
+
+const srv = await startA2AServer({
+  addr: "127.0.0.1:0",
+  skills: [],
+  runTask: async () => ({ text: "unused", status: "done" } as any),
+})
+
+const res = await fetch(srv.url + "/.well-known/agent-card.json")
+assert.equal(res.status, 404, "no profile mounted ⇒ no routes")
+
+await srv.stop()
+console.log("ok:", srv.url)
 ```
 
-### 2. TODO — the realistic case
+### 2. A real, hermetic round trip — served toolkit called by a real A2A caller
 
-{/* TODO:example2 */}
-```ts
-// TODO
+The realistic path: `toolkit.serve` (which calls `startA2AServer` under the hood) against a stub
+LLM, then a second toolkit's `agent()` calling it — the same round trip
+[`agent`](/api/javascript/agents/agent/)'s example 2 walks through, shown here from the serving
+side.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { agent, createClient, createToolkit } from "toolnexus"
+
+const llm = http.createServer((_req, res) => {
+  res.writeHead(200, { "content-type": "application/json" })
+  res.end(JSON.stringify({
+    choices: [{ message: { content: "TRANSCRIBED" } }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  }))
+})
+await new Promise<void>((r) => llm.listen(0, "127.0.0.1", r))
+const llmPort = (llm.address() as any).port
+
+const tk = await createToolkit({ skillsDir: "./examples/skills", builtins: false })
+const client = createClient({ baseUrl: `http://127.0.0.1:${llmPort}`, style: "openai", model: "x", apiKey: "k" })
+
+// Under the hood this calls startA2AServer({ addr, a2a, skills: tk's SkillInfo[], runTask: (t) => client.run(t, { toolkit: tk }) }).
+const srv = await tk.serve("127.0.0.1:0", { client, a2a: { name: "video-desk", skills: ["hello-world"] } })
+
+const card = await (await fetch(srv.url + "/.well-known/agent-card.json")).json()
+assert.equal(card.name, "video-desk")
+assert.equal(card.url, srv.url + "/", "card.url is the JSON-RPC POST endpoint")
+
+const caller = await createToolkit({
+  builtins: false,
+  agents: [agent({ card: srv.url + "/.well-known/agent-card.json", pollEvery: 10 })],
+})
+try {
+  const res = await caller.execute("video-desk_hello-world", { task: "do it" })
+  assert.equal(res.isError, false)
+  assert.equal(res.output, "TRANSCRIBED", "submit → poll → runTask → artifact, end to end")
+  console.log("ok:", res.output)
+} finally {
+  await caller.close()
+  await srv.stop()
+  await tk.close()
+  llm.close()
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — raw JSON-RPC, onTask telemetry, and a fulfilment error surviving
 
-{/* TODO:example3 */}
-```ts
-// TODO
+Calling `startA2AServer` directly with a custom `runTask` (no `Client` involved at all), talking
+raw JSON-RPC to `SendMessage`/`GetTask`, and observing `onTask` fire on both success and a
+fulfilment error — which becomes a `failed` Task, never a crashed server.
+
+```ts test
+import assert from "node:assert"
+import { startA2AServer, type RunResult } from "toolnexus"
+
+const events: any[] = []
+let calls = 0
+
+const srv = await startA2AServer({
+  addr: "127.0.0.1:0",
+  skills: [{ name: "echo", description: "Echoes the task", location: "-", content: "" }],
+  a2a: { name: "custom-runner" },
+  runTask: async (text: string): Promise<RunResult> => {
+    calls++
+    if (text.includes("boom")) throw new Error("runner exploded")
+    return { text: `echo: ${text}`, status: "done" } as RunResult
+  },
+  onTask: (ev) => events.push(ev),
+})
+
+async function rpc(method: string, params: unknown) {
+  const res = await fetch(srv.url + "/", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: "1", method, params }),
+  })
+  return res.json() as Promise<any>
+}
+async function pollUntilTerminal(id: string): Promise<any> {
+  for (let i = 0; i < 50; i++) {
+    const env = await rpc("GetTask", { id })
+    const state = env.result?.status?.state
+    if (state === "completed" || state === "failed") return env.result
+    await new Promise((r) => setTimeout(r, 10))
+  }
+  throw new Error("never terminal")
+}
+
+// Success path.
+const ok = await rpc("SendMessage", { message: { role: "user", parts: [{ kind: "text", text: "hi" }] } })
+assert.equal(ok.result.status.state, "submitted", "SendMessage returns immediately, fulfilment is async")
+const done = await pollUntilTerminal(ok.result.id)
+assert.equal(done.status.state, "completed")
+assert.equal(done.artifacts[0].parts[0].text, "echo: hi")
+
+// Failure path — never crashes the server.
+const bad = await rpc("SendMessage", { message: { role: "user", parts: [{ kind: "text", text: "boom please" }] } })
+const failed = await pollUntilTerminal(bad.result.id)
+assert.equal(failed.status.state, "failed")
+assert.match(failed.status.message.parts[0].text, /runner exploded/)
+
+assert.equal(calls, 2)
+assert.deepEqual(events.map((e) => e.state), ["completed", "failed"])
+
+await srv.stop()
+console.log("ok:", events.map((e) => e.state).join(","))
 ```
+
+## Options
+
+| Field | Type | What it does |
+|---|---|---|
+| `addr` | `string` | `host:port` to bind. Port `0` picks an ephemeral free port. **Required.** |
+| `a2a` | `A2AConfig` | `{ name?, description?, version?, provider?, skills?, store? }`. Absent ⇒ no A2A routes. |
+| `skills` | `SkillInfo[]` | The toolkit's `SkillSource` entries — what the Agent Card advertises. |
+| `runTask` | `(text, contextId?) => Promise<RunResult>` | Fulfils one Task's text against the model. `contextId` (from the A2A message) threads conversation memory. **Required.** |
+| `onTask` | `(ev: OnTaskEvent) => void \| Promise<void>` | Fires on every terminal Task state with the `RunResult` telemetry. |
+| `mcp` | `MCPServeConfig` | Co-mounts `POST /mcp` (§7C). Absent ⇒ no MCP route. |
+| `mcpTools` | `Tool[]` | The toolkit's unified tools, exposed by the `mcp` profile. |
+| `onCall` | `(ev: OnCallEvent) => void \| Promise<void>` | Fires on every inbound `tools/call`. |
+
+## What you get back
+
+`Promise<ServeHandle>` — `{ url, stop(), close() }`. `url` is the base URL of the listening server
+(`0.0.0.0`/`::` report back as `127.0.0.1`); `close()` is an alias for `stop()`. A `RunResult` with
+`status: "pending"` maps the Task to `"input-required"` (§10 crossing A2A) rather than a false
+`"completed"`.
 
 ## The same call in the other five ports
 
 | Port | Symbol | |
 |---|---|---|
 | Python | `Toolkit.serve` | [→](/api/python/serve/a2a/) |
-| Go | `StartAgent` | [→](/api/go/serve/a2a/) |
+| Go | `Toolkit.Serve` | [→](/api/go/serve/a2a/) |
 | Java | `A2AServer.start` | [→](/api/java/serve/a2a/) |
-| C# | `A2AServer.Start` | [→](/api/csharp/serve/a2a/) |
+| C# | `A2AServer.StartAsync` | [→](/api/csharp/serve/a2a/) |
 | Elixir | `Toolnexus.Serve.start` | [→](/api/elixir/serve/a2a/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
@@ -70,3 +230,4 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 - [`buildAgentCard`](/api/javascript/serve/agent-card/) — Construct the Agent Card that advertises your name, skills and endpoint.
 - [`FileTaskStore`](/api/javascript/serve/task-store/) — Persist inbound A2A tasks so a suspended request survives a restart.
 - [`buildMcpServer`](/api/javascript/serve/mcp/) — The inbound MCP profile: any MCP client can call your tools.
+- [`agent`](/api/javascript/agents/agent/) — the outbound side: call a server started this way

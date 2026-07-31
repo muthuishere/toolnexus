@@ -8,49 +8,245 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/agents/Budget.java">agents/Budget.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public final class Budget {
+    public Integer maxTurns;
+    public Long maxTokens;
+    public Long maxToolCalls;
+    public Long maxWallMs;
+    public Integer maxChildren;
+    public Integer maxConcurrent;
+    public Integer maxDepth;
+
+    public Budget maxTurns(int v)      // ...and one chainable setter per field
+}
 ```
 
-Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+A hierarchical, **live-enforced** budget: `{maxTurns, maxTokens, maxToolCalls, maxWallMs,
+maxChildren, maxConcurrent, maxDepth}`. A `null` field is unlimited. Effective values are carved
+at `spawn` (`effective = min(own, parent remaining)`) and re-checked by a live ancestor-chain walk
+before every turn and every spawn — carving alone would miss a sibling's spend. Money is
+deliberately excluded (vendor-specific pricing; hosts convert usage externally).
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Attach a `Budget` to an `AgentDef`/`AgentSpec` whenever a sub-agent — especially one a model can
+delegate to via [the task tool](/api/java/runtime/task-tool/) — needs a hard ceiling: a
+runaway loop, a fan-out that shouldn't spawn unbounded children, or a wall-clock deadline on a
+background persona. Any limit stop surfaces as `status:"incomplete"` with the limit named —
+never a silent `"done"`, never a crash — with partial work and the transcript preserved.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Budgets are enforced by the runtime, not advisory">
+`maxTurns` alone (via `LlmClient.Options.maxTurns`) bounds one agent's own loop. `Budget` goes
+further: it is carved down the whole ancestor chain at spawn AND re-checked live, so a
+coordinator's `maxTokens` genuinely caps what its entire subtree can spend — including tokens a
+child burns that the coordinator never sees directly. Reach for a bare `LlmClient` option only
+when there is no sub-agent tree to bound.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — `maxTurns` stops a loop, `status:"incomplete"`
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.agents.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                ex.getRequestBody().readAllBytes();
+                calls.incrementAndGet();
+                // Never finishes on its own — always another tool call.
+                byte[] b = ("{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":[{\"id\":\"c\",\"type\":\"function\","
+                        + "\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}").getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+
+        try {
+            io.github.muthuishere.toolnexus.Tool lookup = io.github.muthuishere.toolnexus.NativeTool.of(
+                    "lookup", "looks something up", Map.of("type", "object", "properties", Map.of()),
+                    a -> "data");
+            AgentDef def = new AgentDef("looper", "never finishes", "", "test-model")
+                    .tools(java.util.List.of(lookup))
+                    .budget(new Budget().maxTurns(3));
+            RuntimeOptions rtOpts = new RuntimeOptions()
+                    .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                    .apiKey("test-key")
+                    .registry(Map.of("looper", def));
+            AgentRuntime rt = new AgentRuntime(rtOpts);
+            Handle h = rt.spawn(rt.root, "looper").handle();
+
+            var fut = rt.futureResult(h);
+            rt.wake(h, "keep going");
+            TaskResult r = fut.join();
+
+            if (!"incomplete".equals(r.status())) throw new AssertionError(r.status());
+            if (!r.text().contains("maxTurns")) throw new AssertionError(r.text());
+            if (h.state != Handle.State.IDLE) throw new AssertionError("partial work, still usable: " + h.state);
+
+            System.out.println("ok: " + r.status() + " — " + r.text());
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — `maxToolCalls` exhausted ACROSS wakes
 
-{/* TODO:example2 */}
-```java
-// TODO
+Usage rolls up as the ledger: the live ancestor-chain walk runs before each turn **and each
+wake** — so a budget spent by one completed run refuses the next `wake` on the same handle
+outright, before any network call, rather than letting it start and fail mid-flight.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.Json;
+import io.github.muthuishere.toolnexus.agents.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                Map<String, Object> req = Json.toMap(body);
+                List<Object> msgs = (List<Object>) req.get("messages");
+                boolean hasToolResult = msgs.stream().anyMatch(m -> "tool".equals(((Map<?, ?>) m).get("role")));
+                calls.incrementAndGet();
+                String message = hasToolResult
+                        ? "{\"content\":\"found: data\"}"
+                        : "{\"content\":null,\"tool_calls\":[{\"id\":\"c\",\"type\":\"function\","
+                          + "\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}";
+                byte[] b = ("{\"choices\":[{\"message\":" + message + "}]}").getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+
+        try {
+            io.github.muthuishere.toolnexus.Tool lookup = io.github.muthuishere.toolnexus.NativeTool.of(
+                    "lookup", "looks something up", Map.of("type", "object", "properties", Map.of()),
+                    a -> "data");
+            AgentDef def = new AgentDef("researcher", "looks things up", "", "test-model")
+                    .tools(java.util.List.of(lookup))
+                    .budget(new Budget().maxToolCalls(1));
+            RuntimeOptions rtOpts = new RuntimeOptions()
+                    .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                    .apiKey("test-key")
+                    .registry(Map.of("researcher", def));
+            AgentRuntime rt = new AgentRuntime(rtOpts);
+            Handle h = rt.spawn(rt.root, "researcher").handle();
+
+            var fut1 = rt.futureResult(h);
+            rt.wake(h, "look something up");
+            TaskResult r1 = fut1.join();
+            if (!"done".equals(r1.status())) throw new AssertionError(r1.status());
+            if (!r1.text().equals("found: data")) throw new AssertionError(r1.text());
+
+            // The one allowed tool call is already spent — the SECOND wake never reaches the network.
+            int callsAfterFirstWake = calls.get();
+            var fut2 = rt.futureResult(h);
+            rt.wake(h, "look up something else");
+            TaskResult r2 = fut2.join();
+
+            if (!"incomplete".equals(r2.status())) throw new AssertionError(r2.status());
+            if (!r2.text().contains("toolCalls")) throw new AssertionError(r2.text());
+            if (calls.get() != callsAfterFirstWake) throw new AssertionError("refused before any network call");
+
+            System.out.println("ok: " + r1.status() + " then " + r2.status() + " — " + r2.text());
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — `maxChildren` and `maxDepth` refuse a spawn outright
 
-{/* TODO:example3 */}
-```java
-// TODO
+Unlike the token/turn/wall limits (which settle a *running* handle as `incomplete`),
+`maxChildren`/`maxDepth` are checked at `spawn` itself — an over-limit spawn never creates a
+handle at all; it returns an error as data.
+
+```java test
+import io.github.muthuishere.toolnexus.agents.*;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        // maxChildren is a handle's own limit on ITS OWN children.
+        AgentDef coordinator = new AgentDef("coordinator", "delegates", "", "inherit")
+                .budget(new Budget().maxChildren(1));
+        // maxDepth is checked as parent.depth+1 > parent.effMaxDepth — a handle whose OWN
+        // maxDepth is already at (or below) its own depth refuses every spawn beneath it.
+        AgentDef gatekeeper = new AgentDef("gatekeeper", "caps how deep its subtree may go", "", "inherit")
+                .budget(new Budget().maxDepth(1));
+        AgentDef worker = new AgentDef("worker", "does work", "", "inherit");
+
+        AgentRuntime rt = new AgentRuntime(new RuntimeOptions()
+                .registry(Map.of("coordinator", coordinator, "gatekeeper", gatekeeper, "worker", worker)));
+
+        // maxChildren: the first child is fine, the second is refused.
+        Handle coord = rt.spawn(rt.root, "coordinator").handle();
+        AgentRuntime.Spawn first = rt.spawn(coord, "worker");
+        if (first.error() != null) throw new AssertionError(first.error());
+        AgentRuntime.Spawn second = rt.spawn(coord, "worker");
+        if (second.error() == null || !second.error().contains("maxChildren")) {
+            throw new AssertionError(second.error());
+        }
+
+        // maxDepth: gatekeeper (depth 1) declares maxDepth(1) on ITSELF — its own children
+        // would land at depth 2, which already exceeds its own cap.
+        Handle gate = rt.spawn(rt.root, "gatekeeper").handle();
+        AgentRuntime.Spawn blocked = rt.spawn(gate, "worker");
+        if (blocked.error() == null || !blocked.error().contains("maxDepth")) {
+            throw new AssertionError(blocked.error());
+        }
+
+        System.out.println("ok: refused — " + second.error() + " / " + blocked.error());
+    }
+}
 ```
+
+## Fields and overloads
+
+| Member | Type | What it is |
+|---|---|---|
+| `maxTurns` | `Integer` | Per-handle LLM round trips (mirrors `LlmClient.Options.maxTurns`); default 6. |
+| `maxTokens` | `Long` | Rolls up the ancestor chain — a coordinator's cap bounds its whole subtree. |
+| `maxToolCalls` | `Long` | Same roll-up as `maxTokens`. |
+| `maxWallMs` | `Long` | Wall-clock window opens at the handle's first turn. |
+| `maxChildren` | `Integer` | Checked at `spawn`; default unlimited-ish (`Handle.NO_LIMIT`). |
+| `maxConcurrent` | `Integer` | Running children per parent at once; default 8; over the cap ⇒ FIFO wake queue. |
+| `maxDepth` | `Integer` | Checked at `spawn`; default 3. |
+| carve rule | — | `effective = min(own, parent remaining)` at spawn, plus a live walk before every turn/spawn. |
+| limit hit | — | `status:"incomplete"` with the limit named; partial work + transcript preserved — never silent, never a crash. |
 
 ## The same call in the other five ports
 
@@ -59,7 +255,7 @@ _TODO: name the alternative and when to prefer it._
 | JavaScript | `agents.Budget` | [→](/api/javascript/runtime/budgets/) |
 | Python | `Budget` | [→](/api/python/runtime/budgets/) |
 | Go | `agents.Budget` | [→](/api/go/runtime/budgets/) |
-| C# | `AgentTypes.Budget` | [→](/api/csharp/runtime/budgets/) |
+| C# | `Budget` | [→](/api/csharp/runtime/budgets/) |
 | Elixir | `Toolnexus.Agents budget` | [→](/api/elixir/runtime/budgets/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
@@ -67,6 +263,6 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`agents.Agent`](/api/java/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
-- [`agents.Runtime`](/api/java/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
-- [`agents.Handle`](/api/java/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`agents.Agent`](/api/java/runtime/agent/) — `AgentSpec.budget` attaches a `Budget` declaratively.
+- [`agents.Runtime`](/api/java/runtime/runtime/) — `spawn`/`wake` are where budgets are carved and enforced.
+- [`agents.Handle`](/api/java/runtime/handle/) — carries the carved pool (`poolTokens`, `poolToolCalls`, …) at runtime.

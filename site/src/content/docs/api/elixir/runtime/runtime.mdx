@@ -8,49 +8,198 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/agents/runtime.ex">elixir/lib/toolnexus/agents/runtime.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec new(keyword() | map()) :: pid()
+def new(opts)
+# opts: :registry (agent name -> definition, see Agents.registry/2), :transport (§8 seam),
+#       :llm (%{base_url, style, model, api_key, retries}), :max_concurrent_turns (default 8),
+#       :inbox_cap (default 8), :shutdown_ms (default 200), :clock, :store
+
+# the six verbs (all take the runtime pid + a Handle pid):
+def spawn_agent(rt, parent, def_name, budget \\ nil)   # -> {:ok, pid} | {:error, msg}
+def post(rt, pid, item)                                # -> %{ok, is_error?}
+def wake(rt, pid, prompt \\ nil)                        # -> %{ok, is_error?}
+def wait(rt, pid, timeout_ms \\ nil)                    # -> %{text, is_error, status, pending, turns, total_tokens}
+def interrupt(rt, pid)                                  # -> :ok
+def close(rt, opts \\ [])                               # -> :ok  (close(root) = stop-all)
+
+# read-only views + lifecycle:
+def root(rt)          # the root handle
+def list(rt)           # [%{id, state, tokens, inbox}] — every non-root handle
+def snapshot(pid)      # full detail on ONE handle
+def resume(rt, answer)  # route a §10 Answer to the deepest suspended handle
+def shutdown(rt)        # close(root) then tear the runtime down
 ```
 
-The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+An OTP runtime for SPEC §7D: handles are `GenServer`s under a runtime-owned
+`DynamicSupervisor`; the six verbs are the GenServer protocol; a Run (one client-loop invocation)
+is its own monitored process, so its crash or kill crosses the handle boundary as an `is_error`
+**result**, never a GenServer exit. The runtime owns everything cross-cutting — one
+`ConversationStore` for every handle (conversation id = the handle's deterministic id, so resume
+reads real history), one `MetricsRegistry`, an injectable clock, and the global turn gate that
+wraps **only** the LLM HTTP call (never a whole Run — holding it across a Run would deadlock
+parent against child).
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **You need long-lived handles**, not one-shot completion — post to an idle agent later, list
+  everything spawned so far, interrupt one mid-turn. `Toolnexus.Agents.run/3` tears its runtime
+  down as soon as the top-level agent settles; `Runtime` does not.
+- **Driving the unsolicited rail directly** — `post/3` + `wake/3` is how a heartbeat, a timer tick,
+  or a sibling's result reaches an idle agent as a coalesced turn.
+- **Inspecting live state** — `list/1` for a flat overview, `snapshot/1` for one handle's full
+  detail (state, inbox depth, rolled-up tokens, children).
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for Agents.run/3 when one-shot to completion is all you need">
+[`Toolnexus.Agents.run/3`](/api/elixir/runtime/agent/) builds a `Runtime`, spawns the top-level
+agent, wakes it, waits, and tears the runtime down — exactly what most callers want.
+`Toolnexus.Agents.registry/2` turns an `AgentDef` (and its whole team graph) into the `:registry`
+map `Runtime.new/1` expects, so you rarely hand-build one.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — spawn, wake, wait
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.{Agents, Agents.Runtime}
+
+transport = fn %{body: _body} ->
+  resp = %{
+    "choices" => [%{"message" => %{"role" => "assistant", "content" => "pong"}}],
+    "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+  }
+
+  {:ok, %{status: 200, headers: %{}, body: resp}}
+end
+
+peer = Agents.agent("peer", does: "says pong", model: "m-peer")
+rt = Runtime.new(%{transport: transport, registry: Agents.registry(peer)})
+
+{:ok, h} = Runtime.spawn_agent(rt, Runtime.root(rt), "peer")
+%{ok: true} = Runtime.wake(rt, h, "ping")
+r = Runtime.wait(rt, h)
+
+true = r.status == "done"
+true = r.text == "pong"
+true = r.turns == 1
+
+Runtime.shutdown(rt)
+IO.puts("ok: #{r.text} in #{r.turns} turn")
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — the unsolicited rail: `post/3` coalesces into one turn
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.{Agents, Agents.Runtime}
+
+transport = fn %{body: body} ->
+  last = to_string(List.last(body["messages"] || [])["content"] || "")
+  n = length(Regex.scan(~r/^\d+\./m, last))
+
+  resp = %{
+    "choices" => [%{"message" => %{"role" => "assistant", "content" => "processed #{n} items"}}],
+    "usage" => %{"prompt_tokens" => 3, "completion_tokens" => 2, "total_tokens" => 5}
+  }
+
+  {:ok, %{status: 200, headers: %{}, body: resp}}
+end
+
+peer = Agents.agent("peer", does: "coalesces inbox posts", model: "m-peer")
+rt = Runtime.new(%{transport: transport, registry: Agents.registry(peer)})
+
+{:ok, h} = Runtime.spawn_agent(rt, Runtime.root(rt), "peer")
+Runtime.post(rt, h, %{from: "root", channel: "peer", text: "update 1"})
+Runtime.post(rt, h, %{from: "external", channel: "external", text: "webhook payload"})
+Runtime.wake(rt, h)
+r = Runtime.wait(rt, h)
+
+# TWO posts, ONE wake -> ONE turn for both items (coalesced, never two turns)
+true = r.turns == 1
+true = r.text == "processed 2 items"
+
+Runtime.shutdown(rt)
+IO.puts("ok: #{r.text} (#{r.turns} turn for 2 posts)")
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — delegation, `list/1`/`snapshot/1`, then a leaf-first `close/2`
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.{Agents, Agents.Runtime}
+
+transport = fn %{body: body} ->
+  tool_msgs = Enum.filter(body["messages"] || [], &(&1["role"] == "tool"))
+
+  resp =
+    case body["model"] do
+      "m-coordinator" ->
+        if tool_msgs == [] do
+          %{
+            "choices" => [%{"message" => %{"role" => "assistant", "content" => nil, "tool_calls" => [
+              %{"id" => "c1", "type" => "function", "function" => %{"name" => "task", "arguments" => Jason.encode!(%{"agent" => "explore", "prompt" => "find it"})}}
+            ]}}],
+            "usage" => %{"prompt_tokens" => 4, "completion_tokens" => 2, "total_tokens" => 6}
+          }
+        else
+          %{
+            "choices" => [%{"message" => %{"role" => "assistant", "content" => "done: #{hd(tool_msgs)["content"]}"}}],
+            "usage" => %{"prompt_tokens" => 3, "completion_tokens" => 2, "total_tokens" => 5}
+          }
+        end
+
+      "m-explore" ->
+        %{
+          "choices" => [%{"message" => %{"role" => "assistant", "content" => "found it"}}],
+          "usage" => %{"prompt_tokens" => 2, "completion_tokens" => 1, "total_tokens" => 3}
+        }
+    end
+
+  {:ok, %{status: 200, headers: %{}, body: resp}}
+end
+
+explore = Agents.agent("explore", does: "read-only research", model: "m-explore")
+coordinator = Agents.agent("coordinator", does: "delegates to its team", team: [explore], model: "m-coordinator")
+
+rt = Runtime.new(%{transport: transport, registry: Agents.registry(coordinator)})
+{:ok, c} = Runtime.spawn_agent(rt, Runtime.root(rt), "coordinator")
+Runtime.wake(rt, c, "find the thing")
+r = Runtime.wait(rt, c)
+
+true = r.status == "done"
+true = r.text == "done: found it"
+
+# task = spawn -> wake -> wait -> close, FUSED: the child is already closed,
+# but its final state stays queryable (close != loss).
+listing = Runtime.list(rt)
+true = Enum.map(listing, & &1.id) |> Enum.sort() == ["root/coordinator.1", "root/coordinator.1/explore.1"]
+true = Enum.map(listing, & &1.state) |> Enum.sort() == [:closed, :idle]
+
+snap = Runtime.snapshot(c)
+true = snap.turns_total == 2
+
+# close(root) cascades leaf-first; the settled coordinator flips straight to :closed.
+Runtime.close(rt)
+true = Runtime.snapshot(c).state == :closed
+
+Runtime.shutdown(rt)
+IO.puts("ok: #{length(listing)} handle(s) — #{r.text}")
 ```
+
+## `wait/3` result shape
+
+| Field | Type | What it is |
+|---|---|---|
+| `text` | `String.t()` | The final text, or an error/limit message. |
+| `is_error` | `boolean()` | |
+| `status` | `"done" \| "pending" \| "incomplete" \| "interrupted" \| "closed" \| "timeout" \| "error"` | Closed vocabulary — identical strings in all six ports. |
+| `pending` | `Request.t() \| nil` | Set only when `status == "pending"` (§10). |
+| `turns` | `non_neg_integer()` | LLM calls this run made. |
+| `total_tokens` | `non_neg_integer()` | Cumulative for this handle. |
 
 ## The same call in the other five ports
 
@@ -67,6 +216,6 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Toolnexus.Agents`](/api/elixir/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
-- [`Toolnexus.Agents.Handle`](/api/elixir/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
-- [`Toolnexus.Agents budget`](/api/elixir/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+- [`Toolnexus.Agents.agent`](/api/elixir/runtime/agent/) — define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`Toolnexus.Agents.Handle`](/api/elixir/runtime/handle/) — the state machine for one spawned agent: pending, running, suspended, done.
+- [`Toolnexus.Agents budget`](/api/elixir/runtime/budgets/) — cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

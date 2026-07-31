@@ -1,56 +1,265 @@
 ---
-title: "agents.Handle"
+title: "agents.Handle — a running sub-agent"
 description: "The state machine for one spawned agent: pending, running, suspended, done. — Go."
 sidebar:
-  label: "agents.Handle"
+  label: "runtime / handle"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang/agents</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/agents/runtime.go">golang/agents/runtime.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+type State string
+
+const (
+	StateIdle      State = "idle"
+	StateRunning   State = "running"
+	StateSuspended State = "suspended"
+	StateClosed    State = "closed"
+)
+// states:  idle → running → (idle | suspended | closed)
+//          suspended → running  ONLY via the Answer to its pending Request
+
+type Handle struct {
+	ID string // deterministic, parent-scoped: root/coordinator.1/explore.2
+	// … everything else is runtime-owned; read it through the Runtime, below
+}
+
+func (rt *Runtime) StateOf(h *Handle) State
+func (rt *Runtime) Inspect(h *Handle) HandleView
+func (rt *Runtime) InboxLen(h *Handle) int
+func (rt *Runtime) PoolTokens(h *Handle) int64
+func (rt *Runtime) UsageTokens(h *Handle) int
 ```
 
-The state machine for one spawned agent: pending, running, suspended, done.
+`Handle` is `{id, def, state, inbox, budget, children}` — SPEC §7D's exact shape. Every field past
+`ID` is unexported and mutated under the runtime's own mutex; you never poke a `Handle` directly.
+Instead, the `Runtime` that spawned it exposes race-safe read views: `StateOf` for the raw
+transition state, `Inspect`/`List` for the fuller `HandleView` (tokens, turns, inbox depth, the
+pending Request's kind when suspended).
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Read a `Handle`'s state to build observability (a dashboard of running sub-agents), to poll for a
+suspension before deciding whether to answer it, or to assert on transition traces in tests. You
+obtain a `Handle` from [`Spawn`](/api/go/runtime/runtime/) — never construct one yourself.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Handles are capabilities, not a registry">
+There's no global "list all handles anywhere" — `Runtime.List()` walks only the handles under
+`Root` for THAT runtime, and a `Handle` value itself is meaningless outside the `Runtime` that
+returned it (SPEC §7D: "post/wake what you hold, wait only what you spawned"). Reach for
+[`agents.New`](/api/go/runtime/agent/) if what you actually want is to CREATE and run an agent, not
+inspect one that already exists.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. `idle` right after spawn, before any wake
 
-{/* TODO:example1 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func main() {
+	reg := map[string]agents.Def{"peer": {Name: "peer", Does: "a worker", Model: "m-peer"}}
+	rt := agents.NewRuntime(agents.Options{Registry: reg}) // no wake in this example — Transport unused
+
+	h, err := rt.Spawn(rt.Root, "peer", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if rt.StateOf(h) != agents.StateIdle {
+		log.Fatalf("expected idle right after spawn, got %s", rt.StateOf(h))
+	}
+	v := rt.Inspect(h)
+	if v.State != agents.StateIdle || v.Turns != 0 || v.PendingKind != "" {
+		log.Fatalf("unexpected view: %+v", v)
+	}
+
+	fmt.Println("ok:", h.ID, "is", v.State)
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. `idle → running → idle (done)`, observed live
 
-{/* TODO:example2 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"time"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+// gatedLLM blocks until released, so the example can OBSERVE the running state
+// before the turn completes.
+type gatedLLM struct{ gate chan struct{} }
+
+func (g gatedLLM) RoundTrip(req *http.Request) (*http.Response, error) {
+	<-g.gate
+	body, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "finished"}}},
+		"usage":   map[string]any{"prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6},
+	})
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+}
+
+func main() {
+	reg := map[string]agents.Def{"worker": {Name: "worker", Does: "a worker", Model: "m-worker"}}
+	gate := make(chan struct{})
+	rt := agents.NewRuntime(agents.Options{Transport: gatedLLM{gate: gate}, Registry: reg})
+
+	h, err := rt.Spawn(rt.Root, "worker", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	rt.Wake(h, "go")
+
+	for i := 0; i < 200 && rt.StateOf(h) != agents.StateRunning; i++ {
+		time.Sleep(time.Millisecond)
+	}
+	if rt.StateOf(h) != agents.StateRunning {
+		log.Fatal("expected to observe the running state before completion")
+	}
+
+	close(gate) // let the turn finish
+	r := rt.Wait(h, 0)
+	if r.Status != "done" || rt.StateOf(h) != agents.StateIdle {
+		log.Fatalf("unexpected: status=%q state=%s", r.Status, rt.StateOf(h))
+	}
+	v := rt.Inspect(h)
+	if v.Turns != 1 || v.Tokens != 6 {
+		log.Fatalf("unexpected view after done: %+v", v)
+	}
+
+	fmt.Println("ok: idle -> running -> idle, turns =", v.Turns, "tokens =", v.Tokens)
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — `suspended`, `PendingKind`, and durable `Resume`
 
-{/* TODO:example3 */}
-```go
-// TODO
+No `WaitFor` anywhere in the chain ⇒ the suspension goes durable: the handle parks in
+`StateSuspended` and `Runtime.Resume` is the ONLY way back to `running`.
+
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+// checkSecret needs human approval the first time; once ctx.Answer carries a
+// satisfied Answer, it succeeds.
+var checkSecret = tn.Tool{
+	Name: "check_secret", Description: "needs approval", Source: tn.SourceCustom,
+	InputSchema: tn.JSONSchema{"type": "object", "properties": map[string]any{}},
+	Execute: func(_ map[string]any, tctx *tn.ToolContext) (tn.ToolResult, error) {
+		if tctx != nil && tctx.Answer != nil && tctx.Answer.Ok {
+			return tn.ToolResult{Output: "secret-token"}, nil
+		}
+		return tn.Pending(tn.Request{Kind: "approval", Prompt: "approve secret access?"}), nil
+	},
+}
+
+type approvalLLM struct{}
+
+func (approvalLLM) RoundTrip(req *http.Request) (*http.Response, error) {
+	b, _ := io.ReadAll(req.Body)
+	var parsed struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	_ = json.Unmarshal(b, &parsed)
+	sawToolResult := false
+	for _, m := range parsed.Messages {
+		if m["role"] == "tool" {
+			sawToolResult = true
+		}
+	}
+	var resp map[string]any
+	if !sawToolResult {
+		args, _ := json.Marshal(map[string]any{})
+		resp = map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+			map[string]any{"id": "c1", "type": "function", "function": map[string]any{"name": "check_secret", "arguments": string(args)}},
+		}}
+	} else {
+		resp = map[string]any{"role": "assistant", "content": "approved and done"}
+	}
+	body, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": resp}},
+		"usage":   map[string]any{"prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6},
+	})
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+}
+
+func main() {
+	reg := map[string]agents.Def{
+		// No WaitFor on this def, and none higher in the chain: the suspension
+		// goes durable instead of being answered inline.
+		"asker": {Name: "asker", Does: "needs approvals", Model: "m-asker", Tools: []tn.Tool{checkSecret}},
+	}
+	rt := agents.NewRuntime(agents.Options{Transport: approvalLLM{}, Registry: reg})
+
+	h, err := rt.Spawn(rt.Root, "asker", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	rt.Wake(h, "get the secret")
+	r := rt.Wait(h, 0)
+	if r.Status != "pending" || rt.StateOf(h) != agents.StateSuspended {
+		log.Fatalf("expected a durable pending, got status=%q state=%s", r.Status, rt.StateOf(h))
+	}
+	v := rt.Inspect(h)
+	if v.PendingKind != "approval" {
+		log.Fatalf("expected PendingKind=approval, got %q", v.PendingKind)
+	}
+
+	// The out-of-band Answer resumes the DEEPEST suspended handle.
+	if err := rt.Resume(tn.Answer{ID: r.Pending.ID, Ok: true}); err != nil {
+		log.Fatal(err)
+	}
+	if rt.StateOf(h) != agents.StateIdle {
+		log.Fatalf("expected idle after resume, got %s", rt.StateOf(h))
+	}
+
+	fmt.Println("ok: suspended (", v.PendingKind, ") -> resumed ->", rt.StateOf(h))
+}
 ```
+
+## HandleView fields
+
+| Field | Type | What it holds |
+|---|---|---|
+| `ID` | `string` | The handle's deterministic id. |
+| `State` | `State` | `idle` \| `running` \| `suspended` \| `closed`. |
+| `Tokens` | `int` | Rolled-up token usage of the subtree — the budget ledger. |
+| `Turns` | `int` | Cumulative LLM round trips. |
+| `Inbox` | `int` | Current inbox depth. |
+| `PendingKind` | `string` | The suspended Request's `Kind`; `""` unless `State == suspended`. |
 
 ## The same call in the other five ports
 

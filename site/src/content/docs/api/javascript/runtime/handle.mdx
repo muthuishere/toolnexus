@@ -8,49 +8,225 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7d-sub-agents--agent-runtime-source-agent">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/agents/runtime.ts">js/src/agents/runtime.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+type HandleState = "idle" | "running" | "suspended" | "closed"
+
+class agents.Handle {
+  readonly id: string             // deterministic, parent-scoped: "root/coordinator.1/explore.2"
+  readonly def: AgentDef
+  readonly parent: Handle | null
+  readonly depth: number
+  readonly children: Handle[]
+  readonly inbox: InboxItem[]     // agent STATE, never a runtime/language mailbox
+  state: HandleState
+  usageTotal: number
+  toolCallsTotal: number
+  turnsTotal: number              // lifetime — never resets across resumes
+  pendingRequest?: Request        // set only while state === "suspended"
+  lastResult?: TaskResult
+}
 ```
 
-The state machine for one spawned agent: pending, running, suspended, done.
+One live agent — the thing every `spawn()` call returns. States: `idle → running → (idle |
+suspended | closed)`; **`suspended → running` only via the Answer to its own pending Request** —
+there is no other way out of `suspended`. Ids are deterministic and parent-scoped, never random, so
+a transition trace is reproducible. The `inbox` is agent **state** (an array field, checkpointed
+and restorable), not a language-level mailbox or channel.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+You rarely construct a `Handle` yourself — [`AgentRuntime.spawn()`](/api/javascript/runtime/runtime/)
+returns one. Read this page when you need to reason about **what state a sub-agent is in** before
+calling another verb on it: `wake()` on a `suspended` handle is a no-op (it buffers); `wait()` on a
+`closed` handle resolves immediately with the last result; `interrupt()` behaves differently on
+`running` vs `suspended`.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Read agents.AgentRuntime instead for the verbs that move a Handle between states">
+This page is the state machine a `Handle` obeys. The six verbs that drive it —
+`spawn`/`post`/`wake`/`wait`/`interrupt`/`close` — live on
+[`agents.AgentRuntime`](/api/javascript/runtime/runtime/), which owns every `Handle` it spawns. A
+`Handle` never drives itself.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — the plain `idle → running → idle` cycle
 
-{/* TODO:example1 */}
-```ts
-// TODO
+A `TaskResult.status: "done"` run leaves the handle `idle`, not closed — it can be woken again with
+a fresh prompt, its transcript continuing from where it left off.
+
+```ts test
+import assert from "node:assert"
+import { agents } from "toolnexus"
+
+const canned: typeof fetch = async () =>
+  new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } })
+
+const runtime = new agents.AgentRuntime({ fetch: canned, registry: { w: { name: "w", does: "worker", model: "m" } } })
+const h = runtime.spawn(runtime.root, "w") as agents.Handle
+
+assert.equal(h.state, "idle", "freshly spawned, not yet woken")
+
+runtime.wake(h, "go")
+assert.equal(h.state, "running", "admission is synchronous with wake()")
+
+const r = await runtime.wait(h)
+assert.equal(r.status, "done")
+assert.equal(h.state, "idle", "settled turns return to idle, never auto-close")
+assert.equal(h.turnsTotal, 1)
+
+await runtime.close(runtime.root)
+console.log("ok:", h.state)
 ```
 
-### 2. TODO — the realistic case
+### 2. A realistic case — `suspended`, then durable resume
 
-{/* TODO:example2 */}
-```ts
-// TODO
+A tool returns `pending(...)` and no `waitFor` is configured anywhere in the chain: the handle
+parks `suspended` with `pendingRequest` set, `wait()` resolves with `status: "pending"` (never
+throws, never blocks), and only `AgentRuntime.resume(answer)` can move it back to `running`.
+
+```ts test
+import assert from "node:assert"
+import { agents, defineTool, pending } from "toolnexus"
+
+const needsApproval = defineTool({
+  name: "needs_approval",
+  description: "requires human sign-off",
+  run: (_a: any, ctx?: { answer?: { ok: boolean } }) =>
+    ctx?.answer?.ok ? "approved-and-done" : pending({ kind: "approval", prompt: "approve this action?" }),
+})
+
+let turn = 0
+const mockFetch: typeof fetch = async (_url, init) => {
+  turn++
+  const body = JSON.parse(String(init?.body))
+  const hasToolResult = body.messages.some((m: any) => m.role === "tool")
+  const payload = hasToolResult
+    ? { choices: [{ message: { content: `final: ${body.messages.at(-1).content}` } }] }
+    : { choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "needs_approval", arguments: "{}" } }] } }] }
+  return new Response(JSON.stringify({ ...payload, usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } })
+}
+
+const runtime = new agents.AgentRuntime({
+  fetch: mockFetch,
+  registry: { asker: { name: "asker", does: "needs approvals", model: "m", tools: [needsApproval] } },
+  // no waitFor anywhere ⇒ suspension is DURABLE, resolved from outside the run.
+})
+
+const h = runtime.spawn(runtime.root, "asker") as agents.Handle
+runtime.wake(h, "do the sensitive thing")
+const first = await runtime.wait(h)
+
+assert.equal(first.status, "pending")
+assert.equal(h.state, "suspended")
+assert.equal(h.pendingRequest?.kind, "approval")
+
+// Only the pending Request's Answer can move it out of `suspended`.
+await runtime.resume({ id: h.pendingRequest!.id, ok: true })
+const second = await runtime.wait(h)
+
+assert.equal(second.status, "done")
+assert.match(second.text, /final: approved-and-done/)
+assert.equal(h.state, "idle", "resumed and settled ⇒ back to idle")
+assert.equal(h.pendingRequest, undefined)
+
+await runtime.close(runtime.root)
+console.log("ok:", second.text)
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — inline resume via the nearest ancestor `waitFor`, and `interrupt` on a suspended handle
 
-{/* TODO:example3 */}
-```ts
-// TODO
+§7D escalation: a suspending child presents to its parent as a suspending `task` call. When an
+**ancestor** declares `waitFor` (here, the parent — not the child itself), the child's suspension
+resolves **inline**, in the same run: the child's own trace shows `suspended → running` directly —
+the Answer *is* the transition — and the parent's run never surfaces `status: "pending"` at all.
+Separately, `interrupt()` on a durably `suspended` handle cancels the pending Request outright — the
+operator escape hatch — and returns it to `idle`.
+
+```ts test
+import assert from "node:assert"
+import { agents, defineTool, pending } from "toolnexus"
+
+const needsApproval = defineTool({
+  name: "needs_approval",
+  run: (_a: any, ctx?: { answer?: { ok: boolean } }) =>
+    ctx?.answer?.ok ? "approved" : pending({ kind: "approval", prompt: "ok?" }),
+})
+const mockFetch: typeof fetch = async (_url, init) => {
+  const body = JSON.parse(String(init?.body))
+  const toolMsgs = body.messages.filter((m: any) => m.role === "tool")
+  if (body.model === "m-coordinator") {
+    const payload = toolMsgs.length === 0
+      ? { choices: [{ message: { content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "task", arguments: JSON.stringify({ agent: "asker", prompt: "get approval" }) } }] } }] }
+      : { choices: [{ message: { content: `coordinator-final: ${toolMsgs.at(-1).content}` } }] }
+    return new Response(JSON.stringify({ ...payload, usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } })
+  }
+  // m-asker: asks for approval, then finishes once it has one.
+  const payload = toolMsgs.length === 0
+    ? { choices: [{ message: { content: null, tool_calls: [{ id: "a1", type: "function", function: { name: "needs_approval", arguments: "{}" } }] } }] }
+    : { choices: [{ message: { content: `asker-done: ${toolMsgs[0].content}` } }] }
+  return new Response(JSON.stringify({ ...payload, usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } })
+}
+
+// Case A: the PARENT (coordinator) declares waitFor — the child's suspension
+// escalates one hop and resolves inline; the run never goes durable.
+const runtimeA = new agents.AgentRuntime({
+  fetch: mockFetch,
+  registry: {
+    coordinator: { name: "coordinator", does: "delegates, holds approval authority", model: "m-coordinator", team: ["asker"], waitFor: async (req) => ({ id: req.id, ok: true }) },
+    asker: { name: "asker", does: "needs approvals", model: "m-asker", tools: [needsApproval] },
+  },
+})
+const p = runtimeA.spawn(runtimeA.root, "coordinator") as agents.Handle
+runtimeA.wake(p, "handle the sensitive request")
+const ra = await runtimeA.wait(p)
+
+assert.equal(ra.status, "done", "resolved inline via the parent's authority — never status:\"pending\"")
+assert.match(ra.text, /coordinator-final: asker-done: approved/)
+assert.ok(runtimeA.trace.some((l) => l.includes("suspended→running")), "the CHILD's own trace shows the inline resume")
+await runtimeA.close(runtimeA.root)
+
+// Case B: no waitFor anywhere — durable suspension — then interrupt() cancels it outright.
+const runtimeB = new agents.AgentRuntime({
+  fetch: mockFetch,
+  registry: { asker: { name: "asker", does: "needs approvals", model: "m-asker", tools: [needsApproval] } },
+})
+const b = runtimeB.spawn(runtimeB.root, "asker") as agents.Handle
+runtimeB.wake(b, "go")
+await runtimeB.wait(b)
+assert.equal(b.state, "suspended")
+
+runtimeB.interrupt(b)
+assert.equal(b.state, "idle", "interrupt on a suspended handle cancels the pending Request → idle")
+assert.equal(b.pendingRequest, undefined)
+
+await runtimeB.close(runtimeB.root)
+console.log("ok: inline =", ra.status, "; cancelled suspension → idle")
 ```
+
+## Options
+
+`Handle` is never constructed directly — it is returned by
+[`AgentRuntime.spawn()`](/api/javascript/runtime/runtime/). The fields worth reading:
+
+| Field | Type | What it tells you |
+|---|---|---|
+| `id` | `string` | Deterministic, parent-scoped (`root/name.N`) — never random. |
+| `state` | `HandleState` | `"idle" \| "running" \| "suspended" \| "closed"`. |
+| `inbox` | `InboxItem[]` | Buffered unsolicited items — drained whole on the next `wake()`. |
+| `pendingRequest` | `Request \| undefined` | Set only while `suspended`; cleared on resume or interrupt. |
+| `lastResult` | `TaskResult \| undefined` | What `wait()` answers with immediately on a settled handle. |
+| `turnsTotal` / `usageTotal` / `toolCallsTotal` | `number` | Lifetime counters — grow across resumes, never reset. |
+
+## What you get back
+
+Nothing to call — `Handle` is read via its fields, or via `AgentRuntime.list()`/`inspect()` for a
+read-only snapshot view (`{ id, state, tokens, inbox }` / `+ turns, poolTokens, pending`).
 
 ## The same call in the other five ports
 
@@ -70,4 +246,4 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 - [`agents.Agent`](/api/javascript/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
 - [`agents.AgentRuntime`](/api/javascript/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
 - [`agents.Budget`](/api/javascript/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
-- [`agents.taskTool`](/api/javascript/runtime/task-tool/) — The opt-in tool that lets the model itself spawn a teammate. Default OFF.
+- [`waitFor`](/api/javascript/suspension/wait-for/) — the §10 resolver a Handle's suspension escalates to

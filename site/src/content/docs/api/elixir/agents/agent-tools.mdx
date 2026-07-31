@@ -1,56 +1,220 @@
 ---
-title: "Toolnexus.Agents.tools"
+title: "Toolnexus.A2a.agent_tools"
 description: "Expand a remote agent card into one tool per advertised skill. — Elixir."
 sidebar:
-  label: "Toolnexus.Agents.tools"
+  label: "Toolnexus.A2a.agent_tools"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/a2a.ex">elixir/lib/toolnexus/a2a.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec agent_tools(map()) :: [Toolnexus.Tool.t()]
+def agent_tools(ag)
+
+# ag = an Agent descriptor from Toolnexus.A2a.agent/1
+
+# Tool.name  = sanitize(card.name) <> "_" <> sanitize(skill.id || skill.name)
+# Tool.source = "a2a"
+# Tool.input_schema = %{"type"=>"object", "properties"=>%{"task"=>%{"type"=>"string", ...}},
+#                        "required"=>["task"], "additionalProperties"=>false}
 ```
 
-Expand a remote agent card into one tool per advertised skill.
+Fetches the descriptor's Agent Card (`GET <card>`) and turns every entry in `skills[]` into one
+uniform `Toolnexus.Tool`. Each tool's `execute` performs the whole §7A wire dance — one
+`SendMessage` then polling `GetTask` until a terminal state — and maps the finished Task to a
+`ToolResult`. A card fetch or parse failure **raises**; per-peer isolation is the toolkit's job
+(the toolkit catches it and logs, contributing zero tools for that peer, never failing the whole
+build).
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **You have an `Agent` descriptor and want callable tools** — this is the only function that
+  actually performs I/O to resolve one; `agent/1` itself never touches the network.
+- **Wiring it into a toolkit by hand**, without `mcp_config`'s `agents` block — call
+  `agent_tools/1` and pass the result to `Toolnexus.Toolkit.register/2` or `extra_tools:`.
+- **Inspecting what a peer advertises** before deciding whether to add it — the returned tools'
+  `name`/`description` come straight from the card's `skills[]`.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Skip this entirely if you use create_toolkit's agents: option">
+`Toolnexus.create_toolkit!(agents: [...])` and `Toolnexus.Toolkit.add_agent/3` both call
+`agent_tools/1` for you and isolate a failing peer automatically (logged, zero tools, build still
+succeeds). Reach for `agent_tools/1` directly only when you want the raw tool list, or want the
+raise to propagate (e.g. a CI check that a peer's card is reachable).
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — resolve a card, no execution yet
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.A2a
+
+Application.ensure_all_started(:req)
+
+defmodule DocsCardOnlyStub do
+  @behaviour Plug
+  import Plug.Conn
+
+  def call(conn, _opts) do
+    card = %{
+      "name" => "Weather Agent",
+      "skills" => [
+        %{"id" => "forecast", "description" => "Gives a forecast"},
+        %{"name" => "alerts!"}
+      ]
+    }
+
+    conn |> put_resp_content_type("application/json") |> send_resp(200, Jason.encode!(card))
+  end
+
+  def init(opts), do: opts
+end
+
+{:ok, sock} = :gen_tcp.listen(0, [])
+{:ok, port} = :inet.port(sock)
+:gen_tcp.close(sock)
+url = "http://127.0.0.1:#{port}"
+
+{:ok, _pid} = Bandit.start_link(plug: DocsCardOnlyStub, scheme: :http, ip: {127, 0, 0, 1}, port: port)
+
+tools = A2a.agent_tools(A2a.agent(card: url <> "/.well-known/agent-card.json"))
+
+true = Enum.map(tools, & &1.name) == ["Weather_Agent_forecast", "Weather_Agent_alerts_"]
+[forecast, alerts] = tools
+true = forecast.source == "a2a"
+true = forecast.description == "Gives a forecast"
+# a skill with no id/description falls back to its name
+true = alerts.description == "alerts!"
+
+IO.puts("ok: #{Enum.join(Enum.map(tools, & &1.name), ", ")}")
 ```
 
-### 2. TODO — the realistic case
+### 2. The full round trip — execute a resolved tool over real loopback HTTP
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.{A2a, Context}
+
+Application.ensure_all_started(:req)
+
+defmodule DocsCalcAgentStub do
+  @behaviour Plug
+  import Plug.Conn
+
+  def init(agent), do: agent
+
+  def call(conn, agent) do
+    {:ok, body, conn} = read_body(conn)
+    st = Agent.get(agent, & &1)
+
+    case {conn.method, conn.request_path} do
+      {"GET", "/.well-known/agent-card.json"} ->
+        card = %{
+          "name" => "Calc Agent",
+          "url" => st.url,
+          "skills" => [%{"id" => "add", "description" => "Adds two numbers"}]
+        }
+
+        conn |> put_resp_content_type("application/json") |> send_resp(200, Jason.encode!(card))
+
+      {"POST", _} ->
+        rpc = Jason.decode!(body)
+
+        result =
+          case rpc["method"] do
+            "SendMessage" ->
+              %{"id" => "t1", "status" => %{"state" => "submitted"}}
+
+            "GetTask" ->
+              %{
+                "id" => "t1",
+                "status" => %{"state" => "completed"},
+                "artifacts" => [%{"parts" => [%{"kind" => "text", "text" => "5"}]}]
+              }
+          end
+
+        payload = %{"jsonrpc" => "2.0", "id" => rpc["id"], "result" => result}
+        conn |> put_resp_content_type("application/json") |> send_resp(200, Jason.encode!(payload))
+    end
+  end
+end
+
+{:ok, sock} = :gen_tcp.listen(0, [])
+{:ok, port} = :inet.port(sock)
+:gen_tcp.close(sock)
+url = "http://127.0.0.1:#{port}"
+
+{:ok, agent_state} = Agent.start_link(fn -> %{url: url <> "/"} end)
+{:ok, _pid} = Bandit.start_link(plug: {DocsCalcAgentStub, agent_state}, scheme: :http, ip: {127, 0, 0, 1}, port: port)
+
+[add] = A2a.agent_tools(A2a.agent(card: url <> "/.well-known/agent-card.json", poll_every: 20))
+
+result = add.execute.(%{"task" => "add 2 and 3"}, %Context{})
+
+false = result.is_error
+true = result.output == "5"
+true = result.metadata.agent == "Calc Agent"
+true = result.metadata.task_id == "t1"
+true = result.metadata.state == "completed"
+
+IO.puts("ok: #{add.name} -> #{result.output}")
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — a failing peer raises; the toolkit isolates it
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.{A2a, Toolkit}
+
+Application.ensure_all_started(:req)
+
+defmodule DocsDeadCardStub do
+  @behaviour Plug
+  import Plug.Conn
+  def init(opts), do: opts
+  def call(conn, _opts), do: send_resp(conn, 500, "card lookup failed")
+end
+
+{:ok, sock} = :gen_tcp.listen(0, [])
+{:ok, port} = :inet.port(sock)
+:gen_tcp.close(sock)
+url = "http://127.0.0.1:#{port}"
+
+{:ok, _pid} = Bandit.start_link(plug: DocsDeadCardStub, scheme: :http, ip: {127, 0, 0, 1}, port: port)
+
+card_url = url <> "/.well-known/agent-card.json"
+
+# Calling agent_tools/1 directly raises — no isolation at this layer.
+raised? =
+  try do
+    A2a.agent_tools(A2a.agent(card: card_url))
+    false
+  rescue
+    RuntimeError -> true
+  end
+
+true = raised?
+
+# create_toolkit!/1 (agents:) DOES isolate it — the peer contributes zero tools.
+tk = Toolnexus.create_toolkit!(agents: [A2a.agent(card: card_url)], builtins: false)
+true = Toolkit.tools(tk) == []
+
+IO.puts("ok: agent_tools/1 raises directly, the toolkit isolates it")
 ```
+
+## What you get back
+
+| Field | Type | What it is |
+|---|---|---|
+| `name` | `String.t()` | `sanitize(card.name) <> "_" <> sanitize(skill.id \|\| skill.name)`. |
+| `description` | `String.t()` | The skill's `description`, falling back to its `name`/`id`. |
+| `input_schema` | `map()` | Always the fixed `{task: string}` shape (§7A). |
+| `source` | `"a2a"` | |
+| `execute` | `(args, ctx) -> ToolResult.t()` | SendMessage → poll GetTask → map the terminal Task. |
 
 ## The same call in the other five ports
 
@@ -67,5 +231,5 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Toolnexus.Agents.new`](/api/elixir/agents/agent/) — Point at a remote agent's card and use it exactly like a local tool.
-- [`Toolnexus.Agents.parse_config`](/api/elixir/agents/parse-config/) — Declare remote peers in config the way MCP servers are declared, with precedence rules.
+- [`Toolnexus.A2a.agent`](/api/elixir/agents/agent/) — point at a remote agent's card and use it exactly like a local tool.
+- [`Toolnexus.A2a.parse_agents_config`](/api/elixir/agents/parse-config/) — declare remote peers in config the way MCP servers are declared, with precedence rules.

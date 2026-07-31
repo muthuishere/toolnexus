@@ -1,56 +1,285 @@
 ---
-title: "agents.New"
+title: "agents.New — a composable sub-agent"
 description: "Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent. — Go."
 sidebar:
-  label: "agents.New"
+  label: "runtime / agent"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang/agents</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/agents/agent.go">golang/agents/agent.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+func New(name string, spec Spec) *Agent
+
+type Spec struct {
+	Does     string          // routing description the delegating model sees
+	Tools    []tn.Tool       // the toolkit VIEW for this agent — scoping is the security model
+	Soul     string          // system prompt, inline
+	SoulFile string          // system prompt, from a file (wins over Soul if readable)
+	Team     []*Agent        // delegation targets — no Team ⇒ no task tool
+	Budget   *Budget
+	Model    string          // "" ⇒ "inherit"
+	WaitFor  func(tn.Request) (tn.Answer, error)
+	// OnSpawn, OnClose, Hooks, OnMetric — see SPEC §7D
+}
+
+func (a *Agent) Run(opts Options, prompt string) (TaskResult, *Runtime)
+func (a *Agent) AsTool(opts Options) tn.Tool
 ```
 
-Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+`agents.New` is the SPEC §7D axiom made concrete: **an Agent is a Tool** — identity (`Soul`) ×
+a filtered toolkit view (`Tools`) × the shipped client loop, invocable either as a one-shot
+(`Run`) or, via `AsTool`, dropped straight into a classic toolkit's `ExtraTools`.
+
+<Aside type="note" title="Distinct from agents/agent — this one never leaves the process">
+[`agents/agent`](/api/go/agents/agent/) (§7A) calls a REMOTE peer over HTTP/JSON-RPC — a URL, a
+poll loop, a network boundary. `agents.New` (§7D, this page) composes a LOCAL sub-agent — its own
+soul, its own scoped tools, its own budget — that runs in-process against the [`Runtime`](/api/go/runtime/runtime/)
+and never makes an HTTP call to reach its parent. They happen to share the word "agent"; the
+mechanisms are unrelated.
+</Aside>
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `agents.New` to build a coding-agent-style team — a coordinator that delegates focused
+subtasks to specialists, each scoped to only the tools and soul it needs — without standing up a
+server, a URL, or a protocol. Use `Run` for a one-shot; use `AsTool` to make the agent callable
+from an ordinary `Client.Run` loop, exactly like any other tool.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Need more than one Run, or fine control over spawn/wake/wait?">
+`Agent.Run` builds a fresh [`Runtime`](/api/go/runtime/runtime/) and tears it down (unless the run
+suspends). Reach for [`NewRuntime`](/api/go/runtime/runtime/) directly — with `Agent.Registry()` —
+when you need to keep multiple handles alive, fan work out concurrently, or drive the six host
+verbs (`Spawn`/`Post`/`Wake`/`Wait`/`Interrupt`/`Close`) yourself.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+All three use a scripted `http.RoundTripper` in place of a real model — the runtime's documented
+hermetic seam (`Options.Transport`), the same mechanism the port's own tests use. No network call
+is ever made, no real API key required.
 
-{/* TODO:example1 */}
-```go
-// TODO
+### 1. The smallest useful call — one agent, one answer
+
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+// textLLM answers every request with the same fixed text — no network involved.
+type textLLM struct{ reply string }
+
+func (t textLLM) RoundTrip(req *http.Request) (*http.Response, error) {
+	body, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": t.reply}}},
+		"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+	})
+	return &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(bytes.NewReader(body)),
+	}, nil
+}
+
+func main() {
+	greeter := agents.New("greeter", agents.Spec{Does: "says hello", Model: "m-greeter"})
+
+	r, _ := greeter.Run(agents.Options{Transport: textLLM{reply: "hello!"}}, "say hi")
+	if r.Status != "done" || r.Text != "hello!" {
+		log.Fatalf("unexpected: %+v", r)
+	}
+
+	fmt.Println("ok:", r.Text)
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — a coordinator delegating to a teammate
 
-{/* TODO:example2 */}
-```go
-// TODO
+`Team` is what makes delegation possible: a def with a non-empty `Team` gets an auto-added `task`
+tool scoped to exactly those names (see [`runtime/task-tool`](/api/go/runtime/task-tool/)).
+
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func openaiResp(msg map[string]any) *http.Response {
+	full := map[string]any{"role": "assistant"}
+	for k, v := range msg {
+		full[k] = v
+	}
+	b, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": full}},
+		"usage":   map[string]any{"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+	})
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}
+}
+
+// teamLLM scripts BOTH agents by model name — the runtime's turn gate keeps
+// this hermetic regardless of which agent is "in flight".
+type teamLLM struct{}
+
+func (teamLLM) RoundTrip(req *http.Request) (*http.Response, error) {
+	b, _ := io.ReadAll(req.Body)
+	var parsed struct {
+		Model    string           `json:"model"`
+		Messages []map[string]any `json:"messages"`
+	}
+	_ = json.Unmarshal(b, &parsed)
+	sawToolResult := false
+	for _, m := range parsed.Messages {
+		if m["role"] == "tool" {
+			sawToolResult = true
+		}
+	}
+	switch parsed.Model {
+	case "m-coordinator":
+		if !sawToolResult {
+			args, _ := json.Marshal(map[string]any{"agent": "explorer", "prompt": "find the answer"})
+			return openaiResp(map[string]any{"content": nil, "tool_calls": []any{
+				map[string]any{"id": "c1", "type": "function", "function": map[string]any{"name": "task", "arguments": string(args)}},
+			}}), nil
+		}
+		return openaiResp(map[string]any{"content": "delegation complete"}), nil
+	case "m-explorer":
+		return openaiResp(map[string]any{"content": "found it"}), nil
+	default:
+		return openaiResp(map[string]any{"content": "ok"}), nil
+	}
+}
+
+func main() {
+	explorer := agents.New("explorer", agents.Spec{Does: "read-only research", Model: "m-explorer"})
+	coordinator := agents.New("coordinator", agents.Spec{
+		Does: "splits work and delegates", Model: "m-coordinator", Team: []*agents.Agent{explorer},
+	})
+
+	r, _ := coordinator.Run(agents.Options{Transport: teamLLM{}}, "answer the question")
+	if r.Status != "done" || !strings.Contains(r.Text, "delegation complete") {
+		log.Fatalf("unexpected: %+v", r)
+	}
+
+	fmt.Println("ok:", r.Text)
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — `AsTool` bridging into the classic client loop
 
-{/* TODO:example3 */}
-```go
-// TODO
+`AsTool` is the axiom's other direction: an `Agent` dropped into an ordinary toolkit's
+`ExtraTools`, invisible from an LLM's point of view — the model just sees one more tool named
+`explorer`.
+
+```go test
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+// subLLM answers the inner agent's own model directly, no tool calls needed.
+type subLLM struct{}
+
+func (subLLM) RoundTrip(req *http.Request) (*http.Response, error) {
+	b, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "the answer is 42"}}},
+		"usage":   map[string]any{"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4},
+	})
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
+}
+
+func main() {
+	explorer := agents.New("explorer", agents.Spec{Does: "finds facts", Model: "m-explorer"})
+	explorerTool := explorer.AsTool(agents.Options{Transport: subLLM{}})
+
+	// The TOP-LEVEL model/loop is a completely separate, ordinary httptest stub
+	// (same pattern as Client.Run) — it just sees "explorer" as one more tool.
+	turn := 0
+	topLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"explorer","arguments":"{\"prompt\":\"what is the answer?\"}"}}]}}],"usage":{"prompt_tokens":5,"completion_tokens":5,"total_tokens":10}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`))
+	}))
+	defer topLLM.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{
+		Builtins: false, ExtraTools: []toolnexus.Tool{explorerTool},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: topLLM.URL, Style: toolnexus.StyleOpenAI, Model: "gpt-4o-mini", APIKey: "k"})
+	res, err := client.Run(context.Background(), "what is the answer?", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(res.ToolCalls) != 1 || res.ToolCalls[0].Name != "explorer" {
+		log.Fatalf("expected the top loop to call explorer as a plain tool, got %+v", res.ToolCalls)
+	}
+	if res.ToolCalls[0].Output != "the answer is 42" {
+		log.Fatalf("unexpected sub-agent output: %q", res.ToolCalls[0].Output)
+	}
+	if res.ToolCalls[0].Metadata["agent"] != "explorer" {
+		log.Fatalf("expected metadata.agent = explorer, got %v", res.ToolCalls[0].Metadata)
+	}
+
+	fmt.Println("ok:", res.Text, "via sub-agent output:", res.ToolCalls[0].Output)
+}
 ```
+
+## Spec fields
+
+| Field | Type | What it does |
+|---|---|---|
+| `Does` | `string` | The routing description the delegating model (or a parent's `task` tool) sees. |
+| `Tools` | `[]tn.Tool` | The scoped toolkit view — scoping IS the security model; builtins are never added implicitly. |
+| `Soul` / `SoulFile` | `string` | The system prompt, inline or from a file (`SoulFile` wins when both are set and readable). |
+| `Team` | `[]*Agent` | Delegation targets. Empty ⇒ no `task` tool — recursion is opt-in. |
+| `Budget` | `*Budget` | Caps this agent's subtree — see [`agents.Budget`](/api/go/runtime/budgets/). |
+| `Model` | `string` | `""` ⇒ `"inherit"` (the runtime's LLM default). |
+| `WaitFor` | `func(tn.Request) (tn.Answer, error)` | This agent's §10 interpreter authority for its subtree. |
+
+`Agent.Registry()` collects the agent plus the TRANSITIVE CLOSURE of its team graph — unreachable
+agents are never present.
 
 ## The same call in the other five ports
 
@@ -70,3 +299,4 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 - [`NewRuntime`](/api/go/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
 - [`agents.Handle`](/api/go/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
 - [`agents.Budget`](/api/go/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+- [`agents.New` (§7A, remote)](/api/go/agents/agent/) — the REMOTE counterpart: call a peer over HTTP instead of composing one in-process.

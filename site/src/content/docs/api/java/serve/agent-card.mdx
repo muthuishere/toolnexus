@@ -8,49 +8,173 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/A2AServer.java">A2AServer.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public static Map<String, Object> buildAgentCard(A2AServer.A2AConfig cfg,
+    List<SkillSource.SkillInfo> skills, String url)
 ```
 
-Construct the Agent Card that advertises your name, skills and endpoint.
+Builds the plain `Map` served at `GET /.well-known/agent-card.json`: name, description, version,
+protocol version, capabilities, and one `skills[]` entry per `SkillSource.SkillInfo` — filtered
+to `cfg.skills` when given. This is the exact function [`A2AServer.start`](/api/java/serve/a2a/)
+(and `toolkit.serve`) calls on every card request.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Almost never directly — `toolkit.serve(addr, opts.a2a(...))` calls this for you on every `GET`.
+Reach for it yourself when you want the card's `Map` shape without standing up a server: writing
+it to a static file, unit-testing what a config produces, or embedding it in a different
+transport.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="This builds the card; A2AServer.start serves it">
+`buildAgentCard` is a pure function — config + skills + url in, a `Map` out, no I/O. If you
+actually want the card reachable over HTTP (the normal case), use
+[`A2AServer.start`](/api/java/serve/a2a/) via `toolkit.serve(...)`, which calls this on every
+request so the card always reflects the toolkit's current skills.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — defaults with no config
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        A2AServer.A2AConfig cfg = new A2AServer.A2AConfig(); // every field unset
+        Map<String, Object> card = A2AServer.buildAgentCard(cfg, List.of(), "http://127.0.0.1:8080/");
+
+        if (!"toolnexus-agent".equals(card.get("name"))) throw new AssertionError(card.get("name"));
+        if (!"".equals(card.get("description"))) throw new AssertionError(card.get("description"));
+        if (!"0.1.0".equals(card.get("version"))) throw new AssertionError(card.get("version"));
+        if (!"0.3.0".equals(card.get("protocolVersion"))) throw new AssertionError(card.get("protocolVersion"));
+        if (!"http://127.0.0.1:8080/".equals(card.get("url"))) throw new AssertionError(card.get("url"));
+        if (!((List<?>) card.get("skills")).isEmpty()) throw new AssertionError("expected no skills");
+
+        System.out.println("ok: " + card.get("name") + " v" + card.get("version"));
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — skills advertised, filtered by allowlist
 
-{/* TODO:example2 */}
-```java
-// TODO
+`id == name` for every advertised skill; `cfg.skills` (when set) narrows the list — an unknown
+name in the allowlist is simply absent from the wanted set, never an error. `SkillInfo`
+instances come from a real [`SkillSource.load`](/api/java/skills/load/) over the shared
+fixtures — the same objects `toolkit.serve` passes in.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        SkillSource src = SkillSource.load("examples/skills");
+        List<SkillSource.SkillInfo> skills = List.copyOf(src.skills().values());
+
+        A2AServer.A2AConfig cfg = new A2AServer.A2AConfig()
+                .name("front-desk")
+                .description("Handles routine requests")
+                // "does-not-exist" in the allowlist is simply never matched — not an error.
+                .skills(List.of("hello-world", "does-not-exist"));
+
+        Map<String, Object> card = A2AServer.buildAgentCard(cfg, skills, "http://127.0.0.1:0/");
+
+        List<Map<String, Object>> got = (List<Map<String, Object>>) (List<?>) card.get("skills");
+        if (got.size() != 1) throw new AssertionError("filtered to 1: " + got);
+        Map<String, Object> s = got.get(0);
+        if (!s.get("id").equals(s.get("name"))) throw new AssertionError("id == name for skills");
+        if (!"hello-world".equals(s.get("id"))) throw new AssertionError(s);
+
+        System.out.println("ok: " + got);
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — a provider block, and the card as actually served
 
-{/* TODO:example3 */}
-```java
-// TODO
+Every field filled in, then verified against the card a real `toolkit.serve(...)` server hands
+back over HTTP — proving `buildAgentCard` is exactly what's on the wire.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                ex.getRequestBody().readAllBytes();
+                byte[] b = "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}".getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+        LlmClient client = LlmClient.create(new LlmClient.Options()
+                .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                .style("openai").model("test-model").apiKey("test-key"));
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).skillsDir("examples/skills"))) {
+            A2AServer.A2AConfig a2a = new A2AServer.A2AConfig()
+                    .name("front-desk")
+                    .description("Handles routine requests")
+                    .version("2.3.0")
+                    .provider(new A2AServer.A2AProvider("Acme Corp", "https://acme.example"));
+            A2AServer.ServeHandle handle = tk.serve("127.0.0.1:0",
+                    new Toolkit.ServeOptions().client(client).a2a(a2a));
+            try {
+                HttpResponse<String> res = HttpClient.newHttpClient().send(
+                        HttpRequest.newBuilder(URI.create(handle.url() + "/.well-known/agent-card.json")).GET().build(),
+                        HttpResponse.BodyHandlers.ofString());
+                Map<String, Object> served = Json.toMap(res.body());
+
+                if (!"front-desk".equals(served.get("name"))) throw new AssertionError(served);
+                if (!"2.3.0".equals(served.get("version"))) throw new AssertionError(served);
+                Map<String, Object> provider = (Map<String, Object>) served.get("provider");
+                if (!"Acme Corp".equals(provider.get("organization"))) throw new AssertionError(provider);
+                if (!(handle.url() + "/").equals(served.get("url"))) throw new AssertionError(served.get("url"));
+
+                System.out.println("ok: " + served.get("name") + " served by " + provider.get("organization"));
+            } finally {
+                handle.stop();
+            }
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
 ```
+
+## Fields and overloads
+
+| Member | Type | What it is |
+|---|---|---|
+| `buildAgentCard(cfg, skills, url)` | `Map<String,Object>` | Pure function; no I/O. |
+| `A2AConfig.name` / `.description` / `.version` | `String` | Defaults `"toolnexus-agent"` / `""` / `"0.1.0"` when unset. |
+| `A2AConfig.provider` | `A2AProvider{organization,url}` | Included on the card only when configured. |
+| `A2AConfig.skills` | `List<String>` | Allowlist by skill name; `null` ⇒ advertise all. |
+| card `protocolVersion` / `capabilities.streaming` | `"0.3.0"` / `false` | Fixed — this port never streams or pushes. |
+| card `url` | `String` | The JSON-RPC POST endpoint — the served base URL plus `/`. |
 
 ## The same call in the other five ports
 
@@ -67,6 +191,6 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`A2AServer.start`](/api/java/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
-- [`A2AServer.FileTaskStore`](/api/java/serve/task-store/) — Persist inbound A2A tasks so a suspended request survives a restart.
-- [`McpServe.build`](/api/java/serve/mcp/) — The inbound MCP profile: any MCP client can call your tools.
+- [`A2AServer.start`](/api/java/serve/a2a/) — serves the card this function builds, on every request.
+- [`A2AServer.FileTaskStore`](/api/java/serve/task-store/) — persist inbound Tasks a peer submits after reading the card.
+- [`A2A.agentTools`](/api/java/agents/agent-tools/) — the outbound side: resolve a card into callable tools.

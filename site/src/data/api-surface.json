@@ -533,11 +533,12 @@
         "golang": "agents.New",
         "java": "A2A.agent",
         "csharp": "A2A.Agent",
-        "elixir": "Toolnexus.Agents.new"
+        "elixir": "Toolnexus.A2a.agent"
       },
       "sources": [
         "python/examples/a2a_agents.py"
-      ]
+      ],
+      "parityNote": "Elixir's outbound A2A lives on Toolnexus.A2a, not Toolnexus.Agents — that module is the §7D sub-agent runtime, a different concept with the same top-level name collision as JS's Agent (A2A card) vs agents.Agent (sub-agent)."
     },
     {
       "id": "agents/agent-tools",
@@ -552,7 +553,7 @@
         "golang": "AgentTools",
         "java": "A2A.agentTools",
         "csharp": "A2A.AgentTools",
-        "elixir": "Toolnexus.Agents.tools"
+        "elixir": "Toolnexus.A2a.agent_tools"
       }
     },
     {
@@ -568,7 +569,7 @@
         "golang": "ParseAgentsConfig",
         "java": "A2A.parseAgentsConfig",
         "csharp": "A2A.ParseAgentsConfig",
-        "elixir": "Toolnexus.Agents.parse_config"
+        "elixir": "Toolnexus.A2a.parse_agents_config"
       }
     },
     {
@@ -581,11 +582,12 @@
       "symbols": {
         "javascript": "startA2AServer",
         "python": "Toolkit.serve",
-        "golang": "StartAgent",
+        "golang": "Toolkit.Serve",
         "java": "A2AServer.start",
-        "csharp": "A2AServer.Start",
+        "csharp": "A2AServer.StartAsync",
         "elixir": "Toolnexus.Serve.start"
-      }
+      },
+      "parityNote": "Go names this Toolkit.Serve (a method), not a free StartAgent function — StartAgent is the unrelated §7E persona-heartbeat starter."
     },
     {
       "id": "serve/agent-card",
@@ -615,7 +617,7 @@
         "python": "FileTaskStore",
         "golang": "NewFileTaskStore",
         "java": "A2AServer.FileTaskStore",
-        "csharp": "A2AServer.FileTaskStore",
+        "csharp": "FileTaskStore",
         "elixir": "Toolnexus.Serve task_store"
       }
     },
@@ -631,8 +633,8 @@
         "python": "build_mcp_server",
         "golang": "ExposedMcpTools",
         "java": "McpServe.build",
-        "csharp": "McpServe.Build",
-        "elixir": "Toolnexus.McpServe.build"
+        "csharp": "McpServe.BuildMcpServer",
+        "elixir": "Toolnexus.McpServe.exposed_tools"
       }
     },
     {
@@ -705,7 +707,7 @@
         "python": "Budget",
         "golang": "agents.Budget",
         "java": "agents.Budget",
-        "csharp": "AgentTypes.Budget",
+        "csharp": "Budget",
         "elixir": "Toolnexus.Agents budget"
       },
       "sources": [

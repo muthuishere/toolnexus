@@ -1,56 +1,151 @@
 ---
-title: "Toolnexus.McpServe.build"
+title: "Toolnexus.McpServe"
 description: "The inbound MCP profile: any MCP client can call your tools. — Elixir."
 sidebar:
-  label: "Toolnexus.McpServe.build"
+  label: "Toolnexus.McpServe"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7C</a>
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7C</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/mcp_serve.ex">elixir/lib/toolnexus/mcp_serve.ex</a>
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec exposed_tools([Toolnexus.Tool.t()], map() | nil) :: [Toolnexus.Tool.t()]
+def exposed_tools(tools, cfg)
+# cfg[:tools] (a list of names) filters the set; absent/nil ⇒ every toolkit tool;
+# unknown names in the filter are ignored, never an error.
+
+# The everyday entry point — same serve/3 call as A2A, a different opts key:
+@spec serve(Toolnexus.Toolkit.t(), String.t(), keyword()) :: Toolnexus.Serve.Handle.t()
+def Toolnexus.Toolkit.serve(toolkit, addr, opts \\ [])
+# opts[:mcp] = %{name?, version?, tools?: [String.t()]}  — mounts POST /mcp
 ```
 
-The inbound MCP profile: any MCP client can call your tools.
+There is no `McpServe.build/1` — the inbound MCP profile is `Toolnexus.McpServe.exposed_tools/2`
+(the toolkit → exposed-tool-list filter) plus `Toolnexus.McpServe.handle_http/4` (the streamable-HTTP
+JSON-RPC dispatcher), both driven by `Toolnexus.Serve.start/2` when `opts[:mcp]` is present —
+mounted at `POST /mcp`, co-located with the A2A routes on the same listener. Where A2A advertises
+**skills** and fulfils a Task through the whole client loop, MCP advertises the toolkit's
+**unified tools** (every source — mcp · skill · native · http · builtin · a2a) and dispatches each
+`tools/call` straight to `Tool.execute` — there is no `client`, no Task, no TaskStore; the calling
+MCP client *is* the LLM host. This turns a toolkit into a **universal MCP gateway**: aggregate N
+servers + skills + your own tools behind one toolkit, then re-expose the union as one MCP server.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **Re-expose an aggregated toolkit to Claude Desktop, an IDE, or another agent** — connect any MCP
+  client to `POST /mcp` and it sees `tools/list` + can `tools/call` every tool the toolkit knows,
+  regardless of source.
+- **Gateway N MCP servers behind one endpoint** — build a toolkit from several `mcpServers`, serve
+  it, and downstream clients only need to know about the one gateway.
+- **Narrow what's exposed** — `mcp: %{tools: ["safe_tool"]}` filters the surface without touching
+  the underlying toolkit.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for the A2A profile when the caller isn't an MCP client">
+The MCP profile is for MCP clients specifically — `tools/list` + `tools/call`, no LLM loop on this
+side. When the caller is a peer agent that wants to hand you a natural-language task (not a typed
+tool call), see [`Toolnexus.Serve.start`](/api/elixir/serve/a2a/) (the A2A profile) instead — both
+can be co-mounted on the same `serve/3` call.
 </Aside>
+
+Deferred per §7C: a stdio transport, MCP resources/prompts/sampling/completion (skills already
+reach clients via the `skill` tool), and auth in core.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — `exposed_tools/2` filtering, no server
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.{McpServe, Native}
+
+mk = fn name -> Native.define_tool(name: name, description: name, execute: fn _ -> name end) end
+tools = [mk.("add"), mk.("explode")]
+
+true = McpServe.exposed_tools(tools, nil) == tools
+true = McpServe.exposed_tools(tools, %{}) == tools
+true = Enum.map(McpServe.exposed_tools(tools, %{tools: ["explode"]}), & &1.name) == ["explode"]
+# unknown names in the filter are ignored, never an error
+true = McpServe.exposed_tools(tools, %{"tools" => ["nope"]}) == []
+
+IO.puts("ok: nil/[]->all, a named subset, unknown names silently dropped")
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — self-hosting: our own MCP client against our own served toolkit
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.{Context, Mcp, Native, Serve, Toolkit}
+
+Application.ensure_all_started(:req)
+
+add_tool = Native.define_tool(
+  name: "add",
+  description: "Add two numbers",
+  input_schema: %{"type" => "object", "properties" => %{"a" => %{"type" => "number"}, "b" => %{"type" => "number"}}, "required" => ["a", "b"]},
+  execute: fn args -> to_string(trunc(args["a"] + args["b"])) end
+)
+
+fail_tool = Native.define_tool(name: "explode", description: "Always errors", execute: fn _ -> raise "kaboom" end)
+
+{:ok, tk} = Toolnexus.create_toolkit(extra_tools: [add_tool, fail_tool], builtins: false)
+handle = Toolkit.serve(tk, "127.0.0.1:0", mcp: %{name: "gateway", version: "9.9.9"})
+
+source = Mcp.load(%{"mcpServers" => %{"gw" => %{"url" => handle.url <> "/mcp", "timeout" => 10_000}}})
+
+true = source.status == %{"gw" => "connected"}
+true = Enum.map(source.tools, & &1.name) == ["gw_add", "gw_explode"]
+
+add = Enum.find(source.tools, &(&1.name == "gw_add"))
+true = add.source == "mcp"
+result = add.execute.(%{"a" => 2, "b" => 3}, %Context{})
+false = result.is_error
+true = result.output == "5"
+
+# isError propagates end to end (execute raise -> MCP isError -> client error)
+explode = Enum.find(source.tools, &(&1.name == "gw_explode"))
+er = explode.execute.(%{}, %Context{})
+true = er.is_error
+true = er.output == "kaboom"
+
+Mcp.close(source)
+Serve.stop(handle)
+
+IO.puts("ok: gw_add -> #{result.output}, gw_explode isError=#{er.is_error}")
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — `mcp.tools` filters the exposed subset over the real wire
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.{Mcp, Native, Serve, Toolkit}
+
+Application.ensure_all_started(:req)
+
+mk = fn name -> Native.define_tool(name: name, description: name, execute: fn _ -> name end) end
+
+{:ok, tk} = Toolnexus.create_toolkit(extra_tools: [mk.("add"), mk.("explode")], builtins: false)
+handle = Toolkit.serve(tk, "127.0.0.1:0", mcp: %{tools: ["add", "does-not-exist"]})
+
+source = Mcp.load(%{"mcpServers" => %{"gw" => %{"url" => handle.url <> "/mcp", "timeout" => 10_000}}})
+
+# only "add" survives — "explode" is filtered out, "does-not-exist" is silently ignored
+true = Enum.map(source.tools, & &1.name) == ["gw_add"]
+
+Mcp.close(source)
+Serve.stop(handle)
+
+IO.puts("ok: filtered to #{length(source.tools)} tool(s) over real streamable-HTTP")
 ```
+
+## `mcp` profile fields
+
+| Field | Default | What it does |
+|---|---|---|
+| `:name` | `"toolnexus"` | `initialize`'s `serverInfo.name`. |
+| `:version` | `"0.1.0"` | `initialize`'s `serverInfo.version`. |
+| `:tools` | all toolkit tools | Filters the exposed set by name; unknown names ignored. |
 
 ## The same call in the other five ports
 
@@ -60,13 +155,13 @@ _TODO: name the alternative and when to prefer it._
 | Python | `build_mcp_server` | [→](/api/python/serve/mcp/) |
 | Go | `ExposedMcpTools` | [→](/api/go/serve/mcp/) |
 | Java | `McpServe.build` | [→](/api/java/serve/mcp/) |
-| C# | `McpServe.Build` | [→](/api/csharp/serve/mcp/) |
+| C# | `McpServe.BuildMcpServer` | [→](/api/csharp/serve/mcp/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`Toolnexus.Serve.start`](/api/elixir/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
-- [`Toolnexus.Serve.build_agent_card`](/api/elixir/serve/agent-card/) — Construct the Agent Card that advertises your name, skills and endpoint.
-- [`Toolnexus.Serve task_store`](/api/elixir/serve/task-store/) — Persist inbound A2A tasks so a suspended request survives a restart.
+- [`Toolnexus.Serve.start`](/api/elixir/serve/a2a/) — publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+- [`Toolnexus.Serve.build_agent_card`](/api/elixir/serve/agent-card/) — construct the Agent Card that advertises your name, skills and endpoint.
+- [`Toolnexus.Mcp.load`](/api/elixir/mcp/load/) — the outbound mirror: connect to a served MCP endpoint as a client.

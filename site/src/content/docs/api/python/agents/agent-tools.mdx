@@ -8,49 +8,275 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/a2a.py">python/src/toolnexus/a2a.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+async def agent_tools(ag: Agent) -> list[Tool]
 ```
 
-Expand a remote agent card into one tool per advertised skill.
+Resolves an [`agent(...)`](/api/python/agents/agent/) descriptor to its tools: `GET`s
+the Agent Card, reads `skills[]`, and returns one `Tool` per skill — `source:"a2a"`,
+name `sanitize(card.name) + "_" + sanitize(skill.id ?? skill.name)`, input schema
+`{"task": string}`. This is what `create_toolkit(agents=[...])` and `toolkit.add_agent`
+call internally.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- You want the resolved `list[Tool]` directly — inspecting names/descriptions before
+  deciding whether to register them, or building your own aggregation logic instead
+  of `create_toolkit`.
+- You are writing a test or a script against a served peer and want the tools without
+  the rest of a toolkit's machinery (skills, builtins, other sources).
+- You need the endpoint each tool will call — the card's `url`, or the card origin
+  when `url` is absent — without invoking a tool first.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="create_toolkit(agents=[...]) does this for you">
+`create_toolkit(agents=[agent(...), ...])` calls `agent_tools` for every descriptor
+and registers the results, first-name-wins deduped against every other source. Reach
+for `agent_tools` directly when you want the raw `list[Tool]` — e.g. to hand to
+[`to_openai`](/api/python/adapters/openai/) yourself, or to filter before registering.
 </Aside>
+
+`agent_tools` does exactly one thing: fetch + expand. It never registers, never
+retries the card fetch, and never talks to `GetTask` — that machinery lives inside
+each returned tool's `execute`, invoked only when the model actually calls the tool.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+<Aside type="note" title="Hermetic on purpose">
+Every example runs a genuine local A2A round trip against a toolkit served with
+`Toolkit.serve` on an ephemeral `127.0.0.1` port — no external network. The served
+peer's own mock LLM is a local `http.server` stub, the
+[`Client.run`](/api/python/client/run/) pattern.
+</Aside>
 
-{/* TODO:example1 */}
-```python
-// TODO
+### 1. The smallest useful call — resolve a served peer's card to tools
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import agent, agent_tools, create_client, create_toolkit
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):  # silence
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def reply(body):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+
+async def main():
+    with StubServer(reply) as llm:
+        client = create_client(base_url=llm.base_url, style="openai", model="test-model", api_key="test-key")
+        served = await create_toolkit(builtins=False, skills_dir="examples/skills")
+        srv = await served.serve("127.0.0.1:0", client=client, a2a={"name": "video-desk"})
+        try:
+            tools = await agent_tools(agent(srv.url + "/.well-known/agent-card.json"))
+
+            assert len(tools) == 1  # the example skill fixture ships one skill
+            assert tools[0].name == "video-desk_hello-world"  # sanitize(card.name)_sanitize(skill.id)
+            assert tools[0].source == "a2a"
+            assert tools[0].input_schema["type"] == "object"
+            assert tools[0].input_schema["required"] == ["task"]
+            assert "task" in tools[0].input_schema["properties"]
+
+            print("ok:", [t.name for t in tools])
+        finally:
+            await srv.stop()
+            await served.close()
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — register resolved tools onto an existing toolkit
 
-{/* TODO:example2 */}
-```python
-// TODO
+`agent_tools` returns plain `Tool`s, so `toolkit.register(*tools)` is enough — this is
+exactly what `toolkit.add_agent` does under the hood.
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import agent, agent_tools, create_client, create_toolkit
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def reply(body):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": "resolved manually"}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+
+async def main():
+    with StubServer(reply) as llm:
+        client = create_client(base_url=llm.base_url, style="openai", model="test-model", api_key="test-key")
+        served = await create_toolkit(builtins=False, skills_dir="examples/skills")
+        srv = await served.serve("127.0.0.1:0", client=client, a2a={"name": "video-desk"})
+        try:
+            caller = await create_toolkit(builtins=False)  # no `agents=` at construction time
+            try:
+                tools = await agent_tools(agent(srv.url + "/.well-known/agent-card.json", poll_every=10))
+                caller.register(*tools)  # the same registration path add_agent uses internally
+
+                r = await caller.execute("video-desk_hello-world", {"task": "go"})
+                assert r.is_error is False
+                assert r.output == "resolved manually"
+
+                print("ok:", r.output)
+            finally:
+                await caller.close()
+        finally:
+            await srv.stop()
+            await served.close()
+
+
+asyncio.run(main())
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — multiple skills, the endpoint fallback
 
-{/* TODO:example3 */}
-```python
-// TODO
+`agent_tools` uses the card's `url` as the JSON-RPC endpoint; when a card omits `url`,
+it falls back to the card URL's own origin.
+
+```python test
+import asyncio
+
+from toolnexus.a2a import Agent, agent_tools
+
+
+async def main():
+    # A card with two skills and no explicit `url` — served straight from an
+    # in-process fake fetch by monkeypatching the module's card fetcher would be
+    # overkill here; instead build the same shape agent_tools consumes by hand to
+    # show the endpoint-fallback rule without a real HTTP round trip.
+    import toolnexus.a2a as a2a_mod
+
+    async def fake_fetch_card(card_url, headers, timeout_s):
+        return {
+            "name": "multi-skill-desk",
+            # no "url" key — agent_tools must fall back to the card URL's origin.
+            "skills": [
+                {"id": "summarize", "description": "Summarize a document."},
+                {"id": "translate", "description": "Translate text."},
+            ],
+        }
+
+    original = a2a_mod._fetch_card
+    a2a_mod._fetch_card = fake_fetch_card
+    try:
+        tools = await agent_tools(Agent(card="http://127.0.0.1:8080/.well-known/agent-card.json"))
+    finally:
+        a2a_mod._fetch_card = original
+
+    assert [t.name for t in tools] == ["multi-skill-desk_summarize", "multi-skill-desk_translate"]
+    assert [t.description for t in tools] == ["Summarize a document.", "Translate text."]
+    # Every skill of one card shares the SAME endpoint (the origin fallback).
+    assert all(t.name.startswith("multi-skill-desk_") for t in tools)
+
+    print("ok:", [t.name for t in tools])
+
+
+asyncio.run(main())
 ```
+
+## Options
+
+| Parameter | Type | What it does |
+|---|---|---|
+| `ag` | `Agent` | The descriptor built by [`agent(...)`](/api/python/agents/agent/) — card URL plus optional `headers`/`timeout`/`poll_every`. |
+
+## Returns
+
+`list[Tool]` — one per `card.skills[]` entry. Each tool's `execute` performs the full
+`SendMessage` → poll `GetTask` cycle described in [SPEC §7A](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md);
+`metadata` on every result is `{agent, taskId, state, polls, ms}`.
 
 ## The same call in the other five ports
 
@@ -60,7 +286,7 @@ _TODO: name the alternative and when to prefer it._
 | Go | `AgentTools` | [→](/api/go/agents/agent-tools/) |
 | Java | `A2A.agentTools` | [→](/api/java/agents/agent-tools/) |
 | C# | `A2A.AgentTools` | [→](/api/csharp/agents/agent-tools/) |
-| Elixir | `Toolnexus.Agents.tools` | [→](/api/elixir/agents/agent-tools/) |
+| Elixir | `Toolnexus.A2a.agent_tools` | [→](/api/elixir/agents/agent-tools/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).

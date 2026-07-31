@@ -1,56 +1,308 @@
 ---
-title: "StartAgent"
+title: "Toolkit.Serve — expose your toolkit as an A2A agent"
 description: "Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent. — Go."
 sidebar:
-  label: "StartAgent"
+  label: "serve / a2a"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a>
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/serve.go">golang/serve.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+func (tk *Toolkit) Serve(addr string, opts ServeOptions) (*ServeHandle, error)
+
+type ServeOptions struct {
+	Client *Client       // fulfils Tasks via its run loop
+	A2A    *A2AConfig    // opt-in A2A profile — absent ⇒ no A2A routes mount
+	OnTask OnTask        // fires on each Task's terminal state
+	MCP    *MCPServeConfig // independent opt-in MCP profile, see ExposedMcpTools
+	OnCall OnCall
+}
 ```
 
-Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+`Serve` stands up an HTTP server exposing this toolkit's **skills** (never raw tools) as a real A2A
+agent: `GET /.well-known/agent-card.json` publishes the card, `POST /` answers JSON-RPC
+(`SendMessage` submits a Task and fulfils it asynchronously through `Client.Run`; `GetTask` polls
+it). Any A2A peer — including this same port's own [`AgentTools`](/api/go/agents/agent-tools/) —
+can call it.
+
+<Aside type="note" title="Go names this Toolkit.Serve, not `StartAgent`">
+Every other port's serve entry point is a free function or static method (`startA2AServer`,
+`Toolkit.serve`, `A2AServer.start`, …). Go's is a method: `(*Toolkit).Serve`. `StartAgent` (in
+`golang/agents`) is a different, unrelated symbol — the §7E **persona heartbeat** starter, not the
+inbound A2A server.
+</Aside>
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `Serve` when you want your toolkit to be **callable by other agents**, not just by your
+own `Client.Run` loop — a specialist toolkit another team's agent delegates to, a service mesh of
+toolnexus toolkits, or a toolkit fronting both A2A and MCP for different kinds of callers at once.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Only want MCP clients, not A2A peers?">
+`ServeOptions.A2A` and `ServeOptions.MCP` are independent — set only `MCP` (see
+[`ExposedMcpTools`](/api/go/serve/mcp/)) to skip the A2A card/JSON-RPC surface entirely and expose
+tools instead of skills. Set neither and `Serve` mounts nothing (every request 404s).
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+All three stand up a REAL local server on an ephemeral port (`"127.0.0.1:0"`) with a stubbed LLM
+(`httptest.Server` standing in for the model, same pattern as
+[`Client.Run`](/api/go/client/run/)) — no external network, no real API key.
 
-{/* TODO:example1 */}
-```go
-// TODO
+### 1. The smallest useful call — publish the card
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func mockLLM(reply string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": reply}}},
+			"usage":   map[string]any{"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+		})
+	}))
+}
+
+func main() {
+	llm := mockLLM("hi there")
+	defer llm.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: llm.URL, Style: toolnexus.StyleOpenAI, Model: "x", APIKey: "k"})
+	handle, err := tk.Serve("127.0.0.1:0", toolnexus.ServeOptions{
+		Client: client,
+		A2A:    &toolnexus.A2AConfig{Name: "greeter-desk"},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer handle.Stop()
+
+	resp, err := http.Get(handle.URL + "/.well-known/agent-card.json")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var card map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&card)
+	if card["name"] != "greeter-desk" || card["protocolVersion"] != "0.3.0" {
+		log.Fatalf("unexpected card: %+v", card)
+	}
+
+	fmt.Println("ok: card published for", card["name"])
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — two toolkits, a real A2A round trip
 
-{/* TODO:example2 */}
-```go
-// TODO
+Toolkit A is `Serve`d; toolkit B is a completely separate `Toolkit` that resolves toolkit A's card
+and calls it via this port's own outbound [`AgentTools`](/api/go/agents/agent-tools/) — the same
+shape a real external A2A peer would use.
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func mockLLM(reply string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": reply}}},
+			"usage":   map[string]any{"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+		})
+	}))
+}
+
+func main() {
+	llm := mockLLM("42")
+	defer llm.Close()
+
+	skillsDir := filepath.Join(os.TempDir(), "toolnexus-docs-serve-a2a-2")
+	_ = os.MkdirAll(filepath.Join(skillsDir, "answer"), 0o755)
+	_ = os.WriteFile(filepath.Join(skillsDir, "answer", "SKILL.md"),
+		[]byte("---\nname: answer\ndescription: answers a question\n---\n\nAnswer it.\n"), 0o644)
+	defer os.RemoveAll(skillsDir)
+
+	// Toolkit A: served over A2A with one skill.
+	served, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{
+		Builtins: false, SkillsDir: []string{skillsDir},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer served.Close()
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: llm.URL, Style: toolnexus.StyleOpenAI, Model: "x", APIKey: "k"})
+	handle, err := served.Serve("127.0.0.1:0", toolnexus.ServeOptions{
+		Client: client,
+		A2A:    &toolnexus.A2AConfig{Name: "answer-desk"},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer handle.Stop()
+
+	// Toolkit B: a fresh, unrelated toolkit that points AT toolkit A over HTTP.
+	caller, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{
+		Builtins: false,
+		Agents: []toolnexus.Agent{{
+			Card:      handle.URL + "/.well-known/agent-card.json",
+			PollEvery: 5,
+		}},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer caller.Close()
+
+	res, err := caller.Execute(context.Background(), "answer-desk_answer", map[string]any{"task": "what is 6*7?"})
+	if err != nil || res.IsError || res.Output != "42" {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+
+	fmt.Println("ok:", res.Output, "(via a real local A2A round trip)")
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — a served skill, `OnTask`, and a real skill answer
 
-{/* TODO:example3 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func mockLLM(reply string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": reply}}},
+			"usage":   map[string]any{"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+		})
+	}))
+}
+
+func main() {
+	llm := mockLLM("TRANSCRIBED")
+	defer llm.Close()
+
+	skillsDir := filepath.Join(os.TempDir(), "toolnexus-docs-serve-a2a-skills")
+	_ = os.MkdirAll(filepath.Join(skillsDir, "hello-world"), 0o755)
+	_ = os.WriteFile(filepath.Join(skillsDir, "hello-world", "SKILL.md"),
+		[]byte("---\nname: hello-world\ndescription: says hello\n---\n\nSay hello.\n"), 0o644)
+	defer os.RemoveAll(skillsDir)
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{
+		Builtins: false, SkillsDir: []string{skillsDir},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: llm.URL, Style: toolnexus.StyleOpenAI, Model: "x", APIKey: "k"})
+
+	events := make(chan toolnexus.OnTaskEvent, 1)
+	handle, err := tk.Serve("127.0.0.1:0", toolnexus.ServeOptions{
+		Client: client,
+		A2A: &toolnexus.A2AConfig{
+			Name: "video-desk", Skills: []string{"hello-world"},
+			Provider: &toolnexus.A2AProvider{Organization: "acme", URL: "https://acme.example"},
+		},
+		OnTask: func(ev toolnexus.OnTaskEvent) { events <- ev },
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer handle.Stop()
+
+	tools, err := toolnexus.AgentTools(context.Background(), toolnexus.Agent{
+		Card: handle.URL + "/.well-known/agent-card.json", PollEvery: 5,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	var hello *toolnexus.Tool
+	for i := range tools {
+		if tools[i].Name == "video-desk_hello-world" {
+			hello = &tools[i]
+		}
+	}
+	if hello == nil {
+		log.Fatal("expected the served skill to resolve as video-desk_hello-world")
+	}
+
+	res, err := hello.Execute(map[string]any{"task": "do it"}, &toolnexus.ToolContext{Ctx: context.Background()})
+	if err != nil || res.IsError || res.Output != "TRANSCRIBED" {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+
+	ev := <-events
+	if ev.State != "completed" {
+		log.Fatalf("expected OnTask to fire completed, got %q", ev.State)
+	}
+
+	fmt.Println("ok:", res.Output, "OnTask state =", ev.State)
+}
 ```
+
+## ServeOptions fields
+
+| Field | Type | What it does |
+|---|---|---|
+| `Client` | `*Client` | Fulfils each Task by running the prompt through this client's loop. |
+| `A2A` | `*A2AConfig` | Opt-in — `Name`, `Description`, `Version`, `Provider`, `Skills` filter, `Store`. Absent ⇒ no A2A routes. |
+| `OnTask` | `OnTask` | Fires with `{ID, Skill, Task, Result, State}` on every terminal Task state. |
+| `MCP` | `*MCPServeConfig` | Independent opt-in MCP profile at `POST /mcp` — see [`ExposedMcpTools`](/api/go/serve/mcp/). |
+| `OnCall` | `OnCall` | Fires per inbound MCP `tools/call`. |
+
+`ServeHandle{URL, Stop()}` is returned; `Close()` aliases `Stop()`. `A2AConfig.Store` selects Task
+persistence — see [`NewFileTaskStore`](/api/go/serve/task-store/).
 
 ## The same call in the other five ports
 
@@ -59,7 +311,7 @@ _TODO: name the alternative and when to prefer it._
 | JavaScript | `startA2AServer` | [→](/api/javascript/serve/a2a/) |
 | Python | `Toolkit.serve` | [→](/api/python/serve/a2a/) |
 | Java | `A2AServer.start` | [→](/api/java/serve/a2a/) |
-| C# | `A2AServer.Start` | [→](/api/csharp/serve/a2a/) |
+| C# | `A2AServer.StartAsync` | [→](/api/csharp/serve/a2a/) |
 | Elixir | `Toolnexus.Serve.start` | [→](/api/elixir/serve/a2a/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
@@ -70,3 +322,4 @@ See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 - [`BuildAgentCard`](/api/go/serve/agent-card/) — Construct the Agent Card that advertises your name, skills and endpoint.
 - [`NewFileTaskStore`](/api/go/serve/task-store/) — Persist inbound A2A tasks so a suspended request survives a restart.
 - [`ExposedMcpTools`](/api/go/serve/mcp/) — The inbound MCP profile: any MCP client can call your tools.
+- [`agents.New`](/api/go/agents/agent/) — the outbound counterpart: call someone else's served toolkit.

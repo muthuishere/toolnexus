@@ -8,49 +8,295 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/a2a.py">python/src/toolnexus/a2a.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+def agent(
+    card: str,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: int | None = None,
+    poll_every: int | None = None,
+) -> Agent
 ```
 
-Point at a remote agent's card and use it exactly like a local tool.
+Builds an `Agent` descriptor pointing at a remote peer's Agent Card URL — the outbound
+half of §7A. Handing one (or several) to [`create_toolkit(agents=[...])`](/api/python/toolkit/create/)
+fetches each card, reads its `skills[]`, and registers one `Tool` per skill (`source:"a2a"`).
+Calling that tool does one JSON-RPC `SendMessage` then polls `GetTask` until a terminal
+state — a genuine subset of real A2A (verified against `a2a-python`).
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- You want a remote A2A peer's capabilities to show up as ordinary tools your model
+  can call — no different from a local or MCP tool from the model's point of view.
+- You are wiring several remote peers declared as data — pass the list straight to
+  `create_toolkit(agents=[...])`, or [`parse_agents_config`](/api/python/agents/parse-config/)
+  first if they live in a config block.
+- You need a runtime add — `toolkit.add_agent(agent(...))` (or a bare card URL) after
+  the toolkit already exists.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="agent() only builds a descriptor — it never connects">
+`agent(...)` does no I/O by itself; it is a plain constructor, like MCP's
+`ServerConfig`. The card fetch + tool creation happens in
+[`agent_tools`](/api/python/agents/agent-tools/) (called for you by `create_toolkit`
+/ `toolkit.add_agent`). Call `agent_tools` directly when you want the resolved
+`list[Tool]` without registering them into a toolkit.
 </Aside>
+
+A failing agent — unreachable card, malformed skills — is isolated exactly like a
+failing MCP server: logged, contributes no tools, never fatal to the rest of the
+toolkit.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+<Aside type="note" title="Hermetic on purpose">
+Example 1 builds a descriptor with no I/O. Examples 2 and 3 run a genuine local A2A
+round trip: a served toolkit (mock LLM = a local `http.server` stub, the
+[`Client.run`](/api/python/client/run/) pattern) on one ephemeral port, and this
+descriptor pointed at it over real localhost HTTP — no external network.
+</Aside>
 
-{/* TODO:example1 */}
-```python
-// TODO
+### 1. The smallest useful call — build a descriptor, inspect its defaults
+
+```python test
+from toolnexus import agent
+
+ag = agent("http://127.0.0.1:9999/.well-known/agent-card.json")
+
+assert ag.card == "http://127.0.0.1:9999/.well-known/agent-card.json"
+assert ag.headers is None
+assert ag.timeout is None  # agent_tools falls back to 300000ms
+assert ag.poll_every is None  # agent_tools falls back to 1000ms
+
+with_opts = agent(
+    "http://127.0.0.1:9999/.well-known/agent-card.json",
+    headers={"Authorization": "Bearer ${DESK_TOKEN}"},
+    timeout=5000,
+    poll_every=100,
+)
+assert with_opts.timeout == 5000
+assert with_opts.poll_every == 100
+
+print("ok:", ag.card)
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — a full local A2A round trip
 
-{/* TODO:example2 */}
-```python
-// TODO
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import agent, create_client, create_toolkit
+
+
+class StubServer:
+    """A local OpenAI-shaped chat-completions endpoint — the served peer's mock LLM."""
+
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):  # silence
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def reply(body):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": "sunny in Chennai"}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6},
+    }
+
+
+async def main():
+    with StubServer(reply) as llm:
+        client = create_client(base_url=llm.base_url, style="openai", model="test-model", api_key="test-key")
+
+        served = await create_toolkit(builtins=False, skills_dir="examples/skills")
+        srv = await served.serve("127.0.0.1:0", client=client, a2a={"name": "weather-desk"})
+        try:
+            caller = await create_toolkit(
+                builtins=False,
+                agents=[agent(srv.url + "/.well-known/agent-card.json", poll_every=10)],
+            )
+            try:
+                tool = caller.get("weather-desk_hello-world")
+                assert tool is not None
+                assert tool.source == "a2a"
+                # The tool's schema is uniform across every peer: {"task": "..."}.
+                assert tool.input_schema["required"] == ["task"]
+
+                r = await caller.execute("weather-desk_hello-world", {"task": "weather in Chennai?"})
+                assert r.is_error is False
+                assert r.output == "sunny in Chennai"
+                assert r.metadata["polls"] >= 0
+
+                print("ok:", tool.name, "->", r.output)
+            finally:
+                await caller.close()
+        finally:
+            await srv.stop()
+            await served.close()
+
+
+asyncio.run(main())
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — isolation on a bad peer, a failed remote task
 
-{/* TODO:example3 */}
-```python
-// TODO
+A failing agent never sinks the caller's toolkit: no tools from it, and the rest of
+the toolkit is unaffected. A `failed` Task maps to an `is_error` result, not an
+exception.
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import agent, create_client, create_toolkit, define_tool
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def five_hundred(_body):
+    raise AssertionError("never reached — the handler below writes raw 500")
+
+
+async def main():
+    # An unreachable card is isolated, not fatal — the caller's toolkit still has
+    # its own local tool.
+    caller = await create_toolkit(
+        builtins=False,
+        extra_tools=[define_tool(lambda: "pong", name="ping", description="local, unaffected")],
+        agents=[agent("http://127.0.0.1:1/.well-known/agent-card.json", timeout=200)],
+    )
+    try:
+        assert caller.get("ping") is not None  # local tool present
+        assert len(caller.tools()) == 1  # the unreachable peer contributed zero tools
+    finally:
+        await caller.close()
+
+    # A peer that reaches "failed" maps to an is_error ToolResult, never a raised exception.
+    class FailHandler(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):  # noqa: N802
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(b"model down")
+
+    llm_srv = ThreadingHTTPServer(("127.0.0.1", 0), FailHandler)
+    threading.Thread(target=llm_srv.serve_forever, daemon=True).start()
+    client = create_client(
+        base_url=f"http://127.0.0.1:{llm_srv.server_address[1]}/v1",
+        style="openai", model="test-model", api_key="test-key", retries=0,
+    )
+    served = await create_toolkit(builtins=False, skills_dir="examples/skills")
+    srv = await served.serve("127.0.0.1:0", client=client, a2a={"name": "flaky-desk"})
+    try:
+        flaky = await create_toolkit(
+            builtins=False, agents=[agent(srv.url + "/.well-known/agent-card.json", poll_every=10)]
+        )
+        try:
+            r = await flaky.execute("flaky-desk_hello-world", {"task": "go"})
+            assert r.is_error is True
+            assert "failed" in r.output
+            assert r.metadata["state"] == "failed"
+
+            print("ok:", "isolation held, failed task -> is_error:", r.is_error)
+        finally:
+            await flaky.close()
+    finally:
+        await srv.stop()
+        await served.close()
+        llm_srv.shutdown()
+
+
+asyncio.run(main())
 ```
+
+## Options
+
+| Parameter | Type | What it does |
+|---|---|---|
+| `card` | `str` | Required. The peer's Agent Card URL (usually ending `/.well-known/agent-card.json`). |
+| `headers` | `dict[str, str] \| None` | Sent on every request. `${ENV}` values expand at call time; never logged. |
+| `timeout` | `int \| None` | Milliseconds, default `300000`. Bounds the whole SendMessage→poll→terminal cycle. |
+| `poll_every` | `int \| None` | Milliseconds between `GetTask` polls, default `1000`. |
 
 ## The same call in the other five ports
 
@@ -60,7 +306,7 @@ _TODO: name the alternative and when to prefer it._
 | Go | `agents.New` | [→](/api/go/agents/agent/) |
 | Java | `A2A.agent` | [→](/api/java/agents/agent/) |
 | C# | `A2A.Agent` | [→](/api/csharp/agents/agent/) |
-| Elixir | `Toolnexus.Agents.new` | [→](/api/elixir/agents/agent/) |
+| Elixir | `Toolnexus.A2a.agent` | [→](/api/elixir/agents/agent/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).

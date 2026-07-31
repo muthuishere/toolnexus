@@ -8,49 +8,317 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/agents/runtime.py">python/src/toolnexus/agents/runtime.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+class Handle:
+    id: str                     # deterministic, parent-scoped, e.g. "root/worker.1"
+    defn: AgentDef               # this handle's agent definition
+    parent: Handle | None
+    depth: int
+    state: str                  # "idle" | "running" | "suspended" | "closed"
+    inbox: list[InboxItem]      # AGENT STATE — never a runtime/language mailbox
+    children: list[Handle]
+    usage_total: int
+    turns_total: int
+    pending_req: Request | None  # set only while state == "suspended"
+    last_result: TaskResult | None
 ```
 
-The state machine for one spawned agent: pending, running, suspended, done.
+The state machine behind one spawned agent — never constructed directly (you get a
+`Handle` back from `AgentRuntime.spawn`). `state` moves `idle → running → (idle |
+suspended | closed)`; `suspended → running` happens **only** via the Answer to its
+own `pending_req`. Ids are deterministic and parent-scoped (`root/coordinator.1/explore.2`)
+— never random — so a rebuilt tree, a resumed run, and a trace assertion all agree
+on the same names.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- You hold a `Handle` (returned by `spawn`) and want to inspect it directly —
+  `state`, `usage_total`, `turns_total`, `children` — between calling the six verbs.
+- You are writing a supervisor that branches on state: `idle` ⇒ safe to `wake`,
+  `suspended` ⇒ needs an Answer, `closed` ⇒ done (but its `last_result` still reads
+  back — close ≠ loss).
+- You need a handle's id to correlate a trace line, a stored conversation
+  (`conv_id == id`), or a `Request.data["path"]` back to the agent that raised it.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="A Handle is a capability, not a lookup key">
+Handles are returned to the spawner ALONE — post/wake/wait what you hold, wait only
+what you spawned. For a read-only view of the whole tree (without holding every
+handle), use [`AgentRuntime.list()`/`.inspect()`](/api/python/runtime/runtime/)
+instead of walking `children` yourself.
 </Aside>
+
+`suspended` is not "waiting on a human" specifically — it is "waiting on whichever
+`wait_for` interprets `pending_req`", which can resolve in the same call (inline
+escalation, an ancestor's `wait_for` answers before `wait()` even returns) or across
+a process restart (durable resume via `AgentRuntime.resume(answer)`). Both trace
+through the identical `suspended → idle` / `suspended → running` shapes.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+<Aside type="note" title="Hermetic on purpose">
+Every example scripts the LLM with a plain in-process `HttpTransport` stand-in — no
+network, no real LLM.
+</Aside>
 
-{/* TODO:example1 */}
-```python
-// TODO
+### 1. The smallest useful call — `idle → running → idle`, deterministic ids
+
+```python test
+import asyncio
+
+from toolnexus.agents import AgentDef, AgentRuntime, Handle
+
+
+class ScriptedTransport:
+    def __init__(self, scripts):
+        self._scripts = {k: list(v) for k, v in scripts.items()}
+
+    def post(self, url, headers, payload, timeout):
+        return self._scripts[payload.get("model")].pop(0)
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError
+
+
+def final_reply(text):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+    }
+
+
+async def main():
+    registry = {"worker": AgentDef(name="worker", description="does work", system_prompt="", model="inherit")}
+    rt = AgentRuntime(
+        registry=registry,
+        transport=ScriptedTransport({"stub-model": [final_reply("done")]}),
+        llm={"base_url": "http://mock.local", "style": "openai", "model": "stub-model", "api_key": "unused"},
+    )
+
+    h = rt.spawn(rt.root, "worker")
+    assert isinstance(h, Handle)
+    assert h.state == "idle"
+    assert h.parent is rt.root
+    assert h.depth == 1
+    assert h.children == []
+    assert h.pending_req is None
+    assert h.last_result is None  # nothing has completed yet
+
+    rt.wake(h, "go")
+    assert h.state == "running"  # wake's admission is synchronous with the call
+
+    r = await rt.wait(h)
+    assert h.state == "idle"  # a completed turn returns to idle
+    assert h.turns_total == 1
+    assert h.usage_total == 5
+    assert h.last_result is r  # the settled result stays queryable
+
+    print("ok:", h.id, "|", h.state, "| turns:", h.turns_total)
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — inline suspension, escalated within the same turn
 
-{/* TODO:example2 */}
-```python
-// TODO
+An ancestor's `wait_for` (here, the agent's own) resolves a `pending` tool result
+**inside** the same `wait()` call — the handle passes through `suspended` but is back
+to `idle` by the time the caller observes it.
+
+```python test
+import asyncio
+import json
+
+from toolnexus import Answer, define_tool, pending
+from toolnexus.agents import AgentDef, AgentRuntime
+
+
+class ScriptedTransport:
+    def __init__(self, scripts):
+        self._scripts = {k: list(v) for k, v in scripts.items()}
+
+    def post(self, url, headers, payload, timeout):
+        return self._scripts[payload.get("model")].pop(0)
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError
+
+
+def tool_call_reply(name, args):
+    return {
+        "choices": [{
+            "message": {"role": "assistant", "content": None,
+                        "tool_calls": [{"id": "c1", "type": "function",
+                                        "function": {"name": name, "arguments": json.dumps(args)}}]},
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+    }
+
+
+def final_reply(text):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+    }
+
+
+async def ask_approval(args=None, ctx=None):
+    return pending(kind="approval", prompt="need approval to proceed")
+
+
+approval_tool = define_tool(
+    ask_approval, name="ask_approval", description="request approval", input_schema={"type": "object", "properties": {}}
+)
+
+
+async def approve(req):  # the "nearest interpreter" for this agent's own suspensions
+    return Answer(id=req.id, ok=True)
+
+
+async def main():
+    registry = {
+        "worker": AgentDef(
+            name="worker", description="does risky work", system_prompt="", model="inherit",
+            tools=[approval_tool], wait_for=approve,
+        ),
+    }
+    scripts = {"stub-model": [tool_call_reply("ask_approval", {}), final_reply("done, approved inline")]}
+    rt = AgentRuntime(
+        registry=registry, transport=ScriptedTransport(scripts),
+        llm={"base_url": "http://mock.local", "style": "openai", "model": "stub-model", "api_key": "unused"},
+    )
+
+    h = rt.spawn(rt.root, "worker")
+    rt.wake(h, "do the risky thing")
+    r = await rt.wait(h)
+
+    assert r.status == "done"  # resolved inline — never surfaced as "pending" to the caller
+    assert r.text == "done, approved inline"
+    assert h.state == "idle"  # back to idle; suspended was a mid-turn detour
+    assert "running→suspended" in "\n".join(rt.trace)
+    assert "suspended→running" in "\n".join(rt.trace)
+
+    print("ok:", r.status, "|", r.text)
+
+
+asyncio.run(main())
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — durable suspension, `pending_req`, `AgentRuntime.resume`
 
-{/* TODO:example3 */}
-```python
-// TODO
+With **no** `wait_for` anywhere in the ancestor chain, the run halts at `suspended`
+for real — `wait()` returns a `"pending"` result and `h.pending_req` stays set until
+an external `resume(Answer(...))` call answers it (the durable path — the Answer may
+arrive minutes later, even after a restart with a persisted store).
+
+```python test
+import asyncio
+import json
+
+from toolnexus import Answer, define_tool, pending
+from toolnexus.agents import AgentDef, AgentRuntime
+
+
+class ScriptedTransport:
+    def __init__(self, scripts):
+        self._scripts = {k: list(v) for k, v in scripts.items()}
+
+    def post(self, url, headers, payload, timeout):
+        return self._scripts[payload.get("model")].pop(0)
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError
+
+
+def tool_call_reply(name, args):
+    return {
+        "choices": [{
+            "message": {"role": "assistant", "content": None,
+                        "tool_calls": [{"id": "c1", "type": "function",
+                                        "function": {"name": name, "arguments": json.dumps(args)}}]},
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+    }
+
+
+def final_reply(text):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+    }
+
+
+async def ask_approval(args=None, ctx=None):
+    return pending(kind="approval", prompt="need approval to proceed")
+
+
+approval_tool = define_tool(
+    ask_approval, name="ask_approval", description="request approval", input_schema={"type": "object", "properties": {}}
+)
+
+
+async def main():
+    # No wait_for on this def — the run goes durably pending; nothing auto-answers it.
+    registry = {
+        "worker": AgentDef(
+            name="worker", description="does risky work", system_prompt="", model="inherit", tools=[approval_tool]
+        ),
+    }
+    scripts = {"stub-model": [
+        tool_call_reply("ask_approval", {}),   # consumed before suspension
+        tool_call_reply("ask_approval", {}),   # the resumed turn replays from its checkpoint
+        final_reply("done, approved"),
+    ]}
+    rt = AgentRuntime(
+        registry=registry, transport=ScriptedTransport(scripts),
+        llm={"base_url": "http://mock.local", "style": "openai", "model": "stub-model", "api_key": "unused"},
+    )
+
+    h = rt.spawn(rt.root, "worker")
+    rt.wake(h, "do the risky thing")
+    r = await rt.wait(h)
+
+    assert r.status == "pending"  # loud — never a silent "done"
+    assert h.state == "suspended"
+    assert h.pending_req is not None
+    assert h.pending_req.kind == "approval"
+    req = h.pending_req
+
+    # Answer arrives out of band — a human, a webhook, another process.
+    await rt.resume(Answer(id=req.id, ok=True))
+
+    assert h.state == "idle"  # suspended -> idle (checkpoint restored) -> idle (turn settled)
+    assert h.pending_req is None
+    assert h.last_result.status == "done"
+    assert h.last_result.text == "done, approved"
+
+    print("ok:", "suspended with", req.kind, "-> resumed ->", h.last_result.text)
+
+
+asyncio.run(main())
 ```
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `id` | `str` | Deterministic, parent-scoped (`root/worker.1`, `root/worker.1/helper.1`). |
+| `defn` | `AgentDef` | This handle's definition — name, description, tools, budget, `wait_for`. |
+| `parent` | `Handle \| None` | `None` only for `rt.root`. |
+| `depth` | `int` | `0` for `rt.root`; each spawn increments. |
+| `state` | `str` | `"idle" \| "running" \| "suspended" \| "closed"`. |
+| `inbox` | `list[InboxItem]` | Unsolicited-rail state — posts/ticks awaiting the next `wake`. |
+| `children` | `list[Handle]` | This handle's direct spawns. |
+| `usage_total` | `int` | Rolled-up token usage — every ancestor's total grows on every descendant's turn. |
+| `turns_total` | `int` | Cumulative LLM round trips across this handle's whole lifetime. |
+| `pending_req` | `Request \| None` | Set only while `state == "suspended"`. |
+| `last_result` | `TaskResult \| None` | The most recent settled result — stays queryable after `close()` (close ≠ loss). |
 
 ## The same call in the other five ports
 

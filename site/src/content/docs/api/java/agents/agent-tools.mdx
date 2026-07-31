@@ -8,49 +8,246 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/A2A.java">A2A.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public static List<Tool> agentTools(A2A.Agent ag) throws Exception
 ```
 
-Expand a remote agent card into one tool per advertised skill.
+`GET`s the Agent Card at `ag.card()`, reads its `skills[]`, and returns one `Tool` per skill —
+named `sanitize(card.name) + "_" + sanitize(skill.id)`, `source:"a2a"`, with a fixed
+one-field input schema `{task: string}`. Calling the tool performs one JSON-RPC `SendMessage`
+against `card.url` (falling back to the card's origin), then polls `GetTask` until the remote
+Task reaches a terminal state.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When you want the raw `List<Tool>` a peer advertises — to inspect them, filter them, or hand
+them somewhere other than a `Toolkit` (a custom router, a different aggregator). It throws on a
+network/parse failure, so callers that want isolation (one bad peer never breaking the rest)
+should catch around it — which is exactly what `Toolkit.Options.agents(...)` does for you.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Prefer Toolkit.Options.agents(...) when A2A is one source among several">
+[`Toolkit.create`](/api/java/toolkit/create/) calls `agentTools` internally for every descriptor
+in `agents(...)`, merges the results with MCP/skill/native/builtin tools, and isolates a failing
+peer (logged, no tools, never fatal) the same way a bad MCP server is isolated. Reach for
+`agentTools` directly only when you need the tools *before* they are merged into a toolkit, or
+when A2A is genuinely the only source you have.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — one skill, one tool
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer peer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        peer.createContext("/.well-known/agent-card.json", ex -> {
+            String card = "{\"name\":\"reviewer\",\"skills\":[{\"id\":\"review\",\"description\":\"Review some code\"}]}";
+            send(ex, 200, card);
+        });
+        peer.start();
+        int port = peer.getAddress().getPort();
+
+        try {
+            List<Tool> tools = A2A.agentTools(
+                    A2A.agent("http://127.0.0.1:" + port + "/.well-known/agent-card.json"));
+
+            if (tools.size() != 1) throw new AssertionError("expected 1 tool: " + tools.size());
+            Tool review = tools.get(0);
+            if (!review.name().equals("reviewer_review")) throw new AssertionError(review.name());
+            if (!review.source().equals("a2a")) throw new AssertionError(review.source());
+            if (!review.inputSchema().get("required").equals(List.of("task"))) {
+                throw new AssertionError(review.inputSchema());
+            }
+
+            System.out.println("ok: " + review.name());
+        } finally {
+            peer.stop(0);
+        }
+    }
+
+    private static void send(com.sun.net.httpserver.HttpExchange ex, int status, String body) {
+        try {
+            byte[] b = body.getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(status, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        } catch (Exception ignored) { }
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — a full submit→poll round trip
 
-{/* TODO:example2 */}
-```java
-// TODO
+The stub Task starts `working`, then flips to `completed` on the second `GetTask` poll — proving
+`agentTools` actually polls rather than trusting the first response.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        AtomicInteger polls = new AtomicInteger();
+        HttpServer peer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        peer.createContext("/", ex -> {
+            try {
+                String path = ex.getRequestURI().getPath();
+                if ("/.well-known/agent-card.json".equals(path)) {
+                    send(ex, 200, "{\"name\":\"planner\",\"skills\":["
+                            + "{\"id\":\"plan\",\"description\":\"Plan a task\"}]}");
+                    return;
+                }
+                String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                Map<String, Object> rpc = Json.toMap(body);
+                Object id = rpc.get("id");
+                String method = String.valueOf(rpc.get("method"));
+                if ("SendMessage".equals(method)) {
+                    send(ex, 200, "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"result\":"
+                            + "{\"id\":\"t1\",\"status\":{\"state\":\"working\"}}}");
+                } else {
+                    int n = polls.incrementAndGet();
+                    String state = n < 2 ? "working" : "completed";
+                    String extra = n < 2 ? "" : ",\"artifacts\":[{\"parts\":[{\"kind\":\"text\",\"text\":\"3 steps planned\"}]}]";
+                    send(ex, 200, "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"result\":"
+                            + "{\"id\":\"t1\",\"status\":{\"state\":\"" + state + "\"}" + extra + "}}");
+                }
+            } catch (Exception e) {
+                send(ex, 500, "err");
+            }
+        });
+        peer.start();
+        int port = peer.getAddress().getPort();
+
+        try {
+            List<Tool> tools = A2A.agentTools(A2A.agent(
+                    "http://127.0.0.1:" + port + "/.well-known/agent-card.json", null, 5_000L, 10L));
+            Tool plan = tools.get(0);
+
+            ToolResult r = plan.execute(Map.of("task", "ship the release"), null);
+            if (r.isError()) throw new AssertionError(r.output());
+            if (!r.output().equals("3 steps planned")) throw new AssertionError(r.output());
+            if (polls.get() < 2) throw new AssertionError("expected at least 2 polls, got " + polls.get());
+            if (!"completed".equals(r.metadata().get("state"))) throw new AssertionError(r.metadata());
+
+            System.out.println("ok: " + r.output() + " after " + polls.get() + " poll(s)");
+        } finally {
+            peer.stop(0);
+        }
+    }
+
+    private static void send(com.sun.net.httpserver.HttpExchange ex, int status, String body) {
+        try {
+            byte[] b = body.getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(status, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        } catch (Exception ignored) { }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — multiple skills, and a failed Task maps to `isError`
 
-{/* TODO:example3 */}
-```java
-// TODO
+`failed`/`canceled` map to `isError:true` output that carries the remote's own status message
+text — never a thrown exception once the tool is resolved.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer peer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        peer.createContext("/", ex -> {
+            try {
+                String path = ex.getRequestURI().getPath();
+                if ("/.well-known/agent-card.json".equals(path)) {
+                    send(ex, 200, "{\"name\":\"reviewer\",\"skills\":["
+                            + "{\"id\":\"review\",\"description\":\"Review some code\"},"
+                            + "{\"id\":\"fail\",\"description\":\"Always fails\"}]}");
+                    return;
+                }
+                String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                Map<String, Object> rpc = Json.toMap(body);
+                Object id = rpc.get("id");
+                String method = String.valueOf(rpc.get("method"));
+                if ("SendMessage".equals(method)) {
+                    send(ex, 200, "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"result\":"
+                            + "{\"id\":\"t1\",\"status\":{\"state\":\"submitted\"}}}");
+                } else {
+                    send(ex, 200, "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"result\":"
+                            + "{\"id\":\"t1\",\"status\":{\"state\":\"failed\",\"message\":"
+                            + "{\"role\":\"agent\",\"parts\":[{\"kind\":\"text\",\"text\":\"diff would not apply\"}]}}}}");
+                }
+            } catch (Exception e) {
+                send(ex, 500, "err");
+            }
+        });
+        peer.start();
+        int port = peer.getAddress().getPort();
+
+        try {
+            List<Tool> tools = A2A.agentTools(A2A.agent(
+                    "http://127.0.0.1:" + port + "/.well-known/agent-card.json", null, 5_000L, 5L));
+            if (tools.size() != 2) throw new AssertionError("expected 2 skills: " + tools.size());
+
+            Tool fail = tools.stream().filter(t -> t.name().equals("reviewer_fail")).findFirst().orElseThrow();
+            ToolResult r = fail.execute(Map.of("task", "please fail"), null);
+
+            if (!r.isError()) throw new AssertionError("expected isError");
+            if (!r.output().contains("diff would not apply")) throw new AssertionError(r.output());
+            if (!"failed".equals(r.metadata().get("state"))) throw new AssertionError(r.metadata());
+
+            System.out.println("ok: " + r.output());
+        } finally {
+            peer.stop(0);
+        }
+    }
+
+    private static void send(com.sun.net.httpserver.HttpExchange ex, int status, String body) {
+        try {
+            byte[] b = body.getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(status, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        } catch (Exception ignored) { }
+    }
+}
 ```
+
+## Fields and overloads
+
+| Member | Type | What it is |
+|---|---|---|
+| `agentTools(ag)` | `List<Tool>` | Fetch the card, one `Tool` per `skills[]` entry. Throws on network/parse failure. |
+| tool name | `String` | `sanitize(card.name) + "_" + sanitize(skill.id ?? skill.name)`. |
+| tool `inputSchema()` | `Map` | Fixed: `{type:"object", properties:{task:{type:"string"}}, required:["task"]}`. |
+| tool `source()` | `String` | Always `"a2a"`. |
+| `ToolResult.metadata()` | `Map` | `{agent, taskId, state, polls, ms}` on every result, success or failure. |
 
 ## The same call in the other five ports
 
@@ -60,12 +257,14 @@ _TODO: name the alternative and when to prefer it._
 | Python | `agent_tools` | [→](/api/python/agents/agent-tools/) |
 | Go | `AgentTools` | [→](/api/go/agents/agent-tools/) |
 | C# | `A2A.AgentTools` | [→](/api/csharp/agents/agent-tools/) |
-| Elixir | `Toolnexus.Agents.tools` | [→](/api/elixir/agents/agent-tools/) |
+| Elixir | `Toolnexus.A2a.agent_tools` | [→](/api/elixir/agents/agent-tools/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
 ## See also
 
-- [`A2A.agent`](/api/java/agents/agent/) — Point at a remote agent's card and use it exactly like a local tool.
-- [`A2A.parseAgentsConfig`](/api/java/agents/parse-config/) — Declare remote peers in config the way MCP servers are declared, with precedence rules.
+- [`A2A.agent`](/api/java/agents/agent/) — build the descriptor `agentTools` resolves.
+- [`A2A.parseAgentsConfig`](/api/java/agents/parse-config/) — parse a whole `agents` config block into descriptors.
+- [`Toolkit.create`](/api/java/toolkit/create/) — `agents(...)` calls `agentTools` for you, with per-peer failure isolation.
+- [`A2AServer.start`](/api/java/serve/a2a/) — the inbound mirror: expose your own toolkit as an A2A peer.

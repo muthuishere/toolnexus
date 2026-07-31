@@ -8,49 +8,150 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/a2a.py">python/src/toolnexus/a2a.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+def parse_agents_config(block: dict[str, dict] | None) -> list[Agent]
 ```
 
-Declare remote peers in config the way MCP servers are declared, with precedence rules.
+Parses an `agents` config block — the outbound-A2A mirror of `mcpServers` (§2) — into
+a `list[Agent]` descriptors, skipping disabled entries. The block's keys are only
+identifiers; a tool's name prefix comes from the fetched card's `name`, never the
+config key.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- You keep remote peers declared in config (a file or an inline dict) instead of
+  building `Agent` descriptors by hand in code.
+- You want the same `enabled`/`disabled` precedence MCP servers already use, so one
+  mental model covers both `mcpServers` and `agents` blocks.
+- You are about to hand the result straight to `create_toolkit(agents=...)` or loop
+  over it and call `toolkit.add_agent(...)` yourself.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for agent() directly when there's exactly one peer">
+For a single hardcoded peer, calling [`agent(card, ...)`](/api/python/agents/agent/)
+yourself is simpler — no config shape to satisfy. `parse_agents_config` earns its
+keep once peers are *data*: several of them, coming from a file, some disabled,
+maybe headers with `${ENV}` secrets.
 </Aside>
+
+`parse_agents_config` never connects to anything — it is pure config parsing, exactly
+like [`parse_mcp_config`](/api/python/mcp/parse-config/) for MCP servers. Fetching the
+card and building tools is a separate step: [`agent_tools`](/api/python/agents/agent-tools/)
+per descriptor, or `create_toolkit(agents=parse_agents_config(block))` to do both at
+once.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — one enabled peer
 
-{/* TODO:example1 */}
-```python
-// TODO
+```python test
+from toolnexus import parse_agents_config
+
+block = {
+    "video-desk": {"card": "http://127.0.0.1:9999/.well-known/agent-card.json"},
+}
+
+agents = parse_agents_config(block)
+
+assert len(agents) == 1
+assert agents[0].card == "http://127.0.0.1:9999/.well-known/agent-card.json"
+assert agents[0].headers is None
+assert agents[0].timeout is None
+assert agents[0].poll_every is None
+
+print("ok:", agents[0].card)
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — mixed enabled/disabled peers, `pollEvery`
 
-{/* TODO:example2 */}
-```python
-// TODO
+The config key (`"desk-a"` / `"desk-b"`) never becomes the tool prefix — only the
+fetched card's `name` does. `disabled: true` and `enabled: false` both drop an entry.
+
+```python test
+from toolnexus import parse_agents_config
+
+block = {
+    "desk-a": {
+        "card": "http://127.0.0.1:9001/.well-known/agent-card.json",
+        "pollEvery": 250,
+        "timeout": 5000,
+    },
+    "desk-b": {
+        "card": "http://127.0.0.1:9002/.well-known/agent-card.json",
+        "disabled": True,
+    },
+    "desk-c": {
+        "card": "http://127.0.0.1:9003/.well-known/agent-card.json",
+        "enabled": False,
+    },
+    "desk-d": {
+        # missing "card" — silently skipped, not an error.
+        "pollEvery": 100,
+    },
+}
+
+agents = parse_agents_config(block)
+
+assert len(agents) == 1
+only = agents[0]
+assert only.card == "http://127.0.0.1:9001/.well-known/agent-card.json"
+assert only.poll_every == 250
+assert only.timeout == 5000
+
+print("ok:", len(agents), "of", len(block), "peers enabled")
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — precedence, empty/`None` blocks, headers pass through
 
-{/* TODO:example3 */}
-```python
-// TODO
+`disabled: true` wins over `enabled: true` (MCP's own precedence, reused verbatim).
+A `None` or empty block is valid and yields no agents — never an error.
+
+```python test
+from toolnexus import parse_agents_config
+
+# disabled:true beats enabled:true.
+contradictory = {
+    "peer": {
+        "card": "http://127.0.0.1:9009/.well-known/agent-card.json",
+        "enabled": True,
+        "disabled": True,
+    }
+}
+assert parse_agents_config(contradictory) == []
+
+# Absent block, empty block: both valid, both empty.
+assert parse_agents_config(None) == []
+assert parse_agents_config({}) == []
+
+# Headers pass through untouched here — ${ENV} expansion happens at call time
+# (agent_tools / the tool's execute), never during parsing, so secrets never sit
+# resolved in a parsed config object.
+with_headers = parse_agents_config(
+    {
+        "peer": {
+            "card": "http://127.0.0.1:9010/.well-known/agent-card.json",
+            "headers": {"Authorization": "Bearer ${DESK_TOKEN}"},
+        }
+    }
+)
+assert with_headers[0].headers == {"Authorization": "Bearer ${DESK_TOKEN}"}
+
+print("ok:", "precedence + empty-block + headers-passthrough all hold")
 ```
+
+## Options
+
+| Key (in each entry) | Type | What it does |
+|---|---|---|
+| `card` | `str` | Required. The peer's Agent Card URL. An entry without it is skipped. |
+| `headers` | `dict[str, str] \| None` | Passed through unresolved; `${ENV}` values expand at call time, never during parsing. |
+| `timeout` | `int \| None` | Milliseconds. Falls back to `agent()`'s own default (300000ms) when unset. |
+| `pollEvery` | `int \| None` | Milliseconds, wire key (camelCase even in the Python dict). Maps to `Agent.poll_every`. |
+| `enabled` / `disabled` | `bool \| None` | MCP `isEnabled` precedence: `disabled: true` wins, then `enabled: false`; default is enabled. |
 
 ## The same call in the other five ports
 
@@ -60,7 +161,7 @@ _TODO: name the alternative and when to prefer it._
 | Go | `ParseAgentsConfig` | [→](/api/go/agents/parse-config/) |
 | Java | `A2A.parseAgentsConfig` | [→](/api/java/agents/parse-config/) |
 | C# | `A2A.ParseAgentsConfig` | [→](/api/csharp/agents/parse-config/) |
-| Elixir | `Toolnexus.Agents.parse_config` | [→](/api/elixir/agents/parse-config/) |
+| Elixir | `Toolnexus.A2a.parse_agents_config` | [→](/api/elixir/agents/parse-config/) |
 
 Behavior is identical across ports by contract — same `examples/` fixtures, same output.
 See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).

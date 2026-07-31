@@ -8,49 +8,214 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7d-sub-agents--agent-runtime-source-agent">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/agents/agent.ts">js/src/agents/agent.ts</a>
 </p>
 
 ```ts
-{/* TODO:signature */}
+function agents.agent(name: string, spec: AgentSpec): agents.Agent
+
+interface AgentSpec {
+  does: string                              // required — what a delegating model sees
+  uses?: { tools?: Tool[] }                 // this agent's toolkit view (= its security model)
+  soul?: string; soulFile?: string          // identity → system prompt
+  team?: agents.Agent[]                     // declaring agents here IS the task-tool wiring
+  budget?: agents.Budget
+  model?: string                            // default "inherit"
+  waitFor?: (request: Request) => Promise<Answer>
+  onSpawn?: (h: Handle) => void | Promise<void>
+  onClose?: (h: Handle, reason: CloseReason) => void | Promise<void>
+  hooks?: Hooks
+  onMetric?: (ev: MetricEvent) => void
+}
+
+class agents.Agent {
+  run(prompt: string, opts?: AgentRunOptions): Promise<AgentRunResult>
+  asTool(opts?: AgentRunOptions): Tool
+}
 ```
 
-Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+The one new noun in §7D: **an Agent is a Tool** — `(system prompt × a filtered toolkit view × the
+§8 client loop)`, invocable as `{ name, description: does, inputSchema: { prompt }, execute: run its
+loop, return ONLY its final text + metadata { agent, turns, totalTokens } }`. `agent(name, spec)`
+declares it; `.run(prompt)` executes it one-shot against a private `AgentRuntime`; `.asTool()`
+bridges it into the classic API's `extraTools` — the axiom's other direction.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `agents.agent` the moment you want an isolated worker with its **own** system prompt and
+**own** scoped tool list — not just another tool in the same transcript. A sub-agent gets a fresh
+transcript, its own budget, and returns only its final answer to whoever spawned it; the caller
+never sees its intermediate tool calls.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use extraTools + one Client instead when isolation isn't the point">
+If you just want more tools in the same conversation — no separate system prompt, no separate
+transcript, no budget wall — [`defineTool`](/api/javascript/native/define-tool/) into
+[`createToolkit`](/api/javascript/toolkit/create/) is simpler and skips the runtime entirely. Reach
+for `agents.agent` when the isolation (a fresh transcript, a scoped toolkit, an independent budget)
+is itself the thing you need.
 </Aside>
+
+Prefer `agents.agent` when:
+
+- **Team composition matters.** Declaring `team: [explore, planner]` on a coordinator agent *is*
+  the wiring for its `task` delegation tool (§7D) — no separate registration step.
+- **You want the bridge both ways.** `.asTool()` drops the sub-agent straight into a classic
+  `createClient` run's `extraTools`, so a single-agent codebase can add a scoped sub-agent without
+  adopting the runtime everywhere.
+- **You need durable resume.** `.run()` returns `{ ...result, runtime }` — on `status: "pending"`,
+  `result.runtime.resume(answer)` continues from the checkpoint (see
+  [`agents.AgentRuntime`](/api/javascript/runtime/runtime/)).
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — one agent, one turn, no tools
 
-{/* TODO:example1 */}
-```ts
-// TODO
+`fetch` is the hermetic seam: a canned response, no network. The runtime builds the client
+internally — you never call `createClient` yourself.
+
+```ts test
+import assert from "node:assert"
+import { agents } from "toolnexus"
+
+const canned: typeof fetch = async () =>
+  new Response(JSON.stringify({
+    choices: [{ message: { content: "Hello from the greeter." } }],
+    usage: { prompt_tokens: 5, completion_tokens: 4, total_tokens: 9 },
+  }), { status: 200, headers: { "content-type": "application/json" } })
+
+const greeter = agents.agent("greeter", { does: "Greets whoever asks", soul: "You are warm and brief." })
+
+const result = await greeter.run("Say hi.", { fetch: canned })
+
+assert.equal(result.status, "done")
+assert.equal(result.text, "Hello from the greeter.")
+assert.equal(result.turns, 1)
+
+console.log("ok:", result.text)
 ```
 
-### 2. TODO — the realistic case
+### 2. A realistic case — a scoped toolkit, one tool call then an answer
 
-{/* TODO:example2 */}
-```ts
-// TODO
+`uses.tools` is the agent's whole security model: this agent can see `lookup` and nothing else —
+not the parent's tools, not the built-ins.
+
+```ts test
+import assert from "node:assert"
+import { agents, defineTool } from "toolnexus"
+
+const lookup = defineTool({
+  name: "lookup",
+  description: "Look something up",
+  inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] },
+  run: (args: any) => `data(${args.q})`,
+})
+
+const mockFetch: typeof fetch = async (_url, init) => {
+  const body = JSON.parse(String(init?.body))
+  const hasToolResult = body.messages.some((m: any) => m.role === "tool")
+  const payload = hasToolResult
+    ? { choices: [{ message: { content: `found: ${body.messages.at(-1).content}` } }] }
+    : { choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "lookup", arguments: JSON.stringify({ q: "toolnexus" }) } }] } }] }
+  return new Response(JSON.stringify({ ...payload, usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }), {
+    status: 200, headers: { "content-type": "application/json" },
+  })
+}
+
+const explorer = agents.agent("explorer", { does: "Read-only research", uses: { tools: [lookup] } })
+
+const result = await explorer.run("What is toolnexus?", { fetch: mockFetch })
+
+assert.equal(result.status, "done")
+assert.equal(result.text, "found: data(toolnexus)")
+assert.equal(result.turns, 2, "one tool-call turn, one answer turn")
+
+console.log("ok:", result.text)
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — a team, a budget, and the Agent→Tool bridge
 
-{/* TODO:example3 */}
-```ts
-// TODO
+`team` wires the coordinator's `task` delegation tool; `budget` caps it; `.asTool()` drops the
+whole sub-agent tree into a classic `createClient` run as a single tool call.
+
+```ts test
+import assert from "node:assert"
+import { agents, createClient, createToolkit } from "toolnexus"
+
+// The sub-agent's own model reasons over toolMsgs; the CLASSIC client's model
+// (below) sees only the coordinator-as-tool result.
+const subFetch: typeof fetch = async (_url, init) => {
+  const body = JSON.parse(String(init?.body))
+  const hasToolResult = body.messages.some((m: any) => m.role === "tool")
+  const payload = hasToolResult
+    ? { choices: [{ message: { content: `synthesis: ${body.messages.at(-1).content}` } }] }
+    : { choices: [{ message: { content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "task", arguments: JSON.stringify({ agent: "explorer", prompt: "find X" }) } }] } }] }
+  return new Response(JSON.stringify({ ...payload, usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }), { status: 200, headers: { "content-type": "application/json" } })
+}
+const explorerFetch: typeof fetch = async () =>
+  new Response(JSON.stringify({ choices: [{ message: { content: "X is here" } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } })
+
+const routedFetch: typeof fetch = async (url, init) => {
+  const body = JSON.parse(String(init?.body))
+  return body.model === "m-explorer" ? explorerFetch(url, init) : subFetch(url, init)
+}
+
+const explorer = agents.agent("explorer", { does: "Read-only research", model: "m-explorer" })
+const coordinator = agents.agent("coordinator", {
+  does: "Splits work and delegates",
+  model: "m-coordinator",
+  team: [explorer],                          // ⇒ coordinator gets a `task` delegation tool
+  budget: { maxTurns: 4, maxChildren: 2 },    // hierarchical, live-enforced — see agents.Budget
+})
+
+// The bridge: an Agent IS a Tool — drop it into a classic client's extraTools.
+const outerLlm: typeof fetch = async () =>
+  new Response(JSON.stringify({
+    choices: [{ message: { content: null, tool_calls: [{ id: "o1", type: "function", function: { name: "coordinator", arguments: JSON.stringify({ prompt: "investigate X" }) } }] } }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  }), { status: 200, headers: { "content-type": "application/json" } })
+
+let calls = 0
+const outerFetch: typeof fetch = async (url, init) => {
+  calls++
+  if (calls === 1) return outerLlm(url, init)
+  return new Response(JSON.stringify({ choices: [{ message: { content: "Done: synthesis: X is here" } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } })
+}
+
+const tk = await createToolkit({ builtins: false, extraTools: [coordinator.asTool({ fetch: routedFetch })] })
+const client = createClient({ baseUrl: "http://mock.local", style: "openai", model: "outer", apiKey: "k", fetch: outerFetch })
+
+const res = await client.run("Investigate X for me.", { toolkit: tk })
+
+assert.equal(res.toolCalls[0].name, "coordinator")
+assert.equal((res.toolCalls[0].metadata as any).agent, "coordinator")
+assert.match(res.text, /synthesis: X is here/)
+
+await tk.close()
+console.log("ok:", res.text)
 ```
+
+## Options
+
+| Field | Type | What it does |
+|---|---|---|
+| `does` | `string` | Routing description — what a delegating model (or a parent's `task` tool) sees. **Required.** |
+| `uses.tools` | `Tool[]` | This agent's toolkit view — the security model. Omit ⇒ no extra tools (builtins are always off for agent runs). |
+| `soul` / `soulFile` | `string` | System prompt, inline or read from a file at registry-build time. |
+| `team` | `agents.Agent[]` | Reachable delegation targets; declaring this IS the `task`-tool wiring (§7D, opt-in, never default). |
+| `budget` | `agents.Budget` | Hierarchical caps — see [`agents.Budget`](/api/javascript/runtime/budgets/). |
+| `model` | `string` | Model id for this agent's client. Default `"inherit"` (the runtime's `llm.model`). |
+| `waitFor` | `(req) => Promise<Answer>` | §10 interpreter authority for suspensions in this agent's subtree. |
+| `onSpawn` / `onClose` | `(h, ...) => void \| Promise<void>` | Lifecycle hooks — session-start injection / pre-final-checkpoint. |
+| `hooks` / `onMetric` | `Hooks` / `(ev) => void` | §8 seams, forwarded verbatim; set on the spec ⇒ replaces the runtime-wide value for this agent. |
+
+## What you get back
+
+`.run(prompt, opts)` → `Promise<AgentRunResult>` — a `TaskResult` (`text`, `isError`, `status`,
+`pending?`, `turns`, `totalTokens`) plus `runtime: AgentRuntime` for durable resume. `.asTool(opts)`
+→ a `Tool` whose `execute` runs `.run()` and surfaces only `{ output: text, isError, metadata:
+{ agent, turns, totalTokens } }` — the sub-agent's own tool calls and transcript stay private.
 
 ## The same call in the other five ports
 

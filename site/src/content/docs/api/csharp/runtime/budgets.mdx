@@ -8,49 +8,219 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Agents/AgentTypes.cs">Agents/AgentTypes.cs</a>
 </p>
 
 ```csharp
-{/* TODO:signature */}
+namespace Toolnexus.Agents;
+
+public sealed class Budget
+{
+    public int? MaxTurns { get; set; }       // default 6 when unset
+    public long? MaxTokens { get; set; }
+    public long? MaxToolCalls { get; set; }
+    public long? MaxWallMs { get; set; }
+    public int? MaxChildren { get; set; }
+    public int? MaxConcurrent { get; set; }  // default 8 when unset
+    public int? MaxDepth { get; set; }       // default 3 when unset
+}
 ```
 
-Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+<Aside type="caution" title="Not nested under a type named AgentTypes">
+Despite the page title (kept for cross-port symbol parity), the real C# type is simply
+`Toolnexus.Agents.Budget` — a top-level class in `Agents/AgentTypes.cs`, not nested inside anything
+called `AgentTypes`. Construct it as `new Budget { ... }`.
+</Aside>
+
+Hierarchical, **live-enforced** limits (SPEC §7D). A child's budget is *carved* at spawn —
+`effective = min(own value, parent's remaining)` for every pool — and then checked again by a live
+ancestor-chain walk **before every turn and every spawn**, because carving alone misses spend by
+siblings. Any limit stop surfaces as `AgentResult.Status == "incomplete"` with the limit named —
+never a silent `"done"`, never a crash. Money is deliberately excluded (vendor-specific pricing);
+convert token/call counts to cost in your own `onBudget`/telemetry if you need it.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+You're delegating to a sub-agent (or a whole team) and want a hard ceiling it cannot exceed —
+tokens for a cost cap, tool calls to stop a runaway loop, wall-clock for a latency SLA, or
+`MaxChildren`/`MaxConcurrent`/`MaxDepth` to bound how wide and deep the delegation tree can grow.
+Set `Budget` on an `AgentDef`/`AgentSpec`, or pass an override to `AgentRuntime.Spawn` for a
+one-off tighter cap on a single spawn.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Carve at spawn, but the walk is what actually protects you">
+A budget carved once at spawn time can't see a sibling that already spent from the same parent
+pool. That's why the runtime re-checks the **live** ancestor chain before every turn and spawn —
+the carved value is just the starting ceiling, not the enforcement mechanism.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — `MaxTurns` caps a loop that never finishes
 
-{/* TODO:example1 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus;
+using Toolnexus.Agents;
+
+var lookup = NativeTool.Of("lookup", "look something up",
+    new Dictionary<string, object?> { ["type"] = "object", ["properties"] = new Dictionary<string, object?>() },
+    (IDictionary<string, object?> _) => "data");
+
+var calls = 0;
+var llm = new MockLlm(_ =>
+{
+    calls++;
+    // always another tool call — a runaway loop with no final answer.
+    return Task.FromResult(MockLlm.ToolCall($"c{calls}", "lookup", new { }));
+});
+
+var rt = new AgentRuntime(new RuntimeOptions
+{
+    Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
+    Registry = new Dictionary<string, AgentDef>
+    {
+        ["looper"] = new() { Name = "looper", Does = "loops forever", Tools = new List<ITool> { lookup }, Budget = new Budget { MaxTurns = 1 } },
+    },
+});
+
+var h = rt.Spawn(rt.Root, "looper").Handle!;
+var wait = rt.WaitAsync(h);
+rt.Wake(h, "look something up, repeatedly");
+var result = await wait;
+
+if (result.Status != "incomplete") throw new Exception(result.Status);
+if (result.Text != "hit maxTurns without a final answer") throw new Exception(result.Text);
+
+await rt.CloseAsync(rt.Root);
+Console.WriteLine($"ok: {result.Status} — {result.Text}");
+
+sealed class MockLlm : System.Net.Http.HttpMessageHandler
+{
+    readonly Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> _respond;
+    public MockLlm(Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> respond) => _respond = respond;
+    protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+        System.Net.Http.HttpRequestMessage request, CancellationToken ct) => _respond(request);
+    public static System.Net.Http.HttpResponseMessage ToolCall(string id, string name, object args) => Json(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        choices = new[]
+        {
+            new { message = new { role = "assistant", content = (string?)null,
+                tool_calls = new[] { new { id, type = "function", function = new { name, arguments = System.Text.Json.JsonSerializer.Serialize(args) } } } } },
+        },
+        usage = new { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+    }));
+    static System.Net.Http.HttpResponseMessage Json(string body) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json"),
+    };
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — an exhausted pool stops a turn before it calls the model at all
 
-{/* TODO:example2 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus.Agents;
+
+// The mock is never actually invoked in this example — the budget check runs BEFORE the HTTP call.
+var llm = new MockLlm(_ => throw new Exception("should never be called — budget is pre-exhausted"));
+
+var rt = new AgentRuntime(new RuntimeOptions
+{
+    Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
+    Registry = new Dictionary<string, AgentDef>
+    {
+        ["capped"] = new() { Name = "capped", Does = "has zero tool-call budget", Budget = new Budget { MaxToolCalls = 0 } },
+    },
+});
+
+var h = rt.Spawn(rt.Root, "capped").Handle!;
+if (h.PoolToolCalls != 0) throw new Exception($"expected a carved pool of 0, got {h.PoolToolCalls}");
+
+var result = await rt.RunTurnAsync(h, "do anything");
+
+if (result.Status != "incomplete") throw new Exception(result.Status);
+if (result.Text != "budget exhausted (toolCalls); partial work preserved") throw new Exception(result.Text);
+
+await rt.CloseAsync(rt.Root);
+Console.WriteLine($"ok: {result.Status} — {result.Text}");
+
+sealed class MockLlm : System.Net.Http.HttpMessageHandler
+{
+    readonly Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> _respond;
+    public MockLlm(Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> respond) => _respond = respond;
+    protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+        System.Net.Http.HttpRequestMessage request, CancellationToken ct) => _respond(request);
+}
 ```
 
-### 3. TODO — the full surface
+### 3. Full surface — hierarchical carve, then the live ledger draining every ancestor
 
-{/* TODO:example3 */}
-```csharp
-// TODO
+```csharp test
+using Toolnexus.Agents;
+
+var llm = new MockLlm(_ => Task.FromResult(MockLlm.Text("filed")));
+var rt = new AgentRuntime(new RuntimeOptions
+{
+    Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
+    Registry = new Dictionary<string, AgentDef>
+    {
+        ["coordinator"] = new() { Name = "coordinator", Does = "coordinates", Budget = new Budget { MaxTokens = 100 } },
+        ["helper"] = new() { Name = "helper", Does = "helps", Budget = new Budget { MaxTokens = 1_000 } }, // wider than the parent
+    },
+});
+
+var coordinator = rt.Spawn(rt.Root, "coordinator").Handle!;
+var helper = rt.Spawn(coordinator, "helper").Handle!;
+
+// Carve: effective = min(own, parent remaining) — helper asked for 1000 but the parent only has 100.
+if (helper.PoolTokens != 100) throw new Exception($"expected the carve to cap at 100, got {helper.PoolTokens}");
+
+await rt.RunTurnAsync(helper, "help out");
+
+// The mock spends 8 tokens (usage.total_tokens) — the roll-up drains EVERY ancestor's pool live.
+if (helper.PoolTokens != 92) throw new Exception($"helper: expected 92, got {helper.PoolTokens}");
+if (coordinator.PoolTokens != 92) throw new Exception($"coordinator: expected 92 (rolled up), got {coordinator.PoolTokens}");
+if (coordinator.UsageTotal != 8) throw new Exception($"expected the coordinator's ledger to see the child's spend, got {coordinator.UsageTotal}");
+
+await rt.CloseAsync(rt.Root);
+Console.WriteLine($"ok: carved to {helper.PoolTokens + 8}, drained to helper={helper.PoolTokens} coordinator={coordinator.PoolTokens}");
+
+sealed class MockLlm : System.Net.Http.HttpMessageHandler
+{
+    readonly Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> _respond;
+    public MockLlm(Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> respond) => _respond = respond;
+    protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+        System.Net.Http.HttpRequestMessage request, CancellationToken ct) => _respond(request);
+    public static System.Net.Http.HttpResponseMessage Text(string content) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new System.Net.Http.StringContent(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { role = "assistant", content } } },
+            usage = new { prompt_tokens = 5, completion_tokens = 3, total_tokens = 8 },
+        }), System.Text.Encoding.UTF8, "application/json"),
+    };
+}
 ```
+
+<Aside type="caution">
+`MaxTurns`, `MaxConcurrent`, and `MaxDepth` fall back to `6`, `8`, and `3` respectively when unset
+— every OTHER field (`MaxTokens`, `MaxToolCalls`, `MaxWallMs`, `MaxChildren`) is **unlimited** when
+unset. An agent with no `Budget` at all still gets the turn-loop defaults; it just has no
+token/call/wall/children ceiling.
+</Aside>
+
+## Fields
+
+| Field | Type | Unset default | What it caps |
+|---|---|---|---|
+| `MaxTurns` | `int?` | `6` | The client loop's turns for one spawn's turn — hit without a final answer ⇒ `"incomplete"`. |
+| `MaxTokens` | `long?` | unlimited | Total tokens across this handle's turns; ledger rolls up to every ancestor. |
+| `MaxToolCalls` | `long?` | unlimited | Total tool calls across this handle's turns. |
+| `MaxWallMs` | `long?` | unlimited | Wall-clock deadline from spawn time, min'd with the parent's. |
+| `MaxChildren` | `int?` | unlimited | Live children this handle may hold at once. |
+| `MaxConcurrent` | `int?` | `8` | Children of this handle allowed to run a turn simultaneously (excess wakes queue FIFO). |
+| `MaxDepth` | `int?` | `3` | How many spawn levels deep this handle's subtree may go. |
 
 ## The same call in the other five ports
 
