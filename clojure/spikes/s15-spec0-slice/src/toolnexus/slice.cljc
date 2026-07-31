@@ -1,4 +1,4 @@
-;; S12 — a vertical slice of toolnexus SPEC §0, in ONE .cljc, on TWO hosts.
+;; S15 — a vertical slice of toolnexus SPEC §0, in ONE .cljc, on TWO hosts.
 ;;
 ;; The question this spike answers is not "does Clojure work" but: can the
 ;; toolnexus conformance contract be expressed in portable Clojure over koine
@@ -82,13 +82,34 @@
 ;; LIVE child: write a request, keep reading until the matching id arrives, and
 ;; skip the notifications the server interleaves. `sh` cannot express it.
 
+(def ^:private next-id
+  "JSON-RPC ids are allocated from a counter, never written as literals.
+  Literals are safe while calls are serial and become a silent
+  wrong-answer-to-the-wrong-caller bug the moment two calls are in flight —
+  which SPEC §8 parallel tool calls make the normal case. An atom costs
+  nothing and removes the landmine before it is armed. (koine review, 2026-07-31)"
+  (atom 0))
+
 (defn- rpc!
   "Send one JSON-RPC request and read until the response with this id.
-  Skips blank lines and any interleaved notification."
+  Skips blank lines and any interleaved notification.
+
+  LIMIT, and the reason this is a spike and not the transport: the id match
+  lives on the CALLER's side of the read loop, so a message with any other id
+  is treated as noise and dropped. With one caller the only such messages are
+  notifications and that is correct. Under a shared reader loop another
+  caller's response is also a non-matching id, and dropping it would time that
+  caller out. The real transport moves the match INTO the reader — one loop
+  that reads, looks the id up in a pending map, delivers, and treats only
+  id-less messages as notifications."
   [child id method params]
   (proc/send-line! child (json/write-str (cond-> {:jsonrpc "2.0" :id id :method method}
                                            params (assoc :params params))))
   (loop [seen 0]
+    ;; A LINE count, not a deadline, and it guards the wrong hazard: a chatty
+    ;; server can emit 500 notifications while answering correctly, and the real
+    ;; risk — a peer that goes quiet — blocks inside read-line! and never reaches
+    ;; here. It goes away when koine ships the interruptible close. (koine review)
     (when (> seen 500)
       (throw (ex-info "toolnexus/rpc!: no response" {:id id :method method})))
     (let [line (proc/read-line! child)]
@@ -97,7 +118,7 @@
         (nil? line)          (throw (ex-info "toolnexus/rpc!: peer exited"
                                              {:id id :method method}))
         (str/blank? line)    (recur (inc seen))
-        :else (let [msg (json/read-str line {:key-fn keyword})]
+        :else (let [msg (json/read-str line)]
                 (if (= id (:id msg)) msg (recur (inc seen))))))))
 
 (defn- notify! [child method params]
@@ -107,7 +128,7 @@
   "initialize -> notifications/initialized. Returns {:child :server-info}."
   [server]
   (let [child (proc/spawn (:command server))
-        init  (rpc! child 1 "initialize"
+        init  (rpc! child (swap! next-id inc) "initialize"
                     {:protocolVersion "2024-11-05"
                      :capabilities    {}
                      :clientInfo      {:name "toolnexus-clj-spike" :version "0.0.1"}})]
@@ -128,7 +149,7 @@
 (defn list-mcp-tools
   "tools/list -> uniform Tools (SPEC §0.1) with §0.2 names."
   [child server-name]
-  (->> (get-in (rpc! child 2 "tools/list" {}) [:result :tools])
+  (->> (get-in (rpc! child (swap! next-id inc) "tools/list" {}) [:result :tools])
        (map (fn [t]
               {:name        (mcp-tool-name server-name (:name t))
                :description (or (:description t) "")
@@ -138,7 +159,7 @@
        vec))
 
 (defn call-mcp-tool [child tool-name args]
-  (mcp-result (:result (rpc! child 3 "tools/call" {:name tool-name :arguments args}))))
+  (mcp-result (:result (rpc! child (swap! next-id inc) "tools/call" {:name tool-name :arguments args}))))
 
 ;; ---------------------------------------------------------------------------
 ;; §0.5 / §0.6  skills
