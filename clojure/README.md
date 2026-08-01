@@ -25,16 +25,22 @@ is the only third-party dependency.
 | cljgo, AOT binary | `cljgo build && ./toolnexus-test` |
 | cljgo, interpreted | `cljgo run src/run_tests.cljc` |
 
-Verified against koine 0.7.3 and cljgo v0.8.4+ (`56da5a3`).
+Verified against koine 0.7.3 and the **published cljgo v0.8.5 release
+archive** — no source checkout, no `CLJGO_SRC`. cljgo #177 is closed, so these
+numbers are re-runnable by anyone rather than only on the machine that produced
+them.
 
 Two gates beyond the suite:
 
 ```sh
 ./cljgo-gate.sh            # both cljgo legs + a DIFF between them; also a downstream gate for cljgo CI
 ./consumer-exit-check.sh   # does the library let a consumer's process exit?
+./deps-purity-check.sh     # is koine really the only dependency? (transitive classpath)
 ```
 
-Both have been **watched fail** before being trusted — see the header of each.
+All three have been **watched fail** before being trusted — see the header of
+each. The spikes run the same way: `spikes/sNN-*/run-both.sh` diffs all three
+modes byte for byte, and all ten pass on this stack.
 
 ## What's implemented
 

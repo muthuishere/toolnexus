@@ -285,7 +285,11 @@ agree with each other within a single run, which is what the diff asserts, but a
 byte count quoted from one day is not comparable with another day's. Compare the
 three modes against each other, never against yesterday's number.
 
-**FINDING 2 IS STILL LIVE ON v0.8.4** — re-measured, not assumed:
+**FINDING 2 — RE-MEASURED ON v0.8.5: STILL LIVE.** Same error, same mechanism;
+the namespace symbol still keeps its `.cljc` extension. Unchanged across
+v0.8.4 and v0.8.5.
+
+**FINDING 2 WAS STILL LIVE ON v0.8.4** — re-measured, not assumed:
 
 ```
 $ cljgo test --compiled
@@ -298,3 +302,29 @@ The namespace symbol keeps its `.cljc` extension, so `--compiled` (and `--both`)
 cannot run this suite. The AOT test path is covered here by section 2 —
 `cljgo build` plus running the binary — which is what makes this a nuisance
 rather than a hole. Reported upstream with this repro.
+
+## Re-run 2026-08-01, later — koine 0.7.3, cljgo **v0.8.5 release archive**
+
+Still PASS, all three modes byte-identical — at **883 bytes**.
+
+That is the third different byte count in two days for a spike whose *behaviour*
+has not changed at all:
+
+| stack | bytes | why |
+|---|---|---|
+| koine 0.4.2, cljgo 0.1.0-dev | 887 | `cljgo-version` = `0.1.0-dev` |
+| koine 0.7.1, cljgo `56da5a3` | 920 | #170 added `[dev build, commit 56da5a32ad0b]` |
+| koine 0.7.3, cljgo **v0.8.5** | 883 | a released binary reports `0.8.5` — shorter than either |
+
+**This is the caveat working, not a defect.** The payload embeds
+`cljgo-version`, so it is host-version-dependent by construction. A spike that
+diffed against a remembered constant would now be red three times over while
+being correct every time. The rule stands and this is its proof: **compare the
+three modes against each other, never against yesterday's number.**
+
+The general form is worth stating, because it is the same lesson as the
+995-vs-1127 skill payload from the other direction: an expected value
+snapshotted from your own output is not a check. There it enshrined a defect;
+here it would manufacture a failure. Either way the number is not the authority
+— the *comparison* is, and it has to be against something external to the thing
+under test.
