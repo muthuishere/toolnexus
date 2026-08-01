@@ -328,3 +328,47 @@ snapshotted from your own output is not a check. There it enshrined a defect;
 here it would manufacture a failure. Either way the number is not the authority
 — the *comparison* is, and it has to be against something external to the thing
 under test.
+
+## Re-run 2026-08-01, later still — koine 0.8.0, cljgo **v0.8.6** (published archive)
+
+**PASS, all four sections — INCLUDING `cljgo test --compiled`, which has been a
+recorded FINDING in this README since the spike was written.**
+
+```
+cljgo test:             GATE GREEN — 10 tests / 25 assertions (floor 10/25, exit 0)
+cljgo test: armed canary REPORTED as a failure (exit 1)
+cljgo test --compiled:  GATE GREEN — 10/25
+```
+
+**FINDING 2 IS RESOLVED, and it was two bugs wearing one error message — one
+cljgo's, one mine.**
+
+cljgo's half was #182: `nsNameFor` carried its own hand-written extension list
+and never learned about `.cljc`, so the namespace symbol kept its extension.
+Fixed in v0.8.6; `.cljgo` turned out to be broken identically, which only their
+own enumerating test found.
+
+**My half:** `src/run_interpreted.cljc` had no `(ns …)` form at all. It was a
+bare script — `(require …)` plus a call to `-main` — which exists because
+`cljgo run <file>` does not call `-main` for you. `cljgo test --compiled` walks
+the source tree and loads what it finds, and a file that declares no namespace
+cannot be loaded as one. Refusing it is correct.
+
+On v0.8.5 the two were **indistinguishable**: both surfaced as "could not locate
+namespace", so this spike recorded a single upstream finding and I carried a
+workaround for a problem that was half my own. v0.8.6's message separates them,
+and says exactly what to do:
+
+```
+run-interpreted: the file was loaded but did not define this namespace
+  (expected a top-level (ns run-interpreted …) matching its path; found none)
+  — add the ns form, or rename the file to match the ns it declares
+```
+
+That is the diagnostic-quality fix suggested when concurring on #182, and it is
+what made my half findable. **The lesson is not about cljgo**: an error message
+that cannot distinguish two causes will have the more flattering cause assigned
+to it, and the workaround then hides the other one indefinitely.
+
+Byte count unchanged at 883 — `cljgo-version` is the same length on v0.8.5 and
+v0.8.6.
