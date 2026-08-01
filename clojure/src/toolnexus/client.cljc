@@ -113,6 +113,15 @@
       (env/get-env "OPENROUTER_API_KEY")
       ""))
 
+(defn in-memory-store
+  "§conversation-store — the shipped default: per-client, process lifetime.
+  A store is exactly two operations, `:get` and `:save`, so a host can swap in
+  a file or a database without this namespace knowing anything about it."
+  []
+  (let [a (atom {})]
+    {:get  (fn [id] (get @a id))
+     :save (fn [id msgs] (swap! a assoc id msgs) nil)}))
+
 (defn create-client
   "Build a client. Options (idiomatic kebab-case — these never hit the wire):
 
@@ -135,7 +144,18 @@
   {:pre [(some? (:base-url opts)) (some? (:model opts))]}
   (-> opts
       (assoc :style (style-of opts))
-      (update :max-turns #(or % default-max-turns))))
+      (update :max-turns #(or % default-max-turns))
+      ;; §conversation-store: the default is in-memory and per-client, so two
+      ;; clients never share a transcript by accident.
+      (update :store #(or % (in-memory-store)))))
+
+(defn- metric!
+  "§client-observability — SEMANTIC events, not counter primitives. Guarded so
+  that with `:on-metric` unset there is no measurable overhead: the map is not
+  even built."
+  [client f]
+  (when-let [on (:on-metric client)] (on (f)))
+  nil)
 
 (defn- system-message
   "§0.10 — system = systemPrompt + \"\\n\\n\" + skillsPrompt. Empty parts are
@@ -209,23 +229,97 @@
      (cond-> {:model (:model client) :messages messages}
        (seq tools) (assoc :tools tools :tool_choice "auto")))))
 
+(def ^:private retryable-statuses
+  "§resilience-policy — the retryable set. Everything else is terminal unless a
+  host `:on-error` says otherwise."
+  #{429 500 502 503 504})
+
+(defn- retry-after-ms
+  "Honour a `Retry-After` header when the server sends one. Seconds only: the
+  HTTP-date form needs date parsing, which is not portable across these two
+  hosts without reaching past koine, and a server that sends it gets our
+  backoff instead of a wrong answer."
+  [res]
+  (let [h (or (get-in res [:headers "retry-after"]) (get-in res [:headers "Retry-After"]))
+        n (when h (re-matches #"\d+" (str/trim (str h))))]
+    (when n (* 1000 (parse-long n)))))
+
+(defn- post-llm
+  "The one HTTP call. `:http-client` lets a host supply the transport — for a
+  proxy, mTLS, or credentials this library must never see — and it takes the
+  same (url headers body) shape as koine.http/post-json so wrapping the default
+  is a one-liner. Absent, the default is used and nothing changes.
+
+  Scope is the LLM path only, per the capability spec: MCP transports are their
+  own seam and are NOT routed through this."
+  [client url headers body]
+  (if-let [f (:http-client client)]
+    (f url headers body)
+    ;; `request` rather than `post-json`, because only `request` takes
+    ;; :timeout-ms. koine classifies a timeout as DATA ({:status nil :error
+    ;; :timeout}), never a throw, which is what lets the retry loop below treat
+    ;; it as one more retryable failure instead of a host-specific exception.
+    (http/request (cond-> {:method :post :url url :headers headers :body body}
+                    (:timeout-ms client) (assoc :timeout-ms (:timeout-ms client))))))
+
+(defn- classify
+  "§resilience-policy — retry | fail, and NOTHING ELSE. The archived spec is
+  explicit that this capability does not add a failure-originated suspend tier:
+  §10 suspension stays a user-action pause, so an LLM failure can never become
+  one here.
+
+  With no `:on-error` the default is today's behaviour — retryable set retries,
+  everything else fails. A host verdict overrides the default in EITHER
+  direction, but `:retries` still bounds it: a classifier that could loop
+  unbounded would be a denial-of-service on the caller's own bill."
+  [client info]
+  (let [default (if (:retryable? info) :retry :fail)]
+    (if-let [f (:on-error client)]
+      (if (= :retry (f info)) :retry :fail)
+      default)))
+
 (defn- llm-call
-  "One LLM round trip. A transport failure and a non-2xx both become a thrown
-  ex-info — unlike a TOOL error, an LLM failure is not something the model can
-  be shown and asked to retry."
+  "One LLM round trip, with the §resilience-policy retry loop around it. A
+  transport failure and a non-2xx both become a thrown ex-info — unlike a TOOL
+  error, an LLM failure is not something the model can be shown and asked to
+  retry."
   [client system messages tools]
-  (let [res (http/post-json (endpoint client)
-                            (merge {"content-type" "application/json"}
-                                   (request-headers client))
-                            (json/write-str (body-map client system messages tools)))]
-    (cond
-      (http/failed? res)
-      (throw (ex-info (str "LLM transport " (name (:error res))) {:error (:error res)}))
-
-      (or (< (:status res) 200) (>= (:status res) 300))
-      (throw (ex-info (str "LLM " (:status res) ": " (:body res)) {:status (:status res)}))
-
-      :else (json/read-str (:body res)))))
+  (let [url     (endpoint client)
+        headers (merge {"content-type" "application/json"} (request-headers client))
+        body    (json/write-str (body-map client system messages tools))
+        budget  (or (:retries client) 0)
+        base-ms (or (:retry-base-ms client) 250)]
+    (loop [attempt 0]
+      (let [t0      (ktime/now-ms)
+            res     (post-llm client url headers body)
+            failed? (http/failed? res)
+            status  (:status res)
+            ok?     (and (not failed?) status (<= 200 status) (< status 300))]
+        (if ok?
+          (do (metric! client
+                       (fn [] {:event "llm" :model (:model client) :status status
+                               :ms (- (ktime/now-ms) t0)
+                               :prompt_tokens (get-in res [:usage :prompt_tokens])
+                               :completion_tokens (get-in res [:usage :completion_tokens])}))
+              (json/read-str (:body res)))
+          (let [info    {:error     (if failed? (:error res) (:body res))
+                         :status    status
+                         :attempt   attempt
+                         ;; a transport failure has no status and is retryable
+                         :retryable? (boolean (or failed? (contains? retryable-statuses status)))}
+                verdict (classify client info)
+                throw!  (fn []
+                          (if failed?
+                            (throw (ex-info (str "LLM transport " (name (:error res)))
+                                            {:error (:error res)}))
+                            (throw (ex-info (str "LLM " status ": " (:body res))
+                                            {:status status}))))]
+            (if (and (= :retry verdict) (< attempt budget))
+              (do (ktime/sleep! (or (retry-after-ms res)
+                                    ;; exponential backoff: base * 2^attempt
+                                    (* base-ms (bit-shift-left 1 attempt))))
+                  (recur (inc attempt)))
+              (throw!))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; per-style response reading
@@ -324,19 +418,31 @@
   A tool that throws must not park the deref forever, so the body is wrapped:
   tool/execute already converts a throw into an isError result, and the catch
   here covers the residue."
-  [toolkit calls]
+  [client toolkit calls]
   (->> calls
        (mapv (fn [c]
-               (let [p (promise)]
+               (let [p (promise)
+                     t0 (ktime/now-ms)]
                  (proc/run-async!
                   (fn [] (deliver p (assoc c :result
                                            (try (tool/execute toolkit (:name c) (:args c))
                                                 (catch Throwable e
                                                   (tool/failure (or (ex-message e) (str e)))))))))
-                 p)))
-       (mapv deref)))
+                 [p t0])))
+       (mapv (fn [pair]
+               (let [r (deref (first pair))]
+                 ;; §client-observability — one `tool` event per call, emitted
+                 ;; after the result lands so :ms and :is_error are real.
+                 (metric! client
+                          (fn [] {:event "tool"
+                                  :tool (:name r)
+                                  :source (:source (get (:tools toolkit) (:name r)))
+                                  :is_error (boolean (:isError (:result r)))
+                                  :ms (- (ktime/now-ms) (second pair))}))
+                 r)))))
 
 (defn- emit! [on-event ev] (when on-event (on-event ev)) nil)
+
 
 (defn- resolve-pending
   "§10 loop rule, for ONE suspended call.
@@ -426,15 +532,36 @@
   loop buffers the whole response, and faking deltas out of a buffered body
   would be a lie. Real SSE streaming is a separate seam (`koine.stream/sse-post`
   exists and is proven on both hosts) and is NOT implemented in this namespace."
-  [client prompt {:keys [toolkit history on-event]}]
+  [client prompt {:keys [toolkit history on-event conversation-id]}]
   (let [anthropic? (= "anthropic" (:style client))
         system     (system-message client toolkit)
         ;; §0.7 schema comes from toolnexus.adapter — one source of truth for
         ;; the provider shapes, never a second copy in the loop.
         tools      (if anthropic? (adapter/to-anthropic toolkit) (adapter/to-openai toolkit))
         max-turns  (or (:max-turns client) default-max-turns)
+        ;; §conversation-store — an explicit :history still wins; the store is
+        ;; consulted only when a :conversation-id is given. Without an id a run
+        ;; is one-shot and must not inherit a previous transcript.
+        remembered (when (and conversation-id (:store client))
+                     ((:get (:store client)) conversation-id))
+        run-t0     (ktime/now-ms)
+        ;; ONE exit path for the store save and the run metric. Two `run-result`
+        ;; call sites return from this loop, and a save wired into only one of
+        ;; them is the classic half-fix — the turn-limit exit would silently
+        ;; forget the conversation.
+        finish!    (fn [r]
+                     (when (and conversation-id (:store client))
+                       ((:save (:store client)) conversation-id (:messages r)))
+                     (metric! client
+                              (fn [] {:event "run" :model (:model client)
+                                      :turns (:turns r) :tool_calls (:tool-call-count r)
+                                      :total_tokens (get-in r [:usage :total-tokens])
+                                      :ms (- (ktime/now-ms) run-t0)
+                                      :error (:limit? r)}))
+                     r)
         seed       (cond
-                     (seq history) (vec history)
+                     (seq history)    (vec history)
+                     (seq remembered) (vec remembered)
                      ;; the anthropic style carries `system` in the body, not as
                      ;; a message; the openai style carries it as message 0.
                      (or anthropic? (str/blank? system)) []
@@ -446,7 +573,7 @@
            usage      zero-usage]
       (if (>= turn max-turns)
         (let [text (if anthropic? "" (last-assistant-text messages))
-              r    (run-result client text messages tool-calls turns usage true)]
+              r    (finish! (run-result client text messages tool-calls turns usage true))]
           (emit! on-event {:type "done" :result r})
           r)
         (let [body    (llm-call client system messages tools)
@@ -457,13 +584,13 @@
               calls   (tool-calls-of client body)
               messages (conj messages msg)]
           (if (empty? calls)
-            (let [r (run-result client (final-text client body) messages tool-calls turns usage false)]
+            (let [r (finish! (run-result client (final-text client body) messages tool-calls turns usage false))]
               (emit! on-event {:type "done" :result r})
               r)
             (let [_       (doseq [c calls]
                             (emit! on-event {:type "tool_call" :id (:id c) :name (:name c) :args (:args c)}))
                   ;; parallel execution, results in call order …
-                  settled (execute-calls toolkit calls)
+                  settled (execute-calls client toolkit calls)
                   ;; … then §10 resolution, sequential and in the same order.
                   settled (reduce (fn [acc s]
                                     (if (some :halt acc)

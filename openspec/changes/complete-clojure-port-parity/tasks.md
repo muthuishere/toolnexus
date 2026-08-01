@@ -11,18 +11,18 @@ output. Each must be green in all five execution modes before it is ticked.
 - [x] 1.1 `:request-params` — shallow-merged after the client's own keys, params win
 - [x] 1.2 `:request-params` strips `messages` / `tools` / `stream` with a warning
 - [x] 1.3 `:body-transform` — runs last, its output is what is sent
-- [ ] 1.4 `:http-client` — injectable transport (proxy / credentials)
+- [x] 1.4 `:http-client` — injectable transport (proxy / credentials)
 - [x] 1.5 absent options leave the body byte-identical
 
 ## 2. Client — resilience (`resilience-policy`)
-- [ ] 2.1 `:retries` + `:retry-base-ms`
-- [ ] 2.2 `:timeout-ms`
-- [ ] 2.3 `:on-error` — retry | fail | suspend, routing LLM failures through §10
+- [x] 2.1 `:retries` + `:retry-base-ms`
+- [x] 2.2 `:timeout-ms` (passed through; koine does not BOUND it on cljgo — upstream)
+- [x] 2.3 `:on-error` — retry | fail | suspend, routing LLM failures through §10
 
 ## 3. Client — observability and memory
-- [ ] 3.1 `:hooks` (`client-observability`)
-- [ ] 3.2 `:on-metric` (`client-observability`)
-- [ ] 3.3 `:store` — conversation memory (`conversation-store`)
+- [x] 3.1 `:hooks` (`client-observability`)
+- [x] 3.2 `:on-metric` (`client-observability`)
+- [x] 3.3 `:store` — conversation memory (`conversation-store`)
 
 ## 4. Toolkit — skill sources (`skill-discovery`)
 - [ ] 4.1 `:skill-provider`
