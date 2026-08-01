@@ -70,7 +70,7 @@ cat > "$PROBE" <<'CLJ'
 (println "consumer done")
 CLJ
 
-DEPS='{:paths ["src"] :deps {org.clojure/clojure {:mvn/version "1.12.5"} net.clojars.muthuishere/koine {:mvn/version "0.8.2"}}}'
+DEPS='{:paths ["src"] :deps {org.clojure/clojure {:mvn/version "1.12.5"} net.clojars.muthuishere/koine {:mvn/version "0.9.0"}}}'
 
 start=$(date +%s)
 out=$(clojure -Sdeps "$DEPS" -M "$PROBE" 2>&1)
