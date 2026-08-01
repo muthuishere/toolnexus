@@ -166,12 +166,48 @@
            {"authorization" (str "Bearer " (resolve-key client))})
          (:headers client)))
 
+(def ^:private forbidden-request-params
+  "§client-request-shaping — keys `:request-params` may NOT set. They are owned
+  by the loop: `messages` is the conversation it is maintaining, `tools` is the
+  toolkit's schema, `stream` decides which code path runs. Rewriting messages is
+  what `:body-transform` is for, which sees the assembled body and can do it
+  deliberately rather than by collision."
+  #{:messages :tools :stream})
+
+(defn- shape-body
+  "§client-request-shaping — the ordering contract, and the order is the spec:
+
+     base body -> :request-params merge -> :body-transform -> marshal -> wire
+
+  `:request-params` is a SHALLOW merge applied AFTER the client builds its own
+  keys, and a param WINS on collision — that is what makes it useful, e.g.
+  overriding the anthropic style's built-in max_tokens 4096.
+
+  `:body-transform` runs LAST and its return value is what is sent, so it can
+  drop keys the merge added.
+
+  With neither set the body is unchanged, which is the spec's own guarantee and
+  the reason both are applied through `cond->` rather than always-on `merge`."
+  [client body]
+  (let [params (:request-params client)
+        params (when (seq params)
+                 (let [kept (apply dissoc params forbidden-request-params)]
+                   (when (not= (count kept) (count params))
+                     (println "toolnexus: ignoring request-params"
+                              (vec (sort (filter forbidden-request-params (keys params))))
+                              "— owned by the client loop; use :body-transform"))
+                   kept))
+        merged (if (seq params) (merge body params) body)]
+    (if-let [f (:body-transform client)] (f merged) merged)))
+
 (defn- body-map [client system messages tools]
-  (if (= "anthropic" (:style client))
-    (cond-> {:model (:model client) :max_tokens 4096 :system system :messages messages}
-      (seq tools) (assoc :tools tools))
-    (cond-> {:model (:model client) :messages messages}
-      (seq tools) (assoc :tools tools :tool_choice "auto"))))
+  (shape-body
+   client
+   (if (= "anthropic" (:style client))
+     (cond-> {:model (:model client) :max_tokens 4096 :system system :messages messages}
+       (seq tools) (assoc :tools tools))
+     (cond-> {:model (:model client) :messages messages}
+       (seq tools) (assoc :tools tools :tool_choice "auto")))))
 
 (defn- llm-call
   "One LLM round trip. A transport failure and a non-2xx both become a thrown

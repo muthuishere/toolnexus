@@ -463,3 +463,89 @@
           (is (= "done" (:status rr)))
           (is (= "shipped" (:text rr)))
           (is (= ["{\"answers\":[\"yes\"]}"] (outputs-of rr))))))))
+
+;; ---------------------------------------------------------------------------
+;; client-request-shaping — :request-params and :body-transform
+;; ---------------------------------------------------------------------------
+;;
+;; Written TEST-FIRST, and the expected values come from the capability spec
+;; (openspec/specs/client-request-shaping), never from this port's own output.
+;; The ordering contract there is:
+;;
+;;   base body -> RequestParams merge -> BodyTransform -> marshal -> wire
+;;
+;; with RequestParams WINNING on collision, and `messages`/`tools`/`stream`
+;; stripped because message rewriting belongs to BodyTransform.
+;;
+;; These assert on the REQUEST BODY the fake LLM actually received, not on a
+;; return value, because "what went on the wire" is the only thing the spec
+;; constrains and the only thing another port could disagree about.
+
+(deftest request-params-appear-at-the-top-level
+  (with-llm "openai" [{:text "done"}]
+    (fn [{:keys [base requests]}]
+      (let [c (client/create-client {:base-url base :model "m" :api-key "k"
+                                     :request-params {:temperature 0.2
+                                                      :provider_extra "x"}})]
+        (client/run c "hi" {:toolkit (tool/toolkit tools)})
+        (let [body (first @requests)]
+          (is (= 0.2 (:temperature body)))
+          (is (= "x" (:provider_extra body))))))))
+
+(deftest request-params-win-on-collision
+  ;; §client-request-shaping: "RequestParams wins on collision" — the anthropic
+  ;; style sets max_tokens 4096 itself, so this is the case the spec names.
+  (with-llm "anthropic" [{:text "done"}]
+    (fn [{:keys [base requests]}]
+      (let [c (client/create-client {:base-url base :model "m" :api-key "k"
+                                     :style "anthropic"
+                                     :request-params {:max_tokens 99}})]
+        (client/run c "hi" {:toolkit (tool/toolkit tools)})
+        (is (= 99 (:max_tokens (first @requests)))
+            "the client's own default 4096 must lose to request-params")))))
+
+(deftest request-params-cannot-set-forbidden-keys
+  (with-llm "openai" [{:text "done"}]
+    (fn [{:keys [base requests]}]
+      (let [c (client/create-client {:base-url base :model "m" :api-key "k"
+                                     :request-params {:messages [{:role "user" :content "hijacked"}]
+                                                      :tools []
+                                                      :stream true}})]
+        (client/run c "hi" {:toolkit (tool/toolkit tools)})
+        (let [body (first @requests)]
+          (is (= "hi" (:content (last (:messages body))))
+              "messages must come from the loop, never from request-params")
+          (is (nil? (:stream body)))
+          (is (seq (:tools body)) "the toolkit's tools must survive"))))))
+
+(deftest body-transform-runs-last-and-its-output-is-sent
+  (with-llm "openai" [{:text "done"}]
+    (fn [{:keys [base requests]}]
+      (let [c (client/create-client
+               {:base-url base :model "m" :api-key "k"
+                :request-params {:temperature 0.2}
+                ;; it must observe the POST-MERGE body and its output is final
+                :body-transform (fn [b]
+                                  (is (= 0.2 (:temperature b))
+                                      "body-transform must see the merged body")
+                                  (-> b (dissoc :temperature) (assoc :added "yes")))})]
+        (client/run c "hi" {:toolkit (tool/toolkit tools)})
+        (let [body (first @requests)]
+          (is (nil? (:temperature body)) "a key dropped by body-transform must not be sent")
+          (is (= "yes" (:added body))))))))
+
+(deftest neither-option-leaves-the-body-untouched
+  ;; The spec's own guarantee: absent => byte-identical to today. Asserted by
+  ;; comparing two runs rather than against a snapshot of our own output.
+  (let [capture (fn [opts]
+                  (let [out (atom nil)]
+                    (with-llm "openai" [{:text "done"}]
+                      (fn [{:keys [base requests]}]
+                        (client/run (client/create-client
+                                     (merge {:base-url base :model "m" :api-key "k"} opts))
+                                    "hi" {:toolkit (tool/toolkit tools)})
+                        (reset! out (json/write-str (first @requests)))))
+                    @out))]
+    (is (= (capture {})
+           (capture {:request-params nil :body-transform nil}))
+        "explicitly-nil options must be indistinguishable from absent ones")))
