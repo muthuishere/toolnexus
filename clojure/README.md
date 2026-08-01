@@ -34,6 +34,7 @@ Two gates beyond the suite:
 
 ```sh
 ./all-modes-check.sh       # the suite in ALL FIVE ways this port can be executed
+./jvm-only-check.sh        # can someone with ONLY Clojure use this? (no cljgo)
 ./cljgo-gate.sh            # both cljgo legs + a DIFF between them; also a downstream gate for cljgo CI
 ./consumer-exit-check.sh   # does the library let a consumer's process exit?
 ./deps-purity-check.sh     # is koine really the only dependency? (transitive classpath)
@@ -53,6 +54,27 @@ five paths, not two, and the REPLs are where a human actually meets a library:
 All three have been **watched fail** before being trusted — see the header of
 each. The spikes run the same way: `spikes/sNN-*/run-both.sh` diffs all three
 modes byte for byte, and all ten pass on this stack.
+
+## Do I need cljgo?
+
+**No.** If you have a JDK and the Clojure CLI and have never heard of cljgo, this
+is an ordinary Clojure library: `deps.edn` plus `src/`, one dependency (koine),
+nothing else. No `build.cljgo`, no compiled binary, no cljgo artifacts of any
+kind are required or consulted.
+
+That is enforced, not asserted. `./jvm-only-check.sh` copies the source with
+every cljgo artifact deleted and puts a **poisoned `cljgo` first on PATH** — a
+script that prints `POISON` and exits 127 if anything invokes it. Removing cljgo
+from PATH would not be enough, because on a typical machine it sits in the same
+directory as `clojure` itself, and *"I didn't call it"* is not the same as
+*"it was not called"*.
+
+Result: 155 tests / 708 assertions, 0 failures, **no POISON line**. The example
+in `examples/minimal` runs the same way, with `app/main.cljg` sitting in the
+same directory being correctly ignored — the JVM never looks for that extension.
+
+The reverse holds too: a cljgo user needs no JDK. `all-modes-check.sh` covers
+that side by running the AOT binary and both cljgo evaluators.
 
 ## What's implemented
 
