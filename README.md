@@ -8,6 +8,7 @@
 [![Hex.pm](https://img.shields.io/hexpm/v/toolnexus?logo=elixir&label=Hex)](https://hex.pm/packages/toolnexus)
 [![Go Reference](https://pkg.go.dev/badge/github.com/muthuishere/toolnexus/golang.svg)](https://pkg.go.dev/github.com/muthuishere/toolnexus/golang)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Discord](https://img.shields.io/badge/AgentNexus-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/V9C2kvHC8D)
 
 ### Your LLM, with MCP tools and agent skills built in — in 3 lines, in 6 languages.
 
@@ -416,6 +417,11 @@ cd elixir && mix test                 # ExUnit
 The end-to-end agent loop (MCP + skills + native + HTTP through the host loop) is
 additionally verified live against OpenRouter per language via the `examples/agent.*`
 runners (need `OPENROUTER_API_KEY`).
+
+## Community
+
+Questions, ideas, or built something with this? Join **[AgentNexus](https://discord.gg/V9C2kvHC8D)** — a Discord
+for people building with AI agents and open tools. This project lives in **#toolnexus**.
 
 ## License
 
