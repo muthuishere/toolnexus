@@ -24,7 +24,7 @@ that shells out to a test runner and checks `$?` is green on a suite that never 
 1. One `.cljc` `clojure.test` suite — `deftest`, `is`, `testing`, `use-fixtures`
    (`:once` **and** `:each`), pure logic **and** koine (`koine.json`, `koine.fs`,
    `koine.env`) — runs **identically** on Clojure (JVM), a `cljgo build` AOT binary,
-   and `cljgo run` interpreted. All three emit the **same 887 bytes** (`:host` aside).
+   and `cljgo run` interpreted. All three emit the **same 920 bytes** (`:host` aside).
 2. The **counting gate** (`toolnexus.harness/gate`) works on all three, and it
    **catches the empty case**: pointed at a target with no tests it returns
    `:red` with reason `no-tests-collected`, while the underlying runner exits 0.
@@ -52,9 +52,9 @@ prints one JSON line. `:host` is the only field that differs across hosts.
 
 | host / mode | bytes | `gate.verdict` |
 |---|---|---|
-| Clojure (JVM), `clojure -M -m toolnexus.harness` | 887 | `green` |
-| cljgo AOT binary, `cljgo build` → `./harness` | 887 | `green` |
-| cljgo interpreted, `cljgo run src/run_interpreted.cljc` | 887 | `green` |
+| Clojure (JVM), `clojure -M -m toolnexus.harness` | 920 | `green` |
+| cljgo AOT binary, `cljgo build` → `./harness` | 920 | `green` |
+| cljgo interpreted, `cljgo run src/run_interpreted.cljc` | 920 | `green` |
 
 `jvm == cljgo-aot == cljgo-run`, byte-identical after stripping `"host"`. Fixtures
 ran in the same order on every host (`once-before`, 8 × `each`, `once-after`, twice —
@@ -272,3 +272,29 @@ the only third-party dependency, from Clojars, same coordinate on both hosts.
   change.
 - **`empty-project/` is only run through `cljgo test`.** Its JVM equivalent is the
   in-process `empty` mode, which is a namespace rather than a whole project.
+
+## Re-run 2026-08-01 — koine 0.7.1, cljgo v0.8.4+ (`56da5a3`)
+
+Still PASS: all four sections, all three modes byte-identical.
+
+**The payload grew 887 -> 920 bytes, and that is cljgo #170 working.** The 33
+bytes are in `cljgo-version`, which used to read `0.1.0-dev` and nothing else and
+now reads `... [dev build, commit 56da5a32ad0b]`. Worth stating plainly, because
+it makes this spike's payload **host-version-dependent**: the three modes still
+agree with each other within a single run, which is what the diff asserts, but a
+byte count quoted from one day is not comparable with another day's. Compare the
+three modes against each other, never against yesterday's number.
+
+**FINDING 2 IS STILL LIVE ON v0.8.4** — re-measured, not assumed:
+
+```
+$ cljgo test --compiled
+cljgo test --compiled: build: could not locate namespace run-interpreted.cljc
+  (no registered provider, and no run_interpreted/cljc.clj/.cljg/.cljc
+   relative to the requiring file)
+```
+
+The namespace symbol keeps its `.cljc` extension, so `--compiled` (and `--both`)
+cannot run this suite. The AOT test path is covered here by section 2 —
+`cljgo build` plus running the binary — which is what makes this a nuisance
+rather than a hole. Reported upstream with this repro.
