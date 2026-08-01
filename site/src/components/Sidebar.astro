@@ -1,0 +1,11 @@
+---
+// Overrides Starlight's Sidebar (via astro.config.mjs `components.Sidebar`) to suppress
+// starlight-sidebar-topics' default topic picker, which would list every configured topic —
+// i.e. all six language topics plus "Docs" — at the top of every sidebar. The six language
+// topics still exist (each gets its own dedicated sidebar tree once you're on one of its pages);
+// they're reached via the language picker in the header (see LanguagePicker.astro), not from
+// here, so this just renders the current topic's normal sidebar tree with no picker at all.
+import Default from '@astrojs/starlight/components/Sidebar.astro';
+---
+
+<Default><slot /></Default>

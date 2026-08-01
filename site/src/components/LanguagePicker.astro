@@ -1,0 +1,42 @@
+---
+// A header-level picker (next to the theme/locale selects) that jumps straight to any port's
+// API reference in a new tab — reachable from anywhere on the site, not just the /api/ overview
+// page. Replaces the old left-sidebar "Docs"/"API Reference" switcher (see Sidebar.astro).
+import Select from '@astrojs/starlight/components/Select.astro';
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+
+const langs = [
+	{ label: 'JavaScript', slug: 'javascript' },
+	{ label: 'Python', slug: 'python' },
+	{ label: 'Go', slug: 'go' },
+	{ label: 'Java', slug: 'java' },
+	{ label: 'C#', slug: 'csharp' },
+	{ label: 'Elixir', slug: 'elixir' },
+]
+
+const options = [
+	{ label: 'API Reference', value: '', selected: true },
+	...langs.map((l) => ({ label: l.label, value: `${base}/api/${l.slug}/`, selected: false })),
+]
+---
+
+<starlight-language-picker>
+	<Select icon="open-book" label="Open a port's API reference in a new tab" options={options} width="9em" />
+</starlight-language-picker>
+
+<script>
+	class LanguagePicker extends HTMLElement {
+		constructor() {
+			super()
+			const select = this.querySelector('select')
+			select?.addEventListener('change', (e) => {
+				const target = e.currentTarget
+				if (!(target instanceof HTMLSelectElement) || !target.value) return
+				window.open(target.value, '_blank', 'noopener')
+				target.value = ''
+			})
+		}
+	}
+	customElements.define('starlight-language-picker', LanguagePicker)
+</script>
