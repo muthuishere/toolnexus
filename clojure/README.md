@@ -52,11 +52,20 @@ Both have been **watched fail** before being trusted — see the header of each.
 
 ## Parity debt — measured, not estimated
 
-`conformance/check_options_parity.py` tracks six ports; **this port is not yet
-wired into it**, because it would fail, and a gate you exempt yourself from is
-worse than one you fail honestly. The real gap, measured after teaching the
-checker to tokenize kebab-case (it previously reported all 23 options missing,
-of which only 20 were real):
+This port **is** wired into `conformance/check_options_parity.py`, at tier
+`core` — the SPEC §0 conformance contract — while the six shipped ports are at
+tier `full`. Every core option is present; the 17 full-tier options below are
+recorded as DEBT and printed by name on every run, pass or fail, because a
+permitted absence that stops being mentioned is indistinguishable from one that
+was implemented.
+
+The tier is declared in the shared manifest, never by this port about itself: a
+self-graded exam is not a gate, and lowering the bar has to be a visible diff
+the other ports review. Missing a *core* option still fails, for every port,
+regardless of tier.
+
+The gap, measured after teaching the checker to tokenize kebab-case (it
+previously reported all 23 options missing, of which only 20 were real):
 
 **Client** — `hooks`, `retries`, `retry-base-ms`, `timeout-ms`, `store`
 (memory), `on-metric`, `request-params`, `body-transform`, `http-client`,
@@ -64,8 +73,8 @@ of which only 20 were real):
 
 **Toolkit** — `skill-provider`, `skills-filter`, `skill-sample-limit`,
 `agents`, `wait-for` (present on the client, not the toolkit), `disable-tools`,
-`disable-skills`; plus three that exist under shorter names and want aliasing
-rather than implementing: `:mcp` (`mcpConfig`), `:skills` (`skillsDir`),
+`disable-skills`. Three more were aliases rather than absences and are now
+aliased in the manifest: `:mcp` (`mcpConfig`), `:skills` (`skillsDir`),
 `:tools` (`extraTools`).
 
 Also absent: MCP elicitation bridging (§2), per-server tool allowlists, real SSE

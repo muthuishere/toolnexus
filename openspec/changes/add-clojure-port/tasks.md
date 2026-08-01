@@ -38,9 +38,11 @@ contract, so the other six ports are untouched by design.
 
 ## 5. Parity debt — NOT done, tracked so it cannot drift silently
 
-This port is deliberately NOT yet wired into `conformance/check_options_parity.py`:
-it would fail, and a gate you exempt yourself from is worse than one you fail
-honestly. Measured gap, after the tokenizer fix:
+Wired into `conformance/check_options_parity.py` at tier `core` (the six shipped
+ports are `full`). Every core option is present; the full-tier options below are
+printed as named DEBT on every run rather than exempted or hidden. The tier is
+declared in the shared manifest, not by this port. Measured gap after the
+tokenizer fix:
 
 ### 5.1 Client options
 - [ ] `hooks`
@@ -67,4 +69,5 @@ honestly. Measured gap, after the tokenizer fix:
 - [ ] `ListMcpTools` inventory, context-aware load
 - [ ] real SSE streaming (the loop buffers; it emits no text deltas on purpose)
 - [ ] durable resume
-- [ ] wire this port into `check_options_parity.py` once 5.1/5.2 close
+- [x] wire this port into `check_options_parity.py` — done at tier `core`;
+      promote to `full` when 5.1/5.2 close
