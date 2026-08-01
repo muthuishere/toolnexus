@@ -426,15 +426,30 @@
   (if-let [c (stdio-conn)]
     (let [tk      (tool/toolkit (mcp/tools c))
           n       12
+          ;; The future body is wrapped so a throw becomes DATA. `mapv deref`
+          ;; RETHROWS whatever a future threw, which aborts the whole deftest as
+          ;; an ERROR — and an error carries no assertion, so the run reports a
+          ;; short count and never says WHICH caller died. That is precisely the
+          ;; shape of the intermittent short-count seen on the interpreted leg
+          ;; (704 and 700 of 708, error:1). Whether or not this test is that
+          ;; flake, an unattributable error is the wrong failure mode for a
+          ;; twelve-way concurrency test: now a caller that blows up is reported
+          ;; by NUMBER, as a failing assertion, on the next line.
           results (mapv deref
                         (mapv (fn [i]
                                 (future
-                                  [i (tool/execute tk "everything_echo"
-                                                   {:message (str "concurrent-" i)})]))
+                                  [i (try (tool/execute tk "everything_echo"
+                                                        {:message (str "concurrent-" i)})
+                                          (catch Throwable e
+                                            (tool/failure (str "caller " i " threw: "
+                                                               (or (ex-message e) e)))))]))
                               (range n)))]
       (is (= n (count results)))
       (is (every? (fn [pair] (false? (:isError (second pair)))) results)
-          "no caller timed out or was handed a torn frame")
+          (str "no caller timed out or was handed a torn frame; failures: "
+               (pr-str (->> results
+                            (filter (fn [pair] (:isError (second pair))))
+                            (mapv (fn [pair] [(first pair) (:output (second pair))]))))))
       (is (every? (fn [pair]
                     (str/includes? (:output (second pair)) (str "concurrent-" (first pair))))
                   results)
