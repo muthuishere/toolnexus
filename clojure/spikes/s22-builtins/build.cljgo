@@ -4,7 +4,7 @@
 ;;   cljgo build        compile to a native binary
 ;;   cljgo build run    ...and run it
 (defn build [b]
-  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.7.3"})
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.8.0"})
   (let [app (exe b {:name "builtins" :main "src/toolnexus/builtins.cljc"})]
     (install b app)
     (run b app)))

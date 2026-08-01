@@ -191,7 +191,32 @@
     (loop []
       (let [line (try (proc/read-line! child) (catch Throwable _ nil))]
         (if (nil? line)
-          (swap! state assoc :closed? true :close-reason "peer-eof")
+          ;; §2 — EOF alone cannot say WHY the peer stopped. koine 0.8.0's
+          ;; `exit-code` can: nil = has not exited, a number = the status it
+          ;; exited with. This replaces a `kill!` timeout that guessed.
+          ;;
+          ;; BUT IT MUST NOT BE READ THE INSTANT EOF ARRIVES. Measured: a child
+          ;; running `sh -c 'echo …>&2; exit 3'` reported exit-code nil on 4 of 5
+          ;; runs at the moment its stdout closed, because closing stdout and the
+          ;; reaper recording the status are two different events and EOF wins
+          ;; the race. Reading it immediately turns "I do not know yet" into a
+          ;; confident "still running" — a worse answer than the honest
+          ;; `peer-eof` this replaced.
+          ;;
+          ;; So: give the reaper a bounded grace. A peer whose stdout just closed
+          ;; has either exited already or is genuinely still alive, and the first
+          ;; case resolves in milliseconds.
+          (let [code (loop [tries 0]
+                       (let [c (try (proc/exit-code child) (catch Throwable _ nil))]
+                         (cond c c
+                               (>= tries 50) nil          ; ~250ms, then give up
+                               :else (do (ktime/sleep! 5) (recur (inc tries))))))]
+            (swap! state assoc :closed? true
+                   :exit-code code
+                   ;; nil after the grace means UNKNOWN, not "alive". Say so.
+                   :close-reason (if code
+                                   (str "peer-exited (status " code ")")
+                                   "peer-eof (stdout closed, exit status unknown)")))
           (do
             (when-not (str/blank? line)
               (let [msg (try (json/read-str line) (catch Throwable _ ::bad))]
@@ -470,16 +495,32 @@
   Never throws. §0.3: a server that fails to connect is recorded `failed` and
   the caller carries on with the servers that did work.
 
-  HONESTY NOTE — exit vs EOF. When a stdio peer stops talking, all this layer
-  can observe portably is that `read-line!` returned nil, reported as
-  `peer-eof`. It is NOT possible to say from here whether the child exited,
-  crashed, or merely closed stdout while still running: koine's `alive?` is a
-  true liveness check on the JVM (`Process.isAlive`) but on cljgo it only
-  reports whether WE called `close!`/`kill!` — a child that exits on its own
-  still answers true. So `alive?` is deliberately not consulted; the port would
-  otherwise say two different things on two hosts about the same event. The
-  child's stderr ring is attached to the failure instead, which is the evidence
-  that actually explains a crash."
+  EXIT vs EOF — ANSWERED, as of koine 0.8.0. When a stdio peer stops talking,
+  `read-line!` returns nil, and that alone cannot say whether the child exited,
+  crashed, or merely closed stdout while still running. This port used to report
+  a bare `peer-eof` for all three, and distinguished a dead peer from a quiet
+  one with a `kill!` timeout — a guess dressed as a policy, wrong in both
+  directions: too short kills a slow peer, too long hangs on a dead one.
+
+  `koine.process/exit-code` replaces the guess with an observation: nil = has
+  not exited, a number = the status. The close reason is now `peer-exited
+  (status N)` where the status is known, and `:exit-code` is on the connection
+  for a caller whose retry logic needs to tell a crash from a hang.
+
+  ONE TRAP, MEASURED RATHER THAN REASONED: exit-code must NOT be read the
+  instant EOF arrives. A child running `sh -c 'echo …>&2; exit 3'` reported nil
+  on 4 of 5 runs at that moment — closing stdout and the reaper recording the
+  status are different events, and EOF wins the race. Read naively, that turns
+  a do-not-know-yet into a confident still-running, which is a worse answer
+  than the `peer-eof` it replaced. This layer waits up to ~250 ms for the reaper,
+  and if the status is still unknown it SAYS unknown rather than guessing
+  alive.
+
+  Note that `alive?` is still not consulted for this. It answers a different
+  question, and koine reads its own reaper for exit rather than cljgo's native
+  `:exit-code` so there is ONE source of truth for has-it-exited — two would
+  drift. The child's stderr ring remains attached to the failure, because a
+  status code says THAT it died and the stderr says WHY."
   [server]
   (let [timeout-ms (or (:timeout server) default-timeout-ms)
         fail       (fn [phase transport failure]

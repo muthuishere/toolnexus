@@ -1,6 +1,6 @@
 ;; S17 — cljgo side. Same source, same koine artifact from Clojars.
 (defn build [b]
-  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.7.3"})
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.8.0"})
   (let [app (exe b {:name "composition" :main "src/toolnexus/composition.cljc"})]
     (install b app)
     (run b app)))

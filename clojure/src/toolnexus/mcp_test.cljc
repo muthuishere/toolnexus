@@ -466,15 +466,26 @@
     (is false "no :process/spawn on this host — this test measured NOTHING")))
 
 (deftest stdio-dead-command-is-isolated
-  ;; A command that exits immediately: EOF before any response. All this layer
-  ;; can portably say is `peer-eof` — see the honesty note on `mcp/connect`.
+  ;; A command that exits immediately: EOF before any response.
+  ;;
+  ;; This test USED to accept any of #{peer-eof closed timeout}, because the port
+  ;; genuinely could not tell a dead peer from a quiet one and a set of three
+  ;; strings was the honest assertion. koine 0.8.0's exit-code ended that, so the
+  ;; assertion is now specific: the child exits with status 3 and the port must
+  ;; SAY 3. A vaguer assertion here would pass whether or not the capability
+  ;; works, which is what made the old one unable to catch anything.
   (if (host/supports? :process/spawn)
     (let [c (mcp/connect {:name "gone" :kind "local" :enabled true
                           :command ["sh" "-c" "echo boom-on-stderr >&2; exit 3"]
                           :timeout 3000})]
       (is (= "failed" (:status c)))
       (is (= "initialize" (:phase c)))
-      (is (contains? #{"peer-eof" "closed" "timeout"} (get-in c [:error :error])))
+      (is (or (= "peer-exited (status 3)" (get-in c [:error :error]))
+              ;; a spawn that fails before the child ever runs is a different
+              ;; leg and legitimately reports `transport`
+              (= "transport" (get-in c [:error :error])))
+          (str "expected the exit status to be observed, got: "
+               (get-in c [:error :error])))
       (testing "koine's stderr ring is pulled into the message — the point of it existing"
         (is (str/includes? (:message c) "boom-on-stderr"))))
     (is false "no :process/spawn on this host — this test measured NOTHING")))

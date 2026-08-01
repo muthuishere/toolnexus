@@ -2,4 +2,4 @@
 ;;   clojure -M -m toolnexus.serve
 {:paths ["src"]
  :deps  {org.clojure/clojure           {:mvn/version "1.12.5"}
-         net.clojars.muthuishere/koine {:mvn/version "0.7.3"}}}
+         net.clojars.muthuishere/koine {:mvn/version "0.8.0"}}}
