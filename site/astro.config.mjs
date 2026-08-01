@@ -127,9 +127,11 @@ export default defineConfig({
 				{ icon: 'github', label: 'GitHub', href: 'https://github.com/muthuishere/toolnexus' },
 			],
 			components: {
-				// Replaces starlight-sidebar-topics' default topic picker (which would list all
-				// six language topics) with a plain "Docs" / "API Reference" switcher.
-				Sidebar: './src/components/TopicSwitcher.astro',
+				// Suppresses starlight-sidebar-topics' default topic picker (which would list all
+				// six language topics at the top of every sidebar) — see Sidebar.astro.
+				Sidebar: './src/components/Sidebar.astro',
+				// Adds a language picker next to the theme select — see Header.astro.
+				Header: './src/components/Header.astro',
 			},
 		}),
 	],
