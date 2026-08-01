@@ -190,22 +190,6 @@ asyncio.run(main())
 | `source` | `ToolSource` | One of `mcp`, `skill`, `native`, `http`, `builtin`, `a2a`, `custom`. |
 | `execute` | `ExecuteFn` | `async def execute(args, ctx=None) -> ToolResult`. Must be a coroutine function. |
 
-## The same type in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `Tool` | [→](/api/javascript/types/tool/) |
-| Go | `Tool` | [→](/api/go/types/tool/) |
-| Java | `Tool` | [→](/api/java/types/tool/) |
-| C# | `ITool` | [→](/api/csharp/types/tool/) |
-| Elixir | `Toolnexus.Tool` | [→](/api/elixir/types/tool/) |
-
-<Aside type="note" title="Shape differs, behavior does not">
-Python's field names are snake_case (`input_schema`, `is_error`) because they are local API, not
-wire data. The §10 suspension types keep camelCase keys instead — those cross process and language
-boundaries unchanged.
-</Aside>
-
 ## See also
 
 - [`ToolResult`](/api/python/types/tool-result/) — what `execute` returns

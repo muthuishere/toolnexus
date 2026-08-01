@@ -176,19 +176,6 @@ public class Example {
 | `Agent.timeout()` | `Long` | Overall poll budget in ms before a call times out. |
 | `Agent.pollEvery()` | `Long` | Interval between `GetTask` polls in ms. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agent` | [→](/api/javascript/agents/agent/) |
-| Python | `agent` | [→](/api/python/agents/agent/) |
-| Go | `agents.New` | [→](/api/go/agents/agent/) |
-| C# | `A2A.Agent` | [→](/api/csharp/agents/agent/) |
-| Elixir | `Toolnexus.A2a.agent` | [→](/api/elixir/agents/agent/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`A2A.agentTools`](/api/java/agents/agent-tools/) — resolve the descriptor into one `Tool` per advertised skill.

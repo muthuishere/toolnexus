@@ -165,22 +165,6 @@ Inference rules (type hints → JSON-Schema, `ctx`/`context` exclusion, async vs
 return handling, error handling) are exactly [`define_tool`'s](/api/python/native/define-tool/) —
 see that page for the full table.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `tool` | [→](/api/javascript/native/reflect/) |
-| Go | `NativeToolReflect` | [→](/api/go/native/reflect/) |
-| Java | `@Tool annotation` | [→](/api/java/native/reflect/) |
-| C# | `ToolMethodAttribute` | [→](/api/csharp/native/reflect/) |
-| Elixir | _not shipped in this port_ |  |
-
-<Aside type="note" title="Elixir has no reflection-based builder">
-Elixir has no macro-based `@tool` equivalent — use `Toolnexus.Native.define_tool/1` with an
-explicit `input_schema`. The resulting `Tool` contract (name, description, schema, `ToolResult`
-behavior) is unaffected; only how you author the wrapper differs.
-</Aside>
-
 ## See also
 
 - [`define_tool`](/api/python/native/define-tool/) — The direct-call form of exactly this, for functions you did not write for this purpose.

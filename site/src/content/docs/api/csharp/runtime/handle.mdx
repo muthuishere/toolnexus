@@ -236,19 +236,6 @@ itself (the operator's escape hatch out of a stuck approval/auth wait) and retur
 | `Children` | `IReadOnlyList<Handle>` | Direct children only. |
 | `ConvId` | `string` | `== Id` — the key into the runtime's `ConversationStore`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agents.Handle` | [→](/api/javascript/runtime/handle/) |
-| Python | `Handle` | [→](/api/python/runtime/handle/) |
-| Go | `agents.Handle` | [→](/api/go/runtime/handle/) |
-| Java | `agents.Handle` | [→](/api/java/runtime/handle/) |
-| Elixir | `Toolnexus.Agents.Handle` | [→](/api/elixir/runtime/handle/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Agent`](/api/csharp/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.

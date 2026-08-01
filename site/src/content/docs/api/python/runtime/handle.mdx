@@ -320,19 +320,6 @@ asyncio.run(main())
 | `pending_req` | `Request \| None` | Set only while `state == "suspended"`. |
 | `last_result` | `TaskResult \| None` | The most recent settled result — stays queryable after `close()` (close ≠ loss). |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agents.Handle` | [→](/api/javascript/runtime/handle/) |
-| Go | `agents.Handle` | [→](/api/go/runtime/handle/) |
-| Java | `agents.Handle` | [→](/api/java/runtime/handle/) |
-| C# | `Handle` | [→](/api/csharp/runtime/handle/) |
-| Elixir | `Toolnexus.Agents.Handle` | [→](/api/elixir/runtime/handle/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Agent`](/api/python/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.

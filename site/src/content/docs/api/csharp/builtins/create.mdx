@@ -117,19 +117,6 @@ Console.WriteLine($"ok: {schema.Count} built-ins as OpenAI schema, first={fnName
 | `apply_patch` | Apply a Begin/End Patch grammar patch; atomic. |
 | `todowrite` | Replace the session todo list; returns the rendered list. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `createBuiltinTools` | [→](/api/javascript/builtins/create/) |
-| Python | `create_builtin_tools` | [→](/api/python/builtins/create/) |
-| Go | `CreateBuiltinTools` | [→](/api/go/builtins/create/) |
-| Java | `BuiltinTools.create` | [→](/api/java/builtins/create/) |
-| Elixir | `Toolnexus.Builtin.tools` | [→](/api/elixir/builtins/create/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`BuiltinTools.Select`](/api/csharp/builtins/select/) — Pick which built-in file/shell/web tools are in play, by name or by source toggle.

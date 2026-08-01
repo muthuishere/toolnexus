@@ -181,21 +181,6 @@ console.log("ok:", good.enabled.join(","), "| problems:", bad.problems.length)
 | `timeout` | both | Per-server connect/call budget in ms. |
 | `tools` | both | Per-server allowlist keyed on the **original** tool name. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `parse_mcp_config` | [→](/api/python/mcp/parse-config/) |
-| Go | `ParseMcpConfig` | [→](/api/go/mcp/parse-config/) |
-| Java | `McpSource.parseMcpConfig` | [→](/api/java/mcp/parse-config/) |
-| C# | `McpSource.ParseMcpConfig` | [→](/api/csharp/mcp/parse-config/) |
-| Elixir | `Toolnexus.Mcp.parse_config` | [→](/api/elixir/mcp/parse-config/) |
-
-<Aside type="note" title="Go returns an error, the others throw">
-`ParseMcpConfig` in Go returns `(McpConfig, error)`. JavaScript, Python, Java and C# raise, and
-Elixir raises from `Jason.decode!` / `File.read!`. Same contract, each language's convention.
-</Aside>
-
 ## See also
 
 - [`loadMcp`](/api/javascript/mcp/load/) — parse *and* connect

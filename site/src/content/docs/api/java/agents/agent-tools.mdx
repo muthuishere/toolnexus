@@ -249,19 +249,6 @@ public class Example {
 | tool `source()` | `String` | Always `"a2a"`. |
 | `ToolResult.metadata()` | `Map` | `{agent, taskId, state, polls, ms}` on every result, success or failure. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agentTools` | [→](/api/javascript/agents/agent-tools/) |
-| Python | `agent_tools` | [→](/api/python/agents/agent-tools/) |
-| Go | `AgentTools` | [→](/api/go/agents/agent-tools/) |
-| C# | `A2A.AgentTools` | [→](/api/csharp/agents/agent-tools/) |
-| Elixir | `Toolnexus.A2a.agent_tools` | [→](/api/elixir/agents/agent-tools/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`A2A.agent`](/api/java/agents/agent/) — build the descriptor `agentTools` resolves.

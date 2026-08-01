@@ -173,19 +173,6 @@ try {
 | `tools` | `Record<string, ToolInfo[]>` | Per-server, **unfiltered**, **original** tool names — no `server_tool` prefix, no `tools` allowlist applied. |
 | `status` | `Record<string, McpStatus>` | `"connected"`, `"disabled"`, or `"failed"` per server name. A failed/disabled server has no entry in `tools`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `list_mcp_tools` | [→](/api/python/mcp/list-tools/) |
-| Go | `ListMcpTools` | [→](/api/go/mcp/list-tools/) |
-| Java | `McpSource.listMcpTools` | [→](/api/java/mcp/list-tools/) |
-| C# | `McpSource.ListMcpToolsAsync` | [→](/api/csharp/mcp/list-tools/) |
-| Elixir | `Toolnexus.Mcp.list_tools` | [→](/api/elixir/mcp/list-tools/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`loadMcp`](/api/javascript/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.

@@ -41,16 +41,6 @@ tools := []toolnexus.Tool{
 tk, err := toolnexus.CreateToolkit(ctx, toolnexus.Options{ExtraTools: tools})
 ```
 
-## The same capability in the other ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `collectTools` | [→](/api/javascript/native/collect/) |
-| Python | _not shipped in this port_ |  |
-| Java | `Tools.fromObject` | [→](/api/java/native/collect/) |
-| C# | `Tools.FromObject` | [→](/api/csharp/native/collect/) |
-| Elixir | _not shipped in this port_ |  |
-
 ## See also
 
 - [`NativeTool`](/api/go/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.

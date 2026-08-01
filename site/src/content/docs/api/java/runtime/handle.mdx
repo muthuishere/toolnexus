@@ -222,19 +222,6 @@ public class Example {
 | `turnsTotal` / `usageTotal` | `int` / `long` | Cumulative across this handle's own turns (never a child's). |
 | `lastResult` | `TaskResult` | What `waitOn` answers immediately on a settled (idle-with-result or closed) handle. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agents.Handle` | [→](/api/javascript/runtime/handle/) |
-| Python | `Handle` | [→](/api/python/runtime/handle/) |
-| Go | `agents.Handle` | [→](/api/go/runtime/handle/) |
-| C# | `Handle` | [→](/api/csharp/runtime/handle/) |
-| Elixir | `Toolnexus.Agents.Handle` | [→](/api/elixir/runtime/handle/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`agents.Runtime`](/api/java/runtime/runtime/) — the six verbs that create and transition handles.

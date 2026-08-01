@@ -184,18 +184,6 @@ reply goes back as a `functionResponse` part with the matching `name`.
 | `…[i]["description"]` | `ITool.Description` | |
 | `…[i]["parameters"]` | `ITool.InputSchema` | Renamed — `InputSchema` → `parameters`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `toGemini` | [→](/api/javascript/adapters/gemini/) |
-| Python | `to_gemini` | [→](/api/python/adapters/gemini/) |
-| Go | `ToGemini` | [→](/api/go/adapters/gemini/) |
-| Java | `Adapters.toGemini` | [→](/api/java/adapters/gemini/) |
-| Elixir | `Toolnexus.Adapters.to_gemini` | [→](/api/elixir/adapters/gemini/) |
-
-Output is byte-identical across ports for the same tools — that is a §0 conformance obligation.
-
 ## See also
 
 - [`Adapters.ToOpenAI`](/api/csharp/adapters/openai/) · [`Adapters.ToAnthropic`](/api/csharp/adapters/anthropic/)

@@ -346,19 +346,6 @@ func main() {
 | `answer` | `tn.Answer` | Must echo the `ID` of the pending `Request` — routed to the deepest suspended handle. |
 | returns | `error` | Non-nil when `answer.ID` doesn't match any suspended handle's pending request. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `AgentRuntime.resume` | [→](/api/javascript/suspension/resume/) |
-| Python | `AgentRuntime.resume` | [→](/api/python/suspension/resume/) |
-| Java | `AgentRuntime.resume` | [→](/api/java/suspension/resume/) |
-| C# | `AgentRuntime.ResumeAsync` | [→](/api/csharp/suspension/resume/) |
-| Elixir | `Toolnexus.Agents.Runtime.resume` | [→](/api/elixir/suspension/resume/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## Go also has a durable, cross-restart resume (preview)
 
 <Aside type="note" title="STATUS: golang only — a preview, not part of the §0 conformance contract">

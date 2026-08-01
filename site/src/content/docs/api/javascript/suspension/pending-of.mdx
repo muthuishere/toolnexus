@@ -142,19 +142,6 @@ console.log("ok: toolCalls[0] carries no pending; RunResult.pending does:", res.
 | `result` | `ToolResult` | Any tool result — from `toolkit.execute`, a hook, or a fixture. |
 | returns | `Request \| undefined` | The suspension, if `result.metadata.pending` is set. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `pending_of` | [→](/api/python/suspension/pending-of/) |
-| Go | `PendingOf` | [→](/api/go/suspension/pending-of/) |
-| Java | `Request.pendingOf` | [→](/api/java/suspension/pending-of/) |
-| C# | `Suspension.PendingOf` | [→](/api/csharp/suspension/pending-of/) |
-| Elixir | _not shipped in this port_ |  |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`pending`](/api/javascript/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.

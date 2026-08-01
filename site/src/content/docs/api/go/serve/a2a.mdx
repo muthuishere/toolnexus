@@ -304,19 +304,6 @@ func main() {
 `ServeHandle{URL, Stop()}` is returned; `Close()` aliases `Stop()`. `A2AConfig.Store` selects Task
 persistence — see [`NewFileTaskStore`](/api/go/serve/task-store/).
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `startA2AServer` | [→](/api/javascript/serve/a2a/) |
-| Python | `Toolkit.serve` | [→](/api/python/serve/a2a/) |
-| Java | `A2AServer.start` | [→](/api/java/serve/a2a/) |
-| C# | `A2AServer.StartAsync` | [→](/api/csharp/serve/a2a/) |
-| Elixir | `Toolnexus.Serve.start` | [→](/api/elixir/serve/a2a/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`BuildAgentCard`](/api/go/serve/agent-card/) — Construct the Agent Card that advertises your name, skills and endpoint.

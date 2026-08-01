@@ -220,22 +220,6 @@ Accepts a **map or a keyword list**.
 | anything else | `%ToolResult{output: Jason.encode!(it), is_error: false}` |
 | a raise | `%ToolResult{output: Exception.message(e), is_error: true}` |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `defineTool` | [→](/api/javascript/native/define-tool/) |
-| Python | `define_tool` | [→](/api/python/native/define-tool/) |
-| Go | `NativeTool` | [→](/api/go/native/define-tool/) |
-| Java | `NativeTool.of` | [→](/api/java/native/define-tool/) |
-| C# | `NativeTool.Of` | [→](/api/csharp/native/define-tool/) |
-
-<Aside type="note" title="Two real Elixir differences">
-The option is `:execute`, not a positional handler argument — and it may be arity-1 or arity-2,
-whereas the other ports always hand the callback a context (optional in JS/Go). Non-string returns
-are JSON-encoded here exactly as in JS, so tool output stays byte-identical across ports.
-</Aside>
-
 ## See also
 
 - [`Toolnexus.Tool`](/api/elixir/types/tool/) — the struct this produces

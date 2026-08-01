@@ -258,19 +258,6 @@ func main() {
 Discovery skips `node_modules` and `.git`, follows symlinks once (cycle-safe), and samples up to 10
 sibling files into `<skill_files>`.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `loadSkills` | [→](/api/javascript/skills/load/) |
-| Python | `load_skills` | [→](/api/python/skills/load/) |
-| Java | `SkillSource.load` | [→](/api/java/skills/load/) |
-| C# | `SkillSource.Load` | [→](/api/csharp/skills/load/) |
-| Elixir | `Toolnexus.Skill.load` | [→](/api/elixir/skills/load/) |
-
-The `skill` tool's output is **byte-identical** across all six ports for the same directory — that is
-the sharpest conformance obligation in §0.
-
 ## See also
 
 - [`LoadSkillsWith`](/api/go/skills/load-with/) — data skills, allowlists, sample caps

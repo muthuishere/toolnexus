@@ -249,27 +249,6 @@ IO.puts("ok: a declined Answer resolved to a normal turn — final text: #{snap.
 | `data` | `map() \| nil` | Payload the tool reads back via `ctx.answer.data`. |
 | `reason` | `String.t() \| nil` | Optional human-readable reason, most useful on `ok: false`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `AgentRuntime.resume` | [→](/api/javascript/suspension/resume/) |
-| Python | `AgentRuntime.resume` | [→](/api/python/suspension/resume/) |
-| Go | `Runtime.Resume` | [→](/api/go/suspension/resume/) |
-| Java | `AgentRuntime.resume` | [→](/api/java/suspension/resume/) |
-| C# | `AgentRuntime.ResumeAsync` | [→](/api/csharp/suspension/resume/) |
-
-<Aside type="note" title="Go additionally ships a durable, cross-restart resume (preview)">
-Go alone also has `Client.RunWithAnswer`/`Client.AskWithAnswer` — a separate, golang-only §10
-preview for resuming a **bare-client** run across a process restart, not the §7D sub-agent
-mechanism this page covers. See Go's own page and
-[`suspension/relay`](/api/elixir/suspension/relay/).
-</Aside>
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output. Elixir's
-entry point sits on the agent runtime rather than the classic client, per the note above.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Client.create`](/api/elixir/suspension/wait-for/) — the synchronous, in-process resolver (`:wait_for`); prefer it when resolution doesn't need to survive a restart.

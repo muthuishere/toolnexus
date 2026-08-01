@@ -27,16 +27,13 @@ function portTree(lang) {
 	return sections
 }
 
-export function apiReferenceSidebar() {
-	return {
-		label: "API Reference",
-		items: [
-			{ label: "All languages — the surface", slug: "api" },
-			...manifest.langs.map((lang) => ({
-				label: LANGS[lang].label,
-				collapsed: true,
-				items: portTree(lang),
-			})),
-		],
-	}
+/** One topic per port for `starlight-sidebar-topics`: each language's API reference gets its
+ *  own dedicated sidebar (switchable via the topic picker) instead of all six being nested,
+ *  collapsed, under one shared "API Reference" tree. */
+export function apiTopics() {
+	return manifest.langs.map((lang) => ({
+		label: LANGS[lang].label,
+		link: `api/${LANGS[lang].slug}/`,
+		items: portTree(lang),
+	}))
 }

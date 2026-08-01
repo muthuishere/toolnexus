@@ -325,19 +325,6 @@ fetched card's own `url` field, which may differ from `Card`'s origin.
 | `Timeout` | `long?` | Overall poll budget in ms. Default `300000`. |
 | `PollEvery` | `long?` | Interval between `GetTask` polls in ms. Default `1000`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agent` | [→](/api/javascript/agents/agent/) |
-| Python | `agent` | [→](/api/python/agents/agent/) |
-| Go | `agents.New` | [→](/api/go/agents/agent/) |
-| Java | `A2A.agent` | [→](/api/java/agents/agent/) |
-| Elixir | `Toolnexus.A2a.agent` | [→](/api/elixir/agents/agent/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`A2A.AgentTools`](/api/csharp/agents/agent-tools/) — Expand a remote agent card into one tool per advertised skill.

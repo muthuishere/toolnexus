@@ -181,22 +181,6 @@ Returned `SkillSource`:
 Duplicate names are **first-wins**: a later `SKILL.md` (or data def) reusing a taken name is warned
 about and dropped.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `load_skills` | [→](/api/python/skills/load/) |
-| Go | `LoadSkills` | [→](/api/go/skills/load/) |
-| Java | `SkillSource.load` | [→](/api/java/skills/load/) |
-| C# | `SkillSource.Load` | [→](/api/csharp/skills/load/) |
-| Elixir | `Toolnexus.Skill.load` | [→](/api/elixir/skills/load/) |
-
-<Aside type="note" title="One symbol here, two there">
-JavaScript overloads `loadSkills` — a path *or* an options object. Go splits them into `LoadSkills`
-(paths) and `LoadSkillsWith` (options), Java/C# into `load` / `loadWith`. The emitted
-`<skill_content>` block is byte-identical in all six.
-</Aside>
-
 ## See also
 
 - [`listSkills`](/api/javascript/skills/list/) — inventory and skip reasons, no tool built

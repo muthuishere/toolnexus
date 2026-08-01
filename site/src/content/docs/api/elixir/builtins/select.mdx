@@ -124,19 +124,6 @@ IO.puts("ok: dropped #{10 - length(tools)}, kept #{length(tools)}")
 `bash`, `read`, `write`, `edit`, `grep`, `glob`, `webfetch`, `question`, `apply_patch`, `todowrite`
 — see [`Toolnexus.Builtin.tools/0`](/api/elixir/builtins/create/) for what each does.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `selectBuiltins` | [→](/api/javascript/builtins/select/) |
-| Python | `select_builtins` | [→](/api/python/builtins/select/) |
-| Go | `SelectBuiltins` | [→](/api/go/builtins/select/) |
-| Java | `BuiltinTools.select` | [→](/api/java/builtins/select/) |
-| C# | `BuiltinTools.Select` | [→](/api/csharp/builtins/select/) |
-
-Behavior is identical across ports by contract — same defaults, same toggle precedence, same
-fixed tool order. See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Builtin.tools/0`](/api/elixir/builtins/create/) — construct all ten directly, no config

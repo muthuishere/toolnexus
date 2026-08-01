@@ -186,21 +186,6 @@ Histogram buckets (seconds): `[0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, +Inf
 a metric are sorted lexicographically by rendered label string — this ordering, the bucket set,
 and label escaping are all part of the byte-identical contract.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `MetricEvent` | [→](/api/javascript/client/metrics/) |
-| Python | `MetricEvent` | [→](/api/python/client/metrics/) |
-| Go | `MetricEvent` | [→](/api/go/client/metrics/) |
-| Java | `LlmClient.MetricEvent` | [→](/api/java/client/metrics/) |
-| C# | `MetricEvent` | [→](/api/csharp/client/metrics/) |
-
-`Client.metrics()`'s Prometheus text is **byte-identical across all ports** for the same traffic;
-`on_metric`'s field *names* follow each port's idiomatic casing (like `RunResult`), so those are
-not byte-identical — only the scrape text is.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Client.create`](/api/elixir/client/create/) — `:on_metric` and `:registry` are options here.

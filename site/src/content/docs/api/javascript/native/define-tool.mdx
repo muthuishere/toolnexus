@@ -193,22 +193,6 @@ How `run`'s return value becomes a `ToolResult`:
 | anything else (object, number, array, `undefined`) | `{ output: JSON.stringify(value), isError: false }` |
 | throws | `{ output: <error message>, isError: true }` |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `define_tool` | [→](/api/python/native/define-tool/) |
-| Go | `NativeTool` | [→](/api/go/native/define-tool/) |
-| Java | `NativeTool.of` | [→](/api/java/native/define-tool/) |
-| C# | `NativeTool.Of` | [→](/api/csharp/native/define-tool/) |
-| Elixir | `Toolnexus.Native.define_tool` | [→](/api/elixir/native/define-tool/) |
-
-<Aside type="note" title="Same contract, each language's error convention">
-JavaScript catches a thrown `Error`; Go's tool function returns an `error` that is folded into
-`isError`; Java and C# catch exceptions. In all six, a failing native tool reports `isError` — it
-never blows up the loop.
-</Aside>
-
 ## See also
 
 - [`tool`](/api/javascript/native/reflect/) — the decorator form, for a class of methods

@@ -201,22 +201,6 @@ public class Example {
 | `execute(args, ctx)` | `ToolResult` | Runs the tool. `ctx` may be **null** on a direct call. |
 | `Tool.sanitize(v)` | `String` | Static. Replaces everything outside `[a-zA-Z0-9_-]` with `_`. |
 
-## The same type in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `Tool` | [→](/api/javascript/types/tool/) |
-| Python | `Tool` | [→](/api/python/types/tool/) |
-| Go | `Tool` | [→](/api/go/types/tool/) |
-| C# | `ITool` | [→](/api/csharp/types/tool/) |
-| Elixir | `Toolnexus.Tool` | [→](/api/elixir/types/tool/) |
-
-<Aside type="note" title="Shape differs, behavior does not">
-Java returns `ToolResult` directly; JavaScript returns a `Promise`, Go returns
-`(ToolResult, error)`. Each port uses its own convention — the contract is the same: a failed tool
-reports `isError`, it does not blow up the loop.
-</Aside>
-
 ## See also
 
 - [`ToolResult`](/api/java/types/tool-result/) — what `execute` returns

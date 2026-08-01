@@ -215,19 +215,6 @@ IO.puts("ok: custom TaskStore behaviour — #{DocsCountingTaskStore.save_count(s
 | a struct implementing `TaskStore` | that struct | Used as-is — your own persistence. |
 | any other string | — | Raises `ArgumentError`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `FileTaskStore` | [→](/api/javascript/serve/task-store/) |
-| Python | `FileTaskStore` | [→](/api/python/serve/task-store/) |
-| Go | `NewFileTaskStore` | [→](/api/go/serve/task-store/) |
-| Java | `A2AServer.FileTaskStore` | [→](/api/java/serve/task-store/) |
-| C# | `FileTaskStore` | [→](/api/csharp/serve/task-store/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Serve.start`](/api/elixir/serve/a2a/) — publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.

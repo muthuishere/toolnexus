@@ -1,0 +1,62 @@
+---
+// Overrides Starlight's Sidebar (via astro.config.mjs `components.Sidebar`), replacing
+// starlight-sidebar-topics' default picker — which lists every configured topic, i.e. all six
+// languages — with two entries: "Docs" and "API Reference". The six language topics still exist
+// (each gets its own dedicated sidebar tree once you're on one of its pages) but are reached from
+// the API Reference page's own language links (opened in a new tab), not from this switcher.
+import Default from '@astrojs/starlight/components/Sidebar.astro';
+
+const { hasSidebar } = Astro.locals.starlightRoute;
+const { isPageWithTopic } = Astro.locals.starlightSidebarTopics;
+
+const base = import.meta.env.BASE_URL;
+const isApi = Astro.url.pathname.startsWith(`${base}api/`);
+
+const links = [
+	{ label: 'Docs', href: `${base}quickstart/`, current: !isApi },
+	{ label: 'API Reference', href: `${base}api/`, current: isApi },
+];
+---
+
+{
+	hasSidebar && isPageWithTopic && (
+		<ul class="topic-switcher">
+			{links.map((link) => (
+				<li>
+					<a href={link.href} aria-current={link.current ? 'page' : undefined}>
+						{link.label}
+					</a>
+				</li>
+			))}
+		</ul>
+	)
+}
+<Default><slot /></Default>
+
+<style>
+	.topic-switcher {
+		list-style: none;
+		display: flex;
+		gap: 0.5rem;
+		padding: 0;
+		margin: 0 0 1rem;
+	}
+	.topic-switcher li {
+		flex: 1;
+	}
+	.topic-switcher a {
+		display: block;
+		text-align: center;
+		padding: 0.4rem 0.5rem;
+		border-radius: 0.25rem;
+		font-size: var(--sl-text-sm);
+		text-decoration: none;
+		color: var(--sl-color-text);
+		background-color: var(--sl-color-gray-6);
+	}
+	.topic-switcher a[aria-current='page'] {
+		background-color: var(--sl-color-accent);
+		color: var(--sl-color-white);
+		font-weight: 600;
+	}
+</style>

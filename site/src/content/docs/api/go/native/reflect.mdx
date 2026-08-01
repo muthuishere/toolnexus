@@ -225,19 +225,6 @@ func main() {
 | slice / array | `array`, with `items` from the element type |
 | `map`, nested `struct` | `object` (structs recurse into their own field schema) |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `tool` | [→](/api/javascript/native/reflect/) |
-| Python | `tool` | [→](/api/python/native/reflect/) |
-| Java | `@Tool annotation` | [→](/api/java/native/reflect/) |
-| C# | `ToolMethodAttribute` | [→](/api/csharp/native/reflect/) |
-| Elixir | _not shipped in this port_ |  |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`NativeTool`](/api/go/native/define-tool/) — wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.

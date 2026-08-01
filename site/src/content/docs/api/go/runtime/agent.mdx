@@ -281,19 +281,6 @@ func main() {
 `Agent.Registry()` collects the agent plus the TRANSITIVE CLOSURE of its team graph — unreachable
 agents are never present.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agents.Agent` | [→](/api/javascript/runtime/agent/) |
-| Python | `Agent` | [→](/api/python/runtime/agent/) |
-| Java | `agents.Agent` | [→](/api/java/runtime/agent/) |
-| C# | `Agent` | [→](/api/csharp/runtime/agent/) |
-| Elixir | `Toolnexus.Agents` | [→](/api/elixir/runtime/agent/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`NewRuntime`](/api/go/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.

@@ -194,19 +194,6 @@ func main() {
 }
 ```
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `authRequired` | [→](/api/javascript/suspension/auth-required/) |
-| Python | `auth_required` | [→](/api/python/suspension/auth-required/) |
-| Java | `Request.authRequired` | [→](/api/java/suspension/auth-required/) |
-| C# | `Suspension.AuthRequired` | [→](/api/csharp/suspension/auth-required/) |
-| Elixir | _not shipped in this port_ |  |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Pending`](/api/go/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.

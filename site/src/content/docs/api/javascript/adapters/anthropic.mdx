@@ -177,18 +177,6 @@ always wants a real object.
 There is no envelope key and no `type` discriminator: an Anthropic tool entry has exactly these
 three fields, and the input array's order is preserved one-for-one.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `to_anthropic` | [→](/api/python/adapters/anthropic/) |
-| Go | `ToAnthropic` | [→](/api/go/adapters/anthropic/) |
-| Java | `Adapters.toAnthropic` | [→](/api/java/adapters/anthropic/) |
-| C# | `Adapters.ToAnthropic` | [→](/api/csharp/adapters/anthropic/) |
-| Elixir | `Toolnexus.Adapters.to_anthropic` | [→](/api/elixir/adapters/anthropic/) |
-
-Output is byte-identical across ports for the same tools — that is a §0 conformance obligation.
-
 ## See also
 
 - [`toOpenAI`](/api/javascript/adapters/openai/) · [`toGemini`](/api/javascript/adapters/gemini/)

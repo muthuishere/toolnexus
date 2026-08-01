@@ -200,19 +200,6 @@ func main() {
 
 `Card == ""` is also skipped — an entry with no card has nothing to resolve.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `parseAgentsConfig` | [→](/api/javascript/agents/parse-config/) |
-| Python | `parse_agents_config` | [→](/api/python/agents/parse-config/) |
-| Java | `A2A.parseAgentsConfig` | [→](/api/java/agents/parse-config/) |
-| C# | `A2A.ParseAgentsConfig` | [→](/api/csharp/agents/parse-config/) |
-| Elixir | `Toolnexus.A2a.parse_agents_config` | [→](/api/elixir/agents/parse-config/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`agents.New`](/api/go/agents/agent/) — Point at a remote agent's card and use it exactly like a local tool.

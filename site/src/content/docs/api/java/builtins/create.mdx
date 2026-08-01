@@ -131,19 +131,6 @@ public class Example {
 | Failure contract | — | Every built-in returns `ToolResult{isError:true}` on failure — never throws across `execute`. |
 | Paths | — | Resolve relative to the process working directory unless absolute. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `createBuiltinTools` | [→](/api/javascript/builtins/create/) |
-| Python | `create_builtin_tools` | [→](/api/python/builtins/create/) |
-| Go | `CreateBuiltinTools` | [→](/api/go/builtins/create/) |
-| C# | `BuiltinTools.Create` | [→](/api/csharp/builtins/create/) |
-| Elixir | `Toolnexus.Builtin.tools` | [→](/api/elixir/builtins/create/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`BuiltinTools.select`](/api/java/builtins/select/) — the config-aware filter built on top of `create()`.

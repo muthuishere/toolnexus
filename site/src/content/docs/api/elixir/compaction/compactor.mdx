@@ -187,19 +187,6 @@ IO.puts("ok: compactor ran inside a real Client.run — #{length(sent)} messages
 | `:count_tokens` | `([map] -> non_neg_integer())` | `estimate_tokens/1` | Token estimator (`ceil(byte_size(json)/4)` summed), overridable for exactness. |
 | `:flush_to_memory` | `boolean()` | `false` | Inject a system reminder to persist facts via the memory tool before summarizing. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `compactor` | [→](/api/javascript/compaction/compactor/) |
-| Python | `compactor` | [→](/api/python/compaction/compactor/) |
-| Go | `Compactor` | [→](/api/go/compaction/compactor/) |
-| Java | `Compaction.compactor` | [→](/api/java/compaction/compactor/) |
-| C# | `Compaction.Compactor` | [→](/api/csharp/compaction/compactor/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Client.create`](/api/elixir/client/hooks/) — the `:hooks` option this rides (`before_llm`).

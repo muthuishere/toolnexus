@@ -151,16 +151,6 @@ provider error to fail the build.
 | `Agents` | `[]Agent` | Remote A2A peers; a top-level `agents` block is merged in too. |
 | `WaitFor` | `func(Request) (Answer, error)` | Host resolver for MCP elicitation (§10). |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `createToolkit` | [→](/api/javascript/toolkit/create/) |
-| Python | `create_toolkit` | [→](/api/python/toolkit/create/) |
-| Java | `Toolkit.create` | [→](/api/java/toolkit/create/) |
-| C# | `Toolkit.CreateAsync` | [→](/api/csharp/toolkit/create/) |
-| Elixir | `Toolnexus.create_toolkit` | [→](/api/elixir/toolkit/create/) |
-
 ## See also
 
 - [`LoadMcp`](/api/go/mcp/load/) · [`LoadSkills`](/api/go/skills/load/) · [`CreateClient`](/api/go/client/create/)

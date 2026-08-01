@@ -42,16 +42,6 @@ Same wire shape as every other port's `authRequired/1`, same `id` correlation di
 [`pending`](/api/elixir/suspension/pending/) — only the constructor is missing, not the behavior.
 `Toolnexus.ToolResult.pending?/1` reads either shape back identically.
 
-## The same capability in the other ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `authRequired` | [→](/api/javascript/suspension/auth-required/) |
-| Python | `auth_required` | [→](/api/python/suspension/auth-required/) |
-| Go | `AuthRequired` | [→](/api/go/suspension/auth-required/) |
-| Java | `Request.authRequired` | [→](/api/java/suspension/auth-required/) |
-| C# | `Suspension.AuthRequired` | [→](/api/csharp/suspension/auth-required/) |
-
 ## See also
 
 - [`Toolnexus.Client.create`](/api/elixir/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.

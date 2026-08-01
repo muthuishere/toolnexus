@@ -161,19 +161,6 @@ public class Example {
 | `src.status()` | `Map<String,String>` | Per server: `connected` \| `disabled` \| `failed`. |
 | `src.close()` | `void` | Gracefully disconnects every connected client. `AutoCloseable`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `loadMcp` | [→](/api/javascript/mcp/load/) |
-| Python | `load_mcp` | [→](/api/python/mcp/load/) |
-| Go | `LoadMcp` | [→](/api/go/mcp/load/) |
-| C# | `McpSource.LoadAsync` | [→](/api/csharp/mcp/load/) |
-| Elixir | `Toolnexus.Mcp.load` | [→](/api/elixir/mcp/load/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`McpSource.loadWith`](/api/java/mcp/load-with-context/) — the ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.

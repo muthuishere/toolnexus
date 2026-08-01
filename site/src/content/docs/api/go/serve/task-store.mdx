@@ -223,19 +223,6 @@ func main() {
 }
 ```
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `FileTaskStore` | [→](/api/javascript/serve/task-store/) |
-| Python | `FileTaskStore` | [→](/api/python/serve/task-store/) |
-| Java | `A2AServer.FileTaskStore` | [→](/api/java/serve/task-store/) |
-| C# | `FileTaskStore` | [→](/api/csharp/serve/task-store/) |
-| Elixir | `Toolnexus.Serve task_store` | [→](/api/elixir/serve/task-store/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolkit.Serve`](/api/go/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.

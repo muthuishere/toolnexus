@@ -173,22 +173,6 @@ IO.puts("ok: #{Enum.map_join(tools, ", ", & &1.name)}")
 |---|---|
 | `Toolnexus.Tool.sanitize/1` | Replaces every character outside `[a-zA-Z0-9_-]` with `_` (SPEC §0.2). |
 
-## The same type in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `Tool` | [→](/api/javascript/types/tool/) |
-| Python | `Tool` | [→](/api/python/types/tool/) |
-| Go | `Tool` | [→](/api/go/types/tool/) |
-| Java | `Tool` | [→](/api/java/types/tool/) |
-| C# | `ITool` | [→](/api/csharp/types/tool/) |
-
-<Aside type="note" title="One real difference">
-Elixir always passes a context; JavaScript and Go make it optional and may pass nothing. Code
-written against the Elixir port can pattern-match `ctx` without a nil-guard — the reverse is not
-true.
-</Aside>
-
 ## See also
 
 - [`Toolnexus.ToolResult`](/api/elixir/types/tool-result/) — what `execute` returns

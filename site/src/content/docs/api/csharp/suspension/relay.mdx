@@ -38,16 +38,6 @@ depending on which half of "proxy" you actually need:
 Neither reproduces relay's specific "all N calls in one turn ride a single suspension, in OpenAI
 `tool_calls` shape" contract — if you need that exact shape, it's Go-only for now.
 
-## The same capability in the other ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | _not shipped in this port_ |  |
-| Python | _not shipped in this port_ |  |
-| Go | `RelayTool` | [→](/api/go/suspension/relay/) |
-| Java | _not shipped in this port_ |  |
-| Elixir | _not shipped in this port_ |  |
-
 ## See also
 
 - [`ToolResult.Pending`](/api/csharp/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.

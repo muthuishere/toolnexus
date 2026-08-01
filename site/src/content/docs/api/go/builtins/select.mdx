@@ -170,19 +170,6 @@ func main() {
 | `Disabled` | `*bool` | `true` ⇒ off, and wins over `Enabled`. |
 | `Tools` | `map[string]bool` | Per-tool override. A name mapped to `false` is dropped; `true`/absent stays on; unknown names are ignored. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `selectBuiltins` | [→](/api/javascript/builtins/select/) |
-| Python | `select_builtins` | [→](/api/python/builtins/select/) |
-| Java | `BuiltinTools.select` | [→](/api/java/builtins/select/) |
-| C# | `BuiltinTools.Select` | [→](/api/csharp/builtins/select/) |
-| Elixir | `Toolnexus.Builtin.load` | [→](/api/elixir/builtins/select/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`CreateBuiltinTools`](/api/go/builtins/create/) — construct every built-in tool directly, outside a toolkit.

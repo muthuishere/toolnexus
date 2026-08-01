@@ -184,22 +184,6 @@ ignore `Data`.
 | `IsCancelled` | `bool` | Shorthand for `CancellationToken.IsCancellationRequested`. |
 | `Answer` | `Answer?` | Present **only** on a post-`WaitFor` retry. |
 
-## The same type in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `ToolContext` | [→](/api/javascript/types/context/) |
-| Python | `ToolContext` | [→](/api/python/types/context/) |
-| Go | `ToolContext` | [→](/api/go/types/context/) |
-| Java | `ToolContext` | [→](/api/java/types/context/) |
-| Elixir | `Toolnexus.Context` | [→](/api/elixir/types/context/) |
-
-<Aside type="note" title="Two real differences">
-Cancellation follows each language's convention: C# uses a `CancellationToken`, Java an
-`AtomicBoolean`, JavaScript an `AbortSignal`, Go a `context.Context`. And the timeout is
-**milliseconds** in C#, JavaScript, Go and Java, but **seconds** in Python.
-</Aside>
-
 ## See also
 
 - [`ITool`](/api/csharp/types/tool/) — what receives this

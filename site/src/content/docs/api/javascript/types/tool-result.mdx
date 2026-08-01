@@ -142,19 +142,6 @@ Do not treat `isError` alone as "the tool broke"; check
 | `isError` | `boolean` | Whether the call failed. Fed back to the model, not thrown. |
 | `metadata` | `Record<string, unknown>` | Free-form, for your code. **Reserved:** `pending` holds a §10 `Request`. |
 
-## The same type in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `ToolResult` | [→](/api/python/types/tool-result/) |
-| Go | `ToolResult` | [→](/api/go/types/tool-result/) |
-| Java | `ToolResult` | [→](/api/java/types/tool-result/) |
-| C# | `ToolResult` | [→](/api/csharp/types/tool-result/) |
-| Elixir | `Toolnexus.ToolResult` | [→](/api/elixir/types/tool-result/) |
-
-The field names are pinned across ports because they serialize over the wire and cross agent
-boundaries — `isError` stays camelCase even in Python and Go.
-
 ## See also
 
 - [`Tool`](/api/javascript/types/tool/) — what returns this

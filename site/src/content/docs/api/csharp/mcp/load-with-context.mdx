@@ -145,19 +145,6 @@ Console.WriteLine("ok: parent cancellation aborted the whole load");
 | `cancellationToken` | `CancellationToken` | Linked into every server's connect+list wait. Cancel/expire ⇒ the whole load throws `OperationCanceledException`. |
 | server `timeout` (config) | milliseconds | Bounds only that server; a timeout marks it `"failed"` and the load continues. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `loadMcp` | [→](/api/javascript/mcp/load-with-context/) |
-| Python | `load_mcp_with_context` | [→](/api/python/mcp/load-with-context/) |
-| Go | `LoadMcpWithContext` | [→](/api/go/mcp/load-with-context/) |
-| Java | `McpSource.loadWith` | [→](/api/java/mcp/load-with-context/) |
-| Elixir | `Toolnexus.Mcp.load` | [→](/api/elixir/mcp/load-with-context/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`McpSource.LoadAsync`](/api/csharp/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.

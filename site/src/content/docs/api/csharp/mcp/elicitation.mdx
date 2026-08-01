@@ -133,19 +133,6 @@ Console.WriteLine($"ok: {accept.Action} / {declined.Action} / {expired.Action}")
 | `Ok = false, Reason = "declined"` | `"decline"` |
 | `Ok = false`, any other/no reason | `"cancel"` |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `elicitationToRequest` | [→](/api/javascript/mcp/elicitation/) |
-| Python | `elicitation_to_request` | [→](/api/python/mcp/elicitation/) |
-| Go | `ElicitationToRequest` | [→](/api/go/mcp/elicitation/) |
-| Java | `McpSource.elicitationToRequest` | [→](/api/java/mcp/elicitation/) |
-| Elixir | `Toolnexus.Mcp.Protocol.elicitation_to_request` | [→](/api/elixir/mcp/elicitation/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`McpSource.LoadAsync`](/api/csharp/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.

@@ -169,19 +169,6 @@ public class Example {
 | `SkillDef(name, description, content)` | constructor | Instruction-only skill, no resources, base defaults to `skill://<name>/`. |
 | `SkillDef(name, description, content, resources, base)` | constructor | Full form — `resources` sampled like on-disk siblings; `base` overrides the default logical URI. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `loadSkills` | [→](/api/javascript/skills/load-with/) |
-| Python | `load_skills` | [→](/api/python/skills/load-with/) |
-| Go | `LoadSkillsWith` | [→](/api/go/skills/load-with/) |
-| C# | `SkillSource.LoadWith` | [→](/api/csharp/skills/load-with/) |
-| Elixir | `Toolnexus.Skill.load` | [→](/api/elixir/skills/load-with/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`SkillSource.load`](/api/java/skills/load/) — the directory-only sugar over this call.

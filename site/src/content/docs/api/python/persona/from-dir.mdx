@@ -226,19 +226,6 @@ asyncio.run(main())
 | `tools` | `list[Tool] \| None` | Extra tools appended alongside the memory tool (and any `uses["tools"]` in `**opts`). |
 | `**opts` | — | Forwarded verbatim to `Agent(...)`: `team`, `budget`, `model`, `wait_for`, `on_spawn`, `on_close`, `hooks`, `on_metric`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `fromDir` | [→](/api/javascript/persona/from-dir/) |
-| Go | `FromDir` | [→](/api/go/persona/from-dir/) |
-| Java | `A2A.agentFromDir` | [→](/api/java/persona/from-dir/) |
-| C# | `Home.FromDir` | [→](/api/csharp/persona/from-dir/) |
-| Elixir | `Toolnexus.Agents.Home.from_dir` | [→](/api/elixir/persona/from-dir/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`compose_soul`](/api/python/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.

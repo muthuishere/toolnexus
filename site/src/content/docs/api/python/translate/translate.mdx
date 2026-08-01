@@ -338,19 +338,6 @@ asyncio.run(main())
 | `raw` | `dict \| None` | The provider's decoded response, for fields this type doesn't model. |
 | `tool_calls_json()` | `list[dict]` | Renders `tool_calls` as an OpenAI `tool_calls` array, ready for an assistant message. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `translate` | [→](/api/javascript/translate/translate/) |
-| Go | `Translate` | [→](/api/go/translate/translate/) |
-| Java | `Translate.translate` | [→](/api/java/translate/translate/) |
-| C# | `Translate.Run` | [→](/api/csharp/translate/translate/) |
-| Elixir | `Toolnexus.Translate.translate` | [→](/api/elixir/translate/translate/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`openai_messages_to_anthropic`](/api/python/translate/inbound/) — Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong.

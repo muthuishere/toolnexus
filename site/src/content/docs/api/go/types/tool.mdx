@@ -232,19 +232,6 @@ func main() {
 | `Source` | `ToolSource` | One of `mcp`, `skill`, `builtin`, `native`, `http`, `a2a`, `custom`. |
 | `Execute` | `func(map[string]any, *ToolContext) (ToolResult, error)` | Runs the tool. `ctx` may be **nil** — guard it. |
 
-## The same type in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `Tool` | [→](/api/javascript/types/tool/) |
-| Python | `Tool` | [→](/api/python/types/tool/) |
-| Java | `Tool` | [→](/api/java/types/tool/) |
-| C# | `ITool` | [→](/api/csharp/types/tool/) |
-| Elixir | `Toolnexus.Tool` | [→](/api/elixir/types/tool/) |
-
-Go is a struct with a func field, not an interface — but the contract is identical, and the JSON
-tags pin the wire names (`inputSchema`) that cross language boundaries.
-
 ## See also
 
 - [`ToolResult`](/api/go/types/tool-result/) — what `Execute` returns

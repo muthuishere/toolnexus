@@ -216,19 +216,6 @@ IO.puts("ok: agent_tools/1 raises directly, the toolkit isolates it")
 | `source` | `"a2a"` | |
 | `execute` | `(args, ctx) -> ToolResult.t()` | SendMessage → poll GetTask → map the terminal Task. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agentTools` | [→](/api/javascript/agents/agent-tools/) |
-| Python | `agent_tools` | [→](/api/python/agents/agent-tools/) |
-| Go | `AgentTools` | [→](/api/go/agents/agent-tools/) |
-| Java | `A2A.agentTools` | [→](/api/java/agents/agent-tools/) |
-| C# | `A2A.AgentTools` | [→](/api/csharp/agents/agent-tools/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.A2a.agent`](/api/elixir/agents/agent/) — point at a remote agent's card and use it exactly like a local tool.

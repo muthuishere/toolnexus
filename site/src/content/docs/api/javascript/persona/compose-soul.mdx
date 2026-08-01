@@ -131,19 +131,6 @@ console.log("ok: soul truncated, disk file still", fs.statSync(path.join(dir, "M
 | `soul` | `string` | The joined `## <filename>` sections, in bootstrap order — empty string if no files were found. |
 | `found` | `string[]` | Which of the seven bootstrap filenames were present, in bootstrap order. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `compose_soul` | [→](/api/python/persona/compose-soul/) |
-| Go | `ComposeSoul` | [→](/api/go/persona/compose-soul/) |
-| Java | `Home.composeSoul` | [→](/api/java/persona/compose-soul/) |
-| C# | `Home.ComposeSoul` | [→](/api/csharp/persona/compose-soul/) |
-| Elixir | `Toolnexus.Agents.Home.compose_soul` | [→](/api/elixir/persona/compose-soul/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`fromDir`](/api/javascript/persona/from-dir/) — Point at an agent home directory and get a configured agent back.

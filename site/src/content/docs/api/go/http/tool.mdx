@@ -325,18 +325,6 @@ Result mapping:
 Argument routing, in order: URL placeholders first (consumed), then querystring (`Query` names, or
 everything on a `GET`), then whatever is left becomes the body.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `httpTool` | [→](/api/javascript/http/tool/) |
-| Python | `http_tool` | [→](/api/python/http/tool/) |
-| Java | `HttpTool.of` | [→](/api/java/http/tool/) |
-| C# | `HttpTool.Of` | [→](/api/csharp/http/tool/) |
-| Elixir | `Toolnexus.Http.tool` | [→](/api/elixir/http/tool/) |
-
-Same routing rules, same result modes, same `` `${ENV_VAR}` `` expansion in every port.
-
 ## See also
 
 - [`NativeTool`](/api/go/native/define-tool/) — when the call needs real logic

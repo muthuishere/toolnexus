@@ -271,19 +271,6 @@ Exceeding any dimension yields `TaskResult(status="incomplete", is_error=True, t
 (<limit>); incomplete")` (spawn-time) — the limit name (`"maxTurns"`, `"tokens"`,
 `"toolCalls"`, `"wallMs"`) is always present in the message.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agents.Budget` | [→](/api/javascript/runtime/budgets/) |
-| Go | `agents.Budget` | [→](/api/go/runtime/budgets/) |
-| Java | `agents.Budget` | [→](/api/java/runtime/budgets/) |
-| C# | `Budget` | [→](/api/csharp/runtime/budgets/) |
-| Elixir | `Toolnexus.Agents budget` | [→](/api/elixir/runtime/budgets/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Agent`](/api/python/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.

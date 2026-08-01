@@ -234,25 +234,6 @@ public class Example {
 | `Result.finishReason` | `String` | Any tool call ⇒ always `"tool_calls"`; otherwise `stop`/`length`/`content_filter`. |
 | `Result.usage` | `LlmClient.Usage` | This single call's token usage. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `translate` | [→](/api/javascript/translate/translate/) |
-| Python | `translate` | [→](/api/python/translate/translate/) |
-| Go | `Translate` | [→](/api/go/translate/translate/) |
-| C# | `Translate.Run` | [→](/api/csharp/translate/translate/) |
-| Elixir | `Toolnexus.Translate.translate` | [→](/api/elixir/translate/translate/) |
-
-<Aside type="note" title="Verified symbol">
-`translate` is an **instance method on `LlmClient`** (`client.translate(req)`), not a static method
-on the `Translate` class — `Translate` holds the request/result types and the pure helper
-functions (`openAIMessagesToAnthropic` and friends), which `LlmClient.translate` calls internally.
-</Aside>
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Translate.openAIMessagesToAnthropic`](/api/java/translate/inbound/) — Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong.

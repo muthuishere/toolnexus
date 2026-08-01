@@ -167,19 +167,6 @@ public class Example {
 | `origin` | `String` | `"fs"` for directory-sourced skills; `"logical"` only via `loadWith` data skills. |
 | `resources` / `base` | `List<String>` / `String` | Null for directory-sourced skills — they sample siblings from disk instead. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `loadSkills` | [→](/api/javascript/skills/load/) |
-| Python | `load_skills` | [→](/api/python/skills/load/) |
-| Go | `LoadSkills` | [→](/api/go/skills/load/) |
-| C# | `SkillSource.Load` | [→](/api/csharp/skills/load/) |
-| Elixir | `Toolnexus.Skill.load` | [→](/api/elixir/skills/load/) |
-
-Run any port against the shared `examples/skills` fixture and the `skill` tool's output matches
-byte for byte — that is a §0 conformance obligation.
-
 ## See also
 
 - [`SkillSource.loadWith`](/api/java/skills/load-with/) — skills as data, per-agent allowlist, sample cap

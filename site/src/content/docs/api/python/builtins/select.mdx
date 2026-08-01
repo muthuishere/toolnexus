@@ -147,24 +147,6 @@ asyncio.run(main())
 | `{"enabled": False}` | `[]` — whole source off. |
 | `{"tools": {name: False, ...}}` | All ten minus the named ones. Unknown names ignored. `True`/absent stays on — there is no allowlist form. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `selectBuiltins` | [→](/api/javascript/builtins/select/) |
-| Go | `SelectBuiltins` | [→](/api/go/builtins/select/) |
-| Java | `BuiltinTools.select` | [→](/api/java/builtins/select/) |
-| C# | `BuiltinTools.Select` | [→](/api/csharp/builtins/select/) |
-| Elixir | `Toolnexus.Builtin.load` | [→](/api/elixir/builtins/select/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
-<Aside type="note" title="Elixir selects via load/1, not a standalone select function">
-`Toolnexus.Builtin.load/1` takes the same config map and returns the same resolved list; Elixir
-just does not split "select" out as its own named function the way the other ports do.
-</Aside>
-
 ## See also
 
 - [`create_builtin_tools`](/api/python/builtins/create/) — Construct all ten unconditionally, with no config to interpret.

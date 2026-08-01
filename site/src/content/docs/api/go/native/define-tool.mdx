@@ -281,18 +281,6 @@ Return mapping:
 | `("text", nil)` | `{Output: "text", IsError: false}` |
 | `("", err)` | `{Output: err.Error(), IsError: true}` — and `Execute`'s own error stays `nil` |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `defineTool` | [→](/api/javascript/native/define-tool/) |
-| Python | `define_tool` | [→](/api/python/native/define-tool/) |
-| Java | `NativeTool.of` | [→](/api/java/native/define-tool/) |
-| C# | `NativeTool.Of` | [→](/api/csharp/native/define-tool/) |
-| Elixir | `Toolnexus.Native.define_tool` | [→](/api/elixir/native/define-tool/) |
-
-Same four inputs, same result mapping, same emitted schema in every port.
-
 ## See also
 
 - [`NativeToolReflect`](/api/go/native/reflect/) — derive the schema from a struct instead

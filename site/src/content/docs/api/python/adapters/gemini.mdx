@@ -166,19 +166,6 @@ declarations, and omit `tools` from the request body entirely when there are non
 | `…[]["description"]` | `Tool.description` | |
 | `…[]["parameters"]` | `Tool.input_schema` | Renamed — `input_schema` → `parameters`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `toGemini` | [→](/api/javascript/adapters/gemini/) |
-| Go | `ToGemini` | [→](/api/go/adapters/gemini/) |
-| Java | `Adapters.toGemini` | [→](/api/java/adapters/gemini/) |
-| C# | `Adapters.ToGemini` | [→](/api/csharp/adapters/gemini/) |
-| Elixir | `Toolnexus.Adapters.to_gemini` | [→](/api/elixir/adapters/gemini/) |
-
-Output is byte-identical across ports for the same tools — including the single-wrapper shape for an
-empty list. That is a §0 conformance obligation.
-
 ## See also
 
 - [`to_openai`](/api/python/adapters/openai/) · [`to_anthropic`](/api/python/adapters/anthropic/)

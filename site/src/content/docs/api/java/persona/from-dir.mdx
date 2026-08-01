@@ -218,26 +218,6 @@ public class Example {
 | `AgentSpec.tools` | `List<Tool>` | Preserved and extended with the memory tool, not replaced. |
 | `Agent.run(rtOpts, prompt)` | `TaskResult` | One-shot: build a runtime, run to completion, tear down. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `fromDir` | [→](/api/javascript/persona/from-dir/) |
-| Python | `agent_from_dir` | [→](/api/python/persona/from-dir/) |
-| Go | `FromDir` | [→](/api/go/persona/from-dir/) |
-| C# | `Home.FromDir` | [→](/api/csharp/persona/from-dir/) |
-| Elixir | `Toolnexus.Agents.Home.from_dir` | [→](/api/elixir/persona/from-dir/) |
-
-<Aside type="note" title="Verified symbol">
-The real Java symbol is `Agents.agentFromDir` (a static method on
-[`io.github.muthuishere.toolnexus.agents.Agents`](https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/agents/Agents.java)) —
-not `A2A.agentFromDir`. Java's `A2A` class is the §7A/§7B outbound/inbound A2A-agent surface and
-has no persona methods.
-</Aside>
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Agents.composeSoul`](/api/java/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.

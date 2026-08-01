@@ -176,18 +176,6 @@ parallel calls to the same tool.
 | `[]["description"]` | `Tool.description` | What the model reads to decide whether to call it. |
 | `[]["input_schema"]` | `Tool.input_schema` | Copied under the same key — no rename. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `toAnthropic` | [→](/api/javascript/adapters/anthropic/) |
-| Go | `ToAnthropic` | [→](/api/go/adapters/anthropic/) |
-| Java | `Adapters.toAnthropic` | [→](/api/java/adapters/anthropic/) |
-| C# | `Adapters.ToAnthropic` | [→](/api/csharp/adapters/anthropic/) |
-| Elixir | `Toolnexus.Adapters.to_anthropic` | [→](/api/elixir/adapters/anthropic/) |
-
-Output is byte-identical across ports for the same tools — that is a §0 conformance obligation.
-
 ## See also
 
 - [`to_openai`](/api/python/adapters/openai/) · [`to_gemini`](/api/python/adapters/gemini/)

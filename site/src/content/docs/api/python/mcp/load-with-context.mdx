@@ -181,25 +181,6 @@ asyncio.run(main())
 
 Same `McpSource` as [`load_mcp`](/api/python/mcp/load/) — `tools`, `status`, `close()`.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `loadMcp` | [→](/api/javascript/mcp/load-with-context/) |
-| Go | `LoadMcpWithContext` | [→](/api/go/mcp/load-with-context/) |
-| Java | `McpSource.loadWith` | [→](/api/java/mcp/load-with-context/) |
-| C# | `McpSource.LoadAsync` | [→](/api/csharp/mcp/load-with-context/) |
-| Elixir | `Toolnexus.Mcp.load` | [→](/api/elixir/mcp/load-with-context/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
-<Aside type="note" title="JavaScript folds cancellation into loadMcp itself">
-JS does not expose a separate `loadMcpWithContext` — its single `loadMcp` already accepts an
-`AbortSignal`. Python, Go, Java and C# split the ctx-aware variant out as its own entry point;
-the underlying bound (per-server timeout + whole-load cancel) is the same contract.
-</Aside>
-
 ## See also
 
 - [`load_mcp`](/api/python/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.

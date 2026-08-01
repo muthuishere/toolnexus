@@ -244,19 +244,6 @@ public class Example {
 | `Options.store(v)` | — | Wire a custom store into the client; `null` ⇒ the default in-memory store. |
 | `client.conversationStore()` | `ConversationStore` | The exact instance in use — yours, or the default the client created. Read/write it directly to share state with `ask`/`stream`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `InMemoryConversationStore` | [→](/api/javascript/client/store/) |
-| Python | `InMemoryConversationStore` | [→](/api/python/client/store/) |
-| Go | `NewInMemoryConversationStore` | [→](/api/go/client/store/) |
-| C# | `LlmClient.IConversationStore` | [→](/api/csharp/client/store/) |
-| Elixir | `Toolnexus.Client.InMemoryConversationStore` | [→](/api/elixir/client/store/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`LlmClient.create`](/api/java/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

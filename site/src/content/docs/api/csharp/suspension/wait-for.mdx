@@ -301,19 +301,6 @@ you risk deadlocking the client's own async call chain.
 |---|---|---|
 | `WaitFor` | `Func<Request, Task<Answer>>?` | Called once per suspension. `null` ⇒ the run halts with `Status = "pending"` instead of resolving inline. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `waitFor` | [→](/api/javascript/suspension/wait-for/) |
-| Python | `WaitFor` | [→](/api/python/suspension/wait-for/) |
-| Go | `WaitFor` | [→](/api/go/suspension/wait-for/) |
-| Java | `LlmClient.waitFor` | [→](/api/java/suspension/wait-for/) |
-| Elixir | `Toolnexus.Client.create` | [→](/api/elixir/suspension/wait-for/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`ToolResult.Pending`](/api/csharp/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.

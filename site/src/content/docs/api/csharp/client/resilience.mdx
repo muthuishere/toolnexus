@@ -365,22 +365,6 @@ only ever sees a completed non-2xx response or a transport-level throw.
 | `RetryBaseMs` | `int?` | `500` | Backoff base for `baseMs * 2^attempt + jitter`, unless a `Retry-After` header says otherwise. |
 | `TimeoutMs` | `long?` | `null` (none) | Whole-run deadline; exceeding it throws `RunTimeoutException`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `ErrorInfo` | [→](/api/javascript/client/resilience/) |
-| Python | `ErrorClassifier` | [→](/api/python/client/resilience/) |
-| Go | `ErrorInfo` | [→](/api/go/client/resilience/) |
-| Java | `LlmClient.ErrorInfo` | [→](/api/java/client/resilience/) |
-| Elixir | `Toolnexus.Client.create` | [→](/api/elixir/client/resilience/) |
-
-Elixir configures retries/timeout as options on `Toolnexus.Client.create/1` rather than a distinct
-error-classifier type.
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`LlmClient.Create`](/api/csharp/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

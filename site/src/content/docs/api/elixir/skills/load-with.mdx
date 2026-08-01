@@ -162,22 +162,6 @@ IO.puts("ok: all=#{length(all.skills)} allow=#{length(allow.skills)} drop=#{leng
 | `:provider` | `nil` | A 0-arity function returning a list in the same shape as `:skills`, resolved exactly once. A raise, or a non-list return, is isolated with a stderr warning — the rest of the source still loads. |
 | `:filter` | `nil` | `%{name => boolean}`. `nil`/`%{}` means all. If any value is `true`, the filter is an allowlist (only `true` names survive); otherwise it's a droplist (only `false` names are dropped). A name that matches no skill logs a warning. Identical semantics to the MCP `tools` filter and the builtins `tools` toggle map. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `loadSkills` | [→](/api/javascript/skills/load-with/) |
-| Python | `load_skills` | [→](/api/python/skills/load-with/) |
-| Go | `LoadSkillsWith` | [→](/api/go/skills/load-with/) |
-| Java | `SkillSource.loadWith` | [→](/api/java/skills/load-with/) |
-| C# | `SkillSource.LoadWith` | [→](/api/csharp/skills/load-with/) |
-
-<Aside type="note" title="Elixir collapses load + loadWith into one function">
-Other ports expose a separate `loadWith`-style entry point for data/provider/filter; Elixir's
-`Skill.load/1` accepts all of it through the same options map as `:dirs` — there is nothing extra
-to import or call.
-</Aside>
-
 ## See also
 
 - [`Toolnexus.Skill.load`](/api/elixir/skills/load/) — the directory-sourced form and the `skill` tool shape

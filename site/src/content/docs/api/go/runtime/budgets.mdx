@@ -268,19 +268,6 @@ Any limit stop ⇒ `TaskResult{Status: "incomplete", ...}` with the limit named 
 silent, never a crash. Turn-level and spawn-level refusals are always immediate; pooled resources
 apply to the WHOLE subtree, not just the handle they were set on.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agents.Budget` | [→](/api/javascript/runtime/budgets/) |
-| Python | `Budget` | [→](/api/python/runtime/budgets/) |
-| Java | `agents.Budget` | [→](/api/java/runtime/budgets/) |
-| C# | `Budget` | [→](/api/csharp/runtime/budgets/) |
-| Elixir | `Toolnexus.Agents budget` | [→](/api/elixir/runtime/budgets/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`agents.New`](/api/go/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.

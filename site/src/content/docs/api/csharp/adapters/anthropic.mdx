@@ -175,18 +175,6 @@ it a second time. You send the answer back as a `tool_result` content block carr
 
 There is no wrapper key and no wrapper entry: an empty tool list produces an empty list.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `toAnthropic` | [→](/api/javascript/adapters/anthropic/) |
-| Python | `to_anthropic` | [→](/api/python/adapters/anthropic/) |
-| Go | `ToAnthropic` | [→](/api/go/adapters/anthropic/) |
-| Java | `Adapters.toAnthropic` | [→](/api/java/adapters/anthropic/) |
-| Elixir | `Toolnexus.Adapters.to_anthropic` | [→](/api/elixir/adapters/anthropic/) |
-
-Output is byte-identical across ports for the same tools — that is a §0 conformance obligation.
-
 ## See also
 
 - [`Adapters.ToOpenAI`](/api/csharp/adapters/openai/) · [`Adapters.ToGemini`](/api/csharp/adapters/gemini/)

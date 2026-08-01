@@ -202,19 +202,6 @@ public class Example {
 | `tools/call` | — | Dispatches to `Tool.execute`; a throw becomes `isError:true`, never crashes the server. |
 | `OnCall` | functional interface | `accept(OnCallEvent{name, source, ms, isError})` per inbound `tools/call`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `buildMcpServer` | [→](/api/javascript/serve/mcp/) |
-| Python | `build_mcp_server` | [→](/api/python/serve/mcp/) |
-| Go | `ExposedMcpTools` | [→](/api/go/serve/mcp/) |
-| C# | `McpServe.BuildMcpServer` | [→](/api/csharp/serve/mcp/) |
-| Elixir | `Toolnexus.McpServe.exposed_tools` | [→](/api/elixir/serve/mcp/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`A2AServer.start`](/api/java/serve/a2a/) — the sibling inbound profile: skills over A2A, with a model in the loop.

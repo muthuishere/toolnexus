@@ -122,19 +122,6 @@ only ever *removes* tools. To keep just one or two built-ins, filter the result 
 | `cfg.disabled` | `boolean` | `true` turns every built-in off — takes precedence over `enabled`. |
 | `cfg.tools` | `Record<string, boolean>` | Drop-list over the all-on default: `false` removes that tool by name; unknown names are ignored. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `select_builtins` | [→](/api/python/builtins/select/) |
-| Go | `SelectBuiltins` | [→](/api/go/builtins/select/) |
-| Java | `BuiltinTools.select` | [→](/api/java/builtins/select/) |
-| C# | `BuiltinTools.Select` | [→](/api/csharp/builtins/select/) |
-| Elixir | `Toolnexus.Builtin.load` | [→](/api/elixir/builtins/select/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`createBuiltinTools`](/api/javascript/builtins/create/) — Construct every built-in tool directly, outside a toolkit.

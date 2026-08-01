@@ -186,18 +186,6 @@ the `tool_result` block so the model reads the failure text and can correct itse
 
 There is no `"type"` key and no nesting: an Anthropic tool entry has exactly these three keys.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `toAnthropic` | [→](/api/javascript/adapters/anthropic/) |
-| Python | `to_anthropic` | [→](/api/python/adapters/anthropic/) |
-| Go | `ToAnthropic` | [→](/api/go/adapters/anthropic/) |
-| Java | `Adapters.toAnthropic` | [→](/api/java/adapters/anthropic/) |
-| C# | `Adapters.ToAnthropic` | [→](/api/csharp/adapters/anthropic/) |
-
-Output is byte-identical across ports for the same tools — that is a §0 conformance obligation.
-
 ## See also
 
 - [`Adapters.to_openai`](/api/elixir/adapters/openai/) · [`Adapters.to_gemini`](/api/elixir/adapters/gemini/)

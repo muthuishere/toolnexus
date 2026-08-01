@@ -182,19 +182,6 @@ const tk = await createToolkit({
 | `serve(addr, opts)` | `Promise<ServeHandle>` | Expose this toolkit as an A2A agent or MCP server. |
 | `close()` | `Promise<void>` | Shut down every MCP server. **Always call it.** |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `create_toolkit` | [→](/api/python/toolkit/create/) |
-| Go | `CreateToolkit` | [→](/api/go/toolkit/create/) |
-| Java | `Toolkit.create` | [→](/api/java/toolkit/create/) |
-| C# | `Toolkit.CreateAsync` | [→](/api/csharp/toolkit/create/) |
-| Elixir | `Toolnexus.create_toolkit` | [→](/api/elixir/toolkit/create/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output. See
-[SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`loadMcp`](/api/javascript/mcp/load/) — the MCP source on its own

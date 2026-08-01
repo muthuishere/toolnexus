@@ -234,19 +234,6 @@ public class Example {
 | `ServeHandle.url()` / `.stop()` / `.close()` | — | Base URL; `close()` aliases `stop()`. |
 | `a2a` absent | — | No A2A routes mount; every request 404s (unless `mcp` is also configured). |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `startA2AServer` | [→](/api/javascript/serve/a2a/) |
-| Python | `Toolkit.serve` | [→](/api/python/serve/a2a/) |
-| Go | `Toolkit.Serve` | [→](/api/go/serve/a2a/) |
-| C# | `A2AServer.StartAsync` | [→](/api/csharp/serve/a2a/) |
-| Elixir | `Toolnexus.Serve.start` | [→](/api/elixir/serve/a2a/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`A2AServer.buildAgentCard`](/api/java/serve/agent-card/) — the card-building logic behind `GET /.well-known/agent-card.json`.

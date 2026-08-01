@@ -225,19 +225,6 @@ token/call/wall/children ceiling.
 | `MaxConcurrent` | `int?` | `8` | Children of this handle allowed to run a turn simultaneously (excess wakes queue FIFO). |
 | `MaxDepth` | `int?` | `3` | How many spawn levels deep this handle's subtree may go. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agents.Budget` | [→](/api/javascript/runtime/budgets/) |
-| Python | `Budget` | [→](/api/python/runtime/budgets/) |
-| Go | `agents.Budget` | [→](/api/go/runtime/budgets/) |
-| Java | `agents.Budget` | [→](/api/java/runtime/budgets/) |
-| Elixir | `Toolnexus.Agents budget` | [→](/api/elixir/runtime/budgets/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Agent`](/api/csharp/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.

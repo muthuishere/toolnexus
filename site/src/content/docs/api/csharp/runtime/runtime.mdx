@@ -234,19 +234,6 @@ rejections.
 | `Clock` | `TimeProvider?` | Injectable clock for every timer/timeout; `null` ⇒ the system clock. |
 | `BaseUrl` / `Style` / `Model` / `ApiKey` | — | LLM endpoint defaults; a def's `Model == "inherit"` resolves to `Model` here. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agents.AgentRuntime` | [→](/api/javascript/runtime/runtime/) |
-| Python | `AgentRuntime` | [→](/api/python/runtime/runtime/) |
-| Go | `NewRuntime` | [→](/api/go/runtime/runtime/) |
-| Java | `agents.Runtime` | [→](/api/java/runtime/runtime/) |
-| Elixir | `Toolnexus.Agents.Runtime` | [→](/api/elixir/runtime/runtime/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Agent`](/api/csharp/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.

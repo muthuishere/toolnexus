@@ -162,19 +162,6 @@ console.log("ok: unreachable peer isolated")
 An `Agent` descriptor — `{ card, headers?, timeout?, pollEvery? }` — the same shape accepted by
 `createToolkit({ agents })`, `toolkit.addAgent()`, and `agentTools()`. Nothing has connected yet.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `agent` | [→](/api/python/agents/agent/) |
-| Go | `agents.New` | [→](/api/go/agents/agent/) |
-| Java | `A2A.agent` | [→](/api/java/agents/agent/) |
-| C# | `A2A.Agent` | [→](/api/csharp/agents/agent/) |
-| Elixir | `Toolnexus.A2a.agent` | [→](/api/elixir/agents/agent/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`agentTools`](/api/javascript/agents/agent-tools/) — Expand a remote agent card into one tool per advertised skill.

@@ -296,26 +296,6 @@ sealed class MockLlm : System.Net.Http.HttpMessageHandler
 | `answer` | `Answer` | Must echo the `Id` of the pending `Request` — routed to the deepest suspended handle. |
 | returns | `Task` | Call `rt.WaitAsync(handle)` afterward for the finished `AgentResult`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `AgentRuntime.resume` | [→](/api/javascript/suspension/resume/) |
-| Python | `AgentRuntime.resume` | [→](/api/python/suspension/resume/) |
-| Go | `Runtime.Resume` | [→](/api/go/suspension/resume/) |
-| Java | `AgentRuntime.resume` | [→](/api/java/suspension/resume/) |
-| Elixir | `Toolnexus.Agents.Runtime.resume` | [→](/api/elixir/suspension/resume/) |
-
-<Aside type="note" title="Go additionally ships a durable, cross-restart resume (preview)">
-Go alone also has `Client.RunWithAnswer`/`Client.AskWithAnswer` — a separate, golang-only §10
-preview for resuming a **bare-client** run across a process restart, not the §7D sub-agent
-mechanism this page covers. See Go's own page and
-[`suspension/relay`](/api/csharp/suspension/relay/).
-</Aside>
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Handle`](/api/csharp/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.

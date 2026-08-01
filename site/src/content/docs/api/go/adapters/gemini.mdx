@@ -249,19 +249,6 @@ func main() {
 | `[0].functionDeclarations[].description` | `Tool.Description` | |
 | `[0].functionDeclarations[].parameters` | `Tool.InputSchema` | Renamed — `inputSchema` → `parameters`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `toGemini` | [→](/api/javascript/adapters/gemini/) |
-| Python | `to_gemini` | [→](/api/python/adapters/gemini/) |
-| Java | `Adapters.toGemini` | [→](/api/java/adapters/gemini/) |
-| C# | `Adapters.ToGemini` | [→](/api/csharp/adapters/gemini/) |
-| Elixir | `Toolnexus.Adapters.to_gemini` | [→](/api/elixir/adapters/gemini/) |
-
-Output is byte-identical across ports for the same tools — that is a §0 conformance obligation,
-including the single-wrapper shape.
-
 ## See also
 
 - [`ToOpenAI`](/api/go/adapters/openai/) · [`ToAnthropic`](/api/go/adapters/anthropic/)

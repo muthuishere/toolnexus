@@ -153,19 +153,6 @@ print("ok:", card["version"], card["provider"]["organization"])
 | `capabilities.streaming` | `False` (fixed — no streaming in core) |
 | `provider` | omitted entirely unless `cfg["provider"]` is set |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `buildAgentCard` | [→](/api/javascript/serve/agent-card/) |
-| Go | `BuildAgentCard` | [→](/api/go/serve/agent-card/) |
-| Java | `A2AServer.buildAgentCard` | [→](/api/java/serve/agent-card/) |
-| C# | `A2AServer.BuildAgentCard` | [→](/api/csharp/serve/agent-card/) |
-| Elixir | `Toolnexus.Serve.build_agent_card` | [→](/api/elixir/serve/agent-card/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolkit.serve`](/api/python/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.

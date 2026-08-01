@@ -142,19 +142,6 @@ IO.puts("ok: filtered to #{length(served["skills"])} of 2 skills, matching build
 | `:provider` | omitted | `%{organization, url}` — included only when set. |
 | `:skills` | all | A list of skill names to filter the card's `skills[]` to. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `buildAgentCard` | [→](/api/javascript/serve/agent-card/) |
-| Python | `build_agent_card` | [→](/api/python/serve/agent-card/) |
-| Go | `BuildAgentCard` | [→](/api/go/serve/agent-card/) |
-| Java | `A2AServer.buildAgentCard` | [→](/api/java/serve/agent-card/) |
-| C# | `A2AServer.BuildAgentCard` | [→](/api/csharp/serve/agent-card/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Serve.start`](/api/elixir/serve/a2a/) — publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.

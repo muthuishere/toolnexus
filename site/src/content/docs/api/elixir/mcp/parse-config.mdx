@@ -181,21 +181,6 @@ IO.puts("ok: #{Enum.join(good_enabled, ",")} | problems: #{length(bad_problems)}
 
 Wrapped under `mcpServers`, `servers` or `mcp` — all three are unwrapped.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `parseMcpConfig` | [→](/api/javascript/mcp/parse-config/) |
-| Python | `parse_mcp_config` | [→](/api/python/mcp/parse-config/) |
-| Go | `ParseMcpConfig` | [→](/api/go/mcp/parse-config/) |
-| Java | _not shipped in this port_ | [→](/api/java/mcp/parse-config/) |
-| C# | `McpSource.ParseConfig` | [→](/api/csharp/mcp/parse-config/) |
-
-<Aside type="note" title="Error convention differs">
-Elixir raises (from `Jason.decode!/1` or `File.read!/1`), as do JavaScript, Python and C#. Go
-returns `(McpConfig, error)`. Java exposes no public parser at all.
-</Aside>
-
 ## See also
 
 - [`Toolnexus.Mcp.load`](/api/elixir/mcp/load/) — parse *and* connect

@@ -237,19 +237,6 @@ asyncio.run(main())
 | `count_tokens` | `(messages) -> int \| None` | Token estimator. Default [`estimate_tokens`](https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/agents/compaction.py) (`ceil(chars/4)`, an estimate, not a real tokenizer). |
 | `flush_to_memory` | `bool` | Inject a pre-compact system reminder to persist durable facts via the §7E `memory` tool. Default off. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `compactor` | [→](/api/javascript/compaction/compactor/) |
-| Go | `Compactor` | [→](/api/go/compaction/compactor/) |
-| Java | `Compaction.compactor` | [→](/api/java/compaction/compactor/) |
-| C# | `Compaction.Compactor` | [→](/api/csharp/compaction/compactor/) |
-| Elixir | `Toolnexus.Agents.Compaction.compactor` | [→](/api/elixir/compaction/compactor/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Hooks`](/api/python/client/hooks/) — The `before_llm`/`after_llm`/`before_tool`/`after_tool` seams a compactor rides.

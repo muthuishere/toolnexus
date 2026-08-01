@@ -332,19 +332,6 @@ message — `HttpTool` never throws out of `ExecuteAsync`.
 Argument routing, in order: URL placeholders first, then query names (or everything, for GET), and
 whatever remains becomes the body. `GET` and `HEAD` never send a body.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `httpTool` | [→](/api/javascript/http/tool/) |
-| Python | `http_tool` | [→](/api/python/http/tool/) |
-| Go | `HTTPTool` | [→](/api/go/http/tool/) |
-| Java | `HttpTool.of` | [→](/api/java/http/tool/) |
-| Elixir | `Toolnexus.Http.tool` | [→](/api/elixir/http/tool/) |
-
-Argument routing, `${ENV}` expansion and the `HTTP <status>: <body>` error string are identical in
-every port — a §0 conformance obligation.
-
 ## See also
 
 - [`NativeTool.Of`](/api/csharp/native/define-tool/) — when the call needs logic around it

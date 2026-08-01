@@ -192,19 +192,6 @@ IO.puts("ok: an Agent, called through the classic client API like any other tool
 | `:on_spawn` / `:on_close` | functions | Lifecycle callbacks. |
 | `:hooks` / `:on_metric` | §8 seams | Per-agent — replaces the runtime-wide value, never merged. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agents.Agent` | [→](/api/javascript/runtime/agent/) |
-| Python | `Agent` | [→](/api/python/runtime/agent/) |
-| Go | `agents.New` | [→](/api/go/runtime/agent/) |
-| Java | `agents.Agent` | [→](/api/java/runtime/agent/) |
-| C# | `Agent` | [→](/api/csharp/runtime/agent/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Agents.Runtime`](/api/elixir/runtime/runtime/) — the six host verbs that drive sub-agents, plus the read-only list and inspect views.

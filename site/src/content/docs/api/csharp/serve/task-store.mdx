@@ -194,19 +194,6 @@ this only matters if you construct/save Tasks with your own ids directly against
 | `SaveAsync(A2ATask task)` | Atomic write — a temp file, then an overwrite move — so readers never see a partial file. |
 | `A2AServer.ResolveStore(object? store)` | What `StartAsync` calls: `null`/`"memory"` ⇒ `InMemoryTaskStore`; `"file:<dir>"` ⇒ `FileTaskStore`; an `ITaskStore` ⇒ used as-is. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `FileTaskStore` | [→](/api/javascript/serve/task-store/) |
-| Python | `FileTaskStore` | [→](/api/python/serve/task-store/) |
-| Go | `NewFileTaskStore` | [→](/api/go/serve/task-store/) |
-| Java | `A2AServer.FileTaskStore` | [→](/api/java/serve/task-store/) |
-| Elixir | `Toolnexus.Serve task_store` | [→](/api/elixir/serve/task-store/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`A2AServer.Start`](/api/csharp/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.

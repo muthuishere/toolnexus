@@ -161,18 +161,6 @@ the shapes your tool expects.
 | `[]["function"]["description"]` | `ITool.Description` | |
 | `[]["function"]["parameters"]` | `ITool.InputSchema` | Renamed — `InputSchema` → `parameters`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `toOpenAI` | [→](/api/javascript/adapters/openai/) |
-| Python | `to_openai` | [→](/api/python/adapters/openai/) |
-| Go | `ToOpenAI` | [→](/api/go/adapters/openai/) |
-| Java | `Adapters.toOpenAI` | [→](/api/java/adapters/openai/) |
-| Elixir | `Toolnexus.Adapters.to_openai` | [→](/api/elixir/adapters/openai/) |
-
-Output is byte-identical across ports for the same tools — that is a §0 conformance obligation.
-
 ## See also
 
 - [`Adapters.ToAnthropic`](/api/csharp/adapters/anthropic/) · [`Adapters.ToGemini`](/api/csharp/adapters/gemini/)

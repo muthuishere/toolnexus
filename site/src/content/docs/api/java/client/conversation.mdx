@@ -214,19 +214,6 @@ public class Example {
 | `conv.messages()` | `List<Object>` | The full running transcript — same value as the last `RunResult.messages`. |
 | `conv.reset()` | `void` | Clears the transcript; the next `send()` starts a brand-new conversation. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `Conversation` | [→](/api/javascript/client/conversation/) |
-| Python | `Conversation` | [→](/api/python/client/conversation/) |
-| Go | `Conversation` | [→](/api/go/client/conversation/) |
-| C# | `LlmClient.Conversation` | [→](/api/csharp/client/conversation/) |
-| Elixir | `Toolnexus.Client conversation` | [→](/api/elixir/client/conversation/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`LlmClient.create`](/api/java/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

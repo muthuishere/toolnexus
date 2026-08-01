@@ -47,16 +47,6 @@ and guards don't carry the kind of static type information reflection would need
 are hand-writing more than a handful of these, factor the schema into a module attribute or a
 shared helper rather than repeating it inline.
 
-## The same capability in the other ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `tool` | [→](/api/javascript/native/reflect/) |
-| Python | `tool` | [→](/api/python/native/reflect/) |
-| Go | `NativeToolReflect` | [→](/api/go/native/reflect/) |
-| Java | `@Tool annotation` | [→](/api/java/native/reflect/) |
-| C# | `ToolMethodAttribute` | [→](/api/csharp/native/reflect/) |
-
 ## See also
 
 - [`Toolnexus.Native.define_tool`](/api/elixir/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.

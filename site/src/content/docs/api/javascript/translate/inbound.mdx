@@ -129,25 +129,6 @@ console.log("ok:", system, "|", tools[0].name, "|", choice)
 | returns `.messages` | `any[]` | Anthropic-native messages: `tool_use`/`tool_result` content blocks, tool results merged. |
 | returns `.system` | `string` | `system`/`developer` messages hoisted out and joined. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `openai_messages_to_anthropic` | [→](/api/python/translate/inbound/) |
-| Go | _not shipped in this port_ |  |
-| Java | `Translate.openAIMessagesToAnthropic` | [→](/api/java/translate/inbound/) |
-| C# | `Translate.OpenAIMessagesToAnthropic` | [→](/api/csharp/translate/inbound/) |
-| Elixir | `Toolnexus.Translate.openai_messages_to_anthropic` | [→](/api/elixir/translate/inbound/) |
-
-<Aside type="note" title="Go keeps this unexported">
-Go's inbound conversion (`golang/translate.go:283`) exists but is unexported — reachable only
-through `Translate` itself, not called directly. The other five ports export it standalone, as
-this page does.
-</Aside>
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`translate`](/api/javascript/translate/translate/) — Uses this internally on the Anthropic path; most callers want that instead of calling this directly.

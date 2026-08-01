@@ -200,21 +200,6 @@ sealed class EndpointTool : ITool
 | `Source` | `string` | One of `mcp`, `skill`, `native`, `http`, `a2a`, `custom`. |
 | `ExecuteAsync(args, ctx?)` | `Task<ToolResult>` | Runs the tool. `ctx` defaults to `null`. |
 
-## The same type in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `Tool` | [→](/api/javascript/types/tool/) |
-| Python | `Tool` | [→](/api/python/types/tool/) |
-| Go | `Tool` | [→](/api/go/types/tool/) |
-| Java | `Tool` | [→](/api/java/types/tool/) |
-| Elixir | `Toolnexus.Tool` | [→](/api/elixir/types/tool/) |
-
-<Aside type="note" title="C# is the only port that prefixes the I">
-The type is `ITool` here, following .NET naming, and `ExecuteAsync` carries the `Async` suffix. Both
-are naming conventions only — the contract is identical to the other five ports.
-</Aside>
-
 ## See also
 
 - [`ToolResult`](/api/csharp/types/tool-result/) — what `ExecuteAsync` returns

@@ -171,19 +171,6 @@ func main() {
 | `input` | `any` | Anything [`ParseMcpConfig`](/api/go/mcp/parse-config/) accepts. |
 | `waitFor` | `...func(Request) (Answer, error)` | Optional (variadic) host resolver for MCP elicitation (§10). |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `loadMcp` | [→](/api/javascript/mcp/load-with-context/) |
-| Python | `load_mcp_with_context` | [→](/api/python/mcp/load-with-context/) |
-| Java | `McpSource.loadWith` | [→](/api/java/mcp/load-with-context/) |
-| C# | `McpSource.LoadAsync` | [→](/api/csharp/mcp/load-with-context/) |
-| Elixir | `Toolnexus.Mcp.load` | [→](/api/elixir/mcp/load-with-context/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`LoadMcp`](/api/go/mcp/load/) — the `context.Background()`-bound entry point this delegates to.

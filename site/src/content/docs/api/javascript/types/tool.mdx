@@ -166,22 +166,6 @@ console.log("ok:", tools.map((t) => t.name).join(", "))
 | `source` | `ToolSource` | One of `mcp`, `skill`, `builtin`, `native`, `http`, `a2a`, `custom`. |
 | `execute` | `(args, ctx?) => Promise<ToolResult>` | Runs the tool. `ctx` is optional — guard it. |
 
-## The same type in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `Tool` | [→](/api/python/types/tool/) |
-| Go | `Tool` | [→](/api/go/types/tool/) |
-| Java | `Tool` | [→](/api/java/types/tool/) |
-| C# | `ITool` | [→](/api/csharp/types/tool/) |
-| Elixir | `Toolnexus.Tool` | [→](/api/elixir/types/tool/) |
-
-<Aside type="note" title="Shape differs, behavior does not">
-JavaScript's `execute` returns a `Promise<ToolResult>`. Go returns `(ToolResult, error)` and Java
-returns `ToolResult` directly — each port uses its own error convention. The *contract* is the
-same: a failed tool reports `isError`, it does not blow up the loop.
-</Aside>
-
 ## See also
 
 - [`ToolResult`](/api/javascript/types/tool-result/) — what `execute` returns

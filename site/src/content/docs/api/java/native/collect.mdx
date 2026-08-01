@@ -176,20 +176,6 @@ public class Example {
 | Unannotated methods | — | Silently skipped — never collected, never an error. |
 | Binding | — | Each returned `Tool.execute` invokes the method against the **same** `target` instance passed in. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `collectTools` | [→](/api/javascript/native/collect/) |
-| Python | _not shipped in this port_ |  |
-| Go | _not shipped in this port_ |  |
-| C# | `Tools.FromObject` | [→](/api/csharp/native/collect/) |
-| Elixir | _not shipped in this port_ |  |
-
-JS/Java/C# expose an explicit collector; Python, Go and Elixir have no equivalent public symbol
-— those ports build tools individually instead. Behavior (schema inference, skip-if-unannotated)
-matches wherever the capability exists. See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`@ToolMethod annotation`](/api/java/native/reflect/) — what marks a method as collectible, and how its schema is inferred.

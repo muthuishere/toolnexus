@@ -195,18 +195,6 @@ teaches the model the wrong thing about its own call, and it will not correct it
 
 There is no `type` key and no `function` wrapper — that is the OpenAI shape.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `toAnthropic` | [→](/api/javascript/adapters/anthropic/) |
-| Python | `to_anthropic` | [→](/api/python/adapters/anthropic/) |
-| Go | `ToAnthropic` | [→](/api/go/adapters/anthropic/) |
-| C# | `Adapters.ToAnthropic` | [→](/api/csharp/adapters/anthropic/) |
-| Elixir | `Toolnexus.Adapters.to_anthropic` | [→](/api/elixir/adapters/anthropic/) |
-
-Output is byte-identical across ports for the same tools — that is a §0 conformance obligation.
-
 ## See also
 
 - [`Adapters.toOpenAI`](/api/java/adapters/openai/) — the nested `{"type":"function"}` shape

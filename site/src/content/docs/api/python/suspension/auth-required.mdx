@@ -207,19 +207,6 @@ asyncio.run(main())
 | `prompt` | Your `prompt`, or the default `"Authorization required to continue"`. |
 | `id` | Generated. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `authRequired` | [→](/api/javascript/suspension/auth-required/) |
-| Go | `AuthRequired` | [→](/api/go/suspension/auth-required/) |
-| Java | `Request.authRequired` | [→](/api/java/suspension/auth-required/) |
-| C# | `Suspension.AuthRequired` | [→](/api/csharp/suspension/auth-required/) |
-| Elixir | _not shipped in this port_ — build `%ToolResult{metadata: %{pending: %Request{}}}` by hand. |  |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`pending`](/api/python/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.

@@ -214,19 +214,6 @@ asyncio.run(main())
 | `messages` | `list[dict]` | Anthropic-native messages: `tool_use`/`tool_result` blocks, consecutive results merged. |
 | `system` | `str` | The hoisted, joined `system`/`developer` content (`""` if none present). |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `openAIMessagesToAnthropic` | [→](/api/javascript/translate/inbound/) |
-| Go | _not shipped in this port_ — kept unexported (`golang/translate.go:283`); reachable only through `Translate`. |  |
-| Java | `Translate.openAIMessagesToAnthropic` | [→](/api/java/translate/inbound/) |
-| C# | `Translate.OpenAIMessagesToAnthropic` | [→](/api/csharp/translate/inbound/) |
-| Elixir | `Toolnexus.Translate.openai_messages_to_anthropic` | [→](/api/elixir/translate/inbound/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`translate`](/api/python/translate/translate/) — Declare a toolkit to a provider and translate one request/response without executing anything or keeping state.

@@ -136,19 +136,6 @@ public class Example {
 | `McpInventory.tools()` | `Map<String, List<ToolInfo>>` | Keyed by server name; absent key for `disabled`/`failed` servers. |
 | `McpInventory.status()` | `Map<String,String>` | Per server: `connected` \| `disabled` \| `failed`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `listMcpTools` | [→](/api/javascript/mcp/list-tools/) |
-| Python | `list_mcp_tools` | [→](/api/python/mcp/list-tools/) |
-| Go | `ListMcpTools` | [→](/api/go/mcp/list-tools/) |
-| C# | `McpSource.ListMcpToolsAsync` | [→](/api/csharp/mcp/list-tools/) |
-| Elixir | `Toolnexus.Mcp.list_tools` | [→](/api/elixir/mcp/list-tools/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`McpSource.load`](/api/java/mcp/load/) — connect and keep the tools callable.

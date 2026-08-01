@@ -150,26 +150,6 @@ public class Example {
 | `ComposedSoul.found` | `List<String>` | Which bootstrap files actually contributed, in order. |
 | `Agents.BOOTSTRAP_ORDER` | `List<String>` | `AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md, HEARTBEAT.md, MEMORY.md`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `composeSoul` | [→](/api/javascript/persona/compose-soul/) |
-| Python | `compose_soul` | [→](/api/python/persona/compose-soul/) |
-| Go | `ComposeSoul` | [→](/api/go/persona/compose-soul/) |
-| C# | `Home.ComposeSoul` | [→](/api/csharp/persona/compose-soul/) |
-| Elixir | `Toolnexus.Agents.Home.compose_soul` | [→](/api/elixir/persona/compose-soul/) |
-
-<Aside type="note" title="Java's symbol lives on Agents, not a Home class">
-Java implements the whole §7E persona surface as static methods on
-[`io.github.muthuishere.toolnexus.agents.Agents`](https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/agents/Agents.java)
-— `Agents.composeSoul`, `Agents.agentFromDir`, `Agents.memoryTool` — there is no separate `Home`
-type. The code signature above is the real, verified symbol.
-</Aside>
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Agents.agentFromDir`](/api/java/persona/from-dir/) — Point at an agent home directory and get a configured agent back.

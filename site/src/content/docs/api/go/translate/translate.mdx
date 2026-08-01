@@ -248,19 +248,6 @@ func main() {
 | Hooks | `BeforeLLM`/`AfterLLM` each fire exactly once. Tool hooks never fire — no tool runs. |
 | Shared infrastructure | Retries/backoff, request-param merging, and the `llm` observability event are the same as the agent loop's. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `translate` | [→](/api/javascript/translate/translate/) |
-| Python | `translate` | [→](/api/python/translate/translate/) |
-| Java | `Translate.translate` | [→](/api/java/translate/translate/) |
-| C# | `Translate.Run` | [→](/api/csharp/translate/translate/) |
-| Elixir | `Toolnexus.Translate.translate` | [→](/api/elixir/translate/translate/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Client.Run`](/api/go/client/run/) — The stateful agent loop that executes tools, for when the caller does NOT want to own execution.

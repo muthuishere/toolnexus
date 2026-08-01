@@ -111,19 +111,6 @@ true = Enum.map(Builtin.tools(), & &1.name) == Enum.map(full, & &1.name)
 IO.puts("ok: tools/0 always #{length(full)}, load/1 narrowed to #{length(narrowed)}")
 ```
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `createBuiltinTools` | [→](/api/javascript/builtins/create/) |
-| Python | `create_builtin_tools` | [→](/api/python/builtins/create/) |
-| Go | `CreateBuiltinTools` | [→](/api/go/builtins/create/) |
-| Java | `BuiltinTools.create` | [→](/api/java/builtins/create/) |
-| C# | `BuiltinTools.Create` | [→](/api/csharp/builtins/create/) |
-
-Same ten tools, same names, same input schemas, same fixed order across every port — a §0
-conformance obligation. See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Builtin.load`](/api/elixir/builtins/select/) — the config-driven on/off and per-tool toggle

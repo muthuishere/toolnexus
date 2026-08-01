@@ -199,25 +199,6 @@ public class Example {
 | `text` | `String` | Required. The entry (`add`) or the existing substring (`replace`/`remove`). |
 | `with` | `String` | The replacement, for `action=replace`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `memoryTool` | [→](/api/javascript/persona/memory-tool/) |
-| Python | `memory_tool` | [→](/api/python/persona/memory-tool/) |
-| Go | `MemoryTool` | [→](/api/go/persona/memory-tool/) |
-| C# | `Home.MemoryTool` | [→](/api/csharp/persona/memory-tool/) |
-| Elixir | `Toolnexus.Agents.Home.memory_tool` | [→](/api/elixir/persona/memory-tool/) |
-
-<Aside type="note" title="Verified symbol">
-The real Java symbol is `Agents.memoryTool` — a static method on
-[`io.github.muthuishere.toolnexus.agents.Agents`](https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/agents/Agents.java),
-not a separate `Home` class.
-</Aside>
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Agents.composeSoul`](/api/java/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.

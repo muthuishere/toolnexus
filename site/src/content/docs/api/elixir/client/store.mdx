@@ -185,21 +185,6 @@ IO.puts("ok: seeded #{length(sent["messages"]) - 1} prior message(s) were visibl
 | `get/2` | `(store, id) -> [map()] \| nil` | Load a transcript by id, or `nil` if none exists yet. |
 | `save/3` | `(store, id, messages) -> any()` | Persist the transcript under an id. Return value is ignored. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `InMemoryConversationStore` | [→](/api/javascript/client/store/) |
-| Python | `InMemoryConversationStore` | [→](/api/python/client/store/) |
-| Go | `NewInMemoryConversationStore` | [→](/api/go/client/store/) |
-| Java | `LlmClient.ConversationStore` | [→](/api/java/client/store/) |
-| C# | `LlmClient.IConversationStore` | [→](/api/csharp/client/store/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output. Each
-language exposes the idiomatic interface shape (Elixir: a behaviour + struct dispatch; JS/Python:
-a two-method object/protocol; Go: an interface; Java/C#: an interface with async methods).
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Client.create`](/api/elixir/client/create/) — pass a custom store via `:store`.

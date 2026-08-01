@@ -197,19 +197,6 @@ other.
 | `cfg` | `MCPServeConfig?` | `Name`/`Version` for `initialize`; `Tools` narrows `tools/list` (unknown names ignored, never an error). |
 | `onCall` | `OnCall?` | Fires per inbound `tools/call` with `{name, source, ms, isError}`. Host callback errors are isolated. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `buildMcpServer` | [→](/api/javascript/serve/mcp/) |
-| Python | `build_mcp_server` | [→](/api/python/serve/mcp/) |
-| Go | `ExposedMcpTools` | [→](/api/go/serve/mcp/) |
-| Java | `McpServe.build` | [→](/api/java/serve/mcp/) |
-| Elixir | `Toolnexus.McpServe.exposed_tools` | [→](/api/elixir/serve/mcp/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`A2AServer.Start`](/api/csharp/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.

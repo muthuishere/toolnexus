@@ -325,21 +325,6 @@ asyncio.run(main())
 | `runtime` | `AgentRuntime \| None` | Set by `Agent.run()` — hold onto it to call `resume` later. |
 | `turns` / `total_tokens` | `int` | The ask() call that just completed — the resumed replay's own numbers, not a running total. Use `runtime.inspect(handle).tokens` for the handle's lifetime total. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `AgentRuntime.resume` | [→](/api/javascript/suspension/resume/) |
-| Go | `agents.Runtime.Resume` | [→](/api/go/suspension/resume/) |
-| Java | `AgentRuntime.resume` | [→](/api/java/suspension/resume/) |
-| C# | `AgentRuntime.ResumeAsync` | [→](/api/csharp/suspension/resume/) |
-| Elixir | `Toolnexus.Agents.Runtime.resume` | [→](/api/elixir/suspension/resume/) |
-
-Verified directly against each port's source (`agents/runtime.{ts,go,ex}`, `AgentRuntime.java`,
-`AgentRuntime.cs`) — the cross-language manifest's `Client.resume` naming for this entry does
-not match any of the six ports' code. Behavior is identical across ports by contract — same
-`examples/` fixtures, same output. See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`pending`](/api/python/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.

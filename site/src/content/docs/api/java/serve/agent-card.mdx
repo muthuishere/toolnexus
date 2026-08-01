@@ -176,19 +176,6 @@ public class Example {
 | card `protocolVersion` / `capabilities.streaming` | `"0.3.0"` / `false` | Fixed — this port never streams or pushes. |
 | card `url` | `String` | The JSON-RPC POST endpoint — the served base URL plus `/`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `buildAgentCard` | [→](/api/javascript/serve/agent-card/) |
-| Python | `build_agent_card` | [→](/api/python/serve/agent-card/) |
-| Go | `BuildAgentCard` | [→](/api/go/serve/agent-card/) |
-| C# | `A2AServer.BuildAgentCard` | [→](/api/csharp/serve/agent-card/) |
-| Elixir | `Toolnexus.Serve.build_agent_card` | [→](/api/elixir/serve/agent-card/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`A2AServer.start`](/api/java/serve/a2a/) — serves the card this function builds, on every request.

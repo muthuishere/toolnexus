@@ -128,19 +128,6 @@ Console.WriteLine($"ok: {string.Join(", ", inventory.Status.Keys.OrderBy(k => k)
 | `ToolInfo.Description` | `string` | |
 | `ToolInfo.InputSchema` | `IDictionary<string, object?>` | The built JSON-Schema object (same shape `LoadAsync` uses). |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `listMcpTools` | [→](/api/javascript/mcp/list-tools/) |
-| Python | `list_mcp_tools` | [→](/api/python/mcp/list-tools/) |
-| Go | `ListMcpTools` | [→](/api/go/mcp/list-tools/) |
-| Java | `McpSource.listMcpTools` | [→](/api/java/mcp/list-tools/) |
-| Elixir | `Toolnexus.Mcp.list_tools` | [→](/api/elixir/mcp/list-tools/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`McpSource.LoadAsync`](/api/csharp/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.

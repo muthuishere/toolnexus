@@ -217,19 +217,6 @@ console.log("ok:", res.text)
 → a `Tool` whose `execute` runs `.run()` and surfaces only `{ output: text, isError, metadata:
 { agent, turns, totalTokens } }` — the sub-agent's own tool calls and transcript stay private.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `Agent` | [→](/api/python/runtime/agent/) |
-| Go | `agents.New` | [→](/api/go/runtime/agent/) |
-| Java | `agents.Agent` | [→](/api/java/runtime/agent/) |
-| C# | `Agent` | [→](/api/csharp/runtime/agent/) |
-| Elixir | `Toolnexus.Agents` | [→](/api/elixir/runtime/agent/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`agents.AgentRuntime`](/api/javascript/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.

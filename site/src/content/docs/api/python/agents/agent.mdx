@@ -298,19 +298,6 @@ asyncio.run(main())
 | `timeout` | `int \| None` | Milliseconds, default `300000`. Bounds the whole SendMessage→poll→terminal cycle. |
 | `poll_every` | `int \| None` | Milliseconds between `GetTask` polls, default `1000`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agent` | [→](/api/javascript/agents/agent/) |
-| Go | `agents.New` | [→](/api/go/agents/agent/) |
-| Java | `A2A.agent` | [→](/api/java/agents/agent/) |
-| C# | `A2A.Agent` | [→](/api/csharp/agents/agent/) |
-| Elixir | `Toolnexus.A2a.agent` | [→](/api/elixir/agents/agent/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`agent_tools`](/api/python/agents/agent-tools/) — Expand a remote agent card into one tool per advertised skill.

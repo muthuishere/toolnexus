@@ -308,22 +308,6 @@ asyncio.run(main())
 | non-2xx | `"HTTP <code>: <body>"` | `True` | `{"status": <code>}` |
 | transport failure / timeout | the exception message | `True` | — |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `httpTool` | [→](/api/javascript/http/tool/) |
-| Go | `HTTPTool` | [→](/api/go/http/tool/) |
-| Java | `HttpTool.of` | [→](/api/java/http/tool/) |
-| C# | `HttpTool.Of` | [→](/api/csharp/http/tool/) |
-| Elixir | `Toolnexus.Http.tool` | [→](/api/elixir/http/tool/) |
-
-<Aside type="note" title="Timeouts are seconds here, milliseconds in JS">
-Routing, body encoding, result modes and the error shape are identical across ports. The one local
-difference is the unit of `timeout`: Python uses seconds because that is what `urllib` and
-`asyncio` use; JavaScript uses milliseconds for the same reason.
-</Aside>
-
 ## See also
 
 - [`define_tool`](/api/python/native/define-tool/) — when the call needs real logic

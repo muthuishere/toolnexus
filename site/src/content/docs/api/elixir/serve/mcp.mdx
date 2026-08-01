@@ -147,19 +147,6 @@ IO.puts("ok: filtered to #{length(source.tools)} tool(s) over real streamable-HT
 | `:version` | `"0.1.0"` | `initialize`'s `serverInfo.version`. |
 | `:tools` | all toolkit tools | Filters the exposed set by name; unknown names ignored. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `buildMcpServer` | [→](/api/javascript/serve/mcp/) |
-| Python | `build_mcp_server` | [→](/api/python/serve/mcp/) |
-| Go | `ExposedMcpTools` | [→](/api/go/serve/mcp/) |
-| Java | `McpServe.build` | [→](/api/java/serve/mcp/) |
-| C# | `McpServe.BuildMcpServer` | [→](/api/csharp/serve/mcp/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Serve.start`](/api/elixir/serve/a2a/) — publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.

@@ -133,19 +133,6 @@ IO.puts("ok: config block -> #{length(descriptors)} descriptor(s) -> live tool -
 timeout, poll_every}` — ready to pass straight to `agent_tools/1`, `create_toolkit!(agents: ...)`,
 or `Toolkit.add_agent/3`.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `parseAgentsConfig` | [→](/api/javascript/agents/parse-config/) |
-| Python | `parse_agents_config` | [→](/api/python/agents/parse-config/) |
-| Go | `ParseAgentsConfig` | [→](/api/go/agents/parse-config/) |
-| Java | `A2A.parseAgentsConfig` | [→](/api/java/agents/parse-config/) |
-| C# | `A2A.ParseAgentsConfig` | [→](/api/csharp/agents/parse-config/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.A2a.agent`](/api/elixir/agents/agent/) — point at a remote agent's card and use it exactly like a local tool.

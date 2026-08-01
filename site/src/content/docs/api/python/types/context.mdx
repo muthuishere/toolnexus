@@ -207,19 +207,6 @@ ignore `data`.
 | `timeout` | `float \| None` | This call's budget, in **seconds**. |
 | `answer` | `Answer \| None` | Present **only** on a post-`wait_for` retry — the resolution of a prior suspension. |
 
-## The same type in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `ToolContext` | [→](/api/javascript/types/context/) |
-| Go | `ToolContext` | [→](/api/go/types/context/) |
-| Java | `ToolContext` | [→](/api/java/types/context/) |
-| C# | `ToolContext` | [→](/api/csharp/types/context/) |
-| Elixir | `Toolnexus.Context` | [→](/api/elixir/types/context/) |
-
-Cancellation follows each language's convention: Python carries an advisory token, JavaScript an
-`AbortSignal`, Go a `context.Context`.
-
 ## See also
 
 - [`Tool`](/api/python/types/tool/) — what receives this

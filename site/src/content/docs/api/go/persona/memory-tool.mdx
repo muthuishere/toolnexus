@@ -215,19 +215,6 @@ func main() {
 | `replace` | Swaps the first occurrence of `text` with `with`. `IsError` if `text` is absent. | same |
 | `remove` | Deletes the first occurrence of `text`. `IsError` if `text` is absent. | same |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `memoryTool` | [→](/api/javascript/persona/memory-tool/) |
-| Python | `memory_tool` | [→](/api/python/persona/memory-tool/) |
-| Java | `Home.memoryTool` | [→](/api/java/persona/memory-tool/) |
-| C# | `Home.MemoryTool` | [→](/api/csharp/persona/memory-tool/) |
-| Elixir | `Toolnexus.Agents.Home.memory_tool` | [→](/api/elixir/persona/memory-tool/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`ComposeSoul`](/api/go/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.

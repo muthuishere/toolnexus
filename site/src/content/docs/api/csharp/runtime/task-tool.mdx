@@ -288,19 +288,6 @@ new pending type. If the child's own run halts on out-of-band input, the `task` 
 | `prompt` | The task text; together with `agent` this is the **reattachment key** — a repeat call with the same pair reuses the existing child. |
 | Result | `Text` (or `[<status>] <text>` when the child didn't finish `"done"`), `IsError` from the child, `Metadata { agent, turns, totalTokens }`. |
 
-## The same capability in the other ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agents.taskTool` | [→](/api/javascript/runtime/task-tool/) |
-| Python | _not shipped in this port_ |  |
-| Go | _not shipped in this port_ |  |
-| Java | _not shipped in this port_ |  |
-| Elixir | _not shipped in this port_ |  |
-
-Elsewhere (including C#) `task` is behavior — auto-registered whenever `Team` is set — not a
-symbol you import or construct.
-
 ## See also
 
 - [`Agent`](/api/csharp/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.

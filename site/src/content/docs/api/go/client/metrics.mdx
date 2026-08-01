@@ -250,23 +250,6 @@ func main() {
 | `Turns`, `ToolCalls`, `TotalTokens` | `"run"` | Aggregated across the whole run. |
 | `Error` | `"run"` | The failure message, set only on a failed run. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `MetricEvent` | [→](/api/javascript/client/metrics/) |
-| Python | `MetricEvent` | [→](/api/python/client/metrics/) |
-| Java | `LlmClient.MetricEvent` | [→](/api/java/client/metrics/) |
-| C# | `MetricEvent` | [→](/api/csharp/client/metrics/) |
-| Elixir | `Toolnexus.Client.MetricsRegistry` | [→](/api/elixir/client/metrics/) |
-
-The `MetricEvent` shape follows each port's idiomatic field casing (Go's `PascalCase`, like
-`RunResult`), so it is not byte-identical across ports — only the Prometheus text from
-`Client.Metrics()` is a byte-identical conformance obligation.
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`CreateClient`](/api/go/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

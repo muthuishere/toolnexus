@@ -381,19 +381,6 @@ asyncio.run(main())
 | `before_tool` | `name`, `args`, `id`, `turn` | `{"result": ToolResult}` short-circuits (real tool never runs); `{"args": {...}}` rewrites the arguments. |
 | `after_tool` | `name`, `args`, `result`, `id`, `turn` | `{"result": ToolResult}` replaces the result before it enters the transcript. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `Hooks` | [→](/api/javascript/client/hooks/) |
-| Go | `Hooks` | [→](/api/go/client/hooks/) |
-| Java | `LlmClient.Hooks` | [→](/api/java/client/hooks/) |
-| C# | `LlmClient.Hooks` | [→](/api/csharp/client/hooks/) |
-| Elixir | `Toolnexus.Client.create` | [→](/api/elixir/client/hooks/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`create_client`](/api/python/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
