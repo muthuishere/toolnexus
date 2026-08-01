@@ -28,19 +28,6 @@ function mdxEscape(text) {
 	return text.replace(/[{}]/g, (c) => `\\${c}`)
 }
 
-/** The cross-language table: every sibling port, its symbol, and a link to its page. */
-function siblingTable(lang, entry) {
-	const rows = manifest.langs
-		.filter((l) => l !== lang)
-		.map((l) => {
-			const sym = entry.symbols?.[l]
-			const cell = sym === null ? "_not shipped in this port_" : `\`${sym}\``
-			const link = sym === null ? "" : `[→](${urlFor(l, entry)})`
-			return `| ${LANGS[l].label} | ${cell} | ${link} |`
-		})
-	return ["| Port | Symbol | |", "|---|---|---|", ...rows].join("\n")
-}
-
 /** Sibling entries in the same group, for the See also block. */
 function seeAlso(lang, entry) {
 	const siblings = manifest.entries
@@ -89,10 +76,6 @@ ${mdxEscape(entry.summary)}
 {/* TODO:why */}
 _TODO: the closest thing this port does offer, and how to get the same outcome._
 
-## The same capability in the other ports
-
-${siblingTable(lang, entry)}
-
 ## See also
 
 ${seeAlso(lang, entry)}
@@ -140,13 +123,6 @@ _TODO: name the alternative and when to prefer it._
 \`\`\`${meta.fence}
 // TODO
 \`\`\`
-
-## The same call in the other five ports
-
-${siblingTable(lang, entry)}
-
-Behavior is identical across ports by contract — same \`examples/\` fixtures, same output.
-See [SPEC §0](${GITHUB}/blob/main/SPEC.md).
 
 ## See also
 

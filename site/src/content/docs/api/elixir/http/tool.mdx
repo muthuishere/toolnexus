@@ -266,19 +266,6 @@ Accepts a **map or a keyword list**.
 | non-2xx | `"HTTP <status>: <body>"` | `true` | `%{status: status}` |
 | transport failure | The exception message | `true` | `nil` |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `httpTool` | [→](/api/javascript/http/tool/) |
-| Python | `http_tool` | [→](/api/python/http/tool/) |
-| Go | `HTTPTool` | [→](/api/go/http/tool/) |
-| Java | `HttpTool.of` | [→](/api/java/http/tool/) |
-| C# | `HttpTool.Of` | [→](/api/csharp/http/tool/) |
-
-Argument routing, encoding and the error string are byte-identical across ports — the Elixir port
-mirrors `js/src/http.ts` down to `encodeURIComponent` semantics for placeholders.
-
 ## See also
 
 - [`Toolnexus.Native.define_tool`](/api/elixir/native/define-tool/) — when one declarative request is not enough

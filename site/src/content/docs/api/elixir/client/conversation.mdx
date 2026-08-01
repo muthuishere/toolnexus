@@ -169,22 +169,6 @@ IO.puts("ok: streamed #{length(Agent.get(deltas, & &1))} delta(s), returned fina
 | `ask/4` | `:id` | Loads that id's transcript from the client's store, runs, saves the update back. Omit ⇒ stateless, identical to `run/4`. |
 | `ask/4` | `:on_text` | `(delta :: String.t() -> any())`, invoked per text delta while `ask/4` streams internally. Omit ⇒ non-streaming. Return value is still a `RunResult`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `Conversation` | [→](/api/javascript/client/conversation/) |
-| Python | `Conversation` | [→](/api/python/client/conversation/) |
-| Go | `Conversation` | [→](/api/go/client/conversation/) |
-| Java | `LlmClient.Conversation` | [→](/api/java/client/conversation/) |
-| C# | `LlmClient.Conversation` | [→](/api/csharp/client/conversation/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output. Where
-the other ports expose a stateful `Conversation` value wrapping `send`/`messages`/`reset`, Elixir
-exposes the same semantics as `run/4` (`history:`) + `ask/4` (`id:`) — no wrapper object, same
-underlying loop and store.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Client.run`](/api/elixir/client/run/) — the stateless loop `ask/4` is built on.

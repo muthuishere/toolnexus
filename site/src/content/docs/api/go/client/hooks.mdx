@@ -287,22 +287,6 @@ func main() {
 | `AfterToolEvent` | `AfterTool` | `Name`, `Args`, `Result`, `ID`, `Turn`. |
 | `ToolOverride` | returned from `BeforeTool` / `AfterTool` | In `BeforeTool`: `Result` short-circuits (the real tool never runs), else `Args` rewrites the call. In `AfterTool`: `Result` replaces the result. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `Hooks` | [→](/api/javascript/client/hooks/) |
-| Python | `Hooks` | [→](/api/python/client/hooks/) |
-| Java | `LlmClient.Hooks` | [→](/api/java/client/hooks/) |
-| C# | `LlmClient.Hooks` | [→](/api/csharp/client/hooks/) |
-| Elixir | `Toolnexus.Client.create` | [→](/api/elixir/client/hooks/) |
-
-Elixir has no separate `Hooks` type — pass a `:hooks` map (`:before_llm`, `:after_llm`,
-`:before_tool`, `:after_tool`) to `Toolnexus.Client.create/1`.
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`CreateClient`](/api/go/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

@@ -171,26 +171,6 @@ public class Example {
 | `pending(request)` | `ToolResult` | A suspension: `isError:true`, `metadata.pending = request` (id filled in if empty). |
 | `output()` | `String` | `request.prompt()` plus `\n` + `url`, if present. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `pending` | [→](/api/javascript/suspension/pending/) |
-| Python | `pending` | [→](/api/python/suspension/pending/) |
-| Go | `Pending` | [→](/api/go/suspension/pending/) |
-| C# | `Suspension.Pending` | [→](/api/csharp/suspension/pending/) |
-| Elixir | _not shipped in this port_ |  |
-
-<Aside type="note" title="Verified symbol — lives on ToolResult, not Request">
-Java puts `pending`/`authRequired`/`pendingOf` as static methods on
-[`ToolResult`](https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/ToolResult.java),
-not on `Request` (`Request` is the plain, byte-identical wire record). JavaScript, Python and Go
-expose the equivalent as free functions; Elixir ships only the reader.
-</Aside>
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`ToolResult.authRequired`](/api/java/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.

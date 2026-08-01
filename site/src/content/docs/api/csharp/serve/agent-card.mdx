@@ -139,19 +139,6 @@ narrower than "everything the toolkit knows about".
 | `skills` | `IReadOnlyList<SkillSource.SkillInfo>` | The toolkit's skill catalog — filtered to `cfg.Skills` when set, else all. |
 | `url` | `string` | The JSON-RPC endpoint to publish as `card.url` (peers `POST` here). |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `buildAgentCard` | [→](/api/javascript/serve/agent-card/) |
-| Python | `build_agent_card` | [→](/api/python/serve/agent-card/) |
-| Go | `BuildAgentCard` | [→](/api/go/serve/agent-card/) |
-| Java | `A2AServer.buildAgentCard` | [→](/api/java/serve/agent-card/) |
-| Elixir | `Toolnexus.Serve.build_agent_card` | [→](/api/elixir/serve/agent-card/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`A2AServer.Start`](/api/csharp/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.

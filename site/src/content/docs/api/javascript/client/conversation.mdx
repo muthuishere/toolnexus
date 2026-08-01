@@ -165,19 +165,6 @@ console.log("ok:", afterReset.text)
 | `send(prompt)` | `(prompt: string) => Promise<RunResult>` | Run the next turn; prior history is retained automatically. |
 | `reset()` | `() => void` | Drop the transcript back to empty — the next `send()` starts fresh. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `Conversation` | [→](/api/python/client/conversation/) |
-| Go | `Conversation` | [→](/api/go/client/conversation/) |
-| Java | `LlmClient.Conversation` | [→](/api/java/client/conversation/) |
-| C# | `LlmClient.Conversation` | [→](/api/csharp/client/conversation/) |
-| Elixir | `Toolnexus.Client conversation` | [→](/api/elixir/client/conversation/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`createClient`](/api/javascript/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

@@ -260,22 +260,6 @@ Where an argument goes, in order:
 Every outcome carries `metadata.status` except a transport failure (timeout, abort, connection
 refused), which has no status to report.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `http_tool` | [→](/api/python/http/tool/) |
-| Go | `HTTPTool` | [→](/api/go/http/tool/) |
-| Java | `HttpTool.of` | [→](/api/java/http/tool/) |
-| C# | `HttpTool.Of` | [→](/api/csharp/http/tool/) |
-| Elixir | `Toolnexus.Http.tool` | [→](/api/elixir/http/tool/) |
-
-<Aside type="note" title="Same routing rules, native env lookup">
-Argument routing, the `${ENV_VAR}` syntax, the `HTTP <status>: <body>` error string and the three
-result modes are identical in all six ports. Only the environment lookup is native —
-`process.env` here, `os.environ` in Python, `os.Getenv` in Go, `System.getenv` in Java.
-</Aside>
-
 ## See also
 
 - [`defineTool`](/api/javascript/native/define-tool/) — when the call needs real logic

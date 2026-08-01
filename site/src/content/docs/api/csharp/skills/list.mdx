@@ -205,18 +205,6 @@ Console.WriteLine($"ok: kept {string.Join(",", kept)} | skipped {string.Join(","
 `LoadOptions` is shared with `LoadWith`: `Dirs`, `Skills`, `Filter`, `SampleLimit`. `Filter` and
 `SampleLimit` are **ignored** here — the inventory is always the complete picture.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `listSkills` | [→](/api/javascript/skills/list/) |
-| Python | `list_skills` | [→](/api/python/skills/list/) |
-| Go | `ListSkills` | [→](/api/go/skills/list/) |
-| Java | `SkillSource.listSkills` | [→](/api/java/skills/list/) |
-| Elixir | `Toolnexus.Skill.list` | [→](/api/elixir/skills/list/) |
-
-Skip reasons are the same four strings in every port — a §0 conformance obligation.
-
 ## See also
 
 - [`SkillSource.Load`](/api/csharp/skills/load/) — the same discovery, returning the `skill` tool

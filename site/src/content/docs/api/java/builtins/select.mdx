@@ -116,19 +116,6 @@ public class Example {
 | `cfg instanceof Boolean` | | `true`/`false` for the whole source. |
 | `cfg` is a `Map` | | `disabled:true` (wins) or `enabled:false` turns everything off; `tools:{name:false}` drops individual names off the all-on baseline. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `selectBuiltins` | [→](/api/javascript/builtins/select/) |
-| Python | `select_builtins` | [→](/api/python/builtins/select/) |
-| Go | `SelectBuiltins` | [→](/api/go/builtins/select/) |
-| C# | `BuiltinTools.Select` | [→](/api/csharp/builtins/select/) |
-| Elixir | `Toolnexus.Builtin.load` | [→](/api/elixir/builtins/select/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`BuiltinTools.create`](/api/java/builtins/create/) — construct every built-in tool directly, unfiltered.

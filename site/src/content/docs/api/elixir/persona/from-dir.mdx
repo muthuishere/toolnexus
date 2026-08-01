@@ -150,19 +150,6 @@ IO.puts("ok: persona from #{Path.basename(dir)} wrote to its own MEMORY.md via t
 | `:tools` | `[Tool.t()]` | `[]` | Extra tools alongside the memory builtin. |
 | `:memory` | `boolean()` | `true` | Set `false` to omit the memory tool (read-only persona). |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `fromDir` | [→](/api/javascript/persona/from-dir/) |
-| Python | `agent_from_dir` | [→](/api/python/persona/from-dir/) |
-| Go | `FromDir` | [→](/api/go/persona/from-dir/) |
-| Java | `A2A.agentFromDir` | [→](/api/java/persona/from-dir/) |
-| C# | `Home.FromDir` | [→](/api/csharp/persona/from-dir/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Agents.Home.compose_soul`](/api/elixir/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.

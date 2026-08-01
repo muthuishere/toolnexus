@@ -52,19 +52,6 @@ _TODO: name the alternative and when to prefer it._
 // TODO
 ```
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `createClient` | [→](/api/javascript/client/create/) |
-| Python | `create_client` | [→](/api/python/client/create/) |
-| Go | `CreateClient` | [→](/api/go/client/create/) |
-| Java | `LlmClient.create` | [→](/api/java/client/create/) |
-| C# | `LlmClient.Create` | [→](/api/csharp/client/create/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Client.run`](/api/elixir/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.

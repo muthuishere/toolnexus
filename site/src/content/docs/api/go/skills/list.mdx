@@ -269,19 +269,6 @@ func main() {
 | `SkipDuplicateName` | `duplicate-name` | Another candidate already claimed that name; the first one is kept. |
 | `SkipUnreadable` | `unreadable` | The `SKILL.md` could not be read (permissions, broken link). |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `listSkills` | [→](/api/javascript/skills/list/) |
-| Python | `list_skills` | [→](/api/python/skills/list/) |
-| Java | `SkillSource.listSkills` | [→](/api/java/skills/list/) |
-| C# | `SkillSource.ListSkills` | [→](/api/csharp/skills/list/) |
-| Elixir | `Toolnexus.Skill.list` | [→](/api/elixir/skills/list/) |
-
-The skip-reason strings are part of the cross-language contract — same fixture, same reasons,
-everywhere.
-
 ## See also
 
 - [`LoadSkills`](/api/go/skills/load/) — discover and build the `skill` tool

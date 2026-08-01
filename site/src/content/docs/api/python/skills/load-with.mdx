@@ -175,24 +175,6 @@ asyncio.run(main())
 
 Same `SkillSource` as [`load_skills`](/api/python/skills/load/) — `skills`, `tool`, `prompt()`.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `loadSkills` | [→](/api/javascript/skills/load-with/) |
-| Go | `LoadSkillsWith` | [→](/api/go/skills/load-with/) |
-| Java | `SkillSource.loadWith` | [→](/api/java/skills/load-with/) |
-| C# | `SkillSource.LoadWith` | [→](/api/csharp/skills/load-with/) |
-| Elixir | `Toolnexus.Skill.load` | [→](/api/elixir/skills/load-with/) |
-
-<Aside type="note" title="One function in Python, a separate name elsewhere">
-Python, JavaScript and Elixir expose a single `load_skills`/`loadSkills` that already accepts
-`skills`/`filter`/`sample_limit`. Go, Java and C# name the data/filter surface separately
-(`LoadSkillsWith`, `SkillSource.loadWith`, `SkillSource.LoadWith`) because their directory-only
-`LoadSkills` overload has a narrower signature. The resulting `SkillSource` and `<skill_content>`
-output are byte-identical either way — a §0 conformance obligation.
-</Aside>
-
 ## See also
 
 - [`load_skills`](/api/python/skills/load/) — Directory discovery, the `<skill_content>` envelope, and the base `SkillDef`/`filter`/`sample_limit` example.

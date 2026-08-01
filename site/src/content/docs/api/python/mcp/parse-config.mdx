@@ -171,21 +171,6 @@ print("ok:", ",".join(good_enabled), "| problems:", len(bad_problems))
 | `timeout` | both | Per-server connect/call budget in ms. |
 | `tools` | both | Per-server allowlist keyed on the **original** tool name. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `parseMcpConfig` | [→](/api/javascript/mcp/parse-config/) |
-| Go | `ParseMcpConfig` | [→](/api/go/mcp/parse-config/) |
-| Java | `McpSource.parseMcpConfig` | [→](/api/java/mcp/parse-config/) |
-| C# | `McpSource.ParseMcpConfig` | [→](/api/csharp/mcp/parse-config/) |
-| Elixir | `Toolnexus.Mcp.parse_config` | [→](/api/elixir/mcp/parse-config/) |
-
-<Aside type="note" title="Go returns an error, the others raise">
-`ParseMcpConfig` in Go returns `(McpConfig, error)`. Python, JavaScript, Java and C# raise. Same
-contract, each language's convention.
-</Aside>
-
 ## See also
 
 - [`load_mcp`](/api/python/mcp/load/) — parse *and* connect

@@ -268,19 +268,6 @@ func main() {
 | `CountTokens` | `func(messages []any) int` | `EstimateTokens` | The token estimator (`ceil(chars/4)` per message, summed). An estimator, not a tokenizer. |
 | `FlushToMemory` | `bool` | `false` | Injects a pre-compact system reminder to persist durable facts via the §7E `memory` tool before the head is summarized. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `compactor` | [→](/api/javascript/compaction/compactor/) |
-| Python | `compactor` | [→](/api/python/compaction/compactor/) |
-| Java | `Compaction.compactor` | [→](/api/java/compaction/compactor/) |
-| C# | `Compaction.Compactor` | [→](/api/csharp/compaction/compactor/) |
-| Elixir | `Toolnexus.Agents.Compaction.compactor` | [→](/api/elixir/compaction/compactor/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Client.Run`](/api/go/client/run/) — The loop that applies `Hooks.BeforeLLM` on every turn.

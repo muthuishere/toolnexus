@@ -52,16 +52,6 @@ of endpoints, a set of database-backed jobs — build `%Toolnexus.Tool{}` struct
 `Enum.map/2` instead; see the third example on the
 [`Toolnexus.Tool`](/api/elixir/types/tool/) reference page for that pattern.
 
-## The same capability in the other ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `collectTools` | [→](/api/javascript/native/collect/) |
-| Python | _not shipped in this port_ |  |
-| Go | _not shipped in this port_ |  |
-| Java | `Tools.fromObject` | [→](/api/java/native/collect/) |
-| C# | `Tools.FromObject` | [→](/api/csharp/native/collect/) |
-
 ## See also
 
 - [`Toolnexus.Native.define_tool`](/api/elixir/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.

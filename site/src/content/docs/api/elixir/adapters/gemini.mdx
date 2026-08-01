@@ -183,19 +183,6 @@ IO.puts("ok: #{call["name"]} -> #{res.output}")
 | `…[]["description"]` | `Tool.description` | |
 | `…[]["parameters"]` | `Tool.input_schema` | Renamed — `input_schema` → `parameters`, as with OpenAI. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `toGemini` | [→](/api/javascript/adapters/gemini/) |
-| Python | `to_gemini` | [→](/api/python/adapters/gemini/) |
-| Go | `ToGemini` | [→](/api/go/adapters/gemini/) |
-| Java | `Adapters.toGemini` | [→](/api/java/adapters/gemini/) |
-| C# | `Adapters.ToGemini` | [→](/api/csharp/adapters/gemini/) |
-
-Output is byte-identical across ports for the same tools — including the empty-list wrapper, which
-is a §0 conformance obligation rather than an Elixir quirk.
-
 ## See also
 
 - [`Adapters.to_openai`](/api/elixir/adapters/openai/) · [`Adapters.to_anthropic`](/api/elixir/adapters/anthropic/)

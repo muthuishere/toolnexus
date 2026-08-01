@@ -189,22 +189,6 @@ ignore `data`.
 | `timeout` | `number` | This call's budget, in **milliseconds**. |
 | `answer` | `Answer` | Present **only** on a post-`waitFor` retry — the resolution of a prior suspension. |
 
-## The same type in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `ToolContext` | [→](/api/python/types/context/) |
-| Go | `ToolContext` | [→](/api/go/types/context/) |
-| Java | `ToolContext` | [→](/api/java/types/context/) |
-| C# | `ToolContext` | [→](/api/csharp/types/context/) |
-| Elixir | `Toolnexus.Context` | [→](/api/elixir/types/context/) |
-
-<Aside type="note" title="Two real differences across ports">
-Cancellation follows each language's convention: JavaScript carries an `AbortSignal`, Go carries a
-`context.Context`. And `timeout` is **milliseconds** in JavaScript, Go and Java, but **seconds** in
-Python — check the port's page before you divide by a thousand.
-</Aside>
-
 ## See also
 
 - [`Tool`](/api/javascript/types/tool/) — what receives this

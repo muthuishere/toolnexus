@@ -240,22 +240,6 @@ asyncio.run(main())
 | anything else | `ToolResult(output=json.dumps(value), is_error=False)` |
 | raises | `ToolResult(output=str(exc), is_error=True)` |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `defineTool` | [→](/api/javascript/native/define-tool/) |
-| Go | `NativeTool` | [→](/api/go/native/define-tool/) |
-| Java | `NativeTool.of` | [→](/api/java/native/define-tool/) |
-| C# | `NativeTool.Of` | [→](/api/csharp/native/define-tool/) |
-| Elixir | `Toolnexus.Native.define_tool` | [→](/api/elixir/native/define-tool/) |
-
-<Aside type="note" title="Inference is Python's idiom, not the contract">
-Schema *inference from type hints* is what Python (and JS) can do naturally; the statically typed
-ports take the schema more explicitly. What §0 pins is the resulting `Tool` — same name, same
-description, same JSON-Schema, same `ToolResult` behavior — not how you got there.
-</Aside>
-
 ## See also
 
 - [`tool`](/api/python/native/reflect/) — the decorator form of exactly this

@@ -169,20 +169,6 @@ public class Example {
 | `Answer.ok()` | `true` → MCP `accept` (content = `answer.data()`, or `{}`). |
 | `Answer.reason()` | `"declined"` → MCP `decline`; any other non-ok reason (or none) → MCP `cancel`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `elicitationToRequest` | [→](/api/javascript/mcp/elicitation/) |
-| Python | `elicitation_to_request` | [→](/api/python/mcp/elicitation/) |
-| Go | `ElicitationToRequest` | [→](/api/go/mcp/elicitation/) |
-| C# | `McpSource.ElicitationToRequest` | [→](/api/csharp/mcp/elicitation/) |
-| Elixir | `Toolnexus.Mcp.Protocol.elicitation_to_request` | [→](/api/elixir/mcp/elicitation/) |
-
-Java is the one port where this mapping is not a public symbol — the mapped **data shapes** and
-the **bridging behavior** through `McpSource.load` are identical across all six ports; only the
-Java function that performs the mapping is internal. See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`McpSource.load`](/api/java/mcp/load/) — the entry point that actually wires this bridge via `waitFor`.

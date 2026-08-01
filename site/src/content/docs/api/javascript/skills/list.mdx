@@ -174,18 +174,6 @@ console.log("ok: audited", report.names.join(","), "| problems:", report.problem
 `listSkills` takes exactly the inputs `loadSkills` does — a path, an array of paths, or a
 `LoadSkillsOptions` object — except that `filter` and `sampleLimit` have no effect.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `list_skills` | [→](/api/python/skills/list/) |
-| Go | `ListSkills` | [→](/api/go/skills/list/) |
-| Java | `SkillSource.listSkills` | [→](/api/java/skills/list/) |
-| C# | `SkillSource.ListSkills` | [→](/api/csharp/skills/list/) |
-| Elixir | `Toolnexus.Skill.list` | [→](/api/elixir/skills/list/) |
-
-Same discovery, same dedupe, same four skip reasons in every port — a §0 conformance obligation.
-
 ## See also
 
 - [`loadSkills`](/api/javascript/skills/load/) — same discovery, but it builds the `skill` tool

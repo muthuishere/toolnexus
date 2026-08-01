@@ -270,19 +270,6 @@ the loop tries to call it — it never silently falls through to "hook absent" b
 | `:before_tool` | `%{name, args, id, turn}` | `%{result: %ToolResult{}}` or `%{args: map()}` | Short-circuits the tool (deny/cache/dry-run), or rewrites its arguments. |
 | `:after_tool` | `%{name, args, result, id, turn}` | `%{result: %ToolResult{}}` | Transforms the result (redact, annotate) before it joins the transcript. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `Hooks` | [→](/api/javascript/client/hooks/) |
-| Python | `Hooks` | [→](/api/python/client/hooks/) |
-| Go | `Hooks` | [→](/api/go/client/hooks/) |
-| Java | `LlmClient.Hooks` | [→](/api/java/client/hooks/) |
-| C# | `LlmClient.Hooks` | [→](/api/csharp/client/hooks/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Client.create`](/api/elixir/client/create/) — the unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

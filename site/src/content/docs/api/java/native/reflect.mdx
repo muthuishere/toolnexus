@@ -185,24 +185,6 @@ public class Example {
 | `ToolContext` parameter | Recognized by type; excluded from the schema, passed through from `execute`'s `ctx`. |
 | Inferred JSON type | `String`/char → `string`; `boolean`/`Boolean` → `boolean`; any numeric type → `number`; `Collection`/array → `array`; everything else → `object`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `tool` | [→](/api/javascript/native/reflect/) |
-| Python | `tool` | [→](/api/python/native/reflect/) |
-| Go | `NativeToolReflect` | [→](/api/go/native/reflect/) |
-| C# | `ToolMethodAttribute` | [→](/api/csharp/native/reflect/) |
-| Elixir | _not shipped in this port_ |  |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
-<Aside type="note" title="Elixir has no reflection-based tool builder">
-Use `Toolnexus.Native.define_tool/1` with an explicit `input_schema` instead — the same outcome,
-written by hand rather than inferred.
-</Aside>
-
 ## See also
 
 - [`Tools.fromObject`](/api/java/native/collect/) — the collector that actually reflects over an object's `@ToolMethod` methods and builds the `Tool`s.

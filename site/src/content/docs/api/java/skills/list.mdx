@@ -195,19 +195,6 @@ public class Example {
 | `SkillSkip.DUPLICATE_NAME` | `duplicate-name` | A skill with that name was already collected — first wins. |
 | `SkillSkip.UNREADABLE` | `unreadable` | The `SKILL.md` could not be read (permissions, broken link). |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `listSkills` | [→](/api/javascript/skills/list/) |
-| Python | `list_skills` | [→](/api/python/skills/list/) |
-| Go | `ListSkills` | [→](/api/go/skills/list/) |
-| C# | `SkillSource.ListSkills` | [→](/api/csharp/skills/list/) |
-| Elixir | `Toolnexus.Skill.list` | [→](/api/elixir/skills/list/) |
-
-The reason strings are part of the contract — `missing-name`, `malformed-frontmatter`,
-`duplicate-name`, `unreadable` are identical in every port.
-
 ## See also
 
 - [`SkillSource.load`](/api/java/skills/load/) — the same discovery, with the `skill` tool wired

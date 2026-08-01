@@ -196,19 +196,6 @@ Console.WriteLine($"ok: {ok.Output} | {withCtx.Output} | toolkit has {tk.Tools()
 | `inputSchema` | `IDictionary<string, object?>?` | A JSON-Schema **object**. `null` ⇒ `{"type":"object","properties":{},"additionalProperties":false}`. |
 | `fn` | delegate | Your function. Return `string`, `ToolResult`, `null`, or anything JSON-serializable. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `defineTool` | [→](/api/javascript/native/define-tool/) |
-| Python | `define_tool` | [→](/api/python/native/define-tool/) |
-| Go | `NativeTool` | [→](/api/go/native/define-tool/) |
-| Java | `NativeTool.of` | [→](/api/java/native/define-tool/) |
-| Elixir | `Toolnexus.Native.define_tool` | [→](/api/elixir/native/define-tool/) |
-
-Return-value coercion and the throw-becomes-error rule are identical in every port — a §0
-conformance obligation.
-
 ## See also
 
 - [`ToolMethodAttribute`](/api/csharp/native/reflect/) — derive the schema from the method signature

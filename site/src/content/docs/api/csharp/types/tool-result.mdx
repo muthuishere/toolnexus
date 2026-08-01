@@ -159,21 +159,6 @@ suspension is in play.
 | `AuthRequired(url, prompt?)` | Sugar for `Kind:"authorization"` at a login URL. |
 | `PendingOf(result)` | Reads the `Request` back off a result, or `null`. |
 
-## The same type in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `ToolResult` | [→](/api/javascript/types/tool-result/) |
-| Python | `ToolResult` | [→](/api/python/types/tool-result/) |
-| Go | `ToolResult` | [→](/api/go/types/tool-result/) |
-| Java | `ToolResult` | [→](/api/java/types/tool-result/) |
-| Elixir | `Toolnexus.ToolResult` | [→](/api/elixir/types/tool-result/) |
-
-<Aside type="note" title="Where the helpers live differs by port">
-C# and Java put `Pending` / `AuthRequired` / `PendingOf` on **`ToolResult`**. JavaScript, Python and
-Go expose them as free functions. Elixir ships only the reader (`ToolResult.pending?/1`).
-</Aside>
-
 ## See also
 
 - [`ITool`](/api/csharp/types/tool/) — what returns this

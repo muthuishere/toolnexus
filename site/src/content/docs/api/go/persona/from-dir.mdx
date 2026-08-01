@@ -267,19 +267,6 @@ func indexOfSub(s, sub string) int {
 | `Tools` | `[]tn.Tool` | none | Extra tools beyond the memory builtin. |
 | `Memory` | `*bool` | `nil` (enabled) | Point at `false` to omit `MemoryTool(dir)` — a read-only persona. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `fromDir` | [→](/api/javascript/persona/from-dir/) |
-| Python | `agent_from_dir` | [→](/api/python/persona/from-dir/) |
-| Java | `A2A.agentFromDir` | [→](/api/java/persona/from-dir/) |
-| C# | `Home.FromDir` | [→](/api/csharp/persona/from-dir/) |
-| Elixir | `Toolnexus.Agents.Home.from_dir` | [→](/api/elixir/persona/from-dir/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`ComposeSoul`](/api/go/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.

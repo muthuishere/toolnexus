@@ -214,19 +214,6 @@ asyncio.run(main())
 | `data` | `dict \| None` | Kind-specific extra (choices, a JSON-Schema for the expected answer, ...). |
 | `expiresAt` | `str \| None` | RFC3339; the request is stale after this. Wire key — camelCase even in Python. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `pending` | [→](/api/javascript/suspension/pending/) |
-| Go | `Pending` | [→](/api/go/suspension/pending/) |
-| Java | `Request.pending` | [→](/api/java/suspension/pending/) |
-| C# | `Suspension.Pending` | [→](/api/csharp/suspension/pending/) |
-| Elixir | _not shipped in this port_ — construct `%ToolResult{metadata: %{pending: %Request{}}}` by hand. |  |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`auth_required`](/api/python/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.

@@ -193,22 +193,6 @@ ignore `data`.
 | `timeout` | `non_neg_integer() \| nil` | This call's budget in ms. `nil` means unset. |
 | `signal` | `reference() \| pid() \| nil` | Cancellation. |
 
-## The same type in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `ToolContext` | [→](/api/javascript/types/context/) |
-| Python | `ToolContext` | [→](/api/python/types/context/) |
-| Go | `ToolContext` | [→](/api/go/types/context/) |
-| Java | `ToolContext` | [→](/api/java/types/context/) |
-| C# | `ToolContext` | [→](/api/csharp/types/context/) |
-
-<Aside type="note" title="Elixir carries more than the others">
-The §1 contract pins `signal`, `timeout` and `answer` — every port has those. Elixir adds the four
-identity fields on top. Code relying on `session_id` or `agent` will not port directly to
-JavaScript or Go, which do not carry them on the context.
-</Aside>
-
 ## See also
 
 - [`Toolnexus.Tool`](/api/elixir/types/tool/) — what receives this

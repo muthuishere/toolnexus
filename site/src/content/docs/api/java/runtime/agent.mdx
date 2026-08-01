@@ -243,19 +243,6 @@ public class Example {
 | `run(rtOpts, prompt)` | `TaskResult` | One-shot: builds a runtime scoped to this agent's team graph, runs to completion, tears down — unless the run parked `pending`. |
 | `asTool(rtOpts)` | `Tool` | `{prompt}` in, ONLY the final text + `{agent, turns, totalTokens}` metadata out. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agents.Agent` | [→](/api/javascript/runtime/agent/) |
-| Python | `Agent` | [→](/api/python/runtime/agent/) |
-| Go | `agents.New` | [→](/api/go/runtime/agent/) |
-| C# | `Agent` | [→](/api/csharp/runtime/agent/) |
-| Elixir | `Toolnexus.Agents` | [→](/api/elixir/runtime/agent/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`agents.Runtime`](/api/java/runtime/runtime/) — the six host verbs `run`/`asTool` compile down to.

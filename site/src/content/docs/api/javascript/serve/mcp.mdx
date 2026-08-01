@@ -241,19 +241,6 @@ try {
 standard `InvalidParams`/`-32602` error. `exposedMcpTools` returns the filtered `Tool[]` used to
 build the server.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `build_mcp_server` | [→](/api/python/serve/mcp/) |
-| Go | `ExposedMcpTools` | [→](/api/go/serve/mcp/) |
-| Java | `McpServe.build` | [→](/api/java/serve/mcp/) |
-| C# | `McpServe.BuildMcpServer` | [→](/api/csharp/serve/mcp/) |
-| Elixir | `Toolnexus.McpServe.exposed_tools` | [→](/api/elixir/serve/mcp/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`startA2AServer`](/api/javascript/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.

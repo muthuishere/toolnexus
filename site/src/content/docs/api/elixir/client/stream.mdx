@@ -236,22 +236,6 @@ IO.puts("ok: stream/4 with :id persisted #{length(history)} messages, continued 
 | `%{type: "pending", request}` | `request :: Toolnexus.Request.t()` | §10 — a tool suspended; fires before `wait_for` runs. |
 | `%{type: "done", result}` | `result :: Toolnexus.Client.RunResult.t()` | Terminal — same shape `run/4` returns. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `Client.stream` | [→](/api/javascript/client/stream/) |
-| Python | `Client.stream` | [→](/api/python/client/stream/) |
-| Go | `Client.Stream` | [→](/api/go/client/stream/) |
-| Java | `LlmClient.stream` | [→](/api/java/client/stream/) |
-| C# | `LlmClient.StreamAsync` | [→](/api/csharp/client/stream/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output. Each
-language exposes the idiomatic stream shape: Elixir uses a lazy `Enumerable.t()` built with
-`Stream.resource/3`, backed by a monitored process so an early `Enum.take`/halt still tears the
-run down cleanly.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Client.run`](/api/elixir/client/run/) — the same loop, blocking for one `RunResult`.

@@ -199,19 +199,6 @@ console.log("ok:", res.output)
 Calling `execute` runs the full submit→poll cycle described in
 [SPEC §7A](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `agent_tools` | [→](/api/python/agents/agent-tools/) |
-| Go | `AgentTools` | [→](/api/go/agents/agent-tools/) |
-| Java | `A2A.agentTools` | [→](/api/java/agents/agent-tools/) |
-| C# | `A2A.AgentTools` | [→](/api/csharp/agents/agent-tools/) |
-| Elixir | `Toolnexus.A2a.agent_tools` | [→](/api/elixir/agents/agent-tools/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`agent`](/api/javascript/agents/agent/) — Point at a remote agent's card and use it exactly like a local tool.

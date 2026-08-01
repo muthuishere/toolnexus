@@ -200,19 +200,6 @@ async def main():
 asyncio.run(main())
 ```
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `pendingOf` | [→](/api/javascript/suspension/pending-of/) |
-| Go | `PendingOf` | [→](/api/go/suspension/pending-of/) |
-| Java | `Request.pendingOf` | [→](/api/java/suspension/pending-of/) |
-| C# | `Suspension.PendingOf` | [→](/api/csharp/suspension/pending-of/) |
-| Elixir | _not shipped in this port_ — match on `result.metadata` or use `ToolResult.pending?/1`. |  |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`pending`](/api/python/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.

@@ -173,19 +173,6 @@ asyncio.run(main())
 | `input_schema` | `{action: add\|replace\|remove, target: self\|user, text, with}` — `action`/`text` required. |
 | `execute` | Async; writes to `MEMORY.md` (`target="self"`) or `USER.md` (`target="user"`) under `dir`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `memoryTool` | [→](/api/javascript/persona/memory-tool/) |
-| Go | `MemoryTool` | [→](/api/go/persona/memory-tool/) |
-| Java | `Home.memoryTool` | [→](/api/java/persona/memory-tool/) |
-| C# | `Home.MemoryTool` | [→](/api/csharp/persona/memory-tool/) |
-| Elixir | `Toolnexus.Agents.Home.memory_tool` | [→](/api/elixir/persona/memory-tool/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`compose_soul`](/api/python/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.

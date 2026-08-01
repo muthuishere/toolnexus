@@ -199,19 +199,6 @@ a magic link, or a Slack approval.
 | `url` | `string` | The authorize endpoint / login link the host's `WaitFor` should drive. |
 | `prompt` | `string` | Human-readable prompt. Defaults to `"Authorization required to continue"`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `authRequired` | [→](/api/javascript/suspension/auth-required/) |
-| Python | `auth_required` | [→](/api/python/suspension/auth-required/) |
-| Go | `AuthRequired` | [→](/api/go/suspension/auth-required/) |
-| Java | `Request.authRequired` | [→](/api/java/suspension/auth-required/) |
-| Elixir | _not shipped in this port_ |  |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`ToolResult.Pending`](/api/csharp/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.

@@ -273,19 +273,6 @@ public class Example {
 | `Options.timeoutMs(v)` | `long` | Whole-run monotonic deadline; aborts the run (and its in-flight request) once exceeded — throws `TimeoutException`. Never retried. |
 | `CancelToken.cancel()` / `isCancelled()` | — | Cooperative external cancellation; aborts the run — throws `CancelledException`. Never retried, bypasses `onError`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `ErrorInfo` | [→](/api/javascript/client/resilience/) |
-| Python | `ErrorClassifier` | [→](/api/python/client/resilience/) |
-| Go | `ErrorInfo` | [→](/api/go/client/resilience/) |
-| C# | `LlmClient.ErrorInfo` | [→](/api/csharp/client/resilience/) |
-| Elixir | `Toolnexus.Client.create` | [→](/api/elixir/client/resilience/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`LlmClient.create`](/api/java/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

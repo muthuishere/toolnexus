@@ -158,19 +158,6 @@ console.log("ok:", res.status, "|", res.pending?.prompt)
 | `data` | `object?` | Kind-specific extra payload — choices, a form schema, anything. |
 | `expiresAt` | `string?` | RFC3339; the request is stale after this. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `pending` | [→](/api/python/suspension/pending/) |
-| Go | `Pending` | [→](/api/go/suspension/pending/) |
-| Java | `Request.pending` | [→](/api/java/suspension/pending/) |
-| C# | `Suspension.Pending` | [→](/api/csharp/suspension/pending/) |
-| Elixir | _not shipped in this port_ |  |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`authRequired`](/api/javascript/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.

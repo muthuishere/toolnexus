@@ -169,19 +169,6 @@ class OpsService
 | `ParamAttribute.Required` | parameter | Defaults to `true`. `false` drops it from `required` and lets a C# default apply. |
 | `ToolContext` parameter | parameter | Recognized by type and injected — never becomes a schema property. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `tool` | [→](/api/javascript/native/reflect/) |
-| Python | `tool` | [→](/api/python/native/reflect/) |
-| Go | `NativeToolReflect` | [→](/api/go/native/reflect/) |
-| Java | `@Tool annotation` | [→](/api/java/native/reflect/) |
-| Elixir | _not shipped in this port_ |  |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`NativeTool.Of`](/api/csharp/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.

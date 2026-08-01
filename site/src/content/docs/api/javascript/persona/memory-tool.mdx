@@ -132,19 +132,6 @@ The tool's own `inputSchema` — what the model fills in on a call:
 | `text` | `string` | Required. For `add`: the entry. For `replace`/`remove`: the existing substring to match. |
 | `with` | `string` | For `replace`: the replacement text. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `memory_tool` | [→](/api/python/persona/memory-tool/) |
-| Go | `MemoryTool` | [→](/api/go/persona/memory-tool/) |
-| Java | `Home.memoryTool` | [→](/api/java/persona/memory-tool/) |
-| C# | `Home.MemoryTool` | [→](/api/csharp/persona/memory-tool/) |
-| Elixir | `Toolnexus.Agents.Home.memory_tool` | [→](/api/elixir/persona/memory-tool/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`composeSoul`](/api/javascript/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.

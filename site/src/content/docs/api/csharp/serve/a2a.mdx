@@ -323,19 +323,6 @@ first response to carry the final answer.
 | `opts.OnTask` | `OnTask?` | Fires on each Task's terminal state with the `RunResult` telemetry. |
 | `opts.Mcp` / `opts.OnCall` | — | The independent MCP inbound profile — see [`McpServe.Build`](/api/csharp/serve/mcp/). |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `startA2AServer` | [→](/api/javascript/serve/a2a/) |
-| Python | `Toolkit.serve` | [→](/api/python/serve/a2a/) |
-| Go | `Toolkit.Serve` | [→](/api/go/serve/a2a/) |
-| Java | `A2AServer.start` | [→](/api/java/serve/a2a/) |
-| Elixir | `Toolnexus.Serve.start` | [→](/api/elixir/serve/a2a/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`A2AServer.BuildAgentCard`](/api/csharp/serve/agent-card/) — Construct the Agent Card that advertises your name, skills and endpoint.

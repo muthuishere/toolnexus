@@ -365,19 +365,6 @@ asyncio.run(main())
 | Configured, `answer.ok == False` | An error result feeds back (`"declined/expired: <prompt>"`); the loop continues. |
 | Not configured | The run halts with `RunResult(status="pending", pending=request)` — no hang. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `waitFor` | [→](/api/javascript/suspension/wait-for/) |
-| Go | `WaitFor` | [→](/api/go/suspension/wait-for/) |
-| Java | `LlmClient.waitFor` | [→](/api/java/suspension/wait-for/) |
-| C# | `LlmClient.WaitFor` | [→](/api/csharp/suspension/wait-for/) |
-| Elixir | `Toolnexus.Client.create` (`:wait_for` option) | [→](/api/elixir/suspension/wait-for/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`pending`](/api/python/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.

@@ -248,19 +248,6 @@ public class Example {
 | carve rule | — | `effective = min(own, parent remaining)` at spawn, plus a live walk before every turn/spawn. |
 | limit hit | — | `status:"incomplete"` with the limit named; partial work + transcript preserved — never silent, never a crash. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agents.Budget` | [→](/api/javascript/runtime/budgets/) |
-| Python | `Budget` | [→](/api/python/runtime/budgets/) |
-| Go | `agents.Budget` | [→](/api/go/runtime/budgets/) |
-| C# | `Budget` | [→](/api/csharp/runtime/budgets/) |
-| Elixir | `Toolnexus.Agents budget` | [→](/api/elixir/runtime/budgets/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`agents.Agent`](/api/java/runtime/agent/) — `AgentSpec.budget` attaches a `Budget` declaratively.

@@ -215,19 +215,6 @@ func main() {
 `Request`/`Answer` keys are fixed across all ports (they serialize over the wire and cross
 agent boundaries) — pinned exactly as above, not idiomatic-cased like `RunResult`.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `pending` | [→](/api/javascript/suspension/pending/) |
-| Python | `pending` | [→](/api/python/suspension/pending/) |
-| Java | `Request.pending` | [→](/api/java/suspension/pending/) |
-| C# | `Suspension.Pending` | [→](/api/csharp/suspension/pending/) |
-| Elixir | _not shipped in this port_ |  |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`AuthRequired`](/api/go/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.

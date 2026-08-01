@@ -123,19 +123,6 @@ class MathService
 |---|---|---|
 | `target` | `object` | Any instance. Its public instance methods carrying `[ToolMethod]` become the returned tools. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `collectTools` | [→](/api/javascript/native/collect/) |
-| Python | _not shipped in this port_ |  |
-| Go | _not shipped in this port_ |  |
-| Java | `Tools.fromObject` | [→](/api/java/native/collect/) |
-| Elixir | _not shipped in this port_ |  |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`NativeTool.Of`](/api/csharp/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.

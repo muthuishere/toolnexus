@@ -282,19 +282,6 @@ on it. Don't treat `IsError == true` alone as "the tool broke" — check
 |---|---|---|
 | `request` | `Request` | What is being asked. `Id` is filled in for you when empty — the correlation key `WaitFor`/`Answer` echo back. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `pending` | [→](/api/javascript/suspension/pending/) |
-| Python | `pending` | [→](/api/python/suspension/pending/) |
-| Go | `Pending` | [→](/api/go/suspension/pending/) |
-| Java | `Request.pending` | [→](/api/java/suspension/pending/) |
-| Elixir | _not shipped in this port_ |  |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`ToolResult.AuthRequired`](/api/csharp/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.

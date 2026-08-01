@@ -43,16 +43,6 @@ write your own tool that returns `pending(kind="tool_call", data={"calls": [...]
 `wait_for` that executes the calls and returns an `Answer` — you get the same shape relay
 would give you, just without the built-in constructor and collision guard Go ships.
 
-## The same capability in the other ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | _not shipped in this port_ |  |
-| Go | `RelayTool` | [→](/api/go/suspension/relay/) |
-| Java | _not shipped in this port_ |  |
-| C# | _not shipped in this port_ |  |
-| Elixir | _not shipped in this port_ |  |
-
 ## See also
 
 - [`pending`](/api/python/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.

@@ -156,19 +156,6 @@ port; only the convenience constructors are missing.
 | `ToolResult.error/1` | An error result with the given text. |
 | `ToolResult.pending?/1` | True when `metadata.pending` holds a `%Request{}` — i.e. this is a §10 suspension. |
 
-## The same type in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `ToolResult` | [→](/api/javascript/types/tool-result/) |
-| Python | `ToolResult` | [→](/api/python/types/tool-result/) |
-| Go | `ToolResult` | [→](/api/go/types/tool-result/) |
-| Java | `ToolResult` | [→](/api/java/types/tool-result/) |
-| C# | `ToolResult` | [→](/api/csharp/types/tool-result/) |
-
-The struct field is `expires_at` in Elixir, but it serializes as `expiresAt` — the §10 wire keys are
-pinned across every port because they cross process and language boundaries unchanged.
-
 ## See also
 
 - [`Toolnexus.Tool`](/api/elixir/types/tool/) — what returns this

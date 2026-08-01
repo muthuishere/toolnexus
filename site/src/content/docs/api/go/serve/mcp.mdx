@@ -249,19 +249,6 @@ func main() {
 `IsError` propagates verbatim; an `Execute` error becomes `isError:true` with the error text —
 never a server crash. `OnCallEvent{Name, Source, Ms, IsError}` fires per call.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `buildMcpServer` | [→](/api/javascript/serve/mcp/) |
-| Python | `build_mcp_server` | [→](/api/python/serve/mcp/) |
-| Java | `McpServe.build` | [→](/api/java/serve/mcp/) |
-| C# | `McpServe.BuildMcpServer` | [→](/api/csharp/serve/mcp/) |
-| Elixir | `Toolnexus.McpServe.exposed_tools` | [→](/api/elixir/serve/mcp/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolkit.Serve`](/api/go/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.

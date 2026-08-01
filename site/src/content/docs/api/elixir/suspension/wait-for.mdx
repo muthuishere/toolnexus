@@ -228,19 +228,6 @@ IO.puts("ok: denial fed back as a tool error — model replied: #{result.text}")
 | in | `Toolnexus.Request.t()` | The suspension the tool raised (`id`, `kind`, `prompt`, `url?`, `data?`). |
 | out | `Toolnexus.Answer.t()` | `%{id, ok, data?, reason?}`. `ok: true` re-invokes the tool with `ctx.answer` set; `ok: false` resolves to a `"declined/expired: <prompt>"` error result. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `waitFor` | [→](/api/javascript/suspension/wait-for/) |
-| Python | `WaitFor` | [→](/api/python/suspension/wait-for/) |
-| Go | `WaitFor` | [→](/api/go/suspension/wait-for/) |
-| Java | `LlmClient.waitFor` | [→](/api/java/suspension/wait-for/) |
-| C# | `LlmClient.WaitFor` | [→](/api/csharp/suspension/wait-for/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.ToolResult`](/api/elixir/types/tool-result/) — how a tool raises a suspension (`metadata.pending`).

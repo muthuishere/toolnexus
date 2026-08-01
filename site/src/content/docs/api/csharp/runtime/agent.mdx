@@ -278,19 +278,6 @@ Toolnexus;` and `using Toolnexus.Agents;` into scope and the bare name is ambigu
 | `WaitFor` | `Func<Request, Task<Answer>>?` | This agent's §10 interpreter authority. |
 | `Hooks` / `OnMetric` | — | Per-agent §8 seams — replace the runtime-wide ones for this agent only. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agents.Agent` | [→](/api/javascript/runtime/agent/) |
-| Python | `Agent` | [→](/api/python/runtime/agent/) |
-| Go | `agents.New` | [→](/api/go/runtime/agent/) |
-| Java | `agents.Agent` | [→](/api/java/runtime/agent/) |
-| Elixir | `Toolnexus.Agents` | [→](/api/elixir/runtime/agent/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`AgentRuntime`](/api/csharp/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.

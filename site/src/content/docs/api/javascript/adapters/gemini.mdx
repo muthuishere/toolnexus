@@ -173,19 +173,6 @@ an empty array.
 | `[0].functionDeclarations[].description` | `Tool.description` | |
 | `[0].functionDeclarations[].parameters` | `Tool.inputSchema` | Renamed — `inputSchema` → `parameters`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `to_gemini` | [→](/api/python/adapters/gemini/) |
-| Go | `ToGemini` | [→](/api/go/adapters/gemini/) |
-| Java | `Adapters.toGemini` | [→](/api/java/adapters/gemini/) |
-| C# | `Adapters.ToGemini` | [→](/api/csharp/adapters/gemini/) |
-| Elixir | `Toolnexus.Adapters.to_gemini` | [→](/api/elixir/adapters/gemini/) |
-
-Output is byte-identical across ports for the same tools — including the always-one-group rule.
-That is a §0 conformance obligation.
-
 ## See also
 
 - [`toOpenAI`](/api/javascript/adapters/openai/) · [`toAnthropic`](/api/javascript/adapters/anthropic/)

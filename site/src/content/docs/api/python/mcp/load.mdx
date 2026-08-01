@@ -172,19 +172,6 @@ asyncio.run(main())
 | `status` | `dict[str, McpStatus]` | Per-server `"connected"`, `"disabled"`, or `"failed"`. |
 | `close()` | `async () -> None` | Tears down every connection this call opened. Always call it (or let a context manager, once you have wired one, do it for you). |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `loadMcp` | [→](/api/javascript/mcp/load/) |
-| Go | `LoadMcp` | [→](/api/go/mcp/load/) |
-| Java | `McpSource.load` | [→](/api/java/mcp/load/) |
-| C# | `McpSource.LoadAsync` | [→](/api/csharp/mcp/load/) |
-| Elixir | `Toolnexus.Mcp.load` | [→](/api/elixir/mcp/load/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`load_mcp_with_context`](/api/python/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.

@@ -225,19 +225,6 @@ IO.puts("ok: one listener, two profiles — A2A card \"#{card["name"]}\" + MCP s
 | `port` | `:inet.port_number()` | The bound port. |
 | `pid` | `pid()` | The Bandit listener process — `Serve.stop/1` (alias `close/1`) shuts it down. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `startA2AServer` | [→](/api/javascript/serve/a2a/) |
-| Python | `Toolkit.serve` | [→](/api/python/serve/a2a/) |
-| Go | `Toolkit.Serve` | [→](/api/go/serve/a2a/) |
-| Java | `A2AServer.start` | [→](/api/java/serve/a2a/) |
-| C# | `A2AServer.StartAsync` | [→](/api/csharp/serve/a2a/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Serve.build_agent_card`](/api/elixir/serve/agent-card/) — construct the Agent Card that advertises your name, skills and endpoint.

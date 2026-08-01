@@ -228,19 +228,6 @@ console.log("ok: inline =", ra.status, "; cancelled suspension → idle")
 Nothing to call — `Handle` is read via its fields, or via `AgentRuntime.list()`/`inspect()` for a
 read-only snapshot view (`{ id, state, tokens, inbox }` / `+ turns, poolTokens, pending`).
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `Handle` | [→](/api/python/runtime/handle/) |
-| Go | `agents.Handle` | [→](/api/go/runtime/handle/) |
-| Java | `agents.Handle` | [→](/api/java/runtime/handle/) |
-| C# | `Handle` | [→](/api/csharp/runtime/handle/) |
-| Elixir | `Toolnexus.Agents.Handle` | [→](/api/elixir/runtime/handle/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`agents.Agent`](/api/javascript/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.

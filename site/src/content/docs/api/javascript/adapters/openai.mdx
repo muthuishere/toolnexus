@@ -163,18 +163,6 @@ OpenAI sends `arguments` as a **JSON string**, not an object. Parse it before ha
 | `[].function.description` | `Tool.description` | |
 | `[].function.parameters` | `Tool.inputSchema` | Renamed — `inputSchema` → `parameters`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `to_openai` | [→](/api/python/adapters/openai/) |
-| Go | `ToOpenAI` | [→](/api/go/adapters/openai/) |
-| Java | `Adapters.toOpenAI` | [→](/api/java/adapters/openai/) |
-| C# | `Adapters.ToOpenAI` | [→](/api/csharp/adapters/openai/) |
-| Elixir | `Toolnexus.Adapters.to_openai` | [→](/api/elixir/adapters/openai/) |
-
-Output is byte-identical across ports for the same tools — that is a §0 conformance obligation.
-
 ## See also
 
 - [`toAnthropic`](/api/javascript/adapters/anthropic/) · [`toGemini`](/api/javascript/adapters/gemini/)

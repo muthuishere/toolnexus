@@ -160,19 +160,6 @@ IO.puts("ok: 2 consecutive tool results merged into #{length(merged_results["con
 | `messages` (return) | `[map()]` | Anthropic-native `messages` — `tool_use`/`tool_result` blocks, merged where consecutive. |
 | `system` (return) | `String.t()` | Every `system`/`developer` message's text, joined with `"\n\n"`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `openAIMessagesToAnthropic` | [→](/api/javascript/translate/inbound/) |
-| Python | `openai_messages_to_anthropic` | [→](/api/python/translate/inbound/) |
-| Go | _not shipped in this port_ |  |
-| Java | `Translate.openAIMessagesToAnthropic` | [→](/api/java/translate/inbound/) |
-| C# | `Translate.OpenAIMessagesToAnthropic` | [→](/api/csharp/translate/inbound/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Client.translate`](/api/elixir/translate/translate/) — the entry point that calls this internally, then makes the single provider call.

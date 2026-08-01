@@ -147,19 +147,6 @@ to "check what you just remembered" in the same turn; it won't be there until th
 |---|---|---|
 | `dir` | `string` | The persona's home directory — the same one passed to `ComposeSoul`/`FromDir`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `memoryTool` | [→](/api/javascript/persona/memory-tool/) |
-| Python | `memory_tool` | [→](/api/python/persona/memory-tool/) |
-| Go | `MemoryTool` | [→](/api/go/persona/memory-tool/) |
-| Java | `Home.memoryTool` | [→](/api/java/persona/memory-tool/) |
-| Elixir | `Toolnexus.Agents.Home.memory_tool` | [→](/api/elixir/persona/memory-tool/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Home.ComposeSoul`](/api/csharp/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.

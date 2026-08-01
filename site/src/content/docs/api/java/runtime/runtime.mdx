@@ -242,19 +242,6 @@ public class Example {
 | `resume(answer)` | `void` | Routes an Answer to the deepest suspended handle; cascades upward. |
 | `list()` | `List<HandleView>` | Read-only `{id, state, tokens, inbox}` for every handle in the tree. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agents.AgentRuntime` | [→](/api/javascript/runtime/runtime/) |
-| Python | `AgentRuntime` | [→](/api/python/runtime/runtime/) |
-| Go | `NewRuntime` | [→](/api/go/runtime/runtime/) |
-| C# | `AgentRuntime` | [→](/api/csharp/runtime/runtime/) |
-| Elixir | `Toolnexus.Agents.Runtime` | [→](/api/elixir/runtime/runtime/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`agents.Agent`](/api/java/runtime/agent/) — the declarative layer built on these verbs.

@@ -191,19 +191,6 @@ Accepts a **binary** (one root), a **list of binaries** (several roots), or a **
 | `tool` | `%Toolnexus.Tool{}` | The single `skill` tool, `source: "skill"`, one required `name` argument. |
 | `prompt` | `String.t()` | The catalog to paste into your system prompt — described skills only, sorted by name. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `loadSkills` | [→](/api/javascript/skills/load/) |
-| Python | `load_skills` | [→](/api/python/skills/load/) |
-| Go | `LoadSkills` | [→](/api/go/skills/load/) |
-| Java | `SkillSource.load` | [→](/api/java/skills/load/) |
-| C# | `SkillSource.Load` | [→](/api/csharp/skills/load/) |
-
-The `skill` tool's output is **byte-identical** across all six ports for the same directory — that is
-the strictest conformance obligation in SPEC §0, down to directory traversal order.
-
 ## See also
 
 - [`Toolnexus.Skill.load` with data and filters](/api/elixir/skills/load-with/) — `:skills`, `:provider`, `:filter`

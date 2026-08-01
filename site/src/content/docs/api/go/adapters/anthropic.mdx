@@ -245,18 +245,6 @@ OpenAI's `arguments` — hand `block.Input` to `Execute` directly.
 Each entry is the exported struct `AnthropicTool`, so you can type-assert it if you prefer that to
 marshalling. There is no `type` field and no nesting.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `toAnthropic` | [→](/api/javascript/adapters/anthropic/) |
-| Python | `to_anthropic` | [→](/api/python/adapters/anthropic/) |
-| Java | `Adapters.toAnthropic` | [→](/api/java/adapters/anthropic/) |
-| C# | `Adapters.ToAnthropic` | [→](/api/csharp/adapters/anthropic/) |
-| Elixir | `Toolnexus.Adapters.to_anthropic` | [→](/api/elixir/adapters/anthropic/) |
-
-Output is byte-identical across ports for the same tools — that is a §0 conformance obligation.
-
 ## See also
 
 - [`ToOpenAI`](/api/go/adapters/openai/) · [`ToGemini`](/api/go/adapters/gemini/)

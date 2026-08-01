@@ -186,18 +186,6 @@ Deliberately absent: `filter` and `sample_limit`. The inventory reports everythi
 | `duplicate-name` | Another skill already claimed that name; first wins. |
 | `unreadable` | The file could not be read (permissions, a dangling symlink). |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `listSkills` | [→](/api/javascript/skills/list/) |
-| Go | `ListSkills` | [→](/api/go/skills/list/) |
-| Java | `SkillSource.listSkills` | [→](/api/java/skills/list/) |
-| C# | `SkillSource.ListSkills` | [→](/api/csharp/skills/list/) |
-| Elixir | `Toolnexus.Skill.list` | [→](/api/elixir/skills/list/) |
-
-The four skip reasons are the same four strings in every port — a §0 conformance obligation.
-
 ## See also
 
 - [`load_skills`](/api/python/skills/load/) — the same discovery, plus the `skill` tool

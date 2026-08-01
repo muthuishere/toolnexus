@@ -32,16 +32,6 @@ mid-loop; `translate` is a single stateless call where the *caller* already owns
 and will execute the tools itself. ADR-0011 (linked from `SPEC.md`) is the fuller argument for why
 translation, not relay, is the right mechanism for a pure pass-through posture outside Go.
 
-## The same capability in the other ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | _not shipped in this port_ |  |
-| Python | _not shipped in this port_ |  |
-| Go | `RelayTool` | [→](/api/go/suspension/relay/) |
-| C# | _not shipped in this port_ |  |
-| Elixir | _not shipped in this port_ |  |
-
 ## See also
 
 - [`ToolResult.pending`](/api/java/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.

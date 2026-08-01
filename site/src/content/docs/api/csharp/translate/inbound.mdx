@@ -241,19 +241,6 @@ disappears from `Converted.Messages` rather than erroring.
 | `Messages` | `List<object?>` | Anthropic-native messages: `tool_use`/`tool_result` blocks, consecutive tool results merged. |
 | `System` | `string` | The hoisted `system`/`developer` content, joined with blank lines. `""` if none was present. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `openAIMessagesToAnthropic` | [→](/api/javascript/translate/inbound/) |
-| Python | `openai_messages_to_anthropic` | [→](/api/python/translate/inbound/) |
-| Go | _not shipped in this port_ |  |
-| Java | `Translate.openAIMessagesToAnthropic` | [→](/api/java/translate/inbound/) |
-| Elixir | `Toolnexus.Translate.openai_messages_to_anthropic` | [→](/api/elixir/translate/inbound/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`LlmClient.TranslateAsync`](/api/csharp/translate/translate/) — Uses this conversion internally for an Anthropic-style upstream, plus the live provider call.

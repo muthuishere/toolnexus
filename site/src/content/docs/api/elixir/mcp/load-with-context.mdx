@@ -145,22 +145,6 @@ IO.puts("ok: wait_for + deadline together, disabled server unaffected")
 | `:deadline` | `:timeout` | `:infinity` | Overall connect-phase bound in ms. On exceed: every in-flight connect task is killed (`Task.shutdown/2` with `:brutal_kill`), the supervisor is stopped, and `load/2` raises `"toolnexus: MCP load deadline exceeded"`. |
 | `:wait_for` | — | `nil` | `(Request.t() -> Answer.t())`. Advertises the `elicitation` MCP capability; an inbound `elicitation/create` is mapped through [`elicitation_to_request/1`](/api/elixir/mcp/elicitation/), your function is called, and the answer is mapped back. Without it, the capability is not advertised and a compliant server will not elicit. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `loadMcp` | [→](/api/javascript/mcp/load-with-context/) |
-| Python | `load_mcp_with_context` | [→](/api/python/mcp/load-with-context/) |
-| Go | `LoadMcpWithContext` | [→](/api/go/mcp/load-with-context/) |
-| Java | `McpSource.loadWith` | [→](/api/java/mcp/load-with-context/) |
-| C# | `McpSource.LoadAsync` | [→](/api/csharp/mcp/load-with-context/) |
-
-<Aside type="note" title="One real difference">
-Other ports expose a separate cancellation-aware entry point (a context/token/cancel-signal
-parameter). Elixir has no separate function — `:deadline` and `:wait_for` are just options on the
-one `load/2`, always available, never requiring an opt-in.
-</Aside>
-
 ## See also
 
 - [`Toolnexus.Mcp.load`](/api/elixir/mcp/load/) — the base call this page's options extend

@@ -142,22 +142,6 @@ Do not treat `is_error` alone as "the tool broke"; check
 | `is_error` | `bool` | Whether the call failed. Fed back to the model, not raised. |
 | `metadata` | `dict[str, Any] \| None` | Free-form, for your code. **Reserved:** `pending` holds a §10 `Request`. |
 
-## The same type in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `ToolResult` | [→](/api/javascript/types/tool-result/) |
-| Go | `ToolResult` | [→](/api/go/types/tool-result/) |
-| Java | `ToolResult` | [→](/api/java/types/tool-result/) |
-| C# | `ToolResult` | [→](/api/csharp/types/tool-result/) |
-| Elixir | `Toolnexus.ToolResult` | [→](/api/elixir/types/tool-result/) |
-
-<Aside type="note" title="snake_case here, camelCase on the wire">
-Python uses `is_error` because `ToolResult` is local API. The §10 `Request`/`Answer` types keep
-camelCase keys (`expiresAt`) even in Python — those serialize and cross language boundaries
-unchanged.
-</Aside>
-
 ## See also
 
 - [`Tool`](/api/python/types/tool/) — what returns this

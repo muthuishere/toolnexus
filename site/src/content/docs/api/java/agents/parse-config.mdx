@@ -174,19 +174,6 @@ public class Example {
 | entry `headers` / `timeout` / `pollEvery` | — | Same fields as [`A2A.agent`](/api/java/agents/agent/)'s full overload. |
 | entry `enabled` / `disabled` | `boolean` | `disabled:true` wins, then `enabled:false`; otherwise enabled. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `parseAgentsConfig` | [→](/api/javascript/agents/parse-config/) |
-| Python | `parse_agents_config` | [→](/api/python/agents/parse-config/) |
-| Go | `ParseAgentsConfig` | [→](/api/go/agents/parse-config/) |
-| C# | `A2A.ParseAgentsConfig` | [→](/api/csharp/agents/parse-config/) |
-| Elixir | `Toolnexus.A2a.parse_agents_config` | [→](/api/elixir/agents/parse-config/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`A2A.agent`](/api/java/agents/agent/) — the descriptor shape each parsed entry becomes.

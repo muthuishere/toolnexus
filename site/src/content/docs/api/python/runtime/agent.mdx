@@ -278,19 +278,6 @@ asyncio.run(main())
 | `on_spawn` / `on_close` | `Callable \| None` | Lifecycle hooks — once pre-first-turn, once pre-final-checkpoint. |
 | `hooks` / `on_metric` | `Any \| None` | The §8 seams, forwarded verbatim — replace, never merge, the runtime-wide values. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agents.Agent` | [→](/api/javascript/runtime/agent/) |
-| Go | `agents.New` | [→](/api/go/runtime/agent/) |
-| Java | `agents.Agent` | [→](/api/java/runtime/agent/) |
-| C# | `Agent` | [→](/api/csharp/runtime/agent/) |
-| Elixir | `Toolnexus.Agents` | [→](/api/elixir/runtime/agent/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`AgentRuntime`](/api/python/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.

@@ -111,19 +111,6 @@ Console.WriteLine($"ok: {names.Count} of 10 built-ins survive: {string.Join(", "
 | `{ "enabled": false, ... }` | Empty list, unless `disabled` is also set (same outcome). |
 | `{ "tools": { name: bool } }` | All-on baseline, minus any name mapped to `false`. Unknown names ignored. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `selectBuiltins` | [→](/api/javascript/builtins/select/) |
-| Python | `select_builtins` | [→](/api/python/builtins/select/) |
-| Go | `SelectBuiltins` | [→](/api/go/builtins/select/) |
-| Java | `BuiltinTools.select` | [→](/api/java/builtins/select/) |
-| Elixir | `Toolnexus.Builtin.load` | [→](/api/elixir/builtins/select/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`BuiltinTools.Create`](/api/csharp/builtins/create/) — Construct every built-in tool directly, outside a toolkit.

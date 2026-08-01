@@ -198,19 +198,6 @@ public class Example {
 `source()` is always `"native"`, and `args` is never null inside `fn` — a null map is replaced with
 an empty one.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `defineTool` | [→](/api/javascript/native/define-tool/) |
-| Python | `define_tool` | [→](/api/python/native/define-tool/) |
-| Go | `NativeTool` | [→](/api/go/native/define-tool/) |
-| C# | `NativeTool.Of` | [→](/api/csharp/native/define-tool/) |
-| Elixir | `Toolnexus.Native.define_tool` | [→](/api/elixir/native/define-tool/) |
-
-Same contract everywhere: source `native`, string-or-value return, thrown errors captured as error
-results.
-
 ## See also
 
 - [`Tools.fromObject`](/api/java/native/collect/) — sweep a class for `@Tool` methods instead

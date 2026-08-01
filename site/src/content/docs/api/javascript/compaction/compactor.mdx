@@ -173,19 +173,6 @@ console.log("ok: compacted to", sentMessages.length, "messages before the LLM ca
 | `countTokens` | `(messages: Message[]) => number` | Token estimator. Default `ceil(chars/4)` summed over messages — an estimate, not a real tokenizer. |
 | `flushToMemory` | `boolean` | Inject a pre-compact reminder to persist durable facts via the §7E `memory` tool. Default `false`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `compactor` | [→](/api/python/compaction/compactor/) |
-| Go | `Compactor` | [→](/api/go/compaction/compactor/) |
-| Java | `Compaction.compactor` | [→](/api/java/compaction/compactor/) |
-| C# | `Compaction.Compactor` | [→](/api/csharp/compaction/compactor/) |
-| Elixir | `Toolnexus.Agents.Compaction.compactor` | [→](/api/elixir/compaction/compactor/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`createClient`](/api/javascript/client/create/) — `hooks.beforeLLM` is where a bare client wires this in.

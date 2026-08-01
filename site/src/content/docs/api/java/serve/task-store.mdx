@@ -215,19 +215,6 @@ public class Example {
 | `resolveStore(store)` | `TaskStore` | `null`/`"memory"` ⇒ in-memory; `"file:<dir>"` ⇒ `FileTaskStore`; a `TaskStore` object ⇒ used as-is. |
 | `A2AConfig.store` | `Object` | Any of the above, passed straight to `resolveStore`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `FileTaskStore` | [→](/api/javascript/serve/task-store/) |
-| Python | `FileTaskStore` | [→](/api/python/serve/task-store/) |
-| Go | `NewFileTaskStore` | [→](/api/go/serve/task-store/) |
-| C# | `FileTaskStore` | [→](/api/csharp/serve/task-store/) |
-| Elixir | `Toolnexus.Serve task_store` | [→](/api/elixir/serve/task-store/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`A2AServer.start`](/api/java/serve/a2a/) — reads and writes every Task through the resolved store.

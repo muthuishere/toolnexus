@@ -338,19 +338,6 @@ load-bearing (auditing, veto), remember they are silently absent on this path.
 | `System` | `string?` | Overrides the system prompt for this call only. `null` uses any `system` message already in `Messages`, or `Options.SystemPrompt`. |
 | `MaxTokens` | `int` | Overrides the per-provider default. `0` uses the default. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `translate` | [→](/api/javascript/translate/translate/) |
-| Python | `translate` | [→](/api/python/translate/translate/) |
-| Go | `Translate` | [→](/api/go/translate/translate/) |
-| Java | `Translate.translate` | [→](/api/java/translate/translate/) |
-| Elixir | `Toolnexus.Translate.translate` | [→](/api/elixir/translate/translate/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Translate.OpenAIMessagesToAnthropic`](/api/csharp/translate/inbound/) — The inbound conversion `TranslateAsync` uses internally for an Anthropic-style upstream.

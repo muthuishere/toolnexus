@@ -137,19 +137,6 @@ IO.puts("ok: self note → MEMORY.md, user note → USER.md")
 | `text` | `String.t()` | yes | For `add`: the entry. For `replace`/`remove`: the existing substring. |
 | `with` | `String.t()` | for `replace` | The replacement text. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `memoryTool` | [→](/api/javascript/persona/memory-tool/) |
-| Python | `memory_tool` | [→](/api/python/persona/memory-tool/) |
-| Go | `MemoryTool` | [→](/api/go/persona/memory-tool/) |
-| Java | `Home.memoryTool` | [→](/api/java/persona/memory-tool/) |
-| C# | `Home.MemoryTool` | [→](/api/csharp/persona/memory-tool/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Agents.Home.compose_soul`](/api/elixir/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.

@@ -222,19 +222,6 @@ IO.puts("ok: continued a transcript across two run/4 calls (#{length(second_body
 | `limit` | `String.t()` \| `nil` | `"maxTurns"` when `status == "incomplete"`, else `nil`. |
 | `pending` | `Toolnexus.Request.t()` \| `nil` | Set only when `status == "pending"` (§10). |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `Client.run` | [→](/api/javascript/client/run/) |
-| Python | `Client.run` | [→](/api/python/client/run/) |
-| Go | `Client.Run` | [→](/api/go/client/run/) |
-| Java | `LlmClient.run` | [→](/api/java/client/run/) |
-| C# | `LlmClient.RunAsync` | [→](/api/csharp/client/run/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Client.create`](/api/elixir/client/create/) — the unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

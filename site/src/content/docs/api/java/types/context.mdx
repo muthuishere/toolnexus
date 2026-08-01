@@ -205,22 +205,6 @@ ignore `data()`.
 | `cancellationToken()` | `AtomicBoolean` | The raw token, to hand to work you spawn. |
 | `answer()` | `Answer` | Present **only** on a post-`waitFor` retry. |
 
-## The same type in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `ToolContext` | [→](/api/javascript/types/context/) |
-| Python | `ToolContext` | [→](/api/python/types/context/) |
-| Go | `ToolContext` | [→](/api/go/types/context/) |
-| C# | `ToolContext` | [→](/api/csharp/types/context/) |
-| Elixir | `Toolnexus.Context` | [→](/api/elixir/types/context/) |
-
-<Aside type="note" title="Two real differences">
-Cancellation follows each language's convention: Java uses an `AtomicBoolean`, JavaScript an
-`AbortSignal`, Go a `context.Context`. And the timeout is **milliseconds** in Java, JavaScript and
-Go, but **seconds** in Python.
-</Aside>
-
 ## See also
 
 - [`Tool`](/api/java/types/tool/) — what receives this

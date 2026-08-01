@@ -27,16 +27,6 @@ to answer, exactly as a relay declaration would — the difference is Elixir's v
 *some* code locally first (even if that code's only job is to raise the suspension), where a true
 relay tool is declared but never invoked by the library at all.
 
-## The same capability in the other ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | _not shipped in this port_ |  |
-| Python | _not shipped in this port_ |  |
-| Go | `RelayTool` | [→](/api/go/suspension/relay/) |
-| Java | _not shipped in this port_ |  |
-| C# | _not shipped in this port_ |  |
-
 ## See also
 
 - [`Toolnexus.Client.create`](/api/elixir/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.

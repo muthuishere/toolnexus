@@ -163,19 +163,6 @@ successful call, that one is unaffected; each `loadMcp` call owns only the clien
 | `<server>.timeout` | `number` (ms) | one server | Bounds that server's connect + list. Default 30000. On expiry: `status[name] = "failed"`, isolated. |
 | `opts.signal` | `AbortSignal` | the whole call | Bounds every server at once. On abort: `loadMcp` **rejects**, and every client created so far is closed. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `load_mcp_with_context` | [→](/api/python/mcp/load-with-context/) |
-| Go | `LoadMcpWithContext` | [→](/api/go/mcp/load-with-context/) |
-| Java | `McpSource.loadWith` | [→](/api/java/mcp/load-with-context/) |
-| C# | `McpSource.LoadAsync` | [→](/api/csharp/mcp/load-with-context/) |
-| Elixir | `Toolnexus.Mcp.load` | [→](/api/elixir/mcp/load-with-context/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`loadMcp`](/api/javascript/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.

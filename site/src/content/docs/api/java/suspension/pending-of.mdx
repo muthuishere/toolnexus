@@ -169,25 +169,6 @@ public class Example {
 |---|---|---|
 | `pendingOf(result)` | `Request` | The suspension's `Request`, or `null` when `result` is `null`/not a suspension. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `pendingOf` | [→](/api/javascript/suspension/pending-of/) |
-| Python | `pending_of` | [→](/api/python/suspension/pending-of/) |
-| Go | `PendingOf` | [→](/api/go/suspension/pending-of/) |
-| C# | `Suspension.PendingOf` | [→](/api/csharp/suspension/pending-of/) |
-| Elixir | _not shipped in this port_ |  |
-
-<Aside type="note" title="Verified symbol — lives on ToolResult, not Request">
-Java puts `pendingOf` (and `pending`/`authRequired`) as static methods on
-[`ToolResult`](https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/ToolResult.java),
-not on `Request`.
-</Aside>
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`ToolResult.pending`](/api/java/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.

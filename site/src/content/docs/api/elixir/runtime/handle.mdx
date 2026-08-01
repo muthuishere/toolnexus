@@ -197,19 +197,6 @@ IO.puts("ok: suspended -> resume -> \"#{final.text}\"")
 | `pending_req` | `Request.t() \| nil` | Set only while `state == :suspended`. |
 | `last_result` | `map() \| nil` | The most recent settled result (idle or suspended). |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agents.Handle` | [→](/api/javascript/runtime/handle/) |
-| Python | `Handle` | [→](/api/python/runtime/handle/) |
-| Go | `agents.Handle` | [→](/api/go/runtime/handle/) |
-| Java | `agents.Handle` | [→](/api/java/runtime/handle/) |
-| C# | `Handle` | [→](/api/csharp/runtime/handle/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same per-handle
-transition traces. See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Agents.agent`](/api/elixir/runtime/agent/) — define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.

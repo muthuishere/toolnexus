@@ -264,19 +264,6 @@ asyncio.run(main())
 | `cfg` | `dict \| None` | `{name?, version?, tools?: list[str]}`. `name` default `"toolnexus"`, `version` default `"0.1.0"`. `tools` filters by name (unknown names ignored); omit ⇒ all. |
 | `on_call` | `Callable \| None` | Fires per `tools/call`: `{name, source, ms, is_error}` (snake_case). Telemetry only — never on the MCP wire. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `buildMcpServer` | [→](/api/javascript/serve/mcp/) |
-| Go | `ExposedMcpTools` | [→](/api/go/serve/mcp/) |
-| Java | `McpServe.build` | [→](/api/java/serve/mcp/) |
-| C# | `McpServe.BuildMcpServer` | [→](/api/csharp/serve/mcp/) |
-| Elixir | `Toolnexus.McpServe.exposed_tools` | [→](/api/elixir/serve/mcp/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolkit.serve`](/api/python/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.

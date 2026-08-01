@@ -206,19 +206,6 @@ asyncio.run(main())
 `SkillInfo` carries `name`, `description`, `location`, `content`, `origin` (`"fs"` or `"logical"`),
 and — for data skills — `resources` and `base`.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `loadSkills` | [→](/api/javascript/skills/load/) |
-| Go | `LoadSkills` | [→](/api/go/skills/load/) |
-| Java | `SkillSource.load` | [→](/api/java/skills/load/) |
-| C# | `SkillSource.Load` | [→](/api/csharp/skills/load/) |
-| Elixir | `Toolnexus.Skill.load` | [→](/api/elixir/skills/load/) |
-
-The `<skill_content>` envelope is byte-identical across ports for the same fixture — a §0
-conformance obligation. Duplicate names resolve first-wins, with a warning on stderr.
-
 ## See also
 
 - [`list_skills`](/api/python/skills/list/) — the same discovery, plus why files were skipped

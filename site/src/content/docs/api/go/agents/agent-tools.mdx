@@ -235,19 +235,6 @@ func main() {
 | `ag` | `Agent` | The peer descriptor — `Card`, `Headers`, `Timeout`, `PollEvery`. |
 | returns | `([]Tool, error)` | One `Tool` per advertised skill, or an error if the card could not be fetched/parsed. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agentTools` | [→](/api/javascript/agents/agent-tools/) |
-| Python | `agent_tools` | [→](/api/python/agents/agent-tools/) |
-| Java | `A2A.agentTools` | [→](/api/java/agents/agent-tools/) |
-| C# | `A2A.AgentTools` | [→](/api/csharp/agents/agent-tools/) |
-| Elixir | `Toolnexus.A2a.agent_tools` | [→](/api/elixir/agents/agent-tools/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`agents.New`](/api/go/agents/agent/) — Point at a remote agent's card and use it exactly like a local tool.

@@ -143,24 +143,6 @@ public class Example {
 | Abort behavior | — | Interrupts every in-flight server thread, closes already-connected clients, throws `CancellationException`. |
 | Per-server `timeout` | — | Still applies underneath — bounds one server's connect+list even when `cancel` is `null`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `loadMcp` | [→](/api/javascript/mcp/load-with-context/) |
-| Python | `load_mcp_with_context` | [→](/api/python/mcp/load-with-context/) |
-| Go | `LoadMcpWithContext` | [→](/api/go/mcp/load-with-context/) |
-| C# | `McpSource.LoadAsync` | [→](/api/csharp/mcp/load-with-context/) |
-| Elixir | `Toolnexus.Mcp.load` | [→](/api/elixir/mcp/load-with-context/) |
-
-<Aside type="note" title="Same idea, native idiom per port">
-Go threads a `context.Context`; C#/JS use a cancellation token / `AbortSignal` on the same
-`load`/`LoadAsync` entry point; Java's `CancelSignal` is the equivalent cooperative-polling
-shape for a language without a first-class cancellation context. Behavior — abort promptly,
-release what was already connected — is identical across ports by contract.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-</Aside>
-
 ## See also
 
 - [`McpSource.load`](/api/java/mcp/load/) — the two-argument form, for when you don't need cancellation.

@@ -35,16 +35,6 @@ At the `RunResult` level, `Toolnexus.Client.run/4` already surfaces this without
 `result.status == "pending"` and `result.pending` is the `Request` directly (no reader call
 needed — see [`Client.run`](/api/elixir/client/run/#runresult-shape)).
 
-## The same capability in the other ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `pendingOf` | [→](/api/javascript/suspension/pending-of/) |
-| Python | `pending_of` | [→](/api/python/suspension/pending-of/) |
-| Go | `PendingOf` | [→](/api/go/suspension/pending-of/) |
-| Java | `Request.pendingOf` | [→](/api/java/suspension/pending-of/) |
-| C# | `Suspension.PendingOf` | [→](/api/csharp/suspension/pending-of/) |
-
 ## See also
 
 - [`Toolnexus.Client.create`](/api/elixir/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.

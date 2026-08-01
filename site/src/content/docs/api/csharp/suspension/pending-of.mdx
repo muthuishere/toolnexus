@@ -253,19 +253,6 @@ matters most.
 
 `Request?` — the suspension's request when `result.Metadata["pending"]` is present, otherwise `null`.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `pendingOf` | [→](/api/javascript/suspension/pending-of/) |
-| Python | `pending_of` | [→](/api/python/suspension/pending-of/) |
-| Go | `PendingOf` | [→](/api/go/suspension/pending-of/) |
-| Java | `Request.pendingOf` | [→](/api/java/suspension/pending-of/) |
-| Elixir | _not shipped in this port_ |  |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`ToolResult.Pending`](/api/csharp/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.

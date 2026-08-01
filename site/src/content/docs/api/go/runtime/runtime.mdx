@@ -266,19 +266,6 @@ func main() {
 | `Clock` | `Clock` | `nil` ⇒ the real clock; inject a virtual one for deterministic fixtures |
 | `Hooks` / `OnMetric` | — | the §8 seams, applied to every agent unless a `Def` overrides them |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agents.AgentRuntime` | [→](/api/javascript/runtime/runtime/) |
-| Python | `AgentRuntime` | [→](/api/python/runtime/runtime/) |
-| Java | `agents.Runtime` | [→](/api/java/runtime/runtime/) |
-| C# | `AgentRuntime` | [→](/api/csharp/runtime/runtime/) |
-| Elixir | `Toolnexus.Agents.Runtime` | [→](/api/elixir/runtime/runtime/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`agents.New`](/api/go/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.

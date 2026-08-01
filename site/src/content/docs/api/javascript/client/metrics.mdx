@@ -196,19 +196,6 @@ console.log("ok:", toolEvents.length, !!runEvent?.error)
 async contract; it observes only. `client.metrics()` renders the cumulative Prometheus text
 exposition of the same events, independent of whether `onMetric` is set.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `MetricEvent` | [→](/api/python/client/metrics/) |
-| Go | `MetricEvent` | [→](/api/go/client/metrics/) |
-| Java | `LlmClient.MetricEvent` | [→](/api/java/client/metrics/) |
-| C# | `MetricEvent` | [→](/api/csharp/client/metrics/) |
-| Elixir | `Toolnexus.Client.MetricsRegistry` | [→](/api/elixir/client/metrics/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`createClient`](/api/javascript/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

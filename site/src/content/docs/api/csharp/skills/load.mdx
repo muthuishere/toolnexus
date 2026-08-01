@@ -191,19 +191,6 @@ Discovery rules: `node_modules` and `.git` are skipped, symlinks are followed wi
 detection, a file whose frontmatter has no `name` is dropped, and a duplicate name keeps the first
 one seen and warns.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `loadSkills` | [→](/api/javascript/skills/load/) |
-| Python | `load_skills` | [→](/api/python/skills/load/) |
-| Go | `LoadSkills` | [→](/api/go/skills/load/) |
-| Java | `SkillSource.load` | [→](/api/java/skills/load/) |
-| Elixir | `Toolnexus.Skill.load` | [→](/api/elixir/skills/load/) |
-
-The `skill` tool's output is byte-identical across ports for the same directory — a §0 conformance
-obligation.
-
 ## See also
 
 - [`SkillSource.LoadWith`](/api/csharp/skills/load-with/) — skills as data, allowlists, sample limits

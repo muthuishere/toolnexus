@@ -165,19 +165,6 @@ field decorated with a context that also supplies `addInitializer` — `collectT
 [`tool`](/api/javascript/native/reflect/) for how to avoid that.
 </Aside>
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | _not shipped in this port_ |  |
-| Go | _not shipped in this port_ |  |
-| Java | `Tools.fromObject` | [→](/api/java/native/collect/) |
-| C# | `Tools.FromObject` | [→](/api/csharp/native/collect/) |
-| Elixir | _not shipped in this port_ |  |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`defineTool`](/api/javascript/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.

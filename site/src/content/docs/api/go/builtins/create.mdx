@@ -182,19 +182,6 @@ func main() {
 
 `[]Tool` — always length 10, always the same order, each with `Source: SourceBuiltin`.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `createBuiltinTools` | [→](/api/javascript/builtins/create/) |
-| Python | `create_builtin_tools` | [→](/api/python/builtins/create/) |
-| Java | `BuiltinTools.create` | [→](/api/java/builtins/create/) |
-| C# | `BuiltinTools.Create` | [→](/api/csharp/builtins/create/) |
-| Elixir | `Toolnexus.Builtin.tools` | [→](/api/elixir/builtins/create/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`SelectBuiltins`](/api/go/builtins/select/) — pick which built-in file/shell/web tools are in play, by name or by source toggle.

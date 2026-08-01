@@ -194,25 +194,6 @@ public class Example {
 | `authRequired(url)` | `ToolResult` | `kind:"authorization"`, prompt `"Authorization required to continue"`. |
 | `authRequired(url, prompt)` | `ToolResult` | Same, with a custom `prompt`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `authRequired` | [→](/api/javascript/suspension/auth-required/) |
-| Python | `auth_required` | [→](/api/python/suspension/auth-required/) |
-| Go | `AuthRequired` | [→](/api/go/suspension/auth-required/) |
-| C# | `Suspension.AuthRequired` | [→](/api/csharp/suspension/auth-required/) |
-| Elixir | _not shipped in this port_ |  |
-
-<Aside type="note" title="Verified symbol — lives on ToolResult, not Request">
-Java puts `authRequired` (and `pending`/`pendingOf`) as static methods on
-[`ToolResult`](https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/ToolResult.java),
-not on `Request`.
-</Aside>
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`ToolResult.pending`](/api/java/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.

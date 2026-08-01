@@ -179,19 +179,6 @@ func main() {
 `*SkillSource` — same shape as [`LoadSkills`](/api/go/skills/load/) returns: `Skills
 map[string]SkillInfo` plus the built `Tool` named `skill`.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `loadSkills` | [→](/api/javascript/skills/load-with/) |
-| Python | `load_skills` | [→](/api/python/skills/load-with/) |
-| Java | `SkillSource.loadWith` | [→](/api/java/skills/load-with/) |
-| C# | `SkillSource.LoadWith` | [→](/api/csharp/skills/load-with/) |
-| Elixir | `Toolnexus.Skill.load` | [→](/api/elixir/skills/load-with/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`LoadSkills`](/api/go/skills/load/) — glob a skills directory and expose one skill tool with progressive disclosure.

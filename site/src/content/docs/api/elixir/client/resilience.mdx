@@ -183,19 +183,6 @@ IO.puts("ok: retries: 1 bounded the loop to #{Agent.get(attempts, & &1)} total a
 | `:timeout_ms` | `nil` | Whole-run deadline in ms. `nil` = no deadline. Checked before every LLM attempt; past it, the run raises rather than making another call. |
 | `:on_error` | `nil` (default classifier) | `(info -> :retry \| :fail)`. `info`: `%{status:, error:, attempt:, retryable:}` — `status` on a non-2xx response, `error` on a transport exception, `attempt` zero-based, `retryable` = whether the default rule (`429`/`5xx`/network) would already retry it. Absent ⇒ `retryable? :retry : :fail`, byte-identical to the hardcoded rule this option replaced. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `ErrorInfo` | [→](/api/javascript/client/resilience/) |
-| Python | `ErrorClassifier` | [→](/api/python/client/resilience/) |
-| Go | `ErrorInfo` | [→](/api/go/client/resilience/) |
-| Java | `LlmClient.ErrorInfo` | [→](/api/java/client/resilience/) |
-| C# | `LlmClient.ErrorInfo` | [→](/api/csharp/client/resilience/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Client.create`](/api/elixir/client/create/) — the unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

@@ -173,19 +173,6 @@ asyncio.run(main())
 | `apply_patch` | Apply an opencode Begin/End Patch (Add/Update/Delete); atomic — one bad hunk aborts with no writes. |
 | `todowrite` | Replace the session todo list; returns the rendered `[x]`/`[ ]` list. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `createBuiltinTools` | [→](/api/javascript/builtins/create/) |
-| Go | `CreateBuiltinTools` | [→](/api/go/builtins/create/) |
-| Java | `BuiltinTools.create` | [→](/api/java/builtins/create/) |
-| C# | `BuiltinTools.Create` | [→](/api/csharp/builtins/create/) |
-| Elixir | `Toolnexus.Builtin.tools` | [→](/api/elixir/builtins/create/) |
-
-Behavior is identical across ports by contract — same tool names, same input schemas, same
-`ToolResult` shape. See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`select_builtins`](/api/python/builtins/select/) — Pick which built-ins are in play, by name or by a whole-source toggle.

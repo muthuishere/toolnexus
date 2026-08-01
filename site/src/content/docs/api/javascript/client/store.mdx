@@ -186,19 +186,6 @@ console.log("ok:", store.saves)
 Pass a `ConversationStore` implementation as `createClient({ store })`; retrieve whichever one is
 active with `client.conversationStore()`.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `InMemoryConversationStore` | [→](/api/python/client/store/) |
-| Go | `NewInMemoryConversationStore` | [→](/api/go/client/store/) |
-| Java | `LlmClient.ConversationStore` | [→](/api/java/client/store/) |
-| C# | `LlmClient.IConversationStore` | [→](/api/csharp/client/store/) |
-| Elixir | `Toolnexus.Client.InMemoryConversationStore` | [→](/api/elixir/client/store/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`createClient`](/api/javascript/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

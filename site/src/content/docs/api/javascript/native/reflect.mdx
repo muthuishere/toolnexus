@@ -207,19 +207,6 @@ does — the schema is what the model reads, not a runtime guard.
 | `opts.name` | `string` | no | Overrides the exposed tool name. Defaults to the decorator context's `name` (the method/property key), then the function's own `.name`. |
 | `opts.inputSchema` | `JSONSchema` | no | Defaults to an empty-object schema, same as [`defineTool`](/api/javascript/native/define-tool/). |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `tool` | [→](/api/python/native/reflect/) |
-| Go | `NativeToolReflect` | [→](/api/go/native/reflect/) |
-| Java | `@Tool annotation` | [→](/api/java/native/reflect/) |
-| C# | `ToolMethodAttribute` | [→](/api/csharp/native/reflect/) |
-| Elixir | _not shipped in this port_ |  |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`defineTool`](/api/javascript/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.

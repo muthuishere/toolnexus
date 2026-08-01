@@ -185,19 +185,6 @@ isolates a single hung server without aborting the rest — see
 | `status` | `Record<string, McpStatus>` | `"connected"`, `"disabled"`, or `"failed"` per server name. |
 | `close()` | `() => Promise<void>` | Shuts down every connected server's transport. **Always call it.** |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `load_mcp` | [→](/api/python/mcp/load/) |
-| Go | `LoadMcp` | [→](/api/go/mcp/load/) |
-| Java | `McpSource.load` | [→](/api/java/mcp/load/) |
-| C# | `McpSource.LoadAsync` | [→](/api/csharp/mcp/load/) |
-| Elixir | `Toolnexus.Mcp.load` | [→](/api/elixir/mcp/load/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`loadMcp`](/api/javascript/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.

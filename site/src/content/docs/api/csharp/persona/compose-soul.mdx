@@ -139,19 +139,6 @@ off any dangling continuation byte so it never splits a rune mid-character.
 | `Soul` | `string` | The composed system prompt: present files only, in `BootstrapOrder`, each as a `## <file>` section. |
 | `Found` | `List<string>` | Which bootstrap filenames were actually present, in `BootstrapOrder`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `composeSoul` | [→](/api/javascript/persona/compose-soul/) |
-| Python | `compose_soul` | [→](/api/python/persona/compose-soul/) |
-| Go | `ComposeSoul` | [→](/api/go/persona/compose-soul/) |
-| Java | `Home.composeSoul` | [→](/api/java/persona/compose-soul/) |
-| Elixir | `Toolnexus.Agents.Home.compose_soul` | [→](/api/elixir/persona/compose-soul/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Home.FromDir`](/api/csharp/persona/from-dir/) — Point at an agent home directory and get a configured agent back.

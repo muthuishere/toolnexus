@@ -190,19 +190,6 @@ console.log("ok:", res.finishReason, res.usage)
 | `model` | `string` | The model that answered. |
 | `raw` | `any?` | The provider's decoded response, for fields this type doesn't model. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `translate` | [→](/api/python/translate/translate/) |
-| Go | `Translate` | [→](/api/go/translate/translate/) |
-| Java | `Translate.translate` | [→](/api/java/translate/translate/) |
-| C# | `Translate.Run` | [→](/api/csharp/translate/translate/) |
-| Elixir | `Toolnexus.Translate.translate` | [→](/api/elixir/translate/translate/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`createClient`](/api/javascript/client/create/) — Builds the `Client` this method lives on.

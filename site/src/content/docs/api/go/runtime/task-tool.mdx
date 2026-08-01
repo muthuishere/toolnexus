@@ -138,16 +138,6 @@ key) instead of spawning a duplicate: settled ⇒ its recorded result, suspended
 running ⇒ awaited. This is what makes a durable §10 resume idempotent across a re-invoked `task`
 call.
 
-## The same capability in the other ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `agents.taskTool` | [→](/api/javascript/runtime/task-tool/) |
-| Python | _not shipped in this port_ |  |
-| Java | _not shipped in this port_ |  |
-| C# | _not shipped in this port_ |  |
-| Elixir | _not shipped in this port_ |  |
-
 ## See also
 
 - [`agents.New`](/api/go/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.

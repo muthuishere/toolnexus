@@ -145,19 +145,6 @@ IO.puts("ok: malformed config raised, deadline exceeded raised (#{message})")
 | `tools` | `%{server => [%{"name", "description", "inputSchema"}]}` | Original (unprefixed) tool definitions per **connected** server only. |
 | `status` | `%{server => status}` | `"connected"`, `"failed"`, or `"disabled"` per configured server. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `listMcpTools` | [→](/api/javascript/mcp/list-tools/) |
-| Python | `list_mcp_tools` | [→](/api/python/mcp/list-tools/) |
-| Go | `ListMcpTools` | [→](/api/go/mcp/list-tools/) |
-| Java | `McpSource.listMcpTools` | [→](/api/java/mcp/list-tools/) |
-| C# | `McpSource.ListMcpToolsAsync` | [→](/api/csharp/mcp/list-tools/) |
-
-Behavior is identical across ports by contract — same fixtures, same per-server statuses. See
-[SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Mcp.load`](/api/elixir/mcp/load/) — connect and get callable, prefixed, filtered tools

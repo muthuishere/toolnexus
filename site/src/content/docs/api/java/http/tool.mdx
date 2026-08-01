@@ -259,19 +259,6 @@ Result contract: 2xx ⇒ `ToolResult.ok(body)` with `metadata.status`; non-2xx �
 output is `HTTP <status>: <body>`, also with `metadata.status`. A transport failure (connection
 refused, timeout) is an error result carrying the exception message — nothing throws.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `httpTool` | [→](/api/javascript/http/tool/) |
-| Python | `http_tool` | [→](/api/python/http/tool/) |
-| Go | `HTTPTool` | [→](/api/go/http/tool/) |
-| C# | `HttpTool.Of` | [→](/api/csharp/http/tool/) |
-| Elixir | `Toolnexus.Http.tool` | [→](/api/elixir/http/tool/) |
-
-Placeholder consumption, query/body split, `${ENV}` expansion and the `HTTP <status>: <body>` error
-string are identical in every port — a §0 conformance obligation.
-
 ## See also
 
 - [`NativeTool.of`](/api/java/native/define-tool/) — wrap your own client when one request is not enough

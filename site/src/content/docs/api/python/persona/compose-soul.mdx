@@ -141,19 +141,6 @@ with tempfile.TemporaryDirectory() as home:
 | `soul` | `str` | The composed system prompt: `## <file>` sections, in `BOOTSTRAP_ORDER`, joined with blank lines. |
 | `found` | `list[str]` | The bootstrap filenames actually present, in the same order they appear in `soul`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `composeSoul` | [→](/api/javascript/persona/compose-soul/) |
-| Go | `ComposeSoul` | [→](/api/go/persona/compose-soul/) |
-| Java | `Home.composeSoul` | [→](/api/java/persona/compose-soul/) |
-| C# | `Home.ComposeSoul` | [→](/api/csharp/persona/compose-soul/) |
-| Elixir | `Toolnexus.Agents.Home.compose_soul` | [→](/api/elixir/persona/compose-soul/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`agent_from_dir`](/api/python/persona/from-dir/) — Point at an agent home directory and get a configured agent back.

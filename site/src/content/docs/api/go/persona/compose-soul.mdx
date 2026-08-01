@@ -216,19 +216,6 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { re
 | `found` | The ordered list of filenames that were actually present — use it to know what shaped the soul. |
 | Timing | Composition happens once, at session start — the soul is a **frozen snapshot** for the run (the cache-stability rule). |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `composeSoul` | [→](/api/javascript/persona/compose-soul/) |
-| Python | `compose_soul` | [→](/api/python/persona/compose-soul/) |
-| Java | `Home.composeSoul` | [→](/api/java/persona/compose-soul/) |
-| C# | `Home.ComposeSoul` | [→](/api/csharp/persona/compose-soul/) |
-| Elixir | `Toolnexus.Agents.Home.compose_soul` | [→](/api/elixir/persona/compose-soul/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`FromDir`](/api/go/persona/from-dir/) — Point at an agent home directory and get a configured agent back.

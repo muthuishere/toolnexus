@@ -161,19 +161,6 @@ kind of `Request` produced the `Answer`. Getting the MCP `action` right (`accept
 | `ok: false, reason: "declined"` | `{ action: "decline" }` |
 | `ok: false`, any other/absent `reason` | `{ action: "cancel" }` |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `elicitation_to_request` | [→](/api/python/mcp/elicitation/) |
-| Go | `ElicitationToRequest` | [→](/api/go/mcp/elicitation/) |
-| Java | `McpSource.elicitationToRequest` | [→](/api/java/mcp/elicitation/) |
-| C# | `McpSource.ElicitationToRequest` | [→](/api/csharp/mcp/elicitation/) |
-| Elixir | `Toolnexus.Mcp.Protocol.elicitation_to_request` | [→](/api/elixir/mcp/elicitation/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`loadMcp`](/api/javascript/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.

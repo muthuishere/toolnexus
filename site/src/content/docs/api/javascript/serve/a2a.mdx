@@ -212,19 +212,6 @@ console.log("ok:", events.map((e) => e.state).join(","))
 `status: "pending"` maps the Task to `"input-required"` (§10 crossing A2A) rather than a false
 `"completed"`.
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | `Toolkit.serve` | [→](/api/python/serve/a2a/) |
-| Go | `Toolkit.Serve` | [→](/api/go/serve/a2a/) |
-| Java | `A2AServer.start` | [→](/api/java/serve/a2a/) |
-| C# | `A2AServer.StartAsync` | [→](/api/csharp/serve/a2a/) |
-| Elixir | `Toolnexus.Serve.start` | [→](/api/elixir/serve/a2a/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`buildAgentCard`](/api/javascript/serve/agent-card/) — Construct the Agent Card that advertises your name, skills and endpoint.

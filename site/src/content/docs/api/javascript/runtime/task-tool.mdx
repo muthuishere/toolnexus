@@ -197,20 +197,6 @@ Calling `task` returns a `ToolResult` whose `output` is the child's final text (
 totalTokens }` — or, if the child itself suspends, the child's `Request.prompt` as `output` with
 `isError: true` and `metadata.pending` set (§10 escalation, unchanged shape).
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| Python | _not shipped in this port_ |  |
-| Go | _not shipped in this port_ |  |
-| Java | _not shipped in this port_ |  |
-| C# | _not shipped in this port_ |  |
-| Elixir | _not shipped in this port_ |  |
-
-Only JS exposes a page for this as a distinct entry; elsewhere it is the `task` builtin, toggled on
-by declaring a team on the runtime — same behavior, no separate importable symbol.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`agents.Agent`](/api/javascript/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.

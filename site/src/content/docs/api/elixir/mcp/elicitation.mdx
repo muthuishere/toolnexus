@@ -141,23 +141,6 @@ IO.puts("ok: accept/decline/cancel all mapped")
 | `ok: false, reason: "declined"` | `%{"action" => "decline"}` |
 | `ok: false`, any other reason | `%{"action" => "cancel"}` |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `elicitationToRequest` | [→](/api/javascript/mcp/elicitation/) |
-| Python | `elicitation_to_request` | [→](/api/python/mcp/elicitation/) |
-| Go | `ElicitationToRequest` | [→](/api/go/mcp/elicitation/) |
-| Java | `McpSource.elicitationToRequest` | [→](/api/java/mcp/elicitation/) |
-| C# | `McpSource.ElicitationToRequest` | [→](/api/csharp/mcp/elicitation/) |
-
-<Aside type="note" title="Module placement is Elixir-specific">
-The other ports hang this function off their MCP source type directly (`McpSource.*`); Elixir
-splits the pure JSON-RPC codec into `Toolnexus.Mcp.Protocol`, so the equivalent symbol here is
-`Toolnexus.Mcp.Protocol.elicitation_to_request/1`, not `Toolnexus.Mcp.Protocol.elicitation_to_request/1`.
-The mapping itself is identical across all six ports.
-</Aside>
-
 ## See also
 
 - [`Toolnexus.Mcp.load` (ctx-aware form)](/api/elixir/mcp/load-with-context/) — where `:wait_for` receives these requests

@@ -206,20 +206,6 @@ IO.puts("ok: anthropic upstream, OpenAI-shaped result — #{result.text}, #{leng
 | `model` | `String.t()` | The model that answered. |
 | `raw` | `term()` | The provider's decoded response, for fields this struct doesn't model. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `translate` | [→](/api/javascript/translate/translate/) |
-| Python | `translate` | [→](/api/python/translate/translate/) |
-| Go | `Translate` | [→](/api/go/translate/translate/) |
-| Java | `Translate.translate` | [→](/api/java/translate/translate/) |
-| C# | `Translate.Run` | [→](/api/csharp/translate/translate/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output. Elixir's
-entry point sits on `Client` rather than a standalone `Translate` module, per the note above.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Translate.openai_messages_to_anthropic`](/api/elixir/translate/inbound/) — Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong.

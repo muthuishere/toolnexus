@@ -291,19 +291,6 @@ public class Example {
 | `RunResult.pending` | `Request` | The unresolved suspension, non-null iff `status == "pending"`. |
 | `Context.answer()` | `Answer` | Set on the retry after `waitFor` resolves; a tool reads `answer.data()` for `kind:"input"`, ignores it for `kind:"authorization"`. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `waitFor` | [→](/api/javascript/suspension/wait-for/) |
-| Python | `WaitFor` | [→](/api/python/suspension/wait-for/) |
-| Go | `WaitFor` | [→](/api/go/suspension/wait-for/) |
-| C# | `LlmClient.WaitFor` | [→](/api/csharp/suspension/wait-for/) |
-| Elixir | `Toolnexus.Client.create` | [→](/api/elixir/suspension/wait-for/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`ToolResult.pending`](/api/java/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.

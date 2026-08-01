@@ -208,19 +208,6 @@ public class Example {
 | `countTokens` | `Function<List<Object>, Integer>` | Token estimator; default `Compaction::estimateTokens` (`ceil(chars/4)` per message, summed). |
 | `flushToMemory` | `boolean` | When set, injects a pre-compact reminder to persist durable facts via the §7E memory tool. Off by default. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `compactor` | [→](/api/javascript/compaction/compactor/) |
-| Python | `compactor` | [→](/api/python/compaction/compactor/) |
-| Go | `Compactor` | [→](/api/go/compaction/compactor/) |
-| C# | `Compaction.Compactor` | [→](/api/csharp/compaction/compactor/) |
-| Elixir | `Toolnexus.Agents.Compaction.compactor` | [→](/api/elixir/compaction/compactor/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`LlmClient.Hooks`](/api/java/client/hooks/) — The lifecycle middleware `compactor` plugs into via `beforeLLM`.

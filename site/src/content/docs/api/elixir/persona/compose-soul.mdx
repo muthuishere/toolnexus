@@ -131,19 +131,6 @@ IO.puts("ok: oversized MEMORY.md truncated to #{byte_size(soul)} bytes (disk fil
 | `soul` (return) | `String.t()` | The composed system prompt — `## <file>` sections, joined with blank lines. |
 | `found` (return) | `[String.t()]` | Discovered bootstrap filenames, in canonical order. |
 
-## The same call in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `composeSoul` | [→](/api/javascript/persona/compose-soul/) |
-| Python | `compose_soul` | [→](/api/python/persona/compose-soul/) |
-| Go | `ComposeSoul` | [→](/api/go/persona/compose-soul/) |
-| Java | `Home.composeSoul` | [→](/api/java/persona/compose-soul/) |
-| C# | `Home.ComposeSoul` | [→](/api/csharp/persona/compose-soul/) |
-
-Behavior is identical across ports by contract — same `examples/` fixtures, same output.
-See [SPEC §0](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
-
 ## See also
 
 - [`Toolnexus.Agents.Home.from_dir`](/api/elixir/persona/from-dir/) — Point at an agent home directory and get a configured agent back.

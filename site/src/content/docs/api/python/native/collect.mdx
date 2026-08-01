@@ -54,16 +54,6 @@ over the module combined with `isinstance(obj, Tool)` gets you the same sweep JS
 does — `@tool` already leaves a `Tool` instance bound to the name, so filtering a module's members
 by type *is* the collector, without toolnexus needing to ship one.
 
-## The same capability in the other ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `collectTools` | [→](/api/javascript/native/collect/) |
-| Go | _not shipped in this port_ |  |
-| Java | `Tools.fromObject` | [→](/api/java/native/collect/) |
-| C# | `Tools.FromObject` | [→](/api/csharp/native/collect/) |
-| Elixir | _not shipped in this port_ |  |
-
 ## See also
 
 - [`define_tool`](/api/python/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.

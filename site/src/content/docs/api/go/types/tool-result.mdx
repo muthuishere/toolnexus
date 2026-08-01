@@ -204,19 +204,6 @@ Do not treat `IsError` alone as "the tool broke"; check
 | `IsError` | `bool` | Whether the call failed. Fed back to the model, distinct from a returned `error`. |
 | `Metadata` | `map[string]any` | Free-form, for your code. **Reserved:** `pending` holds a §10 `Request`. |
 
-## The same type in the other five ports
-
-| Port | Symbol | |
-|---|---|---|
-| JavaScript | `ToolResult` | [→](/api/javascript/types/tool-result/) |
-| Python | `ToolResult` | [→](/api/python/types/tool-result/) |
-| Java | `ToolResult` | [→](/api/java/types/tool-result/) |
-| C# | `ToolResult` | [→](/api/csharp/types/tool-result/) |
-| Elixir | `Toolnexus.ToolResult` | [→](/api/elixir/types/tool-result/) |
-
-The JSON tags pin the wire names — `isError` stays camelCase even though the Go field is `IsError`,
-because it serializes and crosses agent boundaries.
-
 ## See also
 
 - [`Tool`](/api/go/types/tool/) — what returns this
