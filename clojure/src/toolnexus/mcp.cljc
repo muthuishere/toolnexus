@@ -551,12 +551,35 @@
           (let [with-stderr (fn [failure]
                               ;; stderr is drained on ANOTHER thread, so the
                               ;; lines that explain a crash can still be in
-                              ;; flight at the instant we notice the crash. A
-                              ;; short beat before quoting the ring is the
-                              ;; difference between "server failed" and "server
-                              ;; failed: <the actual reason>".
-                              (ktime/sleep! 50)
-                              (assoc failure :stderr (vec (take-last 5 ((:stderr transport))))))
+                              ;; flight at the instant we notice the crash.
+                              ;;
+                              ;; koine 0.8.2 corrected its own docstring here:
+                              ;; an EMPTY ring means nothing has ARRIVED YET,
+                              ;; never that the child wrote nothing. Reading it
+                              ;; once and concluding no-stderr is the same race
+                              ;; as reading exit-code once and concluding
+                              ;; still-running — and it bites hardest exactly
+                              ;; when it matters, collecting the crash report
+                              ;; from a child that just died.
+                              ;;
+                              ;; This used to be a fixed 50ms sleep, which was
+                              ;; the same GUESS shape as the kill! timeout this
+                              ;; port already deleted: too short loses the
+                              ;; reason, too long taxes every failure. Now it
+                              ;; polls to a deadline and stops as soon as a line
+                              ;; lands.
+                              ;;
+                              ;; A genuinely silent child pays the full deadline.
+                              ;; That is accepted: this runs only on the FAILURE
+                              ;; path, where 300ms buys the difference between
+                              ;; "server failed" and "server failed: <reason>".
+                              (let [lines (loop [tries 0]
+                                            (let [ls (seq ((:stderr transport)))]
+                                              (cond ls ls
+                                                    (>= tries 60) nil
+                                                    :else (do (ktime/sleep! 5)
+                                                              (recur (inc tries))))))]
+                                (assoc failure :stderr (vec (take-last 5 lines)))))
                 init ((:rpc! transport) "initialize"
                       {:protocolVersion protocol-version
                        :capabilities    {}
