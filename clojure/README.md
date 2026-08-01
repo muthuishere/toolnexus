@@ -17,7 +17,7 @@ is the only third-party dependency.
 
 ## Status
 
-155 tests / 708 assertions, 0 failures, on **all three** runtimes:
+155 tests / 708 assertions, 0 failures, in **all five** execution modes:
 
 | runtime | how |
 |---|---|
@@ -25,7 +25,7 @@ is the only third-party dependency.
 | cljgo, AOT binary | `cljgo build && ./toolnexus-test` |
 | cljgo, interpreted | `cljgo run src/run_tests.cljc` |
 
-Verified against koine 0.7.3 and the **published cljgo v0.8.5 release
+Verified against koine 0.8.2 and the **published cljgo v0.8.8 release
 archive** — no source checkout, no `CLJGO_SRC`. cljgo #177 is closed, so these
 numbers are re-runnable by anyone rather than only on the machine that produced
 them.
@@ -33,10 +33,22 @@ them.
 Two gates beyond the suite:
 
 ```sh
+./all-modes-check.sh       # the suite in ALL FIVE ways this port can be executed
 ./cljgo-gate.sh            # both cljgo legs + a DIFF between them; also a downstream gate for cljgo CI
 ./consumer-exit-check.sh   # does the library let a consumer's process exit?
 ./deps-purity-check.sh     # is koine really the only dependency? (transitive classpath)
 ```
+
+**Five execution modes, all green** — because "works on Clojure and on cljgo" is
+five paths, not two, and the REPLs are where a human actually meets a library:
+
+| mode | how |
+|---|---|
+| `jvm-main` | `clojure -M -m toolnexus.test-main` |
+| `jvm-repl` | forms piped into `clojure -r` |
+| `cljgo-aot` | `cljgo build` → native binary |
+| `cljgo-run` | `cljgo run src/run_tests.cljc` |
+| `cljgo-repl` | forms piped into `cljgo repl` |
 
 All three have been **watched fail** before being trusted — see the header of
 each. The spikes run the same way: `spikes/sNN-*/run-both.sh` diffs all three

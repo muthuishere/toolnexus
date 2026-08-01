@@ -17,16 +17,25 @@
 # meets the library. A port proven only through its compiled path is proven in
 # the mode developers use least.
 #
-# STATUS 2026-08-01, cljgo v0.8.6, koine 0.8.0:
+# STATUS 2026-08-01, cljgo v0.8.8, koine 0.8.2 — ALL FIVE GREEN:
 #
 #   jvm-main    155 tests / 708 assertions   PASS
 #   jvm-repl    155 tests / 708 assertions   PASS
 #   cljgo-aot   155 tests / 708 assertions   PASS
 #   cljgo-run   155 tests / 708 assertions   PASS
-#   cljgo-repl  BLOCKED — upstream defect, not a port failure (below)
+#   cljgo-repl  155 tests / 708 assertions   PASS  <- was BLOCKED; cljgo #185
 #
-# THE cljgo-repl BLOCKER, measured rather than assumed. `cljgo repl` resolves
-# neither the project's own source root nor its declared dependencies:
+# cljgo-repl WENT GREEN WITH NO EDIT HERE, which was the point of reporting it
+# as BLOCKED rather than skipping it: the leg kept attempting the real thing
+# every run, so the upstream fix landing is what turned it green, not a human
+# remembering to re-enable it. The history below is kept deliberately — a gate
+# that erases what it used to catch cannot be audited.
+#
+# THE cljgo-repl BLOCKER — FIXED UPSTREAM in cljgo #185, kept here as history.
+# It was: `cljgo repl` resolved neither the project's own source root nor its
+# declared dependencies, because runREPL never called resolveRunDeps while
+# `cljgo run` did. cljgo found the identical bug in `cljgo nrepl` — the editor
+# path — before anyone reported it. What it WAS:
 #
 #   $ printf "(require 'toolnexus.tool)\n" | cljgo repl
 #   error: could not locate namespace toolnexus.tool (no registered provider,
