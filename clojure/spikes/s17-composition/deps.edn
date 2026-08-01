@@ -1,4 +1,4 @@
 ;; S17 — Clojure (JVM) side.
 {:paths ["src"]
  :deps  {org.clojure/clojure           {:mvn/version "1.12.5"}
-         net.clojars.muthuishere/koine {:mvn/version "0.6.0"}}}
+         net.clojars.muthuishere/koine {:mvn/version "0.7.3"}}}
