@@ -42,6 +42,15 @@
 #
 # Cost: ~7s of test work. The cljgo build of this project dominates (~2s here,
 # more on a cold Maven cache), so cache ~/.m2 or you will feel it every push.
+
+# IF THE BUILD STEP FAILS WITH `clojure.tools.build.api`, THAT IS cljgo #176 —
+# NOT a problem with this project's dependencies. cljgo's build path pulls in
+# tools.build when a `build.clj` is present at the repo root, and misreports the
+# failure as the consumer's. This tree has NO build.clj anywhere (verified: 0
+# matches; it uses deps.edn + build.cljgo, tools.build is not involved), which
+# has a consequence worth stating against our own green result: a tree that
+# never enters that path CANNOT vouch for the #176 fix in either direction. Do
+# not read this gate passing as evidence about #176.
 set -uo pipefail
 cd "$(dirname "$0")"
 
