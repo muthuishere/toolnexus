@@ -393,6 +393,9 @@ implementation's examples and tests. The cross-language contract lives in [SPEC.
 - ✅ Verified with live OpenRouter tool-calling round trips (every port)
 - ✅ Published on all six registries: **npm** · **PyPI** · **Go module** · **NuGet** · **Maven Central** · **Hex**
 - ⏳ OpenAPI bulk import + MCP OAuth — follow-ups (pass a bearer token via `headers` for now)
+- 🚫 In-browser bundle — out of scope by design. All six ports target server/Node-style
+  runtimes (MCP stdio child processes, `fs`-based skills, HTTP `serve`); a from-scratch,
+  browser-native tool-calling library is a separate project, not a mode of toolnexus.
 
 ## Tests
 
