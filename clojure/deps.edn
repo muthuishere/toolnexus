@@ -3,4 +3,4 @@
 ;;   clojure -M -m toolnexus.test-main     run the suite (count-gated)
 {:paths ["src"]
  :deps  {org.clojure/clojure           {:mvn/version "1.12.5"}
-         net.clojars.muthuishere/koine {:mvn/version "0.7.1"}}}
+         net.clojars.muthuishere/koine {:mvn/version "0.7.3"}}}

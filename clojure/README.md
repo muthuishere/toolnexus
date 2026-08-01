@@ -7,7 +7,7 @@ implementation, byte-identical on both.
 
 ```clojure
 ;; deps.edn
-net.clojars.muthuishere/koine {:mvn/version "0.7.1"}
+net.clojars.muthuishere/koine {:mvn/version "0.7.3"}
 ```
 
 **Zero reader conditionals in this tree.** Not "few" — zero. Every host
@@ -17,7 +17,7 @@ is the only third-party dependency.
 
 ## Status
 
-154 tests / 707 assertions, 0 failures, on **all three** runtimes:
+155 tests / 708 assertions, 0 failures, on **all three** runtimes:
 
 | runtime | how |
 |---|---|
@@ -25,7 +25,7 @@ is the only third-party dependency.
 | cljgo, AOT binary | `cljgo build && ./toolnexus-test` |
 | cljgo, interpreted | `cljgo run src/run_tests.cljc` |
 
-Verified against koine 0.7.1 and cljgo v0.8.4+ (`cfb9ddf`).
+Verified against koine 0.7.3 and cljgo v0.8.4+ (`56da5a3`).
 
 Two gates beyond the suite:
 
@@ -110,7 +110,16 @@ name:
 (cljgo v0.8.4 closed 77 such extras and added a ratchet test against JVM 1.12.5,
 so this is shrinking — but check anyway.)
 
-**3. On cljgo, assert on output, never on the exit code.** Exit 0 means nothing
+**3. A cross-host diff is not a correctness check.** Two hosts agreeing proves
+they agree; it says nothing about whether both are wrong. This port measured a
+skill payload at 1127 bytes on all three runtimes when the right answer was 995,
+and koine 0.7.2 shipped a key-ordering bug that was consistent everywhere. Only
+an EXTERNAL authority closes that class — the other ports, or a value derived
+from the spec rather than from our own output. Never snapshot an expected value
+from your own run: that enshrines whatever defect produced it as a regression
+test defending the bug.
+
+**4. On cljgo, assert on output, never on the exit code.** Exit 0 means nothing
 threw, not that anything ran: a suite collecting zero tests still exits 0 and
 looks green forever. `toolnexus.test-main` gates on a *count floor* and prints a
 machine-readable verdict; both gate scripts refuse a run that produces no

@@ -20,6 +20,17 @@
 # release blocker (its ADR 0007) and is the failure this gate is best placed to
 # catch.
 #
+# WHAT THE CROSS-LEG DIFF CANNOT SEE, stated because this gate has been
+# described with more confidence than it earns. It catches DIVERGENCE. It is
+# structurally blind to anything both legs get IDENTICALLY wrong — and that is
+# not hypothetical: koine 0.7.2 shipped a key-ordering bug that was consistent
+# across hosts, and this port once measured a skill payload at 1127 bytes on all
+# three runtimes while the correct answer was 995. Both were wrong the same way
+# everywhere, so every cross-host check stayed green. Only comparison against an
+# EXTERNAL authority — the other ports, or a value derived from the spec rather
+# than from our own output — closes that class. Two legs agreeing is evidence
+# about cljgo, never evidence about correctness.
+#
 # ZERO COLLECTED TESTS IS A FAILURE, LOUDLY. `Ran 0 tests, 0 failures` exits 0
 # and looks green forever; cljgo shipped v0.8.2 partly because that had been
 # green for weeks. The suite carries its own count gate (a floor, not an exact
@@ -55,14 +66,22 @@ set -uo pipefail
 cd "$(dirname "$0")"
 
 REPO_ROOT=$(cd .. && pwd)
-export TN_EXAMPLES="${TN_EXAMPLES:-$REPO_ROOT/examples}"
+# HARD OVERRIDE, not a default. `${TN_EXAMPLES:-...}` let a stale value in the
+# caller's environment win, and the existence check below could not catch it,
+# because a wrong-but-real directory passes `-d`. cljgo hit exactly that: ten
+# failures reproduced through this gate from an inherited TN_EXAMPLES, and the
+# recipe they published told others to reproduce it the same way. This gate
+# knows where the fixtures are — the shared examples/ beside it — so it says so
+# rather than asking.
+export TN_EXAMPLES="$REPO_ROOT/examples"
 
 log()  { printf '%s\n' "$*" >&2; }
 fail=0
 legs=""
 
-if [ ! -d "$TN_EXAMPLES" ]; then
-  log "FATAL: TN_EXAMPLES does not exist: $TN_EXAMPLES"
+# Existence is not enough — assert the directory really is the fixture set.
+if [ ! -f "$TN_EXAMPLES/mcp.json" ] || [ ! -d "$TN_EXAMPLES/skills" ]; then
+  log "FATAL: not the shared fixtures (need mcp.json + skills/): $TN_EXAMPLES"
   printf '{"gate":"FAILED: fixtures missing","legs":[]}\n'
   exit 2
 fi

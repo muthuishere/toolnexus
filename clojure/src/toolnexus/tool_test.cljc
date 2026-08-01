@@ -1,5 +1,6 @@
 (ns toolnexus.tool-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [toolnexus.tool :as tool]))
 
 (deftest sanitize-is-spec-0-2
@@ -53,3 +54,41 @@
         tk (tool/toolkit [t])]
     (is (= "no-ctx"  (:output (tool/execute tk "t" {}))))
     (is (= "ctx:yes" (:output (tool/execute tk "t" {} {:answer "yes"}))))))
+
+;; ---------------------------------------------------------------------------
+;; Byte-order of JSON keys OUTSIDE the BMP — the state where the hosts diverge
+;; ---------------------------------------------------------------------------
+;;
+;; koine's encoder sorts keys, and that sort is what makes §0 byte-comparison
+;; possible at all. But sorting a string means sorting its CODE UNITS on the JVM
+;; (UTF-16) and its BYTES on cljgo (UTF-8), and those two orders disagree for
+;; any key outside the Basic Multilingual Plane:
+;;
+;;   U+1F600 GRINNING FACE   UTF-16 D83D DE00   UTF-8 F0 9F 98 80
+;;   U+E000  PRIVATE USE     UTF-16 E000        UTF-8 EE 80 80
+;;
+;; D83D < E000, so a UTF-16 sort puts the emoji FIRST; F0 > EE, so a UTF-8 sort
+;; puts it SECOND. Same input, two different byte streams, no error on either
+;; side — exactly the shape a cross-host diff can catch but a single-host suite
+;; cannot. Fixed in koine 0.7.3 (0.7.2 briefly got it wrong in the other
+;; direction and lived about an hour; this port never ran it).
+;;
+;; This asserts CODEPOINT order, which is the one both hosts must agree on, so
+;; it fails on whichever host is wrong rather than merely reporting that they
+;; differ. We had 707 assertions and not one of them entered this state — the
+;; suite was green on both hosts and blind to the whole class.
+;;
+;; Reach: tool NAMES are ASCII by §0.2's sanitize, so the exposure is
+;; model-supplied argument and result keys, which we do not control. Narrow, not
+;; zero.
+(deftest json-keys-outside-the-bmp-sort-by-codepoint
+  (let [json-write (requiring-resolve 'koine.json/write-str)
+        emoji      "😀"          ; U+1F600, supplementary plane
+        private    ""                ; U+E000, BMP private use
+        encoded    (json-write {private 1 emoji 2})]
+    (testing "U+E000 precedes U+1F600 by codepoint, on BOTH hosts"
+      ;; clojure.string/index-of, NOT (.indexOf s) — a bare `.method` call is
+      ;; Java interop and would not survive the trip to cljgo.
+      (is (< (str/index-of encoded private)
+             (str/index-of encoded emoji))
+          (str "key order disagrees with codepoint order: " encoded)))))
