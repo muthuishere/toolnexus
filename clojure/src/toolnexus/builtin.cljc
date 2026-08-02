@@ -588,8 +588,16 @@
   [opt]
   (if-not (source-on? opt)
     []
-    (let [m (when (map? opt) (:tools opt))]
-      (vec (filter (fn [t] (not (false? (get m (keyword (:name t)))))) builtin-tools)))))
+    ;; Keys are normalised to plain NAMES before lookup. `(get m (keyword …))`
+    ;; matched keyword keys only, so `{:tools {"bash" false}}` — and EVERY config
+    ;; read from JSON without `:key-fn keyword` — left all ten builtins armed.
+    ;; It failed OPEN: the one direction a disable toggle must never fail. The
+    ;; same both-spellings rule already governs the §3 skills filter
+    ;; (`skill/filter-name`); this is that rule, applied where it was missing.
+    (let [m       (when (map? opt) (:tools opt))
+          by-name (when (map? m)
+                    (into {} (map (fn [[k v]] [(if (keyword? k) (name k) (str k)) v]) m)))]
+      (vec (filter (fn [t] (not (false? (get by-name (:name t))))) builtin-tools)))))
 
 (defn enabled-builtin-names [opt] (mapv :name (enabled-builtins opt)))
 

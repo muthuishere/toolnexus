@@ -872,6 +872,32 @@
           (is (= "c1" (:id ev)))
           (is (= 0 (:turn ev))))))))
 
+(deftest a-throwing-tool-hook-must-not-park-the-consumer-forever
+  ;; REGRESSION. `execute-calls` runs each tool on `run-async!` and blocks on a
+  ;; promise. The `try/catch` covered `tool/execute` ONLY, and both §8 tool hooks
+  ;; are invoked outside it — so a host whose hook threw killed the worker before
+  ;; `deliver` ran and the `deref` blocked FOREVER. The JVM printed a stack trace
+  ;; from the dying thread; cljgo hung with no diagnostic at all.
+  ;;
+  ;; The assertion is deliberately "it comes back at all". A test that only
+  ;; checked the exception type would pass against an implementation that threw
+  ;; correctly for one call and hung for a parallel one, and hanging is the whole
+  ;; failure. `deftest` cannot time out portably, so a hang shows up as a suite
+  ;; that never finishes — which the CI job's own timeout reports.
+  (doseq [hook [:before-tool :after-tool]]
+    (with-llm "openai" [{:calls [{:id "c1" :name "upper" :args {:text "x"}}]} {:text "done"}]
+      (fn [{:keys [base]}]
+        (let [c (client-for "openai" base
+                            {:hooks {hook (fn [_ev] (throw (ex-info "hook exploded" {:hook hook})))}})
+              outcome (try (client/run c "hi" {:toolkit toolkit})
+                           :returned-normally
+                           (catch Throwable e (ex-message e)))]
+          ;; Rethrown on the CALLING thread, not swallowed into an isError: the
+          ;; shipped ports wrap neither hook, so a throwing hook rejects the run
+          ;; and the host sees its own bug rather than a mystery tool failure.
+          (is (= "hook exploded" outcome)
+              (str hook " must surface the host's exception, not hang and not hide it")))))))
+
 (deftest before-tool-result-short-circuits-the-tool
   ;; `boom` throws when it runs. A short-circuit that returns a clean result
   ;; therefore PROVES the real tool never ran (SPEC §8: "the real tool never
