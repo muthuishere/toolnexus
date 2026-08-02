@@ -12,15 +12,23 @@ import { Aside } from '@astrojs/starlight/components';
 
 <Aside type="note">
 This port is wired into the shared conformance checker at tier **core** (the SPEC §0 contract),
-while the six shipped ports are at tier **full**. Every core option is present; the full-tier
-options — client `hooks`/`retries`/`timeout-ms`/`store`/`on-metric`, toolkit `agents` (sub-agents)
-/`skill-provider`/`disable-tools`, MCP elicitation bridging, real SSE streaming, and durable resume
-— are recorded as parity debt in `clojure/README.md`. Symbols below are the real public surface of
-`clojure/src/toolnexus/`.
+while the six shipped ports are at tier **full**. Every core option is present; what is still
+missing at full tier is client **hooks**, the §7D–§7F layers (sub-agents, personas, compaction),
+skills-as-data / provider / allowlist, the **MCP elicitation** bridge, real **SSE streaming** (the
+loop buffers and emits no text deltas) and **durable cross-process resume**. Those are recorded in
+`clojure/README.md` — note that the README's client-option list runs behind the code (`:retries`,
+`:timeout-ms`, `:store`, `:on-metric`, `:on-error`, `:request-params`, `:body-transform` and
+`:http-client` are all implemented), so the source is the authority. Symbols below are the real
+public surface of `clojure/src/toolnexus/`.
 </Aside>
 
 Namespaces live under **`toolnexus.*`** (`clojure/src/toolnexus/`). koine coordinate:
-`net.clojars.muthuishere/koine`.
+`net.clojars.muthuishere/koine`. **Not on Clojars yet** — use the port from a checkout, or
+`clojure -T:build install` it into your local `~/.m2`.
+
+Every entry point below also has its own page, generated from the same manifest as the other six
+ports — open the **Clojure** topic in the API-reference picker, or start at
+[`toolnexus.core/build`](/api/clojure/toolkit/create/).
 
 ## Toolkit — `toolnexus.core/build`
 
@@ -38,15 +46,14 @@ Namespaces live under **`toolnexus.*`** (`clojure/src/toolnexus/`). koine coordi
 
 ## Skills — `toolnexus.skill`
 
-- `(load-skills roots) -> {:skills .. :skipped ..}` — one root (string) or several (seq); an
-  earlier root wins a name collision.
+- `(load-skills roots) -> {:skills .. :by-name .. :skipped ..}` — one root (string) or several
+  (seq); roots are visited in the order given, and an earlier one wins a name collision.
 - `(list-skills roots) -> {:skills .. :skipped ..}` — discover + validate without building a
   toolkit; typed skip reasons `missing-name` · `malformed-frontmatter` · `duplicate-name` ·
   `unreadable`.
 - `(skill-tool loaded)` — the single `skill` tool over a loaded source (progressive disclosure);
   `(skills-prompt loaded)` — the §3/§0.6 system-prompt catalog (re-exported as
   `toolnexus.core/skills-prompt`).
-- A **data skill** is a plain map: `{:name .. :description .. :body .. :dir .. :files [..]}`.
 - Equivalents: `loadSkills` / `listSkills` (js) · `load_skills` / `list_skills` (py) ·
   `LoadSkillsWith` / `ListSkills` (go) · `SkillSource.loadWith` / `listSkills` (java) ·
   `SkillSource.LoadWith` / `ListSkills` (c#) · `Toolnexus.Skill.load` / `Toolnexus.Skill.list` (elixir).
@@ -54,8 +61,8 @@ Namespaces live under **`toolnexus.*`** (`clojure/src/toolnexus/`). koine coordi
 ## MCP · Adapters · Client
 
 - `toolnexus.mcp` — `(from-config config)` connects every server (stdio + streamable-HTTP),
-  returns `{:tools .. :statuses .. :connections .. :errors ..}`; `(tools conn)`, `(disconnect conn)`,
-  `(disconnect-all conns)`.
+  returns `{:tools .. :statuses .. :connections .. :errors ..}`; `(parse-config config)` validates
+  without connecting; `(tools conn)`, `(disconnect conn)`, `(disconnect-all conns)`.
 - Adapters (`toolnexus.adapter`, re-exported on `core`): `(to-openai tk)` · `(to-anthropic tk)` ·
   `(to-gemini tk)`.
 - Client (`toolnexus.client`): `(create-client opts)` → `(run client prompt {:toolkit tk :history [..] :on-event f :conversation-id id})`.
@@ -93,11 +100,23 @@ Namespaces live under **`toolnexus.*`** (`clojure/src/toolnexus/`). koine coordi
   `Toolkit.serve` / `Toolkit.add_agent` (elixir).
 
 <Aside type="caution">
-**Not in this port** (parity debt, see `clojure/README.md`): local sub-agents / `team` / `Budget`,
-the `memory` built-in and `fromDir`/heartbeat persona layer, `beforeLLM`/`afterLLM` hooks + the
-compactor, and SSE text-delta streaming. A2A remote agents (above) are the cross-process form of
-delegation this port does ship.
+**Not in this port**: local sub-agents / `team` / `Budget` (§7D), the `memory` built-in and the
+`fromDir`/heartbeat persona layer (§7E), the compactor (§7F), `beforeLLM`/`afterLLM` hooks, and SSE
+text-delta streaming — `run`'s `:on-event` sink emits `tool_call`, `tool_result`, `pending`, `usage`
+and `done`, but no text deltas, because the loop buffers the whole response. A2A remote agents
+(above) are the cross-process form of delegation this port does ship.
 </Aside>
+
+## Translation — `toolnexus.translate`
+
+- `(translate client {:messages [..] :tools [..] :toolkit tk :toolChoice .. :system .. :maxTokens ..})`
+  — SPEC §11: exactly **one** provider call, returned in OpenAI shape
+  `{:text :toolCalls [{:id :name :arguments}] :finishReason :usage :model :raw}`. Drives no loop,
+  executes no tool, touches no conversation store. `:arguments` is a JSON **string** — the OpenAI
+  wire form.
+- `(openai-messages-to-anthropic messages)` · `(openai-tools-to-anthropic tools)` ·
+  `(openai-tool-choice-to-anthropic choice)` — the inbound half, including the tool-result merging
+  a flattening translator gets wrong.
 
 ## Suspension & the human loop — `toolnexus.client`
 

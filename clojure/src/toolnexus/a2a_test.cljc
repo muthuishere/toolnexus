@@ -301,3 +301,40 @@
         "the failing GetTask is not counted")
     (is (= 0 (get-in abort [:metadata :polls]))
         "abort fires before the first GetTask, so SendMessage counts as zero")))
+
+;; ---------------------------------------------------------------------------
+;; §7A — the top-level `agents` config block
+;; ---------------------------------------------------------------------------
+;;
+;; js/src/a2a.ts parseAgentsConfig: a NAME->descriptor object (mirroring
+;; `mcpServers`), entries with no string `card` skipped, `disabled:true` /
+;; `enabled:false` skipped, `pollEvery` accepted in its config-file spelling.
+
+(deftest agents-config-block-parses-into-descriptors
+  (let [ds (a2a/parse-agents-config {:one {:card "http://a/card" :timeout 5 :pollEvery 7}
+                                     :two {:card "http://b/card"}})]
+    (is (= ["http://a/card" "http://b/card"] (vec (sort (map :card ds)))))
+    (let [one (first (filter #(= "http://a/card" (:card %)) ds))]
+      (is (= 5 (:timeout one)))
+      (is (= 7 (:poll-every one))))))
+
+(deftest agents-config-block-skips-the-unusable-and-the-disabled
+  (is (= [] (a2a/parse-agents-config nil)))
+  (is (= [] (a2a/parse-agents-config {})))
+  (is (= [] (a2a/parse-agents-config {:nocard {:timeout 1}})))
+  (is (= [] (a2a/parse-agents-config {:off {:card "http://a" :disabled true}})))
+  (is (= [] (a2a/parse-agents-config {:off {:card "http://a" :enabled false}}))))
+
+(deftest agents-config-block-is-ordered-by-name
+  ;; Two runtimes must not disagree about which agent registered first, and the
+  ;; §7A tool names collide the moment two peers advertise the same card name.
+  (is (= ["c-card" "m-card" "z-card"]
+         (mapv :card (a2a/parse-agents-config {:zeta {:card "z-card"}
+                                               :mid  {:card "m-card"}
+                                               :alfa {:card "c-card"}})))))
+
+(deftest descriptors-from-the-config-block-resolve-like-the-option
+  (let [d (first (a2a/parse-agents-config
+                  {:demo {:card (str (base) "/.well-known/agent-card.json")
+                          :timeout 300 :pollEvery 60}}))]
+    (is (= 3 (count (a2a/agent-tools d))))))

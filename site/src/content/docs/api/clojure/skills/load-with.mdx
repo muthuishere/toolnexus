@@ -1,0 +1,104 @@
+---
+title: "loadSkillsWith — data skills, providers, filters"
+description: "Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist. — Clojure."
+sidebar:
+  label: "skills / load-with"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/skill.cljc">clojure/src/toolnexus/skill.cljc</a>
+</p>
+
+<Aside type="caution" title="Not available in Clojure">
+`toolnexus.skill/load-skills` takes filesystem roots and nothing else — one root string or a seq of
+them, earlier root wins a name collision. There is no options map, so skills supplied as data, a
+lazy skill provider, and the per-agent allowlist are all absent. They are recorded parity debt in
+`clojure/README.md`, which is why this port sits at conformance tier `core` while the other six sit
+at `full`.
+</Aside>
+
+Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist.
+
+## What to use instead
+
+**For skills that are not on disk: write them out, then load the directory.** A `SKILL.md` is
+frontmatter plus a body, and the sampler discloses whatever else sits next to it, so materialising a
+generated skill into a directory gets you the same catalog entry the other ports build in memory:
+
+```clojure
+(require '[koine.fs :as fs]
+         '[toolnexus.skill :as skill])
+
+(defn write-skill!
+  "One skill definition as an on-disk SKILL.md. Plain scalars only —
+  toolnexus.frontmatter rejects block scalars."
+  [root {:keys [name description content]}]
+  (let [dir (str root "/" name)]
+    (fs/mkdirs! dir)
+    (fs/write-file (str dir "/SKILL.md")
+                   (str "---\n"
+                        "name: " name "\n"
+                        "description: " description "\n"
+                        "---\n\n"
+                        content "\n"))))
+
+(def generated "target/generated-skills")
+
+(doseq [s [{:name "release" :description "Cut a release"
+            :content "1. Bump the version.\n2. Tag it."}
+           {:name "triage"  :description "Triage an incoming bug report"
+            :content "1. Reproduce it."}]]
+  (write-skill! generated s))
+
+;; Now it is an ordinary root, and it can be layered like any other.
+(def loaded (skill/load-skills ["project/skills" generated]))
+
+(map :name (:skills loaded))     ;=> ("deploy" "release" "triage")
+```
+
+Two consequences worth stating plainly. The skill's `:dir` is a real path, so the `Base directory
+for this skill: file://…` line in the tool output names a host path — the other ports can emit a
+logical `skill://` base for an in-memory skill and this one cannot. And resolution is eager: you
+write before you load, so there is no lazy provider and no refresh between calls.
+
+**For the per-agent allowlist: filter the loaded map yourself.** It is plain data, and
+`skill-tool` only ever reads `:by-name`:
+
+```clojure
+(require '[toolnexus.skill :as skill]
+         '[toolnexus.tool :as tool])
+
+(defn allow-skills
+  "Keep only the named skills. Rebuilds both :skills and :by-name so the
+  `skill` tool's not-found message lists exactly what this agent can see."
+  [loaded allowed]
+  (let [allowed (set allowed)
+        kept    (vec (filter #(contains? allowed (:name %)) (:skills loaded)))]
+    (assoc loaded
+           :skills  kept
+           :by-name (reduce #(assoc %1 (:name %2) %2) {} kept))))
+
+(def loaded (skill/load-skills "team/skills"))
+
+(def deployer (allow-skills loaded ["deploy" "rollback"]))
+(def support  (allow-skills loaded ["triage" "postmortem"]))
+
+(map :name (:skills deployer))                        ;=> ("deploy" "rollback")
+(skill/skills-prompt support)                         ; only what support may use
+(:output (skill/execute-skill support "deploy"))
+;; => "Skill \"deploy\" not found. Available skills: postmortem, triage"
+
+(def tk (tool/toolkit [(skill/skill-tool deployer)]))
+```
+
+Rebuild both keys, not just one. `:skills` drives `skills-prompt` and `:by-name` drives lookup, so
+narrowing only the first leaves a skill the model cannot see but can still load by guessing its
+name. Nothing warns you about an allowlist entry that matched no skill either — compare against
+`(map :name (:skills loaded))` if that matters.
+
+## See also
+
+- [`toolnexus.skill/load-skills`](/api/clojure/skills/load/) — Glob a skills directory and expose one skill tool with progressive disclosure.
+- [`toolnexus.skill/list-skills`](/api/clojure/skills/list/) — Enumerate discovered skills and, crucially, the ones that were skipped and why.

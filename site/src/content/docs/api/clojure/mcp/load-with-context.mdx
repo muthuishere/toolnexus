@@ -1,0 +1,78 @@
+---
+title: "loadMcpWithContext — cancellable load"
+description: "The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process. — Clojure."
+sidebar:
+  label: "mcp / load-with-context"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/mcp.cljc">clojure/src/toolnexus/mcp.cljc</a>
+</p>
+
+<Aside type="caution" title="Not available in Clojure">
+There is no context-aware or cancellable load in this port. `toolnexus.mcp/from-config` bounds each
+server with that server's own `:timeout` and returns when every server has either connected or
+failed; there is no handle to cancel the load from outside while it runs.
+</Aside>
+
+The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child
+process.
+
+## What to use instead
+
+The budget is **per server and per phase**, declared in the config rather than passed at the call
+site. Each of `initialize` and `tools/list` gets a fresh budget of that server's `:timeout`
+milliseconds (each *page* of `tools/list`, in fact), defaulting to
+`toolnexus.mcp/default-timeout-ms`, which is `30000`. A server that accepts the write and never
+answers fails with the stable error `"timeout"` and the rest of the config carries on:
+
+```clojure
+(require '[toolnexus.mcp :as mcp])
+
+mcp/default-timeout-ms   ;; => 30000
+
+(def res
+  (mcp/from-config
+    {:mcpServers {"fast"  {:command ["node" "fast-server.js"]  :timeout 2000}
+                  "slow"  {:command ["node" "slow-server.js"]  :timeout 15000}
+                  "flaky" {:url "https://example.invalid/mcp"}}}))   ; the 30s default
+
+(try
+  (:statuses res)                    ;; => {"fast" "connected" "slow" "connected" "flaky" "failed"}
+  (get (:errors res) "flaky")        ;; names the phase and the stable error
+  (finally
+    (mcp/disconnect-all res)))       ;; the only teardown handle there is
+```
+
+Cancellation after the fact is `toolnexus.mcp/disconnect` (one connection) or
+`toolnexus.mcp/disconnect-all` (everything a `from-config` opened). Both are idempotent and never
+throw, and for stdio they are **bounded by construction**: they kill the child rather than politely
+closing its stdin and waiting. That is deliberate — `close-stdin-and-wait` hangs forever on a child
+that ignores its stdin closing, which is the exact failure teardown is supposed to end. Killing the
+child closes its stdout, which makes the reader loop's parked read return, which marks the
+transport closed, which releases every waiter. One mechanism, no hang.
+
+Two consequences worth knowing:
+
+- **A hung server costs you its timeout, once.** Because servers are connected serially in name
+  order, a server whose `:timeout` is 30 seconds delays the ones after it by up to 30 seconds. If
+  you have a flaky remote in the config, give it a short explicit `:timeout` rather than relying on
+  the default.
+- **A dead stdio peer is diagnosed, not guessed.** When a child's stdout closes, the port waits up
+  to ~250 ms for the process reaper and reports `peer-exited (status N)` when it knows the status
+  and `peer-eof (stdout closed, exit status unknown)` when it does not — rather than confidently
+  claiming the peer is still alive. The connection carries `:exit-code` for retry logic that needs
+  to tell a crash from a hang, and the child's last stderr lines ride along on the failure, because
+  the status says *that* it died and the stderr says *why*.
+
+If you need a hard outer bound on the whole load, put it where your host language already has one —
+around the `from-config` call itself — and call `disconnect-all` on the result in a `finally` so no
+child survives the attempt.
+
+## See also
+
+- [`toolnexus.mcp/from-config`](/api/clojure/mcp/load/) — the load, with `:timeout` and the status map
+- [`toolnexus.mcp/parse-config`](/api/clojure/mcp/parse-config/) — see the resolved `:timeout` per server before connecting
+- [`toolnexus.core/build`](/api/clojure/toolkit/create/) — pair with `toolnexus.core/shutdown!` for teardown

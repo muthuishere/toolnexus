@@ -1,0 +1,27 @@
+---
+title: "Inbound translation — transcripts across providers"
+description: "Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong. — Clojure."
+sidebar:
+  label: "translate / inbound"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a>
+</p>
+
+<Aside type="caution" title="Not available in Clojure">
+Go keeps openAIMessagesToAnthropic unexported (golang/translate.go:283) — inbound translation is reachable only through Translate. The Clojure port does not implement SPEC §11 translate at all, so there is no inbound transcript conversion.
+</Aside>
+
+Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong.
+
+## What to use instead
+
+{/* TODO:why */}
+_TODO: the closest thing this port does offer, and how to get the same outcome._
+
+## See also
+
+- _TODO: related entry points_

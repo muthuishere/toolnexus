@@ -7,7 +7,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 The six shipped ports are published from the same release and carry the same version. The seventh —
 Clojure — is a single `.cljc` source tree (JVM + [cljgo](https://github.com/muthuishere/cljgo)) with
-[koine](https://github.com/muthuishere/koine) as its only dependency.
+[koine](https://github.com/muthuishere/koine) as its only dependency, and it is **not published yet**.
 
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">
@@ -54,13 +54,18 @@ end
 Elixir ≥ 1.16 / OTP 26 · [Hex · toolnexus](https://hex.pm/packages/toolnexus) · MCP client: in-house (OTP-supervised, no SDK)
 </TabItem>
 <TabItem label="Clojure">
+**Not yet released to Clojars.** There is no `net.clojars.muthuishere/toolnexus` artifact to depend
+on — use the port from a checkout of the repo (its `clojure/` directory is a normal deps.edn
+project), or build and install it locally with `clojure -T:build install`:
+
 ```clojure
-;; deps.edn — the toolnexus.* namespaces live under clojure/src/,
-;; koine is the only third-party dependency
-{:deps {net.clojars.muthuishere/koine {:mvn/version "0.7.3"}}}
+;; deps.edn — point at a checkout; koine is the only third-party dependency
+{:deps {net.clojars.muthuishere/koine {:mvn/version "0.9.1"}}
+ :paths ["src" "../toolnexus/clojure/src"]}
 ```
 Clojure CLI (JVM) or [cljgo](https://github.com/muthuishere/cljgo) · MCP client: in-house over
 [koine](https://github.com/muthuishere/koine) (`koine.process` stdio / `koine.http` streamable-HTTP)
+· [API reference](/toolnexus/api/clojure/)
 </TabItem>
 </Tabs>
 

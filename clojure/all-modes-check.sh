@@ -86,12 +86,21 @@ fail=0; rows=""
 
 # Every leg is judged on the suite's own machine-readable verdict line, which
 # carries its own count gate — so a mode that runs nothing cannot look green.
-verdict_of() { grep -E '^\{"assertions"' | tail -1; }
+# -a because a truncated or interleaved log can contain a NUL, and grep then
+# prints "Binary file … matches" instead of the line — silently turning a green
+# run into a failure with no verdict to show for it.
+verdict_of() { grep -aE '^\{"assertions"' | tail -1; }
 
 # Per-mode logs, kept. The first version of this script threw stderr away, and
 # when a leg failed intermittently the evidence went with it — a gate that can
 # tell you THAT something broke but never WHY costs more than it saves.
-LOGDIR=${LOGDIR:-/tmp/tn-all-modes}
+# PID-SCOPED, not a fixed path. A fixed /tmp/tn-all-modes meant two simultaneous
+# runs truncated each other's logs, and `verdict_of`'s grep then reported
+# "Binary file (standard input) matches" instead of the verdict line — a FALSE
+# FAILED on three legs while the suite was actually green. Found by an agent
+# running this concurrently with another; a gate that lies under concurrency is
+# worse than one that refuses to run.
+LOGDIR=${LOGDIR:-/tmp/tn-all-modes-$$}
 mkdir -p "$LOGDIR"
 
 run_mode() {  # $1 = label, $2 = shell command

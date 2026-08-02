@@ -27,6 +27,9 @@ const PORTS = {
 	java: { dir: "java/src/main/java", ext: ["java"] },
 	csharp: { dir: "csharp", ext: ["cs"] },
 	elixir: { dir: "elixir/lib", ext: ["ex"] },
+	// Clojure keeps its tests beside the source (clojure/src/toolnexus/*_test.cljc), so a symbol
+	// that exists only in a test must NOT count as a shipped public symbol.
+	clojure: { dir: "clojure/src", ext: ["cljc"], exclude: ["*_test.cljc"] },
 }
 
 /** The identifier to look for: last dotted segment, minus prose decoration. */
@@ -36,21 +39,24 @@ function identifiersOf(symbol) {
 		.replace(/^\[|\]$/g, "")
 		.replace(/\s+(annotation|attribute|option|options|tool|task tool|conversation|hooks|budget|relay|task_store)$/i, "")
 		.trim()
-	const parts = cleaned.split(".").filter(Boolean)
+	// Split on `.` and on `/` — Clojure names its members `namespace/member`, everyone else
+	// dots all the way down. Either way the member is the last segment.
+	const parts = cleaned.split(/[./]/).filter(Boolean)
 	// ALWAYS require the final segment — the member being claimed. Matching only the
 	// owning type (e.g. "McpSource" existing while "parseMcpConfig" does not) is exactly
 	// the false positive this check exists to catch.
 	return [parts[parts.length - 1]]
 }
 
-function grepCount(dir, ext, ident) {
+function grepCount(dir, ext, ident, exclude = []) {
 	const abs = path.join(repoRoot, dir)
 	if (!fs.existsSync(abs)) return -1
 	const includes = ext.flatMap((e) => ["--include", `*.${e}`])
+	const excludes = exclude.flatMap((e) => ["--exclude", e])
 	try {
 		const out = execFileSync(
 			"grep",
-			["-rlw", ...includes, "--exclude-dir=node_modules", "--exclude-dir=obj", "--exclude-dir=bin", "--", ident, abs],
+			["-rlw", ...includes, ...excludes, "--exclude-dir=node_modules", "--exclude-dir=obj", "--exclude-dir=bin", "--", ident, abs],
 			{ encoding: "utf8" },
 		)
 		return out.trim() ? out.trim().split("\n").length : 0
@@ -78,7 +84,7 @@ for (const entry of manifest.entries) {
 		checked++
 		const port = PORTS[lang]
 		const idents = identifiersOf(symbol)
-		const hits = Math.max(...idents.map((i) => grepCount(port.dir, port.ext, i)))
+		const hits = Math.max(...idents.map((i) => grepCount(port.dir, port.ext, i, port.exclude ?? [])))
 		if (hits <= 0) missing.push({ id: entry.id, lang, symbol, idents, hits })
 	}
 }

@@ -300,3 +300,33 @@
   "Convenience: just the tools, isolating a failing agent to `[]`."
   [opts]
   (:tools (remote-agent opts)))
+
+(defn parse-agents-config
+  "§7A — the top-level `agents` block of a parsed config object, as descriptors
+  `remote-agent`/`agent-tools` accept.
+
+  The block is a NAME -> descriptor map, exactly mirroring `mcpServers`, and the
+  same two disable spellings apply (`disabled:true`, `enabled:false`). An entry
+  with no string `card` is not an agent and is skipped rather than failed —
+  §0.3's isolation rule reaches config parsing too.
+
+  Ordered by NAME, for the same reason `mcp/parse-config` is: two runtimes must
+  not disagree about which peer registered first, and §7A tool names collide the
+  moment two cards share a name."
+  [block]
+  (if-not (map? block)
+    []
+    (->> (keys block)
+         (sort-by (fn [k] (if (keyword? k) (name k) (str k))))
+         (keep (fn [k]
+                 (let [cfg (get block k)]
+                   (when (and (map? cfg)
+                              (string? (:card cfg))
+                              (not (true? (:disabled cfg)))
+                              (not (false? (:enabled cfg))))
+                     (cond-> {:card (:card cfg)}
+                       (:headers cfg)   (assoc :headers (:headers cfg))
+                       (:timeout cfg)   (assoc :timeout (:timeout cfg))
+                       (or (:poll-every cfg) (:pollEvery cfg))
+                       (assoc :poll-every (or (:poll-every cfg) (:pollEvery cfg))))))))
+         vec)))

@@ -1,0 +1,94 @@
+---
+title: "listMcpTools — inventory without connecting"
+description: "List what each configured server would expose, plus per-server status, without wiring it into a toolkit. — Clojure."
+sidebar:
+  label: "mcp / list-tools"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/mcp.cljc">clojure/src/toolnexus/mcp.cljc</a>
+</p>
+
+<Aside type="caution" title="Not available in Clojure">
+This port ships no inventory call that lists tools without connecting.
+`toolnexus.mcp/parse-config` validates the config offline, and
+`toolnexus.mcp/from-config` returns `:statuses` and `:errors` next to `:tools` once the servers are
+connected.
+</Aside>
+
+List what each configured server would expose, plus per-server status, without wiring it into a
+toolkit.
+
+## What to use instead
+
+Split the question in two, because the two halves have genuinely different costs.
+
+**Is the config sane?** That is offline, free and instant.
+[`toolnexus.mcp/parse-config`](/api/clojure/mcp/parse-config/) hands back one map per server with
+the kind inferred, the enablement resolved and the timeout defaulted — no process, no socket. A
+misspelled server block, a server with neither `command` nor `url`, an entry you thought was enabled
+and is not: all visible here.
+
+```clojure
+(require '[toolnexus.mcp :as mcp])
+
+(def servers (mcp/parse-config (slurp "mcp.json")))
+
+(mapv (juxt :name :kind :enabled :timeout) servers)
+;; => [["docs" "remote" true 5000] ["fs" "local" true 30000] ["old" "unknown" false 30000]]
+
+;; a "kind" of "unknown" means neither command nor url — that server can only fail
+(filterv #(= "unknown" (:kind %)) servers)
+```
+
+**What tools does it actually expose?** That question cannot be answered without talking to the
+server — MCP has no static manifest, `tools/list` is a live RPC. So the honest answer is
+[`from-config`](/api/clojure/mcp/load/), which connects and hands you the inventory *and* the
+per-server outcome in one value:
+
+```clojure
+(require '[toolnexus.mcp :as mcp])
+
+(def res (mcp/from-config (slurp "mcp.json")))
+
+(try
+  ;; the inventory
+  (mapv (juxt :server :remote-name :name) (:tools res))
+  ;; => [["docs" "search" "docs_search"] ["fs" "read file" "fs_read_file"]]
+
+  ;; the per-server outcome, in the same value
+  (:statuses res)   ;; => {"docs" "connected" "fs" "connected" "old" "disabled"}
+  (:errors res)     ;; => {} when everything worked
+
+  ;; a doctor command is this and nothing more
+  (when-let [bad (seq (:errors res))]
+    (doseq [[server message] bad] (println "FAILED" server "-" message)))
+
+  (finally
+    (mcp/disconnect-all res)))
+```
+
+If what you actually want is the **name** a server's tool will get — to write an allowlist, or to
+check a collision against a builtin — you can compute that without connecting, because SPEC §0.2
+naming is pure:
+
+```clojure
+(require '[toolnexus.mcp :as mcp])
+
+(mcp/mcp-tool-name "remote api" "zebra note")   ;; => "remote_api_zebra_note"
+(mcp/mcp-tool-name "remote api" "alpha/stats")  ;; => "remote_api_alpha_stats"
+```
+
+The one thing to avoid is treating a connect-and-disconnect as a cheap probe. Connecting spawns a
+child process or opens an HTTP session per server, serially; always pair it with
+`mcp/disconnect-all` in a `finally`, and keep the `:timeout` short if the probe is on a startup
+path.
+
+## See also
+
+- [`toolnexus.mcp/parse-config`](/api/clojure/mcp/parse-config/) — the offline half of the question
+- [`toolnexus.mcp/from-config`](/api/clojure/mcp/load/) — the connected half: `:tools` plus `:statuses` and `:errors`
+- [Bounding a load](/api/clojure/mcp/load-with-context/) — `:timeout` per server, and teardown
+- [`toolnexus.core/build`](/api/clojure/toolkit/create/) — the same status map, across every source

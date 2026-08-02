@@ -1,0 +1,176 @@
+---
+title: "toolnexus.client/create-client"
+description: "Classify an LLM error into retry / fail, bound a run with a deadline, and cancel cleanly. — Clojure."
+sidebar:
+  label: "toolnexus.client/create-client"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+```clojure
+(create-client {:base-url      "…"
+                :model         "…"
+                :retries       3        ; extra attempts after the first (default 0)
+                :retry-base-ms 250      ; backoff base; delay = base * 2^attempt
+                :timeout-ms    30000    ; per HTTP call, passed to the transport
+                :on-error      (fn [info] :retry)})  ; or :fail
+
+;; :on-error receives, per failed attempt:
+;; {:error      "the response body, or a koine error keyword"
+;;  :status     429            ; nil on a transport failure
+;;  :attempt    0              ; zero-based
+;;  :retryable? true}          ; the default verdict, for you to accept or override
+```
+
+The default policy retries 429, 500, 502, 503 and 504 plus any transport failure, and treats
+everything else as terminal. Backoff is exponential from `:retry-base-ms` — 250ms, 500ms, 1s — and
+a numeric `Retry-After` header, in seconds, overrides it. The HTTP-date form of `Retry-After` is
+deliberately not parsed: date parsing is not portable across these two hosts without reaching past
+koine, and a server that sends it gets our backoff instead of a wrong answer.
+
+`:retries` counts **extra** attempts, so the default of 0 means one try. A budget of 3 means up to
+four calls.
+
+`:on-error` overrides the default verdict in either direction, but `:retries` still bounds it. A
+classifier that could loop unbounded would be a denial-of-service on your own bill, so a forced
+`:retry` on a terminal status still stops when the budget runs out.
+
+The verdicts are `:retry` and `:fail`, and nothing else. An LLM failure never becomes a §10
+suspension: suspension is a user-action pause, and a 500 from the provider is not one. When the
+budget is exhausted the call throws an `ex-info` carrying `:status` or `:error` — a provider
+failure is not something the model can be shown and asked to retry, unlike a tool error.
+
+<Aside type="caution" title=":timeout-ms depends on the host">
+The client passes `:timeout-ms` to `koine.http/request`, which classifies a timeout as **data** —
+`{:status nil :error :timeout}` — so the retry loop treats it as one more retryable failure rather
+than a host-specific exception. Measured 2026-08-01 against koine 0.9.0: the JVM bounds the call;
+cljgo accepts the budget and ignores it. The port's own suite reports that gap rather than
+asserting past it. Passing the budget through is all this port can do until koine enforces it on
+both hosts.
+</Aside>
+
+## When to use it
+
+- **Any production run** — 429 and 503 are normal traffic from every provider, and a bare client
+  makes one attempt and gives up.
+- **When your gateway has its own error vocabulary** — an `:on-error` classifier is how a 402
+  top-up-required or a proxy's 418 gets the treatment it deserves.
+- **When a run must not hang** — `:timeout-ms` bounds each HTTP call, and `:max-turns` bounds how
+  many there can be.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Wrap the transport instead when the policy is not about the LLM">
+`:http-client` on [`create-client`](/api/clojure/client/create/) hands you the whole `(url headers
+body)` call. If you already have a resilience library, a circuit breaker or a proxy with its own
+retry rules, put them there and leave `:retries` at 0 — two retry layers stacked on each other
+multiply attempts rather than adding them. Use `:on-error` when the decision genuinely depends on
+the provider's status code.
+</Aside>
+
+Note the scope: this policy covers the **LLM path only**. MCP transports are their own seam, and a
+tool that fails returns an error ToolResult the model can react to — retrying it is the model's
+job, not the client's.
+
+## Examples
+
+### Surviving rate limits
+
+```clojure
+(require '[toolnexus.client :as client])
+
+(def llm
+  (client/create-client
+    {:base-url      "https://api.anthropic.com"
+     :style         "anthropic"
+     :model         "claude-sonnet-4-5"
+     :retries       3        ; up to four attempts per LLM call
+     :retry-base-ms 250      ; 250ms, 500ms, 1s — unless Retry-After says otherwise
+     :timeout-ms    60000}))
+
+(client/run llm "Summarise the incident" {:toolkit toolkit})
+```
+
+Two 429s followed by a 200 costs three calls and returns normally. A 400 costs one call and throws
+immediately — no budget is spent on an error that will not change.
+
+### A classifier for your gateway
+
+```clojure
+(def llm
+  (client/create-client
+    {:base-url "https://gateway.internal/v1"
+     :model    "gpt-4.1"
+     :retries  4
+     :on-error (fn [{:keys [status attempt error retryable?]}]
+                 (println "llm attempt" attempt "failed:" status)
+                 (cond
+                   ;; the gateway rate-limits with 409, which is not in the default set
+                   (= 409 status) :retry
+                   ;; do not burn the budget on a bad key
+                   (= 401 status) :fail
+                   ;; anything else: keep the default verdict
+                   retryable?     :retry
+                   :else          :fail))}))
+```
+
+Returning anything other than `:retry` means `:fail`, so a classifier that falls through a `cond`
+fails safe rather than looping.
+
+### Bounding the whole run, not just one call
+
+Resilience options bound a single HTTP call; `:max-turns` bounds how many the loop may make. Both
+matter — a model that keeps calling tools will otherwise spend a long time succeeding.
+
+```clojure
+(def llm
+  (client/create-client
+    {:base-url   "https://api.openai.com/v1"
+     :model      "gpt-4.1"
+     :timeout-ms 20000       ; per call
+     :max-turns  5           ; per run
+     :retries    2
+     :on-metric  (fn [m] (when (= "run" (:event m))
+                           (println "run took" (:ms m) "ms over" (:turns m) "turns")))}))
+
+(let [r (try (client/run llm "Reindex everything" {:toolkit toolkit})
+             (catch Throwable e
+               ;; an LLM failure that outlived the retry budget arrives here
+               {:status "failed" :text (ex-message e) :ex-data (ex-data e)}))]
+  (case (:status r)
+    "done"       (println (:text r))
+    "incomplete" (println "turn limit:" (:limit r))
+    "failed"     (println "provider error:" (:text r))
+    (println (:status r))))
+```
+
+Only the LLM call throws. A tool that throws is converted to an error ToolResult and the run
+continues, which is why the `try` here is narrow rather than a blanket around everything.
+
+## Options
+
+| Option | Default | What it does |
+|---|---|---|
+| `:retries` | `0` | Extra attempts after the first. Bounds `:on-error` too. |
+| `:retry-base-ms` | `250` | Backoff base; the delay for attempt *n* is `base * 2^n`. |
+| `:timeout-ms` | none | Per HTTP call, passed to `koine.http/request`. See the host caveat above. |
+| `:on-error` | none | `(fn [info] :retry-or-:fail)`. Overrides the default verdict in either direction. |
+
+### The default verdict
+
+| Condition | Default |
+|---|---|
+| Transport failure (no status) | `:retry` — `:retryable?` is true, `:status` is nil |
+| 429, 500, 502, 503, 504 | `:retry` |
+| Any other non-2xx | `:fail` |
+
+## See also
+
+- [`toolnexus.client/create-client`](/api/clojure/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`toolnexus.client/run`](/api/clojure/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`toolnexus.client/create-client`](/api/clojure/client/metrics/) — Emit one metric event per model call and per tool call: tokens, latency, outcome.
+- [`toolnexus.client/in-memory-store`](/api/clojure/client/store/) — Swap in-memory history for your own store so a conversation survives a process restart.

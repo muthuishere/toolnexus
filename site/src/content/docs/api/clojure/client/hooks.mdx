@@ -1,0 +1,92 @@
+---
+title: "Hooks — lifecycle middleware"
+description: "Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite. — Clojure."
+sidebar:
+  label: "client / hooks"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+<Aside type="caution" title="Not available in Clojure">
+This port ships no hooks. There is no `:hooks` option and no before/after model or tool
+interception point on `toolnexus.client/create-client` — it is recorded parity debt against the six
+full-tier ports. `:body-transform` is the one request-shaping seam that exists, and it sees only
+the outbound request body.
+</Aside>
+
+Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+
+## What to use instead
+
+Three seams cover most of what hooks are used for, and none of them requires the library to grow a
+middleware stack.
+
+**Before the model call** — `:body-transform` runs last in the request pipeline, sees the fully
+assembled body including `messages` and `tools`, and its return value is what goes on the wire.
+That is the redact / rewrite / audit slot.
+
+**Around a tool call** — wrap the tool. A Tool is a plain map with an `:execute` closure, so
+decorating one is `update`, not a framework.
+
+```clojure
+(require '[toolnexus.tool :as tool]
+         '[toolnexus.client :as client])
+
+(defn- audited-call [f t allowed args ctx]
+  (if-not (contains? allowed (:name t))
+    ;; a veto is an error ToolResult, not a throw — the model sees it and adapts
+    (tool/failure (str "blocked by policy: " (:name t)))
+    (let [r (if ctx (f args ctx) (f args))]
+      (println "tool" (:name t) (if (:isError r) "ERROR" "ok"))
+      r)))
+
+(defn audited
+  "Wrap a Tool so every call is logged and only allowlisted tools run."
+  [t allowed]
+  (update t :execute
+          (fn [f]
+            (fn
+              ([args]     (audited-call f t allowed args nil))
+              ([args ctx] (audited-call f t allowed args ctx))))))
+
+(def guarded
+  (tool/toolkit (mapv #(audited % #{"read" "grep" "glob"})
+                      (tool/all-tools toolkit))))
+
+(def llm
+  (client/create-client
+    {:base-url       "https://api.anthropic.com"
+     :style          "anthropic"
+     :model          "claude-sonnet-4-5"
+     ;; the before-model seam: the body is yours to inspect and rewrite
+     :body-transform (fn [body]
+                       (println "->" (count (:messages body)) "messages,"
+                                (count (:tools body)) "tools")
+                       body)}))
+
+(client/run llm "Summarise the failing tests" {:toolkit guarded})
+```
+
+Keep the wrapper multi-arity. `toolnexus.tool/execute` calls `(f args)` when there is no §1
+Context and `(f args ctx)` when there is one, and a suspension's post-`wait-for` retry always
+arrives on the two-argument arity.
+
+**Observing rather than changing** — [`:on-metric`](/api/clojure/client/metrics/) already emits one
+event per LLM call, one per tool call and one per run, and [`:on-event`](/api/clojure/client/run/)
+emits `tool_call` / `tool_result` / `pending` / `usage` / `done` as the loop moves. If your hook
+would only have logged, counted or traced, use those — they are the observation seam, and they cost
+nothing when unset.
+
+The one thing this arrangement cannot do is cancel an in-flight model call from a callback. Bound
+the run with [`:timeout-ms` and `:on-error`](/api/clojure/client/resilience/) instead.
+
+## See also
+
+- [`toolnexus.client/create-client`](/api/clojure/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`toolnexus.client/run`](/api/clojure/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`toolnexus.client/create-client`](/api/clojure/client/metrics/) — Emit one metric event per model call and per tool call: tokens, latency, outcome.
+- [`toolnexus.client/create-client`](/api/clojure/client/resilience/) — `:retries`, `:timeout-ms` and the `:on-error` classifier.

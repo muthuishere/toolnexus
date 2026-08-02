@@ -1,0 +1,168 @@
+---
+title: "toolnexus.mcp/parse-config"
+description: "Parse and validate config without connecting — the fast fail for a malformed or misspelled server block. — Clojure."
+sidebar:
+  label: "toolnexus.mcp/parse-config"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/mcp.cljc">clojure/src/toolnexus/mcp.cljc</a>
+</p>
+
+```clojure
+(toolnexus.mcp/parse-config config)   ; config: a JSON string or an already-parsed map
+
+;; => a vector of server maps, sorted by name
+[{:name        "docs"
+  :kind        "remote"          ; "local" | "remote" | "unknown"
+  :enabled     true
+  :command     []
+  :cwd         nil
+  :environment {}
+  :url         "https://example.com/mcp"
+  :raw-headers {"Authorization" "Bearer ${DOCS_TOKEN}"}
+  :headers     {"authorization" "Bearer …"}   ; ${ENV} already expanded — never log this
+  :timeout     30000}]
+```
+
+Config in, servers out. No process is spawned, no socket is opened and no `tools/list` is sent —
+this is the offline half of the MCP source, and everything it decides is decided by SPEC §2's rules
+rather than by asking the server.
+
+Three normalizations happen here, and they are the ones worth knowing. **The wrapper is optional**:
+`mcpServers`, `servers` and `mcp` are all accepted, and with no wrapper the object itself is the
+server map, minus the reserved sibling keys `:builtins`, `:agents`, `:a2a` and `:mcpServer` — which
+are config sections, never servers. **The kind is inferred**: an explicit `type` wins, otherwise a
+`url` means remote and a `command` means local, and a server with neither is `"unknown"` — a server
+that can only ever fail. **The order is fixed**: the vector is sorted by name, so two runtimes given
+the same file produce the same sequence.
+
+The result is plain data. You can filter it, print it, diff it in a test, or hand it to
+`toolnexus.mcp/connect` one server at a time.
+
+## When to use it
+
+- **A startup or CI check** — assert that every server in `mcp.json` has a kind, is enabled, and
+  carries the timeout you expect, so a typo fails the build instead of failing at 3am as a
+  mysterious `"unknown"`.
+- **Deciding what to connect.** Filter the vector, then call `toolnexus.mcp/connect` on the servers
+  you actually want — the per-server allowlist this port does not have as an option.
+- **Explaining a config to a human** — a `mcp doctor` command, an admin page, a log line at boot.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="from-config when you want tools, parse-config when you want answers">
+[`toolnexus.mcp/from-config`](/api/clojure/mcp/load/) calls this and then connects, which costs a
+child process or an HTTP session per server, serially. `parse-config` costs a JSON parse. If the
+question is "is this config well-formed and what did it resolve to", stop here — connecting cannot
+tell you anything more about the config than this already has.
+</Aside>
+
+One caveat that matters: **`parse-config` reads the environment.** Remote `headers` values expand
+`${ENV_VAR}` at parse time (SPEC §0.3), so `:headers` in the returned map holds real secret values.
+Never print, log or serialize that key. When you need to *report* on headers, use
+`toolnexus.mcp/header-shape`, which is deliberately built to leak nothing: it returns the sorted key
+names and a boolean saying whether expansion changed anything — never a value, and never a length,
+because a length leaks a secret's size.
+
+## What each server map holds
+
+| Key | What it is |
+|---|---|
+| `:name` | The key from the config, as a string. |
+| `:kind` | `"local"`, `"remote"` or `"unknown"`. Explicit `type` wins; else `url` ⇒ remote, `command` ⇒ local. |
+| `:enabled` | `false` when the entry had `disabled: true` **or** `enabled: false` — the same statement, two spellings. |
+| `:command` | The argv vector for a local server; `[]` for a remote one. |
+| `:cwd` | Working directory for a local server, or `nil`. |
+| `:environment` | Extra env for the child. `env` is accepted as the documented alias. |
+| `:url` | The endpoint for a remote server, or `nil`. |
+| `:raw-headers` | The headers exactly as configured, still holding `${ENV_VAR}` placeholders. |
+| `:headers` | The same headers with `${ENV_VAR}` expanded. Real secrets — use, never log. |
+| `:timeout` | The per-phase budget in ms; `toolnexus.mcp/default-timeout-ms` (30000) when unset. |
+
+## Examples
+
+### 1. Wrappers, kind inference, and the fixed order
+
+```clojure
+(require '[toolnexus.mcp :as mcp]
+         '[koine.json :as json])
+
+;; all three wrappers mean the same thing
+(mapv :name (mcp/parse-config {:mcpServers {:one {:command ["a"]}}}))   ;; => ["one"]
+(mapv :name (mcp/parse-config {:servers    {:one {:command ["a"]}}}))   ;; => ["one"]
+(mapv :name (mcp/parse-config {:mcp        {:one {:command ["a"]}}}))   ;; => ["one"]
+
+(def parsed
+  (mcp/parse-config
+    (json/write-str {:mcpServers {"loc"  {:command ["x" "y"]}
+                                  "rem"  {:url "https://example.com/mcp"}
+                                  "huh"  {:description "neither"}
+                                  "over" {:type "remote" :url "https://example.com/mcp"}}})))
+
+(mapv :name parsed)          ;; => ["huh" "loc" "over" "rem"] — sorted by name
+(mapv :kind parsed)          ;; => ["unknown" "local" "remote" "remote"]
+(:command (second parsed))   ;; => ["x" "y"]
+```
+
+`"huh"` has neither `command` nor `url`, so it is `"unknown"`. That server will fail at the `config`
+phase the moment you connect, without a transport ever being created — catching it here is the whole
+point.
+
+### 2. Enablement and the timeout default, as a CI gate
+
+```clojure
+(require '[toolnexus.mcp :as mcp])
+
+(def parsed
+  (mcp/parse-config {:mcpServers {"a" {:command ["x"] :disabled true}
+                                  "b" {:command ["x"] :enabled false}
+                                  "c" {:command ["x"]}
+                                  "d" {:command ["x"] :timeout 1234}}}))
+
+(mapv (juxt :name :enabled :timeout) parsed)
+;; => [["a" false 30000] ["b" false 30000] ["c" true 30000] ["d" true 1234]]
+
+mcp/default-timeout-ms   ;; => 30000
+
+;; the gate: nothing may be silently unusable
+(def broken (filterv #(and (:enabled %) (= "unknown" (:kind %))) parsed))
+(assert (empty? broken) (str "unusable server blocks: " (mapv :name broken)))
+```
+
+Also note that a bare map with no wrapper *is* the server map: `\{:builtins … :agents … :real
+\{:command ["x"]\}\}` parses to exactly one server, `"real"`. The four reserved keys are removed
+because they are sibling config sections, and this is the only place that distinction matters.
+
+### 3. Headers — expanded for use, never for printing
+
+```clojure
+(require '[toolnexus.mcp :as mcp])
+
+(def parsed
+  (mcp/parse-config {:mcpServers {"docs" {:url "https://example.com/mcp"
+                                          :headers {"Authorization" "Bearer ${DOCS_TOKEN}"
+                                                    "X-Client"      "toolnexus"}}}}))
+
+(def docs (first parsed))
+
+;; SAFE to log: which keys exist, and whether expansion changed anything
+(mcp/header-shape (:raw-headers docs) (:headers docs))
+;; => {:keys ["Authorization" "X-Client"] :expanded true}
+
+;; NOT safe to log — this map holds the real token
+(:headers docs)
+```
+
+An unset variable expands to nothing rather than failing, so `:expanded false` on a config you
+believed used `${…}` is the signal that the variable is missing from the environment. That is the
+check to write, rather than one that inspects the value.
+
+## See also
+
+- [`toolnexus.mcp/from-config`](/api/clojure/mcp/load/) — the same parse, then connect
+- [Inventory without connecting](/api/clojure/mcp/list-tools/) — how far offline inspection goes
+- [Bounding a load](/api/clojure/mcp/load-with-context/) — what `:timeout` actually bounds
+- [`toolnexus.core/build`](/api/clojure/toolkit/create/) — where an `:mcp` config is normally handed in

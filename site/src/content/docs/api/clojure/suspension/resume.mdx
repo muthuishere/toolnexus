@@ -1,0 +1,30 @@
+---
+title: "AgentRuntime.resume — resume a suspended sub-agent"
+description: "Route an Answer to the deepest suspended sub-agent handle and resume it in place. — Clojure."
+sidebar:
+  label: "suspension / resume"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+</p>
+
+<Aside type="caution" title="Not available in Clojure">
+Go additionally ships a separate, golang-only SPEC §10 preview (Client.RunWithAnswer/Client.AskWithAnswer) for durable, cross-process resume of a bare-client run — not part of the §0 conformance contract. Documented on Go's own page and cross-linked from suspension/relay. Clojure has no sub-agent runtime to resume into. A suspension is resolved in-process by the :wait-for slot on toolnexus.client/create-client; durable, cross-process resume is recorded parity debt.
+</Aside>
+
+Route an Answer to the deepest suspended sub-agent handle and resume it in place.
+
+## What to use instead
+
+{/* TODO:why */}
+_TODO: the closest thing this port does offer, and how to get the same outcome._
+
+## See also
+
+- [`toolnexus.client/suspend`](/api/clojure/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`toolnexus.client/auth-required`](/api/clojure/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`toolnexus.client/create-client`](/api/clojure/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`toolnexus.client/pending-of`](/api/clojure/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.

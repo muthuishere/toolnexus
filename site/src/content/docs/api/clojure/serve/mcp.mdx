@@ -1,0 +1,164 @@
+---
+title: "toolnexus.serve/exposed-tools"
+description: "The inbound MCP profile: any MCP client can call your tools. — Clojure."
+sidebar:
+  label: "toolnexus.serve/exposed-tools"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7C</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/serve.cljc">clojure/src/toolnexus/serve.cljc</a>
+</p>
+
+```clojure
+(toolnexus.serve/exposed-tools toolkit mcp-cfg)
+
+;; mcp-cfg  the :mcp profile map:
+;;   :tools           allowlist of tool NAMES; omitted ⇒ every toolkit tool
+;;   :name :version   serverInfo, defaults "toolnexus" / "0.1.0"
+;;   :protocolVersion default "2024-11-05"
+
+;; => (Tool ...)   sorted by :name
+```
+
+`exposed-tools` answers one question: which of a toolkit's tools does the §7C inbound MCP profile
+show to a connecting client. Given `:tools` in the profile it keeps exactly those names — unknown
+names in the list are ignored, which §7C states explicitly — and given no `:tools` it keeps
+everything. The result is sorted by name so two runtimes serving the same toolkit cannot disagree
+about order.
+
+It is also **authoritative for calls**, not just for listing. §7C's text says only that `mcp.tools`
+filters the list; ported literally, a tool hidden from `tools/list` would still be callable through
+`tools/call`, turning what every reader takes for an allowlist into a cosmetic filter — on the one
+surface whose entire job is exposing a toolkit to strangers. `tools/call` therefore resolves out of
+this same filtered set, and an excluded tool answers `-32602 Unknown tool: <name>` exactly as a
+nonexistent one does. That is a deliberate, security-motivated deviation, reported upward rather than
+left for six ports to each guess at.
+
+Tool names go out **verbatim**. They were already sanitized at registration, and re-sanitizing at a
+gateway double-mangles names on every hop — so a toolkit holding `calc.sum` serves `calc.sum`, and
+the string `calc_sum` appears nowhere. This is the opposite of the §7A/§7B rule, where skill ids
+*are* sanitized, and the asymmetry is intentional.
+
+On the wire, a call's result becomes one `\{:type "text"\}` content part carrying the tool's output,
+with `isError` propagated. A tool that throws is caught by `toolnexus.tool/execute` and becomes an
+error result — never an exception on the server thread.
+
+## When to use it
+
+- **Verifying an allowlist in a test** — assert the exact set a profile exposes without opening a
+  socket or speaking JSON-RPC.
+- **Rendering what a client will see** — a startup log line or an admin page listing the served
+  catalog.
+- **Deciding what to expose** — diff `(exposed-tools tk \{\})` against `(exposed-tools tk cfg)` to see
+  precisely what an allowlist removes.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Serve mounts the endpoint; this is the policy behind it">
+You do not call `exposed-tools` to serve MCP — pass `:mcp` to
+[`toolnexus.serve/serve`](/api/clojure/serve/a2a/) and the `/mcp` endpoint is mounted, calling this
+internally for both `tools/list` and `tools/call`. Call it directly when you want the *decision* as
+data. And if the goal is trimming a toolkit for every consumer rather than for one MCP profile, do it
+at [`toolnexus.core/build`](/api/clojure/toolkit/create/) instead — a tool that was never registered
+cannot be exposed by any surface.
+</Aside>
+
+## Examples
+
+### What a profile actually exposes
+
+```clojure
+(require '[toolnexus.serve :as serve]
+         '[toolnexus.core :as core])
+
+(def tk (core/build {:mcp "examples/mcp.json" :skills "examples/skills"}))
+
+;; no allowlist ⇒ everything, sorted
+(mapv :name (serve/exposed-tools tk {}))
+
+;; an allowlist ⇒ exactly these; "no-such-tool" is ignored, not an error
+(mapv :name (serve/exposed-tools tk {:tools ["skill" "no-such-tool"]}))
+;; => ["skill"]
+```
+
+### Serve the profile and connect to it
+
+```clojure
+(require '[toolnexus.core :as core]
+         '[toolnexus.serve :as serve])
+
+(def tk (core/build {:skills "examples/skills"}))
+
+(def h (serve/serve tk {:port    0
+                        :mcp     {:name "tn-mcp" :version "1.0.0"
+                                  :tools ["skill"]}
+                        :on-call (fn [c] (println "called" (:name c)
+                                                  "from" (:source c)
+                                                  "isError" (:isError c)))}))
+
+;; POST <url>/mcp  -> initialize | tools/list | tools/call
+;; No :a2a profile here, so the Agent Card path and POST / both 404.
+(println (str (:url h) "/mcp"))
+```
+
+`:on-call` fires once per inbound `tools/call` with `\{:name :source :isError\}` — enough for an
+audit log. Result metadata is not on the MCP wire; `:on-call` is where you see it.
+
+### The three MCP methods, from a client's side
+
+```clojure
+(require '[koine.http :as http]
+         '[koine.json :as json])
+
+(defn rpc! [url method params]
+  (-> (http/post-json url {} (json/write-str {:jsonrpc "2.0" :id 1
+                                              :method method :params params}))
+      :body json/read-str :result))
+
+(rpc! mcp-url "initialize" {})
+;; => {:protocolVersion "2024-11-05" :capabilities {:tools {}}
+;;     :serverInfo {:name "tn-mcp" :version "1.0.0"}}
+
+(rpc! mcp-url "tools/list" {})
+;; => {:tools [{:name "skill" :description "..." :inputSchema {...}}]}
+
+(rpc! mcp-url "tools/call" {:name "skill" :arguments {:name "hello-world"}})
+;; => {:content [{:type "text" :text "<skill_content ...>"}] :isError false}
+
+;; a tool the allowlist excluded answers exactly like one that does not exist:
+;; JSON-RPC error -32602 "Unknown tool: bash"
+```
+
+## Options (the `:mcp` profile map)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `:tools` | all | Allowlist of tool names. Unknown names ignored. Governs `tools/list` **and** `tools/call`. |
+| `:name` | `"toolnexus"` | `serverInfo.name` returned by `initialize`. |
+| `:version` | `"0.1.0"` | `serverInfo.version`. |
+| `:protocolVersion` | `"2024-11-05"` | Advertised MCP protocol version. |
+
+### What goes on the wire per tool
+
+| MCP field | Source |
+|---|---|
+| `name` | `(:name tool)` — verbatim, never re-sanitized. |
+| `description` | `(:description tool)`. |
+| `inputSchema` | `(:input-schema tool)`, as registered. |
+
+### Error codes
+
+| Code | Cause |
+|---|---|
+| `-32700` | The request body was not decodable JSON. Answered on HTTP 200. |
+| `-32601` | A method other than `initialize` / `tools/list` / `tools/call`. |
+| `-32602` | `tools/call` for a name that is unknown **or** excluded by `:tools`. |
+| `-32603` | An internal error that escaped a handler. The server stays up. |
+
+## See also
+
+- [`toolnexus.serve/serve`](/api/clojure/serve/a2a/) — mounts `/mcp` and calls this
+- [`toolnexus.mcp/from-config`](/api/clojure/mcp/load/) — the outbound direction: consuming someone else's MCP server
+- [`toolnexus.core/build`](/api/clojure/toolkit/create/) — filter at registration instead of at the gateway

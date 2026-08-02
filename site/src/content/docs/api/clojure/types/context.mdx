@@ -1,0 +1,84 @@
+---
+title: "ToolContext — what execute receives"
+description: "Optional per-call context handed to execute: cancellation, identity, and host-supplied state. — Clojure."
+sidebar:
+  label: "types / context"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/tool.cljc">clojure/src/toolnexus/tool.cljc</a>
+</p>
+
+<Aside type="caution" title="Not available in Clojure">
+There is no ToolContext type in this port. The context is a plain map, passed as the optional third
+argument to `toolnexus.tool/execute`, and a tool receives it only if it was written to. A native
+tool opts in with `:ctx? true`.
+</Aside>
+
+Optional per-call context handed to execute: cancellation, identity, and host-supplied state.
+
+## What to use instead
+
+In Clojure an *optional trailing argument* is **arity**, not a nullable parameter.
+`toolnexus.tool/execute` calls `(f args)` when no context was supplied and `(f args ctx)` when one
+was, so a tool that wants the context is written multi-arity:
+
+```clojure
+(require '[toolnexus.tool :as tool])
+
+(def t
+  (tool/tool {:name "answerer"
+              :execute (fn ([args]     (tool/success "no context"))
+                           ([args ctx] (tool/success (str "answer: " (:answer ctx)))))}))
+
+(def tk (tool/toolkit [t]))
+
+(tool/execute tk "answerer" {})                    ;; => {:output "no context" :isError false}
+(tool/execute tk "answerer" {} {:answer "yes"})    ;; => {:output "answer: yes" :isError false}
+```
+
+The context is whatever map the caller passes. The port itself puts exactly one thing there: when a
+tool suspends and a `:wait-for` resolves it, the client re-executes the same call with
+`\{:answer answer\}` as the context. That is the resume path of SPEC §10 — the first execution has
+no context, the retry does, which is why the two-arity form is the portable contract here.
+
+[`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) takes a single-argument `:run`
+function by default and declares the context with a flag:
+
+```clojure
+(require '[toolnexus.native :as native])
+
+;; no context — the common case
+(native/native-tool {:name "upper"
+                     :description "Uppercase the text"
+                     :run (fn [args] (clojure.string/upper-case (str (:text args))))})
+
+;; opts in: :run now receives (args ctx)
+(native/native-tool {:name  "confirm"
+                     :description "Act on a resolved answer"
+                     :ctx?  true
+                     :run   (fn [args ctx]
+                              (if (:answer ctx)
+                                (str "confirmed " (:id args))
+                                "no answer yet"))})
+```
+
+The flag exists because the two hosts share no portable way to ask a function how many arguments it
+takes: arity introspection is `java.lang.reflect` on the JVM and absent on cljgo. JavaScript,
+Python and Go can hand `run` both values and let the callee ignore the extra one; Clojure cannot.
+Passing two arguments to a one-argument `fn` is an arity error, not a silently ignored extra — so
+the flag is the honest version of what the other ports get for free. It costs one keyword and
+never guesses wrong.
+
+There is no cancellation handle and no identity carried in the context by the port. If you need
+either, put it in the map yourself at the call site: the context is opaque to `execute`, which only
+decides whether to pass it.
+
+## See also
+
+- [`toolnexus.tool/tool`](/api/clojure/types/tool/) — the Tool whose `:execute` may take the context
+- [`toolnexus.tool/success`](/api/clojure/types/tool-result/) — what `:execute` returns either way
+- [`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) — the `:ctx? true` opt-in
+- [`toolnexus.client/wait-for`](/api/clojure/suspension/wait-for/) — the one place the port supplies a context of its own

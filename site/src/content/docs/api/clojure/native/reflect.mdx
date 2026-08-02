@@ -1,0 +1,75 @@
+---
+title: "Annotation / reflection tools"
+description: "Derive the schema from the function signature or annotation instead of writing it by hand. — Clojure."
+sidebar:
+  label: "native / reflect"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/native.cljc">clojure/src/toolnexus/native.cljc</a>
+</p>
+
+<Aside type="caution" title="Not available in Clojure">
+There is no reflection- or metadata-driven tool builder in this port. Clojure and cljgo share no
+portable way to introspect a function's arity or argument names — that is `java.lang.reflect` on
+the JVM and absent on cljgo — so the schema is always written by hand. The same constraint is why a
+tool that wants the Context declares `:ctx? true` rather than being detected.
+</Aside>
+
+Derive the schema from the function signature or annotation instead of writing it by hand.
+
+## What to use instead
+
+[`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) is the whole native-tool surface
+here, and it always takes an explicit `:input-schema`. Write the JSON Schema as a Clojure map next
+to the function:
+
+```clojure
+(require '[toolnexus.native :as native])
+
+(def get-weather
+  (native/native-tool
+    {:name         "get_weather"
+     :description  "Current weather for a city"
+     :input-schema {:type       "object"
+                    :properties {:city  {:type "string" :description "City name"}
+                                 :units {:type "string" :enum ["c" "f"] :default "c"}}
+                    :required   ["city"]}
+     :run          (fn [args] (str "sunny in " (:city args)))}))
+
+((:execute get-weather) {:city "Chennai"})   ;=> {:output "sunny in Chennai" :isError false}
+```
+
+A Clojure `fn` carries no argument names and no types at runtime on either host, so there is
+nothing for reflection to read even if the mechanism existed — a derived schema would be a guess
+about a dynamically typed function, and the model would be the one to discover the guess was wrong.
+Writing it out costs a few lines and buys a schema that is exactly what the endpoint accepts.
+
+The schema is a value, so factor it the way you factor any other value when you have more than a
+handful of tools:
+
+```clojure
+(require '[toolnexus.native :as native])
+
+(defn- string-arg [desc] {:type "string" :description desc})
+
+(defn- object-schema [props required]
+  {:type "object" :properties props :required required})
+
+(def lookup-order
+  (native/native-tool
+    {:name         "lookup_order"
+     :description  "Fetch one order by id"
+     :input-schema (object-schema {:order-id (string-arg "The order id")} ["order-id"])
+     :run          (fn [args] (str "order " (:order-id args)))}))
+```
+
+The positional arity is the same builder with the map flattened, which reads well when the schema
+is already a named value: `(native/native-tool "lookup_order" "Fetch one order by id" schema f)`.
+
+## See also
+
+- [`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.
+- [Gathering decorated functions](/api/clojure/native/collect/) — the other half of the same constraint: no decorator means no collector.

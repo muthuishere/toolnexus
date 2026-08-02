@@ -102,16 +102,50 @@
               ;; `name` is REQUIRED. No frontmatter at all lands here too, since
               ;; frontmatter/parse returns [{} text] for a plain body.
               {:skip {:location path :reason "missing-name"}}
-              {:info {:name        (:name data)
-                      ;; ABSENT description (nil) and EMPTY description ("") are
-                      ;; different: js/src/skill.ts filters the prompt catalog on
-                      ;; `description !== undefined`, golang/skill.go on
-                      ;; `!= ""`. Those two shipped ports genuinely disagree for
-                      ;; `description:` with an empty value; we follow JS.
-                      :description (:description data)
-                      :location    path
-                      :content     body
-                      :dir         (parent-dir path)}})))))))
+              (let [dir (parent-dir path)]
+                {:info {:name        (:name data)
+                        ;; ABSENT description (nil) and EMPTY description ("") are
+                        ;; different: js/src/skill.ts filters the prompt catalog on
+                        ;; `description !== undefined`, golang/skill.go on
+                        ;; `!= ""`. Those two shipped ports genuinely disagree for
+                        ;; `description:` with an empty value; we follow JS.
+                        :description (:description data)
+                        :location    path
+                        :content     body
+                        :dir         dir
+                        ;; js/src/skill.ts uses pathToFileURL(dir).href, which for
+                        ;; an absolute POSIX path is exactly "file://" + dir.
+                        :base        (str "file://" dir)
+                        :origin      "fs"}}))))))))
+
+;; ---------------------------------------------------------------------------
+;; §3 S1 — skills supplied as DATA (no filesystem) and §3 S4 — a logical base
+;; ---------------------------------------------------------------------------
+
+(defn- def->candidate
+  "One caller-supplied skill definition as a candidate.
+
+  `{:name :description :content :resources :base}`. A def with no `name` is the
+  same typed skip a nameless SKILL.md is, located at its base (js/src/skill.ts
+  `candidatesFromDefs`: `d.base ?? \"skill://\"`)."
+  [d]
+  (if (str/blank? (str (:name d)))
+    {:skip {:location (if (str/blank? (str (:base d))) "skill://" (str (:base d)))
+            :reason   "missing-name"}}
+    (let [base (if (str/blank? (str (:base d)))
+                 (str "skill://" (:name d) "/")
+                 (str (:base d)))]
+      {:info {:name        (str (:name d))
+              :description (:description d)
+              :location    base
+              :content     (or (:content d) "")
+              ;; `:dir` is what reaches the ToolResult metadata; for a logical
+              ;; skill that IS the base, so no host path can leak from a source
+              ;; that never touched a disk.
+              :dir         base
+              :base        base
+              :origin      "logical"
+              :resources   (vec (:resources d))}})))
 
 (defn candidates
   "Every SKILL.md under `root`, in DISCOVERY ORDER, as a parsed skill or a typed
@@ -152,17 +186,99 @@
           {:skills [] :by-name {} :skipped []}
           cands))
 
+(defn- warn!
+  "The port's one log line. Everything it can say is already data on the
+  returned map, so nothing here is load-bearing — it exists because §3 S2 asks
+  for a warn-level record of an allowlist name that matched nothing."
+  [msg]
+  (println (str "[toolnexus] " msg)))
+
+(def ^:private load-opt-keys
+  "The keys that make a map an OPTIONS map rather than a single skill def.
+  Mirrors js/src/skill.ts `LoadSkillsOptions`."
+  #{:dirs :skills :filter :sample-limit})
+
+(defn load-opts
+  "`load-skills` accepts every shape js/src/skill.ts' `loadSkills` accepts, plus
+  the two data shapes: a root string, a seq of roots, a seq of skill defs, one
+  skill def, or the full options map."
+  [input]
+  (cond
+    (nil? input)     {}
+    (string? input)  {:dirs [input]}
+    (and (map? input) (some (fn [k] (contains? input k)) load-opt-keys)) input
+    (map? input)     {:skills [input]}
+    (sequential? input) (if (map? (first input))
+                          {:skills (vec input)}
+                          {:dirs (vec input)})
+    :else            {:dirs [(str input)]}))
+
+(defn- filter-name
+  "A filter key as a plain skill name. A caller writing Clojure reaches for
+  keywords; a caller reading a JSON config has strings. Both mean the name."
+  [k]
+  (if (keyword? k) (name k) (str k)))
+
+(defn apply-skills-filter
+  "SPEC §3 S2 — the per-agent allowlist, semantics IDENTICAL to the MCP
+  per-server tools filter: nil or empty ⇒ every skill; at least one `true` ⇒ an
+  allowlist of exactly the true-mapped names; only `false` values ⇒ a drop-list
+  over the all-on baseline. Unknown names are ignored.
+
+  Returns `[filtered-by-name unmatched-names]`. The unmatched list is RETURNED
+  rather than only logged so the requirement is testable without capturing
+  stdout — the warn line is emitted from `load-skills`."
+  [by-name filter-map]
+  (if (empty? filter-map)
+    [by-name []]
+    (let [m         (reduce (fn [acc e] (assoc acc (filter-name (key e)) (val e))) {} filter-map)
+          has-true? (some true? (vals m))
+          unmatched (vec (sort (remove (fn [k] (contains? by-name k)) (keys m))))]
+      [(reduce (fn [acc e]
+                 (let [nm (key e)]
+                   (if (if has-true? (true? (get m nm)) (not (false? (get m nm))))
+                     (assoc acc nm (val e))
+                     acc)))
+               {} by-name)
+       unmatched])))
+
 (defn load-skills
-  "Discover skills under one root (a string) or several (a seq). Roots are
-  visited in the order given, so an earlier root wins a name collision."
-  [roots]
-  (merge-candidates (vec (mapcat candidates (if (string? roots) [roots] roots)))))
+  "Discover skills from every source §3 offers and shape them into one loaded
+  map.
+
+  `input` is a root string, a seq of roots, a seq of skill DEFS, or an options
+  map `{:dirs … :skills … :filter … :sample-limit …}` — the same union
+  js/src/skill.ts' `loadSkills` takes. Directory roots are collected first, in
+  the order given, then the data defs, so the existing first-name-wins rule
+  resolves collisions ACROSS sources without needing a second rule.
+
+  Returns `{:skills [info…] :by-name {} :skipped [] :filter-unmatched []
+  :sample-limit n}`. A caller passing only roots gets byte-identical behaviour
+  to before this option existed."
+  [input]
+  (let [opts   (load-opts input)
+        dirs   (let [d (:dirs opts)]
+                 (cond (nil? d) [] (string? d) [d] :else (vec d)))
+        defs   (vec (:skills opts))
+        merged (merge-candidates (into (vec (mapcat candidates dirs))
+                                       (mapv def->candidate defs)))
+        [by-name unmatched] (apply-skills-filter (:by-name merged) (:filter opts))]
+    (doseq [nm unmatched] (warn! (str "skill filter name \"" nm "\" matched no skill")))
+    {:skills           (vec (filter (fn [s] (contains? by-name (:name s))) (:skills merged)))
+     :by-name          by-name
+     :skipped          (:skipped merged)
+     :filter-unmatched unmatched
+     :sample-limit     (or (:sample-limit opts) 0)}))
 
 (defn list-skills
   "SPEC §3 S3 — list/validate inventory: `{:skills … :skipped …}`, no toolkit
-  wired, nothing left open."
-  [roots]
-  (let [m (load-skills roots)]
+  wired, nothing left open.
+
+  DELIBERATELY UNFILTERED, following js/src/skill.ts `listSkills`, which ignores
+  `opts.filter` entirely: the inventory is what you AUTHOR an allowlist from, so
+  filtering it would be circular."
+  [input]
+  (let [m (load-skills (dissoc (load-opts input) :filter))]
     {:skills (:skills m) :skipped (:skipped m)}))
 
 ;; ---------------------------------------------------------------------------
@@ -200,6 +316,24 @@
          (take (if (zero? limit) default-sample-limit limit))
          vec)))
 
+(defn skill-files
+  "The `<skill_files>` list for one skill, or nil when there is no block.
+
+  Two sources, one rule, following js/src/skill.ts' execute:
+    * an on-disk skill samples its siblings and ALWAYS emits the block (even
+      empty) unless sampling is off — that is the shipped byte-exact behaviour;
+    * a data/provider skill lists its SUPPLIED logical resources, in the order
+      supplied, and omits the block entirely when it has none (an
+      instruction-only skill has nothing to disclose)."
+  [info limit]
+  (if (= "logical" (:origin info))
+    (let [res (vec (:resources info))]
+      (cond
+        (neg? limit)  nil
+        (empty? res)  nil
+        :else         (vec (take (if (zero? limit) default-sample-limit limit) res))))
+    (sample-sibling-files (:dir info) limit)))
+
 ;; ---------------------------------------------------------------------------
 ;; §0.6 — the byte-exact `skill` output
 ;; ---------------------------------------------------------------------------
@@ -215,7 +349,7 @@
        "\n"
        (str/trim (str (:content skill))) "\n"
        "\n"
-       "Base directory for this skill: file://" (:dir skill) "\n"
+       "Base directory for this skill: " (or (:base skill) (str "file://" (:dir skill))) "\n"
        "Relative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.\n"
        (if (nil? files)
          ""
@@ -236,7 +370,7 @@
   golang/skill.go, js, python, java, csharp and elixir all emit
   `\"Available skills: \"` (and the literal `none` when there are no skills).
   We match the ports. SPEC §3 should be corrected."
-  ([loaded skill-name] (execute-skill loaded skill-name 0))
+  ([loaded skill-name] (execute-skill loaded skill-name (or (:sample-limit loaded) 0)))
   ([loaded skill-name limit]
    (let [by-name (:by-name loaded)
          info    (get by-name (str skill-name))]
@@ -244,12 +378,12 @@
        (tool/failure (str "Skill \"" (str skill-name) "\" not found. Available skills: "
                       (let [avail (sort (keys by-name))]
                         (if (seq avail) (str/join ", " avail) "none"))))
-       (tool/success (skill-output info (sample-sibling-files (:dir info) limit))
+       (tool/success (skill-output info (skill-files info limit))
                 {:name (:name info) :dir (:dir info)})))))
 
 (defn skill-tool
   "The single `skill` tool (SPEC §3), shipped by default alongside the skills."
-  ([loaded] (skill-tool loaded {}))
+  ([loaded] (skill-tool loaded {:sample-limit (:sample-limit loaded)}))
   ([loaded {:keys [sample-limit]}]
    (tool/tool {:name         "skill"
                :description  skill-tool-description

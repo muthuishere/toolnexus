@@ -1,0 +1,162 @@
+---
+title: "toolnexus.core/build"
+description: "Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list. — Clojure."
+sidebar:
+  label: "toolnexus.core/build"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/core.cljc">clojure/src/toolnexus/core.cljc</a>
+</p>
+
+```clojure
+(toolnexus.core/build
+  {:mcp      "…mcp.json…"    ; a JSON string or an already-parsed map (§2/§0.3)
+   :skills   "./skills"      ; a skills root, or a seq of roots (§3)
+   :builtins {}              ; false | {:disabled ..} | {:enabled ..} | {:tools {..}}
+   :tools    [a-tool]})      ; extra Tools of your own — native, http, a2a, anything
+
+;; =>
+{:tools       {"read" {...} "skill" {...} "docs_search" {...}}   ; name -> Tool
+ :sources     {"builtin" "connected"}
+ :skills      {...}                                              ; the loaded skill catalog
+ :statuses    {"builtin" "connected" "docs" "connected" "old" "failed"}
+ :errors      {"old" "mcp server \"old\" failed at initialize: transport (connect-failed)"}
+ :connections [{...}]}                                           ; live MCP connections
+```
+
+One call, every source, one flat namespace of tools. `build` is the integration layer: it loads
+skills into the `skill` tool, connects MCP servers, folds in the builtins and your own Tools, and
+hands back a toolkit that `toolnexus.core/execute` and the adapters consume unchanged.
+
+**Registration order is the contract, not a detail.** `toolnexus.tool/add-tools` lets a later tool
+win a name collision, and SPEC §0.11 requires MCP to take precedence over a builtin of the same
+name — so builtins go in first, then the `skill` tool, then your `:tools`, and MCP last. The order
+of those four lines is load-bearing rather than stylistic.
+
+**Every source is isolated.** A source that fails contributes an entry in `:errors` and a status in
+`:statuses`, never an exception. A malformed `:mcp` string, a server that will not start, a skills
+root that does not exist — each leaves you with a working toolkit containing everything that did
+load. That is the whole point of the status map.
+
+## When to use it
+
+- **The normal entry point for an application.** With more than one source, this is the call that
+  gets precedence and isolation right for you.
+- **When you want the skills preamble.** `toolnexus.core/skills-prompt` reads the catalog `build`
+  attached, so the system prompt and the `skill` tool cannot disagree about what exists.
+- **When you are about to hand the tools to a provider.** `to-openai`, `to-anthropic` and
+  `to-gemini` are re-exported here, so a caller needs one `require` rather than four.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Call the source namespace directly when you only have one source">
+[`toolnexus.mcp/from-config`](/api/clojure/mcp/load/), `toolnexus.skill/load-skills` and
+[`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) each work standalone and return
+plain data. Use them when you want exactly one source and control over the merge — a CLI that only
+talks to MCP, a test that needs one native Tool. `build` earns its keep the moment two sources can
+collide on a name, or you want one dead source not to sink the rest.
+</Aside>
+
+Note that `build` **opens things**: a connected MCP server is a child process or a live HTTP
+session. Pair it with `toolnexus.core/shutdown!`, which closes every connection the toolkit opened
+and is idempotent.
+
+## Options
+
+| Option | Effect |
+|---|---|
+| `:mcp` | An `mcp.json` string or a parsed map. Servers are connected serially in name order — see [`from-config`](/api/clojure/mcp/load/). Registered **last**, so MCP wins a name collision (§0.11). |
+| `:skills` | A skills root, or a seq of roots. When anything loads, a single `skill` tool is added and the catalog is kept on `:skills` for `skills-prompt`. |
+| `:builtins` | The §0.11 toggle. `false`, `\{:disabled true\}` or `\{:enabled false\}` turn the whole source off; `\{:tools \{:bash false\}\}` drops individual tools from the all-on baseline of ten. Absent means on. |
+| `:tools` | Extra Tools of your own. Registered after the `skill` tool and before MCP. |
+
+## What you get back
+
+| Key | What it is |
+|---|---|
+| `:tools` | `name -> Tool`, the merged namespace. `toolnexus.core/tool-names` returns the sorted names. |
+| `:sources` | The source-status map the builtin toolkit was seeded with. |
+| `:skills` | The loaded skill catalog — read by `skills-prompt` and by the `skill` tool. `\{\}` when no skills were configured. |
+| `:statuses` | `"builtin"` plus one entry per MCP server: `"connected"`, `"disabled"` or `"failed"`. |
+| `:errors` | `server -> message` for the failures only, including `"<config>"` when `:mcp` itself could not be parsed. |
+| `:connections` | The live MCP connections, for `shutdown!`. |
+
+## Examples
+
+### 1. Three sources at once, in one flat namespace
+
+```clojure
+(require '[toolnexus.core :as tn]
+         '[toolnexus.tool :as tool])
+
+(def tk
+  (tn/build {:skills   "./skills"
+             :builtins {:tools {:bash false}}          ; nine builtins, not ten
+             :tools    [(tool/tool {:name "mine" :source "native"
+                                    :execute (fn [_] (tool/success "ok"))})]}))
+
+(contains? (:tools tk) "skill")   ;; => true  — the §3 progressive-disclosure tool
+(contains? (:tools tk) "read")    ;; => true  — a builtin
+(contains? (:tools tk) "mine")    ;; => true  — yours
+(contains? (:tools tk) "bash")    ;; => false — dropped by the per-tool toggle
+
+(get (:statuses tk) "builtin")    ;; => "connected"
+```
+
+Turning the source off entirely is `:builtins false`, and then the `:tools` map is never consulted
+at all — a whole-source-off short-circuits, so `\{:disabled true :tools \{:bash true\}\}` still
+yields nothing.
+
+### 2. A dead source is an entry in the map, not a stack trace
+
+```clojure
+(require '[toolnexus.core :as tn])
+
+(def tk (tn/build {:mcp "{not json" :builtins {}}))
+
+(seq (:errors tk))                ;; => truthy — recorded under "<config>"
+(contains? (:tools tk) "read")    ;; => true   — every other source still loaded
+```
+
+The same holds one level down: a config that parses but names a server that will not start leaves
+that server `"failed"` in `:statuses` with its message in `:errors`, while the servers that did
+connect contribute their tools normally.
+
+### 3. The whole pipeline — build, prompt, adapt, shut down
+
+```clojure
+(require '[toolnexus.core :as tn])
+
+(def tk (tn/build {:mcp (slurp "mcp.json") :skills "./skills" :builtins {}}))
+
+(try
+  ;; the §3/§0.6 preamble for the system prompt, derived from the same catalog
+  ;; the `skill` tool reads — the two cannot drift
+  (tn/skills-prompt tk)
+
+  ;; one tool set, three wire formats; all three agree on contents AND on order
+  (count (tn/to-openai tk))
+  (count (tn/to-anthropic tk))
+  (count (:functionDeclarations (first (tn/to-gemini tk))))
+
+  (tn/tool-names tk)                       ;; sorted, so two runtimes emit the same array
+  (tn/execute tk "read" {:path "README.md"})
+
+  (finally
+    (tn/shutdown! tk)))                    ;; closes every MCP connection; idempotent
+```
+
+`shutdown!` matters more than it looks. A connected stdio server is a child process, and while this
+port is careful never to hold your process open itself — no `future` in library code, ever — the
+child is yours to close.
+
+## See also
+
+- [`toolnexus.mcp/from-config`](/api/clojure/mcp/load/) — the MCP source on its own
+- [`toolnexus.mcp/parse-config`](/api/clojure/mcp/parse-config/) — validate an `mcp.json` without connecting
+- [`toolnexus.tool/tool`](/api/clojure/types/tool/) — the shape everything in `:tools` has
+- [`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) — build the Tools you pass as `:tools`
+- [OpenAI adapter](/api/clojure/adapters/openai/) — what `to-openai` emits

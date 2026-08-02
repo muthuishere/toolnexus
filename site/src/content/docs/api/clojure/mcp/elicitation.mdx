@@ -1,0 +1,28 @@
+---
+title: "Elicitation bridge — server asks the user"
+description: "Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back. — Clojure."
+sidebar:
+  label: "mcp / elicitation"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+</p>
+
+<Aside type="caution" title="Not available in Clojure">
+Elixir's elicitation_to_request lives on Toolnexus.Mcp.Protocol, not Toolnexus.Mcp — there is no delegate on the top-level Mcp module. The Clojure port does not bridge MCP elicitation yet (recorded parity debt in clojure/README.md); a server's elicitation request is not mapped onto the §10 suspension contract.
+</Aside>
+
+Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.
+
+## What to use instead
+
+{/* TODO:why */}
+_TODO: the closest thing this port does offer, and how to get the same outcome._
+
+## See also
+
+- [`toolnexus.mcp/from-config`](/api/clojure/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+- [`toolnexus.mcp/parse-config`](/api/clojure/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.

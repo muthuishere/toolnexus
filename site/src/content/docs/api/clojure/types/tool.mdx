@@ -1,0 +1,154 @@
+---
+title: "toolnexus.tool/tool"
+description: "The uniform shape every tool source collapses to: name, description, JSON-Schema parameters, execute. — Clojure."
+sidebar:
+  label: "toolnexus.tool/tool"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/tool.cljc">clojure/src/toolnexus/tool.cljc</a>
+</p>
+
+```clojure
+(toolnexus.tool/tool
+  {:name         "get_weather"       ; required
+   :description  "Current weather"   ; optional — "" when absent
+   :input-schema {:type "object"}    ; optional — {:type "object"} when absent
+   :source       "native"            ; optional — "custom" when absent
+   :execute      (fn [args] ...)})   ; required — may also take [args ctx]
+
+;; =>
+{:name         "get_weather"
+ :description  "Current weather"
+ :input-schema {:type "object"}
+ :source       "native"
+ :execute      #function[...]}
+```
+
+A Tool in this port is **a plain map with one closure in it**. No protocol, no record, no
+`deftype` — a map of data plus a `fn` needs nothing but `fn`, `get` and `assoc`, and that is the
+only shape that behaves identically on Clojure (JVM) and on cljgo, the two runtimes this one
+`.cljc` tree runs on unchanged. Everything MCP, skills, builtins, HTTP and A2A produce is this
+same map; `tool` is the constructor you call when the value comes from somewhere the port has no
+builder for.
+
+The constructor does exactly three things: it asserts (`:pre`) that `:name` is present and
+`:execute` is a function, it `str`s the name, and it fills the three defaults above. There is no
+validation of `:input-schema` — it goes through to the adapters verbatim.
+
+`:execute` returns a **ToolResult map**, not a string. Build it with
+[`toolnexus.tool/success`](/api/clojure/types/tool-result/) or `toolnexus.tool/failure`. If it
+throws instead, `toolnexus.tool/execute` turns the throw into a failure result: a misbehaving tool
+must not take down the loop (SPEC §0.8).
+
+## When to use it
+
+- **Adapting a source the port does not build for you** — a queue consumer, an in-process service,
+  a fixture. Anything that can answer a map with a map can be a Tool.
+- **Overriding a tool by name.** Registration order *is* the precedence rule:
+  `toolnexus.tool/add-tools` lets a later tool win a name collision, which is exactly how SPEC
+  §0.11 gives MCP precedence over a builtin of the same name.
+- **Tests** — a two-line Tool with a deterministic result exercises the toolkit, the adapters and
+  the client loop without a network or a child process.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for native-tool when you are wrapping a plain function">
+[`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) wraps an ordinary function and
+**normalizes whatever it returns**: a string becomes the output, `nil` becomes empty output, and a
+map that already has `:output` passes through with `:isError` forced to a boolean.
+`toolnexus.tool/tool` does none of that — your `:execute` must return the ToolResult itself. Use
+`tool` when you are already producing results (writing a source adapter); use `native-tool` when
+you have a function that just returns a value.
+</Aside>
+
+`tool` also does **not** sanitize the name. SPEC §0.2 naming is applied by the sources that derive
+a name from a remote one — `toolnexus.mcp/mcp-tool-name` calls `toolnexus.tool/sanitize` for you.
+A name you write by hand is used as written, so keep it inside `[a-zA-Z0-9_-]` yourself, or run it
+through `sanitize`.
+
+## Options
+
+| Key | Required | Default | What it does |
+|---|---|---|---|
+| `:name` | yes | — | The name the model calls. `str`ed, never sanitized. |
+| `:execute` | yes | — | `(fn [args])`, or a two-arity `fn` that also accepts `ctx`. Returns a ToolResult map. |
+| `:description` | no | `""` | Handed to the model verbatim by the adapters. |
+| `:input-schema` | no | `{:type "object"}` | JSON Schema for the arguments; passed through untouched. |
+| `:source` | no | `"custom"` | Provenance label — `"mcp"`, `"native"`, `"builtin"`, `"a2a"`, `"http"`. Not behavioural; useful for filtering and metrics. |
+
+## Examples
+
+### 1. A tool written by hand, run through a toolkit
+
+```clojure
+(require '[toolnexus.tool :as tool])
+
+(def greet
+  (tool/tool {:name         "greet"
+              :description  "Greet someone by name"
+              :input-schema {:type "object"
+                             :properties {:name {:type "string"}}
+                             :required ["name"]}
+              :source       "native"
+              :execute      (fn [args] (tool/success (str "Hello, " (:name args))))}))
+
+(def tk (tool/toolkit [greet]))
+
+(tool/execute tk "greet" {:name "Muthu"})
+;; => {:output "Hello, Muthu" :isError false}
+
+(tool/tool-names tk)
+;; => ["greet"]  — sorted, always: two runtimes must not disagree on order
+```
+
+### 2. Later wins — the mechanism behind MCP precedence
+
+```clojure
+(require '[toolnexus.tool :as tool])
+
+(def builtin-read
+  (tool/tool {:name "read" :source "builtin" :execute (fn [_] (tool/success "builtin"))}))
+
+(def mcp-read
+  (tool/tool {:name "read" :source "mcp" :execute (fn [_] (tool/success "mcp"))}))
+
+(def tk (-> (tool/toolkit [builtin-read])
+            (tool/add-tools [mcp-read])))
+
+(count (:tools tk))                     ;; => 1 — one name, one slot
+(:output (tool/execute tk "read" {}))   ;; => "mcp"
+```
+
+This is why [`toolnexus.core/build`](/api/clojure/toolkit/create/) registers builtins **first** and
+MCP **last**. The order in that function is load-bearing, not stylistic.
+
+### 3. A throwing tool is still a well-behaved tool
+
+```clojure
+(require '[toolnexus.tool :as tool])
+
+(def tk
+  (tool/toolkit [(tool/tool {:name "boom"
+                             :execute (fn [_] (throw (ex-info "kaboom" {})))})]))
+
+(tool/execute tk "boom" {})
+;; => {:output "kaboom" :isError true}
+
+(tool/execute tk "nope" {})
+;; => {:output "unknown tool: nope" :isError true}
+```
+
+`toolnexus.tool/execute` catches `Throwable` — a bare symbol, which is the one catch target both
+hosts accept — so SPEC §0.8 is written once and holds on the JVM and on cljgo alike. An unknown
+name is the same kind of answer: a value the model can read and retry from, never an exception
+thrown at your loop.
+
+## See also
+
+- [`toolnexus.tool/success`](/api/clojure/types/tool-result/) — the result envelope `:execute` must return
+- [The context argument](/api/clojure/types/context/) — the optional third argument to `execute`
+- [`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) — wrap a plain function instead
+- [`toolnexus.core/build`](/api/clojure/toolkit/create/) — where Tools from every source are merged

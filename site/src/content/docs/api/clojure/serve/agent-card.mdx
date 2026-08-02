@@ -1,0 +1,153 @@
+---
+title: "toolnexus.serve/agent-card"
+description: "Construct the Agent Card that advertises your name, skills and endpoint. — Clojure."
+sidebar:
+  label: "toolnexus.serve/agent-card"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/serve.cljc">clojure/src/toolnexus/serve.cljc</a>
+</p>
+
+```clojure
+(toolnexus.serve/agent-card cfg base skills)
+
+;; cfg    the :a2a profile map — :name :description :version :protocolVersion
+;;        :provider :skills (an allowlist of skill NAMES)
+;; base   the server's base URL; the card's `url` is (str base "/")
+;; skills a SkillSource: a list-skills result, a name->info index, or a seq
+
+;; => {:name "tn-agent" :description "" :version "0.1.0" :protocolVersion "0.3.0"
+;;     :capabilities {:streaming false :pushNotifications false}
+;;     :defaultInputModes ["text"] :defaultOutputModes ["text"]
+;;     :skills [{:id "hello_world" :name "hello-world" :description "..."}]
+;;     :url "http://127.0.0.1:8080/"}
+```
+
+`agent-card` builds the JSON document a peer fetches from `/.well-known/agent-card.json` to discover
+what you can do. [`serve`](/api/clojure/serve/a2a/) calls it on every card request, so the card always
+reflects the live skill source; calling it yourself is for tests, static publication and admin views.
+
+The advertised skills come from the toolkit's **SkillSource** — never from its tools. That is
+deliberate: a peer asks an A2A agent for capabilities, not for a function catalog, and exposing every
+`bash` and `grep` on the card would be both noisy and wrong. Pass `:skills` in the profile to narrow
+it further; unknown names in that allowlist are ignored, matching §7C's explicit rule for
+`mcp.tools`.
+
+Two naming rules sit side by side here. A skill's `id` is **sanitized** — that is the token peers
+concatenate into a tool name, so it must be safe. Its `name` is passed through untouched, because
+that is the human-readable label. Skills are emitted sorted by name so two runtimes cannot serve
+different cards from the same configuration.
+
+`:provider` is present only when configured — absent, not `null`. Everything else has a spec default,
+which is why `(agent-card {} base skills)` already produces a valid card.
+
+## When to use it
+
+- **Asserting on the card in a test** without standing up a server or making an HTTP request.
+- **Publishing a static card** — writing `/.well-known/agent-card.json` to a CDN or behind a
+  gateway that terminates in front of your process.
+- **An admin or registry view** — rendering "here is what this agent advertises" from the same
+  function the wire uses, so the page cannot drift from reality.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Serve builds it for you">
+If you are calling [`toolnexus.serve/serve`](/api/clojure/serve/a2a/) with an `:a2a` profile, the card
+is already mounted and already rebuilt per request — you do not need this function at all. Call it
+directly only when you want the card as *data*: in a test, in a static file, or in a page.
+</Aside>
+
+Note the `base` argument is yours to supply. `serve` passes its own resolved `http://127.0.0.1:<port>`,
+which is right for local peers and wrong the moment a reverse proxy or a public hostname is in
+front — in that case build the card yourself with the externally reachable base.
+
+## Examples
+
+### The card with every default
+
+```clojure
+(require '[toolnexus.serve :as serve])
+
+(serve/agent-card {} "http://127.0.0.1:8080"
+                  [{:name "hello-world" :description "Greets the world."}])
+;; => {:name "toolnexus-agent"
+;;     :description ""
+;;     :version "0.1.0"
+;;     :protocolVersion "0.3.0"
+;;     :capabilities {:streaming false :pushNotifications false}
+;;     :defaultInputModes ["text"] :defaultOutputModes ["text"]
+;;     :skills [{:id "hello_world" :name "hello-world" :description "Greets the world."}]
+;;     :url "http://127.0.0.1:8080/"}
+```
+
+Note `:capabilities` — this port serves neither streaming nor push notifications, and says so
+truthfully rather than advertising a capability it would then fail to honour.
+
+### Advertise a subset, from a real skill source
+
+```clojure
+(require '[toolnexus.skill :as skill]
+         '[toolnexus.serve :as serve])
+
+(def skills (skill/list-skills "examples/skills"))
+
+(serve/agent-card {:name        "release-bot"
+                   :description "Cuts releases"
+                   :version     "1.2.0"
+                   :provider    {:organization "toolnexus"
+                                 :url "https://example.invalid"}
+                   ;; only these names are advertised; unknown names are ignored
+                   :skills      ["hello-world" "no-such-skill"]}
+                  "https://agents.example.com/release-bot"
+                  skills)
+```
+
+`agent-card` accepts the `\{:skills [...] :skipped [...]\}` shape `list-skills` returns, a
+name→info index, or a plain sequence of maps with `:name` and `:description` — so a data-defined
+skill list works without touching disk.
+
+### Publish a static card behind a proxy
+
+```clojure
+(require '[koine.fs :as fs]
+         '[koine.json :as json]
+         '[toolnexus.serve :as serve])
+
+(fs/write-file "public/.well-known/agent-card.json"
+               (json/write-str
+                 (serve/agent-card {:name "release-bot" :version "1.2.0"}
+                                   "https://agents.example.com"   ;; the PUBLIC base
+                                   skills)))
+```
+
+The card's `url` becomes `https://agents.example.com/`, which is where peers will POST — so it has to
+be the address that reaches your `serve` process, not the loopback one it bound to.
+
+## Options (the `:a2a` profile map)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `:name` | `"toolnexus-agent"` | The agent name. Peers sanitize it into the prefix of every tool name they derive. |
+| `:description` | `""` | Free text. |
+| `:version` | `"0.1.0"` | Your agent's version. |
+| `:protocolVersion` | `"0.3.0"` | The A2A protocol version advertised. |
+| `:provider` | absent | Any map, e.g. `\{:organization ... :url ...\}`. Omitted from the card entirely when unset. |
+| `:skills` | all | Allowlist of skill **names**. Unknown names are ignored, not errors. |
+
+### Card fields
+
+| Field | Source |
+|---|---|
+| `:capabilities` | Always `\{:streaming false :pushNotifications false\}` — this port implements neither. |
+| `:defaultInputModes` / `:defaultOutputModes` | Always `["text"]`. |
+| `:skills` | From the SkillSource, filtered, sorted by name. `:id` is sanitized; `:name` is verbatim; `:description` defaults to `""`. |
+| `:url` | `(str base "/")` — the JSON-RPC POST endpoint. |
+
+## See also
+
+- [`toolnexus.serve/serve`](/api/clojure/serve/a2a/) — mounts this card at `/.well-known/agent-card.json`
+- [`toolnexus.skill/list-skills`](/api/clojure/skills/list/) — the inventory this card advertises
+- [`toolnexus.a2a/remote-agent`](/api/clojure/agents/agent/) — the peer that reads it

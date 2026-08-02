@@ -46,6 +46,66 @@
 (defn- next-id! [] (swap! ids inc))
 
 ;; ---------------------------------------------------------------------------
+;; §10  the elicitation bridge — a server asking US, mapped onto the ONE waitFor
+;; ---------------------------------------------------------------------------
+;;
+;; A connected server may send `elicitation/create` mid-`tools/call`: a REVERSE
+;; request, the only place in §2 where traffic flows server -> client. The
+;; suspension spec pins the mapping — form mode becomes a §10 `kind:"input"`
+;; Request, URL mode a `kind:"authorization"` Request carrying the url — and the
+;; Answer maps back onto MCP's three actions. Both directions are PURE, which is
+;; what makes them byte-parity-testable without a live peer.
+;;
+;; They are also the only §10 surface the host has to trust, so the security pin
+;; is enforced by the mapping itself: `requestedSchema` rides along ONLY in form
+;; mode. A credential is never collected through a form.
+
+(def ^:private elicitation-seq (atom 0))
+
+(defn elicitation->request
+  "SPEC §10 — an MCP `elicitation/create` params object as a §10 Request.
+
+  The id is opaque and per-process (js/src/mcp.ts builds it from a timestamp and
+  a counter, and no port compares ids with another). Uniqueness is the only
+  property anything depends on, so the counter — not the clock — is what
+  guarantees it here."
+  [params]
+  (let [url? (= "url" (str (:mode params)))
+        req  {:id     (str "elc-" (ktime/mono-ms) "-" (swap! elicitation-seq inc))
+              :kind   (if url? "authorization" "input")
+              :prompt (str (or (:message params) ""))}]
+    (cond-> req
+      (and url? (:url params))                (assoc :url (:url params))
+      (and (not url?) (:requestedSchema params))
+      (assoc :data {:schema (:requestedSchema params)}))))
+
+(defn answer->elicit-result
+  "SPEC §10 — a resolved §10 Answer as an MCP `ElicitResult`.
+  `ok` ⇒ accept carrying `data` as content; otherwise `reason:\"declined\"` ⇒
+  decline and anything else (cancelled, expired, absent) ⇒ cancel."
+  [answer]
+  (if (:ok answer)
+    {:action "accept" :content (or (:data answer) {})}
+    {:action (if (= "declined" (str (:reason answer))) "decline" "cancel")}))
+
+(defn server-request-response
+  "The response to ONE server-initiated JSON-RPC request, or nil when the
+  message is not one.
+
+  Satisfied INLINE, as §10 requires: the in-flight `tools/call` resumes when
+  this returns, and nothing re-executes. With no `wait-for` the client never
+  advertised `elicitation`, so a request for it is simply an unknown method —
+  a clean refusal rather than a hang. A host callback that THROWS becomes a
+  cancel: §0.3's isolation rule does not stop at the reverse-request boundary."
+  [wait-for msg]
+  (when (and (some? (:id msg)) (:method msg))
+    (let [reply (fn [body] (merge {:jsonrpc "2.0" :id (:id msg)} body))]
+      (if (and wait-for (= "elicitation/create" (:method msg)))
+        (reply {:result (try (answer->elicit-result (wait-for (elicitation->request (:params msg))))
+                             (catch Throwable _ {:action "cancel"}))})
+        (reply {:error {:code -32601 :message "Method not found"}})))))
+
+;; ---------------------------------------------------------------------------
 ;; §0.2  naming
 ;; ---------------------------------------------------------------------------
 
@@ -178,10 +238,18 @@
   Only the absence of an id makes something a notification. That is the whole
   fix over the spikes, where a non-matching id was indistinguishable from noise.
 
+  §10 REFINES THE THIRD BRANCH. An id nobody is waiting for is not automatically
+  noise: an id that arrives WITH a `method` is a server-initiated REQUEST (an
+  elicitation), and dropping it as unmatched is how a bridged `waitFor` would
+  silently never fire. So: id + method + not-ours ⇒ answer it inline, on this
+  thread, through `respond!`. Answering on the reader thread is correct rather
+  than convenient — nothing else can arrive that matters until the server has
+  its answer, because the `tools/call` we are blocked on is what is waiting.
+
   On EOF it marks the transport closed, which is what unblocks every waiter —
   including one parked on a peer that will never speak again, once `kill!` has
   closed that peer's stdout."
-  [child state]
+  [child state respond!]
   ;; run-async!, not `future` — see execute-calls in client.cljc. A reader loop
   ;; is exactly the case koine documents: library code, one non-daemon pool
   ;; thread per connected MCP server, each holding the consumer's process open
@@ -227,11 +295,17 @@
                   (nil? (:id msg))
                   (swap! state update :notifications conj (str (:method msg)))
 
+                  (contains? (:pending (deref state)) (:id msg))
+                  (swap! state assoc-in [:inbox (:id msg)] msg)
+
+                  ;; an id we never sent, carrying a method — the server is
+                  ;; asking US something (§10 elicitation)
+                  (:method msg)
+                  (do (swap! state update :server-requests conj (str (:method msg)))
+                      (try (respond! msg) (catch Throwable _ nil)))
+
                   :else
-                  (swap! state (fn [s]
-                                 (if (contains? (:pending s) (:id msg))
-                                   (assoc-in s [:inbox (:id msg)] msg)
-                                   (update s :unmatched inc)))))))
+                  (swap! state update :unmatched inc))))
             (if (:closed? @state) nil (recur)))))))))
 
 (defn- await-response!
@@ -283,15 +357,20 @@
   `environment`, in `cwd`. koine's `spawn` drains stderr into a bounded ring
   from the first instant, which is why a verbose server no longer deadlocks on a
   full pipe, and why `:stderr` below can explain a crash."
-  [{:keys [command cwd environment]}]
+  ([server] (stdio-transport server nil))
+  ([{:keys [command cwd environment]} {:keys [wait-for]}]
   (let [child (proc/spawn (vec command)
                           (cond-> {}
                             cwd          (assoc :dir cwd)
                             (seq environment) (assoc :env environment)))
         state (atom {:pending #{} :inbox {} :closed? false :close-reason nil
-                     :notifications [] :unmatched 0 :junk 0})
-        lock  (atom false)]
-    (start-reader! child state)
+                     :notifications [] :server-requests [] :unmatched 0 :junk 0})
+        lock  (atom false)
+        respond! (fn [msg]
+                   (when-let [reply (server-request-response wait-for msg)]
+                     (with-write-lock! lock
+                       (fn [] (proc/send-line! child (json/write-str reply))))))]
+    (start-reader! child state respond!)
     {:kind    "stdio"
      :state   state
      :rpc!    (fn [method params timeout-ms] (stdio-rpc! child state lock method params timeout-ms))
@@ -314,7 +393,7 @@
      :close!  (fn []
                 (swap! state assoc :closed? true :close-reason "closed")
                 (try (proc/kill! child) (catch Throwable _ nil))
-                nil)}))
+                nil)})))
 
 ;; ---------------------------------------------------------------------------
 ;; §2  transport — streamable-HTTP
@@ -521,7 +600,8 @@
   `:exit-code` so there is ONE source of truth for has-it-exited — two would
   drift. The child's stderr ring remains attached to the failure, because a
   status code says THAT it died and the stderr says WHY."
-  [server]
+  ([server] (connect server nil))
+  ([server {:keys [wait-for] :as conn-opts}]
   (let [timeout-ms (or (:timeout server) default-timeout-ms)
         fail       (fn [phase transport failure]
                      (when transport (try ((:close! transport)) (catch Throwable _ nil)))
@@ -542,7 +622,7 @@
       (let [transport (try
                         (if (= "remote" (:kind server))
                           (http-transport server)
-                          (stdio-transport server))
+                          (stdio-transport server conn-opts))
                         (catch Throwable e
                           {:spawn-error (or (ex-message e) (str e))}))]
         (if (:spawn-error transport)
@@ -582,7 +662,11 @@
                                 (assoc failure :stderr (vec (take-last 5 lines)))))
                 init ((:rpc! transport) "initialize"
                       {:protocolVersion protocol-version
-                       :capabilities    {}
+                       ;; SPEC §10: advertise `elicitation` ONLY when a host
+                       ;; waitFor can actually satisfy it. Promising a
+                       ;; capability we would then have to refuse is worse than
+                       ;; degrading — a spec-compliant server simply never asks.
+                       :capabilities    (if wait-for {:elicitation {}} {})
                        :clientInfo      client-info}
                       timeout-ms)]
             (if (rpc-failed? init)
@@ -599,7 +683,7 @@
                      :tools       (->> (:ok listed)
                                        (map (fn [t] (uniform-tool (:name server) transport timeout-ms t)))
                                        (sort-by :name)
-                                       vec)}))))))))))
+                                       vec)})))))))))))
 
 (defn disconnect
   "Close a connection's transport. Idempotent, never throws, and BOUNDED — for
@@ -636,13 +720,14 @@
   premise is that two runtimes given the same fixture produce the same output.
   A tool-name collision resolved by whichever server answered first is exactly
   the kind of drift this repo exists to prevent."
-  [config]
-  (let [conns (mapv connect (parse-config config))]
+  ([config] (from-config config nil))
+  ([config conn-opts]
+  (let [conns (mapv (fn [srv] (connect srv conn-opts)) (parse-config config))]
     {:tools       (->> conns (mapcat :tools) (sort-by :name) vec)
      :statuses    (reduce (fn [acc c] (assoc acc (:name c) (:status c))) {} conns)
      :errors      (reduce (fn [acc c] (if (:message c) (assoc acc (:name c) (:message c)) acc))
                           {} conns)
-     :connections conns}))
+     :connections conns})))
 
 (defn disconnect-all
   "Close every connection a `from-config` opened."

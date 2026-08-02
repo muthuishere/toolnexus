@@ -16,14 +16,14 @@ export default defineConfig({
 			// Remove the right-hand "On this page" table of contents site-wide.
 			tableOfContents: false,
 			description:
-				'Your LLM, with MCP tools and agent skills built in — in 3 lines, in 6 languages. Vendor-neutral, byte-identical across JavaScript, Python, Go, Java, C# and Elixir.',
+				'Your LLM, with MCP tools and agent skills built in — in 3 lines, in 7 languages. Vendor-neutral, byte-identical across JavaScript, Python, Go, Java, C#, Elixir and Clojure.',
 			plugins: [
 				starlightLlmsTxt({
 					projectName: 'toolnexus',
 					description:
-						'A small, vendor-neutral library that gives any LLM dynamic tool-calling: an MCP host, agent skills, native + HTTP + built-in tools, remote A2A agents, a human-in-the-loop suspension layer, and a unified client loop — byte-identical across JavaScript, Python, Go, Java, C# and Elixir.',
+						'A small, vendor-neutral library that gives any LLM dynamic tool-calling: an MCP host, agent skills, native + HTTP + built-in tools, remote A2A agents, a human-in-the-loop suspension layer, and a unified client loop — byte-identical across JavaScript, Python, Go, Java, C# and Elixir, plus a seventh port in Clojure at the SPEC §0 core tier.',
 					details:
-						'toolnexus unifies every tool source (MCP servers, agent skills, your own functions via defineTool, HTTP/REST endpoints, built-in shell/file tools, and remote A2A agents) behind one Tool interface, emits schema in OpenAI/Anthropic/Gemini formats, and ships a client with a built-in tool-calling loop (skills injection, parallel + chained calls, hooks, streaming, retries, conversation memory, observability). The same examples/ fixtures produce identical behavior in all six ports.',
+						'toolnexus unifies every tool source (MCP servers, agent skills, your own functions via defineTool, HTTP/REST endpoints, built-in shell/file tools, and remote A2A agents) behind one Tool interface, emits schema in OpenAI/Anthropic/Gemini formats, and ships a client with a built-in tool-calling loop (skills injection, parallel + chained calls, hooks, streaming, retries, conversation memory, observability). The same examples/ fixtures produce identical behavior in all six full-tier ports; the seventh, Clojure, is wired into the same conformance checker at the core tier.',
 				}),
 				// Splits the whole site into topics, each with its own dedicated sidebar (switchable
 				// via the topic picker at the top of the nav): the main "Docs" topic below, plus one
@@ -110,7 +110,7 @@ export default defineConfig({
 								{
 									label: 'Reference',
 									items: [
-										{ label: 'Install — all six languages', slug: 'install' },
+										{ label: 'Install — all seven languages', slug: 'install' },
 										{ label: 'Ecosystem & references', slug: 'references' },
 									],
 								},

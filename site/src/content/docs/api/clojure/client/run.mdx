@@ -1,0 +1,184 @@
+---
+title: "toolnexus.client/run"
+description: "Send a prompt, let the loop call tools until the model stops, get a RunResult. — Clojure."
+sidebar:
+  label: "toolnexus.client/run"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+```clojure
+(run client prompt {:keys [toolkit history on-event conversation-id]})
+
+;; => RunResult
+;; {:text            "the final assistant text"
+;;  :messages        [{:role "user" :content "…"} …]   ; the whole transcript
+;;  :tool-calls      [{:name :args :output :isError :metadata} …]
+;;  :tool-call-count 3
+;;  :turns           4                                  ; LLM round trips made
+;;  :usage           {:prompt-tokens 0 :completion-tokens 0 :total-tokens 0}
+;;  :model           "claude-sonnet-4-5"
+;;  :status          "done" | "pending" | "incomplete"
+;;  :limit           "maxTurns"   ; only when :status is "incomplete"
+;;  :pending         Request}     ; only when :status is "pending"
+```
+
+`run` is the whole agent loop in one blocking call. It assembles the system message
+(`:system-prompt` + a blank line + the toolkit's skills prompt, empty parts dropped), emits the
+toolkit's schema in the client's style, posts, executes whatever tools the model asked for, feeds
+the results back in the provider's own shape, and repeats until the model answers with text or
+`:max-turns` is reached.
+
+Tool calls within one turn run **in parallel** and their results are ordered by **call order**, not
+completion order. That is not cosmetic: a scrambled transcript pairs the wrong output with the
+wrong `tool_call_id`, and the model never sees a crash, only a lie. Execution uses
+`koine.process/run-async!` rather than `future`, because Clojure's future-pool threads are
+non-daemon with a 60-second keep-alive and would hold a consumer's process open long after its
+program finished.
+
+A tool that throws does not take the run down. `toolnexus.tool/execute` converts the throw into an
+error ToolResult, the model sees it, and the loop continues — SPEC §0.8. An **LLM** failure is the
+opposite: it throws an `ex-info`, because a 500 from the provider is not something the model can be
+shown and asked to retry.
+
+The three terminal statuses are the whole contract. `"done"` means the model produced text.
+`"incomplete"` means `:max-turns` fired first, and `:limit` is `"maxTurns"`. `"pending"` means a
+tool suspended and no `:wait-for` was configured, and `:pending` carries the
+[`Request`](/api/clojure/suspension/pending/) that parked it.
+
+## When to use it
+
+- **Every time you want the model to actually do something** — this is the entry point the whole
+  library exists to feed.
+- **When tools are chained** — the model calls `grep`, reads the output, then calls `read`; that is
+  several turns, and `run` handles all of them under one `:max-turns` budget.
+- **When you want the transcript back** — `:messages` is the full conversation, ready to hand to
+  the next `run` as `:history`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use call-provider when there is nothing to loop over">
+`toolnexus.client/call-provider` sends a body map you built through the same endpoint, headers,
+retry policy and `llm` metric — with no loop, no toolkit and no tool execution. Prefer it for
+single-turn work (classification, a translation, a one-shot completion) where a full agent loop is
+pure overhead. `run` is for the case where the model may need several steps and several tools to
+answer.
+</Aside>
+
+For a conversation that spans several user messages, do not stitch transcripts by hand: pass
+`:conversation-id` and let the client's [store](/api/clojure/client/store/) keep the history — see
+[conversations](/api/clojure/client/conversation/).
+
+## Examples
+
+### One prompt, one answer
+
+```clojure
+(require '[toolnexus.core :as tn]
+         '[toolnexus.client :as client])
+
+(def toolkit (tn/build {:mcp "./examples/mcp.json" :skills "./examples/skills"}))
+
+;; The API key is read from the environment by the client; never hard-code it.
+(def llm (client/create-client {:base-url "https://api.openai.com/v1"
+                                :model    "gpt-4.1"}))
+
+(let [r (client/run llm "List the files in this directory" {:toolkit toolkit})]
+  (println (:status r) "in" (:turns r) "turns")
+  (println (:text r))
+  (doseq [c (:tool-calls r)]
+    (println "  " (:name c) "->" (if (:isError c) "ERROR" "ok"))))
+```
+
+`:tool-calls` is a flat record of every call across every turn, in the order they were made, each
+with the `:args` the model supplied and the `:output` your tool produced.
+
+### Watching the run as it happens
+
+`:on-event` is a synchronous sink for the event vocabulary this non-streaming loop can honestly
+produce. There are no text deltas — see [streaming](/api/clojure/client/stream/) for why.
+
+```clojure
+(def events (atom []))
+
+(client/run llm "Check the build and fix it"
+            {:toolkit  toolkit
+             :on-event (fn [ev]
+                         (swap! events conj ev)
+                         (case (:type ev)
+                           "tool_call"   (println "->" (:name ev) (:args ev))
+                           "tool_result" (println "<-" (:name ev)
+                                                  (if (:isError ev) "ERROR" "ok"))
+                           "pending"     (println "!! waiting on"
+                                                  (get-in ev [:request :prompt]))
+                           "usage"       nil
+                           "done"        (println "==" (:status (:result ev)))
+                           nil))})
+```
+
+| Event `:type` | Payload | When |
+|---|---|---|
+| `tool_call` | `:id` `:name` `:args` | Once per call, before execution starts. |
+| `tool_result` | `:id` `:name` `:output` `:isError` | Once per call, after the result lands and after any suspension was resolved. |
+| `pending` | `:request` | **Before** `:wait-for` runs, so a channel handler can push the link in real time. |
+| `usage` | `:usage` | After each LLM round trip, carrying the running total. |
+| `done` | `:result` | Once, with the same RunResult `run` returns. |
+
+### The full call shape — history, a turn limit, and a pending outcome
+
+```clojure
+(def llm (client/create-client {:base-url  "https://api.anthropic.com"
+                                :style     "anthropic"
+                                :model     "claude-sonnet-4-5"
+                                :max-turns 6}))
+
+(def r
+  (client/run llm "Deploy to staging"
+              {:toolkit toolkit
+               ;; an explicit :history always wins over the store
+               :history [{:role "user"      :content "The branch is release/1.4"}
+                         {:role "assistant" :content "Noted."}]}))
+
+(case (:status r)
+  "done"       (println (:text r))
+  "incomplete" (println "hit the turn limit:" (:limit r))
+  "pending"    (println "parked on:"
+                        (get-in r [:pending :kind])
+                        (get-in r [:pending :prompt])
+                        (get-in r [:pending :url])))
+
+;; Usage is summed across every turn of the run.
+(:usage r)   ;; => {:prompt-tokens 3120 :completion-tokens 412 :total-tokens 3532}
+```
+
+A `"pending"` result is not an error — the run stopped cleanly, and the transcript in `:messages`
+holds every call up to and including the one that parked. Configure
+[`:wait-for`](/api/clojure/suspension/wait-for/) if you want the run to resolve suspensions in
+place instead.
+
+### What you get back
+
+| Key | Type | What it is |
+|---|---|---|
+| `:text` | string | Final assistant text. The pending prompt when `:status` is `"pending"`; `""` on an anthropic-style turn-limit exit. |
+| `:messages` | vector | The full transcript, in the provider's own message shape. |
+| `:tool-calls` | vector | Every call: `:name` `:args` `:output` `:isError` `:metadata`. |
+| `:tool-call-count` | int | The count of the above. |
+| `:turns` | int | LLM round trips actually made. |
+| `:usage` | map | `:prompt-tokens` / `:completion-tokens` / `:total-tokens`, summed across turns. |
+| `:model` | string | Echoed from the client. |
+| `:status` | string | `"done"` · `"incomplete"` · `"pending"`. |
+| `:limit` | string | `"maxTurns"`, present only when `"incomplete"`. |
+| `:pending` | map | The §10 `Request`, present only when `"pending"`. |
+
+## See also
+
+- [`toolnexus.client/create-client`](/api/clojure/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`toolnexus.client/run`](/api/clojure/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.
+- [`toolnexus.client/in-memory-store`](/api/clojure/client/store/) — Swap in-memory history for your own store so a conversation survives a process restart.
+- [`toolnexus.client/create-client`](/api/clojure/client/metrics/) — Emit one metric event per model call and per tool call: tokens, latency, outcome.
+- [streaming](/api/clojure/client/stream/) — why there are no text deltas, and what the event sink gives you instead.

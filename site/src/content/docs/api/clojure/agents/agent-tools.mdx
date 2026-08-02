@@ -1,0 +1,151 @@
+---
+title: "toolnexus.a2a/agent-tools"
+description: "Expand a remote agent card into one tool per advertised skill. — Clojure."
+sidebar:
+  label: "toolnexus.a2a/agent-tools"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/a2a.cljc">clojure/src/toolnexus/a2a.cljc</a>
+</p>
+
+```clojure
+(toolnexus.a2a/agent-tools
+  {:card       "https://peer.example/.well-known/agent-card.json" ; required
+   :headers    {"authorization" "Bearer ${PEER_TOKEN}"}
+   :timeout    300000
+   :poll-every 1000})
+
+;; => [Tool ...]   one per advertised skill, :source "a2a"
+;; => []           the card could not be fetched — the reason is discarded
+```
+
+`agent-tools` is exactly `(:tools (remote-agent opts))`. It takes the same options, fetches the same
+card, and produces the same tools — it just throws the card and the error string away and hands you
+the vector, which is the shape `:tools` on [`toolnexus.core/build`](/api/clojure/toolkit/create/)
+already wants.
+
+Each returned tool is named `sanitize(card name)_sanitize(skill id)` and takes an object with a
+required string `task`. Executing one runs the full §7A cycle: one `SendMessage`, then `GetTask`
+polling until a terminal state, a timeout or an abort. Everything documented on
+[`remote-agent`](/api/clojure/agents/agent/) about output strings, metadata and error isolation
+applies unchanged, because it is the same code path.
+
+The isolation guarantee is what makes the one-liner safe. A peer that is down, slow to hand back its
+card, or serving malformed JSON contributes `[]` — never a thrown exception, never a half-built
+toolkit. `into` a vector of peers and the toolkit is whatever peers were actually reachable at
+startup.
+
+## When to use it
+
+- **Composing a toolkit in one expression** — peers spliced into `:tools` next to your native and
+  HTTP tools, with no intermediate bindings.
+- **Fan-out over several peers** — `(into [] (mapcat agent-tools) peers)` collects every reachable
+  peer's skills and quietly drops the rest.
+- **You have already checked liveness elsewhere** — a health endpoint or a startup probe is
+  reporting peer status, so the per-call `:error` is redundant.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use remote-agent when silence is the wrong answer">
+`agent-tools` cannot tell you *why* a peer produced nothing — an empty vector means "no skills
+advertised" and "the host is unreachable" identically. If a missing peer should be logged, alerted
+on, or surfaced in a status page, call [`toolnexus.a2a/remote-agent`](/api/clojure/agents/agent/)
+and read `:error`. Use `agent-tools` only where a quiet degrade is the behaviour you actually want.
+</Aside>
+
+Both functions fetch the card at call time, so neither is free — call them once at startup and reuse
+the tools, rather than per request.
+
+## Examples
+
+### One peer, spliced into a toolkit
+
+```clojure
+(require '[toolnexus.a2a :as a2a]
+         '[toolnexus.core :as core])
+
+(def tk
+  (core/build {:mcp    "examples/mcp.json"
+               :skills "examples/skills"
+               :tools  (a2a/agent-tools
+                         {:card "http://127.0.0.1:8080/.well-known/agent-card.json"})}))
+
+(core/tool-names tk)
+```
+
+### Several peers, reachable ones win
+
+```clojure
+(require '[toolnexus.a2a :as a2a]
+         '[toolnexus.core :as core])
+
+(def peers
+  [{:card "http://127.0.0.1:8080/.well-known/agent-card.json"}
+   {:card "http://127.0.0.1:8081/.well-known/agent-card.json" :timeout 5000}
+   ;; deliberately dead — contributes [] and nothing else
+   {:card "http://127.0.0.1:9/.well-known/agent-card.json" :timeout 250}])
+
+(def tk (core/build {:tools (into [] (mapcat a2a/agent-tools) peers)}))
+```
+
+Two peers up and one down yields the union of the two live catalogs. Note that §7A tool names
+collide the moment two cards share a `name`, and a later tool wins the collision — give your peers
+distinct card names.
+
+### Peers from your own config file
+
+There is no built-in parser for an `agents` config block in this port — see
+[`agents / parse-config`](/api/clojure/agents/parse-config/). Reading one is a `map` over descriptors:
+
+```clojure
+(require '[toolnexus.a2a :as a2a]
+         '[toolnexus.core :as core]
+         '[koine.fs :as fs]
+         '[koine.json :as json])
+
+(def cfg (json/read-str (fs/read-file "config.json")))
+
+(defn peer-descriptors
+  "A name -> {:card ... :pollEvery ... :disabled ...} block, sorted by name so two
+   runtimes agree on which peer registers first (§7A names collide on card name)."
+  [block]
+  (->> (sort (keys block))
+       (keep (fn [k]
+               (let [e (get block k)]
+                 (when (and (string? (:card e)) (not (true? (:disabled e))))
+                   (cond-> {:card (:card e)}
+                     (:headers e)   (assoc :headers (:headers e))
+                     (:timeout e)   (assoc :timeout (:timeout e))
+                     (:pollEvery e) (assoc :poll-every (:pollEvery e)))))))))
+
+(def tk
+  (core/build {:tools (into [] (mapcat a2a/agent-tools)
+                            (peer-descriptors (:agents cfg)))}))
+```
+
+## Options
+
+Identical to [`remote-agent`](/api/clojure/agents/agent/):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `:card` | — | Required. URL of the peer's Agent Card. |
+| `:headers` | none | Card GET and every JSON-RPC call. `${ENV_VAR}` expanded, never logged. |
+| `:timeout` | `300000` | Per-request and overall task budget, in ms. |
+| `:poll-every` | `1000` | `GetTask` interval in ms. `:pollEvery` also accepted. |
+
+### What you get back
+
+| Shape | When |
+|---|---|
+| `[Tool ...]` | The card was fetched. One tool per entry in the card's `skills`, in card order. |
+| `[]` | The card had no skills, **or** the fetch failed. The two are indistinguishable here. |
+
+## See also
+
+- [`toolnexus.a2a/remote-agent`](/api/clojure/agents/agent/) — the same call, plus `:card`, `:endpoint` and `:error`
+- [`agents / parse-config`](/api/clojure/agents/parse-config/) — the config-block parser this port does not ship
+- [`toolnexus.core/build`](/api/clojure/toolkit/create/) — where the tools go

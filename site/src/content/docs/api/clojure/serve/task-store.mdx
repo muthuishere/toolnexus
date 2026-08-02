@@ -1,0 +1,150 @@
+---
+title: "toolnexus.serve/file-store"
+description: "Persist inbound A2A tasks so a suspended request survives a restart. — Clojure."
+sidebar:
+  label: "toolnexus.serve/file-store"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/serve.cljc">clojure/src/toolnexus/serve.cljc</a>
+</p>
+
+```clojure
+(toolnexus.serve/file-store "./tasks")
+;; => {:get  (fn [id]   task-or-nil)
+;;     :save (fn [task]  task)}
+
+(toolnexus.serve/memory-store)
+;; => {:get (fn [id] ...) :save (fn [task] ...) :all (fn [] {id task})}
+
+(toolnexus.serve/resolve-store store)
+;;  nil | "memory"   ⇒ (memory-store)
+;;  "file:<dir>"     ⇒ (file-store <dir>)
+;;  anything else    ⇒ used as-is
+```
+
+A §7B TaskStore is deliberately not a protocol and not a record — it is a plain map of two closures,
+`:get` and `:save`. Protocols and records are the two things guaranteed to differ between Clojure on
+the JVM and cljgo, so the store contract is expressed in the one shape both hosts agree on. Anything
+supplying those two keys is a store.
+
+`file-store` writes one `<id>.json` per task into `dir`, creating the directory if it does not exist.
+`:save` serialises the whole task map; `:get` reads it back, returning `nil` for an unknown id and
+also for a file that fails to parse — a corrupt task reads as a missing task rather than taking the
+request down. `memory-store` is the default: an atom of id→task, plus an extra `:all` for tests and
+admin views that `file-store` does not provide.
+
+`resolve-store` is what [`serve`](/api/clojure/serve/a2a/) calls on the `:store` option, so in practice
+you pass the string `"file:./tasks"` rather than calling `file-store` yourself. Calling it directly
+matters when you want to *read* the store — a status endpoint, a test, a cleanup job — or when you
+are writing your own.
+
+Durability here means `GetTask` keeps answering across a restart, not that in-flight work resumes.
+Fulfilment runs on a background thread; a process that dies mid-task leaves that task saved as
+`working` forever, because nothing is left to finish it. Treat a long-stale `working` as failed.
+
+## When to use it
+
+- **Tasks outlive the process** — a peer polls `GetTask` for minutes and your service redeploys in
+  the middle.
+- **You want to inspect tasks out of band** — one JSON file per id is greppable, diffable and
+  trivially exported.
+- **Several processes read the same tasks** — a shared volume gives reads across instances (writes
+  are last-writer-wins; there is no locking).
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Memory is the right default">
+[`memory-store`](/api/clojure/serve/task-store/) costs nothing, needs no disk, and gives you `:all`
+for free — take it for tests, short-lived tasks, and any single-process agent whose peers poll for
+seconds rather than minutes. `file-store` buys survival across a restart at the cost of a JSON write
+per state transition (three per task: `submitted`, `working`, then terminal). Reach for it when a
+lost task id is a real failure, not a re-run.
+</Aside>
+
+For anything beyond a directory — Postgres, Redis, S3 — do not subclass anything: hand `serve` a map
+with your own `:get` and `:save`, and `resolve-store` will pass it straight through.
+
+## Examples
+
+### Durable tasks, via the config string
+
+```clojure
+(require '[toolnexus.core :as core]
+         '[toolnexus.serve :as serve])
+
+(def tk (core/build {:skills "examples/skills"}))
+
+(def h (serve/serve tk {:port   8080
+                        :a2a    {:name "tn-agent"}
+                        :skills (:skills tk)
+                        :store  "file:./tasks"
+                        :run    (fn [text] {:text (str "ran: " text)})}))
+
+;; ./tasks/<task-id>.json now holds the task, rewritten at each state change.
+;; The resolved store is on the handle, ready to read:
+((:get (:store h)) "some-task-id")
+```
+
+### Read the store back after a restart
+
+```clojure
+(require '[toolnexus.serve :as serve])
+
+(def store (serve/file-store "./tasks"))
+
+(let [t ((:get store) "3f2c...-task-id")]
+  (case (get-in t [:status :state])
+    "completed" (->> (:artifacts t) (mapcat :parts) (map :text))
+    "failed"    (get-in t [:status :message :parts 0 :text])
+    "working"   :still-running-or-orphaned
+    nil         :unknown-task))
+```
+
+An unknown id and an unreadable file both give `nil`, so an id you never issued and a task whose
+JSON got truncated are handled by the same branch.
+
+### Your own store
+
+```clojure
+(require '[toolnexus.serve :as serve])
+
+(defn sql-store [conn]
+  {:get  (fn [id]   (fetch-task conn id))
+   :save (fn [task] (upsert-task conn task) task)})
+
+;; passed straight through by resolve-store
+(serve/serve tk {:port 8080 :a2a {} :store (sql-store conn) :run run-fn})
+
+;; the two strings resolve-store special-cases:
+(serve/resolve-store nil)            ;; => an in-memory store
+(serve/resolve-store "memory")       ;; => an in-memory store
+(serve/resolve-store "file:./tasks") ;; => (file-store "./tasks")
+```
+
+`:save` must return the task — `serve` uses the returned value.
+
+## The store contract
+
+| Key | Signature | Contract |
+|---|---|---|
+| `:get` | `(fn [id])` | The saved task map, or `nil` when absent or unreadable. Must not throw. |
+| `:save` | `(fn [task])` | Persists by `(:id task)` and **returns the task**. |
+| `:all` | `(fn [])` | Optional. `memory-store` only — the whole id→task map. `file-store` does not implement it. |
+
+### Task shape as stored
+
+| Field | Present when |
+|---|---|
+| `:id` | Always. |
+| `:status` | Always — `\{:state "submitted"\|"working"\|"completed"\|"failed"\}`. |
+| `:artifacts` | Completed tasks only: `[\{:artifactId ... :parts [\{:kind "text" :text ...\}]\}]`. |
+| `:status :message` | Failed tasks only — the error text, as an agent-role message. |
+
+## See also
+
+- [`toolnexus.serve/serve`](/api/clojure/serve/a2a/) — the `:store` option, and `:store` on the handle
+- [`toolnexus.a2a/remote-agent`](/api/clojure/agents/agent/) — the peer whose `GetTask` polls read this
+- [`toolnexus.client/in-memory-store`](/api/clojure/client/store/) — the unrelated conversation store on the client side

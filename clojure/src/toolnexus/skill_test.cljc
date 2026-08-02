@@ -291,3 +291,136 @@
         (testing "unknown skill against the shared fixture"
           (is (= "Skill \"nope\" not found. Available skills: hello-world"
                  (:output (skill/execute-skill ld "nope")))))))))
+
+;; ---------------------------------------------------------------------------
+;; §3 S1 — skills supplied as DATA or by a PROVIDER
+;; ---------------------------------------------------------------------------
+;;
+;; Expected values below are read off js/src/skill.ts (candidatesFromDefs +
+;; the `origin === "logical"` branch of the skill tool's execute), which is the
+;; shipped behaviour the other five ports were built to. Nothing here is
+;; snapshotted from this port's own output.
+
+(def ^:private data-skill
+  {:name "data-a" :description "From data." :content "Data body."})
+
+(defn- file-lines [out]
+  (vec (filter #(str/starts-with? % "<file>") (str/split-lines out))))
+
+(deftest data-sourced-skill-needs-no-directory
+  (let [ld (skill/load-skills {:skills [data-skill]})]
+    (is (= ["data-a"] (vec (sort (keys (:by-name ld))))))
+    (is (str/includes? (skill/skills-prompt ld) "- **data-a**: From data."))
+    (let [out (:output (skill/execute-skill ld "data-a"))]
+      (is (str/includes? out "Data body."))
+      (testing "a LOGICAL base, and no absolute host path anywhere (S4)"
+        (is (str/includes? out "Base directory for this skill: skill://data-a/\n"))
+        (is (not (str/includes? out "file://")))))))
+
+(deftest data-skill-resources-become-the-file-block
+  (let [ld  (skill/load-skills
+             {:skills [(assoc data-skill :resources ["scripts/foo.sh" "ref/x.md"])]})
+        out (:output (skill/execute-skill ld "data-a"))]
+    (is (= ["<file>scripts/foo.sh</file>" "<file>ref/x.md</file>"] (file-lines out)))
+    (testing "the logical resources are emitted in the ORDER SUPPLIED, unsorted —
+              they are a caller-authored list, not a directory walk"
+      (is (str/includes? out "<skill_files>\n<file>scripts/foo.sh</file>\n<file>ref/x.md</file>\n</skill_files>\n")))))
+
+(deftest a-data-skill-with-no-resources-omits-the-file-block
+  ;; js/src/skill.ts: `if (res.length === 0) emitFiles = false` — an
+  ;; instruction-only data skill has no <skill_files>, where an EMPTY on-disk
+  ;; skill still emits an empty block.
+  (is (not (str/includes? (:output (skill/execute-skill (skill/load-skills {:skills [data-skill]})
+                                                        "data-a"))
+                          "<skill_files>"))))
+
+(deftest a-supplied-base-wins-over-the-default
+  (let [ld (skill/load-skills {:skills [(assoc data-skill :base "mem://pack/")]})]
+    (is (str/includes? (:output (skill/execute-skill ld "data-a"))
+                       "Base directory for this skill: mem://pack/\n"))
+    (is (= "mem://pack/" (:dir (:metadata (skill/execute-skill ld "data-a")))))))
+
+(deftest a-data-skill-without-a-name-is-a-typed-skip
+  (let [ld (skill/load-skills {:skills [{:description "d" :content "c"}]})]
+    (is (empty? (:skills ld)))
+    (is (= [{:location "skill://" :reason "missing-name"}] (:skipped ld)))))
+
+(deftest directories-and-data-compose-with-first-wins
+  (let [ld (skill/load-skills {:dirs   fixture-root
+                               :skills [{:name "alpha" :description "impostor" :content "no"}
+                                        data-skill]})]
+    (testing "the directory source was collected first, so it keeps the name"
+      (is (str/includes? (:output (skill/execute-skill ld "alpha")) "Alpha body line.")))
+    (is (contains? (skip-reasons ld) "duplicate-name"))
+    (testing "the non-colliding data skill still lands"
+      (is (contains? (:by-name ld) "data-a")))))
+
+(deftest a-directory-sourced-skill-is-untouched-by-the-data-path
+  ;; S4's byte-identity clause: adding a data source must not move the on-disk
+  ;; output by one byte.
+  (is (= (:output (skill/execute-skill (skill/load-skills fixture-root) "alpha"))
+         (:output (skill/execute-skill (skill/load-skills {:dirs fixture-root :skills [data-skill]})
+                                       "alpha")))))
+
+;; ---------------------------------------------------------------------------
+;; §3 S2 — the per-agent skills allowlist
+;; ---------------------------------------------------------------------------
+
+(deftest skills-filter-allowlist-exposes-only-true-names
+  (let [ld (skill/load-skills {:dirs fixture-root :filter {"alpha" true "beta" true}})]
+    (is (= ["alpha" "beta"] (vec (sort (keys (:by-name ld))))))
+    (is (= ["alpha" "beta"] (vec (sort (map :name (:skills ld))))))
+    (testing "a filtered-out skill is not loadable either"
+      (is (true? (:isError (skill/execute-skill ld "gamma")))))))
+
+(deftest skills-filter-droplist-removes-named-skills
+  (let [ld (skill/load-skills {:dirs fixture-root :filter {"gamma" false}})]
+    (is (= ["alpha" "beta" "many"] (vec (sort (keys (:by-name ld))))))))
+
+(deftest an-unknown-filter-name-is-ignored-and-recorded
+  (let [ld (skill/load-skills {:dirs fixture-root :filter {"alpha" true "nope" true}})]
+    (is (= ["alpha"] (vec (sort (keys (:by-name ld))))))
+    (testing "the unmatched name is DATA on the result, so the warning is testable
+              without capturing stdout"
+      (is (= ["nope"] (:filter-unmatched ld))))))
+
+(deftest nil-and-empty-filters-expose-everything
+  (is (= 4 (count (:skills (skill/load-skills {:dirs fixture-root :filter nil})))))
+  (is (= 4 (count (:skills (skill/load-skills {:dirs fixture-root :filter {}})))))
+  (is (= [] (:filter-unmatched (skill/load-skills {:dirs fixture-root})))))
+
+(deftest keyword-filter-keys-work-too
+  ;; A caller writing Clojure will reach for keywords; a caller reading an
+  ;; mcp.json will have strings. Both must mean the same thing.
+  (is (= ["alpha"] (vec (sort (keys (:by-name (skill/load-skills
+                                               {:dirs fixture-root :filter {:alpha true}}))))))))
+
+(deftest the-inventory-is-unfiltered
+  ;; js/src/skill.ts listSkills() ignores opts.filter entirely — the inventory
+  ;; exists to AUTHOR the allowlist, so filtering it would be circular.
+  (is (= 4 (count (:skills (skill/list-skills {:dirs fixture-root :filter {"alpha" true}}))))))
+
+;; ---------------------------------------------------------------------------
+;; §3 S5 — the sample cap travels with the source
+;; ---------------------------------------------------------------------------
+
+(deftest sample-limit-travels-with-the-loaded-source
+  (testing "-1 omits the block"
+    (let [tk (tool/toolkit [(skill/skill-tool (skill/load-skills {:dirs fixture-root
+                                                                  :sample-limit -1}))])]
+      (is (not (str/includes? (:output (tool/execute tk "skill" {"name" "alpha"}))
+                              "<skill_files>")))))
+  (testing "a positive cap caps"
+    (let [tk (tool/toolkit [(skill/skill-tool (skill/load-skills {:dirs fixture-root
+                                                                  :sample-limit 2}))])]
+      (is (= 2 (count (file-lines (:output (tool/execute tk "skill" {"name" "many"}))))))))
+  (testing "0 is the default 10"
+    (let [tk (tool/toolkit [(skill/skill-tool (skill/load-skills {:dirs fixture-root
+                                                                  :sample-limit 0}))])]
+      (is (= 10 (count (file-lines (:output (tool/execute tk "skill" {"name" "many"})))))))))
+
+(deftest a-positive-cap-also-caps-logical-resources
+  (let [ld (skill/load-skills {:skills [(assoc data-skill :resources ["a" "b" "c"])]
+                               :sample-limit 2})]
+    (is (= ["<file>a</file>" "<file>b</file>"]
+           (file-lines (:output (skill/execute-skill ld "data-a")))))))

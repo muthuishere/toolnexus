@@ -278,16 +278,13 @@
       (if (= :retry (f info)) :retry :fail)
       default)))
 
-(defn- llm-call
+(defn- post-with-retry
   "One LLM round trip, with the §resilience-policy retry loop around it. A
   transport failure and a non-2xx both become a thrown ex-info — unlike a TOOL
   error, an LLM failure is not something the model can be shown and asked to
-  retry."
-  [client system messages tools]
-  (let [url     (endpoint client)
-        headers (merge {"content-type" "application/json"} (request-headers client))
-        body    (json/write-str (body-map client system messages tools))
-        budget  (or (:retries client) 0)
+  retry. `body` is the already-marshalled request string."
+  [client url headers body]
+  (let [budget  (or (:retries client) 0)
         base-ms (or (:retry-base-ms client) 250)]
     (loop [attempt 0]
       (let [t0      (ktime/now-ms)
@@ -320,6 +317,28 @@
                                     (* base-ms (bit-shift-left 1 attempt))))
                   (recur (inc attempt)))
               (throw!))))))))
+
+(defn- llm-call
+  "The agent loop's round trip: build the loop's body, then post it."
+  [client system messages tools]
+  (post-with-retry client
+                   (endpoint client)
+                   (merge {"content-type" "application/json"} (request-headers client))
+                   (json/write-str (body-map client system messages tools))))
+
+(defn call-provider
+  "ONE provider round trip for a CALLER-BUILT body map, through exactly the
+  endpoint, headers, §resilience-policy retry/backoff and `llm` metric the agent
+  loop uses. §8's `:request-params` merge and `:body-transform` apply unchanged.
+
+  This is the seam §11 `toolnexus.translate` sits on: single-turn translation
+  must lose neither resilience nor metrics, and the only way to guarantee that
+  is to share the code rather than copy it."
+  [client body]
+  (post-with-retry client
+                   (endpoint client)
+                   (merge {"content-type" "application/json"} (request-headers client))
+                   (json/write-str (shape-body client body))))
 
 ;; ---------------------------------------------------------------------------
 ;; per-style response reading
@@ -371,9 +390,15 @@
     (mapv (fn [s] {:role "tool" :tool_call_id (:id s) :content (:output (:result s))})
           settled)))
 
-(defn- add-usage
+(def zero-usage
+  "The empty §8 Usage. Idiomatic kebab-case — Usage is a RETURN value, it never
+  crosses the wire."
+  {:prompt-tokens 0 :completion-tokens 0 :total-tokens 0})
+
+(defn add-usage
   "Sum token usage across turns. OpenAI prompt/completion/total_tokens;
-  Anthropic input_tokens -> prompt, output_tokens -> completion."
+  Anthropic input_tokens -> prompt, output_tokens -> completion. Public because
+  §11 translation reports the same Usage from the same provider payloads."
   [acc client raw]
   (if-not raw
     acc
@@ -480,8 +505,6 @@
 ;; ---------------------------------------------------------------------------
 ;; RunResult
 ;; ---------------------------------------------------------------------------
-
-(def ^:private zero-usage {:prompt-tokens 0 :completion-tokens 0 :total-tokens 0})
 
 (defn- run-result [client text messages tool-calls turns usage exhausted?]
   (let [incomplete? (and exhausted? (= "" text))]

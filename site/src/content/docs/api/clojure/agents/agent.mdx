@@ -1,0 +1,169 @@
+---
+title: "toolnexus.a2a/remote-agent"
+description: "Point at a remote agent's card and use it exactly like a local tool. — Clojure."
+sidebar:
+  label: "toolnexus.a2a/remote-agent"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/a2a.cljc">clojure/src/toolnexus/a2a.cljc</a>
+</p>
+
+```clojure
+(toolnexus.a2a/remote-agent
+  {:card       "https://peer.example/.well-known/agent-card.json" ; required
+   :headers    {"authorization" "Bearer ${PEER_TOKEN}"}           ; ${ENV} expanded, never logged
+   :timeout    300000                                             ; ms, default 300000
+   :poll-every 1000})                                             ; ms, default 1000
+
+;; card fetched
+;; => {:card     {:name "tn-agent" :url "https://peer.example/" :skills [...]}
+;;     :endpoint "https://peer.example/"
+;;     :tools    [Tool ...]}
+
+;; card could not be fetched — isolated, never thrown
+;; => {:card nil :tools [] :error "HTTP 404: Not Found"}
+```
+
+`remote-agent` does one GET of an A2A Agent Card and turns every skill the card advertises into an
+ordinary `Tool`. The tool name is `sanitize(card name)` + `_` + `sanitize(skill id, else skill
+name)`, and each one takes the same one-field schema — an object with a required string `task`. To
+the toolkit and to the model, a remote agent is indistinguishable from a native tool.
+
+Calling one of those tools sends a single JSON-RPC `SendMessage` to the card's `url` (falling back
+to the card URL's own `scheme://host:port` when the card omits it), then polls `GetTask` every
+`:poll-every` ms until the task reaches `completed`, `failed` or `canceled`, the `:timeout` budget
+runs out, or the context's abort predicate fires. A completed task's output is every
+`kind: "text"` part across `artifacts[].parts[]` joined with newlines; with no artifacts it falls
+back to the last `role: "agent"` history message.
+
+The failure posture is the load-bearing part: this function **never throws**. An unreachable peer, a
+non-2xx card response, or a card that is not JSON all come back as a map carrying `:error` with an
+empty `:tools`, so a dead peer costs you its tools and nothing else. The same rule holds during
+execution — a transport failure mid-poll becomes an error `ToolResult` built with
+`toolnexus.tool/failure`, not an exception thrown into your loop.
+
+Every result, success or failure, carries metadata: the agent name, task id, last state, poll count
+and elapsed ms. `:polls` counts successful `GetTask` responses only — the opening `SendMessage` is
+not a poll — and `:ms` is elapsed wall time, while the timeout *message* quotes the configured
+budget.
+
+## When to use it
+
+- **Delegating to another process or another language.** A peer running the Python or Go port — or
+  any A2A-conforming agent — becomes callable without sharing a runtime.
+- **You need the card, not just the tools.** Registry views, health checks and "what can this peer
+  actually do" pages want `:card` and `:endpoint` alongside the tools.
+- **You want a dead peer to be visible.** `:error` is the only place a fetch failure is reported;
+  the tools list simply goes empty.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use agent-tools when you only want the tools">
+[`toolnexus.a2a/agent-tools`](/api/clojure/agents/agent-tools/) is `(:tools (remote-agent opts))` and
+nothing more. Reach for it when you are splicing peers straight into `:tools` on
+[`toolnexus.core/build`](/api/clojure/toolkit/create/) and have no use for the card or the error
+string. Use `remote-agent` when a failed peer has to be *noticed* rather than silently absent.
+</Aside>
+
+The name is `remote-agent`, not `agent`, deliberately: `clojure.core/agent` exists on both hosts and
+this port never shadows a core name — on cljgo a core-shaped symbol can make the static interop scan
+reject the whole namespace, not just the one function.
+
+## Examples
+
+### Attach a peer's skills to your own toolkit
+
+```clojure
+(require '[toolnexus.a2a :as a2a]
+         '[toolnexus.core :as core])
+
+(let [peer (a2a/remote-agent {:card "http://127.0.0.1:8080/.well-known/agent-card.json"})]
+  (when (:error peer)
+    (println "peer unavailable:" (:error peer)))
+  (core/build {:skills "examples/skills"
+               :tools  (:tools peer)}))
+```
+
+The toolkit is built either way. With the peer down you get your local tools plus a printed reason;
+with it up you additionally get one tool per advertised skill.
+
+### Call a peer tool and read the task metadata
+
+```clojure
+(require '[toolnexus.a2a :as a2a]
+         '[toolnexus.tool :as tool])
+
+(let [peer (a2a/remote-agent {:card       "http://127.0.0.1:8080/.well-known/agent-card.json"
+                              :timeout    30000
+                              :poll-every 200})
+      tk   (tool/toolkit (:tools peer))
+      nm   (first (tool/tool-names tk))
+      r    (tool/execute tk nm {:task "summarise the release notes"})]
+  (println (:output r))
+  (println (:isError r))
+  ;; {:agent "tn-agent" :taskId "..." :state "completed" :polls 3 :ms 640}
+  (println (:metadata r)))
+```
+
+A `failed` or `canceled` task comes back as a `toolnexus.tool/failure` whose output reads
+`A2A task <id> failed: <status message text>`; a timeout reads
+`A2A task <id> timed out after 30000ms (state=working)`.
+
+### Authenticated peer, cancelled from the outside
+
+```clojure
+(require '[toolnexus.a2a :as a2a]
+         '[toolnexus.tool :as tool])
+
+;; PEER_TOKEN is read from the environment at call time and never logged.
+(def peer
+  (a2a/remote-agent {:card    "https://peer.example/.well-known/agent-card.json"
+                     :headers {"authorization" "Bearer ${PEER_TOKEN}"}
+                     :timeout 120000}))
+
+(def cancelled? (atom false))
+
+(tool/execute (tool/toolkit (:tools peer))
+              (:name (first (:tools peer)))
+              {:task "long running job"}
+              {:aborted? (fn [] @cancelled?)})
+;; setting cancelled? to true resolves to "A2A task <id> canceled",
+;; with metadata :state "canceled" — the local verdict, not the peer's.
+```
+
+## Options
+
+| Key | Default | Meaning |
+|---|---|---|
+| `:card` | — | Required. URL of the peer's Agent Card. |
+| `:headers` | none | Sent on the card GET and on every JSON-RPC call. Values expand `${ENV_VAR}`; never logged. |
+| `:timeout` | `300000` | Per-request budget in ms, and the overall task budget. |
+| `:poll-every` | `1000` | Delay between `GetTask` polls, in ms. `:pollEvery` is accepted as an alias, matching the config-file spelling. |
+
+### What you get back
+
+| Key | Type | What it is |
+|---|---|---|
+| `:card` | map / `nil` | The decoded Agent Card, `nil` when the fetch failed. |
+| `:endpoint` | string | The JSON-RPC endpoint: the card's `url`, else the card URL's origin. |
+| `:tools` | vector | One `Tool` per advertised skill, `:source "a2a"`. Empty on failure. |
+| `:error` | string | Present **only** on failure — `HTTP <status>: <body>`, `HTTP transport <kind>`, or `bad card: ...`. |
+
+### Result metadata (on every call)
+
+| Key | What it is |
+|---|---|
+| `:agent` | The card's `name`. |
+| `:taskId` | The remote task id; `""` when `SendMessage` itself failed. |
+| `:state` | The task's last known state; `"canceled"` on a local abort. |
+| `:polls` | Successful `GetTask` responses. `SendMessage` does not count. |
+| `:ms` | Elapsed wall time. |
+
+## See also
+
+- [`toolnexus.a2a/agent-tools`](/api/clojure/agents/agent-tools/) — the tools-only shorthand
+- [`agents / parse-config`](/api/clojure/agents/parse-config/) — why there is no config-file peer block, and what to write instead
+- [`toolnexus.serve/serve`](/api/clojure/serve/a2a/) — the other direction: be the peer

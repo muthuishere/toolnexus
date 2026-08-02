@@ -7,8 +7,14 @@ implementation, byte-identical on both.
 
 ```clojure
 ;; deps.edn
-net.clojars.muthuishere/koine {:mvn/version "0.7.3"}
+net.clojars.muthuishere/toolnexus {:mvn/version "0.12.0"}   ; this port
+net.clojars.muthuishere/koine     {:mvn/version "0.9.1"}    ; its only dependency
 ```
+
+Released to Clojars as **`net.clojars.muthuishere/toolnexus`** — see
+[`PUBLISHING.md`](../PUBLISHING.md). Build it locally with `clojure -T:build jar`;
+the tooling sits behind the `:build` alias so it never touches the library's own
+classpath.
 
 **Zero reader conditionals in this tree.** Not "few" — zero. Every host
 difference lives behind [koine](https://github.com/muthuishere/koine), the

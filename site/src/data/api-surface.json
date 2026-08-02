@@ -6,7 +6,8 @@
     "golang",
     "java",
     "csharp",
-    "elixir"
+    "elixir",
+    "clojure"
   ],
   "entries": [
     {
@@ -22,7 +23,8 @@
         "golang": "Tool",
         "java": "Tool",
         "csharp": "ITool",
-        "elixir": "Toolnexus.Tool"
+        "elixir": "Toolnexus.Tool",
+        "clojure": "toolnexus.tool/tool"
       }
     },
     {
@@ -38,7 +40,8 @@
         "golang": "ToolResult",
         "java": "ToolResult",
         "csharp": "ToolResult",
-        "elixir": "Toolnexus.ToolResult"
+        "elixir": "Toolnexus.ToolResult",
+        "clojure": "toolnexus.tool/success"
       }
     },
     {
@@ -54,8 +57,10 @@
         "golang": "ToolContext",
         "java": "ToolContext",
         "csharp": "ToolContext",
-        "elixir": "Toolnexus.Context"
-      }
+        "elixir": "Toolnexus.Context",
+        "clojure": null
+      },
+      "parityNote": "Clojure has no ToolContext type. The context is a plain map passed as the third argument to toolnexus.tool/execute; a native tool opts into receiving it with :ctx? true."
     },
     {
       "id": "toolkit/create",
@@ -70,7 +75,8 @@
         "golang": "CreateToolkit",
         "java": "Toolkit.create",
         "csharp": "Toolkit.CreateAsync",
-        "elixir": "Toolnexus.create_toolkit"
+        "elixir": "Toolnexus.create_toolkit",
+        "clojure": "toolnexus.core/build"
       },
       "sources": [
         "js/examples/basic.ts",
@@ -92,7 +98,8 @@
         "golang": "LoadMcp",
         "java": "McpSource.load",
         "csharp": "McpSource.LoadAsync",
-        "elixir": "Toolnexus.Mcp.load"
+        "elixir": "Toolnexus.Mcp.load",
+        "clojure": "toolnexus.mcp/from-config"
       },
       "sources": [
         "examples/mcp.json"
@@ -111,8 +118,10 @@
         "golang": "LoadMcpWithContext",
         "java": "McpSource.loadWith",
         "csharp": "McpSource.LoadAsync",
-        "elixir": "Toolnexus.Mcp.load"
-      }
+        "elixir": "Toolnexus.Mcp.load",
+        "clojure": null
+      },
+      "parityNote": "Clojure has no ctx-aware load. toolnexus.mcp/from-config bounds each server with its own :timeout (toolnexus.mcp/default-timeout-ms); there is no cancellation handle."
     },
     {
       "id": "mcp/list-tools",
@@ -127,8 +136,10 @@
         "golang": "ListMcpTools",
         "java": "McpSource.listMcpTools",
         "csharp": "McpSource.ListMcpToolsAsync",
-        "elixir": "Toolnexus.Mcp.list_tools"
-      }
+        "elixir": "Toolnexus.Mcp.list_tools",
+        "clojure": null
+      },
+      "parityNote": "Clojure ships no list-without-connecting inventory. toolnexus.mcp/parse-config validates config offline, and toolnexus.mcp/from-config returns :statuses alongside :tools once connected."
     },
     {
       "id": "mcp/parse-config",
@@ -143,7 +154,8 @@
         "golang": "ParseMcpConfig",
         "java": null,
         "csharp": "McpSource.ParseConfig",
-        "elixir": "Toolnexus.Mcp.parse_config"
+        "elixir": "Toolnexus.Mcp.parse_config",
+        "clojure": "toolnexus.mcp/parse-config"
       },
       "parityNote": "Java keeps parseConfig package-private (McpSource.java:141) \u2014 there is no public config parser. C# exposes it as McpSource.ParseConfig, not ParseMcpConfig."
     },
@@ -160,9 +172,10 @@
         "golang": "ElicitationToRequest",
         "java": "McpSource.elicitationToRequest",
         "csharp": "McpSource.ElicitationToRequest",
-        "elixir": "Toolnexus.Mcp.Protocol.elicitation_to_request"
+        "elixir": "Toolnexus.Mcp.Protocol.elicitation_to_request",
+        "clojure": null
       },
-      "parityNote": "Elixir's elicitation_to_request lives on Toolnexus.Mcp.Protocol, not Toolnexus.Mcp \u2014 there is no delegate on the top-level Mcp module."
+      "parityNote": "Elixir's elicitation_to_request lives on Toolnexus.Mcp.Protocol, not Toolnexus.Mcp \u2014 there is no delegate on the top-level Mcp module. The Clojure port does not bridge MCP elicitation yet (recorded parity debt in clojure/README.md); a server's elicitation request is not mapped onto the \u00a710 suspension contract."
     },
     {
       "id": "skills/load",
@@ -177,7 +190,8 @@
         "golang": "LoadSkills",
         "java": "SkillSource.load",
         "csharp": "SkillSource.Load",
-        "elixir": "Toolnexus.Skill.load"
+        "elixir": "Toolnexus.Skill.load",
+        "clojure": "toolnexus.skill/load-skills"
       },
       "sources": [
         "examples/skills"
@@ -196,8 +210,10 @@
         "golang": "LoadSkillsWith",
         "java": "SkillSource.loadWith",
         "csharp": "SkillSource.LoadWith",
-        "elixir": "Toolnexus.Skill.load"
-      }
+        "elixir": "Toolnexus.Skill.load",
+        "clojure": null
+      },
+      "parityNote": "Clojure's toolnexus.skill/load-skills takes only filesystem roots (one string or a seq, earlier root wins). Skills-as-data, a lazy skill provider and the per-agent allowlist are recorded parity debt."
     },
     {
       "id": "skills/list",
@@ -212,7 +228,8 @@
         "golang": "ListSkills",
         "java": "SkillSource.listSkills",
         "csharp": "SkillSource.ListSkills",
-        "elixir": "Toolnexus.Skill.list"
+        "elixir": "Toolnexus.Skill.list",
+        "clojure": "toolnexus.skill/list-skills"
       }
     },
     {
@@ -228,7 +245,8 @@
         "golang": "NativeTool",
         "java": "NativeTool.of",
         "csharp": "NativeTool.Of",
-        "elixir": "Toolnexus.Native.define_tool"
+        "elixir": "Toolnexus.Native.define_tool",
+        "clojure": "toolnexus.native/native-tool"
       },
       "sources": [
         "js/examples/advanced.ts",
@@ -249,9 +267,10 @@
         "golang": "NativeToolReflect",
         "java": "@Tool annotation",
         "csharp": "ToolMethodAttribute",
-        "elixir": null
+        "elixir": null,
+        "clojure": null
       },
-      "parityNote": "Elixir has no reflection-based tool builder; use Toolnexus.Native.define_tool/1 with an explicit input_schema."
+      "parityNote": "Elixir has no reflection-based tool builder; use Toolnexus.Native.define_tool/1 with an explicit input_schema. Clojure has no reflection-based builder either \u2014 Clojure and cljgo share no portable fn-arity introspection, which is also why a context-taking tool declares :ctx? true. Use toolnexus.native/native-tool with an explicit :input-schema."
     },
     {
       "id": "native/collect",
@@ -266,9 +285,10 @@
         "golang": null,
         "java": "Tools.fromObject",
         "csharp": "Tools.FromObject",
-        "elixir": null
+        "elixir": null,
+        "clojure": null
       },
-      "parityNote": "JS/Java/C# expose an explicit collector; Python, Go and Elixir have no equivalent public symbol."
+      "parityNote": "JS/Java/C# expose an explicit collector; Python, Go and Elixir have no equivalent public symbol. Clojure has no collector either."
     },
     {
       "id": "http/tool",
@@ -283,7 +303,8 @@
         "golang": "HTTPTool",
         "java": "HttpTool.of",
         "csharp": "HttpTool.Of",
-        "elixir": "Toolnexus.Http.tool"
+        "elixir": "Toolnexus.Http.tool",
+        "clojure": "toolnexus.http/http-tool"
       }
     },
     {
@@ -299,7 +320,8 @@
         "golang": "SelectBuiltins",
         "java": "BuiltinTools.select",
         "csharp": "BuiltinTools.Select",
-        "elixir": "Toolnexus.Builtin.load"
+        "elixir": "Toolnexus.Builtin.load",
+        "clojure": "toolnexus.builtin/enabled-builtins"
       },
       "parityNote": "Elixir selects built-ins via Toolnexus.Builtin.load/1 (a config map), not a named select function."
     },
@@ -316,7 +338,8 @@
         "golang": "CreateBuiltinTools",
         "java": "BuiltinTools.create",
         "csharp": "BuiltinTools.Create",
-        "elixir": "Toolnexus.Builtin.tools"
+        "elixir": "Toolnexus.Builtin.tools",
+        "clojure": "toolnexus.builtin/builtin-tools"
       },
       "parityNote": "Elixir has no Builtin.create/1 \u2014 the zero-arg 'build the full set' constructor is Toolnexus.Builtin.tools/0."
     },
@@ -333,7 +356,8 @@
         "golang": "ToOpenAI",
         "java": "Adapters.toOpenAI",
         "csharp": "Adapters.ToOpenAI",
-        "elixir": "Toolnexus.Adapters.to_openai"
+        "elixir": "Toolnexus.Adapters.to_openai",
+        "clojure": "toolnexus.adapter/to-openai"
       }
     },
     {
@@ -349,7 +373,8 @@
         "golang": "ToAnthropic",
         "java": "Adapters.toAnthropic",
         "csharp": "Adapters.ToAnthropic",
-        "elixir": "Toolnexus.Adapters.to_anthropic"
+        "elixir": "Toolnexus.Adapters.to_anthropic",
+        "clojure": "toolnexus.adapter/to-anthropic"
       }
     },
     {
@@ -365,7 +390,8 @@
         "golang": "ToGemini",
         "java": "Adapters.toGemini",
         "csharp": "Adapters.ToGemini",
-        "elixir": "Toolnexus.Adapters.to_gemini"
+        "elixir": "Toolnexus.Adapters.to_gemini",
+        "clojure": "toolnexus.adapter/to-gemini"
       }
     },
     {
@@ -381,7 +407,8 @@
         "golang": "CreateClient",
         "java": "LlmClient.create",
         "csharp": "LlmClient.Create",
-        "elixir": "Toolnexus.Client.create"
+        "elixir": "Toolnexus.Client.create",
+        "clojure": "toolnexus.client/create-client"
       },
       "sources": [
         "js/examples/basic.ts",
@@ -402,7 +429,8 @@
         "golang": "Client.Run",
         "java": "LlmClient.run",
         "csharp": "LlmClient.RunAsync",
-        "elixir": "Toolnexus.Client.run"
+        "elixir": "Toolnexus.Client.run",
+        "clojure": "toolnexus.client/run"
       }
     },
     {
@@ -418,13 +446,15 @@
         "golang": "Client.Stream",
         "java": "LlmClient.stream",
         "csharp": "LlmClient.StreamAsync",
-        "elixir": "Toolnexus.Client.stream"
+        "elixir": "Toolnexus.Client.stream",
+        "clojure": null
       },
       "sources": [
         "js/examples/streaming.ts",
         "python/examples/streaming.py",
         "golang/examples/streaming"
-      ]
+      ],
+      "parityNote": "Clojure ships no streaming loop. toolnexus.client/run takes an :on-event sink that emits tool_call, tool_result, pending, usage and done \u2014 but no text deltas, because the loop buffers the whole response and synthesising deltas from a buffered body would be a lie. Real SSE is a separate seam (koine.stream/sse-post) and is not wired in."
     },
     {
       "id": "client/hooks",
@@ -439,7 +469,8 @@
         "golang": "Hooks",
         "java": "LlmClient.Hooks",
         "csharp": "LlmClient.Hooks",
-        "elixir": "Toolnexus.Client.create"
+        "elixir": "Toolnexus.Client.create",
+        "clojure": null
       },
       "sources": [
         "js/examples/hooks.ts",
@@ -447,7 +478,7 @@
         "golang/examples/hooks",
         "examples/agent-hooks"
       ],
-      "parityNote": "Elixir has no separate Hooks type \u2014 pass a :hooks map (:before_llm, :after_llm, :before_tool, :after_tool) to Toolnexus.Client.create/1."
+      "parityNote": "Elixir has no separate Hooks type \u2014 pass a :hooks map (:before_llm, :after_llm, :before_tool, :after_tool) to Toolnexus.Client.create/1. Clojure has no hooks: before/after model and tool interception is recorded parity debt in clojure/README.md. :body-transform on toolnexus.client/create-client is the one request-shaping seam that exists."
     },
     {
       "id": "client/conversation",
@@ -462,7 +493,8 @@
         "golang": "Conversation",
         "java": "LlmClient.Conversation",
         "csharp": "LlmClient.Conversation",
-        "elixir": "Toolnexus.Client conversation"
+        "elixir": "Toolnexus.Client conversation",
+        "clojure": "toolnexus.client/run"
       },
       "sources": [
         "js/examples/memory.ts",
@@ -483,7 +515,8 @@
         "golang": "NewInMemoryConversationStore",
         "java": "LlmClient.ConversationStore",
         "csharp": "LlmClient.IConversationStore",
-        "elixir": "Toolnexus.Client.InMemoryConversationStore"
+        "elixir": "Toolnexus.Client.InMemoryConversationStore",
+        "clojure": "toolnexus.client/in-memory-store"
       }
     },
     {
@@ -499,7 +532,8 @@
         "golang": "MetricEvent",
         "java": "LlmClient.MetricEvent",
         "csharp": "MetricEvent",
-        "elixir": "Toolnexus.Client.MetricsRegistry"
+        "elixir": "Toolnexus.Client.MetricsRegistry",
+        "clojure": "toolnexus.client/create-client"
       },
       "parityNote": "C# has no wrapping Metrics class \u2014 MetricEvent is a top-level record in namespace Toolnexus."
     },
@@ -516,7 +550,8 @@
         "golang": "ErrorInfo",
         "java": "LlmClient.ErrorInfo",
         "csharp": "LlmClient.ErrorInfo",
-        "elixir": "Toolnexus.Client.create"
+        "elixir": "Toolnexus.Client.create",
+        "clojure": "toolnexus.client/create-client"
       },
       "parityNote": "Elixir configures retries/timeout as options on Toolnexus.Client.create/1 rather than a distinct error-classifier type."
     },
@@ -533,7 +568,8 @@
         "golang": "agents.New",
         "java": "A2A.agent",
         "csharp": "A2A.Agent",
-        "elixir": "Toolnexus.A2a.agent"
+        "elixir": "Toolnexus.A2a.agent",
+        "clojure": "toolnexus.a2a/remote-agent"
       },
       "sources": [
         "python/examples/a2a_agents.py"
@@ -553,7 +589,8 @@
         "golang": "AgentTools",
         "java": "A2A.agentTools",
         "csharp": "A2A.AgentTools",
-        "elixir": "Toolnexus.A2a.agent_tools"
+        "elixir": "Toolnexus.A2a.agent_tools",
+        "clojure": "toolnexus.a2a/agent-tools"
       }
     },
     {
@@ -569,8 +606,10 @@
         "golang": "ParseAgentsConfig",
         "java": "A2A.parseAgentsConfig",
         "csharp": "A2A.ParseAgentsConfig",
-        "elixir": "Toolnexus.A2a.parse_agents_config"
-      }
+        "elixir": "Toolnexus.A2a.parse_agents_config",
+        "clojure": null
+      },
+      "parityNote": "Clojure has no agents-config parser \u2014 construct peers with toolnexus.a2a/remote-agent and pass their tools to toolnexus.core/build via :tools."
     },
     {
       "id": "serve/a2a",
@@ -585,7 +624,8 @@
         "golang": "Toolkit.Serve",
         "java": "A2AServer.start",
         "csharp": "A2AServer.StartAsync",
-        "elixir": "Toolnexus.Serve.start"
+        "elixir": "Toolnexus.Serve.start",
+        "clojure": "toolnexus.serve/serve"
       },
       "parityNote": "Go names this Toolkit.Serve (a method), not a free StartAgent function \u2014 StartAgent is the unrelated \u00a77E persona-heartbeat starter."
     },
@@ -602,7 +642,8 @@
         "golang": "BuildAgentCard",
         "java": "A2AServer.buildAgentCard",
         "csharp": "A2AServer.BuildAgentCard",
-        "elixir": "Toolnexus.Serve.build_agent_card"
+        "elixir": "Toolnexus.Serve.build_agent_card",
+        "clojure": "toolnexus.serve/agent-card"
       }
     },
     {
@@ -618,7 +659,8 @@
         "golang": "NewFileTaskStore",
         "java": "A2AServer.FileTaskStore",
         "csharp": "FileTaskStore",
-        "elixir": "Toolnexus.Serve task_store"
+        "elixir": "Toolnexus.Serve task_store",
+        "clojure": "toolnexus.serve/file-store"
       }
     },
     {
@@ -634,7 +676,8 @@
         "golang": "ExposedMcpTools",
         "java": "McpServe.build",
         "csharp": "McpServe.BuildMcpServer",
-        "elixir": "Toolnexus.McpServe.exposed_tools"
+        "elixir": "Toolnexus.McpServe.exposed_tools",
+        "clojure": "toolnexus.serve/exposed-tools"
       }
     },
     {
@@ -650,14 +693,16 @@
         "golang": "agents.New",
         "java": "agents.Agent",
         "csharp": "Agent",
-        "elixir": "Toolnexus.Agents"
+        "elixir": "Toolnexus.Agents",
+        "clojure": null
       },
       "sources": [
         "js/examples/agent.ts",
         "python/examples/agent.py",
         "golang/examples/agent",
         "elixir/examples/agent.exs"
-      ]
+      ],
+      "parityNote": "The Clojure port has no \u00a77D sub-agent runtime (recorded parity debt). Remote A2A peers via toolnexus.a2a/remote-agent are the delegation this port does ship."
     },
     {
       "id": "runtime/runtime",
@@ -672,12 +717,14 @@
         "golang": "NewRuntime",
         "java": "agents.Runtime",
         "csharp": "AgentRuntime",
-        "elixir": "Toolnexus.Agents.Runtime"
+        "elixir": "Toolnexus.Agents.Runtime",
+        "clojure": null
       },
       "sources": [
         "examples/subagent-lifecycle",
         "examples/subagent-fanout"
-      ]
+      ],
+      "parityNote": "The Clojure port has no \u00a77D agent runtime (recorded parity debt)."
     },
     {
       "id": "runtime/handle",
@@ -692,8 +739,10 @@
         "golang": "agents.Handle",
         "java": "agents.Handle",
         "csharp": "Handle",
-        "elixir": "Toolnexus.Agents.Handle"
-      }
+        "elixir": "Toolnexus.Agents.Handle",
+        "clojure": null
+      },
+      "parityNote": "The Clojure port has no \u00a77D handle type (recorded parity debt)."
     },
     {
       "id": "runtime/budgets",
@@ -708,11 +757,13 @@
         "golang": "agents.Budget",
         "java": "agents.Budget",
         "csharp": "Budget",
-        "elixir": "Toolnexus.Agents budget"
+        "elixir": "Toolnexus.Agents budget",
+        "clojure": null
       },
       "sources": [
         "examples/subagent-budgets"
-      ]
+      ],
+      "parityNote": "The Clojure port has no \u00a77D budgets (recorded parity debt)."
     },
     {
       "id": "runtime/task-tool",
@@ -727,9 +778,10 @@
         "golang": null,
         "java": null,
         "csharp": null,
-        "elixir": null
+        "elixir": null,
+        "clojure": null
       },
-      "parityNote": "Only JS exposes a constructible task tool symbol; elsewhere it is the `task` builtin, toggled on the runtime."
+      "parityNote": "Only JS exposes a constructible task tool symbol; elsewhere it is the `task` builtin, toggled on the runtime. Clojure has no task tool: it ships no sub-agent runtime for one to drive."
     },
     {
       "id": "persona/compose-soul",
@@ -744,14 +796,16 @@
         "golang": "ComposeSoul",
         "java": "Home.composeSoul",
         "csharp": "Home.ComposeSoul",
-        "elixir": "Toolnexus.Agents.Home.compose_soul"
+        "elixir": "Toolnexus.Agents.Home.compose_soul",
+        "clojure": null
       },
       "sources": [
         "examples/persona-agent",
         "js/examples/persona.ts",
         "python/examples/persona.py",
         "golang/examples/persona"
-      ]
+      ],
+      "parityNote": "The Clojure port ships no \u00a77E persona layer \u2014 no agent home, no soul composition (recorded parity debt)."
     },
     {
       "id": "persona/from-dir",
@@ -766,8 +820,10 @@
         "golang": "FromDir",
         "java": "A2A.agentFromDir",
         "csharp": "Home.FromDir",
-        "elixir": "Toolnexus.Agents.Home.from_dir"
-      }
+        "elixir": "Toolnexus.Agents.Home.from_dir",
+        "clojure": null
+      },
+      "parityNote": "The Clojure port ships no \u00a77E persona layer \u2014 there is no agent home to load from (recorded parity debt)."
     },
     {
       "id": "persona/memory-tool",
@@ -782,8 +838,10 @@
         "golang": "MemoryTool",
         "java": "Home.memoryTool",
         "csharp": "Home.MemoryTool",
-        "elixir": "Toolnexus.Agents.Home.memory_tool"
-      }
+        "elixir": "Toolnexus.Agents.Home.memory_tool",
+        "clojure": null
+      },
+      "parityNote": "The Clojure port ships no memory built-in; its ten built-ins are bash, read, write, edit, grep, glob, webfetch, question, apply_patch and todowrite."
     },
     {
       "id": "compaction/compactor",
@@ -798,11 +856,13 @@
         "golang": "Compactor",
         "java": "Compaction.compactor",
         "csharp": "Compaction.Compactor",
-        "elixir": "Toolnexus.Agents.Compaction.compactor"
+        "elixir": "Toolnexus.Agents.Compaction.compactor",
+        "clojure": null
       },
       "sources": [
         "examples/compaction"
-      ]
+      ],
+      "parityNote": "The Clojure port ships no \u00a77F compaction \u2014 bound a long run with :max-turns on toolnexus.client/create-client and trim :history yourself."
     },
     {
       "id": "suspension/pending",
@@ -817,7 +877,8 @@
         "golang": "Pending",
         "java": "Request.pending",
         "csharp": "Suspension.Pending",
-        "elixir": null
+        "elixir": null,
+        "clojure": "toolnexus.client/suspend"
       },
       "sources": [
         "js/examples/pending.ts"
@@ -837,7 +898,8 @@
         "golang": "AuthRequired",
         "java": "Request.authRequired",
         "csharp": "Suspension.AuthRequired",
-        "elixir": null
+        "elixir": null,
+        "clojure": "toolnexus.client/auth-required"
       },
       "parityNote": "Elixir ships no auth_required/pending producer helpers \u2014 build %ToolResult{metadata: %{pending: %Request{}}} by hand. Only the reader, ToolResult.pending?/1, exists."
     },
@@ -854,7 +916,8 @@
         "golang": "WaitFor",
         "java": "LlmClient.waitFor",
         "csharp": "LlmClient.WaitFor",
-        "elixir": "Toolnexus.Client.create"
+        "elixir": "Toolnexus.Client.create",
+        "clojure": "toolnexus.client/create-client"
       },
       "parityNote": "Elixir passes :wait_for as an option to Toolnexus.Client.create/1 rather than exposing a WaitFor type."
     },
@@ -871,7 +934,8 @@
         "golang": "PendingOf",
         "java": "Request.pendingOf",
         "csharp": "Suspension.PendingOf",
-        "elixir": null
+        "elixir": null,
+        "clojure": "toolnexus.client/pending-of"
       },
       "parityNote": "Elixir has no pending_of/1; match on result.metadata or use ToolResult.pending?/1."
     },
@@ -888,12 +952,13 @@
         "golang": "Runtime.Resume",
         "java": "AgentRuntime.resume",
         "csharp": "AgentRuntime.ResumeAsync",
-        "elixir": "Toolnexus.Agents.Runtime.resume"
+        "elixir": "Toolnexus.Agents.Runtime.resume",
+        "clojure": null
       },
       "sources": [
         "examples/subagent-durable-resume"
       ],
-      "parityNote": "Go additionally ships a separate, golang-only SPEC \u00a710 preview (Client.RunWithAnswer/Client.AskWithAnswer) for durable, cross-process resume of a bare-client run \u2014 not part of the \u00a70 conformance contract. Documented on Go's own page and cross-linked from suspension/relay."
+      "parityNote": "Go additionally ships a separate, golang-only SPEC \u00a710 preview (Client.RunWithAnswer/Client.AskWithAnswer) for durable, cross-process resume of a bare-client run \u2014 not part of the \u00a70 conformance contract. Documented on Go's own page and cross-linked from suspension/relay. Clojure has no sub-agent runtime to resume into. A suspension is resolved in-process by the :wait-for slot on toolnexus.client/create-client; durable, cross-process resume is recorded parity debt."
     },
     {
       "id": "suspension/relay",
@@ -908,9 +973,10 @@
         "golang": "RelayTool",
         "java": null,
         "csharp": null,
-        "elixir": null
+        "elixir": null,
+        "clojure": null
       },
-      "parityNote": "Go-only today (golang/relay.go). SPEC \u00a710 addendum landed as a Go preview; the other five ports do not ship a relay tool yet."
+      "parityNote": "Go-only today (golang/relay.go). SPEC \u00a710 addendum landed as a Go preview; the other five ports do not ship a relay tool yet. Clojure does not ship a relay tool either."
     },
     {
       "id": "translate/translate",
@@ -925,7 +991,8 @@
         "golang": "Translate",
         "java": "Translate.translate",
         "csharp": "Translate.Run",
-        "elixir": "Toolnexus.Translate.translate"
+        "elixir": "Toolnexus.Translate.translate",
+        "clojure": "toolnexus.translate/translate"
       }
     },
     {
@@ -941,7 +1008,8 @@
         "golang": null,
         "java": "Translate.openAIMessagesToAnthropic",
         "csharp": "Translate.OpenAIMessagesToAnthropic",
-        "elixir": "Toolnexus.Translate.openai_messages_to_anthropic"
+        "elixir": "Toolnexus.Translate.openai_messages_to_anthropic",
+        "clojure": "toolnexus.translate/openai-messages-to-anthropic"
       },
       "parityNote": "Go keeps openAIMessagesToAnthropic unexported (golang/translate.go:283) \u2014 inbound translation is reachable only through Translate."
     }

@@ -60,6 +60,12 @@
     :else
     {:content [{:type "text" :text (str "unknown tool: " tool-name)}] :isError true}))
 
+(def ^:private seen-capabilities
+  "The `capabilities` object the client advertised on its LAST initialize.
+  §10's elicitation bridge is only allowed to promise what it can satisfy, and
+  the only place that promise is visible is on the wire."
+  (atom ::never))
+
 (defn- rpc-response
   "`paged?` splits tools/list across two pages via nextCursor, so the client's
   pagination is exercised rather than asserted."
@@ -68,6 +74,8 @@
         id     (:id msg)
         method (:method msg)
         params (:params msg)]
+    (when (= method "initialize")
+      (reset! seen-capabilities (:capabilities params)))
     (cond
       (= method "initialize")
       {:jsonrpc "2.0" :id id
@@ -530,3 +538,107 @@
            (mcp/shape-result {:content [{:type "image" :data "…"} {:type "text" :text "only"}]}))))
   (testing "an empty content list is an empty output, not nil"
     (is (= (tool/success "") (mcp/shape-result {:content []})))))
+
+;; ---------------------------------------------------------------------------
+;; §10 — the MCP elicitation bridge onto the ONE waitFor
+;; ---------------------------------------------------------------------------
+;;
+;; The two mappings are pure and are the byte-parity surface. Expected values
+;; are read off js/src/mcp.ts (`elicitationToRequest` / `answerToElicitResult`)
+;; and the suspension spec's "MCP server elicitation is bridged" requirement —
+;; not from this port's output.
+
+(deftest elicitation-form-mode-becomes-an-input-request
+  (let [r (mcp/elicitation->request
+           {:message "What is your name?"
+            :requestedSchema {:type "object" :properties {:name {:type "string"}}}})]
+    (is (= "input" (:kind r)))
+    (is (= "What is your name?" (:prompt r)))
+    (testing "requestedSchema rides on data.schema (R2), never as a graft"
+      (is (= {:type "object" :properties {:name {:type "string"}}}
+             (get-in r [:data :schema]))))
+    (is (nil? (:url r)))
+    (is (str/starts-with? (str (:id r)) "elc-"))
+    (testing "ids are unique — two elicitations in flight must not collide"
+      (is (not= (:id r) (:id (mcp/elicitation->request {:message "again"})))))))
+
+(deftest elicitation-url-mode-becomes-an-authorization-request
+  (let [r (mcp/elicitation->request
+           {:mode "url" :message "Authorize us" :url "https://example.test/oauth"
+            :requestedSchema {:type "object"}})]
+    (is (= "authorization" (:kind r)))
+    (is (= "Authorize us" (:prompt r)))
+    (is (= "https://example.test/oauth" (:url r)))
+    (testing "URL mode carries no schema — the credential never comes through a form"
+      (is (nil? (get-in r [:data :schema]))))))
+
+(deftest elicitation-with-no-message-still-yields-a-request
+  (is (= "" (:prompt (mcp/elicitation->request {})))))
+
+(deftest answers-map-back-onto-the-three-mcp-actions
+  (is (= {:action "accept" :content {:name "muthu"}}
+         (mcp/answer->elicit-result {:ok true :data {:name "muthu"}})))
+  (testing "ok with no data accepts with an empty content object"
+    (is (= {:action "accept" :content {}} (mcp/answer->elicit-result {:ok true}))))
+  (testing "reason 'declined' is decline; anything else is cancel (R1)"
+    (is (= {:action "decline"} (mcp/answer->elicit-result {:ok false :reason "declined"})))
+    (is (= {:action "cancel"}  (mcp/answer->elicit-result {:ok false :reason "cancelled"})))
+    (is (= {:action "cancel"}  (mcp/answer->elicit-result {:ok false})))))
+
+(deftest a-server-request-is-answered-inline-by-wait-for
+  (let [seen  (atom nil)
+        reply (mcp/server-request-response
+               (fn [request] (reset! seen request) {:ok true :data {:name "muthu"}})
+               {:jsonrpc "2.0" :id 77 :method "elicitation/create"
+                :params {:message "Who are you?"}})]
+    (is (= {:jsonrpc "2.0" :id 77 :result {:action "accept" :content {:name "muthu"}}} reply))
+    (testing "the SAME §10 Request the host would have seen from the client loop"
+      (is (= "input" (:kind @seen)))
+      (is (= "Who are you?" (:prompt @seen))))))
+
+(deftest a-declining-wait-for-does-not-crash-the-session
+  (is (= {:jsonrpc "2.0" :id 3 :result {:action "decline"}}
+         (mcp/server-request-response (fn [_] {:ok false :reason "declined"})
+                                      {:id 3 :method "elicitation/create" :params {}}))))
+
+(deftest a-throwing-wait-for-becomes-a-cancel
+  ;; §0.3's isolation rule at the reverse-request boundary: a host callback that
+  ;; blows up must not take the connection down with it.
+  (is (= "cancel" (get-in (mcp/server-request-response
+                           (fn [_] (throw (ex-info "boom" {})))
+                           {:id 4 :method "elicitation/create" :params {}})
+                          [:result :action]))))
+
+(deftest an-unknown-server-request-is-a-method-not-found
+  (is (= {:jsonrpc "2.0" :id 9 :error {:code -32601 :message "Method not found"}}
+         (mcp/server-request-response (fn [_] {:ok true}) {:id 9 :method "sampling/createMessage"}))))
+
+(deftest with-no-wait-for-there-is-nothing-to-answer-with
+  ;; The capability is not advertised, so a spec-compliant server never asks;
+  ;; if one asks anyway it gets a clean error rather than a hang.
+  (is (= -32601 (get-in (mcp/server-request-response nil {:id 1 :method "elicitation/create"})
+                        [:error :code]))))
+
+(deftest elicitation-capability-is-advertised-only-with-a-wait-for
+  (let [url (str (base) "/mcp")]
+    (testing "no waitFor ⇒ capabilities is bare"
+      (reset! seen-capabilities ::never)
+      (let [c (mcp/connect {:name "cap-off" :kind "remote" :enabled true :url url :timeout 5000})]
+        (is (= "connected" (:status c)))
+        (is (= {} @seen-capabilities))
+        (mcp/disconnect c)))
+    (testing "a waitFor ⇒ capabilities.elicitation is promised"
+      (reset! seen-capabilities ::never)
+      (let [c (mcp/connect {:name "cap-on" :kind "remote" :enabled true :url url :timeout 5000}
+                           {:wait-for (fn [_] {:ok true})})]
+        (is (= "connected" (:status c)))
+        (is (= {:elicitation {}} @seen-capabilities))
+        (mcp/disconnect c)))))
+
+(deftest from-config-threads-wait-for-to-every-server
+  (reset! seen-capabilities ::never)
+  (let [res (mcp/from-config {:mcpServers {"one" {:url (str (base) "/mcp") :timeout 5000}}}
+                             {:wait-for (fn [_] {:ok true})})]
+    (is (= {"one" "connected"} (:statuses res)))
+    (is (= {:elicitation {}} @seen-capabilities))
+    (mcp/disconnect-all res)))

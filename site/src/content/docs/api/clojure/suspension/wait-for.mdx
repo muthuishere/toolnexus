@@ -1,0 +1,184 @@
+---
+title: "toolnexus.client/create-client"
+description: "The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract. — Clojure."
+sidebar:
+  label: "toolnexus.client/create-client"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+```clojure
+(create-client {:base-url "…" :model "…"
+                :wait-for (fn [request] answer)})   ; the ONE host slot of SPEC §10
+
+(make-answer id ok)
+(make-answer id ok data)
+(make-answer id ok data reason)
+;; => {:id "sus-…" :ok true :data {…} :reason "…"}
+;;    :data only when non-nil; :reason ONLY when ok is false
+```
+
+`:wait-for` is a plain, blocking `(fn [request] answer)`. The loop calls it when a tool suspends,
+hands it the `Request`, and expects an `Answer` back. What happens in between is entirely yours:
+read a line from a terminal, post to Slack and poll, park a row in Postgres and block a worker
+thread — the contract is the same in all three cases.
+
+There is no channel, no `core.async` and no executor anywhere in this rule. §10's async framing
+assumes a function-colouring problem Clojure does not have, and adding one would buy nothing.
+
+The three outcomes are fixed. An `ok` answer re-executes the **same tool with the same args exactly
+once**, with `Context.answer` set, and that result is what the model sees. A not-ok answer feeds
+`"declined/expired: <prompt>"` back as an error result and the loop continues — the model decides
+what to do about it. If the retry suspends *again*, the loop writes `"unresolved: <prompt>"` rather
+than looping forever on one request.
+
+Resolution is sequential, in tool-call order, even though the tools themselves ran in parallel.
+That is what makes concurrent suspensions deterministic instead of a function of thread scheduling.
+
+<Aside type="note" title="Why not `await`">
+SPEC §10 names this slot "never `await`" because `await` is reserved in JavaScript, Python and C#.
+In Clojure it is not reserved — it is `clojure.core/await`, and it exists on **both** hosts, so
+defining one would shadow a core name, and cljgo's static interop scan can reject a whole namespace
+for it. Same answer, sharper teeth.
+</Aside>
+
+## When to use it
+
+- **Any run where a tool may need a human** — without it, the first suspension ends the run with
+  `:status "pending"`.
+- **An interactive session** — a CLI, a chat bot, an operator console, where blocking the run while
+  a person answers is exactly the desired behaviour.
+- **Not in a request handler with a short timeout** — a blocking `:wait-for` holds the run open for
+  as long as the human takes. Omit it there and handle `"pending"` yourself.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Omit it when the human is not on the other end of this call">
+With no `:wait-for` the run returns cleanly with `:status "pending"` and the `Request` on
+`:pending`, having recorded every tool call up to and including the parked one. That is the right
+shape for a web request, a queue worker, or anything where the answer arrives minutes later through
+a different process. `:wait-for` is for when the answering party is reachable *now*, from this
+thread.
+</Aside>
+
+Whichever you pick, the tool is written once. It suspends, and the client decides whether that
+becomes a block or a return.
+
+## Examples
+
+### Asking on the terminal
+
+```clojure
+(require '[toolnexus.client :as client])
+
+(defn console-wait-for [request]
+  (println)
+  (println (:prompt request))
+  (when-let [url (:url request)] (println "  ->" url))
+  (let [line (read-line)]
+    (case (:kind request)
+      "authorization" (client/make-answer (:id request) true)
+      "approval"      (if (= "y" (clojure.string/lower-case (str line)))
+                        (client/make-answer (:id request) true)
+                        (client/make-answer (:id request) false nil "declined at the console"))
+      ;; "input" / "question": the answer IS the payload
+      (client/make-answer (:id request) true {:city line}))))
+
+(def llm (client/create-client {:base-url "https://api.openai.com/v1"
+                                :model    "gpt-4.1"
+                                :wait-for console-wait-for}))
+
+(client/run llm "Book me a flight tomorrow" {:toolkit toolkit})
+```
+
+Note `:reason` — it is only populated when `ok` is false, and the loop branches on `ok` alone and
+never reads it. It exists for your own logs and for whatever you show the user.
+
+### Answering out of process, with a deadline
+
+`:wait-for` is where a durable queue plugs in. It blocks the run, but the *answer* can come from
+anywhere.
+
+```clojure
+(require '[koine.time :as ktime])
+
+(defn queued-wait-for
+  "Park the request for a human and poll until they answer or the deadline passes."
+  [request]
+  (enqueue-for-human! request)                 ; e.g. a DB row, a Slack message
+  (let [deadline (+ (ktime/now-ms) 120000)]
+    (loop []
+      (if-let [reply (poll-answer! (:id request))]
+        (client/make-answer (:id request) (:approved? reply) (:data reply)
+                            (when-not (:approved? reply) (:note reply)))
+        (if (< (ktime/now-ms) deadline)
+          (do (ktime/sleep! 1000) (recur))
+          ;; a timeout is a not-ok answer, not a throw — the model sees it and moves on
+          (client/make-answer (:id request) false nil "timed out waiting for a human"))))))
+
+(def llm (client/create-client {:base-url "https://api.anthropic.com"
+                                :style    "anthropic"
+                                :model    "claude-sonnet-4-5"
+                                :wait-for queued-wait-for}))
+```
+
+Correlate on `(:id request)` — it is unique per suspension and is the only thing tying a human's
+click to the run that is waiting for it. Respect `:expiresAt` if the request carries one; the loop
+does not enforce it.
+
+### Routing by kind, and seeing every path
+
+```clojure
+(defn router [request]
+  (case (:kind request)
+    ;; the world changed out of band; the answer carries no payload
+    "authorization" (client/make-answer (:id request) (open-browser-and-wait! (:url request)))
+    ;; the answer IS the payload; `data.schema` tells you what shape to collect
+    "input"         (client/make-answer (:id request) true
+                                        (collect-form! (get-in request [:data :schema])))
+    ;; the `question` builtin's shape: one answer per question
+    "question"      (client/make-answer (:id request) true
+                                        {:answers (ask-each! (get-in request [:data :questions]))})
+    "approval"      (client/make-answer (:id request) (approve? (:prompt request)))
+    ;; unknown kinds decline rather than guess
+    (client/make-answer (:id request) false nil (str "unsupported kind: " (:kind request)))))
+
+(def llm (client/create-client {:base-url base-url :model "gpt-4.1" :wait-for router}))
+
+(let [r (client/run llm "Ship it" {:toolkit toolkit})]
+  ;; with :wait-for set, a run never ends in "pending" — it resolves or reports
+  (doseq [c (:tool-calls r)]
+    (println (:name c) "->" (:output c))))
+```
+
+Three outputs tell you which path a call took: your tool's own result (resolved),
+`"declined/expired: <prompt>"` (not ok), and `"unresolved: <prompt>"` (the retry suspended again).
+
+### The Answer
+
+| Key | Required | Notes |
+|---|---|---|
+| `:id` | yes | Must match the `Request`'s `:id`. |
+| `:ok` | yes | A JSON boolean. The loop branches on this alone. |
+| `:data` | no | The payload the retry reads as `(get-in ctx [:answer :data])`. Omitted when nil. |
+| `:reason` | no | Populated **only** when `ok` is false. Never read by the loop. |
+
+### The three outcomes
+
+| `:wait-for` | Answer | What the model sees |
+|---|---|---|
+| set | `ok` | Your tool's result from a single re-execution with `Context.answer`. |
+| set | `ok`, but the retry suspends again | `"unresolved: <prompt>"`, `isError` true. |
+| set | not ok | `"declined/expired: <prompt>"`, `isError` true. |
+| unset | — | The run ends: `:status "pending"`, `:pending` is the `Request`. |
+
+## See also
+
+- [`toolnexus.client/suspend`](/api/clojure/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`toolnexus.client/auth-required`](/api/clojure/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`toolnexus.client/pending-of`](/api/clojure/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`toolnexus.client/create-client`](/api/clojure/client/create/) — the rest of the client's options.

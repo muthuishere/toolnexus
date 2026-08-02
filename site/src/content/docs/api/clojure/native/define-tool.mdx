@@ -1,0 +1,169 @@
+---
+title: "toolnexus.native/native-tool"
+description: "Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call. — Clojure."
+sidebar:
+  label: "toolnexus.native/native-tool"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/native.cljc">clojure/src/toolnexus/native.cljc</a>
+</p>
+
+```clojure
+(native-tool {:name         "upper"
+              :description  "Uppercase the text"
+              :input-schema {:type "object"
+                             :properties {:text {:type "string"}}
+                             :required ["text"]}
+              :run          (fn [args] …)      ; (fn [args ctx] …) when :ctx? is true
+              :ctx?         false})
+
+(native-tool tool-name description input-schema run)   ; positional, no :ctx?
+
+;; => {:name "upper" :description "Uppercase the text"
+;;     :input-schema {…} :source "native" :execute (fn ([args]) ([args ctx]))}
+```
+
+`native-tool` is the whole native-tool surface of this port: a function, a name, a description and
+a JSON Schema in, a Tool map out. A Tool is a plain map with one closure in it — no protocol, no
+record, no deftype, because none of those behave identically on Clojure (JVM) and on cljgo.
+
+Whatever `:run` returns is normalised into a ToolResult. A string becomes the output. `nil` becomes
+empty output, which is the right answer for a tool that only performs an effect. Anything else is
+`str`-ed. A map that already has `:output` — one you built with `toolnexus.tool/success` or
+`toolnexus.tool/failure` — passes through unchanged, except that `:isError` is forced to a real
+boolean so a truthy non-boolean can never reach the wire.
+
+A throw is not special-cased here on purpose. `toolnexus.tool/execute` already wraps every tool
+call in `(catch Throwable …)` and converts it to an error ToolResult, so a native tool obeys the
+same boundary rule as every other source rather than being the one exception to it. Use
+`toolnexus.native/execute-native` when you hold a Tool without a toolkit and want that same rule
+applied.
+
+## When to use it
+
+- **Exposing code you already have** — a lookup, a calculation, a call into your own service. This
+  is the shortest path from a `defn` to something the model can call.
+- **Tools that need the loop's Context** — anything reading `ctx` (the resume answer, a request id,
+  your own tagged data) sets `:ctx? true` and takes two arguments.
+- **Adapting a source toolnexus has no module for** — a queue, a database, an internal RPC client.
+  Wrap the call, hand back a string.
+- **Tests and fixtures** — a deterministic fake tool is three lines, and the resulting map is data
+  you can inspect field by field.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use http-tool when the body of the function would just be an HTTP call">
+If `:run` would only build a URL, set headers and return the body,
+[`toolnexus.http/http-tool`](/api/clojure/http/tool/) already does that — including `{placeholder}`
+substitution, `${ENV_VAR}` expansion in headers, and non-2xx to `isError` mapping. Reach for
+`native-tool` when there is real logic in the function; reach for `http-tool` when there is not.
+</Aside>
+
+There is no reflection-based variant. Clojure and cljgo share no portable way to ask a function how
+many arguments it takes — arity introspection is `java.lang.reflect` on the JVM and simply absent on
+cljgo — so the schema is always explicit and the context is always opt-in via `:ctx?`. See
+[Annotation / reflection tools](/api/clojure/native/reflect/).
+
+## Examples
+
+### A one-argument function becomes a tool
+
+```clojure
+(require '[clojure.string :as str]
+         '[toolnexus.native :as native]
+         '[toolnexus.tool :as tool])
+
+(def upper
+  (native/native-tool {:name         "upper"
+                       :description  "Uppercase the text"
+                       :input-schema {:type "object"
+                                      :properties {:text {:type "string"}}
+                                      :required ["text"]}
+                       :run          (fn [args] (str/upper-case (str (:text args))))}))
+
+(:source upper)                                  ;=> "native"
+((:execute upper) {:text "abc"})                 ;=> {:output "ABC" :isError false}
+
+;; Register it and call it by name.
+(def tk (tool/toolkit [upper]))
+(:output (tool/execute tk "upper" {:text "abc"}))   ;=> "ABC"
+(:isError (tool/execute tk "nosuch" {}))            ;=> true
+```
+
+Omit `:description` and it defaults to `""`; omit `:input-schema` and it defaults to
+`{:type "object"}`. Neither can be nil in the emitted adapter payloads.
+
+### Failure that the model is meant to see, and failure that it is not
+
+```clojure
+(require '[toolnexus.native :as native]
+         '[toolnexus.tool :as tool])
+
+;; An expected failure is a VALUE. The model reads it and tries again.
+(def charge
+  (native/native-tool
+    {:name "charge_card"
+     :description "Charge the customer's card"
+     :run (fn [args]
+            (if (neg? (long (:amount args)))
+              (tool/failure "amount must be positive")
+              (tool/success (str "charged " (:amount args)))))}))
+
+((:execute charge) {:amount -1})     ;=> {:output "amount must be positive" :isError true}
+
+;; An unexpected failure is a throw, converted at the boundary — never propagated.
+(def boom (native/native-tool {:name "boom" :run (fn [_] (throw (ex-info "kaboom" {})))}))
+
+(native/execute-native boom {})      ;=> {:output "kaboom" :isError true}
+(tool/execute (tool/toolkit [boom]) "boom" {})   ;=> {:output "kaboom" :isError true}
+```
+
+Build results with `toolnexus.tool/success` and `toolnexus.tool/failure`. They are not named `ok`
+and `err` because cljgo's `clojure.core` has both of those and the JVM's does not — a name that
+shadows core on one host only is exactly the drift this port exists to prevent.
+
+### Reading the Context, and registering with the rest of the toolkit
+
+```clojure
+(require '[toolnexus.core :as toolnexus]
+         '[toolnexus.native :as native])
+
+;; :ctx? true is the opt-in. Without it, :run is called with args alone
+;; regardless of which execute arity the loop uses.
+(def whoami
+  (native/native-tool
+    {:name         "whoami"
+     :description  "Who is this conversation for"
+     :input-schema {:type "object"}
+     :ctx?         true
+     :run          (fn [_args ctx] (str "user " (:user-id ctx)))}))
+
+((:execute whoami) {} {:user-id "u-42"})    ;=> {:output "user u-42" :isError false}
+((:execute whoami) {})                      ;=> {:output "user " :isError false}
+
+;; Native tools go in through :tools, alongside every other source.
+(def tk (toolnexus/build {:skills "examples/skills"
+                          :tools  [whoami]}))
+
+(toolnexus/tool-names tk)
+;; => ["apply_patch" "bash" "edit" "glob" "grep" "question" "read"
+;;     "skill" "todowrite" "webfetch" "whoami" "write"]
+```
+
+| Key | Required | What it does |
+|---|---|---|
+| `:name` | yes | The tool name the model calls. Sanitise it with `toolnexus.tool/sanitize` if it comes from user data. |
+| `:description` | no | Defaults to `""`. This is what the model reads to decide whether to call the tool — write it for the model, not for you. |
+| `:input-schema` | no | JSON Schema as a Clojure map. Defaults to `{:type "object"}`. Emitted verbatim by all three adapters. |
+| `:run` | yes | `(fn [args])`, or `(fn [args ctx])` when `:ctx?` is true. |
+| `:ctx?` | no | Defaults to `false`. Set it to receive the Context as a second argument. |
+
+## See also
+
+- [Annotation / reflection tools](/api/clojure/native/reflect/) — why the schema is always explicit in this port.
+- [Gathering decorated functions](/api/clojure/native/collect/) — there is no collector in this port; the alternative is a vector.
+- [`toolnexus.http/http-tool`](/api/clojure/http/tool/) — the same idea when the function body would only be an HTTP call.
+- [`toolnexus.builtin/builtin-tools`](/api/clojure/builtins/create/) — the ten built-in tools, built the same way.

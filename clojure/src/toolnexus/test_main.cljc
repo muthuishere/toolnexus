@@ -22,6 +22,7 @@
             [toolnexus.http-test]
             [toolnexus.builtin-test]
             [toolnexus.client-test]
+            [toolnexus.translate-test]
             [toolnexus.a2a-test]
             [toolnexus.serve-test]
             [toolnexus.core-test]))
@@ -36,6 +37,7 @@
     toolnexus.http-test
     toolnexus.builtin-test
     toolnexus.client-test
+    toolnexus.translate-test
     toolnexus.a2a-test
     toolnexus.serve-test
     toolnexus.core-test])
