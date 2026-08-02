@@ -1,18 +1,24 @@
-# Runs the two Medium-article demos (clj-1 = JVM, cljgo-1 = native AOT binary)
-# against OpenRouter. Requires OPENROUTER_API_KEY in the environment — the value
-# is never echoed, only passed through by name.
+# The article demos, both hosts, one Taskfile. Requires OPENROUTER_API_KEY in
+# the environment — the value is only ever passed through by name, never echoed.
 #
-#   task ex1                 # clj-1 on the JVM
-#   task ex2                 # cljgo-1 AOT-compiled to ./announce, then run
-#   task all                 # both
-#   task ex1 MODEL=...       # override the model for a run
+#   task build-all            # AOT-compile the three cljgo binaries, ONCE
+#   task clj-ex1              # skills + native tool          (JVM)
+#   task clj-ex2              # MCP filesystem server         (JVM)
+#   task clj-ex3              # sub-agent + skill             (JVM)
+#   task cljgo-ex1 / -ex2 / -ex3   # the same sources as native binaries
+#   task repl-clj-ex1         # ex1 piped into a JVM REPL
+#   task repl-cljgo-ex1       # ex1 piped into the cljgo REPL
+#   task clj-ex1 MODEL=...    # any tool-capable OpenRouter model
 version: '3'
 
 vars:
-  # Small, cheap default. Override per-run: task ex1 MODEL=qwen/qwen-2.5-7b-instruct
+  # Small, cheap default. Override per-run: task clj-ex1 MODEL=qwen/qwen-2.5-72b-instruct
   MODEL: openai/gpt-4o-mini
   # The published cljgo, not the local-checkout shim.
   CLJGO: '{{.HOME}}/go/bin/cljgo'
+
+env:
+  TN_MODEL: '{{.MODEL}}'
 
 tasks:
   default:
@@ -27,30 +33,103 @@ tasks:
       - sh: test -n "$OPENROUTER_API_KEY"
         msg: 'OPENROUTER_API_KEY is not set. Export it first (the value is never printed).'
 
-  ex1:
-    desc: 'clj-1 on the JVM — skill + native tool against OpenRouter'
-    deps: [check-key]
-    dir: clj-1
-    env:
-      TN_MODEL: '{{.MODEL}}'
-    cmds:
-      - clojure -M -m demo
-
-  ex2:
-    desc: 'cljgo-1 — AOT-compile the same source to ./announce, then run it'
-    deps: [check-key]
-    dir: cljgo-1
-    env:
-      TN_MODEL: '{{.MODEL}}'
+  check-cljgo:
+    internal: true
+    silent: true
     preconditions:
       - sh: test -x {{.CLJGO}}
         msg: 'cljgo not found at {{.CLJGO}} — install it: go install github.com/muthuishere/cljgo@latest'
+
+  # ---- build once; the run tasks below only run ------------------------------
+
+  build-all:
+    desc: 'AOT-compile all three cljgo examples to native binaries'
+    deps: [check-cljgo]
     cmds:
-      - '{{.CLJGO}} build'
+      - cd cljgo-ex1 && {{.CLJGO}} build
+      - cd cljgo-ex2 && {{.CLJGO}} build
+      - cd cljgo-ex3 && {{.CLJGO}} build
+
+  # ---- JVM runs --------------------------------------------------------------
+
+  clj-ex1:
+    desc: 'ex1 on the JVM — agent skill (SKILL.md) + native tool announce a release'
+    deps: [check-key]
+    dir: clj-ex1
+    cmds:
+      - clojure -M -m demo
+
+  clj-ex2:
+    desc: 'ex2 on the JVM — a real MCP stdio server; the agent inspects its own project'
+    deps: [check-key]
+    dir: clj-ex2
+    cmds:
+      - clojure -M -m inspect
+
+  clj-ex3:
+    desc: 'ex3 on the JVM — a budgeted sub-agent as a tool, next to a skill'
+    deps: [check-key]
+    dir: clj-ex3
+    cmds:
+      - clojure -M -m newsroom
+
+  # ---- native runs (task build-all first) ------------------------------------
+
+  cljgo-ex1:
+    desc: 'ex1 as a native binary (run `task build-all` once first)'
+    deps: [check-key]
+    dir: cljgo-ex1
+    preconditions:
+      - sh: test -x ./announce
+        msg: 'cljgo-ex1/announce not built — run `task build-all` first.'
+    cmds:
       - ./announce
 
-  all:
-    desc: 'Run both demos (JVM, then native)'
+  cljgo-ex2:
+    desc: 'ex2 as a native binary (run `task build-all` once first)'
+    deps: [check-key]
+    dir: cljgo-ex2
+    preconditions:
+      - sh: test -x ./inspect
+        msg: 'cljgo-ex2/inspect not built — run `task build-all` first.'
     cmds:
-      - task: ex1
-      - task: ex2
+      - ./inspect
+
+  cljgo-ex3:
+    desc: 'ex3 as a native binary (run `task build-all` once first)'
+    deps: [check-key]
+    dir: cljgo-ex3
+    preconditions:
+      - sh: test -x ./newsroom
+        msg: 'cljgo-ex3/newsroom not built — run `task build-all` first.'
+    cmds:
+      - ./newsroom
+
+  # ---- REPL modes — the same source, evaluated form by form ------------------
+
+  repl-clj-ex1:
+    desc: 'ex1 piped into a JVM REPL (clojure -r) — no main, forms evaluated live'
+    deps: [check-key]
+    dir: clj-ex1
+    cmds:
+      - printf "(require 'demo)\n(demo/-main)\n" | clojure -M -r
+
+  repl-cljgo-ex1:
+    desc: 'ex1 piped into the cljgo REPL — same forms, Go host'
+    deps: [check-key, check-cljgo]
+    dir: cljgo-ex1
+    cmds:
+      - printf "(require 'demo)\n(demo/-main)\n" | {{.CLJGO}} repl
+
+  # ---- everything ------------------------------------------------------------
+
+  all:
+    desc: 'build-all, then every example on both hosts'
+    cmds:
+      - task: build-all
+      - task: clj-ex1
+      - task: clj-ex2
+      - task: clj-ex3
+      - task: cljgo-ex1
+      - task: cljgo-ex2
+      - task: cljgo-ex3

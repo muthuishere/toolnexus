@@ -1,0 +1,4 @@
+;; The SAME inspect.cljc, compiled to a native Go binary by cljgo.
+(defn build [b]
+  (dep b "net.clojars.muthuishere/toolnexus" {:mvn/version "0.13.0"})
+  (install b (exe b {:name "inspect" :main "src/inspect.cljc"})))
