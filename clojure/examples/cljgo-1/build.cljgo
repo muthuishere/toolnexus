@@ -1,0 +1,8 @@
+;; The SAME demo.cljc, compiled to a native Go binary by cljgo.
+;;
+;;   cljgo build && OPENROUTER_API_KEY=... ./announce
+;;
+;; Same artifact from Clojars, same source file as ../clj-1 — that is the point.
+(defn build [b]
+  (dep b "net.clojars.muthuishere/toolnexus" {:mvn/version "0.13.0"})
+  (install b (exe b {:name "announce" :main "src/demo.cljc"})))
