@@ -1,0 +1,15 @@
+;; toolnexus (Clojure port) benchmark runner — the cljgo half.
+;;
+;;   $HOME/go/bin/cljgo build      -> ./bench, an AOT-compiled Go binary
+;;
+;; ONE source tree, two hosts: `src/toolnexus` is the same symlink the JVM
+;; project on this directory's deps.edn puts on its classpath, and `bench.cljc`
+;; is the same file. That is the whole point of measuring both — the numbers
+;; differ because the RUNTIME differs, not because the code does.
+;;
+;; Build it with the PUBLISHED cljgo ($HOME/go/bin/cljgo, v0.9.0), never the
+;; `cljgo` shim on PATH: that one rebuilds from a local checkout, so it would
+;; measure whatever is in a working tree rather than a released compiler.
+(defn build [b]
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.11.0"})
+  (install b (exe b {:name "bench" :main "src/bench.cljc"})))
