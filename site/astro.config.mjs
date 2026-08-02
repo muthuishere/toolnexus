@@ -107,12 +107,13 @@ export default defineConfig({
 						{ label: 'Java', slug: 'api/java' },
 						{ label: 'C#', slug: 'api/csharp' },
 							{ label: 'Elixir', slug: 'api/elixir' },
+						{ label: 'Clojure', slug: 'api/clojure' },
 					],
 				},
 				{
 					label: 'Reference',
 					items: [
-						{ label: 'Install — all six languages', slug: 'install' },
+						{ label: 'Install — all seven languages', slug: 'install' },
 						{ label: 'Ecosystem & references', slug: 'references' },
 					],
 				},
