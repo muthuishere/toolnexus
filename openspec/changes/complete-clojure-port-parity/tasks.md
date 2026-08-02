@@ -54,7 +54,19 @@ with no Clojure implementation:
       the backwards scan for the most recent `user` turn silently found nothing
       and the fallback never fired — JVM green, cljgo red. Worked around with an
       explicit `loop`; reported upstream.
-- [ ] 5b.5 `agent-home` (`js/src/agents/home.ts`)
+- [~] 5b.5 `agent-home` (`js/src/agents/home.ts`) — §7E. PARTLY:
+      `toolnexus.agents.home/compose-soul` (the seven bootstrap files in the
+      pinned order, 2 MiB byte cap) and `home/memory-tool` (add/replace/remove
+      over MEMORY.md and USER.md, a miss is a loud isError) both ship, with 17
+      tests that read the files back off disk. STILL MISSING: `from-dir` and
+      `start-agent` (the heartbeat) — both compose an AgentDef, so both are
+      blocked on 5b.2/5b.3.
+
+PUBLISH GATE: 5b.2, 5b.3 and the remainder of 5b.5 are what hold this port back
+from Clojars. Everything else the other six ports ship is here and green in all
+five execution modes. The decision on record is that a partial port is not
+published: "byte-identical across seven languages" must not become false for the
+first person who reaches for an agent team.
 
 NOTE FOR THE GATE ITSELF: that these were invisible is a defect in
 `check_options_parity.py`, not just in this port. A port can be missing an
