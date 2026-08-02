@@ -128,8 +128,16 @@ log "== every execution mode"
 run_mode jvm-main  "clojure -M -m toolnexus.test-main"
 run_mode jvm-repl  "printf \"(require 'toolnexus.test-main)\\n(toolnexus.test-main/-main)\\n\" | clojure -r"
 
-if ! $CLJGO build >/dev/null 2>&1; then
+# Output KEPT, not discarded. The first version sent this to /dev/null, and when
+# it failed in CI the diagnosis went with it — the run reported "cannot produce
+# the AOT binary" and nothing else, so the cause had to be guessed from a
+# distance. Same defect as the per-leg logging, missed one step higher up.
+if ! $CLJGO build > "$LOGDIR/cljgo-build.log" 2>&1; then
   log "  FAIL  cljgo build — cannot produce the AOT binary"
+  log "        --- cljgo build output ---"
+  sed 's/^/        /' "$LOGDIR/cljgo-build.log" >&2
+  log "        --- cljgo version ---"
+  $CLJGO version 2>&1 | sed 's/^/        /' >&2
   rows="$rows{\"mode\":\"cljgo-aot\",\"gate\":\"FAILED: build\"},"
   fail=1
 else

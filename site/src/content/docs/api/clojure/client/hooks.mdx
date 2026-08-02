@@ -1,8 +1,8 @@
 ---
-title: "Hooks — lifecycle middleware"
+title: "toolnexus.client/create-client"
 description: "Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite. — Clojure."
 sidebar:
-  label: "client / hooks"
+  label: "toolnexus.client/create-client"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -11,82 +11,138 @@ import { Aside } from '@astrojs/starlight/components';
 <strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
 </p>
 
-<Aside type="caution" title="Not available in Clojure">
-This port ships no hooks. There is no `:hooks` option and no before/after model or tool
-interception point on `toolnexus.client/create-client` — it is recorded parity debt against the six
-full-tier ports. `:body-transform` is the one request-shaping seam that exists, and it sees only
-the outbound request body.
-</Aside>
-
-Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
-
-## What to use instead
-
-Three seams cover most of what hooks are used for, and none of them requires the library to grow a
-middleware stack.
-
-**Before the model call** — `:body-transform` runs last in the request pipeline, sees the fully
-assembled body including `messages` and `tools`, and its return value is what goes on the wire.
-That is the redact / rewrite / audit slot.
-
-**Around a tool call** — wrap the tool. A Tool is a plain map with an `:execute` closure, so
-decorating one is `update`, not a framework.
-
 ```clojure
-(require '[toolnexus.tool :as tool]
-         '[toolnexus.client :as client])
-
-(defn- audited-call [f t allowed args ctx]
-  (if-not (contains? allowed (:name t))
-    ;; a veto is an error ToolResult, not a throw — the model sees it and adapts
-    (tool/failure (str "blocked by policy: " (:name t)))
-    (let [r (if ctx (f args ctx) (f args))]
-      (println "tool" (:name t) (if (:isError r) "ERROR" "ok"))
-      r)))
-
-(defn audited
-  "Wrap a Tool so every call is logged and only allowlisted tools run."
-  [t allowed]
-  (update t :execute
-          (fn [f]
-            (fn
-              ([args]     (audited-call f t allowed args nil))
-              ([args ctx] (audited-call f t allowed args ctx))))))
-
-(def guarded
-  (tool/toolkit (mapv #(audited % #{"read" "grep" "glob"})
-                      (tool/all-tools toolkit))))
-
-(def llm
-  (client/create-client
-    {:base-url       "https://api.anthropic.com"
-     :style          "anthropic"
-     :model          "claude-sonnet-4-5"
-     ;; the before-model seam: the body is yours to inspect and rewrite
-     :body-transform (fn [body]
-                       (println "->" (count (:messages body)) "messages,"
-                                (count (:tools body)) "tools")
-                       body)}))
-
-(client/run llm "Summarise the failing tests" {:toolkit guarded})
+(toolnexus.client/create-client
+  {:base-url "https://api.anthropic.com"
+   :style    "anthropic"
+   :model    "claude-sonnet-4-6"
+   :hooks    {:before-llm  (fn [{:keys [messages tools model turn]}] nil)   ; -> {:messages …} / {:tools …}
+              :after-llm   (fn [{:keys [response model turn]}] nil)         ; observe only
+              :before-tool (fn [{:keys [name args id turn]}] nil)           ; -> {:result …} or {:args …}
+              :after-tool  (fn [{:keys [name args result id turn]}] nil)}}) ; -> {:result …}
 ```
 
-Keep the wrapper multi-arity. `toolnexus.tool/execute` calls `(f args)` when there is no §1
-Context and `(f args ctx)` when there is one, and a suspension's post-`wait-for` retry always
-arrives on the two-argument arity.
+There is no `Hooks` type — hooks are a plain map under `:hooks`, and every key is optional. Each
+hook takes one map and returns one map, or `nil`; **`nil` changes nothing**, which is the common
+case because most hooks only observe. Every application inside the loop is an `or` against the
+current value rather than a blind overwrite, so an observer cannot accidentally blank a field.
 
-**Observing rather than changing** — [`:on-metric`](/api/clojure/client/metrics/) already emits one
-event per LLM call, one per tool call and one per run, and [`:on-event`](/api/clojure/client/run/)
-emits `tool_call` / `tool_result` / `pending` / `usage` / `done` as the loop moves. If your hook
-would only have logged, counted or traced, use those — they are the observation seam, and they cost
-nothing when unset.
+The event maps are kebab-case, because a hook never crosses the wire. The one exception is the
+`ToolResult` a tool hook carries, which keeps its pinned `:isError` — that one does cross the wire.
 
-The one thing this arrangement cannot do is cancel an in-flight model call from a callback. Bound
-the run with [`:timeout-ms` and `:on-error`](/api/clojure/client/resilience/) instead.
+## When to use it
+
+- **Audit and cost tracing** — `:after-llm` receives the provider's decoded response, so `usage` is
+  right there. Use it for logging and tracing; use `:on-metric` when you want the semantic event
+  rather than the raw payload.
+- **A policy gate on tools** — `:before-tool` returning `{:result …}` **short-circuits**: the real
+  tool never runs. That one shape covers deny, dry-run and cache-hit.
+- **Rewriting a call** — `:before-tool` returning `{:args …}` replaces the arguments. Those args are
+  what runs, what the transcript records, and what a §10 retry re-executes with.
+- **Redacting output** — `:after-tool` returning `{:result …}` replaces the result the model sees.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use :body-transform when you care about the wire, not the loop">
+`:before-llm` operates on the loop's own values — `messages` and `tools`, before the body is
+assembled. [`:body-transform`](/api/clojure/client/create/) sits at the other end of the pipeline
+and sees the fully marshalled body. The order is the spec: base body → `:before-llm` →
+`:request-params` merge → `:body-transform` → marshal → wire. Reach for a hook to change what the
+loop believes; reach for `:body-transform` to change what the HTTP call sends.
+</Aside>
+
+Two behaviours are worth knowing before you rely on them:
+
+- **A suspension skips `:after-tool`.** A pending `Request` is not a real result, so the hook does
+  not fire for it. The resolved result — once `:wait-for` has answered — does flow through
+  `:after-tool`, so a redaction hook still sees it exactly once.
+- **`before-llm!` and `after-llm!` are public.** They are public because §11
+  [`toolnexus.translate/translate`](/api/clojure/translate/translate/) must fire `:before-llm`
+  exactly once for its single call, and a second copy of that rule in another namespace is
+  precisely the drift the ports exist to prevent.
+
+## Examples
+
+### 1. Observe — log every model call and every tool call
+
+```clojure
+(require '[toolnexus.client :as client]
+         '[toolnexus.core :as core])
+
+(def tk (core/build {:skills "examples/skills"}))
+
+(def c
+  (client/create-client
+    {:base-url "https://api.anthropic.com"
+     :style    "anthropic"
+     :model    "claude-sonnet-4-6"
+     :hooks    {:after-llm  (fn [{:keys [response turn]}]
+                              (println "turn" turn "usage" (:usage response))
+                              nil)
+                :after-tool (fn [{:keys [name args]}]
+                              (println "called" name "with" args)
+                              nil)}}))          ; nil => nothing is rewritten
+
+(client/run c "list the skills you have" {:toolkit tk})
+```
+
+### 2. Gate — deny a tool without the tool ever running
+
+```clojure
+(def read-only
+  {:before-tool (fn [{:keys [name]}]
+                  (when (#{"bash" "write" "edit" "apply_patch"} name)
+                    ;; a short-circuit result: the model sees a refusal, the tool never runs
+                    {:result {:output (str "denied: " name " is disabled in this environment")
+                              :isError true}}))})
+
+(def c (client/create-client {:base-url "https://api.anthropic.com"
+                              :style    "anthropic"
+                              :model    "claude-sonnet-4-6"
+                              :hooks    read-only}))
+```
+
+Returning `nil` for every other tool name is what lets the rest through — the `when` yields `nil` on
+a miss, and `nil` means "no opinion".
+
+### 3. Rewrite both directions — pin an argument, redact an output
+
+```clojure
+(require '[clojure.string :as str])
+
+(def tenant-scoped
+  {;; force every search into this tenant, whatever the model asked for
+   :before-tool (fn [{:keys [name args]}]
+                  (when (= name "search")
+                    {:args (assoc args :tenant "acme")}))
+
+   ;; never let a token reach the transcript
+   :after-tool  (fn [{:keys [result]}]
+                  (let [redacted (str/replace (:output result) #"sk-[A-Za-z0-9]+" "sk-***")]
+                    (when (not= redacted (:output result))
+                      {:result (assoc result :output redacted)})))
+
+   ;; trim the tool list the model is offered on later turns
+   :before-llm  (fn [{:keys [tools turn]}]
+                  (when (> turn 3)
+                    {:tools (vec (take 5 tools))}))})
+```
+
+The rewritten `:args` are authoritative — they are what executes, what the transcript records, and
+what a §10 resume re-executes with — so a hook that scopes a tenant cannot be undone by a retry.
+
+## The four hooks
+
+| Hook | Receives | What returning a map changes |
+|---|---|---|
+| `:before-llm` | `{:messages :tools :model :turn}` | `{:messages …}` and/or `{:tools …}`, applied before the body is assembled |
+| `:after-llm` | `{:response :model :turn}` | Nothing. Observe only — a return value would be a silent contract |
+| `:before-tool` | `{:name :args :id :turn}` | `{:result …}` short-circuits the call · `{:args …}` rewrites it |
+| `:after-tool` | `{:name :args :result :id :turn}` | `{:result …}` replaces what the model sees. Skipped for a suspension |
 
 ## See also
 
-- [`toolnexus.client/create-client`](/api/clojure/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
-- [`toolnexus.client/run`](/api/clojure/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
-- [`toolnexus.client/create-client`](/api/clojure/client/metrics/) — Emit one metric event per model call and per tool call: tokens, latency, outcome.
-- [`toolnexus.client/create-client`](/api/clojure/client/resilience/) — `:retries`, `:timeout-ms` and the `:on-error` classifier.
+- [`toolnexus.client/create-client`](/api/clojure/client/create/) — the rest of the option map, including `:body-transform` and `:request-params`
+- [`toolnexus.client/run`](/api/clojure/client/run/) — the loop the hooks fire inside, and its `:on-event` sink
+- [metrics — `:on-metric`](/api/clojure/client/metrics/) — the semantic event instead of the raw payload
+- [`toolnexus.translate/translate`](/api/clojure/translate/translate/) — the one-call path that fires `:before-llm` exactly once

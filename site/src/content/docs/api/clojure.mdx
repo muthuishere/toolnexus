@@ -11,15 +11,15 @@ the [combined API Reference](/api/) for the shared surface in the other ports' t
 import { Aside } from '@astrojs/starlight/components';
 
 <Aside type="note">
-This port is wired into the shared conformance checker at tier **core** (the SPEC §0 contract),
-while the six shipped ports are at tier **full**. Every core option is present; what is still
-missing at full tier is client **hooks**, the §7D–§7F layers (sub-agents, personas, compaction),
-real **SSE streaming** (the loop buffers and emits no text deltas) and **durable cross-process
-resume**. Those are recorded in `clojure/README.md` — note that the README runs behind the code
-(the client's `:retries`, `:timeout-ms`, `:store`, `:on-metric`, `:on-error`, `:request-params`,
-`:body-transform` and `:http-client`, the toolkit's skill/agent/disable options, §11 `translate`
-and the MCP elicitation bridge are all implemented), so the source is the authority. Symbols below
-are the real public surface of `clojure/src/toolnexus/`.
+This port is wired into the shared conformance checker at tier **full**, the same tier as the six
+published ports (`conformance/options_manifest.json`). What it still does not ship is the §7D–§7F
+layers (sub-agents, personas, compaction), real **SSE streaming** — the loop buffers and emits no
+text deltas, and synthesising deltas from a buffered body would be a lie — and **durable
+cross-process resume**. `clojure/README.md` runs behind the code (client `:hooks`, `:retries`,
+`:timeout-ms`, `:store`, `:on-metric`, `:on-error`, `:request-params`, `:body-transform` and
+`:http-client`, the toolkit's skill/agent/disable options, §11 `translate` and the MCP elicitation
+bridge are all implemented), so the source is the authority. Symbols below are the real public
+surface of `clojure/src/toolnexus/`.
 </Aside>
 
 Namespaces live under **`toolnexus.*`** (`clojure/src/toolnexus/`). koine coordinate:
@@ -118,10 +118,10 @@ ports — open the **Clojure** topic in the API-reference picker, or start at
 
 <Aside type="caution">
 **Not in this port**: local sub-agents / `team` / `Budget` (§7D), the `memory` built-in and the
-`fromDir`/heartbeat persona layer (§7E), the compactor (§7F), `beforeLLM`/`afterLLM` hooks, and SSE
-text-delta streaming — `run`'s `:on-event` sink emits `tool_call`, `tool_result`, `pending`, `usage`
-and `done`, but no text deltas, because the loop buffers the whole response. A2A remote agents
-(above) are the cross-process form of delegation this port does ship.
+`fromDir`/heartbeat persona layer (§7E), the compactor (§7F), and SSE text-delta streaming —
+`run`'s `:on-event` sink emits `tool_call`, `tool_result`, `pending`, `usage` and `done`, but no
+text deltas, because the loop buffers the whole response. A2A remote agents (above) are the
+cross-process form of delegation this port does ship.
 </Aside>
 
 ## Translation — `toolnexus.translate`

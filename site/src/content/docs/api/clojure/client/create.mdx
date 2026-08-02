@@ -25,7 +25,7 @@ import { Aside } from '@astrojs/starlight/components';
 ;;   :request-params  shallow-merged into the request body, wins on collision
 ;;   :body-transform  (fn [body] body) — runs last, its return value is sent
 ;;   :http-client     (fn [url headers body] response) — supply the transport
-;;   … plus the :retries / :on-metric / :store / :wait-for slices, each on its own page
+;;   … plus the :hooks / :retries / :on-metric / :store / :wait-for slices, each on its own page
 
 ;; the returned client is a plain map with the defaults filled in:
 ;;   {:base-url "…" :model "…" :style "openai" :max-turns 10
@@ -164,6 +164,7 @@ routed through it.
 | `:request-params` | `nil` | Shallow-merged into the body, wins on collision. `:messages` / `:tools` / `:stream` are ignored. |
 | `:body-transform` | `nil` | `(fn [body] body)` — runs after the merge; its return value is sent. |
 | `:http-client` | koine | `(fn [url headers body] response)` for the LLM call only. |
+| `:hooks` | `nil` | `{:before-llm :after-llm :before-tool :after-tool}` — §8 lifecycle middleware. Absent changes nothing. |
 
 With neither `:request-params` nor `:body-transform` set the body is byte-identical to the default,
 and explicitly-nil options are indistinguishable from absent ones.
@@ -176,3 +177,4 @@ and explicitly-nil options are indistinguishable from absent ones.
 - [`toolnexus.client/create-client`](/api/clojure/client/metrics/) — Emit one metric event per model call and per tool call: tokens, latency, outcome.
 - [`toolnexus.client/create-client`](/api/clojure/client/resilience/) — `:retries`, `:retry-base-ms`, `:timeout-ms` and the `:on-error` classifier.
 - [`toolnexus.client/create-client`](/api/clojure/suspension/wait-for/) — `:wait-for`, the one host slot of SPEC §10.
+- [`toolnexus.client/create-client`](/api/clojure/client/hooks/) — `:hooks`, the four lifecycle interception points.
