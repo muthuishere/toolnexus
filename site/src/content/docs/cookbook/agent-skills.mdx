@@ -1,6 +1,6 @@
 ---
 title: Agent skills
-description: toolnexus reads the open SKILL.md standard — the same agent skills Claude Code, opencode, Codex and the community ship — and gives them to ANY model. In all six languages.
+description: toolnexus reads the open SKILL.md standard — the same agent skills Claude Code, opencode, Codex and the community ship — and gives them to ANY model. In all seven languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -93,6 +93,15 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options()
 {:ok, tk} = Toolnexus.create_toolkit(skills_dir: "./skills")   # one or more skill roots
 res = Toolnexus.Toolkit.execute(tk, "skill", %{"name" => "hello-world"})
 IO.puts(res.output)
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.core :as tn])
+
+(def tk (tn/build {:skills "./skills"}))     ; one root, or a seq of roots
+(def res (tn/execute tk "skill" {:name "hello-world"}))
+(println (:output res))
 ```
 </TabItem>
 </Tabs>

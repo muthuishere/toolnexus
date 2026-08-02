@@ -1,11 +1,13 @@
 ---
-title: Install — all six languages
-description: Install toolnexus in JavaScript, Python, Go, Java, C# or Elixir. Same behavior, native shape.
+title: Install — all seven languages
+description: Install toolnexus in JavaScript, Python, Go, Java, C#, Elixir or Clojure. Same behavior, native shape.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-All six ports are published from the same release and carry the same version.
+The six shipped ports are published from the same release and carry the same version. The seventh —
+Clojure — is a single `.cljc` source tree (JVM + [cljgo](https://github.com/muthuishere/cljgo)) with
+[koine](https://github.com/muthuishere/koine) as its only dependency.
 
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">
@@ -50,6 +52,15 @@ def deps do
 end
 ```
 Elixir ≥ 1.16 / OTP 26 · [Hex · toolnexus](https://hex.pm/packages/toolnexus) · MCP client: in-house (OTP-supervised, no SDK)
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+;; deps.edn — the toolnexus.* namespaces live under clojure/src/,
+;; koine is the only third-party dependency
+{:deps {net.clojars.muthuishere/koine {:mvn/version "0.7.3"}}}
+```
+Clojure CLI (JVM) or [cljgo](https://github.com/muthuishere/cljgo) · MCP client: in-house over
+[koine](https://github.com/muthuishere/koine) (`koine.process` stdio / `koine.http` streamable-HTTP)
 </TabItem>
 </Tabs>
 

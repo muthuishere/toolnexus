@@ -1,0 +1,111 @@
+---
+title: API Reference — Clojure
+description: The toolnexus Clojure port — toolkit, client, skills, MCP, adapters, native/HTTP/built-in tools, A2A and suspension — one .cljc source tree that runs on the JVM and on cljgo, with each symbol's equivalents in the other ports.
+---
+
+The **seventh port**: one `.cljc` source tree that runs unchanged on **Clojure (JVM)** and on
+[**cljgo**](https://github.com/muthuishere/cljgo) (Clojure hosted on Go). Every host difference
+lives behind [koine](https://github.com/muthuishere/koine), the only third-party dependency. See
+the [combined API Reference](/api/) for the shared surface in the other ports' tabs.
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="note">
+This port is wired into the shared conformance checker at tier **core** (the SPEC §0 contract),
+while the six shipped ports are at tier **full**. Every core option is present; the full-tier
+options — client `hooks`/`retries`/`timeout-ms`/`store`/`on-metric`, toolkit `agents` (sub-agents)
+/`skill-provider`/`disable-tools`, MCP elicitation bridging, real SSE streaming, and durable resume
+— are recorded as parity debt in `clojure/README.md`. Symbols below are the real public surface of
+`clojure/src/toolnexus/`.
+</Aside>
+
+Namespaces live under **`toolnexus.*`** (`clojure/src/toolnexus/`). koine coordinate:
+`net.clojars.muthuishere/koine`.
+
+## Toolkit — `toolnexus.core/build`
+
+- `(build {:keys [mcp skills builtins tools]}) -> toolkit`
+  - `:mcp` — an `mcp.json` string or map (§2/§0.3)
+  - `:skills` — a skills root string, or a seq of roots (§3)
+  - `:builtins` — the §0.11 toggle: `false | {:disabled ..} | {:enabled ..} | {:tools {..}}`
+  - `:tools` — extra Tools of your own (native, http, a2a — anything)
+- Returns `{:tools .. :sources .. :skills .. :statuses .. :errors .. :connections ..}`. Every
+  source is isolated: a dead MCP server contributes an error + status, never an exception.
+- `(shutdown! tk)` — disconnect every MCP connection the toolkit opened (idempotent).
+- `(tool-names tk)` — sorted tool names. `(execute tk name args)` / `(execute tk name args ctx)`.
+- Equivalents: `createToolkit` (js) · `create_toolkit` (py) · `CreateToolkit` (go) ·
+  `Toolkit.create` (java) · `Toolkit.CreateAsync` (c#) · `Toolnexus.create_toolkit` (elixir).
+
+## Skills — `toolnexus.skill`
+
+- `(load-skills roots) -> {:skills .. :skipped ..}` — one root (string) or several (seq); an
+  earlier root wins a name collision.
+- `(list-skills roots) -> {:skills .. :skipped ..}` — discover + validate without building a
+  toolkit; typed skip reasons `missing-name` · `malformed-frontmatter` · `duplicate-name` ·
+  `unreadable`.
+- `(skill-tool loaded)` — the single `skill` tool over a loaded source (progressive disclosure);
+  `(skills-prompt loaded)` — the §3/§0.6 system-prompt catalog (re-exported as
+  `toolnexus.core/skills-prompt`).
+- A **data skill** is a plain map: `{:name .. :description .. :body .. :dir .. :files [..]}`.
+- Equivalents: `loadSkills` / `listSkills` (js) · `load_skills` / `list_skills` (py) ·
+  `LoadSkillsWith` / `ListSkills` (go) · `SkillSource.loadWith` / `listSkills` (java) ·
+  `SkillSource.LoadWith` / `ListSkills` (c#) · `Toolnexus.Skill.load` / `Toolnexus.Skill.list` (elixir).
+
+## MCP · Adapters · Client
+
+- `toolnexus.mcp` — `(from-config config)` connects every server (stdio + streamable-HTTP),
+  returns `{:tools .. :statuses .. :connections .. :errors ..}`; `(tools conn)`, `(disconnect conn)`,
+  `(disconnect-all conns)`.
+- Adapters (`toolnexus.adapter`, re-exported on `core`): `(to-openai tk)` · `(to-anthropic tk)` ·
+  `(to-gemini tk)`.
+- Client (`toolnexus.client`): `(create-client opts)` → `(run client prompt {:toolkit tk :history [..] :on-event f :conversation-id id})`.
+
+## Tools you build — native, HTTP, built-ins
+
+- `toolnexus.native/native-tool` — map form
+  `(native-tool {:name .. :description .. :input-schema {..} :run (fn [args] ..)})`; a tool that
+  needs the §1 Context declares `:ctx? true` and its `:run` takes `(fn [args ctx] ..)`. (The flag
+  exists because Clojure/cljgo have no portable fn-arity introspection.)
+- `toolnexus.http/http-tool` — `(http-tool {:name .. :description .. :method :get :url ".../{id}"
+  :headers {"authorization" "Bearer ${API_TOKEN}"} :query [:verbose] :body "json" :timeout-ms 30000
+  :result-mode "text"})`. `:timeout-ms` in **milliseconds** (default 30000); `:body` is
+  `"json" | "form" | "raw"`; `:result-mode` is `"text" | "json" | "status+text"`.
+- `toolnexus.builtin` — `builtin-names` / `builtin-tools`: the same ten built-ins, `source
+  "builtin"`, identical names: `bash · read · write · edit · grep · glob · webfetch · question ·
+  apply_patch · todowrite`. The toolkit `:builtins` toggle selects them.
+- `toolnexus.tool` — the primitives every source flows through: `(tool {..})`, `(success output)` /
+  `(failure output)` (deliberately **not** `ok`/`err` — those shadow a `clojure.core` name on
+  cljgo), `(toolkit tools)`, `(add-tools tk tools)`, `(tool-names tk)`, `(execute tk name args)`.
+- Equivalents: `defineTool` / `httpTool` (js) · `define_tool` / `http_tool` (py) · `NativeTool` /
+  `HTTPTool` (go) · `NativeTool.of` / `HttpTool.of` (java) · `NativeTool.Of` / `HttpTool.Of` (c#) ·
+  `Toolnexus.Native.define_tool` / `Toolnexus.Http.tool` (elixir).
+
+## A2A — serve & remote agents
+
+- Serve (`toolnexus.serve`): `(serve tk {:port 0 :a2a {..} :mcp {..} :skills .. :client llm :on-task f :on-call f})`
+  → `{:url :port :store :stop! :handle}`; `(stop! handle)`. `:a2a`/`:mcp` absent ⇒ those routes off.
+  `(agent-card a2a base skills)`.
+- Remote agents (`toolnexus.a2a`): `(remote-agent {:card url :headers {..} :timeout ms :poll-every ms})`
+  → `{:card .. :endpoint .. :tools [..]}`; a failing agent is isolated to `{:tools [] :error ".."}`.
+  `(agent-tools spec)` returns just the tools. Pass the tools via `build`'s `:tools`.
+- Equivalents: `tk.serve` / `agent` + `tk.addAgent` (js) · `serve` / `add_agent` (py) · `Serve` /
+  `AddAgent` (go) · `serve` / `addAgent` (java) · `ServeAsync` / `AddAgentAsync` (c#) ·
+  `Toolkit.serve` / `Toolkit.add_agent` (elixir).
+
+<Aside type="caution">
+**Not in this port** (parity debt, see `clojure/README.md`): local sub-agents / `team` / `Budget`,
+the `memory` built-in and `fromDir`/heartbeat persona layer, `beforeLLM`/`afterLLM` hooks + the
+compactor, and SSE text-delta streaming. A2A remote agents (above) are the cross-process form of
+delegation this port does ship.
+</Aside>
+
+## Suspension & the human loop — `toolnexus.client`
+
+- `:wait-for` — the host resolver on `create-client`: `(fn [request] answer)`, the one host slot of §10.
+- `(make-request kind prompt opts)` · `(make-answer id ok data reason)`.
+- `(suspend request)` / `(suspend request output)` — a `ToolResult` whose `metadata.pending` is a
+  `Request` **is** a suspension (§0.12); `(pending-of result)` returns that `Request` or nil.
+- `(auth-required url)` / `(auth-required url prompt)` — a `kind:"authorization"` suspension at `url`.
+- Equivalents: `waitFor` / `pending` / `authRequired` / `pendingOf` (js) · `wait_for` / `pending`
+  (py) · `WaitFor` / `Pending` / `AuthRequired` / `PendingOf` (go) · `waitFor` / `ToolResult.pending`
+  (java) · `WithWaitFor` / `ToolResult.Pending` (c#) · `wait_for` / `ToolResult.pending?` (elixir).

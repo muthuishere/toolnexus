@@ -1,6 +1,6 @@
 ---
 title: HTTP / REST tools
-description: Turn a REST endpoint into a tool with placeholder URLs and ${ENV} headers, in all six languages.
+description: Turn a REST endpoint into a tool with placeholder URLs and ${ENV} headers, in all seven languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -99,6 +99,19 @@ get_post = Toolnexus.Http.tool(
     "properties" => %{"id" => %{"type" => "integer"}}, "required" => ["id"]}
 )
 tk = Toolnexus.Toolkit.register(tk, [get_post])
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.core :as tn] '[toolnexus.http :as http])
+
+(def get-post
+  (http/http-tool
+    {:name "get_post" :description "Fetch a placeholder blog post by id."
+     :method :get :url "https://jsonplaceholder.typicode.com/posts/{id}"
+     :input-schema {:type "object"
+                    :properties {:id {:type "number"}} :required ["id"]}}))
+(def tk (tn/build {:tools [get-post]}))
 ```
 </TabItem>
 </Tabs>

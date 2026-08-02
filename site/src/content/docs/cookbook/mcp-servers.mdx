@@ -1,6 +1,6 @@
 ---
 title: MCP servers
-description: Point the toolkit at an mcp.json and every server's tools appear, uniform and vendor-neutral — in all six languages.
+description: Point the toolkit at an mcp.json and every server's tools appear, uniform and vendor-neutral — in all seven languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -59,6 +59,14 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options()
 {:ok, tk} = Toolnexus.create_toolkit(
   mcp_config: "./mcp.json"           # path, raw JSON string, or a parsed map
 )
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.core :as tn])
+
+(def tk (tn/build {:mcp "./mcp.json"}))    ; path, raw JSON string, or a parsed map
+(tn/tool-names tk)                          ; sorted; (:statuses tk) shows any failed server
 ```
 </TabItem>
 </Tabs>

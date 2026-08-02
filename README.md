@@ -14,7 +14,8 @@
 
 Point toolnexus at an `mcp.json` and a `skills/` folder and you get a **working agent**: the
 tool-calling loop, skills injection, six unified tool sources, and conversation memory — all
-included. Vendor-neutral, byte-identical across **JavaScript · Python · Go · Java · C# · Elixir**.
+included. Vendor-neutral, byte-identical across **JavaScript · Python · Go · Java · C# · Elixir**,
+plus a seventh **Clojure** port (one `.cljc` tree on the JVM + cljgo, at the SPEC core tier).
 
 > **Right-sized.** Not a framework — no builders, advisors, runnables, or config to wade through.
 > Not a toy that falls over the moment you need streaming or a retry. Exactly what a real agent
@@ -28,6 +29,7 @@ go get github.com/muthuishere/toolnexus/golang    # Go
 dotnet add package Toolnexus                       # C#
 {:toolnexus, "~> 0.11"}                             # Elixir (mix.exs deps)
 # Java (Maven): io.github.muthuishere:toolnexus:0.12.0
+# Clojure (deps.edn): not yet on Clojars — one .cljc tree, runs on Clojure (JVM) and cljgo
 ```
 
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
@@ -137,9 +139,12 @@ from scratch:
 | Java   | [`java/`](java/)     | `io.modelcontextprotocol.sdk:mcp` (official)    |
 | C#     | [`csharp/`](csharp/) | `ModelContextProtocol` (official)               |
 | Elixir | [`elixir/`](elixir/) | in-house MCP client (OTP-supervised, no SDK)    |
+| Clojure| [`clojure/`](clojure/) | in-house MCP client over [koine](https://github.com/muthuishere/koine) (JVM + cljgo) |
 
-The language-independent behavior is pinned in **[SPEC.md](SPEC.md)** so all six stay
-byte-compatible (especially the skill loader output).
+The language-independent behavior is pinned in **[SPEC.md](SPEC.md)** so all the shipped ports stay
+byte-compatible (especially the skill loader output). The Clojure port (one `.cljc` source tree on
+the JVM and [cljgo](https://github.com/muthuishere/cljgo)) is the seventh, at the SPEC §0 **core**
+tier — see [`clojure/README.md`](clojure/README.md) for its measured parity debt.
 
 ## Six tool sources, one interface
 
@@ -373,7 +378,7 @@ cd golang && go build -o toolnexus ./cmd/toolnexus
 ## Per-language docs
 
 Full docs site (all six languages): **<https://muthuishere.github.io/toolnexus/>**.
-Per port: [`js/`](js/) · [`python/`](python/) · [`golang/`](golang/) · [`java/`](java/) · [`csharp/`](csharp/) · [`elixir/`](elixir/) — quickstarts and API.
+Per port: [`js/`](js/) · [`python/`](python/) · [`golang/`](golang/) · [`java/`](java/) · [`csharp/`](csharp/) · [`elixir/`](elixir/) · [`clojure/`](clojure/) — quickstarts and API.
 Embedding in a Go app? See [`golang/GUIDE.md`](golang/GUIDE.md).
 [`examples/`](examples/) holds the shared `mcp.json` + sample skill used by every
 implementation's examples and tests. The cross-language contract lives in [SPEC.md](SPEC.md).

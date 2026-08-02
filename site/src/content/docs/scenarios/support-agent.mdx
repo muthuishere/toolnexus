@@ -1,6 +1,6 @@
 ---
 title: A customer-support agent
-description: Answer customer questions from your real systems (orders, CRM) over MCP, keep policy in agent skills, gate refunds behind a human, serve the whole thing to your web app as an A2A endpoint, and cap what a chatty customer can spend — in all six languages.
+description: Answer customer questions from your real systems (orders, CRM) over MCP, keep policy in agent skills, gate refunds behind a human, serve the whole thing to your web app as an A2A endpoint, and cap what a chatty customer can spend — in all seven languages.
 ---
 
 import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
@@ -343,6 +343,36 @@ issue_refund =
   )
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.native :as native] '[toolnexus.client :as client])
+
+(def threshold 50)
+
+;; A suspending tool needs the §1 Context, so declare :ctx? true — its :run
+;; then takes (fn [args ctx]) and reads the approver's Answer off (:answer ctx).
+(def issue-refund
+  (native/native-tool
+    {:name "issue_refund"
+     :description "Refund an order. Amounts at or above the approval threshold require a human."
+     :input-schema {:type "object"
+                    :properties {:orderId {:type "string"}
+                                 :amount  {:type "number"}
+                                 :reason  {:type "string"}}
+                    :required ["orderId" "amount" "reason"]}
+     :ctx? true
+     :run (fn [{:keys [orderId amount reason]} ctx]
+            (if (and (>= amount threshold) (nil? (:answer ctx)))
+              ;; first pass: over threshold, no answer yet → suspend
+              (client/suspend
+                (client/make-request
+                  "approval"
+                  (str "Approve " amount " USD refund on order " orderId "? Reason: " reason)
+                  {:data {:orderId orderId :amount amount :reason reason}}))
+              ;; retry pass: the approver said yes
+              (billing-refund orderId amount)))}))
+```
+</TabItem>
 </Tabs>
 
 Three properties of this gate matter in production:
@@ -456,6 +486,19 @@ client =
 result = Toolnexus.Client.run(client, ticket_text, tk)
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(def client
+  (client/create-client
+    {:base-url base-url :style "openai" :model model :max-turns 8
+     :wait-for (fn [req]
+                 (let [decision (approvals-ask-on-shift (:prompt req) (:data req))]
+                   (client/make-answer (:id req) (:approved decision)
+                                       nil (when-not (:approved decision) "declined"))))}))
+(def result (client/run client ticket-text {:toolkit tk}))
+;; (:status result) => "done" — the refund ran only after an approver said yes
+```
+</TabItem>
 </Tabs>
 
 `ok: false` is not an error either — the loop feeds `"declined: <prompt>"` back to the model, which
@@ -537,6 +580,17 @@ case res.status do
 end
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+;; no :wait-for configured → the run halts durably; pass a :conversation-id so
+;; the transcript is stored for replay
+(def res (client/run client ticket-text {:toolkit tk :conversation-id ticket-id}))
+(if (= "pending" (:status res))
+  (do (approval-queue-insert ticket-id (:pending res))   ; a plain Request map
+      (reply 200 "Escalated to a supervisor for approval."))
+  (reply 200 (:text res)))
+```
+</TabItem>
 </Tabs>
 
 **Phase 2 — the supervisor clicks Approve; resume the same conversation.** Same `id`, a client
@@ -598,6 +652,17 @@ resume =
   )
 
 done = Toolnexus.Client.ask(resume, ticket_text, tk, ticket_id)
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(def resume
+  (client/create-client
+    {:base-url base-url :style "openai" :model model :max-turns 8
+     :wait-for (fn [req] (client/make-answer (:id req) (:approved decision)))}))
+;; same :conversation-id → the stored transcript replays, issue_refund re-runs
+;; with (:answer ctx) set
+(def done (client/run resume ticket-text {:toolkit tk :conversation-id ticket-id}))
 ```
 </TabItem>
 </Tabs>
@@ -682,6 +747,21 @@ handle =
     client: client,
     a2a: %{name: "support-agent", store: "file:./tasks"}
   )
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.serve :as serve])
+
+(def handle
+  (serve/serve tk {:port 8080
+                   :client client
+                   :skills loaded-skills                 ; what the Agent Card advertises
+                   :a2a {:name "support-agent"
+                         :description "Answers order and refund questions from the systems of record."
+                         :store "file:./tasks"}          ; survives a restart
+                   :on-task (fn [t] (metrics-record t))}))
+(println (:url handle))   ; stop with ((:stop! handle))
 ```
 </TabItem>
 </Tabs>
@@ -787,6 +867,14 @@ r = Toolnexus.Agents.run(support, [llm: llm], ticket_text)
 ```
 </TabItem>
 </Tabs>
+
+<Aside type="note" title="Clojure">
+The Clojure port ships the client-level cap `:max-turns` (default 10; exhausting it yields
+`:status "incomplete"` with `:limit "maxTurns"`), so this whole scenario — MCP systems of record,
+skills-as-policy, the suspending refund gate, and A2A `serve` — runs on it. The **agent runtime**
+shown here (`agents.agent` + `Budget` + `onBudget`, plus client `retries`/`timeout-ms`) is recorded
+as parity debt (see the [Clojure API page](/api/clojure/)), so it has no Clojure tab.
+</Aside>
 
 <Aside type="note" title="Budgets never lie about why they stopped">
 Any limit stop yields `status: "incomplete"` with the limit **named** — never a silent `"done"` and

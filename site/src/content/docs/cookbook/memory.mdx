@@ -1,6 +1,6 @@
 ---
 title: Multi-turn memory
-description: Keep a conversation across turns — a conversation object or ask-with-id, in all six languages.
+description: Keep a conversation across turns — a conversation object or ask-with-id, in all seven languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -63,10 +63,19 @@ r = Toolnexus.Client.ask(client, "What's my name?", tk, "user-42")
 IO.puts(r.text)   # recalls "Muthu"
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+;; the client carries a per-client store (in-memory by default); a :conversation-id
+;; makes run load + save that thread's transcript
+(client/run agent "My name is Muthu. Remember it." {:toolkit tk :conversation-id "user-42"})
+(def r (client/run agent "What's my name?" {:toolkit tk :conversation-id "user-42"}))
+(println (:text r))   ; recalls "Muthu"
+```
+</TabItem>
 </Tabs>
 
 The transcript store is pluggable (in-memory by default; bring your own to persist
 to Redis, Postgres, …). See [Memory & conversations](/toolnexus/memory/).
 
 More recipes coming — streaming, human-in-the-loop suspension, and A2A serve, each
-in all six languages. Runnable versions live in every port's `examples/` folder.
+in all seven languages. Runnable versions live in every port's `examples/` folder.

@@ -114,6 +114,16 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options {
 )
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+;; The MCP per-server `tools` allowlist (control #1, in mcp.json) and the
+;; `:builtins` toggle (control #2) both work in the Clojure port:
+(tn/build {:mcp      "./mcp.json"
+           :builtins {:tools {"bash" false}}})   ; drop one builtin
+;; `disable-tools` / `disable-skills` / `skills-filter` (controls #3–#4) are
+;; NOT in this port yet — recorded as parity debt in clojure/README.md.
+```
+</TabItem>
 </Tabs>
 
 ## 4. Allowlist skills per agent
