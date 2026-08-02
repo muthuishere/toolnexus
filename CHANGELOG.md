@@ -76,10 +76,19 @@ both compose an agent definition, so both need the §7D runtime this port does n
 Two upstream defects were found by writing these:
 
 - **cljgo: a descending `range` was an inconsistent seq** — `(range 6 1 -1)` counted 5 and
-  mapped to five elements while `seq`/`vec`/`some`/`filter` traversed it as `(6)`, and `reduce`
-  returned its seed untouched. Nothing threw, so any code walking a collection backwards was
-  silently wrong on cljgo and right on the JVM. Root-caused to three ascending-only comparisons
-  in `LongRange`, fixed in cljgo v0.9.0 (PR #194).
+  mapped to five elements while `seq`/`vec`/`doall`/`some`/`filter` traversed it as `(6)`, and
+  the 2-arity `(reduce + coll)` returned `6`, the first element. Nothing threw, so any code
+  walking a collection backwards was silently wrong on cljgo and right on the JVM. Root-caused to
+  three ascending-only comparisons in `LongRange`, fixed in cljgo v0.9.0 (PR #194).
+
+  One correction, since the first version of this entry got it wrong and koine caught it: the
+  **seeded 3-arity `(reduce f init coll)` was CORRECT** at the Clojure level — `clojure.core`
+  does not route it through the broken method for this type. The broken Go method
+  (`LongRange.ReduceInit`) is real, and our Go-level test measured it returning `init`; the
+  Clojure surface simply never reached it. Both measurements were right about different layers,
+  and only the Clojure one is what a user could hit — so an audit grepping for a seed-returning
+  `reduce` would clear code that is actually broken and miss `(reduce f coll)`, the form that
+  failed.
 - **The documented Clojure examples did not all run.** They do now: `site/tests/runners/clojure.sh`
   executes every one of them four ways — JVM main, JVM REPL, cljgo interpreted, cljgo AOT —
   and caught a call to a function that does not exist, an invented `build.cljgo` verb, and a
