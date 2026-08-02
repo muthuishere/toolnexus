@@ -172,9 +172,17 @@ jobs:
       - run: ./consumer-exit-check.sh
         env:
           TN_EXAMPLES: ${{ github.workspace }}/examples
+      # The shipped examples, on BOTH hosts. A README example that no longer runs
+      # is a broken promise to the first person who tries the library.
+      - run: ./examples/clj/run.sh
+        env:
+          TN_EXAMPLES: ${{ github.workspace }}/examples
+      - run: ./examples/cljgo/run.sh
+        env:
+          TN_EXAMPLES: ${{ github.workspace }}/examples
 
   docs-examples:
-    name: Docs examples (six full-tier ports)
+    name: Docs examples (seven ports)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -201,6 +209,15 @@ jobs:
         with:
           elixir-version: "1.17"
           otp-version: "27"
+      # Clojure runs its examples on BOTH hosts, so this job needs the cljgo
+      # toolchain as well as the JVM one — a docs example that works under
+      # `clojure -M` and fails under `cljgo build` is the drift the port exists
+      # to prevent, and only the second host can see it.
+      - uses: DeLaGuardo/setup-clojure@13.4
+        with:
+          cli: latest
+      - run: go install github.com/muthuishere/cljgo/cmd/cljgo@v0.9.0
+      - run: echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
       # Build the ports the runners link against.
       - run: npm install && npm run build

@@ -223,4 +223,8 @@
 (defn -main [& _]
   ;; Both projects sit one level under clojure/examples/, so the default
   ;; reaches the repo's shared fixtures from either of them.
-  (run-demo (or (env/get-env "TN_EXAMPLES") "../../../examples")))
+  (run-demo (or (env/get-env "TN_EXAMPLES") "../../../examples"))
+  ;; The success marker every example in clj/run.sh and cljgo/run.sh is judged
+  ;; on. A demo that printed most of its report and then died would otherwise
+  ;; exit 0 and look identical to one that finished.
+  (println "OK"))

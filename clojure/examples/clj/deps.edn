@@ -1,0 +1,14 @@
+;; The five examples on Clojure (JVM).
+;;
+;;   ./run.sh                       all five
+;;   clojure -M -m examples.skills  one of them
+;;
+;; `src` is a SYMLINK to ../src — the same source the cljgo/ project compiles.
+;; Two project files, one source tree: forking the examples per host would
+;; quietly destroy the only claim this port makes.
+;;
+;; koine is the sole dependency, and its version is the one clojure/deps.edn
+;; pins. No HTTP client, no JSON library, no process library.
+{:paths ["src"]
+ :deps  {org.clojure/clojure           {:mvn/version "1.12.5"}
+         net.clojars.muthuishere/koine {:mvn/version "0.10.0"}}}

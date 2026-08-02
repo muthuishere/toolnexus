@@ -1,68 +1,171 @@
 ---
-title: "memoryTool — file-backed memory"
+title: "toolnexus.agents.home/memory-tool"
 description: "The opt-in built-in that lets a persona write durable notes to its own home. — Clojure."
 sidebar:
-  label: "persona / memory-tool"
+  label: "toolnexus.agents.home/memory-tool"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a>
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/agents/home.cljc">clojure/src/toolnexus/agents/home.cljc</a>
 </p>
 
-<Aside type="caution" title="Not available in Clojure">
-The Clojure port ships no memory built-in; its ten built-ins are bash, read, write, edit, grep, glob, webfetch, question, apply_patch and todowrite.
+<Aside type="tip" title="Supported on Clojure (JVM) and on cljgo">
+One `.cljc` source tree, zero reader conditionals, verified in all five execution modes. Every
+example below writes to a real directory and reads it back on both hosts.
 </Aside>
 
-The opt-in built-in that lets a persona write durable notes to its own home.
-
-## What to use instead
-
-Two different things are called "memory", and this port ships one of them.
-
-**Transcript memory works.** Give a run a `:conversation-id` and the client's `:store` keeps the
-message history across turns, so the model remembers what it already did. That is
-[`toolnexus.client/in-memory-store`](/api/clojure/client/store/) by default, and a store is only
-`:get` and `:save`, so a file- or database-backed one is a few lines.
-
-**Durable notes the agent writes for itself do not.** There is no `memory` tool in the catalog, so a
-model has no way to record a fact for next week. Build it as a native tool over the same file you
-read the persona's identity from — it is a dozen lines, and unlike the built-in it is yours to scope:
-
 ```clojure
-(require '[toolnexus.core :as core]
-         '[toolnexus.native :as native]
-         '[toolnexus.tool :as tool]
-         '[koine.fs :as fs])
-
-(def notes "agents/researcher/MEMORY.md")
-
-(def remember
-  (native/native-tool
-    {:name         "remember"
-     :description  "Append a durable note to your own memory file."
-     :input-schema {:type "object"
-                    :properties {:note {:type "string"}}
-                    :required ["note"]}
-     :run          (fn [args]
-                     (let [prev (if (fs/exists? notes) (fs/read-file notes) "")]
-                       (fs/write-file notes (str prev "- " (:note args) "\n"))
-                       (tool/success "noted")))}))
-
-;; the notes go back into the prompt at startup, the tool appends to them at run time
-(def tk (core/build {:tools [remember]}))
+(memory-tool "./personas/ava")
+;; => a Tool named "memory" — add it to a toolkit like any other
 ```
 
-Two cautions. The file is read into `:system-prompt` when you build the client, so a note written
-mid-run is visible on the *next* run, not this one — re-read it if you need same-run visibility.
-And the `write` and `edit` built-ins already reach the filesystem: if they are enabled, a model can
-already clobber that file, which is an argument for `:builtins {:tools {:write false :edit false}}`
-alongside a narrow `remember` tool rather than for adding one more path to the same directory.
+One tool, three actions, over two files in the persona's home:
+
+| action | effect |
+|--------|--------|
+| `add` | append an entry |
+| `replace` | swap an existing substring for `with` |
+| `remove` | delete an existing substring |
+
+`target` is `self` (`MEMORY.md`, the default) or `user` (`USER.md`, the agent's model of you).
+
+**Not a default builtin.** Unlike the §4A tools, `memory` exists only when you wire a home
+directory — a read-only persona simply never gets it.
+
+## Two rules that surprise people
+
+<Aside type="caution" title="Writes land on disk, but not in this session's prompt">
+Every action writes to disk immediately. None of them changes the **current** session's system
+prompt: persisted memory loads at the start of the *next* session. That is the frozen-snapshot
+rule that keeps a long-lived persona cache-stable, and the tool's own description states it, so
+the model knows too.
+</Aside>
+
+A `replace` or `remove` whose substring is absent is a loud `isError` — never a silent no-op. An
+agent that thinks it edited its memory and did not is worse than one that is told it failed.
+
+## When to use it
+
+- **A persona should remember across sessions** — preferences, decisions, facts about you.
+- **You want the agent to curate its own notes**, not just append forever: `replace` and `remove`
+  are what make `MEMORY.md` maintainable.
+- **You are using `:flush-to-memory`** on
+  [`compactor`](/toolnexus/api/clojure/compaction/compactor/) — that reminder tells the model to
+  save durable facts *through this tool* before the transcript head is summarised.
+
+## Examples
+
+### 1. Add, and read it back off disk
+
+```clojure test
+(require '[toolnexus.agents.home :as home]
+         '[toolnexus.native :as native]
+         '[koine.fs :as fs])
+
+(def dir (str (fs/temp-dir! "ava")))
+(def mem (home/memory-tool dir))
+
+(println "tool name:" (:name mem))
+(assert (= "memory" (:name mem)))
+
+(def r (native/execute-native mem {:action "add" :text "the user prefers Clojure"}))
+(println "result:" (:output r))
+(assert (false? (:isError r)))
+
+;; The claim is that it PERSISTS — so read the file, not the return value.
+(println "MEMORY.md =>" (pr-str (fs/read-file (str dir "/MEMORY.md"))))
+(assert (= "- the user prefers Clojure\n" (fs/read-file (str dir "/MEMORY.md"))))
+
+;; A second add appends; it does not overwrite.
+(native/execute-native mem {:action "add" :text "and Go"})
+(assert (= "- the user prefers Clojure\n- and Go\n" (fs/read-file (str dir "/MEMORY.md"))))
+
+(fs/delete-tree! dir)
+(println "OK")
+```
+
+### 2. Curate — replace, remove, and a loud miss
+
+```clojure test
+(require '[toolnexus.agents.home :as home]
+         '[toolnexus.native :as native]
+         '[clojure.string :as str]
+         '[koine.fs :as fs])
+
+(def dir (str (fs/temp-dir! "ava")))
+(fs/write-file (str dir "/MEMORY.md") "- likes tea\n- ships on Fridays\n")
+(def mem (home/memory-tool dir))
+
+(native/execute-native mem {:action "replace" :text "tea" :with "coffee"})
+(println (fs/read-file (str dir "/MEMORY.md")))
+(assert (str/includes? (fs/read-file (str dir "/MEMORY.md")) "- likes coffee"))
+
+(native/execute-native mem {:action "remove" :text "- ships on Fridays\n"})
+(assert (= "- likes coffee\n" (fs/read-file (str dir "/MEMORY.md"))))
+
+;; A substring that is not there is an ERROR, not a quiet success.
+(def miss (native/execute-native mem {:action "replace" :text "absent" :with "x"}))
+(println "miss =>" (:isError miss) (:output miss))
+(assert (true? (:isError miss)))
+(assert (str/includes? (:output miss) "not found"))
+;; …and the file is untouched by the failed edit.
+(assert (= "- likes coffee\n" (fs/read-file (str dir "/MEMORY.md"))))
+
+(fs/delete-tree! dir)
+(println "OK")
+```
+
+### 3. `target user` writes `USER.md`
+
+```clojure test
+(require '[toolnexus.agents.home :as home]
+         '[toolnexus.native :as native]
+         '[koine.fs :as fs])
+
+(def dir (str (fs/temp-dir! "ava")))
+(def mem (home/memory-tool dir))
+
+(native/execute-native mem {:action "add" :target "user" :text "works in IST"})
+
+(assert (= "- works in IST\n" (fs/read-file (str dir "/USER.md"))))
+(assert (not (fs/exists? (str dir "/MEMORY.md"))))   ; the agent's own notes are untouched
+
+(fs/delete-tree! dir)
+(println "OK")
+```
+
+### 4. In a toolkit, alongside everything else
+
+The memory tool is an ordinary `Tool` — it goes into `:tools` with your own functions, MCP tools
+and built-ins.
+
+```clojure test
+(require '[toolnexus.agents.home :as home]
+         '[toolnexus.core :as toolnexus]
+         '[toolnexus.native :as native]
+         '[koine.fs :as fs])
+
+(def dir (str (fs/temp-dir! "ava")))
+
+(def tk (toolnexus/build
+         {:tools [(home/memory-tool dir)
+                  (native/native-tool {:name         "now"
+                                       :description  "The current time, as a fixed string."
+                                       :input-schema {:type "object" :properties {}}
+                                       :run          (fn [_] "2026-08-02T00:00:00Z")})]}))
+
+(println "tools:" (pr-str (sort (toolnexus/tool-names tk))))
+(assert (some #(= "memory" %) (toolnexus/tool-names tk)))
+
+(fs/delete-tree! dir)
+(println "OK")
+```
 
 ## See also
 
-- [`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) — how the note-taking tool is built
-- [`toolnexus.client/in-memory-store`](/api/clojure/client/store/) — the transcript memory that does ship
-- [`toolnexus.client/run`](/api/clojure/client/run/) — `:conversation-id`, the key that turns it on
-- [`persona / compose-soul`](/api/clojure/persona/compose-soul/) — reading those notes back into the prompt
+- [`toolnexus.agents.home/compose-soul`](/toolnexus/api/clojure/persona/compose-soul/) — the home
+  directory this tool writes into, and how `MEMORY.md` reaches the prompt
+- [`toolnexus.agents.compaction/compactor`](/toolnexus/api/clojure/compaction/compactor/) —
+  `:flush-to-memory` points the model at this tool
