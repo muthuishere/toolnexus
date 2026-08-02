@@ -8,7 +8,7 @@
 ;; same version (cljgo ADR 0095), and while resolving it cljgo statically
 ;; rejects any namespace in that jar that reaches for Java interop.
 (defn build [b]
-  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.10.0"})
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.11.0"})
   (doseq [n ["demo" "native_and_http" "skills" "persona_memory" "compaction"]]
     (install b (exe b {:name (str "ex-" n)
                        :main (if (= n "demo")

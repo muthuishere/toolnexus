@@ -776,3 +776,24 @@
                   (emit! on-event {:type "done" :result r})
                   r)
                 (recur msgs tools (inc turn) turns (into tool-calls records) usage)))))))))
+
+
+(defn ask
+  "`run`, remembering the conversation (§conversation-store) — the id-keyed
+  sugar every other port ships as `ask`.
+
+      (ask client \"and the second one?\" {:toolkit tk :id \"muthu\"})
+
+  With an `:id`, the store's history for that id is loaded before the call and
+  the full transcript saved after it, so the next `ask` with the same id
+  continues the conversation. WITHOUT an id it is a stateless one-shot,
+  identical to `run` — the same rule as js/src/client.ts, where `ask` with no
+  id delegates straight to `run`.
+
+  This is deliberately nothing more than `run` with `:conversation-id` filled
+  in: the memory mechanics live in ONE place, and a second copy of the
+  load-then-save rule here is exactly the drift the ports exist to prevent."
+  [client prompt {:keys [toolkit id on-event] :as ctx}]
+  (run client prompt (cond-> {:toolkit toolkit :on-event on-event}
+                       id (assoc :conversation-id id)
+                       (:history ctx) (assoc :history (:history ctx)))))

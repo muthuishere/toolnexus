@@ -8,7 +8,7 @@ implementation, byte-identical on both.
 ```clojure
 ;; deps.edn
 net.clojars.muthuishere/toolnexus {:mvn/version "0.12.0"}   ; this port
-net.clojars.muthuishere/koine     {:mvn/version "0.10.0"}    ; its only dependency
+net.clojars.muthuishere/koine     {:mvn/version "0.11.0"}    ; its only dependency
 ```
 
 Released to Clojars as **`net.clojars.muthuishere/toolnexus`** — see
@@ -31,7 +31,7 @@ is the only third-party dependency.
 | cljgo, AOT binary | `cljgo build && ./toolnexus-test` |
 | cljgo, interpreted | `cljgo run src/run_tests.cljc` |
 
-Verified against koine 0.10.0 and the **published cljgo v0.9.0 release
+Verified against koine 0.11.0 and the **published cljgo v0.9.0 release
 archive** — no source checkout, no `CLJGO_SRC`. cljgo #177 is closed, so these
 numbers are re-runnable by anyone rather than only on the machine that produced
 them. Verify against a RELEASED binary, not a local build: a rebuild-from-source
