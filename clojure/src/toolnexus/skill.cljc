@@ -233,7 +233,9 @@
     [by-name []]
     (let [m         (reduce (fn [acc e] (assoc acc (filter-name (key e)) (val e))) {} filter-map)
           has-true? (some true? (vals m))
-          unmatched (vec (sort (remove (fn [k] (contains? by-name k)) (keys m))))]
+          ;; tool/sort-strings: this list is RETURNED as `:filter-unmatched`
+          ;; and printed by the warn line, so its order is host-visible.
+          unmatched (tool/sort-strings (remove (fn [k] (contains? by-name k)) (keys m)))]
       [(reduce (fn [acc e]
                  (let [nm (key e)]
                    (if (if has-true? (true? (get m nm)) (not (false? (get m nm))))
@@ -312,7 +314,10 @@
          (remove ignored-path?)
          (remove fs/directory?)
          (remove #(= "SKILL.md" (file-name %)))
-         sort
+         ;; tool/sort-strings, not `sort`: this list is the §0.6 byte-exact
+         ;; <skill_files> block, and plain sort disagrees across hosts above the
+         ;; BMP.
+         tool/sort-strings
          (take (if (zero? limit) default-sample-limit limit))
          vec)))
 
@@ -376,7 +381,7 @@
          info    (get by-name (str skill-name))]
      (if-not info
        (tool/failure (str "Skill \"" (str skill-name) "\" not found. Available skills: "
-                      (let [avail (sort (keys by-name))]
+                      (let [avail (tool/sort-strings (keys by-name))]
                         (if (seq avail) (str/join ", " avail) "none"))))
        (tool/success (skill-output info (skill-files info limit))
                 {:name (:name info) :dir (:dir info)})))))
@@ -407,7 +412,12 @@
   [loaded]
   (let [described (->> (:skills loaded)
                        (filter #(some? (:description %)))
-                       (sort-by :name))]
+                       ;; tool/compare-strings, not bare `sort-by`: this is the
+                       ;; §3 system-prompt catalog, a byte-exact cross-port
+                       ;; surface, and skill names are NOT sanitized — a name
+                       ;; above the BMP ordered one way on the JVM and the other
+                       ;; on cljgo.
+                       (sort-by :name tool/compare-strings))]
     (if (empty? described)
       no-skills-message
       (str skills-prompt-preamble

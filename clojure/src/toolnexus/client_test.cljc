@@ -49,21 +49,35 @@
 
 (defn- script-response [style script n]
   (let [spec (get script (dec n))]
-    (if (seq (:calls spec))
-      (calls-response style (:calls spec))
-      (text-response style (or (:text spec) "done")))))
+    (cond
+      ;; a VERBATIM provider payload, for shapes the two helpers above cannot
+      ;; build (an Anthropic turn with several text blocks, a usage block whose
+      ;; total is not the sum of its parts)
+      (:raw spec)        (:raw spec)
+      (seq (:calls spec)) (calls-response style (:calls spec))
+      :else               (text-response style (or (:text spec) "done")))))
+
+(defn- lower-keys
+  "Header CASE is a host detail (the JVM's server lowercases, cljgo's does not
+  promise to), so every header assertion normalises first."
+  [m]
+  (reduce (fn [acc [k v]] (assoc acc (str/lower-case (name k)) v)) {} m))
 
 (defn with-llm
-  "Start a scripted LLM, hand `f` a map {:base :requests :paths}, stop it after.
-  `:requests` is an atom of the PARSED request bodies, in arrival order — the
-  only way to assert on what the client actually fed back."
+  "Start a scripted LLM, hand `f` a map {:base :requests :paths :headers}, stop
+  it after. `:requests` is an atom of the PARSED request bodies, in arrival
+  order — the only way to assert on what the client actually fed back;
+  `:headers` is the matching atom of REQUEST headers (lowercased), which is what
+  makes the auth / api-key path observable at all."
   [style script f]
   (let [n        (atom 0)
         requests (atom [])
         paths    (atom [])
+        headers  (atom [])
         srv      (server/serve
                    (fn [req]
                      (swap! paths conj (:path req))
+                     (swap! headers conj (lower-keys (:headers req)))
                      (swap! requests conj (json/read-str (str (:body req))))
                      {:status 200
                       :headers {"content-type" "application/json"}
@@ -72,7 +86,8 @@
     (try
       (f {:base (str "http://127.0.0.1:" (server/port srv))
           :requests requests
-          :paths paths})
+          :paths paths
+          :headers headers})
       (finally (server/stop! srv)))))
 
 ;; ---------------------------------------------------------------------------
@@ -234,11 +249,115 @@
                     {:type "tool_result" :tool_use_id "u2" :content "quick"     :is_error false}]
                    (:content results)))))))))
 
+(deftest anthropic-final-text-joins-every-text-block
+  ;; A real Anthropic turn interleaves text blocks around `tool_use`, and every
+  ;; fixture in this suite used to carry exactly ONE — so "join all text blocks"
+  ;; and "return the first one" were indistinguishable, and a loop that silently
+  ;; truncated the model's answer passed clean.
+  (with-llm "anthropic"
+    [{:raw {:content [{:type "text" :text "part one. "}
+                      {:type "text" :text "part two. "}
+                      {:type "thinking" :thinking "not text — contributes nothing"}
+                      {:type "text" :text "part three."}]
+            :usage {:input_tokens 7 :output_tokens 3}}}]
+    (fn [{:keys [base]}]
+      (let [rr (client/run (client-for "anthropic" base {}) "go" {:toolkit toolkit})]
+        (is (= "part one. part two. part three." (:text rr))
+            "ALL text blocks, in order, with no separator")
+        (is (= "done" (:status rr)))))))
+
+(deftest usage-honours-a-provider-total-that-is-not-the-sum
+  ;; OpenAI reasoning models report total_tokens > prompt + completion (reasoning
+  ;; / cached tokens). Every usage fixture in this repo used to be internally
+  ;; consistent, so `(or (:total_tokens raw) (+ p c))` and a plain `(+ p c)`
+  ;; agreed on all of them and dropping the field under-reported billed tokens
+  ;; invisibly. Asserted on the unit AND over two summed turns.
+  (testing "one payload"
+    (is (= {:prompt-tokens 10 :completion-tokens 5 :total-tokens 42}
+           (client/add-usage client/zero-usage {:style "openai"}
+                             {:prompt_tokens 10 :completion_tokens 5 :total_tokens 42}))))
+  (testing "summed across turns, each keeping its own stated total"
+    (is (= {:prompt-tokens 20 :completion-tokens 10 :total-tokens 84}
+           (-> client/zero-usage
+               (client/add-usage {:style "openai"}
+                                 {:prompt_tokens 10 :completion_tokens 5 :total_tokens 42})
+               (client/add-usage {:style "openai"}
+                                 {:prompt_tokens 10 :completion_tokens 5 :total_tokens 42})))))
+  (testing "absent total_tokens still falls back to prompt+completion"
+    (is (= {:prompt-tokens 10 :completion-tokens 5 :total-tokens 15}
+           (client/add-usage client/zero-usage {:style "openai"}
+                             {:prompt_tokens 10 :completion_tokens 5}))))
+  (testing "and it reaches the RunResult through the loop"
+    (with-llm "openai"
+      [{:raw {:choices [{:message {:role "assistant" :content "done"}}]
+              :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 42}}}]
+      (fn [{:keys [base]}]
+        (is (= {:prompt-tokens 10 :completion-tokens 5 :total-tokens 42}
+               (:usage (client/run (client-for "openai" base {}) "go" {:toolkit toolkit}))))))))
+
 (deftest anthropic-base-url-already-versioned
   (with-llm "anthropic" [{:text "hi"}]
     (fn [{:keys [base paths]}]
       (client/run (client-for "anthropic" (str base "/v1") {}) "go" {:toolkit toolkit})
       (is (= ["/v1/messages"] @paths) "a /v1 suffix is not doubled"))))
+
+;; ---------------------------------------------------------------------------
+;; request headers — the auth path
+;; ---------------------------------------------------------------------------
+;;
+;; Nothing used to assert `(:headers req)` at all, so `request-headers` could
+;; return `{}` — no authorization, no x-api-key, no anthropic-version, `:headers`
+;; silently dropped — and the whole suite stayed green. A client that sends the
+;; Anthropic key in the OpenAI header is exactly the regression a provider-style
+;; switch produces, and it would have shipped.
+;;
+;; Values here are obvious fakes passed as `:api-key`, never a real credential
+;; and never read from the environment: the env fallback chain cannot be tested
+;; portably (no host-neutral way to SET a variable in-process), so `:api-key` is
+;; asserted to WIN, which is the half that is testable.
+
+(deftest openai-sends-a-bearer-authorization-header
+  (with-llm "openai" [{:text "hi"}]
+    (fn [{:keys [base headers]}]
+      (client/run (client-for "openai" base {:api-key "FAKE_NOT_A_SECRET"}) "go"
+                  {:toolkit toolkit})
+      (let [h (first @headers)]
+        (is (= "Bearer FAKE_NOT_A_SECRET" (get h "authorization")))
+        (is (nil? (get h "x-api-key")) "the anthropic header must not appear on this style")
+        (is (nil? (get h "anthropic-version")))
+        (is (= "application/json" (get h "content-type")))))))
+
+(deftest anthropic-sends-x-api-key-and-the-pinned-version
+  (with-llm "anthropic" [{:text "hi"}]
+    (fn [{:keys [base headers]}]
+      (client/run (client-for "anthropic" base {:api-key "FAKE_NOT_A_SECRET"}) "go"
+                  {:toolkit toolkit})
+      (let [h (first @headers)]
+        (is (= "FAKE_NOT_A_SECRET" (get h "x-api-key"))
+            "anthropic takes the raw key in x-api-key, NOT a Bearer authorization")
+        (is (= "2023-06-01" (get h "anthropic-version"))
+            "the version header is a pinned constant; anthropic rejects a request without it")
+        (is (nil? (get h "authorization")) "the openai header must not appear on this style")))))
+
+(deftest client-headers-are-merged-and-can-override
+  (with-llm "openai" [{:text "hi"}]
+    (fn [{:keys [base headers]}]
+      (client/run (client-for "openai" base {:api-key "FAKE_NOT_A_SECRET"
+                                             :headers {"x-tenant" "acme"
+                                                       "authorization" "Bearer OVERRIDDEN"}})
+                  "go" {:toolkit toolkit})
+      (let [h (first @headers)]
+        (is (= "acme" (get h "x-tenant")) ":headers must reach the wire")
+        (is (= "Bearer OVERRIDDEN" (get h "authorization"))
+            ":headers is merged LAST, so a host can replace the auth scheme entirely")))))
+
+(deftest an-explicit-api-key-beats-the-environment
+  ;; resolve-key's first branch. The env fallback itself (OPENAI_API_KEY /
+  ;; ANTHROPIC_API_KEY / OPENROUTER_API_KEY) is NOT covered — see the note above.
+  (with-llm "openai" [{:text "hi"}]
+    (fn [{:keys [base headers]}]
+      (client/run (client-for "openai" base {:api-key "FAKE_EXPLICIT"}) "go" {:toolkit toolkit})
+      (is (= "Bearer FAKE_EXPLICIT" (get (first @headers) "authorization"))))))
 
 ;; ---------------------------------------------------------------------------
 ;; §8 — parallel tool calls, results in CALL ORDER
@@ -704,17 +823,30 @@
 ;; with a shipped in-memory default.
 
 (deftest on-metric-emits-llm-tool-and-run-events
-  (with-llm "openai" [{:calls [{:id "1" :name "upper" :args {:text "x"}}]} {:text "done"}]
+  ;; COUNTS, not floors. `(is (seq ...))` is a floor of 1 where 2 are expected,
+  ;; and it hid the classic "fires once per process instead of once per round
+  ;; trip". The tool fixture carries TWO calls for the same reason: with N=1 a
+  ;; loop that emitted the metric for only the first of N parallel calls was
+  ;; invisible.
+  (with-llm "openai" [{:calls [{:id "1" :name "upper" :args {:text "x"}}
+                               {:id "2" :name "quick"}]}
+                      {:text "done"}]
     (fn [{:keys [base]}]
       (let [seen (atom [])
             c    (client/create-client {:base-url base :model "m" :api-key "k"
                                         :on-metric (fn [m] (swap! seen conj m))})]
         (client/run c "hi" {:toolkit (tool/toolkit tools)})
         (let [by-event (group-by :event @seen)]
-          (is (seq (get by-event "llm")) "an llm event per call")
-          (is (seq (get by-event "tool")) "a tool event per tool call")
+          (is (= 2 (count (get by-event "llm")))
+              "ONE llm event per round trip — this run made two")
+          (is (= 2 (count (get by-event "tool")))
+              "ONE tool event per tool call — this turn made two")
           (is (= 1 (count (get by-event "run"))) "exactly one run event")
-          (let [llm (first (get by-event "llm"))]
+          (testing "the whole emission order is pinned: llm, both tools, llm, run"
+            (is (= ["llm" "tool" "tool" "llm" "run"] (mapv :event @seen))))
+          (is (= ["upper" "quick"] (mapv :tool (get by-event "tool")))
+              "in call order, one per call")
+          (doseq [llm (get by-event "llm")]
             (is (= "m" (:model llm)))
             (is (= 200 (:status llm))))
           (let [t (first (get by-event "tool"))]
@@ -722,7 +854,7 @@
             (is (false? (:is_error t))))
           (let [r (first (get by-event "run"))]
             (is (= 2 (:turns r)))
-            (is (= 1 (:tool_calls r)))
+            (is (= 2 (:tool_calls r)))
             (is (pos? (:total_tokens r)))))))))
 
 (deftest a-client-without-on-metric-still-runs
@@ -871,6 +1003,32 @@
           (is (= {:text "quiet"} (:args ev)))
           (is (= "c1" (:id ev)))
           (is (= 0 (:turn ev))))))))
+
+(deftest a-throwing-tool-hook-must-not-park-the-consumer-forever
+  ;; REGRESSION. `execute-calls` runs each tool on `run-async!` and blocks on a
+  ;; promise. The `try/catch` covered `tool/execute` ONLY, and both §8 tool hooks
+  ;; are invoked outside it — so a host whose hook threw killed the worker before
+  ;; `deliver` ran and the `deref` blocked FOREVER. The JVM printed a stack trace
+  ;; from the dying thread; cljgo hung with no diagnostic at all.
+  ;;
+  ;; The assertion is deliberately "it comes back at all". A test that only
+  ;; checked the exception type would pass against an implementation that threw
+  ;; correctly for one call and hung for a parallel one, and hanging is the whole
+  ;; failure. `deftest` cannot time out portably, so a hang shows up as a suite
+  ;; that never finishes — which the CI job's own timeout reports.
+  (doseq [hook [:before-tool :after-tool]]
+    (with-llm "openai" [{:calls [{:id "c1" :name "upper" :args {:text "x"}}]} {:text "done"}]
+      (fn [{:keys [base]}]
+        (let [c (client-for "openai" base
+                            {:hooks {hook (fn [_ev] (throw (ex-info "hook exploded" {:hook hook})))}})
+              outcome (try (client/run c "hi" {:toolkit toolkit})
+                           :returned-normally
+                           (catch Throwable e (ex-message e)))]
+          ;; Rethrown on the CALLING thread, not swallowed into an isError: the
+          ;; shipped ports wrap neither hook, so a throwing hook rejects the run
+          ;; and the host sees its own bug rather than a mystery tool failure.
+          (is (= "hook exploded" outcome)
+              (str hook " must surface the host's exception, not hang and not hide it")))))))
 
 (deftest before-tool-result-short-circuits-the-tool
   ;; `boom` throws when it runs. A short-circuit that returns a clean result

@@ -111,7 +111,18 @@
           (str template)
           args))
 
-(defn- query-string [args names]
+(defn query-string
+  "The `?`-less querystring for the `:query` names, in DECLARATION order, taking
+  each value from `args`; nil when nothing matched. Names and values are
+  percent-encoded, and an absent arg contributes no pair at all (rather than an
+  empty one) so an optional parameter is genuinely optional.
+
+  Public for the same reason `placeholders` / `substitute` / `url-encode` are:
+  neither host's HTTP server exposes the query portably to the handler (the
+  JVM's `URI.getPath` strips it, cljgo's `:uri` keeps it), so an end-to-end test
+  cannot see it. Testing this directly is the only way a `:query` that is
+  silently dropped fails a test instead of an API call."
+  [args names]
   (let [pairs (->> names
                    (map (fn [q] [(name q) (get args (keyword (name q)))]))
                    (filter (fn [p] (some? (nth p 1)))))]

@@ -193,6 +193,22 @@
               {:id "inline_note" :name "inline note"}]
              (mapv (fn [s'] {:id (:id s') :name (:name s')}) (:skills c2)))))))
 
+(deftest card-skill-order-is-by-code-point-on-every-host
+  ;; The Agent Card's `skills[]` order goes out on the wire to strangers, and
+  ;; `skill-seq`'s docstring already claimed "two runtimes must not disagree on
+  ;; order" — but it sorted with bare `sort-by`, which is the one construct that
+  ;; DOES disagree: above the BMP the JVM orders by UTF-16 code unit (a
+  ;; surrogate D83D below E000) and cljgo by UTF-8 byte (F0 above EE). Skill
+  ;; names are not sanitized (see the §7B/§7C asymmetry above), so such a name
+  ;; reaches the sort intact. The fixture skills are ASCII, where the two orders
+  ;; coincide — which is why the bare sort survived. U+E000 is an escape (an
+  ;; ordinary BMP char); U+1F600 is written DIRECTLY, because an escaped
+  ;; surrogate is not portable source.
+  (let [mixed [{:name "😀s" :description "D."} {:name "\uE000s" :description "D."}
+               {:name "zs" :description "D."} {:name "as" :description "D."}]]
+    (is (= ["as" "zs" "\uE000s" "😀s"]
+           (mapv :name (:skills (serve/agent-card {} "http://x" mixed)))))))
+
 (deftest unknown-names-in-a2a-skills-are-ignored
   ;; §7B is silent; §7C says unknown mcp.tools names are ignored. Symmetry.
   (let [c (serve/agent-card {:skills ["hello-world" "no-such-skill"]} "http://x" skills)]
@@ -283,6 +299,32 @@
     (is (= ["calc.sum" "echo_ok"] names))
     (is (not (contains? (set names) "no-such-tool")) "unknown names ignored, never an error")
     (is (not (contains? (mcp! :s1 "tools/list") :error)))))
+
+(deftest exposed-tools-are-sorted-and-sorted-portably
+  ;; `exposed-tools` promises "Sorted, so two runtimes cannot disagree on
+  ;; order", and NOTHING held it to that: the fixture toolkit above is
+  ;; REGISTERED in alphabetical order, so `tools-list-uses-toolkit-names-
+  ;; verbatim` passes identically with the sort deleted. Order is a §7C
+  ;; `tools/list` surface two independent runtimes must agree on, so it needs a
+  ;; toolkit whose registration order is not already the answer.
+  ;;
+  ;; The second half is why the comparator is `tool/compare-strings` and not
+  ;; bare `sort-by`. Above the BMP the two hosts order strings OPPOSITELY —
+  ;; the JVM by UTF-16 code unit (a surrogate D83D below E000), cljgo by UTF-8
+  ;; byte (F0 above EE) — so plain `sort` would have made this very list
+  ;; host-dependent, which is the one thing the docstring rules out. U+E000 is
+  ;; written as an escape because it is a normal BMP char; U+1F600 is written
+  ;; DIRECTLY, because an escaped surrogate pair is not portable source.
+  (let [t   (fn [n] (tool/tool {:name n :description "x" :input-schema {:type "object"}
+                                :source "native" :execute (fn [_] (tool/success n))}))
+        ;; registered LAST-first, so insertion order is the reverse of the answer
+        rev (tool/toolkit (mapv t ["\uE000zed" "😀tool" "zulu" "mike" "alpha"]))]
+    (testing "omitted mcp.tools ⇒ every tool, in code-point order"
+      (is (= ["alpha" "mike" "zulu" "\uE000zed" "😀tool"]
+             (mapv :name (serve/exposed-tools rev {})))))
+    (testing "an mcp.tools allowlist is filtered AND sorted"
+      (is (= ["alpha" "zulu"]
+             (mapv :name (serve/exposed-tools rev {:tools ["zulu" "alpha" "no-such-tool"]})))))))
 
 (deftest tools-call-maps-tool-result-to-call-tool-result
   (let [ok (mcp! :s2 "tools/call" {:name "echo_ok" :arguments {:msg "hi"}})]

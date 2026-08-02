@@ -302,14 +302,44 @@
         (is (= [{:role "system" :content "mine"} {:role "user" :content "hi"}]
                (:messages (first @requests))))))))
 
+(defn- finish-reason-turn
+  "One openai-shaped text turn stating `stated` — `:none` omits the field."
+  [stated]
+  {:choices [(cond-> {:message {:role "assistant" :content "x"}}
+               (not= :none stated) (assoc :finish_reason stated))]})
+
 (deftest openai-provider-finish-reason-wins-when-present
   ;; Matches js/src/translate.ts (`choice?.finish_reason ?? finishReasonFor(...)`)
   ;; and the go/python/elixir ports. See the report note on §11's prose.
-  (with-provider [{:choices [{:message {:role "assistant" :content "cut off"}
-                              :finish_reason "length"}]}]
-    (fn [{:keys [base]}]
-      (is (= "length" (:finishReason (tr/translate (client-for "openai" base {})
-                                                   {:messages [{:role "user" :content "hi"}]})))))))
+  ;;
+  ;; This is the port's DELIBERATE §11 divergence from the spec prose, so it is
+  ;; exactly the rule that needs a fixture where passthrough and mapping DISAGREE.
+  ;; Every value this file used to test ("stop", "length", "tool_calls") maps to
+  ;; itself, so the two implementations were indistinguishable and replacing the
+  ;; whole rule with `(finish-reason-for (seq calls) stated)` passed clean.
+  ;;
+  ;; All the cases share ONE server, answered in order: a server per case meant
+  ;; seven more short-lived loopback listeners in a suite that already has plenty,
+  ;; and that is the shape the port's known load flake lives in.
+  (let [stated ["end_turn" "refusal" "max_tokens" "provider_specific_reason"
+                "length" "stop" :none ""]]
+    (with-provider (mapv finish-reason-turn stated)
+      (fn [{:keys [base]}]
+        (let [c   (client-for "openai" base {})
+              got (mapv (fn [_] (:finishReason
+                                 (tr/translate c {:messages [{:role "user" :content "hi"}]})))
+                        stated)]
+          (testing "a value the MAPPER would rewrite is passed through VERBATIM"
+            ;; finish-reason-for(false,"end_turn") is "stop", "refusal" is
+            ;; "content_filter" and "max_tokens" is "length" — so a mapping
+            ;; implementation cannot produce any of these three answers.
+            (is (= ["end_turn" "refusal" "max_tokens"] (subvec got 0 3))))
+          (testing "an unknown provider value survives unrecognized, not as stop"
+            (is (= "provider_specific_reason" (nth got 3))))
+          (testing "a value that happens to agree with the mapper is unchanged too"
+            (is (= ["length" "stop"] (subvec got 4 6))))
+          (testing "only an ABSENT or blank finish_reason falls back to the mapping"
+            (is (= ["stop" "stop"] (subvec got 6 8)))))))))
 
 (deftest openai-empty-choices-is-not-fatal
   (with-provider [{:choices []}]
@@ -399,6 +429,39 @@
     (fn [{:keys [base]}]
       (is (= "stop" (:finishReason (tr/translate (client-for "anthropic" base {})
                                                  {:messages [{:role "user" :content "hi"}]})))))))
+
+(deftest anthropic-text-blocks-are-JOINED-not-taken-first
+  ;; A real Anthropic turn interleaves text blocks around `tool_use`; every
+  ;; fixture in both suites used to carry exactly ONE text block, so "join all
+  ;; text blocks" and "return the first one" were indistinguishable and a port
+  ;; that silently truncated the answer shipped green.
+  (with-provider [{:content [{:type "text" :text "first, "}
+                             {:type "tool_use" :id "t1" :name "get_weather" :input {:city "Pune"}}
+                             {:type "text" :text "second, "}
+                             {:type "thinking" :thinking "ignored"}
+                             {:type "text" :text "third"}]
+                   :stop_reason "tool_use"}]
+    (fn [{:keys [base]}]
+      (let [res (tr/translate (client-for "anthropic" base {})
+                              {:messages [{:role "user" :content "hi"}]})]
+        (is (= "first, second, third" (:text res))
+            "ALL text blocks, in order, with no separator — a non-text block contributes nothing")
+        (is (= ["t1"] (mapv :id (:toolCalls res)))
+            "the interleaved tool_use is still picked up")))))
+
+(deftest usage-honours-a-provider-total-that-is-not-the-sum
+  ;; OpenAI reasoning models report total_tokens > prompt + completion (reasoning
+  ;; and cached tokens). Every fixture in this repo used to be internally
+  ;; consistent, so `(or (:total_tokens raw) (+ p c))` and a plain `(+ p c)`
+  ;; agreed everywhere and dropping the field under-reported billed tokens
+  ;; invisibly.
+  (with-provider [{:choices [{:message {:role "assistant" :content "hi"} :finish_reason "stop"}]
+                   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 42}}]
+    (fn [{:keys [base]}]
+      (is (= {:prompt-tokens 10 :completion-tokens 5 :total-tokens 42}
+             (:usage (tr/translate (client-for "openai" base {})
+                                   {:messages [{:role "user" :content "hi"}]})))
+          "the provider's own total wins over prompt+completion"))))
 
 (deftest anthropic-system-precedence
   (testing ":system beats both the client prompt and a hoisted system message"

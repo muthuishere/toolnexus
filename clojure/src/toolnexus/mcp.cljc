@@ -30,6 +30,7 @@
             [koine.http :as http]
             [koine.json :as json]
             [koine.process :as proc]
+            [koine.stream :as stream]
             [koine.time :as ktime]
             [toolnexus.tool :as tool]))
 
@@ -147,6 +148,8 @@
   length — a length leaks a secret's size."
   [raw expanded]
   (let [raw (reduce (fn [acc e] (assoc acc (key-str (key e)) (str (val e)))) {} raw)]
+    ;; Bare `sort` is fine: these are HTTP header field names, which RFC 7230
+    ;; restricts to ASCII tokens, so the two hosts cannot order them differently.
     {:keys     (vec (sort (keys expanded)))
      :expanded (boolean (some (fn [e] (not= (val e) (get raw (key e)))) expanded))}))
 
@@ -188,7 +191,14 @@
                     (apply dissoc cfg reserved-keys))]
     (->> servers
          (map (fn [entry] (one-server (key entry) (val entry))))
-         (sort-by :name)
+         ;; tool/compare-strings, not bare `sort-by`. These are the RAW server
+         ;; names out of the user's mcp.json — the one name in the MCP path that
+         ;; `mcp-tool-name` has not yet run through `tool/sanitize` — and this
+         ;; order is load-bearing twice over: it is the connection order, and
+         ;; `from-config`'s first-wins collision rule inherits it. Bare sort put
+         ;; a non-BMP server name in a different place on each host, so which
+         ;; server won a name clash could depend on the runtime.
+         (sort-by :name tool/compare-strings)
          vec)))
 
 ;; ---------------------------------------------------------------------------
@@ -401,12 +411,21 @@
 
 (defn- ok-status? [status] (and status (>= status 200) (< status 300)))
 
-(defn- header-value
-  "Case-insensitive header lookup — the two hosts' clients do not agree on the
-  case they hand back."
-  [headers k]
-  (let [k (str/lower-case (str k))]
-    (some (fn [e] (when (= k (str/lower-case (key-str (key e)))) (val e))) headers)))
+;; RESPONSE HEADERS ARE READ THROUGH `koine.http/header`, NEVER `get`.
+;;
+;; The two hosts' HTTP clients disagreed about the CASE of the names they hand
+;; back — java.net.http lowercases, Go's http.Header canonicalises — so
+;; a literal `(get (:headers res) "Mcp-Session-Id")` returned the value on cljgo
+;; and nil on the JVM, and the lowercase spelling did the exact reverse. No portable
+;; spelling existed, and it failed SILENTLY: a missing header and a mis-cased
+;; one are both nil, so the session id simply stopped being echoed and the
+;; server started a fresh session per request.
+;;
+;; koine 0.10.0 made lowercase the normal form on every host and added `header`
+;; to read one case-insensitively. This port used to carry its own private
+;; `header-value` for the same reason; it is gone, because two implementations
+;; of one normalisation rule is exactly how the two hosts drift apart again.
+;; Every response-header read in the port goes through the one function.
 
 (defn- sse-messages
   "A streamable-HTTP server MAY answer a POST with `text/event-stream`, carrying
@@ -427,20 +446,53 @@
   [msgs id]
   (or (some (fn [m] (when (= id (:id m)) m)) msgs) (last msgs)))
 
+(defn- request-headers
+  "The headers on every POST to a streamable-HTTP endpoint. `Mcp-Session-Id`
+  rides along once the server has issued one — that is the whole reason reading
+  it back correctly matters."
+  [headers session]
+  (cond-> (merge {"content-type" "application/json"
+                  "accept"       "application/json, text/event-stream"}
+                 headers)
+    (deref session) (assoc "mcp-session-id" (deref session))))
+
+(defn- take-session!
+  "Record the session id from a response head, if it carries one. `res` is any
+  map with `:headers` — a buffered response or `sse-post`'s open head."
+  [session res]
+  (when-let [sid (http/header res "mcp-session-id")]
+    (reset! session sid))
+  nil)
+
+(defn- rpc-message-result
+  "The shared tail of both HTTP legs: the JSON-RPC message for our id becomes an
+  {:ok …} or the named failure. Written once so the buffered and streaming legs
+  cannot disagree about what a response means."
+  [msgs id status]
+  (let [msg (pick-message msgs id)]
+    (cond
+      (nil? msg)   {:error "malformed-body" :status status}
+      (:error msg) {:error "rpc-error"
+                    :code    (get-in msg [:error :code])
+                    :message (get-in msg [:error :message])}
+      :else        {:ok msg})))
+
 (defn- http-rpc!
-  "One JSON-RPC message per HTTP POST. Never throws: koine's `http/request`
-  returns a transport failure as DATA, which is exactly what §0.3's isolation
-  requires of this boundary."
-  [url headers session method params timeout-ms]
+  "One JSON-RPC message per HTTP POST, BUFFERED. Never throws: koine's
+  `http/request` returns a transport failure as DATA, which is exactly what
+  §0.3's isolation requires of this boundary.
+
+  `sse?` is a latch, not a decoration: a server that answered in
+  `text/event-stream` can send a server→client request mid-call, and buffering
+  makes that impossible to answer. Seeing it once switches the transport onto
+  the streaming leg below."
+  [url headers session sse? method params timeout-ms]
   (let [id  (next-id!)
         res (http/request
              {:method  :post
               :url     url
               :timeout-ms timeout-ms
-              :headers (cond-> (merge {"content-type" "application/json"
-                                       "accept"       "application/json, text/event-stream"}
-                                      headers)
-                         (deref session) (assoc "mcp-session-id" (deref session)))
+              :headers (request-headers headers session)
               :body    (json/write-str (cond-> {:jsonrpc "2.0" :id id :method method}
                                          params (assoc :params params)))})]
     (cond
@@ -455,35 +507,133 @@
       (do
         ;; A streamable-HTTP server issues a session id on initialize and
         ;; expects it echoed on every later request.
-        (when-let [sid (header-value (:headers res) "mcp-session-id")]
-          (reset! session sid))
-        (let [ct   (str (header-value (:headers res) "content-type"))
-              msgs (if (str/includes? ct "text/event-stream")
-                     (sse-messages (:body res))
-                     (let [m (try (json/read-str (:body res)) (catch Throwable _ ::bad))]
-                       (if (map? m) [m] [])))
-              msg  (pick-message msgs id)]
-          (cond
-            (nil? msg)   {:error "malformed-body" :status (:status res)}
-            (:error msg) {:error "rpc-error"
-                          :code    (get-in msg [:error :code])
-                          :message (get-in msg [:error :message])}
-            :else        {:ok msg}))))))
+        (take-session! session res)
+        (let [ct  (str (http/header res "content-type"))
+              sse (str/includes? ct "text/event-stream")]
+          (when (and sse sse?) (reset! sse? true))
+          (rpc-message-result (if sse
+                                (sse-messages (:body res))
+                                (let [m (try (json/read-str (:body res))
+                                             (catch Throwable _ ::bad))]
+                                  (if (map? m) [m] [])))
+                              id
+                              (:status res)))))))
+
+;; ---------------------------------------------------------------------------
+;; §2 + §10  the streaming leg — the elicitation bridge over streamable-HTTP
+;; ---------------------------------------------------------------------------
+;;
+;; stdio gets a server→client request for free: the child's stdout is a channel
+;; that stays open, so `start-reader!` can answer an `elicitation/create` while
+;; the `tools/call` is still in flight. HTTP had no such channel here, and the
+;; gap was koine's, not §2's: `http/request` buffers (the body arrives only once
+;; the server is done, so a reverse request can never be seen in time) and
+;; `stream/sse-post` streamed but exposed no response headers — and MCP carries
+;; session identity in the `Mcp-Session-Id` RESPONSE header, which the reply POST
+;; must echo. A consumer had to choose between learning the session id and
+;; receiving events incrementally.
+;;
+;; koine 0.10.0 closed it: `sse-post` takes `{:on-open f}`, applied ONCE to
+;; `{:status :headers}` before the first event while the stream is still open.
+;; So this leg reads the session id from the open head, streams the events, and
+;; when one of them is a server request answers it INLINE on a second POST — MCP
+;; streamable-HTTP's channel for a client→server response, which the server
+;; answers 202. The in-flight `tools/call` then resumes on the same stream and
+;; the tool is NOT re-executed, which is exactly the stdio behaviour and exactly
+;; what §10 requires.
+;;
+;; Why a latch on `sse?` rather than streaming unconditionally: `sse-post`
+;; surfaces `data:` frames and nothing else, so a plain `application/json` body
+;; would be dropped on the floor. The transport therefore streams only once it
+;; has SEEN the server answer in `text/event-stream` — which `initialize`, always
+;; the first message, establishes. A JSON-only server keeps the buffered leg and
+;; cannot elicit anyway (it has no channel to elicit on).
+
+(defn- post-server-response!
+  "Answer a server-initiated request on its own POST. The server replies 202 with
+  no body, so nothing is parsed — but the session id MUST be on it, or the server
+  cannot match the answer to the call it is blocked on."
+  [url headers session reply]
+  (http/request {:method     :post
+                 :url        url
+                 :timeout-ms 30000
+                 :headers    (request-headers headers session)
+                 :body       (json/write-str reply)})
+  nil)
+
+(defn- http-stream-rpc!
+  "One JSON-RPC request over an SSE POST, answering any server→client request
+  that arrives mid-stream. Never throws — `sse-post` DOES throw on a transport
+  failure, and §0.3 does not allow that to cross this boundary."
+  [url headers session wait-for method params timeout-ms]
+  (let [id   (next-id!)
+        st   (atom {:msgs [] :head nil :done false :error nil})
+        body (json/write-str (cond-> {:jsonrpc "2.0" :id id :method method}
+                               params (assoc :params params)))
+        hdrs (request-headers headers session)
+        on-open  (fn [head]
+                   (take-session! session head)
+                   (swap! st assoc :head head))
+        on-event (fn [data]
+                   (let [m (try (json/read-str data) (catch Throwable _ nil))]
+                     (when (map? m)
+                       ;; A `method` is what makes a message a REQUEST. A
+                       ;; response never carries one, so this is the whole
+                       ;; discrimination — ids cannot do it, since the server
+                       ;; numbers its requests in its own space and may well
+                       ;; reuse one of ours.
+                       (if (and (some? (:id m)) (:method m))
+                         (when-let [reply (server-request-response wait-for m)]
+                           (try (post-server-response! url headers session reply)
+                                (catch Throwable _ nil)))
+                         (swap! st update :msgs conj m)))))]
+    ;; run-async!, not `future` — same reason as `start-reader!`: library code
+    ;; must not hold a consumer's process open on a non-daemon pool thread.
+    (proc/run-async!
+     (fn []
+       (try (stream/sse-post url hdrs body on-event {:on-open on-open})
+            (catch Throwable e (swap! st assoc :error (or (ex-message e) (str e))))
+            (finally (swap! st assoc :done true)))))
+    (let [deadline (+ (ktime/mono-ms) (long timeout-ms))
+          ;; Stop at OUR answer, not at end-of-stream: a server is entitled to
+          ;; hold the stream open with keep-alives after it has responded, and
+          ;; waiting for the close would spend the caller's whole budget on a
+          ;; call that already succeeded.
+          final    (loop []
+                     (let [s @st]
+                       (cond
+                         (some (fn [m] (= id (:id m))) (:msgs s)) s
+                         (:done s)                                s
+                         (>= (ktime/mono-ms) deadline)            (assoc s :timed-out true)
+                         :else (do (ktime/sleep! 2) (recur)))))]
+      (cond
+        (:timed-out final) {:error "timeout" :timeout-ms timeout-ms}
+        (:error final)     {:error "transport" :transport-error "stream-failed"
+                            :message (:error final)}
+        (not (ok-status? (get-in final [:head :status])))
+        {:error "http-status" :status (get-in final [:head :status])}
+        :else (rpc-message-result (:msgs final) id (get-in final [:head :status]))))))
 
 (defn http-transport
   "The remote leg. Identical shape to `stdio-transport`, which is the point:
   every line above §2 is written once."
-  [{:keys [url headers]}]
-  (let [session (atom nil)]
-    {:kind    "http"
-     :url     url
-     :rpc!    (fn [method params timeout-ms] (http-rpc! url headers session method params timeout-ms))
-     ;; A notification is a POST the server answers 202 to; a failure to deliver
-     ;; one is not worth failing a connect over.
-     :notify! (fn [method params] (http-rpc! url headers session method params 5000) nil)
-     :stderr  (fn [] [])
-     :closed? (fn [] false)
-     :close!  (fn [] nil)}))
+  ([server] (http-transport server nil))
+  ([{:keys [url headers]} {:keys [wait-for]}]
+   (let [session (atom nil)
+         sse?    (atom false)]
+     {:kind    "http"
+      :url     url
+      :rpc!    (fn [method params timeout-ms]
+                 (if (deref sse?)
+                   (http-stream-rpc! url headers session wait-for method params timeout-ms)
+                   (http-rpc! url headers session sse? method params timeout-ms)))
+      ;; A notification is a POST the server answers 202 to; a failure to deliver
+      ;; one is not worth failing a connect over. Always buffered — a
+      ;; notification has no response to wait for, so there is nothing to stream.
+      :notify! (fn [method params] (http-rpc! url headers session nil method params 5000) nil)
+      :stderr  (fn [] [])
+      :closed? (fn [] false)
+      :close!  (fn [] nil)})))
 
 ;; ---------------------------------------------------------------------------
 ;; §0.4  result shaping
@@ -621,7 +771,9 @@
       :else
       (let [transport (try
                         (if (= "remote" (:kind server))
-                          (http-transport server)
+                          ;; conn-opts carries the §10 waitFor to BOTH legs now —
+                          ;; the elicitation bridge is no longer stdio-only.
+                          (http-transport server conn-opts)
                           (stdio-transport server conn-opts))
                         (catch Throwable e
                           {:spawn-error (or (ex-message e) (str e))}))]
@@ -680,6 +832,13 @@
                      :status      "connected"
                      :transport   transport
                      :server-info (get-in init [:ok :result :serverInfo])
+                     ;; Bare `sort-by` is CORRECT here, unlike `parse-config`'s
+                     ;; above: every name in this list came out of
+                     ;; `mcp-tool-name`, i.e. `tool/sanitize` twice, so it is
+                     ;; `[a-zA-Z0-9_-]+` by construction. Code-unit and
+                     ;; code-point order coincide over ASCII, so there is no
+                     ;; host divergence to fix and no mutation that could prove
+                     ;; one — which is why this is a comment and not a change.
                      :tools       (->> (:ok listed)
                                        (map (fn [t] (uniform-tool (:name server) transport timeout-ms t)))
                                        (sort-by :name)
@@ -723,6 +882,8 @@
   ([config] (from-config config nil))
   ([config conn-opts]
   (let [conns (mapv (fn [srv] (connect srv conn-opts)) (parse-config config))]
+    ;; Bare `sort-by` again, and again deliberately: `mcp-tool-name` sanitized
+    ;; every one of these to `[a-zA-Z0-9_-]+`. See `connect`.
     {:tools       (->> conns (mapcat :tools) (sort-by :name) vec)
      :statuses    (reduce (fn [acc c] (assoc acc (:name c) (:status c))) {} conns)
      :errors      (reduce (fn [acc c] (if (:message c) (assoc acc (:name c) (:message c)) acc))

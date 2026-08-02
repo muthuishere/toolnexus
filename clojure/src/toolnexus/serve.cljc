@@ -83,9 +83,12 @@
     * a SkillSource-shaped index    ⇒ `{name -> info}`
     * a plain sequence of `{:name :description}`
   All normalize to a sorted seq — sorted because two runtimes must not disagree
-  on order."
+  on order, and sorted through `tool/compare-strings` because bare `sort-by` is
+  exactly where they DO disagree: skill names are not sanitized, and above the
+  BMP the JVM orders by UTF-16 code unit and cljgo by UTF-8 byte. This list goes
+  out on the §7B Agent Card."
   [skills]
-  (sort-by :name
+  (sort-by :name tool/compare-strings
            (cond
              (nil? skills)                     []
              (and (map? skills)
@@ -249,9 +252,14 @@
   (let [allow   (:tools cfg)
         allowed (set allow)
         ts      (vals (:tools tk))]
-    (sort-by :name (if (seq allow)
-                     (filter (fn [t] (contains? allowed (:name t))) ts)
-                     ts))))
+    ;; `tool/compare-strings`, not bare `sort-by`: above the BMP the JVM orders
+    ;; by UTF-16 code unit and cljgo by UTF-8 byte, which are OPPOSITE answers —
+    ;; so plain `sort` would have made the docstring's "two runtimes cannot
+    ;; disagree on order" false on exactly the surface it is claimed for.
+    (sort-by :name tool/compare-strings
+             (if (seq allow)
+               (filter (fn [t] (contains? allowed (:name t))) ts)
+               ts))))
 
 (defn- mcp-rpc [tk cfg on-call body]
   (let [[tag msg] (parse-body body)]

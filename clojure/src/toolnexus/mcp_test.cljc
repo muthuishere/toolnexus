@@ -114,6 +114,16 @@
                :still-template (str/includes? (str auth) "${")
                :non-empty      (not= "Bearer " (str auth))}))))
 
+(def ^:private echoed-session
+  "The `Mcp-Session-Id` the CLIENT sent back on a request after initialize, read
+  off the wire case-insensitively so the observation cannot itself be the bug."
+  (atom ::never))
+
+(defn- observe-session! [req]
+  (when-let [e (some (fn [e] (when (= "mcp-session-id" (str/lower-case (str (key e)))) e))
+                     (:headers req))]
+    (reset! echoed-session (str (val e)))))
+
 (defn- start-fake! []
   (server/serve
    (fn [req]
@@ -137,6 +147,20 @@
           :body (str ": keep-alive\n\n"
                      "event: message\n"
                      "data: " (json/write-str (rpc-response (:body req) false)) "\n\n")}
+
+         ;; Every RESPONSE header here is spelled in the mixed case an MCP
+         ;; server actually uses on the wire — `Mcp-Session-Id`, `Content-Type`
+         ;; — and the body is SSE, so BOTH of the port's response-header reads
+         ;; are forced through a non-lowercase spelling at once. The lowercase
+         ;; `/mcp` leg above cannot tell a case-insensitive read from an exact
+         ;; one; this leg can.
+         (= path "/mcp-mixedcase")
+         (do (observe-session! req)
+             {:status 200 :headers {"Content-Type"   "text/event-stream"
+                                    "Mcp-Session-Id" "sess-MiXeD-1"}
+              :body (str ": keep-alive\n\n"
+                         "event: message\n"
+                         "data: " (json/write-str (rpc-response (:body req) false)) "\n\n")})
 
          (= path "/badstatus")
          {:status 503 :headers {"content-type" "text/plain"} :body "service unavailable"}
@@ -251,6 +275,22 @@
     (is (= 30000 (:timeout (get by-name "c"))) "SPEC §0.3 default")
     (is (= 1234  (:timeout (get by-name "d"))))))
 
+(deftest config-server-order-is-by-code-point-on-every-host
+  ;; `parse-config`'s order is load-bearing twice: it is the order servers are
+  ;; connected in, and `from-config`'s first-wins collision rule inherits it —
+  ;; so which server wins a tool-name clash follows from this sort. RAW server
+  ;; names are the one name on the MCP path that has NOT been through
+  ;; `tool/sanitize` (that happens later, in `mcp-tool-name`), so a non-BMP name
+  ;; reaches the sort intact and bare `sort-by` places it differently on each
+  ;; host — the JVM by UTF-16 code unit (a surrogate D83D below E000), cljgo by
+  ;; UTF-8 byte (F0 above EE). Every other config fixture here is ASCII, where
+  ;; the two orders coincide, which is why the bare sort survived. U+E000 is an
+  ;; escape (an ordinary BMP char); U+1F600 is written DIRECTLY, because an
+  ;; escaped surrogate is not portable source.
+  (let [srv    {:command ["x"]}
+        parsed (mcp/parse-config {:mcpServers {"\uE000s" srv "😀s" srv "zs" srv "as" srv}})]
+    (is (= ["as" "zs" "\uE000s" "😀s"] (mapv :name parsed)))))
+
 (deftest config-reserved-sibling-keys
   (testing "with no wrapper the object IS the server map, minus §2's reserved keys"
     (let [parsed (mcp/parse-config {:builtins {:tools {:bash false}}
@@ -332,6 +372,34 @@
       (is (= 4 (count (mcp/tools c))))
       (is (= "Echo: over-sse"
              (:output (run-tool c "sse_echo" {:message "over-sse"}))))
+      (finally (mcp/disconnect c)))))
+
+(deftest response-headers-are-read-case-insensitively
+  ;; The port's own comment block above `sse-messages` records the historical
+  ;; bug: `(get (:headers res) "Mcp-Session-Id")` returned the value on one host
+  ;; and nil on the other, the lowercase spelling did the reverse, and it failed
+  ;; SILENTLY — a missing header and a mis-cased one are both nil, so the
+  ;; session id simply stopped being echoed and the server began a fresh session
+  ;; per request. That defence had NO test: an exact-match lookup shipped green.
+  ;;
+  ;; This asserts the two reads that exist, against a server that spells both
+  ;; headers in mixed case:
+  ;;   * `Mcp-Session-Id` — issued on initialize, and OBSERVED coming back on
+  ;;     the next request, which is the only thing the session is for. Asserting
+  ;;     the client "connected" would not do it: connecting works fine with the
+  ;;     session silently dropped, which is exactly how the bug hid.
+  ;;   * `Content-Type` — `text/event-stream` must still be recognised, so the
+  ;;     body is parsed as SSE frames rather than handed to the JSON reader.
+  (reset! echoed-session ::never)
+  (let [c (mcp/connect {:name "mixed" :kind "remote" :enabled true
+                        :url (str (base) "/mcp-mixedcase") :timeout 5000})]
+    (try
+      (is (= "connected" (:status c)))
+      (testing "mixed-case Content-Type ⇒ the SSE body was decoded, not JSON-parsed"
+        (is (= 4 (count (mcp/tools c))))
+        (is (= "Echo: mixed" (:output (run-tool c "mixed_echo" {:message "mixed"})))))
+      (testing "mixed-case Mcp-Session-Id ⇒ read, kept, and echoed on the next request"
+        (is (= "sess-MiXeD-1" @echoed-session)))
       (finally (mcp/disconnect c)))))
 
 (deftest remote-pagination

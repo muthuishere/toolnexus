@@ -22,15 +22,86 @@
       (is (not (contains? (:tools tk) "bash"))))
     (is (= "connected" (get (:statuses tk) "builtin")))))
 
-(deftest mcp-takes-precedence-over-a-builtin-of-the-same-name
-  (testing "SPEC §0.11. Registration order is the mechanism: builtins first,
-            MCP last, and tool/add-tools lets the later one win. If this ever
-            inverts, a server could no longer override our `read`."
-    (let [tk (tn/build {:builtins {}
-                        :tools [(tool/tool {:name "read" :source "mcp"
-                                            :execute (fn [_] (tool/success "from-mcp"))})]})]
-      ;; :tools is applied after builtins, standing in for the MCP source here
-      (is (= "from-mcp" (:output (tn/execute tk "read" {})))))))
+(defn- mcp-peer-serving-read
+  "A streamable-HTTP MCP peer whose ONLY tool is named `read` — the same name as
+  the §4A builtin. Minimal on purpose: initialize, tools/list, tools/call."
+  []
+  (server/serve
+   (fn [req]
+     ;; koine's json/read-str yields KEYWORD keys — `(get msg "method")` is
+     ;; always nil, which shows up as a peer that connects and registers nothing.
+     (let [msg    (json/read-str (str (:body req)))
+           id     (:id msg)
+           method (:method msg)
+           result (case method
+                    "initialize" {:protocolVersion "2024-11-05"
+                                  :capabilities {:tools {}}
+                                  :serverInfo {:name "peer" :version "1"}}
+                    "tools/list" {:tools [{:name "read"
+                                           :description "The SERVER's read, not ours."
+                                           :inputSchema {:type "object"
+                                                         :properties {:path {:type "string"}}}}]}
+                    "tools/call" {:content [{:type "text" :text "FROM-THE-MCP-SERVER"}]
+                                  :isError false}
+                    {})]
+       {:status 200
+        :headers {"content-type" "application/json" "mcp-session-id" "s1"}
+        :body (json/write-str {:jsonrpc "2.0" :id id :result result})}))
+   {:port 0}))
+
+(deftest mcp-registration-order-and-why-a-builtin-collision-cannot-happen
+  ;; SPEC §0.11 + §0.2. The old test here claimed to prove that "a server could
+  ;; override our `read`", registering its stand-in through `:tools` — a
+  ;; DIFFERENT slot in `core/build` from the MCP source. An audit inverted the
+  ;; real registration order and the whole suite stayed green.
+  ;;
+  ;; Investigating that produced a better answer than a stronger assertion:
+  ;; **the collision it described cannot occur.** §0.2 names every MCP tool
+  ;; `sanitize(server)_sanitize(tool)` at the single call site in
+  ;; `mcp/mcp-tool-name`, so an MCP tool is always `<server>_<tool>` and can
+  ;; never be spelled `read`. The rule was untestable because it was unreachable.
+  ;;
+  ;; So this asserts the two things that ARE true and reachable: the prefix that
+  ;; makes a builtin collision impossible, and the last-wins order where a
+  ;; collision genuinely can happen — a host extra named exactly like a
+  ;; prefixed MCP tool.
+  (let [srv (mcp-peer-serving-read)
+        url (str "http://127.0.0.1:" (server/port srv) "/mcp")
+        cfg (json/write-str {"mcpServers" {"peer" {"type" "remote" "url" url}}})]
+    (try
+      (testing "the MCP tool is PREFIXED, so the builtin of the bare name survives"
+        (let [tk (tn/build {:builtins {} :mcp cfg})]
+          (is (empty? (:errors tk)) (str "the peer must connect: " (pr-str (:errors tk))))
+          (is (contains? (:tools tk) "peer_read")
+              "§0.2 — sanitize(server)_sanitize(tool), never the bare remote name")
+          (is (not (contains? (:tools tk) "read_"))
+              "and nothing registers the remote name unprefixed")
+          (is (= "builtin" (:source (get (:tools tk) "read")))
+              "the §4A builtin `read` is untouched — the two names cannot collide")
+          (is (= "FROM-THE-MCP-SERVER" (:output (tn/execute tk "peer_read" {:path "x"})))
+              "and the prefixed name reaches the server")))
+
+      (testing "where a collision IS reachable, MCP wins — it is registered last"
+        ;; A host extra deliberately named like the prefixed MCP tool. This is
+        ;; the ordering §0.11 actually governs, and inverting `core/build`'s two
+        ;; `add-tools` calls flips this assertion.
+        (let [tk (tn/build {:builtins {}
+                            :mcp cfg
+                            :tools [(tool/tool {:name "peer_read" :source "custom"
+                                                :description "the host's own"
+                                                :execute (fn [_] (tool/success "FROM-THE-HOST"))})]})]
+          (is (= "mcp" (:source (get (:tools tk) "peer_read")))
+              "MCP is applied after host extras, so the server's tool is the one registered")
+          (is (= "FROM-THE-MCP-SERVER" (:output (tn/execute tk "peer_read" {}))))))
+
+      (testing "a host extra DOES beat a builtin — the other half of the order"
+        (let [tk (tn/build {:builtins {}
+                            :tools [(tool/tool {:name "read" :source "custom"
+                                                :description "the host's own read"
+                                                :execute (fn [_] (tool/success "FROM-THE-HOST"))})]})]
+          (is (= "custom" (:source (get (:tools tk) "read"))))
+          (is (= "FROM-THE-HOST" (:output (tn/execute tk "read" {}))))))
+      (finally (server/stop! srv)))))
 
 (deftest a-broken-mcp-config-is-isolated-not-fatal
   (testing "SPEC §0.3 — a source that fails contributes an error, never a throw.

@@ -132,7 +132,15 @@ if ! printf '%s' "$poison_out" | grep -q POISON; then
   exit 2
 fi
 
+# LANG survives the strip DELIBERATELY. `env -i` with no locale drops the JVM
+# into the C locale on Linux, where sun.jnu.encoding mangles every non-ASCII
+# FILENAME to a literal "?" — two non-BMP fixture files collapsed into one and
+# the glob order test failed in CI while passing on macOS, whose JVM ignores
+# the locale for filenames. A JDK-only consumer on a real machine has a UTF-8
+# locale; a C-locale JVM is an artifact of this sandbox, not a condition the
+# library claims to support.
 out=$(cd "$WORK" && env -i PATH="$SANDBOX_PATH" HOME="$HOME" TN_EXAMPLES="$TN_EXAMPLES" \
+      LANG="${LANG:-C.UTF-8}" LC_ALL="${LC_ALL:-C.UTF-8}" \
         clojure -M -m toolnexus.test-main 2>&1)
 line=$(printf '%s' "$out" | grep -E '^\{"assertions"' | tail -1)
 

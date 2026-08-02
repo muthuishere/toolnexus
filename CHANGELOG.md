@@ -30,8 +30,8 @@ failure-originated suspend tier), `:on-metric`, `:store` + conversation memory.
 permitted absences, the same bar as the six shipped ports.
 
 Since landed: **client hooks** (`:before-llm` / `:after-llm` / `:before-tool` / `:after-tool`),
-**§11 single-turn translation**, the **MCP elicitation bridge** (§2/§10, stdio
-only — see below), and all twelve toolkit options (`:skill-provider`, `:skills-filter`,
+**§11 single-turn translation**, the **MCP elicitation bridge** (§2/§10, on **both**
+transports — see below), and all twelve toolkit options (`:skill-provider`, `:skills-filter`,
 `:skill-sample-limit`, data skills, `:agents`, toolkit `:wait-for`, `:disable-tools` /
 `:disable-skills`).
 
@@ -45,10 +45,32 @@ which is a different capability from `openspec/specs/subagents` — that one rem
 here and is not satisfied by it. `clojure.core/agent` exists on both hosts, so a future
 subagents entry point cannot be named `agent`.
 
-**MCP elicitation is stdio-only.** A streamable-HTTP peer cannot hold `tools/call` open for a
-server→client reverse request: `koine.http/request` buffers the whole body, and
-`koine.stream/sse-post` is incremental but exposes no response headers — where MCP's
-`Mcp-Session-Id` lives. A consumer must choose streaming or the session id. Raised upstream.
+**MCP elicitation now works on streamable-HTTP too, not just stdio** — the gap reported here
+previously is closed. It was koine's, not §2's: `koine.http/request` buffers the whole body (so a
+server→client reverse request arriving mid-`tools/call` can never be seen in time) while
+`koine.stream/sse-post` streamed but exposed no response headers — and MCP carries session
+identity in the `Mcp-Session-Id` RESPONSE header that the reply must echo, so a consumer had to
+choose between streaming and the session id. koine 0.10.0 added `{:on-open f}` to `sse-post`,
+applied once to `{:status :headers}` while the stream is still open. The HTTP transport now
+switches to the streaming leg as soon as a server answers in `text/event-stream`, maps an
+`elicitation/create` onto the same one §10 `waitFor` as stdio (form ⇒ `kind:"input"` with
+`requestedSchema` in `data.schema`; URL ⇒ `kind:"authorization"`), and posts the Answer back on
+its own request carrying the session id — **inline**, so the in-flight `tools/call` resumes and
+the tool is not re-executed. A JSON-only peer keeps the buffered leg unchanged.
+
+**A silent cross-host bug fixed with it: response header CASING.** The two runtimes' HTTP clients
+disagreed about the case of the names they hand back — `java.net.http` lowercases, Go's
+`http.Header` canonicalises — so `(get (:headers res) "Mcp-Session-Id")` found the value on cljgo
+and nil on the JVM, and the lowercase spelling did the exact reverse. No portable spelling
+existed, and it failed silently, because a missing header and a mis-cased one are both nil: the
+client would simply stop echoing the session id and the server would start a new session per
+request. koine 0.10.0 lowercases response header names on every host and adds
+`koine.http/header` for a case-insensitive read; every response-header read in the port (MCP
+session id, MCP content type, the client loop's `Retry-After`) now goes through it, and the
+port's own private copy of that normalisation is gone. Regression-tested against a real
+loopback peer that issues the SAME session id under two different spellings of the header name —
+either spelling alone is a state where a correct and a broken client coincide on one of the two
+hosts.
 
 **§11 divergence, recorded not resolved.** SPEC §11 says any tool call ⇒ `finishReason`
 `"tool_calls"`. js, go, python and elixir all prefer the provider's own `finish_reason` when
@@ -76,10 +98,19 @@ both compose an agent definition, so both need the §7D runtime this port does n
 Two upstream defects were found by writing these:
 
 - **cljgo: a descending `range` was an inconsistent seq** — `(range 6 1 -1)` counted 5 and
-  mapped to five elements while `seq`/`vec`/`some`/`filter` traversed it as `(6)`, and `reduce`
-  returned its seed untouched. Nothing threw, so any code walking a collection backwards was
-  silently wrong on cljgo and right on the JVM. Root-caused to three ascending-only comparisons
-  in `LongRange`, fixed in cljgo v0.9.0 (PR #194).
+  mapped to five elements while `seq`/`vec`/`doall`/`some`/`filter` traversed it as `(6)`, and
+  the 2-arity `(reduce + coll)` returned `6`, the first element. Nothing threw, so any code
+  walking a collection backwards was silently wrong on cljgo and right on the JVM. Root-caused to
+  three ascending-only comparisons in `LongRange`, fixed in cljgo v0.9.0 (PR #194).
+
+  One correction, since the first version of this entry got it wrong and koine caught it: the
+  **seeded 3-arity `(reduce f init coll)` was CORRECT** at the Clojure level — `clojure.core`
+  does not route it through the broken method for this type. The broken Go method
+  (`LongRange.ReduceInit`) is real, and our Go-level test measured it returning `init`; the
+  Clojure surface simply never reached it. Both measurements were right about different layers,
+  and only the Clojure one is what a user could hit — so an audit grepping for a seed-returning
+  `reduce` would clear code that is actually broken and miss `(reduce f coll)`, the form that
+  failed.
 - **The documented Clojure examples did not all run.** They do now: `site/tests/runners/clojure.sh`
   executes every one of them four ways — JVM main, JVM REPL, cljgo interpreted, cljgo AOT —
   and caught a call to a function that does not exist, an invented `build.cljgo` verb, and a
@@ -88,6 +119,52 @@ Two upstream defects were found by writing these:
 `clojure/examples/clj/` and `clojure/examples/cljgo/` are two projects over one symlinked source
 tree with five runnable examples each (MCP + skills + native, native/HTTP tools, progressive
 disclosure, persona memory, compaction), verified in CI on both hosts.
+
+### Added — Clojure: the §7D runtime completed, and an adversarial audit paid for itself
+
+**The agent layer is now whole.** `from-dir` (the directory is the agent) and `start-agent`
+(the heartbeat, on the runtime's injectable clock — deterministic under a virtual clock) landed
+on the §7D runtime, plus `:on-budget` — the §7D host budget callback
+(`stop | extend | suspend`, "suspend" parking on a §10 approval). js and golang already ship
+`onBudget`; **python, java, csharp and elixir do not** — a pre-existing gap now named here so it
+cannot go quiet. The runtime's previously-untested edges (maxWallMs, the tool-call pool, forced
+close, wake-on-closed, model inherit, def-level on-metric) are each covered by a test that was
+watched to fail.
+
+**An adversarial audit found three shipped defects**, each proven by mutation before fixing:
+
+- **A throwing §8 tool hook hung the consumer forever, on both hosts** — the try/catch covered
+  `tool/execute` only, and both hooks ran outside it, so `deliver` never fired and the `deref`
+  never returned. Now every exit delivers, and a hook's throw is rethrown on the calling thread,
+  matching the shipped ports.
+- **The §4A builtins toggle failed OPEN for string-keyed config** — `{:tools {"bash" false}}`
+  and any JSON-read config left all ten builtins armed. Keys are normalised now, the same rule
+  the §3 skills filter always had.
+- **`write` reported a different byte count on each host, and both were wrong** — `utf8-count`
+  folded code units, so one file was "8 bytes" on the JVM, "5" on cljgo, and 6 in truth.
+
+**A whole class fell with them: nine host-dependent sorts.** `sort` orders by UTF-16 unit on
+the JVM and UTF-8 byte on cljgo, so every sorted output surface — the §0.6 `<skill_files>`
+block, the §3 catalog and not-found list, glob, the §7B Agent Card `skills[]`, and `mcp.json`
+server order, where **which server wins a name collision** could depend on the host — now goes
+through a code-point comparator. Three sorts were deliberately left: their inputs are
+ASCII-by-construction, and a change that cannot be made to fail is not a fix.
+
+**The long-standing "cljgo-only flake" was ours.** A fixture pinned at a fixed relative path let
+concurrent suite runs trample each other — one run's delete mid-rebuild while another read,
+which also produced our historical short-count aborts. Process-unique temp dirs; proven at
+5-concurrent red before, 6-concurrent green after, on the JVM. The load-sensitivity hypothesis
+this had fed upstream was withdrawn the same day.
+
+**And the gates that let all of this ship green got teeth**: the suite registry is counted and
+cross-checked (a dropped suite now fails by name, not by a floor 3× too loose), the five
+execution modes must agree with each other to the assertion, the §0.11 test that asserted an
+unreachable collision now drives a real MCP peer, and a new `env-chain-check.sh` proves the
+API-key fallback chain from outside with fake keys — the one §8 behaviour no in-process test
+can reach. Verified live end-to-end against a real provider on both hosts (2 turns, 1 tool
+call, identical output) — the port's first live-LLM run.
+
+393 tests / 1608 assertions, five execution modes, both hosts in exact agreement.
 
 ### Changed — cross-port conformance gate
 
@@ -101,10 +178,18 @@ disclosure, persona memory, compaction), verified in CI on both hosts.
   that stops being reported is indistinguishable from one that was implemented. The tier lives
   in the shared manifest so lowering the bar is a visible diff the other ports review.
 
-### Known gap
+### Known gaps
 
-The option gate compares option **names in two files**, so a port can be missing an entire
-subsystem and still report parity OK. A capability-level check belongs beside it.
+- The option gate compares option **names in two files**, so a port can be missing an entire
+  subsystem and still report parity OK. A capability-level check belongs beside it.
+- **Sorted output is not seven-port identical above the BMP.** python, go, elixir and now
+  clojure order strings by code point; js, java and c# by UTF-16 code unit — so any sorted
+  byte-exact surface (the §0.6 `<skill_files>` block, §3 catalogs, adapter order) diverges
+  between the two camps for a non-BMP tool or skill name. Harmless for ASCII names, which is
+  every name in the shared fixtures. Fixing it means SPEC.md pinning one order and three ports
+  moving — a cross-port change, tracked here until an OpenSpec change picks it up. (cljgo
+  aligning its `compare` with the JVM, requested upstream, would not close this: it would only
+  move clojure between camps.)
 
 ## 0.12.0 — 2026-07-30
 

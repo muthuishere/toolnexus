@@ -17,7 +17,12 @@
 # meets the library. A port proven only through its compiled path is proven in
 # the mode developers use least.
 #
-# STATUS 2026-08-02, cljgo v0.9.0, koine 0.9.1 — ALL FIVE GREEN, NONE WAIVED:
+# STATUS 2026-08-02, cljgo v0.9.0, koine 0.10.0 — ALL FIVE GREEN, NONE WAIVED.
+# The counts below are a SNAPSHOT of that run and go stale as the suite grows;
+# they are not the gate. The gate is that all five modes report the SAME count
+# (see the comparison at the bottom) — a number in a comment cannot notice a
+# test evaporating on one host, and this one had gone 63 tests stale before the
+# comparison existed.
 #
 #   jvm-main    291 tests / 1100 assertions  PASS
 #   jvm-repl    291 tests / 1100 assertions  PASS
@@ -88,9 +93,16 @@ cd "$(dirname "$0")"
 REPO_ROOT=$(cd .. && pwd)
 export TN_EXAMPLES="$REPO_ROOT/examples"
 
+# WHICH cljgo? `cljgo` on PATH may be a shim that rebuilds from a local
+# checkout, which is NOT the published binary the STATUS block above is measured
+# against — so the run records what it actually used instead of leaving the
+# reader to guess. Override with CLJGO=$HOME/go/bin/cljgo to pin the release.
 CLJGO=${CLJGO:-cljgo}
 log() { printf '%s\n' "$*" >&2; }
 fail=0; rows=""
+# "<label> <n> tests / <m> assertions" per green leg — the input to the
+# cross-mode comparison at the bottom. See there for why.
+counts=""
 
 # Every leg is judged on the suite's own machine-readable verdict line, which
 # carries its own count gate — so a mode that runs nothing cannot look green.
@@ -98,6 +110,12 @@ fail=0; rows=""
 # prints "Binary file … matches" instead of the line — silently turning a green
 # run into a failure with no verdict to show for it.
 verdict_of() { grep -aE '^\{"assertions"' | tail -1; }
+
+# `tests/assertions` out of a verdict line, as one comparable string. The keys
+# are emitted sorted, so "assertions" precedes "tests" on every line.
+counts_of() {
+  printf '%s' "$1" | sed -n 's/.*"assertions":\([0-9]*\).*"tests":\([0-9]*\).*/\2 tests \/ \1 assertions/p'
+}
 
 # Per-mode logs, kept. The first version of this script threw stderr away, and
 # when a leg failed intermittently the evidence went with it — a gate that can
@@ -129,9 +147,12 @@ run_mode() {  # $1 = label, $2 = shell command
                      fail=1 ;;
   esac
   rows="$rows{\"mode\":\"$label\",\"summary\":$line},"
+  counts="$counts$label $(counts_of "$line")
+"
 }
 
 log "== every execution mode"
+log "   cljgo: $(command -v "$CLJGO" 2>/dev/null || echo "$CLJGO")  ($($CLJGO version 2>&1 | head -1))"
 
 run_mode jvm-main  "clojure -M -m toolnexus.test-main"
 run_mode jvm-repl  "printf \"(require 'toolnexus.test-main)\\n(toolnexus.test-main/-main)\\n\" | clojure -r"
@@ -164,6 +185,8 @@ if [ -n "$repl_line" ]; then
     *)               log "  FAIL  cljgo-repl  $repl_line"; fail=1 ;;
   esac
   rows="$rows{\"mode\":\"cljgo-repl\",\"summary\":$repl_line},"
+  counts="$counts""cljgo-repl $(counts_of "$repl_line")
+"
 else
   # Distinguish "upstream cannot resolve anything" from a real port failure, by
   # asking the REPL for something that needs no project and no dependency.
@@ -186,8 +209,44 @@ else
   fi
 fi
 
-printf '{"check":"all-modes","gate":"%s","modes":[%s]}\n' \
-  "$([ $fail -eq 0 ] && echo OK || echo FAILED)" "${rows%,}"
+# THE FIVE MODES MUST AGREE WITH EACH OTHER, not merely each with the floor.
+#
+# Until this existed, every leg was judged solely on its own `gate:OK` — and
+# that gate is `minimum-tests`, a FLOOR. So the one thing this script exists to
+# catch was invisible to it: a `deftest` that compiles on the JVM and fails to
+# register on cljgo would show 354 on the two JVM legs and 300 on the three
+# cljgo legs, every leg would clear the floor, and the run would print
+# "PASS (all five modes; no mode is waived)". Host parity is the whole product;
+# a gate that cannot see 54 tests evaporating between hosts is not measuring it.
+#
+# `cljgo-gate.sh` already diffs its two legs this way ("aot != interp"); this is
+# the same mechanism at the level that spans BOTH hosts, which is where the
+# drift that matters lives. Only green legs contribute — a failed leg is already
+# reported, and comparing counts from a run that aborted would just double it.
+divergence=""
+if [ $fail -eq 0 ] && [ -n "$counts" ]; then
+  distinct=$(printf '%s' "$counts" | awk 'NF{print $2, $3, $4, $5, $6}' | sort -u | wc -l | tr -d ' ')
+  legs_seen=$(printf '%s' "$counts" | awk 'NF' | wc -l | tr -d ' ')
+  if [ "$legs_seen" != "5" ]; then
+    # Belt and braces: the comparison is only meaningful over ALL five legs, and
+    # a leg that stops contributing its count would otherwise make the remaining
+    # ones agree trivially — the same "green because it measured less" failure
+    # one level up.
+    log "  FAIL  only $legs_seen of 5 modes reported a count to compare"
+    divergence='"fewer than five modes reported a count"'
+    fail=1
+  elif [ "$distinct" != "1" ]; then
+    log "  FAIL  the five modes DISAGREE on how much they ran — host/mode drift:"
+    printf '%s' "$counts" | awk 'NF{printf "        %-11s %s %s %s %s %s\n",$1,$2,$3,$4,$5,$6}' >&2
+    divergence='"modes disagree on test/assertion counts"'
+    fail=1
+  else
+    log "  ok    all $legs_seen modes agree: $(printf '%s' "$counts" | awk 'NF{print $2,$3,$4,$5,$6; exit}')"
+  fi
+fi
+
+printf '{"check":"all-modes","gate":"%s","divergence":%s,"modes":[%s]}\n' \
+  "$([ $fail -eq 0 ] && echo OK || echo FAILED)" "${divergence:-null}" "${rows%,}"
 
 [ $fail -eq 0 ] && log "PASS (all five modes; no mode is waived)" || log "FAIL"
 exit $fail

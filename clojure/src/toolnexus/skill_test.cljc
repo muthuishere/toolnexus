@@ -6,9 +6,11 @@
 ;; Two fixture sources on purpose:
 ;;   * the SHARED examples/skills tree (path from TN_EXAMPLES) — the byte-exact
 ;;     conformance fixture, the one that carries an ABSOLUTE base path;
-;;   * a small tree this suite builds at a RELATIVE path — a mktemp path would
-;;     put a random absolute string inside every `Base directory:` and `<file>`
-;;     line and every byte count below would move between runs.
+;;   * a small tree this suite builds in a PROCESS-UNIQUE temp dir — every
+;;     expectation over it is built from `fixture-root`, so the random absolute
+;;     path lands on both sides of the comparison and no byte count moves. It
+;;     used to be a fixed relative path; see the note at `fixture-base` for the
+;;     concurrency defect that cost.
 (ns toolnexus.skill-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.string :as str]
@@ -18,11 +20,28 @@
             [toolnexus.tool :as tool]))
 
 ;; ---------------------------------------------------------------------------
-;; the relative fixture tree
+;; the private fixture tree
 ;; ---------------------------------------------------------------------------
 
-(def fixture-base "test-fixtures")
-(def fixture-root "test-fixtures/skills")
+;; PROCESS-UNIQUE, and that is a bug fix, not tidying. These were the fixed
+;; relative paths "test-fixtures" / "test-fixtures/skills", i.e. a shared
+;; mutable directory in whatever cwd the suite ran from — so TWO suite runs in
+;; the same checkout (two agents, or a CI matrix sharing a workspace) trampled
+;; each other: one run's `build-fixtures!` opens with `delete-tree!` and the
+;; `:once` teardown deletes the base, while the other is mid-read. "alpha" is
+;; written first, so it disappears first; the captured failure was 28 red
+;; assertions, every one of them alpha missing, plus a `str/includes?` on nil.
+;; That is the "cljgo-only intermittent under load" this port has been carrying
+;; — it reproduced on the JVM under a concurrent triple run too. cljgo was not
+;; the cause, it just lost the race more often.
+;;
+;; The header above says a relative path is needed because a mktemp path would
+;; move the byte counts. It would not: every assertion over this tree builds its
+;; expected string from `fixture-root` itself (see `output-shape-is-byte-exact`),
+;; and the one hardcoded byte count in this file — 995 — is measured against the
+;; SHARED examples/ tree and normalises for its own path length.
+(def fixture-base (str (fs/temp-dir! "tn-skill-fixtures")))
+(def fixture-root (str fixture-base "/skills"))
 
 (defn- write-fixture! [path text]
   (fs/mkdirs! (skill/parent-dir path))
@@ -240,6 +259,24 @@
     (is (= "skill" (:name t)))
     (is (= "skill" (:source t)))
     (is (= skill/skill-tool-input-schema (:input-schema t)))
+    ;; SPEC §3 "skill.txt (loader description, verbatim from opencode)" pins
+    ;; this string byte for byte across every port; js holds the same bytes in
+    ;; `SKILL_TOOL_DESCRIPTION` (js/src/skill.ts:18-22). A LENGTH check was the
+    ;; only thing guarding it, and a reword of the same length is exactly what a
+    ;; length check cannot see — so it is transcribed here from SPEC.md §3 and
+    ;; compared whole, like every other §3 constant in this file. Written out
+    ;; rather than referred to: comparing `skill/skill-tool-description` with
+    ;; itself would prove nothing.
+    (is (= (str "Load a specialized skill when the task at hand matches one of the skills listed in the system prompt.\n"
+                "\n"
+                "Use this tool to inject the skill's instructions and resources into current conversation."
+                " The output may contain detailed workflow guidance as well as references to scripts, files,"
+                " etc in the same directory as the skill.\n"
+                "\n"
+                "The skill name must match one of the skills listed in your system prompt.")
+           (:description t)))
+    ;; The old assertion, kept: it is now redundant, but a second, independent
+    ;; statement of the same fact is what catches a transcription slip ABOVE.
     (is (= 398 (count (:description t))))))
 
 (deftest skill-tool-executes-through-the-toolkit
@@ -361,6 +398,31 @@
   (is (= (:output (skill/execute-skill (skill/load-skills fixture-root) "alpha"))
          (:output (skill/execute-skill (skill/load-skills {:dirs fixture-root :skills [data-skill]})
                                        "alpha")))))
+
+(deftest name-ordering-is-by-code-point-on-every-host-visible-list
+  ;; Skill names are NOT sanitized — unlike MCP tool names, which
+  ;; `mcp-tool-name` reduces to [a-zA-Z0-9_-] — so a name above the BMP reaches
+  ;; these sorts intact, and a bare `sort`/`sort-by` orders it OPPOSITELY on the
+  ;; two hosts: the JVM by UTF-16 code unit (a surrogate D83D below E000),
+  ;; cljgo by UTF-8 byte (F0 above EE). Both lists below are host-visible — the
+  ;; §3 system-prompt catalog, and the `:filter-unmatched` names the warn line
+  ;; prints — and every other fixture in this file is ASCII, where the two
+  ;; orders coincide. U+E000 is an escape (an ordinary BMP char); U+1F600 is
+  ;; written DIRECTLY, because an escaped surrogate is not portable source.
+  (let [nm (fn [n] {:name n :description "D." :content "C."})
+        ld (skill/load-skills {:skills [(nm "😀s") (nm "\uE000s") (nm "zs") (nm "as")]})]
+    (testing "§3 catalog order"
+      (is (= (str skill/skills-prompt-preamble
+                  "\n\n## Available Skills\n"
+                  "- **as**: D.\n"
+                  "- **zs**: D.\n"
+                  "- **\uE000s**: D.\n"
+                  "- **😀s**: D.")
+             (skill/skills-prompt ld))))
+    (testing ":filter-unmatched order"
+      (let [f (skill/load-skills {:skills [(nm "as")]
+                                  :filter {"😀no" true "\uE000no" true "zno" true "ano" true}})]
+        (is (= ["ano" "zno" "\uE000no" "😀no"] (vec (:filter-unmatched f))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; §3 S2 — the per-agent skills allowlist

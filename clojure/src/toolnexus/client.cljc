@@ -290,9 +290,14 @@
   "Honour a `Retry-After` header when the server sends one. Seconds only: the
   HTTP-date form needs date parsing, which is not portable across these two
   hosts without reaching past koine, and a server that sends it gets our
-  backoff instead of a wrong answer."
+  backoff instead of a wrong answer.
+
+  Read through `koine.http/header`, not `get`: the two hosts' clients used to
+  disagree about the case of the names they hand back, so trying two spellings
+  was a guess that happened to cover the two known ones. koine 0.10.0 lowercases
+  on every host and `header` is the one lookup that cannot be mis-cased."
   [res]
-  (let [h (or (get-in res [:headers "retry-after"]) (get-in res [:headers "Retry-After"]))
+  (let [h (http/header res "retry-after")
         n (when h (re-matches #"\d+" (str/trim (str h))))]
     (when n (* 1000 (parse-long n)))))
 
@@ -528,19 +533,39 @@
   the JVM and a goroutine on cljgo. The promise is how a fire-and-forget
   primitive gives a value back — run-async! discards its fn's return.
 
-  A tool that throws must not park the deref forever, so the body is wrapped:
-  tool/execute already converts a throw into an isError result, and the catch
-  here covers the residue."
+  NOTHING may park the caller's deref forever, so the body delivers on every
+  exit including a throw. `tool/execute` converts a throwing TOOL into an isError
+  result; the catch here covers the rest of the body — in particular the two §8
+  tool hooks, which are host code and are invoked outside that conversion. A
+  throw from a hook is rethrown on the calling thread, matching the shipped
+  ports, where an unguarded hook rejects the run."
   [client toolkit calls turn]
   (->> calls
        (mapv (fn [c]
                (let [p (promise)
                      t0 (ktime/now-ms)]
+                 ;; EVERY exit from the body delivers, including a throw. Only
+                 ;; `tool/execute` was guarded before, and both §8 tool hooks are
+                 ;; invoked OUTSIDE that guard — so a host whose `:before-tool`
+                 ;; threw killed this thread before `deliver` ran and parked the
+                 ;; consumer on the `deref` below FOREVER. On the JVM that at
+                 ;; least printed a stack trace from the dying thread; on cljgo it
+                 ;; hung with no diagnostic at all.
                  (proc/run-async!
-                  (fn [] (deliver p (execute-tool client toolkit c turn))))
+                  (fn []
+                    (deliver p (try {:value (execute-tool client toolkit c turn)}
+                                    (catch Throwable e {:thrown e})))))
                  [p t0])))
        (mapv (fn [pair]
-               (let [r (deref (first pair))]
+               ;; Rethrow on the CALLING thread rather than converting to an
+               ;; isError result: js/src/client.ts wraps neither hook, so a hook
+               ;; that throws rejects `run()` and the host sees its own bug. A
+               ;; tool that throws is still an isError result — that rule is
+               ;; `tool/execute`'s and is unchanged. This is about the host's
+               ;; code failing, not the tool's.
+               (let [outcome (deref (first pair))
+                     _       (when-let [e (:thrown outcome)] (throw e))
+                     r       (:value outcome)]
                  ;; §client-observability — one `tool` event per call, emitted
                  ;; after the result lands so :ms and :is_error are real.
                  (metric! client
