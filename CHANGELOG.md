@@ -30,8 +30,8 @@ failure-originated suspend tier), `:on-metric`, `:store` + conversation memory.
 permitted absences, the same bar as the six shipped ports.
 
 Since landed: **client hooks** (`:before-llm` / `:after-llm` / `:before-tool` / `:after-tool`),
-**§11 single-turn translation**, the **MCP elicitation bridge** (§2/§10, stdio
-only — see below), and all twelve toolkit options (`:skill-provider`, `:skills-filter`,
+**§11 single-turn translation**, the **MCP elicitation bridge** (§2/§10, on **both**
+transports — see below), and all twelve toolkit options (`:skill-provider`, `:skills-filter`,
 `:skill-sample-limit`, data skills, `:agents`, toolkit `:wait-for`, `:disable-tools` /
 `:disable-skills`).
 
@@ -45,10 +45,32 @@ which is a different capability from `openspec/specs/subagents` — that one rem
 here and is not satisfied by it. `clojure.core/agent` exists on both hosts, so a future
 subagents entry point cannot be named `agent`.
 
-**MCP elicitation is stdio-only.** A streamable-HTTP peer cannot hold `tools/call` open for a
-server→client reverse request: `koine.http/request` buffers the whole body, and
-`koine.stream/sse-post` is incremental but exposes no response headers — where MCP's
-`Mcp-Session-Id` lives. A consumer must choose streaming or the session id. Raised upstream.
+**MCP elicitation now works on streamable-HTTP too, not just stdio** — the gap reported here
+previously is closed. It was koine's, not §2's: `koine.http/request` buffers the whole body (so a
+server→client reverse request arriving mid-`tools/call` can never be seen in time) while
+`koine.stream/sse-post` streamed but exposed no response headers — and MCP carries session
+identity in the `Mcp-Session-Id` RESPONSE header that the reply must echo, so a consumer had to
+choose between streaming and the session id. koine 0.10.0 added `{:on-open f}` to `sse-post`,
+applied once to `{:status :headers}` while the stream is still open. The HTTP transport now
+switches to the streaming leg as soon as a server answers in `text/event-stream`, maps an
+`elicitation/create` onto the same one §10 `waitFor` as stdio (form ⇒ `kind:"input"` with
+`requestedSchema` in `data.schema`; URL ⇒ `kind:"authorization"`), and posts the Answer back on
+its own request carrying the session id — **inline**, so the in-flight `tools/call` resumes and
+the tool is not re-executed. A JSON-only peer keeps the buffered leg unchanged.
+
+**A silent cross-host bug fixed with it: response header CASING.** The two runtimes' HTTP clients
+disagreed about the case of the names they hand back — `java.net.http` lowercases, Go's
+`http.Header` canonicalises — so `(get (:headers res) "Mcp-Session-Id")` found the value on cljgo
+and nil on the JVM, and the lowercase spelling did the exact reverse. No portable spelling
+existed, and it failed silently, because a missing header and a mis-cased one are both nil: the
+client would simply stop echoing the session id and the server would start a new session per
+request. koine 0.10.0 lowercases response header names on every host and adds
+`koine.http/header` for a case-insensitive read; every response-header read in the port (MCP
+session id, MCP content type, the client loop's `Retry-After`) now goes through it, and the
+port's own private copy of that normalisation is gone. Regression-tested against a real
+loopback peer that issues the SAME session id under two different spellings of the header name —
+either spelling alone is a state where a correct and a broken client coincide on one of the two
+hosts.
 
 **§11 divergence, recorded not resolved.** SPEC §11 says any tool call ⇒ `finishReason`
 `"tool_calls"`. js, go, python and elixir all prefer the provider's own `finish_reason` when

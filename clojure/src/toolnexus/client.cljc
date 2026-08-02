@@ -290,9 +290,14 @@
   "Honour a `Retry-After` header when the server sends one. Seconds only: the
   HTTP-date form needs date parsing, which is not portable across these two
   hosts without reaching past koine, and a server that sends it gets our
-  backoff instead of a wrong answer."
+  backoff instead of a wrong answer.
+
+  Read through `koine.http/header`, not `get`: the two hosts' clients used to
+  disagree about the case of the names they hand back, so trying two spellings
+  was a guess that happened to cover the two known ones. koine 0.10.0 lowercases
+  on every host and `header` is the one lookup that cannot be mis-cased."
   [res]
-  (let [h (or (get-in res [:headers "retry-after"]) (get-in res [:headers "Retry-After"]))
+  (let [h (http/header res "retry-after")
         n (when h (re-matches #"\d+" (str/trim (str h))))]
     (when n (* 1000 (parse-long n)))))
 

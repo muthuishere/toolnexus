@@ -16,6 +16,7 @@
             [toolnexus.tool-test]
             [toolnexus.frontmatter-test]
             [toolnexus.mcp-test]
+            [toolnexus.mcp-http-test]
             [toolnexus.skill-test]
             [toolnexus.adapter-test]
             [toolnexus.native-test]
@@ -33,6 +34,7 @@
   '[toolnexus.tool-test
     toolnexus.frontmatter-test
     toolnexus.mcp-test
+    toolnexus.mcp-http-test
     toolnexus.skill-test
     toolnexus.adapter-test
     toolnexus.native-test
