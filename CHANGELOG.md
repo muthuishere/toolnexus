@@ -178,6 +178,13 @@ call, identical output) — the port's first live-LLM run.
   that stops being reported is indistinguishable from one that was implemented. The tier lives
   in the shared manifest so lowering the bar is a visible diff the other ports review.
 
+### Changed — docs
+
+- The launch explainer video on the docs site now says **seven** languages, and names Elixir and
+  Clojure in the parity scene and Hex and Clojars in the closing registry line. It had been
+  recorded when there were five, so the one place a first-time visitor hears the parity claim
+  out loud was under-counting the ports by two.
+
 ### Known gaps
 
 - The option gate compares option **names in two files**, so a port can be missing an entire
