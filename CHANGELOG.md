@@ -178,10 +178,18 @@ call, identical output) — the port's first live-LLM run.
   that stops being reported is indistinguishable from one that was implemented. The tier lives
   in the shared manifest so lowering the bar is a visible diff the other ports review.
 
-### Known gap
+### Known gaps
 
-The option gate compares option **names in two files**, so a port can be missing an entire
-subsystem and still report parity OK. A capability-level check belongs beside it.
+- The option gate compares option **names in two files**, so a port can be missing an entire
+  subsystem and still report parity OK. A capability-level check belongs beside it.
+- **Sorted output is not seven-port identical above the BMP.** python, go, elixir and now
+  clojure order strings by code point; js, java and c# by UTF-16 code unit — so any sorted
+  byte-exact surface (the §0.6 `<skill_files>` block, §3 catalogs, adapter order) diverges
+  between the two camps for a non-BMP tool or skill name. Harmless for ASCII names, which is
+  every name in the shared fixtures. Fixing it means SPEC.md pinning one order and three ports
+  moving — a cross-port change, tracked here until an OpenSpec change picks it up. (cljgo
+  aligning its `compare` with the JVM, requested upstream, would not close this: it would only
+  move clojure between camps.)
 
 ## 0.12.0 — 2026-07-30
 
