@@ -120,6 +120,52 @@ Two upstream defects were found by writing these:
 tree with five runnable examples each (MCP + skills + native, native/HTTP tools, progressive
 disclosure, persona memory, compaction), verified in CI on both hosts.
 
+### Added — Clojure: the §7D runtime completed, and an adversarial audit paid for itself
+
+**The agent layer is now whole.** `from-dir` (the directory is the agent) and `start-agent`
+(the heartbeat, on the runtime's injectable clock — deterministic under a virtual clock) landed
+on the §7D runtime, plus `:on-budget` — the §7D host budget callback
+(`stop | extend | suspend`, "suspend" parking on a §10 approval). js and golang already ship
+`onBudget`; **python, java, csharp and elixir do not** — a pre-existing gap now named here so it
+cannot go quiet. The runtime's previously-untested edges (maxWallMs, the tool-call pool, forced
+close, wake-on-closed, model inherit, def-level on-metric) are each covered by a test that was
+watched to fail.
+
+**An adversarial audit found three shipped defects**, each proven by mutation before fixing:
+
+- **A throwing §8 tool hook hung the consumer forever, on both hosts** — the try/catch covered
+  `tool/execute` only, and both hooks ran outside it, so `deliver` never fired and the `deref`
+  never returned. Now every exit delivers, and a hook's throw is rethrown on the calling thread,
+  matching the shipped ports.
+- **The §4A builtins toggle failed OPEN for string-keyed config** — `{:tools {"bash" false}}`
+  and any JSON-read config left all ten builtins armed. Keys are normalised now, the same rule
+  the §3 skills filter always had.
+- **`write` reported a different byte count on each host, and both were wrong** — `utf8-count`
+  folded code units, so one file was "8 bytes" on the JVM, "5" on cljgo, and 6 in truth.
+
+**A whole class fell with them: nine host-dependent sorts.** `sort` orders by UTF-16 unit on
+the JVM and UTF-8 byte on cljgo, so every sorted output surface — the §0.6 `<skill_files>`
+block, the §3 catalog and not-found list, glob, the §7B Agent Card `skills[]`, and `mcp.json`
+server order, where **which server wins a name collision** could depend on the host — now goes
+through a code-point comparator. Three sorts were deliberately left: their inputs are
+ASCII-by-construction, and a change that cannot be made to fail is not a fix.
+
+**The long-standing "cljgo-only flake" was ours.** A fixture pinned at a fixed relative path let
+concurrent suite runs trample each other — one run's delete mid-rebuild while another read,
+which also produced our historical short-count aborts. Process-unique temp dirs; proven at
+5-concurrent red before, 6-concurrent green after, on the JVM. The load-sensitivity hypothesis
+this had fed upstream was withdrawn the same day.
+
+**And the gates that let all of this ship green got teeth**: the suite registry is counted and
+cross-checked (a dropped suite now fails by name, not by a floor 3× too loose), the five
+execution modes must agree with each other to the assertion, the §0.11 test that asserted an
+unreachable collision now drives a real MCP peer, and a new `env-chain-check.sh` proves the
+API-key fallback chain from outside with fake keys — the one §8 behaviour no in-process test
+can reach. Verified live end-to-end against a real provider on both hosts (2 turns, 1 tool
+call, identical output) — the port's first live-LLM run.
+
+393 tests / 1608 assertions, five execution modes, both hosts in exact agreement.
+
 ### Changed — cross-port conformance gate
 
 - `conformance/check_options_parity.py` now tokenizes **kebab-case**. It previously split on
