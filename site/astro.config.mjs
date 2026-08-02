@@ -10,6 +10,9 @@ import { apiTopics } from './scripts/lib/sidebar.mjs';
 export default defineConfig({
 	site: 'https://muthuishere.github.io',
 	base: '/toolnexus',
+	// The old "One demo, five sources" page duplicated the quickstart; published
+	// links to it must not 404.
+	redirects: { '/demo': '/toolnexus/quickstart/' },
 	integrations: [
 		starlight({
 			title: 'toolnexus',
@@ -39,7 +42,6 @@ export default defineConfig({
 									label: 'Start here',
 									items: [
 										{ label: 'Quickstart', slug: 'quickstart' },
-										{ label: 'One demo, five sources', slug: 'demo' },
 									],
 								},
 								{

@@ -62,8 +62,8 @@ Three steps to a working agent. Pick your language once — the tabs stay in syn
    </TabItem>
    <TabItem label="Clojure">
    ```clojure
-   ;; deps.edn — the toolnexus.* namespaces + koine (the only dependency)
-   {:deps {net.clojars.muthuishere/koine     {:mvn/version "0.11.0"}}}
+   ;; deps.edn — one artifact; koine (the portability seam) comes with it
+   {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.13.0"}}}
    ```
    </TabItem>
    </Tabs>
@@ -257,6 +257,6 @@ Go deeper on each source: [MCP servers](/toolnexus/mcp/) · [Agent skills](/tool
 
 <Aside type="tip">
 Next: see all the tool sources — a function, MCP, a skill, a remote A2A agent, and a
-human-in-the-loop question — in [one demo](/toolnexus/demo/), then delegate to
+human-in-the-loop question — in [quickstart](/toolnexus/quickstart/), then delegate to
 [in-process sub-agents](/toolnexus/subagents/).
 </Aside>
