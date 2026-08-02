@@ -70,7 +70,14 @@ cat > "$PROBE" <<'CLJ'
 (println "consumer done")
 CLJ
 
-DEPS='{:paths ["src"] :deps {org.clojure/clojure {:mvn/version "1.12.5"} net.clojars.muthuishere/koine {:mvn/version "0.9.0"}}}'
+# The koine version is READ from the port's own deps.edn, never repeated here. A
+# second copy is a second thing to forget: this script pinned 0.9.0 while the
+# port moved to 0.10.0, so the day a source file called a 0.10.0-only function
+# (koine.http/header) this gate failed for a reason that had nothing to do with
+# what it measures.
+KOINE=$(grep -o 'net.clojars.muthuishere/koine {:mvn/version "[^"]*"' deps.edn | grep -o '[0-9][^"]*')
+[ -n "$KOINE" ] || { echo "FAIL: could not read the koine version from deps.edn" >&2; exit 1; }
+DEPS='{:paths ["src"] :deps {org.clojure/clojure {:mvn/version "1.12.5"} net.clojars.muthuishere/koine {:mvn/version "'"$KOINE"'"}}}'
 
 start=$(date +%s)
 out=$(clojure -Sdeps "$DEPS" -M "$PROBE" 2>&1)

@@ -92,3 +92,48 @@
       (is (< (str/index-of encoded private)
              (str/index-of encoded emoji))
           (str "key order disagrees with codepoint order: " encoded)))))
+
+(deftest sorting-is-identical-on-both-hosts-above-the-bmp
+  ;; REGRESSION (C3). `sort` is host-dependent above the BMP: the JVM orders by
+  ;; UTF-16 code unit (surrogate D83D < E000) and cljgo by UTF-8 byte (F0 > EE),
+  ;; so `(sort ["\uD83D\uDE00" "\uE000"])` returned OPPOSITE answers. That fed
+  ;; the §0.6 byte-exact <skill_files> block, the §3 not-found list, adapter
+  ;; order and glob — so "byte-identical on both hosts" held only while every
+  ;; name stayed inside the BMP.
+  ;;
+  ;; Asserted against a FIXED expected order, never host-against-host: two hosts
+  ;; agreeing proves they agree, not that either is right — this project has
+  ;; already shipped a payload that was identically wrong on three runtimes.
+  ;; The two characters are written DIRECTLY, never as \uXXXX escapes. Escaped
+  ;; lone surrogates are not portable source: the JVM reader assembles
+  ;; "\uD83D\uDE00" into one supplementary character, and cljgo's reader yields
+  ;; TWO U+FFFD replacement characters instead. Measured on cljgo v0.9.0 — and it
+  ;; is a reasonable reading of the standard on cljgo's side, since a lone
+  ;; surrogate is not a valid scalar value. It just means an escape cannot be
+  ;; used to write one.
+  (let [emoji "😀"      ; U+1F600, a surrogate pair on the JVM, one rune on cljgo
+        pua   ""]       ; U+E000, BMP, above the surrogate block
+    (testing "code-points folds a surrogate pair back into one code point"
+      (is (= [0x1F600] (tool/code-points emoji)))
+      (is (= [0xE000] (tool/code-points pua)))
+      (is (= [0x61 0x1F600 0x62] (tool/code-points (str "a" emoji "b")))))
+    (testing "code-point order: U+E000 sorts BELOW U+1F600 on every host"
+      (is (= [pua emoji] (tool/sort-strings [emoji pua])))
+      (is (= [pua emoji] (tool/sort-strings [pua emoji])) "and it is stable either way")
+      (is (neg? (tool/compare-strings pua emoji)))
+      (is (pos? (tool/compare-strings emoji pua)))
+      (is (zero? (tool/compare-strings emoji emoji))))
+    (testing "a prefix sorts before the string it prefixes — not by length first"
+      ;; `compare` on the code-point VECTORS would order by length first, putting
+      ;; any 1-element vector below any 2-element one whatever it contains.
+      (is (= ["a" "ab"] (tool/sort-strings ["ab" "a"])))
+      (is (= ["b" "ba"] (tool/sort-strings ["ba" "b"])))
+      (is (= [emoji (str emoji "a")] (tool/sort-strings [(str emoji "a") emoji]))))
+    (testing "ASCII order is unchanged — the common path must not move"
+      (is (= ["a" "b" "z"] (tool/sort-strings ["z" "a" "b"])))
+      (is (= ["SKILL.md" "a.txt" "b.txt"] (tool/sort-strings ["b.txt" "a.txt" "SKILL.md"]))))
+    (testing "tool-names uses it, so a toolkit's order is host-independent too"
+      (let [tk (tool/toolkit [(tool/tool {:name pua   :description "d" :execute (fn [_] nil)})
+                              (tool/tool {:name emoji :description "d" :execute (fn [_] nil)})
+                              (tool/tool {:name "a"   :description "d" :execute (fn [_] nil)})])]
+        (is (= ["a" pua emoji] (tool/tool-names tk)))))))

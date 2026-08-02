@@ -121,8 +121,8 @@
   (->> (fs/list-tree root)
        (map str)
        (remove fs/directory?)
-       sort
-       vec))
+       ;; tool/sort-strings, not `sort` — glob output must not depend on the host.
+       tool/sort-strings))
 
 (defn- rel-path [root p]
   (let [root (str root)
