@@ -130,6 +130,30 @@ client = Toolnexus.Client.create(
 )
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[koine.env :as env]
+         '[koine.http :as http]
+         '[toolnexus.client :as client])
+
+;; The seam is a plain function — (fn [url headers body] response) — the same shape
+;; as koine.http/post-json, so wrapping the default is a one-liner. Return
+;; {:status :body :headers}; a transport failure is DATA ({:status nil :error …}),
+;; never a throw, and the retry loop already understands it.
+(defn my-post [url headers body]
+  ;; Your transport goes here — koine's default below, or your host's own client
+  ;; (a JVM HttpClient with a ProxySelector, Go's http.Client with a Transport).
+  (http/request {:method :post :url url :headers headers :body body :timeout-ms 60000}))
+
+;; NOT named `agent` — `clojure.core/agent` exists on both hosts.
+(def llm-client
+  (client/create-client
+   {:base-url "https://openrouter.ai/api/v1" :style "openai"
+    :model "openai/gpt-4o-mini" :api-key (env/get-env "OPENROUTER_API_KEY")
+    :http-client my-post                    ; ← toolnexus calls this for every LLM request
+    :headers {"X-Egress-Token" (env/get-env "EGRESS_TOKEN")}}))
+```
+</TabItem>
 </Tabs>
 
 The injection seam per port:
@@ -142,6 +166,7 @@ The injection seam per port:
 | Java | `httpClient` (`java.net.http.HttpClient`) | `headers` |
 | C# | `HttpClient` or `HttpHandler` (default honors system proxy) | `Headers` |
 | Elixir | `http_options` (Req/Finch options) | `headers` |
+| Clojure | `:http-client` — a `(fn [url headers body] response)`, same shape as `koine.http/post-json` | `:headers` |
 
 Scope is the **LLM path** only — MCP transports use their own SDK clients. Whatever
 your client does (mTLS, a recording double in tests, an observability transport,

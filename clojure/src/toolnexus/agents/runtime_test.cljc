@@ -22,6 +22,7 @@
 ;; No java.*, no `future`, no reader conditionals.
 (ns toolnexus.agents.runtime-test
   (:require [clojure.string :as str]
+            [koine.fs :as fs]
             [clojure.test :refer [deftest is testing]]
             [koine.json :as json]
             [koine.process :as proc]
@@ -1170,3 +1171,35 @@
         "tree order, root excluded")
     (is (= ["root/boss.1" "root/boss.1/w.1"] (mapv :id (rt/handles rt "root/boss.1")))
         "a subtree view starts AT the given handle — only the RUNTIME root is excluded")))
+
+
+(deftest soul-file-resolves-at-spawn-and-wins-over-soul
+  ;; §7E: an AgentDef may carry :soul-file — the other six ports spell it
+  ;; soulFile/soul_file, and it was the most repeated divergence when the docs
+  ;; tabs were written. Three claims, each on the WIRE, not on the def:
+  ;;   1. the file's content is the system prompt
+  ;;   2. :soul-file WINS over :soul when both are set (as in every port)
+  ;;   3. it is frozen AT SPAWN — editing the file after spawn changes nothing
+  (let [dir (fs/temp-dir! "tn-soulfile")
+        f   (str dir "/SOUL.md")]
+    (try
+      (fs/write-file f "You are the file soul.")
+      (let [{:keys [rt requests]}
+            (runtime-with {"w" {:name "w" :does "works"
+                                :soul "the inline soul, which must LOSE"
+                                :soul-file f}}
+                          {"default" [{:text "done"}]})
+            id (rt/spawn rt rt/root "w")]
+        (fs/write-file f "EDITED AFTER SPAWN — must not appear")
+        (rt/wake rt id "go")
+        (rt/wait rt id 2000)
+        (let [sys (->> (:messages (first @requests))
+                       (filter #(= "system" (:role %)))
+                       first :content str)]
+          (is (str/includes? sys "You are the file soul.")
+              "the FILE is the soul on the wire")
+          (is (not (str/includes? sys "inline soul"))
+              ":soul-file wins over :soul, as in every other port")
+          (is (not (str/includes? sys "EDITED AFTER SPAWN"))
+              "resolved once at spawn — the frozen-snapshot rule")))
+      (finally (fs/delete-tree! dir)))))

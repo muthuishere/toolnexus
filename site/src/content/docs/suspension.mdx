@@ -1,6 +1,6 @@
 ---
 title: Suspension & the human loop
-description: Sometimes an agent hits a wall only a human can clear — approve a risky action, log in, answer a question. Suspension lets any tool pause the loop and resume once the answer arrives, whether that's in seconds or in days. The same primitive in all six ports.
+description: Sometimes an agent hits a wall only a human can clear — approve a risky action, log in, answer a question. Suspension lets any tool pause the loop and resume once the answer arrives, whether that's in seconds or in days. The same primitive in all seven ports.
 ---
 
 import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
@@ -10,7 +10,7 @@ Your agent is halfway through a task and hits a wall only a person can clear: **
 loop do — crash? Block a thread for six hours? Guess?
 
 toolnexus gives you a fourth answer: **suspend**. Any tool can pause the loop, surface a `Request`,
-and resume once it's answered — the same way in all six ports.
+and resume once it's answered — the same way in all seven ports.
 
 ## The one decision: can the human answer *now*, or *later*?
 
@@ -130,6 +130,39 @@ var result = await client.RunAsync("Refund order #4021 if policy allows.", tk);
 // result.Status == "done" — the refund tool ran only after you typed y
 ```
 </TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.{Answer, Client}
+
+wait_for = fn req ->
+  line = IO.gets("#{req.prompt} [y/N] ")            # read the operator's decision off the terminal
+  %Answer{id: req.id, ok: String.trim(line || "") |> String.downcase() == "y"}
+end
+
+client = Client.create(base_url: base, style: "openai", model: model, wait_for: wait_for)
+result = Client.run(client, "Refund order #4021 if policy allows.", tk)
+# result.status == "done" — the refund tool ran only after you typed y
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[clojure.string :as str] '[toolnexus.client :as client])
+
+(def llm
+  (client/create-client
+    {:base-url base-url :style "openai" :model model
+     ;; Called whenever a tool suspends. `wait-for` is a plain blocking
+     ;; (fn [request] answer) — read the operator's decision off the terminal.
+     :wait-for (fn [request]
+                 (println (:prompt request) "[y/N] ")
+                 ;; ok false → the loop tells the model it was declined
+                 (client/make-answer (:id request)
+                                     (= "y" (str/lower-case (str/trim (str (read-line)))))))}))
+
+(def result (client/run llm "Refund order #4021 if policy allows." {:toolkit tk}))
+;; (:status result) => "done" — the refund tool ran only after you typed y
+```
+</TabItem>
 </Tabs>
 
 The tool that gated the action simply returned `pending({ kind: "question", prompt: "Approve refund?" })`.
@@ -169,7 +202,7 @@ const client = createClient({
 
 <Aside type="note">
 `authRequired(url, prompt)` is a one-liner over the same primitive — it returns
-`pending({ kind: "authorization", url, prompt })`. The **same shape works in all six ports**;
+`pending({ kind: "authorization", url, prompt })`. The **same shape works in all seven ports**;
 only the surface syntax differs. Nothing here is special-cased for auth.
 </Aside>
 
@@ -242,6 +275,29 @@ if (res.Status == "pending")
 }
 ```
 </TabItem>
+<TabItem label="Elixir">
+```elixir
+res = Toolnexus.Client.ask(client, prompt, tk, conversation_id)   # no wait_for; ask records the id
+
+if res.status == "pending" do
+  req = res.pending                             # %Toolnexus.Request{id, kind, prompt, url, data}
+  DB.save(conversation_id, req)                  # persist — plain serializable data
+  Slack.post(channel, req.prompt)                # ask the human, out of band
+end                                              # the caller returns; nothing is blocked
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+;; No :wait-for on the client → the run halts durably instead of blocking.
+;; :conversation-id records the transcript under that id so you can resume it later.
+(let [res (client/run llm prompt {:toolkit toolkit :conversation-id conversation-id})]
+  (when (= "pending" (:status res))
+    (let [req (:pending res)]                    ; {:id :kind :prompt :url :data}
+      (db-save! conversation-id req)             ; persist — plain serializable data
+      (slack-post! channel (:prompt req)))))     ; ask the human, out of band
+;; the handler returns; nothing is blocked
+```
+</TabItem>
 </Tabs>
 
 **Phase 2 — hours later, the reply arrives; resume the same conversation:**
@@ -306,6 +362,31 @@ var done = await resume.AskAsync(prompt, tk, conversationId);
 // done.Status == "done"
 ```
 </TabItem>
+<TabItem label="Elixir">
+```elixir
+resume =
+  Toolnexus.Client.create(
+    base_url: base, style: "openai", model: model,
+    wait_for: fn req -> %Toolnexus.Answer{id: req.id, ok: true, data: %{"answers" => [reply]}} end
+  )
+
+done = Toolnexus.Client.ask(resume, prompt, tk, conversation_id)
+# done.status == "done"
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+;; A different handler, maybe a different process. You now hold the human's answer.
+(def resumed
+  (client/create-client
+    {:base-url base-url :style "openai" :model model
+     :wait-for (fn [req] (client/make-answer (:id req) true {:answers [reply]}))}))
+
+;; Same :conversation-id → memory replays the thread; the suspended tool re-runs and resolves.
+(def done (client/run resumed prompt {:toolkit toolkit :conversation-id conversation-id}))
+;; (:status done) => "done"
+```
+</TabItem>
 </Tabs>
 
 <Aside type="note" title="Why this survives restarts">
@@ -342,7 +423,7 @@ to servers only when a `waitFor` is present.
   handler can push the link the instant the agent asks.
 
 <Aside type="note">
-This layer shipped byte-identical across JavaScript, Python, Go, Java and C#. The A2A fulfilment
+This layer shipped byte-identical across JavaScript, Python, Go, Java, C#, Elixir and Clojure. The A2A fulfilment
 path maps a suspended run to the A2A `input-required` state, so a *served* toolnexus agent can ask
 its caller a question too.
 </Aside>

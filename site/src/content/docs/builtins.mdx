@@ -62,6 +62,18 @@ Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false));
 await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false });
 ```
 </TabItem>
+<TabItem label="Elixir">
+```elixir
+{:ok, tk} = Toolnexus.create_toolkit(builtins: false)
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.core :as tn])
+
+(def tk (tn/build {:builtins false}))
+```
+</TabItem>
 </Tabs>
 
 **Or drop individual tools on the all-on baseline** — here, disable `bash` while keeping the rest:
@@ -99,6 +111,16 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
         ["tools"] = new Dictionary<string, object?> { ["bash"] = false },
     },
 });
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+{:ok, tk} = Toolnexus.create_toolkit(builtins: %{"tools" => %{"bash" => false}})
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(def tk (tn/build {:builtins {:tools {:bash false}}}))
 ```
 </TabItem>
 </Tabs>

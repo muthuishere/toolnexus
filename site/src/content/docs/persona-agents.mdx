@@ -1,6 +1,6 @@
 ---
 title: Persona agents
-description: Build a long-lived assistant whose identity lives in files, whose memory it can edit, and which acts on a heartbeat — fromDir + the memory builtin + startAgent, in all six languages.
+description: Build a long-lived assistant whose identity lives in files, whose memory it can edit, and which acts on a heartbeat — fromDir + the memory builtin + startAgent, in all seven languages.
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -26,7 +26,8 @@ Three surfaces, one runtime. Pick by lifetime and who drives the loop.
 
 <Aside type="note" title="Same namespace as sub-agents">
 The persona surface ships in the same **`agents`** namespace as `agent()` — `agents.fromDir`
-(JS/C#/Elixir `FromDir`/`from_dir`), `agent_from_dir` (Python), `Agents.agentFromDir` (Java).
+(JS/C#/Elixir `FromDir`/`from_dir`), `agent_from_dir` (Python), `Agents.agentFromDir` (Java),
+`toolnexus.agents.home/from-dir` (Clojure).
 Nothing here collides with the A2A `Agent` (the remote Agent-Card type).
 </Aside>
 
@@ -120,6 +121,24 @@ r = Toolnexus.Agents.run(ava,
 IO.puts("#{r.status} #{r.text}")
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.agents.home :as home] '[toolnexus.agents.runtime :as rt])
+
+;; from-dir returns a plain AgentDef map: the composed soul plus a `memory` tool
+;; over the same directory. Put it in a registry and it is an agent.
+(def ava (home/from-dir "./personas/ava"))
+
+(def runtime
+  (rt/create-runtime {:registry {(:name ava) ava}
+                      :llm      {:base-url "https://openrouter.ai/api/v1"
+                                 :style    "openai"
+                                 :model    "openai/gpt-4o-mini"}}))
+
+(def r (rt/run-agent runtime (:name ava) "What's on my plate today?"))
+(println (:status r) (:text r))
+```
+</TabItem>
 </Tabs>
 
 ## Durable memory — the `memory` builtin
@@ -178,6 +197,11 @@ var notes = Home.MemoryTool("./personas/ava");
 <TabItem label="Elixir">
 ```elixir
 notes = Home.memory_tool("./personas/ava")
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(def notes (home/memory-tool "./personas/ava"))  ; add | replace | remove over MEMORY.md / USER.md
 ```
 </TabItem>
 </Tabs>
@@ -249,6 +273,19 @@ started = Home.start_agent(ava, rt_opts,
   on_beat: fn text -> send_to_telegram(text) end)   # only NON-silent beats arrive here
 # ... later:
 Home.stop(started)
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(def started
+  (home/start-agent ava
+                    {:llm {:base-url "https://openrouter.ai/api/v1"
+                           :style    "openai"
+                           :model    "openai/gpt-4o-mini"}}
+                    {:every-ms 60000
+                     :on-beat  (fn [text] (send-to-telegram! text))}))  ; only NON-silent beats
+;; ... later:
+((:stop started))
 ```
 </TabItem>
 </Tabs>
@@ -380,6 +417,22 @@ client = Toolnexus.Client.create(
   hooks: %{before_llm: compact})
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.agents.compaction :as compaction] '[toolnexus.client :as client])
+
+(def compact
+  (compaction/compactor
+    {:max-tokens 120000     ; compact once the estimate crosses this
+     :keep-tail  40000      ; always keep this much recent context verbatim
+     :summarize  (fn [older] (summarise-with-cheap-model older))}))  ; MAY call a small model
+
+(def agent
+  (client/create-client
+    {:base-url "https://openrouter.ai/api/v1" :style "openai" :model "openai/gpt-4o-mini"
+     :hooks    {:before-llm compact}}))   ; the one seam compaction rides
+```
+</TabItem>
 </Tabs>
 
 ### Wire it on an **agent run** (per agent)
@@ -456,6 +509,16 @@ researcher =
       before_llm: Toolnexus.Agents.Compaction.compactor(max_tokens: 60_000, summarize: summarize)
     }
   )
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+;; an AgentDef is a map, so its own :hooks is just another key
+(def researcher
+  {:name  "researcher"
+   :does  "digs through long documents"
+   :soul  "You are a careful researcher."
+   :hooks {:before-llm (compaction/compactor {:max-tokens 60000 :summarize summarize})}})
 ```
 </TabItem>
 </Tabs>
@@ -619,6 +682,32 @@ ava = Toolnexus.Client.create(
     summarize: fn older -> summarise_with_cheap_model(older) end)})
 
 Toolnexus.Client.ask(ava, user_text, tk, "ava")            # weeks of turns; transcript self-compacts
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.agents.home :as home] '[toolnexus.agents.compaction :as compaction]
+         '[toolnexus.core :as tn] '[toolnexus.client :as client])
+
+(def dir "./personas/ava")
+(def soul (:soul (home/compose-soul dir)))  ; identity + durable MEMORY.md, frozen for the session
+
+(def tk (tn/build {:builtins true                      ; shell/file built-ins …
+                   :tools    [(home/memory-tool dir)]}))  ; … plus the memory builtin
+
+(def ava
+  (client/create-client
+    {:base-url      "https://openrouter.ai/api/v1" :style "openai" :model "openai/gpt-4o-mini"
+     :system-prompt soul
+     :hooks {:before-llm
+             (compaction/compactor
+               {:max-tokens      120000
+                :keep-tail       40000
+                :flush-to-memory true   ; save durable facts to MEMORY.md BEFORE summarizing
+                :summarize       (fn [older] (summarise-with-cheap-model older))})}}))
+
+;; Weeks of turns keyed by one stable id: the transcript self-compacts, MEMORY.md keeps growing.
+(client/run ava user-text {:toolkit tk :conversation-id "ava"})
 ```
 </TabItem>
 </Tabs>
