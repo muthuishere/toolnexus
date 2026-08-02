@@ -15,8 +15,8 @@
 Point toolnexus at an `mcp.json` and a `skills/` folder and you get a **working agent**: the
 tool-calling loop, skills injection, six unified tool sources, and conversation memory — all
 included. Vendor-neutral, byte-identical across **JavaScript · Python · Go · Java · C# · Elixir ·
-Clojure** — the Clojure port is one `.cljc` tree that runs on both the JVM and cljgo, and is held
-to the same `full` tier as the other six. It is the one port not yet on a registry.
+Clojure** — the Clojure port is one `.cljc` tree that runs on both the JVM and cljgo, held
+to the same `full` tier as the other six and published to Clojars like the rest.
 
 > **Right-sized.** Not a framework — no builders, advisors, runnables, or config to wade through.
 > Not a toy that falls over the moment you need streaming or a retry. Exactly what a real agent
@@ -28,9 +28,9 @@ npm i toolnexus                                   # JS / TypeScript
 pip install toolnexus                             # Python
 go get github.com/muthuishere/toolnexus/golang    # Go
 dotnet add package Toolnexus                       # C#
-{:toolnexus, "~> 0.11"}                             # Elixir (mix.exs deps)
-# Java (Maven): io.github.muthuishere:toolnexus:0.12.0
-# Clojure (deps.edn): not yet on Clojars — one .cljc tree, runs on Clojure (JVM) and cljgo
+{:toolnexus, "~> 0.13"}                             # Elixir (mix.exs deps)
+# Java (Maven): io.github.muthuishere:toolnexus:0.13.0
+# Clojure (deps.edn): net.clojars.muthuishere/toolnexus {:mvn/version "0.13.0"} — JVM and cljgo
 ```
 
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
@@ -110,7 +110,7 @@ const { text } = await agent.run("Refund order 1234 for the customer.", { toolki
 That's the whole thing. `createToolkit()` alone (no config) still gives you a working agent —
 the 10 built-in tools are on by default. Bring your own loop instead? Use `tk.toOpenAI()` /
 `toAnthropic()` / `toGemini()` for the schema and `tk.execute(name, args)` to run a call.
-The same three steps work in Python, Go, Java, C#, and Elixir.
+The same three steps work in Python, Go, Java, C#, Elixir, and Clojure.
 
 ## Why toolnexus
 
@@ -144,10 +144,9 @@ from scratch:
 
 The language-independent behavior is pinned in **[SPEC.md](SPEC.md)** so all the shipped ports stay
 byte-compatible (especially the skill loader output). Clojure (one `.cljc` source tree on the JVM
-and [cljgo](https://github.com/muthuishere/cljgo)) is held to the same **`full`** tier as the rest.
-It is the one language not yet on a registry: the agent runtime, sub-agents, compaction and agent
-home (§7D–§7F) are still being written, and we are not publishing a partial port — see
-[`clojure/README.md`](clojure/README.md).
+and [cljgo](https://github.com/muthuishere/cljgo)) is held to the same **`full`** tier as the
+rest — agent runtime, sub-agents, personas and compaction included — and is on Clojars since
+v0.13.0; see [`clojure/README.md`](clojure/README.md).
 
 ## Six tool sources, one interface
 
