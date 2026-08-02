@@ -21,3 +21,9 @@ deps/
 # Go module binaries built into runner dirs (source: main.go/go.mod/go.sum kept)
 run_eino/run_eino
 run_langchaingo/run_langchaingo
+# Clojure runner: the cljgo AOT binary and both hosts' caches. `src/toolnexus`
+# is a SYMLINK to the local port and IS tracked — it is what makes this runner
+# measure the port in this tree rather than a published artifact.
+run_toolnexus_clojure/bench
+run_toolnexus_clojure/.cpcache/
+run_toolnexus_clojure/build.lock.edn

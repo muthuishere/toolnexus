@@ -27,6 +27,7 @@ Results and full methodology: [`../docs/performance-benchmarks.md`](../docs/perf
 | `run_toolnexus_csharp/` | toolnexus **C#** runner (`--config mcp` \| `full`; ProjectReference → local `csharp/` port; official MCP SDK). |
 | `run_semantic_kernel/` | Microsoft Semantic Kernel runner (OpenAI connector via custom `HttpClient`; **native** KernelFunctions). |
 | `run_ms_extensions_ai/` | Microsoft.Extensions.AI runner (official OpenAI .NET client + `UseFunctionInvocation`; **native** AIFunctions). |
+| `run_toolnexus_clojure/` | toolnexus **Clojure** runner — ONE source file, **both hosts**: Clojure on the JVM (`clojure -M -m bench`, via `deps.edn`) and cljgo as an AOT-compiled Go binary (`cljgo build`, via `build.cljgo`). `src/toolnexus` is a symlink to the local `clojure/src/toolnexus`, the same trick the Go runner's `replace` pulls. |
 | `run_all.py` | Orchestrator: runs each runner under `/usr/bin/time -l` (peak RSS), aggregates mean / p50 / p95, writes `results.json`. |
 
 Each runner measures **cold init** (build toolkit / agent incl. MCP connect + tool
@@ -60,13 +61,38 @@ uv venv "$VENVS/toolnexus" -p 3.11 && uv pip install --python "$VENVS/toolnexus/
 uv venv "$VENVS/langgraph" -p 3.11 && uv pip install --python "$VENVS/langgraph/bin/python" langgraph langchain-mcp-adapters langchain-openai mcp
 # Google ADK
 uv venv "$VENVS/adk" -p 3.11 && uv pip install --python "$VENVS/adk/bin/python" google-adk litellm orjson mcp
+# CrewAI / Pydantic AI / OpenAI Agents SDK — one venv each, same pattern
+uv venv "$VENVS/crewai"        -p 3.11 && uv pip install --python "$VENVS/crewai/bin/python" crewai crewai-tools mcp
+uv venv "$VENVS/pydantic"      -p 3.11 && uv pip install --python "$VENVS/pydantic/bin/python" "pydantic-ai-slim[openai,mcp]"
+uv venv "$VENVS/openai-agents" -p 3.11 && uv pip install --python "$VENVS/openai-agents/bin/python" openai-agents mcp
+```
+
+JS competitors install into their own directories outside the repo (each runner's
+header names the env var):
+
+```sh
+for d in js-vercel js-langchain js-mastra; do mkdir -p "$VENVS/$d" && ( cd "$VENVS/$d" && npm init -y >/dev/null ); done
+( cd "$VENVS/js-vercel"    && npm i ai @ai-sdk/openai @ai-sdk/mcp zod )
+( cd "$VENVS/js-langchain" && npm i langchain @langchain/core @langchain/openai @langchain/mcp-adapters )
+( cd "$VENVS/js-mastra"    && npm i @mastra/core @mastra/mcp @ai-sdk/openai zod )
 ```
 
 ### 2. Build the compiled runners
 
 ```sh
-# Go (single binary)
+# JS port (the runner imports js/dist)
+( cd "$REPO/js" && npm install && npm run build )
+# Go (single binary) — toolnexus + the two Go competitors
 ( cd "$REPO/benchmarks/run_toolnexus_go" && go build -o "$VENVS/bench_go" . )
+( cd "$REPO/benchmarks/run_eino"         && go build -o "$VENVS/bench_eino" . )
+( cd "$REPO/benchmarks/run_langchaingo"  && go build -o "$VENVS/bench_langchaingo" . )
+# Elixir port + the Elixir competitor
+( cd "$REPO/elixir" && mix deps.get && mix compile )
+( cd "$REPO/benchmarks/run_langchain_elixir" && mix deps.get && mix compile )
+# Clojure: the cljgo half is an AOT binary; the JVM half needs no build step.
+# Use the PUBLISHED cljgo ($HOME/go/bin/cljgo), never a `cljgo` shim on PATH
+# that rebuilds the compiler from a local checkout.
+( cd "$REPO/benchmarks/run_toolnexus_clojure" && "$HOME/go/bin/cljgo" build )
 # toolnexus Java (composite build → local java port)
 ( cd "$REPO/benchmarks/run_toolnexus_java" && gradle --no-daemon installDist -q )
 # Spring AI (Spring Boot fat jar)
@@ -100,11 +126,23 @@ export LC4J_APP="$REPO/benchmarks/run_langchain4j/build/install/run-langchain4j/
 export TN_CSHARP_DLL="$REPO/benchmarks/run_toolnexus_csharp/bin/Release/net10.0/run_toolnexus_csharp.dll"
 export SK_DLL="$REPO/benchmarks/run_semantic_kernel/bin/Release/net10.0/run_semantic_kernel.dll"
 export MEAI_DLL="$REPO/benchmarks/run_ms_extensions_ai/bin/Release/net10.0/run_ms_extensions_ai.dll"
+# JS (these runners start their own mock on a free port)
+export TN_JS=1
+export VERCEL_DIR="$VENVS/js-vercel" LC_DIR="$VENVS/js-langchain" MASTRA_DIR="$VENVS/js-mastra"
+# Go competitors
+export EINO_BIN="$VENVS/bench_eino" LANGCHAINGO_BIN="$VENVS/bench_langchaingo"
+# Elixir
+export ELIXIR_DIR="$REPO/elixir" LANGCHAIN_ELIXIR_DIR="$REPO/benchmarks/run_langchain_elixir"
+# Clojure — both hosts, one source tree
+export CLJ_BENCH_DIR="$REPO/benchmarks/run_toolnexus_clojure"
+export CLJGO_BIN="$REPO/benchmarks/run_toolnexus_clojure/bench"
 
 python3 "$REPO/benchmarks/run_all.py"
 ```
 
 Only the frameworks whose env var is set are run, so you can benchmark a subset.
+A runner that fails to produce a result is listed under `skipped` in
+`results.json` — it is recorded, never silently dropped.
 
 ## Fairness notes
 
@@ -128,5 +166,23 @@ Only the frameworks whose env var is set are run, so you can benchmark a subset.
   trivial as their native `KernelFunction` / `AIFunction` surface, so the native
   form is the honest, framework-idiomatic comparison. `toolnexus-go` is native for
   the SDK-bug reason above.
+- **Clojure samples in batches, and says so.** Every other runner times a single
+  scenario run with a sub-millisecond clock. The Clojure runner cannot: koine's
+  portable monotonic clock (`koine.time/mono-ms`) has **millisecond** resolution
+  on both hosts, and the scenario costs ~2–10 ms, so single-run timing would
+  quantise the sample to whole milliseconds. A sub-ms timer exists on each host
+  (`System/nanoTime`, `cljg.date/nano-time`) but reaching for either puts
+  host-specific code in the one file whose entire claim is that it has none. So a
+  **sample is a batch of `BENCH_BATCH` (default 10) consecutive runs**, divided by
+  the batch size — 0.1 ms resolution. **Mean is unaffected**; p50/p95 are
+  percentiles over batch means and are therefore *smoother* than the other ports'
+  per-run percentiles. Read the Clojure p95 as "the 95th-percentile 10-run
+  stretch", not "the 95th-percentile request".
+- **Clojure reports both hosts, including the JVM's startup.** `toolnexus-clojure-jvm`
+  and `toolnexus-clojure-cljgo` run the *same source file* — the difference is
+  the runtime. `init_ms` is measured in-process on every port (so it excludes
+  interpreter/JVM boot everywhere, and stays comparable); the JVM's ~1 s
+  process-level cold start is measured separately and published in the docs
+  rather than quietly excluded.
 - Nothing here is committed automatically and no registry token is used; the
   runners only *import/install* the libraries, they never modify a port's `src/`.

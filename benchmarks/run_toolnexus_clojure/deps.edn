@@ -1,0 +1,10 @@
+;; toolnexus (Clojure port) benchmark runner — the JVM half.
+;;
+;;   BENCH_REPO=… MCP_PYTHON=… clojure -M -m bench
+;;
+;; `src/toolnexus` is a SYMLINK to ../../../clojure/src/toolnexus — the local
+;; port, exactly as run_toolnexus_go/ uses a `replace` to the local Go module.
+;; koine comes from Clojars at the version clojure/deps.edn pins; nothing else.
+{:paths ["src"]
+ :deps  {org.clojure/clojure           {:mvn/version "1.12.5"}
+         net.clojars.muthuishere/koine {:mvn/version "0.11.0"}}}

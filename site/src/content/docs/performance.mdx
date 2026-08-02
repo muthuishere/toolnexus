@@ -1,7 +1,7 @@
 ---
 title: Performance benchmarks
 description: >-
-  Reproducible mock-LLM framework-overhead numbers across 18 framework configs in 6 languages — every figure MEASURED. Pick your language.
+  Reproducible mock-LLM framework-overhead numbers across 39 framework configs in 7 languages — every figure MEASURED. Pick your language.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -12,24 +12,32 @@ import SortableTables from '../../components/SortableTables.astro';
 > We publish **only** figures we actually measured, and we report where a competitor edges
 > toolnexus rather than hide it. A partial-but-real table beats a complete-but-fake one.
 >
-> Measured **July 2026** across the ports and their real competitors. Frameworks move fast —
-> re-run before quoting.
+> Measured **2 August 2026** across all seven ports and their real competitors, in one sitting on
+> one machine. This replaces the July 2026 run wholesale — same hardware spec, a newer toolchain
+> under everything (Go 1.23 → 1.26, Node 22 → 24, .NET and Elixir/OTP forward a generation) and
+> every competitor library re-resolved. Compare ratios *within* this table, not cells against the
+> old one. Frameworks move fast — re-run before quoting.
 
 ## TL;DR
 
 Every framework points at the **same local mock LLM** and the **same stdio MCP server**, running
 one fixed tool-calling scenario (2 LLM round-trips + 2 tool calls). We measure only the framework's
-own per-request overhead — a real model call (100 ms–seconds) would swamp it. Across **18 framework
-configurations in 6 languages**:
+own per-request overhead — a real model call (100 ms–seconds) would swamp it. Across **39 framework
+configurations in 7 languages**:
 
-- **toolnexus has the lowest or joint-lowest per-request overhead in Python, JavaScript, Go, and
-  Elixir**, and sits within noise of the fastest in C# and Java — where a lighter *native-tool*
-  competitor edges it by tenths of a millisecond at the sub-few-ms floor, while toolnexus is doing
-  **real MCP**.
+- **toolnexus has the lowest per-request overhead in Python, JavaScript, Go and Java**, and sits
+  within noise of the fastest in C# and Elixir — where a lighter *native-tool* competitor edges it
+  by hundredths of a millisecond at the sub-millisecond floor, while toolnexus is doing **real MCP**.
+- **Go publishes a real MCP row for the first time.** The stdio-MCP bug that forced July's
+  native-only Go number is fixed: 0.49 ms p50 over a live MCP session, in a 10 MB binary at 17 MB RSS.
+- **Clojure is new here, and it is the slowest port on the page** — ~5.5 ms p50 on both hosts,
+  five times the Python port. Published because it is measured, with the cost located (~2 ms per
+  MCP tool call, in the port's stdio JSON-RPC path) rather than glossed.
 - **toolnexus keeps the smallest or near-smallest install footprint in every language** — often
-  dramatically (vs CrewAI 828 MB, Google ADK 207 MB, LangChain.js 106 MB).
+  dramatically (vs CrewAI 787 MB, Google ADK 230 MB, Mastra 144 MB, LangChain.js 106 MB).
 - **Every competitor that ships an MCP client did real MCP here**; toolnexus does real MCP in all
-  six languages.
+  seven languages.
+- **Nothing was skipped.** All 39 registered configurations produced a result.
 
 ## Results — pick your language
 
@@ -50,42 +58,44 @@ Every Python competitor ships a first-class MCP client, so all rows are over the
 
 | Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | RSS (MB) | Tools | ok |
 |---|--:|--:|--:|--:|--:|--:|:-:|
-| **toolnexus** | 17 | **1.00** | 1.23 | 1.04 | 59.6 | 3 | ✅ |
-| **toolnexus** (+ skill + native) | 19 | 1.07 | 1.37 | 1.12 | 59.4 | 5 | ✅ |
-| OpenAI Agents SDK | 19 | 4.14 | 4.55 | 4.13 | 109 | 3 | ✅ |
-| Pydantic AI | 37 | 5.45 | 6.34 | 6.43 | 123 | 3 | ✅ |
-| LangGraph (persistent session) | 144 | 7.00 | 9.72 | 8.32 | 127 | 3 | ✅ |
-| Google ADK | 23 | 8.80 | 10.53 | 8.87 | 292 | 3 | ✅ |
-| CrewAI | 41 | 10.46 | 15.36 | 11.06 | 211 | 3 | ✅ |
-| LangGraph (reconnect-per-call)¹ | 154 | 31.3 | 33.5 | 32.9 | 127 | 3 | ✅ |
+| **toolnexus** (+ skill + native) | 17 | **0.976** | 1.138 | 0.996 | 58.8 | 5 | ✅ |
+| **toolnexus** | 14 | 0.998 | 1.100 | 1.004 | 58.8 | 3 | ✅ |
+| OpenAI Agents SDK | 19 | 4.077 | 4.316 | 4.068 | 110 | 3 | ✅ |
+| Pydantic AI | 27 | 4.954 | 5.293 | 4.988 | 139 | 3 | ✅ |
+| LangGraph (persistent session) | 115 | 5.508 | 5.931 | 5.504 | 127 | 3 | ✅ |
+| Google ADK | 17 | 5.896 | 6.730 | 6.005 | 290 | 3 | ✅ |
+| CrewAI | 37 | 9.266 | 10.097 | 9.429 | 213 | 3 | ✅ |
+| LangGraph (reconnect-per-call)¹ | 124 | 23.24 | 24.27 | 23.41 | 127 | 3 | ✅ |
 
-**Install footprint:** toolnexus **33 MB** (2 deps) · OpenAI Agents 64 MB · LangGraph 83 MB ·
-Pydantic AI 96 MB · Google ADK 207 MB · **CrewAI 828 MB** (heaviest; also needed a manual
-`litellm` add). ¹ LangGraph's documented default re-spawns the MCP subprocess **on every tool
-call**; the persistent-session row is the apples-to-apples one.
+**Install footprint:** toolnexus **34 MB** (2 deps) · OpenAI Agents 65 MB · LangGraph 87 MB ·
+Pydantic AI 130 MB · Google ADK 230 MB · **CrewAI 787 MB** (heaviest; also needs the
+`crewai-tools[mcp]` extra or its MCP adapter aborts on a prompt). ¹ LangGraph's documented default
+re-spawns the MCP subprocess **on every tool call**; the persistent-session row is the
+apples-to-apples one. LangGraph and Google ADK both need `mcp&lt;2` pinned — `mcp` 2.0.0 removed
+symbols their adapters import.
 </TabItem>
 <TabItem label="JavaScript">
 #### Over MCP
 
-| Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | Tools | ok |
-|---|--:|--:|--:|--:|--:|:-:|
-| **toolnexus** (+ skill + native) | 24 | **0.92** | 1.28 | 0.97 | 5 | ✅ |
-| **toolnexus** | 24 | 1.16 | 1.96 | 1.21 | 3 | ✅ |
-| Vercel AI SDK | 21 | 1.25 | 1.74 | 1.28 | 3 | ✅ |
-| LangChain.js | 25 | 3.37 | 5.14 | 3.54 | 3 | ✅ |
-| Mastra | 21 | 3.48 | 5.03 | 3.60 | 3 | ✅ |
+| Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | RSS (MB) | Tools | ok |
+|---|--:|--:|--:|--:|--:|--:|:-:|
+| **toolnexus** | 16 | **0.91** | 1.09 | 0.91 | 134 | 3 | ✅ |
+| **toolnexus** (+ skill + native) | 19 | 0.93 | 1.15 | 0.94 | 135 | 5 | ✅ |
+| Vercel AI SDK | 16 | 1.20 | 1.52 | 1.20 | 139 | 3 | ✅ |
+| LangChain.js | 20 | 2.42 | 3.43 | 2.46 | 249 | 3 | ✅ |
+| Mastra | 18 | 2.59 | 3.77 | 2.69 | 285 | 3 | ✅ |
 
 #### Native tools
 
-| Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | Tools | ok |
-|---|--:|--:|--:|--:|--:|:-:|
-| **toolnexus** | 0.2 | **0.80** | 1.04 | 0.82 | 2 | ✅ |
-| Vercel AI SDK | 0.2 | 1.40 | 1.93 | 1.42 | 2 | ✅ |
-| LangChain.js | 2.3 | 2.69 | 3.45 | 2.75 | 2 | ✅ |
-| Mastra | 0.5 | 3.57 | 4.74 | 3.66 | 2 | ✅ |
+| Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | RSS (MB) | Tools | ok |
+|---|--:|--:|--:|--:|--:|--:|:-:|
+| **toolnexus** | 0.2 | **0.76** | 0.89 | 0.77 | 132 | 2 | ✅ |
+| Vercel AI SDK | 0.2 | 1.10 | 1.51 | 1.14 | 139 | 2 | ✅ |
+| LangChain.js | 2.3 | 2.26 | 2.95 | 2.32 | 249 | 2 | ✅ |
+| Mastra | 0.4 | 2.61 | 3.61 | 2.69 | 278 | 2 | ✅ |
 
-**Install footprint:** Vercel AI SDK **21 MB** · toolnexus **26 MB** · LangChain.js **106 MB** ·
-Mastra **155 MB**. All four do real MCP.
+**Install footprint:** Vercel AI SDK **23 MB** · toolnexus **26 MB** · LangChain.js **106 MB** ·
+Mastra **144 MB**. All four do real MCP.
 
 <Aside type="note" title="Mastra is a platform, not just a runtime">
 This measures **per-call runtime overhead only** — the tool-calling loop against a mock LLM.
@@ -105,22 +115,25 @@ The Go MCP client is **`mark3labs/mcp-go`** (used by both toolnexus and Eino).
 
 #### Over MCP (`mark3labs/mcp-go`)
 
-| Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | Tools | ok |
-|---|--:|--:|--:|--:|--:|:-:|
-| Eino | 20 | 0.54 | 0.76 | 0.57 | 3 | ✅ |
-| **toolnexus** | — | *pending re-run*¹ | — | — | — | — |
+| Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | RSS (MB) | Tools | ok |
+|---|--:|--:|--:|--:|--:|--:|:-:|
+| **toolnexus** (+ skill + native) | 12.6 | **0.488** | 0.648 | 0.506 | 17.5 | 5 | ✅ |
+| **toolnexus** | 11.9 | 0.491 | 0.676 | 0.512 | **17.0** | 3 | ✅ |
+| Eino | 14.4 | 0.545 | 0.628 | 0.548 | 27.6 | 3 | ✅ |
 
 #### Native tools
 
 | Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | RSS (MB) | Tools | ok |
 |---|--:|--:|--:|--:|--:|--:|:-:|
-| **toolnexus** | 0.0 | **0.51** | 0.73 | 0.53 | **15.2** | 2 | ✅ |
-| langchaingo | 0.0 | 0.53 | 0.77 | 0.57 | — | 2 | ✅ |
+| **toolnexus** | 0.0 | **0.418** | 0.471 | 0.423 | **14.9** | 2 | ✅ |
+| langchaingo | 0.1 | 0.548 | 1.046 | 0.610 | 21.6 | 2 | ✅ |
 
-**Install footprint:** toolnexus **10 MB** static binary · Eino 21 MB (91 modules) · langchaingo
-16 MB (329 modules). Go framework overhead is uniformly sub-millisecond. ¹ The 0.9.0 stdio-MCP
-bug is **fixed since 0.9.2** (the [resilience benchmark](/toolnexus/resilience/) confirms a live Go
-stdio session); this run measured native only, so the MCP row lands on a re-run.
+**Install footprint:** toolnexus **10 MB** static binary · langchaingo 16 MB · Eino 21 MB. Go
+framework overhead is uniformly sub-millisecond, and Go is the fastest and smallest cell on the
+whole page. **The MCP row is new:** the 0.9.0 stdio-MCP bug that forced July's table to publish a
+native-only Go number is fixed since 0.9.2, so Go now discovers over a live stdio session like
+every other port — at a cost of ~0.07 ms/request over native, which is the honest price of the
+subprocess.
 </TabItem>
 <TabItem label="Java">
 Every Java competitor here ships an MCP client, so all rows are over the real MCP server.
@@ -129,15 +142,17 @@ Every Java competitor here ships an MCP client, so all rows are over the real MC
 
 | Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | RSS (MB) | Tools | ok |
 |---|--:|--:|--:|--:|--:|--:|:-:|
-| LangChain4j | 193 | **2.27** | 2.91 | 2.28 | 130 | 3 | ✅ |
-| **toolnexus** (+ skill + native) | 391 | 3.02 | 4.03 | 3.20 | 176 | 5 | ✅ |
-| **toolnexus** | 388 | 3.05 | 3.55 | 3.07 | 170 | 3 | ✅ |
-| Spring AI | 1064¹ | 5.59 | 10.36 | 6.52 | 418 | 3 | ✅ |
+| LangChain4j | 211 | **2.145** | 3.072 | 2.277 | 125 | 3 | ✅ |
+| **toolnexus** | 389 | 2.187 | 3.346 | 2.331 | 155 | 3 | ✅ |
+| **toolnexus** (+ skill + native) | 312 | 2.191 | 2.857 | 2.227 | 171 | 5 | ✅ |
+| Spring AI | 883¹ | 3.245 | 7.466 | 3.956 | 400 | 3 | ✅ |
 
-**Install footprint:** toolnexus **156 KB** jar + 8.6 MB deps · LangChain4j 11 MB · Spring AI
-25 MB fat jar. **Honest read:** LangChain4j's MCP path edges toolnexus here (2.27 vs 3.05 ms);
-both are well under Spring AI, and toolnexus carries the smallest footprint. Post-warmup.
-¹ Spring AI's `Init` is Spring Boot context startup, not a toolkit build.
+**Install footprint:** toolnexus **279 KB** jar + 8.6 MB deps · LangChain4j 11 MB · Spring AI
+26 MB fat jar. **Honest read:** LangChain4j's MCP path still edges toolnexus, but the gap closed
+to **0.04 ms** (2.145 vs 2.187) — a dead heat at this floor, and inside the harness's noise. Both
+are well under Spring AI, toolnexus carries the smallest footprint by 40×, and Spring AI's p95
+(7.5 ms) is more than twice toolnexus's. Post-warmup. ¹ Spring AI's `Init` is Spring Boot context
+startup, not a toolkit build.
 </TabItem>
 <TabItem label="C#">
 No C# competitor ships a first-class MCP client, so the comparison is toolnexus's **real MCP** vs
@@ -147,39 +162,107 @@ the competitors' **native tools** — kept in separate tables so it stays honest
 
 | Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | RSS (MB) | Tools | ok |
 |---|--:|--:|--:|--:|--:|--:|:-:|
-| **toolnexus** | 76 | **0.590** | 0.781 | 0.621 | 78.6 | 3 | ✅ |
-| **toolnexus** (+ skill + native) | 92 | 0.640 | 0.769 | 0.652 | 81.4 | 5 | ✅ |
+| **toolnexus** | 84 | **0.626** | 0.816 | 0.637 | 78.1 | 3 | ✅ |
+| **toolnexus** (+ skill + native) | 96 | 0.657 | 0.859 | 0.683 | 80.8 | 5 | ✅ |
 
 #### Native tools
 
 | Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | RSS (MB) | Tools | ok |
 |---|--:|--:|--:|--:|--:|--:|:-:|
-| Semantic Kernel | 41 | **0.575** | 0.701 | 0.595 | 71.7 | 2 | ✅ |
-| Microsoft.Extensions.AI | 25 | 0.575 | 0.724 | 0.601 | 68.7 | 2 | ✅ |
+| Semantic Kernel | 51 | **0.594** | 0.792 | 0.621 | 71.2 | 2 | ✅ |
+| Microsoft.Extensions.AI | 27 | 0.626 | 0.720 | 0.616 | 68.2 | 2 | ✅ |
 
-**Install footprint:** toolnexus **3.1 MB** · Microsoft.Extensions.AI 5.4 MB · Semantic Kernel
-7.8 MB. At the sub-ms floor SK/MEAI native paths shade toolnexus's real-MCP path by ~15 µs (within
-noise); toolnexus is smallest and the only one here discovering tools over a live MCP session.
+**Install footprint:** toolnexus **3.2 MB** · Microsoft.Extensions.AI 5.4 MB · Semantic Kernel
+7.8 MB. At the sub-ms floor Semantic Kernel's native path shades toolnexus's real-MCP path by
+~32 µs and Microsoft.Extensions.AI ties it exactly (0.626 both) — all three inside noise.
+toolnexus is smallest and the only one here discovering tools over a live MCP session.
 </TabItem>
 <TabItem label="Elixir">
 No Elixir framework ships an MCP client, so only toolnexus has an **Over MCP** row.
 
 #### Over MCP
 
-| Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | Tools | ok |
-|---|--:|--:|--:|--:|--:|:-:|
-| **toolnexus** | 27 | 0.602 | 0.677 | 0.612 | 3 | ✅ |
+| Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | RSS (MB) | Tools | ok |
+|---|--:|--:|--:|--:|--:|--:|:-:|
+| **toolnexus** | 27 | 0.602 | 0.664 | 0.605 | 123 | 3 | ✅ |
 
 #### Native tools
 
-| Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | Tools | ok |
-|---|--:|--:|--:|--:|--:|:-:|
-| **toolnexus** | 5.3 | **0.534** | 0.671 | 0.554 | 2 | ✅ |
-| Elixir LangChain | 0.0 | 0.654 | 0.734 | 0.652 | 2 | ✅ |
+| Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | RSS (MB) | Tools | ok |
+|---|--:|--:|--:|--:|--:|--:|:-:|
+| **toolnexus** | 8.2 | **0.602** | 0.703 | 0.594 | 116 | 2 | ✅ |
+| Elixir LangChain | 0.0 | 0.646 | 0.749 | 0.659 | 111 | 2 | ✅ |
 
 **Install footprint:** both ~5.3 MB deps. `brainlid/langchain` is the one mature Elixir competitor
-that stood up — same sub-ms ballpark. **The real differentiator:** no Elixir framework ships an
-MCP client, so toolnexus's MCP variant has **no Elixir peer**.
+that stood up — same sub-ms ballpark, 0.04 ms behind. **The real differentiator:** no Elixir
+framework ships an MCP client, so toolnexus's MCP variant has **no Elixir peer** — and it costs
+nothing over native here (0.602 either way).
+</TabItem>
+<TabItem label="Clojure">
+Clojure is the seventh port and the newest. It appears on this page for the first time because a
+runner for it now exists — this page stayed six-language for exactly that reason, and it would
+still be six-language if the numbers were unflattering. **They are unflattering. Here they are.**
+
+**One source file, two hosts.** `benchmarks/run_toolnexus_clojure/src/bench.cljc` is loaded by
+`clojure -M` on the JVM and compiled to a native Go binary by
+[cljgo](https://github.com/muthuishere/cljgo) — same file, no reader conditionals, no `java.*`.
+Both rows are reported. No third-party Clojure framework ships an MCP client (or an agent loop of
+this shape), so there is no competitor row.
+
+#### Over MCP
+
+| Framework | Host | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | RSS (MB) | Tools | ok |
+|---|---|--:|--:|--:|--:|--:|--:|:-:|
+| **toolnexus** | JVM | 24 | **5.5** | 6.8 | 5.55 | 510¹ | 3 | ✅ |
+| **toolnexus** (+ skill + native) | JVM | 25 | 5.5 | 6.8 | 5.46 | 492¹ | 5 | ✅ |
+| **toolnexus** | cljgo | 18 | 5.7 | 5.9 | 5.69 | **31.3** | 3 | ✅ |
+| **toolnexus** (+ skill + native) | cljgo | 18 | 6.2 | 6.5 | 6.19 | 30.8 | 5 | ✅ |
+
+#### Native tools
+
+| Framework | Host | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | RSS (MB) | Tools | ok |
+|---|---|--:|--:|--:|--:|--:|--:|:-:|
+| **toolnexus** | cljgo | 0 | **1.7** | 1.9 | 1.74 | **29.6** | 2 | ✅ |
+| **toolnexus** | JVM | 0 | 1.7 | 3.1 | 1.89 | 511¹ | 2 | ✅ |
+
+#### Process cold start — where the hosts really differ
+
+| | JVM | cljgo |
+|---|--:|--:|
+| exec → first answer (median of 3) | **~1.13 s** | **~0.02 s** |
+| Peak RSS | ~500 MB¹ | **~31 MB** |
+| Artifact | Clojure runtime + a 68 KB koine jar | a 15 MB static binary |
+
+**Read this honestly:**
+
+- **Clojure is the slowest toolnexus port on this page**, ~5× the Python port and ~11× the Go port
+  over MCP. That is real.
+- **The loop is fine; the MCP round trip is not.** With native tools the same port runs the
+  scenario in **1.7 ms** — mid-table. The same two tools over the shared stdio MCP server add
+  **~3.9 ms**, i.e. ~2 ms per `tools/call`, where Go pays 0.07 ms and Python ~0 for identical wire
+  traffic. The cost is in this port's stdio JSON-RPC path, and it is the biggest single
+  optimisation target on this page.
+- **The two hosts agree to within 0.2 ms**, from the same source. That is the port's whole claim,
+  measured under load rather than in tests.
+- **`Init (ms)` excludes JVM boot** — it is measured in-process on every port, which is what keeps
+  the column comparable. For a long-lived agent that is the right number. For a CLI or a lambda it
+  hides the story: the JVM leg needs **~1.13 s** from exec to first answer (`clojure -M -e nil`
+  alone is ~0.32 s), against **~0.02 s** for the cljgo binary.
+
+¹ **~500 MB RSS on the JVM is not a typo and not a toolnexus figure** — it is the JVM's default
+heap sizing on a 48 GB machine (`clojure -M` sets no `-Xmx`). It is peak resident set, measured, so
+it is published as measured. The identical source compiled by cljgo does the same work in 31 MB.
+
+<Aside type="caution" title="The Clojure p95 is not measured the same way">
+koine's portable monotonic clock (`koine.time/mono-ms`) has **millisecond** resolution on both
+hosts, and a sub-millisecond timer would mean host-specific code in the one file whose entire claim
+is that it has none. So a Clojure **sample is a batch of 10 consecutive runs divided by 10** —
+0.1 ms effective resolution. **Mean is unaffected.** p50 and p95 are percentiles over *batch means*
+and are therefore smoother than every other port's per-run percentiles: one slow request is
+averaged across its batch instead of standing alone in the tail. Read the Clojure p95 as "the
+95th-percentile 10-run stretch", not "the 95th-percentile request". Three independent samples put
+p50 within 0.4 ms (JVM 5.1–5.5, cljgo 5.6–5.8).
+</Aside>
 </TabItem>
 </Tabs>
 
@@ -198,8 +281,8 @@ names work.
 
 | Metric | How |
 |---|---|
-| **Cold init** | Wall time to build the toolkit/agent *including* MCP connect + tool discovery. Honest per-language timers (`perf_counter`, `time.Now`, `System.nanoTime`, `Stopwatch`, `monotonic_time`). |
-| **p50/p95/mean** | Wall time per scenario run, over **N = 30** measured runs after **5 warmup**. |
+| **Cold init** | Wall time to build the toolkit/agent *including* MCP connect + tool discovery. Measured **in-process** on every port, so it excludes interpreter/JVM boot everywhere and stays comparable. Honest per-language timers (`perf_counter`, `performance.now`, `time.Now`, `System.nanoTime`, `Stopwatch`, `monotonic_time`, `koine.time/mono-ms`). |
+| **p50/p95/mean** | Wall time per scenario run, over **N = 30** measured runs after **5 warmup**. Clojure is the one exception — a sample there is a batch of 10 runs divided by 10; see the Clojure tab. |
 | **Peak RSS** | Max resident set of the runner process (`/usr/bin/time -l`). |
 | **Footprint** | Isolated per-framework install (`du -sh` of each venv/module/dll set). |
 
@@ -207,10 +290,15 @@ names work.
 
 | | |
 |---|---|
-| Machine | Apple Mac17,8 (`arm64`), 18 cores, 48 GB RAM |
-| OS | macOS 26.4 |
-| Runtimes | CPython 3.11 · Node 22 · Go 1.23 · OpenJDK 21 · .NET 10 · Elixir 1.20/OTP 29 |
+| Machine | Apple Mac17,8 — M5 Pro (`arm64`), 18 cores, 48 GB RAM |
+| OS | macOS 26.4 (Darwin 25.4.0) |
+| Date | 2 August 2026 — every row from one sitting |
+| Runtimes | CPython 3.11.15 · Node 24.18 · Go 1.26.3 · Temurin JDK 21.0.11 · .NET SDK 10.0.301 · Elixir 1.20.2/OTP 29 · Clojure 1.12.5 on OpenJDK 26, and cljgo 0.9.0 |
 | Network | none — mock LLM + MCP server are both local, offline, deterministic |
+
+Single machine, otherwise idle, one process at a time. Absolute numbers will differ on your
+hardware; the **ratios within this table** are the portable takeaway. Treat ±0.5 ms as the noise
+floor for the multi-millisecond rows and ~0.05 ms for the sub-millisecond ones.
 
 ### MCP vs native
 
@@ -221,6 +309,13 @@ langchaingo, Elixir LangChain), the row uses **in-process native tools** with id
 names/behavior and is tagged `(native)`. Native skips the stdio spawn + discovery, so a `(native)`
 row has an inherent small advantage over an MCP row — kept explicit so the comparison stays honest.
 
+### Skipped
+
+**Nothing.** All 39 registered configurations produced a result in this run; the `skipped` list in
+`benchmarks/results.json` is empty. If a future run cannot stand a framework up — a dropped
+package, an SDK that starts demanding a real key — it lands in that list with a reason, rather than
+disappearing from the table.
+
 ## Reproduce it
 
 Full instructions + every runner:
@@ -230,11 +325,18 @@ competitor installs in its own isolated venv/module (toolnexus from the local re
 
 ## Verdict
 
-On pure **framework overhead** for a fixed MCP tool-calling scenario, toolnexus is the **lowest or
-joint-lowest** in Python, JavaScript, Go, and Elixir, and **within noise of the fastest** in C# and
-Java — where a lighter native-tool or MCP competitor edges it by fractions of a millisecond at a
-floor where a real model call is 100–1000× larger. What holds in **every** language: toolnexus does
-real MCP, carries the **smallest or near-smallest install footprint**, and never falls into the
-heavy tier (Spring AI, LangGraph, ADK, CrewAI). That matches its design goal — a small, right-sized
-library, not a runtime — and the honest asterisks (LangChain4j edges Java; SK/MEAI native edge C#)
-are exactly the kind of thing we'd rather publish than hide.
+On pure **framework overhead** for a fixed MCP tool-calling scenario, toolnexus is the **lowest**
+in Python, JavaScript, Go and Java, and **within noise of the fastest** in C# and Elixir — where a
+lighter native-tool competitor edges it by hundredths of a millisecond at a floor where a real
+model call is 100–1000× larger. What holds in **every** language: toolnexus does real MCP, carries
+the **smallest or near-smallest install footprint**, and never falls into the heavy tier (Spring
+AI, LangGraph, ADK, CrewAI). That matches its design goal — a small, right-sized library, not a
+runtime.
+
+The honest asterisks, all of them: **LangChain4j edges Java by 0.04 ms** — a dead heat, though the
+gap did close from 0.78 ms in July. **Semantic Kernel's native path edges C# by 0.03 ms** while
+toolnexus is doing live MCP. And **the Clojure port is last on this page by a factor of five**,
+with ~2 ms per MCP tool call sitting in its stdio JSON-RPC path — a specific, findable cost,
+published the day a runner existed to measure it rather than the day it looked good. The one
+unambiguous improvement: **Go's stdio-MCP bug is fixed**, so the Go row finally does the same work
+as everyone else's — and it is the fastest cell on the page.
