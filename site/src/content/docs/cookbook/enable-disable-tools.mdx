@@ -116,12 +116,12 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options {
 </TabItem>
 <TabItem label="Clojure">
 ```clojure
-;; The MCP per-server `tools` allowlist (control #1, in mcp.json) and the
-;; `:builtins` toggle (control #2) both work in the Clojure port:
-(tn/build {:mcp      "./mcp.json"
-           :builtins {:tools {"bash" false}}})   ; drop one builtin
-;; `disable-tools` / `disable-skills` / `skills-filter` (controls #3–#4) are
-;; NOT in this port yet — recorded as parity debt in clojure/README.md.
+;; All four controls, same as every other port:
+(tn/build {:mcp           "./mcp.json"            ; #1: per-server allowlist in mcp.json
+           :builtins      {:tools {"bash" false}} ; #2: drop one builtin
+           :skills-filter {"refunds" true}        ; #3: skill allowlist
+           :disable-tools ["peer_write"]})        ; #4: drop tools by name
+;; :disable-skills exists too — sugar over the filter for the drop-by-name case.
 ```
 </TabItem>
 </Tabs>

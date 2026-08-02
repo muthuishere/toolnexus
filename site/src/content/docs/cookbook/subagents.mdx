@@ -171,7 +171,7 @@ IO.puts("#{r.status} #{r.text} #{r.total_tokens}")
 </TabItem>
 <TabItem label="Clojure">
 ```clojure
-(require '[koine.fs :as fs]
+(require '
          '[toolnexus.agents.runtime :as rt])
 
 ;; An AgentDef is a plain map; `:team` names the agents `task` can reach.
@@ -183,7 +183,7 @@ IO.puts("#{r.status} #{r.text} #{r.total_tokens}")
 (def coder
   {:name   "coder"
    :does   "implements changes"
-   :soul   (fs/read-file "AGENTS.md")
+   :soul-file "AGENTS.md"
    :team   ["explore"]                      ; team = who `task` can reach
    :budget {:max-tokens 10000}})
 

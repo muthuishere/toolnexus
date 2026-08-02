@@ -8,8 +8,9 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 Six of the seven languages are published from the same release and carry the same version. Clojure
 is a single `.cljc` source tree (JVM + [cljgo](https://github.com/muthuishere/cljgo)) with
 [koine](https://github.com/muthuishere/koine) as its only dependency, and it is **not published
-yet** — the agent runtime, sub-agents and compaction (§7D–§7F) are still being written, and a
-partial port is not going on Clojars.
+yet** — the port is feature-complete (the agent runtime, sub-agents, personas and compaction all
+ship, at the same `full` conformance tier as the other six); it simply has not had its first
+Clojars release cut.
 
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">
@@ -62,7 +63,7 @@ project), or build and install it locally with `clojure -T:build install`:
 
 ```clojure
 ;; deps.edn — point at a checkout; koine is the only third-party dependency
-{:deps {net.clojars.muthuishere/koine {:mvn/version "0.9.1"}}
+{:deps {net.clojars.muthuishere/koine     {:mvn/version "0.11.0"}}
  :paths ["src" "../toolnexus/clojure/src"]}
 ```
 Clojure CLI (JVM) or [cljgo](https://github.com/muthuishere/cljgo) · MCP client: in-house over

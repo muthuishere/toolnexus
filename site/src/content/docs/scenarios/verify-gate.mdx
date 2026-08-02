@@ -244,7 +244,7 @@ verifier =
 </TabItem>
 <TabItem label="Clojure">
 ```clojure
-(require '[koine.fs :as fs]
+(require '
          '[toolnexus.core :as tn]
          '[toolnexus.tool :as tool])
 
@@ -255,7 +255,7 @@ verifier =
 (def verifier
   {:name   "verifier"
    :does   "Adversarially verifies an artifact against a task. Replies PASS or FAIL + critique. Read/test-only."
-   :soul   (fs/read-file "verifier/SOUL.md")   ; a soul is a string here — read the file yourself
+   :soul-file "verifier/SOUL.md"   ; a soul is a string here — read the file yourself
    :tools  (tool/all-tools inspect-tk)         ; read, grep, glob, bash(tests) — no write/edit/patch
    :model  "openai/gpt-4o-mini"                ; cheap: verifying is not a frontier-model task
    :budget {:max-turns 10 :max-tokens 40000}})
@@ -796,7 +796,7 @@ end
 </TabItem>
 <TabItem label="Clojure">
 ```clojure
-(require '[koine.fs :as fs]
+(require '
          '[toolnexus.agents.runtime :as rt]
          '[toolnexus.core :as tn]
          '[toolnexus.tool :as tool])
@@ -812,7 +812,7 @@ end
 (def worker
   {:name   "worker"
    :does   "Implements a change in this repository and returns the diff."
-   :soul   (fs/read-file "AGENTS.md")
+   :soul-file "AGENTS.md"
    :tools  (tool/all-tools full)
    :model  "anthropic/claude-sonnet-4"
    :budget {:max-turns 40 :max-tokens 300000}})
@@ -821,7 +821,7 @@ end
 (def verifier
   {:name   "verifier"
    :does   "Adversarially verifies a diff. Compiles + runs the tests. PASS or FAIL + critique."
-   :soul   (fs/read-file "verifier/SOUL.md")
+   :soul-file "verifier/SOUL.md"
    :tools  (tool/all-tools inspect-tk)
    :model  "openai/gpt-4o-mini"
    :budget {:max-turns 10 :max-tokens 40000}})

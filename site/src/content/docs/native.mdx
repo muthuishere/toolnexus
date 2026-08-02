@@ -1,6 +1,6 @@
 ---
 title: Native tools — your own functions
-description: Turn any plain function into a first-class Tool with defineTool, sitting in the same registry as MCP servers, agent skills, HTTP endpoints and A2A agents. Schema is explicit or inferred, and the same shape works across all six languages.
+description: Turn any plain function into a first-class Tool with defineTool, sitting in the same registry as MCP servers, agent skills, HTTP endpoints and A2A agents. Schema is explicit or inferred, and the same shape works across all seven languages.
 ---
 
 import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
@@ -93,6 +93,40 @@ var add = NativeTool.Of("add", "Add two numbers",
 tk.Register(add);
 ```
 </TabItem>
+<TabItem label="Elixir">
+```elixir
+add =
+  Toolnexus.define_tool(
+    name: "add",
+    description: "Add two numbers",
+    input_schema: %{
+      "type" => "object",
+      "properties" => %{"a" => %{"type" => "number"}, "b" => %{"type" => "number"}},
+      "required" => ["a", "b"]
+    },
+    execute: fn %{"a" => a, "b" => b} -> to_string(a + b) end
+  )
+
+tk = Toolnexus.Toolkit.register(tk, [add])   # now in the toolkit, beside every other source
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.core :as tn] '[toolnexus.native :as native])
+
+(def add
+  (native/native-tool
+    {:name         "add"
+     :description  "Add two numbers"
+     :input-schema {:type "object"
+                    :properties {:a {:type "number"} :b {:type "number"}}
+                    :required ["a" "b"]}
+     :run          (fn [{:keys [a b]}] (str (+ a b)))}))  ; a string, or a richer ToolResult
+
+;; tools go in through :tools, alongside every other source
+(def tk (tn/build {:tools [add]}))
+```
+</TabItem>
 </Tabs>
 
 That's the whole thing. `add` is now indistinguishable from an MCP tool to the model — it shows up
@@ -107,7 +141,8 @@ shape:
 - **Inferred** — **Python** reads the JSON input schema from your **type hints**, and the
   description from the **first docstring line**. **Go**'s `NativeToolReflect[T]` derives the schema
   from a struct's `json` tags. You write a function; the schema falls out of the types.
-- **Explicit** — **JS/TS**, **Java** and **C#** take an `inputSchema` object directly. Go's plain
+- **Explicit** — **JS/TS**, **Java**, **C#**, **Elixir** and **Clojure** take an `inputSchema`
+  (`input_schema` / `:input-schema`) object directly. Go's plain
   `NativeTool(name, description, schema, fn)` does too when you'd rather hand-write the schema.
 
 <Aside type="tip">
@@ -121,7 +156,7 @@ The simplest tool returns a string. When you need to signal an error, attach met
 **suspend for a human**, return a `ToolResult` instead — including `pending(...)` to pause the loop
 and ask a question (see [Suspension & the human loop](/toolnexus/suspension/)). The function
 receives a context argument (`ctx`) carrying, among other things, the resolved `answer` when a
-suspended call resumes.
+suspended call resumes. (Clojure passes `ctx` only when the tool opts in with `:ctx? true`.)
 
 ## When to reach for a native tool
 

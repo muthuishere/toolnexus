@@ -1,6 +1,6 @@
 ---
 title: Streaming & hooks
-description: Stream the loop's events live — text deltas, tool calls, results, usage, done — and wrap every tool call with beforeTool/afterTool hooks to rewrite args, deny a call, or redact output. The same shapes across all six languages.
+description: Stream the loop's events live — text deltas, tool calls, results, usage, done — and wrap every tool call with beforeTool/afterTool hooks to rewrite args, deny a call, or redact output. The same shapes across all seven languages.
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -14,6 +14,15 @@ every tool call to guard, rewrite, or transform it.
 `usage`, `pending` ([a suspension](/toolnexus/suspension/)), and a terminal `done` carrying the final
 result. With an `id` it's stateful, exactly like [`ask`](/toolnexus/memory/) — the thread loads
 first and saves on `done`.
+
+<Aside type="caution" title="Clojure has no streaming loop">
+Six ports ship `stream`. The **Clojure** port does not: its `run` buffers the whole provider
+response, so it emits **no `text` deltas** — and synthesising deltas out of a buffered body would
+be a lie. Everything else in the event vocabulary (`tool_call`, `tool_result`, `pending`, `usage`,
+`done`) is live on the `:on-event` sink shown in its tab, which covers the progress-reporting case.
+For character-level output, call the provider's SSE endpoint yourself and use the toolkit only for
+the schema. It is tracked as this port's one declared streaming gap.
+</Aside>
 
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">
@@ -64,6 +73,39 @@ await client.StreamAsync("Summarize the repo.", tk, ev =>
     if (ev.Type == StreamKind.Text) Console.Write(ev.Delta);
     else if (ev.Type == StreamKind.ToolCall) Console.WriteLine($"\n→ {ev.Name}");
 }, id: "user-42");
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+for ev <- Toolnexus.Client.stream(client, "Summarize the repo.", tk, id: "user-42") do
+  case ev.type do
+    "text" -> IO.write(ev.delta)
+    "tool_call" -> IO.puts("\n→ #{ev.name}")
+    "done" -> IO.puts("\n(#{ev.result.turns} turns)")
+    _ -> :ok
+  end
+end
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.client :as client])
+
+;; This port has NO streaming loop and emits NO text deltas: `run` buffers the
+;; whole response, and synthesising deltas out of a buffered body would be a lie.
+;; Everything else in the event vocabulary arrives on `:on-event`, live.
+(client/run llm "Summarize the repo."
+            {:toolkit         tk
+             :conversation-id "user-42"
+             :on-event (fn [ev]
+                         (case (:type ev)
+                           "tool_call"   (println "\n→" (:name ev))
+                           "tool_result" (println "  " (:name ev)
+                                                  (if (:isError ev) "failed" "ok"))
+                           "pending"     (println "waiting on"
+                                                  (get-in ev [:request :prompt]))
+                           "done"        (println (str "\n(" (:turns (:result ev)) " turns)"))
+                           nil))})
 ```
 </TabItem>
 </Tabs>
@@ -150,6 +192,40 @@ var client = LlmClient.Create(new LlmClient.Options
 {
     BaseUrl = baseUrl, Style = "openai", Model = model, Hooks = hooks,
 });
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+before_tool = fn ev ->
+  if ev.name == "bash" and String.contains?(to_string(ev.args["command"]), "rm -rf") do
+    %{result: %Toolnexus.ToolResult{output: "denied by policy", is_error: true}}   # tool never runs
+  end
+end
+
+client =
+  Toolnexus.Client.create(
+    base_url: base, style: "openai", model: model,
+    hooks: %{
+      before_tool: before_tool,
+      after_tool: fn ev -> %{result: %{ev.result | output: redact(ev.result.output)}} end
+    }
+  )
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[clojure.string :as str] '[toolnexus.client :as client])
+
+(def llm
+  (client/create-client
+    {:base-url base-url :style "openai" :model model
+     :hooks {:before-tool (fn [{:keys [name args]}]
+                            (when (and (= "bash" name)
+                                       (str/includes? (str (:command args)) "rm -rf"))
+                              ;; a short-circuit result: the tool never runs
+                              {:result {:output "denied by policy" :isError true}}))
+             :after-tool  (fn [{:keys [result]}]
+                            {:result (update result :output redact)})}}))
 ```
 </TabItem>
 </Tabs>

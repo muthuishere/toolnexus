@@ -887,7 +887,7 @@ if r.status == "incomplete", do: IO.warn("stopped by a budget: #{r.text}")
 </TabItem>
 <TabItem label="Clojure">
 ```clojure
-(require '[koine.fs :as fs]
+(require '
          '[toolnexus.agents.runtime :as rt]
          '[toolnexus.client :as client]
          '[toolnexus.core :as tn]
@@ -915,9 +915,7 @@ if r.status == "incomplete", do: IO.warn("stopped by a budget: #{r.text}")
 (def coder
   {:name     "coder"
    :does     "Implements a change in this repository"
-   ;; no `:soul-file` in this port — the soul is a string, and reading the file
-   ;; is one call you already own
-   :soul     (fs/read-file "AGENTS.md")
+   :soul-file "AGENTS.md"   ; resolved at spawn — same as soulFile in the other ports
    :tools    coder-tools
    :team     ["explore"]                ; a team is a list of NAMES in the registry
    :budget   {:max-turns 60 :max-tokens 400000 :max-children 8 :max-depth 2}

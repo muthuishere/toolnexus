@@ -179,7 +179,7 @@ reviewer =
 </TabItem>
 <TabItem label="Clojure">
 ```clojure
-(require '[koine.fs :as fs]
+(require '
          '[toolnexus.agents.home :as home])
 
 (def dir "./personas/ava")
@@ -188,7 +188,7 @@ reviewer =
   {:name   "reviewer"
    :does   "reads a finished run and records durable lessons"
    ;; no `:soul-file` in this port — a soul is a string, so read the file yourself
-   :soul   (fs/read-file "personas/reviewer/SOUL.md")
+   :soul-file "personas/reviewer/SOUL.md"
    :tools  [(home/memory-tool dir)]            ; the ONLY tool it can touch
    :model  "openai/gpt-4o-mini"                ; cheap: it reads a digest, not a codebase
    :budget {:max-tokens 4000 :max-turns 3}})   ; a review that runs long is a broken review

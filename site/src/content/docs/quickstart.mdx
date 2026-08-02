@@ -52,10 +52,18 @@ Three steps to a working agent. Pick your language once — the tabs stay in syn
    dotnet add package Toolnexus
    ```
    </TabItem>
+   <TabItem label="Elixir">
+   ```elixir
+   # mix.exs
+   def deps do
+     [{:toolnexus, "~> 0.11"}]
+   end
+   ```
+   </TabItem>
    <TabItem label="Clojure">
    ```clojure
    ;; deps.edn — the toolnexus.* namespaces + koine (the only dependency)
-   {:deps {net.clojars.muthuishere/koine {:mvn/version "0.7.3"}}}
+   {:deps {net.clojars.muthuishere/koine     {:mvn/version "0.11.0"}}}
    ```
    </TabItem>
    </Tabs>
@@ -119,6 +127,17 @@ Three steps to a working agent. Pick your language once — the tabs stay in syn
    });
    ```
    </TabItem>
+   <TabItem label="Elixir">
+   ```elixir
+   {:ok, tk} = Toolnexus.create_toolkit()
+   agent =
+     Toolnexus.Client.create(
+       base_url: "https://openrouter.ai/api/v1",
+       style: "openai",
+       model: "openai/gpt-4o-mini"
+     )
+   ```
+   </TabItem>
    <TabItem label="Clojure">
    ```clojure
    (require '[toolnexus.core :as tn] '[toolnexus.client :as client])
@@ -162,6 +181,12 @@ Three steps to a working agent. Pick your language once — the tabs stay in syn
    ```csharp
    var res = await agent.RunAsync("List the files here, then summarise the README.", tk);
    Console.WriteLine(res.Text);
+   ```
+   </TabItem>
+   <TabItem label="Elixir">
+   ```elixir
+   res = Toolnexus.Client.run(agent, "List the files here, then count them.", tk)
+   IO.puts(res.text)
    ```
    </TabItem>
    <TabItem label="Clojure">
@@ -214,6 +239,11 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
     McpConfig = "./mcp.json",
     SkillsDir = "./skills",
 });
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+{:ok, tk} = Toolnexus.create_toolkit(mcp_config: "./mcp.json", skills_dir: "./skills")
 ```
 </TabItem>
 <TabItem label="Clojure">
