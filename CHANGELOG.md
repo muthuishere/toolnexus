@@ -36,8 +36,11 @@ only — see below), and all twelve toolkit options (`:skill-provider`, `:skills
 `:disable-skills`).
 
 **Still absent, and the option gate structurally cannot see any of it** (it compares option
-NAMES in two files, so a missing subsystem has no names to compare): agent runtime (§7D),
-subagents (§7E), context compaction (§7F), agent home. Note `:agents` is the **A2A** option (remote agents behind an Agent Card),
+NAMES in two files, so a missing subsystem has no names to compare): the agent runtime (§7D) and
+sub-agents, plus the two §7E entry points that need them (`from-dir`, `start-agent`). Context
+compaction (§7F) and the rest of agent home shipped — see the next entry. Those remaining gaps
+are what hold this port back from Clojars: not a tier downgrade, a subsystem not yet written.
+Note `:agents` is the **A2A** option (remote agents behind an Agent Card),
 which is a different capability from `openspec/specs/subagents` — that one remains unshipped
 here and is not satisfied by it. `clojure.core/agent` exists on both hosts, so a future
 subagents entry point cannot be named `agent`.
@@ -56,6 +59,35 @@ prose. Correcting it is a cross-port change.
 **Verified in five execution modes**, not two: `jvm-main`, `jvm-repl`, `cljgo-aot`, `cljgo-run`,
 `cljgo-repl` — a REPL is where a human meets a library, and cljgo's own ADR 0007 calls a
 REPL-vs-binary divergence unforgivable.
+
+### Added — §7F context compaction and §7E agent home, in Clojure
+
+`toolnexus.agents.compaction/compactor` returns a `:before-llm` hook that summarises the older
+transcript and keeps a recent tail, so a long-lived agent stays inside the model's context
+window. Below `:max-tokens` it is a no-op and the run is byte-identical to one with no
+compactor. `toolnexus.agents.home/compose-soul` composes a persona's bootstrap files into one
+system prompt — the directory is the agent — and `home/memory-tool` gives it durable notes it
+edits itself, with a write landing on disk immediately but loading only at the start of the next
+session.
+
+`from-dir` and `start-agent` (the heartbeat) are the two §7E entry points still missing here:
+both compose an agent definition, so both need the §7D runtime this port does not ship yet.
+
+Two upstream defects were found by writing these:
+
+- **cljgo: a descending `range` was an inconsistent seq** — `(range 6 1 -1)` counted 5 and
+  mapped to five elements while `seq`/`vec`/`some`/`filter` traversed it as `(6)`, and `reduce`
+  returned its seed untouched. Nothing threw, so any code walking a collection backwards was
+  silently wrong on cljgo and right on the JVM. Root-caused to three ascending-only comparisons
+  in `LongRange`, fixed in cljgo v0.9.0 (PR #194).
+- **The documented Clojure examples did not all run.** They do now: `site/tests/runners/clojure.sh`
+  executes every one of them four ways — JVM main, JVM REPL, cljgo interpreted, cljgo AOT —
+  and caught a call to a function that does not exist, an invented `build.cljgo` verb, and a
+  broken success contract, all in freshly written documentation.
+
+`clojure/examples/clj/` and `clojure/examples/cljgo/` are two projects over one symlinked source
+tree with five runnable examples each (MCP + skills + native, native/HTTP tools, progressive
+disclosure, persona memory, compaction), verified in CI on both hosts.
 
 ### Changed — cross-port conformance gate
 
