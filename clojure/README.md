@@ -117,6 +117,18 @@ previously reported all 23 options missing, of which only 20 were real):
 aliased in the manifest: `:mcp` (`mcpConfig`), `:skills` (`skillsDir`),
 `:tools` (`extraTools`).
 
+**Whole capabilities absent** — and the option-parity gate cannot see these,
+because it compares option NAMES in two files and a missing subsystem has no
+names to compare. Found by diffing modules against the JS port:
+
+| capability | JS module |
+|---|---|
+| §11 `translate` — one provider call, no loop, the inbound half of the adapters | `translate.ts` |
+| agent runtime (§7D) | `agents/runtime.ts` |
+| subagents / persona (§7E) | `agents/agent.ts` |
+| context compaction (§7F) | `agents/compaction.ts` |
+| agent home | `agents/home.ts` |
+
 Also absent: MCP elicitation bridging (§2), per-server tool allowlists, real SSE
 streaming (the loop buffers and emits no text deltas — faking them out of a
 buffered body would be a lie), and durable resume.

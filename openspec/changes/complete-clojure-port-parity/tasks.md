@@ -34,6 +34,27 @@ output. Each must be green in all five execution modes before it is ticked.
 - [ ] 5.2 toolkit-level `:wait-for`
 - [ ] 5.3 `:disable-tools` / `:disable-skills`
 
+## 5b. WHOLE CAPABILITIES ABSENT — found by merging main, not by the gate
+
+The option-parity gate measures OPTION NAMES in two files. It cannot see a
+capability that does not exist at all, so "17 options" understated the gap. A
+module-level diff against the JS port after merging main shows five subsystems
+with no Clojure implementation:
+
+- [ ] 5b.1 `§11 translate` (`tool-translation`) — `js/src/translate.ts`. One
+      provider call, no loop, no tool execution; the INBOUND half of the
+      adapters, which are outbound-only. Shipped in six ports.
+- [ ] 5b.2 `agent-runtime` (`js/src/agents/runtime.ts`)
+- [ ] 5b.3 `subagents` (`js/src/agents/agent.ts`) — §7D/§7E
+- [ ] 5b.4 `context-compaction` (`js/src/agents/compaction.ts`) — §7F
+- [ ] 5b.5 `agent-home` (`js/src/agents/home.ts`)
+
+NOTE FOR THE GATE ITSELF: that these were invisible is a defect in
+`check_options_parity.py`, not just in this port. A port can be missing an
+entire subsystem and still report "parity OK" as long as the two options files
+mention the right names. A capability-level check belongs next to the
+option-level one.
+
 ## 6. Promotion
 - [ ] 6.1 Flip `clojure` to tier `full` in `conformance/options_manifest.json`
 - [ ] 6.2 `check_options_parity.py` exits 0 with zero debt rows
