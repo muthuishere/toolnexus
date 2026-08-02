@@ -1,10 +1,56 @@
 # Changelog
 
-All six ports (js / python / golang / java / csharp / elixir) are versioned and released
-together; entries here apply to every port unless a port is named. Releases are cut as
+All ports are versioned and released together; entries here apply to every port unless a port
+is named. Six ports are at full parity (js / python / golang / java / csharp / elixir); the
+**Clojure port is at tier `core`** — see `conformance/options_manifest.json`, which is where a
+port's tier is declared, never by the port about itself. Releases are cut as
 GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
+
+### Added — Clojure, a seventh port (tier `core`)
+
+One `.cljc` source tree on **two runtimes**: Clojure on the JVM and
+[cljgo](https://github.com/muthuishere/cljgo) (Clojure hosted on Go). Not two implementations
+that agree — *one* implementation, byte-identical on both, with **zero reader conditionals**;
+every host difference lives behind [koine](https://github.com/muthuishere/koine), which is the
+port's only third-party dependency.
+
+Implemented: SPEC §0.1–0.2 (Tool/ToolResult, sanitize), §0.3+§2 (MCP over stdio **and**
+streamable-HTTP, per-source isolation), §0.5/§0.6/§3 (agent skills, byte-exact `skill` output),
+§0.7 (OpenAI/Anthropic/Gemini adapters), §0.8/§0.9 (native + HTTP tools), §0.10/§8 (the client
+loop, both provider styles, parallel tool calls), §0.11/§4A (builtins and MCP precedence),
+§0.12/§10 (suspension), §7A/§7B/§7C (A2A out, `serve` in, MCP server in).
+
+Also landed from the shared capability specs: `:request-params`, `:body-transform`,
+`:http-client`, `:retries`/`:retry-base-ms`, `:timeout-ms`, `:on-error` (retry|fail — no
+failure-originated suspend tier), `:on-metric`, `:store` + conversation memory.
+
+**Not yet at parity**, tracked in `openspec/changes/complete-clojure-port-parity` and printed
+by name on every run of the option gate: six toolkit options, plus five whole subsystems the
+option gate structurally cannot see — §11 translate, agent runtime (§7D), subagents (§7E),
+context compaction (§7F), agent home.
+
+**Verified in five execution modes**, not two: `jvm-main`, `jvm-repl`, `cljgo-aot`, `cljgo-run`,
+`cljgo-repl` — a REPL is where a human meets a library, and cljgo's own ADR 0007 calls a
+REPL-vs-binary divergence unforgivable.
+
+### Changed — cross-port conformance gate
+
+- `conformance/check_options_parity.py` now tokenizes **kebab-case**. It previously split on
+  `-`, so a Lisp port could never match an option name and reported all 23 as missing when only
+  20 were. Applied by file extension: widening it for C-family languages would glue unrelated
+  tokens together and manufacture false PASSES, which is the worse direction for a gate.
+- **Port tiers.** A port is held to the tier declared in `conformance/options_manifest.json` —
+  `full` (every option) or `core` (the §0 conformance contract). A full-tier option missing from
+  a core-tier port is **debt, printed by name on every run**, never a pass: a permitted absence
+  that stops being reported is indistinguishable from one that was implemented. The tier lives
+  in the shared manifest so lowering the bar is a visible diff the other ports review.
+
+### Known gap
+
+The option gate compares option **names in two files**, so a port can be missing an entire
+subsystem and still report parity OK. A capability-level check belongs beside it.
 
 ## 0.12.0 — 2026-07-30
 

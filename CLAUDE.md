@@ -145,6 +145,36 @@ bump them together. Never bake registry tokens into code, config, or CI; they ar
   where it helps, e.g. `feat(go client): …`, `test(js): …`. Do **not** add `Co-authored-by:`.
 - Touch only what the task needs; note unrelated issues rather than fixing them inline.
 
+## CHANGELOG.md — required, and it is not the git log
+
+`CHANGELOG.md` at the repo root is the **one place a user learns what changed**. Keeping it is
+part of the change, not a release chore: the person who made the behaviour is the only one who
+still knows *why*, and a changelog written later from `git log` reliably records what was
+touched rather than what a user gets.
+
+**Every change of substance adds to `## Unreleased` in the same PR that makes it.** A change is
+of substance if a user could notice it: new capability, new option, changed default, changed
+output, a fixed bug they could have hit, a new port, a moved contract. Typo and internal-only
+refactors do not qualify.
+
+**Write what a user gets, not what a file did.** `feat(clojure): add :on-error` is a commit
+subject; the entry says what the option is for, what happens without it, and what it now makes
+possible. Follow the existing entries — they lead with the user-visible change, then the
+reasoning, then the detail.
+
+**Say what is NOT done.** Every entry that ships a partial capability names the gap, and names
+where it is tracked (`openspec/changes/<name>`). A port at `core` tier lists its debt. This is
+the same rule as the option gate printing permitted absences by name: an omission that stops
+being mentioned is indistinguishable from something that was finished.
+
+**On release**, `## Unreleased` becomes `## X.Y.Z — YYYY-MM-DD` and a fresh empty `## Unreleased`
+goes above it. The version must match the GitHub Release tag and every port manifest — the
+`preflight` job in `release.yml` fails the run on drift. The GitHub Release body should be the
+changelog section, not a second, divergent account of the same work.
+
+**Per-port notes** belong in the shared entry, named inline (e.g. "golang only"), never in a
+per-port changelog — six parallel changelogs is exactly the drift this repo exists to prevent.
+
 ## Documentation map
 
 | Document | Purpose |
@@ -155,6 +185,7 @@ bump them together. Never bake registry tokens into code, config, or CI; they ar
 | `js/README.md`, `python/README.md`, `golang/README.md` + `golang/GUIDE.md`, `java/README.md`, `csharp/README.md` | Per-language end-user docs |
 | `openspec/changes/` | Active OpenSpec change proposals — feature/change work starts here (`/opsx:propose`) |
 | `openspec/specs/` | Canonical capability specs (accrue from archived changes) |
+| `CHANGELOG.md` | What changed, for users — updated in the SAME PR as the change (see above) |
 | `PUBLISHING.md` | How each port is published |
 
 Consult `SPEC.md`, `openspec/`, and the relevant port's README before making behavior changes.
