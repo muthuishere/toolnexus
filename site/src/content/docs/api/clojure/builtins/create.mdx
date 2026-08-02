@@ -8,50 +8,164 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a>
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/builtin.cljc">clojure/src/toolnexus/builtin.cljc</a>
 </p>
 
 ```clojure
-{/* TODO:signature */}
+builtin-tools    ; a VECTOR of ten Tools, in SPEC §4A table order — not a constructor
+builtin-names    ; ["bash" "read" "write" "edit" "grep" "glob"
+                 ;  "webfetch" "question" "apply_patch" "todowrite"]
+
+;; each element is an ordinary Tool map
+{:name "read" :description "Read a UTF-8 text file."
+ :input-schema {:type "object" :properties {…} :required ["path"]}
+ :source "builtin" :execute (fn ([args]) ([args ctx]))}
+
+;; the schemas are public values too
+bash-schema read-schema write-schema edit-schema grep-schema
+glob-schema webfetch-schema question-schema apply-patch-schema todowrite-schema
 ```
 
-Construct every built-in tool directly, outside a toolkit.
+`builtin-tools` is a `def`, not a function. There is nothing to construct: a Tool here is the same
+plain map every other source produces, so the ten built-ins are simply a vector you can filter,
+inspect, or hand to `toolnexus.tool/toolkit` yourself.
+
+That makes the built-in set inspectable in ways a constructor would not be. The `:input-schema` of
+each tool is the §4A contract — the thing the model actually sees — and you can read it, diff it
+against another port, or assert on it in a test without running anything.
+
+Executing one directly is `((:execute t) args)` or `((:execute t) args ctx)`. Both arities exist on
+every builtin. Going through `toolnexus.tool/execute` instead adds the §0.8 boundary rule, which
+converts a throw into an error ToolResult rather than letting it escape into your loop — prefer it
+unless you are deliberately testing the raw closure.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **Assembling a toolkit by hand** — a subset of builtins plus your own tools, without going
+  through `toolnexus.core/build`.
+- **Reading the schemas** — checking what §4A actually pins for `edit` or `webfetch`, or wiring the
+  same schema into something else.
+- **Calling one tool without an LLM** — a script that wants the `glob` or `apply_patch`
+  implementation and nothing else.
+- **Conformance work** — comparing the ten names, descriptions and schemas against another port.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Use enabled-builtins when a config decides the set">
+[`toolnexus.builtin/enabled-builtins`](/api/clojure/builtins/select/) applies the SPEC §0.11 toggle
+— the whole-source gate and the per-tool drop-list — and returns the surviving subset.
+`builtin-tools` is the unfiltered baseline it filters. If a config value is choosing for you, use
+`enabled-builtins`; if you are choosing in code, filter this vector.
 </Aside>
+
+Nothing here is lazy or stateful. The vector is built once at namespace load; the tools close over
+no session, hold no handle, and need no shutdown.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### Look at the set, then execute one directly
 
-{/* TODO:example1 */}
 ```clojure
-// TODO
+(require '[toolnexus.builtin :as builtin]
+         '[toolnexus.tool :as tool])
+
+builtin/builtin-names
+;; => ["bash" "read" "write" "edit" "grep" "glob" "webfetch" "question" "apply_patch" "todowrite"]
+
+(count builtin/builtin-tools)                          ;=> 10
+(:source (first builtin/builtin-tools))                ;=> "builtin"
+
+(def read-tool (first (filter #(= "read" (:name %)) builtin/builtin-tools)))
+
+(:input-schema read-tool)
+;; => {:type "object"
+;;     :properties {:path {:type "string" :description "Path to the file to read"}
+;;                  :offset {:type "number" :description "1-based line to start from"}
+;;                  :limit {:type "number" :description "Number of lines to read"}}
+;;     :required ["path"]}
+
+((:execute read-tool) {:path "README.md" :offset 1 :limit 3})
+;; => {:output "# toolnexus — Clojure\n\nThe seventh port…" :isError false}
+
+;; A missing file is a value the model can read, not an exception.
+((:execute read-tool) {:path "nope.md"})
+;; => {:output "read: file not found: nope.md" :isError true}
 ```
 
-### 2. TODO — the realistic case
+### A toolkit of exactly the tools you want
 
-{/* TODO:example2 */}
 ```clojure
-// TODO
+(require '[toolnexus.builtin :as builtin]
+         '[toolnexus.native :as native]
+         '[toolnexus.tool :as tool])
+
+(def safe-names #{"read" "grep" "glob"})
+
+(def whoami
+  (native/native-tool {:name "whoami" :description "Who this agent runs as"
+                       :run (fn [_] "reporting-bot")}))
+
+;; Builtins first, yours after — later tools win a name collision, which is
+;; how §0.11's precedence rule is expressed.
+(def tk (tool/toolkit (conj (vec (filter #(contains? safe-names (:name %))
+                                         builtin/builtin-tools))
+                            whoami)))
+
+(tool/tool-names tk)                              ;=> ["glob" "grep" "read" "whoami"]
+(:output (tool/execute tk "glob" {:pattern "**/*.md" :path "docs"}))
 ```
 
-### 3. TODO — the full surface
+### The two builtins that do not just return a string
 
-{/* TODO:example3 */}
 ```clojure
-// TODO
+(require '[koine.json :as json]
+         '[toolnexus.builtin :as builtin]
+         '[toolnexus.tool :as tool])
+
+(def tk (tool/toolkit builtin/builtin-tools))
+
+;; `question` suspends: metadata.pending carries a §10 Request, and the client
+;; loop resumes the call with ctx.answer once a human has replied.
+(def asked (tool/execute tk "question" {:questions [{:question "Ship it?"
+                                                     :options ["yes" "no"]}]}))
+(:isError asked)                                  ;=> true
+(get-in asked [:metadata :pending :kind])         ;=> "question"
+(get-in asked [:metadata :pending :prompt])       ;=> "Ship it? (options: yes, no)"
+
+;; Re-executed with an answer in the Context, it resolves to that answer.
+(:output (tool/execute tk "question"
+                       {:questions [{:question "Ship it?"}]}
+                       {:answer {:ok true :data {:choice "yes"}}}))
+;; => "{\"choice\":\"yes\"}"
+
+;; `apply_patch` plans every file change from reads before writing anything,
+;; so a hunk that does not match leaves the tree untouched.
+(:output (tool/execute tk "apply_patch"
+                       {:patchText "*** Begin Patch\n*** Add File: notes.md\n+hello\n*** End Patch\n"}))
+;; => "Applied 1 file change(s): add notes.md"
 ```
+
+| Tool | What it does | Notes |
+|---|---|---|
+| `bash` | Runs a shell command, combined stdout+stderr. | `timeout` in **milliseconds**, default 60000. A timeout and a non-zero exit are both `isError`. |
+| `read` | Reads a UTF-8 text file. | Optional 1-based `offset` and `limit`. |
+| `write` | Writes a file, creating parent directories. | Returns the UTF-8 byte count written. |
+| `edit` | Exact-string replace. | Refuses a non-unique `oldString` unless `replaceAll` is true. |
+| `grep` | Regex search over file contents. | Dialect differs per host — `java.util.regex` versus Go RE2 — so only the common subset is portable. |
+| `glob` | Lists files matching a glob. | `**` crosses separators, `*` and `?` do not. |
+| `webfetch` | HTTP GET, returned as `markdown`, `text` or `html`. | `timeout` in **seconds**, default 30. |
+| `question` | Asks the human. | Suspends via `metadata.pending`; see above. |
+| `apply_patch` | Add / update / delete files from a patch. | Atomic: all changes are planned from reads first. |
+| `todowrite` | Replaces the session todo list. | Stateless in this version — it echoes the list back. |
+
+<Aside type="caution" title="Two rendering details are this port's choice, not the contract">
+§4A pins the tool names and input schemas, not every byte of output. `webfetch`'s HTML-to-markdown
+conversion and `todowrite`'s `- [x]` rendering are unpinned, so they are this port's decision and
+are not guaranteed to match the other six. Both are reported upstream. Everything in the schemas is
+contract.
+</Aside>
 
 ## See also
 
 - [`toolnexus.builtin/enabled-builtins`](/api/clojure/builtins/select/) — Pick which built-in file/shell/web tools are in play, by name or by source toggle.
+- [`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) — the same Tool shape, for code of your own.

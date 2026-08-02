@@ -263,11 +263,19 @@
                    (into [{:role "system" :content sys}] given)
                    given)
         declared (declared-openai req)
+        ;; §11 "Shared infrastructure": beforeLLM/afterLLM fire EXACTLY ONCE for
+        ;; the single call, and before the body is assembled — the same ordering
+        ;; the loop uses. Tool hooks never fire here, structurally: nothing in
+        ;; this namespace executes a tool.
+        hooked   (client/before-llm! client messages declared 0)
+        messages (first hooked)
+        declared (second hooked)
         body     (cond-> {:model (:model client) :messages messages}
                    (seq declared)             (assoc :tools declared)
                    (some? (:toolChoice req))  (assoc :tool_choice (:toolChoice req))
                    (positive-max-tokens req)  (assoc :max_tokens (positive-max-tokens req)))
         data     (client/call-provider client body)
+        _        (client/after-llm! client data 0)
         choice   (get-in data [:choices 0])
         message  (or (:message choice) {})
         calls    (tool-calls-of message)
@@ -293,13 +301,20 @@
                       (:system converted))
         declared  (declared-anthropic req)
         choice    (openai-tool-choice-to-anthropic (:toolChoice req))
+        ;; §11 — one beforeLLM, before the body; `system` is not part of the
+        ;; event (it is a body field on this style, not a message), matching
+        ;; js/src/client.ts translateAnthropic.
+        hooked    (client/before-llm! client (:messages converted) declared 0)
+        messages  (first hooked)
+        declared  (second hooked)
         body      (cond-> {:model      (:model client)
                            :max_tokens (or (positive-max-tokens req) 4096)
-                           :messages   (:messages converted)}
+                           :messages   messages}
                     (not (str/blank? sys)) (assoc :system sys)
                     (seq declared)         (assoc :tools declared)
                     choice                 (assoc :tool_choice choice))
         data      (client/call-provider client body)
+        _         (client/after-llm! client data 0)
         blocks    (filter map? (:content data))
         calls     (->> blocks
                        (filter (fn [b] (= "tool_use" (:type b))))

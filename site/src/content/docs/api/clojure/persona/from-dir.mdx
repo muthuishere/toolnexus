@@ -12,16 +12,63 @@ import { Aside } from '@astrojs/starlight/components';
 </p>
 
 <Aside type="caution" title="Not available in Clojure">
-The Clojure port ships no §7E persona layer — there is no agent home to load from (recorded parity debt).
+There is no agent home in this port, so there is nothing to load one from. What it does read off disk
+is a **skills** directory — `toolnexus.skill/load-skills` globs `**/SKILL.md` — and that is the whole
+filesystem-to-capability path here.
 </Aside>
 
 Point at an agent home directory and get a configured agent back.
 
+`fromDir` is the one-call form of §7E: a path in, a fully configured agent out — prompt, skills,
+memory and model all resolved from the directory's layout. It exists so an operator can add a persona
+by creating a folder, with no deploy.
+
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Skills already work exactly that way, and they are the part of a persona that actually needs
+discovery. A directory of `SKILL.md` files becomes a catalog with no code change:
+
+```clojure
+(require '[toolnexus.core :as core]
+         '[toolnexus.client :as client]
+         '[koine.fs :as fs]
+         '[koine.json :as json])
+
+(defn load-persona
+  "Everything this port can resolve from a directory: skills by discovery,
+   the prompt by convention, the model from your own config."
+  [home]
+  (let [tk  (core/build {:skills (str home "/skills")})
+        cfg (if (fs/exists? (str home "/agent.json"))
+              (json/read-str (fs/read-file (str home "/agent.json")))
+              {})]
+    {:toolkit tk
+     :client  (client/create-client
+                {:base-url      (or (:base-url cfg) "https://api.anthropic.com")
+                 :style         (or (:style cfg) "anthropic")
+                 :model         (or (:model cfg) "claude-sonnet-4-6")
+                 :max-turns     (or (:max-turns cfg) 10)
+                 :system-prompt (when (fs/exists? (str home "/IDENTITY.md"))
+                                  (fs/read-file (str home "/IDENTITY.md")))})}))
+
+(let [{:keys [client toolkit]} (load-persona "agents/researcher")]
+  (client/run client "what changed this week?" {:toolkit toolkit}))
+```
+
+Three things make this less than `fromDir`. There is no agreed directory layout, so `IDENTITY.md`
+and `agent.json` are your conventions and will not match another port's. There is no memory the agent
+writes back to. And a missing skills root is only a warning — `load-skills` contributes nothing and
+carries on, so a typo in the path yields a persona with no capabilities rather than an error.
+
+If the discovery you want is *skills* rather than a whole persona, the port has more than a directory
+glob: [`toolnexus.core/build`](/api/clojure/toolkit/create/) takes `:skill-defs` for skills supplied
+as data, `:skill-provider` for a function that produces them at build time, and `:skills-filter` to
+narrow the catalog per agent. A persona registry backed by a database rather than a filesystem is a
+`:skill-provider`, not a directory walk.
 
 ## See also
 
-- _TODO: related entry points_
+- [`toolnexus.skill/load-skills`](/api/clojure/skills/load/) — the directory discovery that does ship
+- [`skills / load-with`](/api/clojure/skills/load-with/) — skills as data, a provider fn, and per-agent filters
+- [`toolnexus.client/create-client`](/api/clojure/client/create/) — the model and prompt half
+- [`persona / compose-soul`](/api/clojure/persona/compose-soul/) — the prompt assembly this would perform

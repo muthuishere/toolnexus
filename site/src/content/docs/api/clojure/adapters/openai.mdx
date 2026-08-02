@@ -8,51 +8,156 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a>
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/adapter.cljc">clojure/src/toolnexus/adapter.cljc</a>
 </p>
 
 ```clojure
-{/* TODO:signature */}
+(to-openai tools-or-toolkit)
+
+;; => [{:type     "function"
+;;      :function {:name        "echo"
+;;                 :description "Echo the input back."
+;;                 :parameters  {:type "object" :properties {…} :required […]}}}
+;;     …]
 ```
 
-Render the toolkit as OpenAI function-calling schema.
+`to-openai` renders every tool in the toolkit as one entry in OpenAI's function-calling array. The
+shape is a wrapper — `:type "function"` plus a `:function` map — and the tool's `:input-schema` is
+emitted verbatim under the key **`:parameters`**. That nesting is what distinguishes this adapter
+from the other two: Anthropic's entries are flat, and Gemini's live inside a single declarations
+wrapper.
+
+It is schema only. Nothing here touches a network, a key or a host — the return value is data you
+hand to whatever OpenAI client you already use. Execution is identical for all three providers:
+read the tool name and args the model returned, call `toolnexus.tool/execute`, feed the output back
+as a tool message.
+
+Order is deterministic by construction. A toolkit goes through `toolnexus.tool/all-tools`, which
+sorts by name, because map order is not a contract on either host. An explicit seq of tools is left
+in the order you gave it — that is the only way to pin a non-alphabetical order.
+
+With no tools, `to-openai` returns `[]`. Same for Anthropic; Gemini is the one that does not.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **Calling the OpenAI Chat Completions API** — or anything that speaks its function-calling shape,
+  which is most of the OpenAI-compatible gateways.
+- **Rendering a subset** — pass a vector of tools rather than the toolkit when this request should
+  only see some of them.
+- **Pinning a tool order** — models are mildly sensitive to it, and an explicit seq is how you
+  control it.
+- **Asserting on a payload in a test** — the output is plain data with no hidden state, so
+  comparing it against an expected vector is a normal `=`.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Match the adapter to the API you are actually calling">
+The three adapters are not interchangeable renderings of one payload — they emit different key
+names and different nesting. Sending [`to-anthropic`](/api/clojure/adapters/anthropic/) output to
+OpenAI fails on the missing `:function` wrapper, and
+[`to-gemini`](/api/clojure/adapters/gemini/) output is wrapped one level deeper again. Pick by
+endpoint, not by preference.
 </Aside>
+
+`toolnexus.core/to-openai` re-exports this function, so a caller that already requires
+`toolnexus.core` does not need a second require. It is the same function with the same result.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### Render a whole toolkit
 
-{/* TODO:example1 */}
 ```clojure
-// TODO
+(require '[toolnexus.core :as toolnexus])
+
+(def tk (toolnexus/build {:skills "examples/skills"}))
+
+(toolnexus/to-openai tk)
+;; => [{:type "function"
+;;      :function {:name "apply_patch"
+;;                 :description "Apply an add/update/delete patch."
+;;                 :parameters {:type "object"
+;;                              :properties {:patchText {:type "string" …}}
+;;                              :required ["patchText"]}}}
+;;     {:type "function" :function {:name "bash" …}}
+;;     …]
+
+(map #(get-in % [:function :name]) (toolnexus/to-openai tk))
+;; => ("apply_patch" "bash" "edit" "glob" "grep" "question" "read"
+;;     "skill" "todowrite" "webfetch" "write")
 ```
 
-### 2. TODO — the realistic case
+### One request, a hand-picked subset in a hand-picked order
 
-{/* TODO:example2 */}
 ```clojure
-// TODO
+(require '[toolnexus.adapter :as adapter]
+         '[toolnexus.native :as native])
+
+(def search
+  (native/native-tool {:name "search" :description "Search the catalog"
+                       :input-schema {:type "object"
+                                      :properties {:q {:type "string"}}
+                                      :required ["q"]}
+                       :run (fn [args] (str "results for " (:q args)))}))
+
+(def refund
+  (native/native-tool {:name "refund" :description "Refund an order"
+                       :run (fn [args] (str "refunded " (:order args)))}))
+
+;; A vector keeps YOUR order — the toolkit form would sort these alphabetically.
+(adapter/to-openai [search refund])
+;; => [{:type "function" :function {:name "search"
+;;                                  :description "Search the catalog"
+;;                                  :parameters {:type "object"
+;;                                               :properties {:q {:type "string"}}
+;;                                               :required ["q"]}}}
+;;     {:type "function" :function {:name "refund"
+;;                                  :description "Refund an order"
+;;                                  :parameters {:type "object"}}}]
 ```
 
-### 3. TODO — the full surface
+A tool declared without a description renders `""`, never `nil`, and one declared without a schema
+renders `{:type "object"}` — `toolnexus.tool/tool` fills both defaults in, so no adapter can emit a
+null into a provider payload.
 
-{/* TODO:example3 */}
+### Closing the loop: model reply back to `execute`
+
 ```clojure
-// TODO
+(require '[koine.json :as json]
+         '[toolnexus.core :as toolnexus])
+
+(def tk (toolnexus/build {:skills "examples/skills"}))
+
+;; What you send.
+(def request {:model "gpt-4o" :messages [] :tools (toolnexus/to-openai tk)})
+
+;; What comes back, per tool call: a name and a JSON string of arguments.
+(defn run-tool-call [tk call]
+  (let [nm   (get-in call ["function" "name"])
+        args (json/read-str (get-in call ["function" "arguments"]) {:key-fn keyword})
+        res  (toolnexus/execute tk nm args)]
+    ;; A failed tool is a message, not an exception — the model reads it and retries.
+    {:role "tool" :tool_call_id (get call "id") :content (:output res)}))
+
+(run-tool-call tk {"id" "call_1"
+                   "function" {"name" "skill" "arguments" "{\"name\":\"hello-world\"}"}})
+;; => {:role "tool" :tool_call_id "call_1" :content "<skill_content name=\"hello-world\">…"}
 ```
+
+| Emitted key | Source |
+|---|---|
+| `:type` | Always the literal `"function"`. |
+| `:function` `:name` | The tool's `:name`. |
+| `:function` `:description` | The tool's `:description`, `""` when unset. |
+| `:function` `:parameters` | The tool's `:input-schema` verbatim, `{:type "object"}` when unset. |
+
+| Input | Order |
+|---|---|
+| a toolkit | Sorted by tool name. |
+| a seq of tools | Exactly as given. |
+| an empty toolkit or seq | `[]`. |
 
 ## See also
 
 - [`toolnexus.adapter/to-anthropic`](/api/clojure/adapters/anthropic/) — Render the toolkit as Anthropic tool-use schema.
 - [`toolnexus.adapter/to-gemini`](/api/clojure/adapters/gemini/) — Render the toolkit as Gemini function-declaration schema.
+- [`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) — where the `:input-schema` that lands in `:parameters` comes from.

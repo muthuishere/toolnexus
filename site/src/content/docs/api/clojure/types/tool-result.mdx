@@ -23,7 +23,7 @@ There is **no ToolResult type** in this port. A result is a plain map with two k
 third, built by one of these two functions. `output` is `str`ed on the way in — the model reads
 text, so `(success 42)` yields `"42"` rather than a number that each host would print differently.
 `metadata` is omitted from the map entirely when it is `nil`, so `(success "hi")` is exactly
-`\{:output "hi" :isError false\}` and nothing else.
+`{:output "hi" :isError false}` and nothing else.
 
 They are named `success` and `failure`, not `ok` and `err`. cljgo's `clojure.core` **has** `ok` and
 `err`; the JVM's does not. Defining `ok` would shadow a core name on one host only — a hazard that
@@ -61,7 +61,7 @@ explicitly when you want an **error** result, or metadata, or when you are const
 |---|---|---|---|
 | `:output` | string | yes | The text the model sees. Non-strings are `str`ed. |
 | `:isError` | boolean | yes | `false` from `success`, `true` from `failure`. |
-| `:metadata` | map | no | Present only when you passed one. `\{:pending Request\}` is the reserved §10 use. |
+| `:metadata` | map | no | Present only when you passed one. `{:pending Request}` is the reserved §10 use. |
 
 ## Examples
 

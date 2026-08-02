@@ -14,12 +14,12 @@ import { Aside } from '@astrojs/starlight/components';
 This port is wired into the shared conformance checker at tier **core** (the SPEC §0 contract),
 while the six shipped ports are at tier **full**. Every core option is present; what is still
 missing at full tier is client **hooks**, the §7D–§7F layers (sub-agents, personas, compaction),
-skills-as-data / provider / allowlist, the **MCP elicitation** bridge, real **SSE streaming** (the
-loop buffers and emits no text deltas) and **durable cross-process resume**. Those are recorded in
-`clojure/README.md` — note that the README's client-option list runs behind the code (`:retries`,
-`:timeout-ms`, `:store`, `:on-metric`, `:on-error`, `:request-params`, `:body-transform` and
-`:http-client` are all implemented), so the source is the authority. Symbols below are the real
-public surface of `clojure/src/toolnexus/`.
+real **SSE streaming** (the loop buffers and emits no text deltas) and **durable cross-process
+resume**. Those are recorded in `clojure/README.md` — note that the README runs behind the code
+(the client's `:retries`, `:timeout-ms`, `:store`, `:on-metric`, `:on-error`, `:request-params`,
+`:body-transform` and `:http-client`, the toolkit's skill/agent/disable options, §11 `translate`
+and the MCP elicitation bridge are all implemented), so the source is the authority. Symbols below
+are the real public surface of `clojure/src/toolnexus/`.
 </Aside>
 
 Namespaces live under **`toolnexus.*`** (`clojure/src/toolnexus/`). koine coordinate:
@@ -32,12 +32,19 @@ ports — open the **Clojure** topic in the API-reference picker, or start at
 
 ## Toolkit — `toolnexus.core/build`
 
-- `(build {:keys [mcp skills builtins tools]}) -> toolkit`
+- `(build {:keys [mcp skills skill-defs skill-provider skills-filter skill-sample-limit
+  disable-skills builtins agents tools disable-tools wait-for]}) -> toolkit`
   - `:mcp` — an `mcp.json` string or map (§2/§0.3)
-  - `:skills` — a skills root string, or a seq of roots (§3)
+  - `:skills` — a skills root, a seq of roots, or a seq of skill defs (§3); `:skill-defs` and
+    `:skill-provider` supply them as data, `:skills-filter` / `:disable-skills` /
+    `:skill-sample-limit` narrow the catalog
   - `:builtins` — the §0.11 toggle: `false | {:disabled ..} | {:enabled ..} | {:tools {..}}`
-  - `:tools` — extra Tools of your own (native, http, a2a — anything)
-- Returns `{:tools .. :sources .. :skills .. :statuses .. :errors .. :connections ..}`. Every
+  - `:agents` — remote A2A peers; each advertised skill becomes a tool (§7A)
+  - `:tools` — extra Tools of your own (native, http, a2a — anything); `:disable-tools` drops
+    names across EVERY source
+  - `:wait-for` — the ONE §10 host resolver, handed to the MCP source so a server may elicit
+    input mid-`tools/call`; absent ⇒ the `elicitation` capability is not advertised at all
+- Returns `{:tools .. :sources .. :skills .. :statuses .. :errors .. :connections .. :wait-for ..}`. Every
   source is isolated: a dead MCP server contributes an error + status, never an exception.
 - `(shutdown! tk)` — disconnect every MCP connection the toolkit opened (idempotent).
 - `(tool-names tk)` — sorted tool names. `(execute tk name args)` / `(execute tk name args ctx)`.
@@ -46,11 +53,16 @@ ports — open the **Clojure** topic in the API-reference picker, or start at
 
 ## Skills — `toolnexus.skill`
 
-- `(load-skills roots) -> {:skills .. :by-name .. :skipped ..}` — one root (string) or several
-  (seq); roots are visited in the order given, and an earlier one wins a name collision.
-- `(list-skills roots) -> {:skills .. :skipped ..}` — discover + validate without building a
+- `(load-skills input) -> {:skills .. :by-name .. :skipped .. :filter-unmatched .. :sample-limit ..}`
+  — `input` is a root string, a seq of roots, one skill def, a seq of defs, or the options map
+  `{:dirs .. :skills .. :filter .. :sample-limit ..}`. Roots are visited in the order given, and an
+  earlier one wins a name collision.
+- `(list-skills input) -> {:skills .. :skipped ..}` — discover + validate without building a
   toolkit; typed skip reasons `missing-name` · `malformed-frontmatter` · `duplicate-name` ·
   `unreadable`.
+- A **data skill** is a plain map: `{:name .. :description .. :content .. :resources [..] :base ..}`.
+  With no `:base` it gets the logical base `skill://<name>/`, so a source that never touched a disk
+  cannot leak a host path.
 - `(skill-tool loaded)` — the single `skill` tool over a loaded source (progressive disclosure);
   `(skills-prompt loaded)` — the §3/§0.6 system-prompt catalog (re-exported as
   `toolnexus.core/skills-prompt`).
@@ -63,6 +75,9 @@ ports — open the **Clojure** topic in the API-reference picker, or start at
 - `toolnexus.mcp` — `(from-config config)` connects every server (stdio + streamable-HTTP),
   returns `{:tools .. :statuses .. :connections .. :errors ..}`; `(parse-config config)` validates
   without connecting; `(tools conn)`, `(disconnect conn)`, `(disconnect-all conns)`.
+  `(from-config config {:wait-for f})` also bridges a server's **elicitation** onto §10 —
+  `(elicitation->request params)` / `(answer->elicit-result answer)` — and with no `:wait-for` the
+  capability is not advertised at all.
 - Adapters (`toolnexus.adapter`, re-exported on `core`): `(to-openai tk)` · `(to-anthropic tk)` ·
   `(to-gemini tk)`.
 - Client (`toolnexus.client`): `(create-client opts)` → `(run client prompt {:toolkit tk :history [..] :on-event f :conversation-id id})`.
@@ -94,7 +109,9 @@ ports — open the **Clojure** topic in the API-reference picker, or start at
   `(agent-card a2a base skills)`.
 - Remote agents (`toolnexus.a2a`): `(remote-agent {:card url :headers {..} :timeout ms :poll-every ms})`
   → `{:card .. :endpoint .. :tools [..]}`; a failing agent is isolated to `{:tools [] :error ".."}`.
-  `(agent-tools spec)` returns just the tools. Pass the tools via `build`'s `:tools`.
+  `(agent-tools spec)` returns just the tools; `(parse-agents-config config)` declares peers in
+  config the way MCP servers are declared. Pass the specs via `build`'s `:agents`, or the tools via
+  `:tools`.
 - Equivalents: `tk.serve` / `agent` + `tk.addAgent` (js) · `serve` / `add_agent` (py) · `Serve` /
   `AddAgent` (go) · `serve` / `addAgent` (java) · `ServeAsync` / `AddAgentAsync` (c#) ·
   `Toolkit.serve` / `Toolkit.add_agent` (elixir).

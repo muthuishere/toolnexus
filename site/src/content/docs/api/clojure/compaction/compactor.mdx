@@ -12,16 +12,76 @@ import { Aside } from '@astrojs/starlight/components';
 </p>
 
 <Aside type="caution" title="Not available in Clojure">
-The Clojure port ships no §7F compaction — bound a long run with :max-turns on toolnexus.client/create-client and trim :history yourself.
+The Clojure port ships no §7F compaction. Nothing watches the transcript and nothing summarises it:
+the messages you pass as `:history` (or the ones the store replayed for a `:conversation-id`) go to
+the provider verbatim, and a run that outgrows the context window fails at the provider.
 </Aside>
 
 Summarise older turns when the transcript grows, so a long-lived agent stays inside its context window.
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Two bounds and one summarisation, all of them yours to apply.
+
+**Bound the run.** `:max-turns` on [`toolnexus.client/create-client`](/api/clojure/client/create/)
+caps how many model round-trips one `run` may take (default 10). A run that hits the cap comes back
+with `:status "incomplete"` and `:limit? true` instead of looping until the window is full — that is
+the cheap guard, and it costs nothing.
+
+**Bound the transcript.** Because history is a plain vector of messages, trimming it is a vector
+operation you do between turns. Keep the system message and the tail, drop the middle:
+
+```clojure
+(require '[toolnexus.client :as client])
+
+(defn keep-recent
+  "The crudest compaction that works: the last n messages."
+  [messages n]
+  (vec (take-last n messages)))
+
+(def c (client/create-client {:base-url  "https://api.anthropic.com"
+                              :style     "anthropic"
+                              :model     "claude-sonnet-4-6"
+                              :max-turns 10}))
+
+(loop [history [] prompts ["step one" "step two" "step three"]]
+  (when-let [p (first prompts)]
+    (let [r (client/run c p {:history history})]
+      (recur (keep-recent (:messages r) 40) (rest prompts)))))
+```
+
+**Summarise, if truncation loses too much.** A compactor is one extra model call whose output
+replaces the turns it summarised. `run` with no toolkit is that call, and so is
+[`toolnexus.translate/translate`](/api/clojure/translate/translate/) if you want one provider call
+with no loop and no store around it:
+
+```clojure
+(require '[toolnexus.client :as client]
+         '[toolnexus.translate :as translate])
+
+(defn summarise [c messages]
+  (:text (translate/translate
+           c {:messages (conj (vec messages)
+                              {:role "user"
+                               :content "Summarise the conversation so far in under 200 words. Keep decisions, file paths and open questions."})})))
+
+;; keep the summary as the first message, then the recent tail
+(defn compact [c messages keep-n]
+  (let [[old recent] (split-at (- (count messages) keep-n) messages)]
+    (if (seq old)
+      (vec (cons {:role "user" :content (str "Earlier context: " (summarise c old))} recent))
+      (vec messages))))
+```
+
+What you do not get by hand: a threshold the loop checks for you, so nothing compacts unless you
+call it; and no equivalent inside a `:conversation-id` run, where the store holds the full
+transcript — compact the vector and `:save` it back through the store's two operations yourself.
+Note also that a summary is lossy in a way truncation is not honest about: tool-call ids in the
+summarised span are gone, so compact only spans whose tool calls have already been answered.
 
 ## See also
 
-- _TODO: related entry points_
+- [`toolnexus.client/create-client`](/api/clojure/client/create/) — `:max-turns`, the bound that does ship
+- [`toolnexus.client/run`](/api/clojure/client/run/) — `:history` and the `:messages` it returns
+- [`toolnexus.client/in-memory-store`](/api/clojure/client/store/) — where a `:conversation-id` transcript lives
+- [`toolnexus.translate/translate`](/api/clojure/translate/translate/) — one provider call, no loop, for the summary itself

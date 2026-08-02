@@ -498,3 +498,87 @@
          (tr/tool-calls-json {:toolCalls [{:id "call_1" :name "get_weather"
                                            :arguments "{\"city\":\"Chennai\"}"}]})))
   (is (= [] (tr/tool-calls-json {:toolCalls []}))))
+
+;; ---------------------------------------------------------------------------
+;; §11 + `tool-translation` — the §8 hooks on the single-turn path
+;; ---------------------------------------------------------------------------
+;;
+;; SPEC.md §11 "Shared infrastructure": "`beforeLLM` and `afterLLM` each fire
+;; EXACTLY ONCE. Tool hooks do NOT fire — no tool runs." The capability spec
+;; (openspec/specs/tool-translation) says the same in requirement form. Both
+;; upstream styles, because they are two separate code paths.
+
+(defn- hook-recorder
+  "All four §8 hooks, each appending [tag turn] to `seen`. The LLM hooks return
+  nil so they observe only."
+  [seen]
+  {:before-llm  (fn [ev] (swap! seen conj [:before-llm (:turn ev)]) nil)
+   :after-llm   (fn [ev] (swap! seen conj [:after-llm (:turn ev)]) nil)
+   :before-tool (fn [ev] (swap! seen conj [:before-tool (:turn ev)]) nil)
+   :after-tool  (fn [ev] (swap! seen conj [:after-tool (:turn ev)]) nil)})
+
+(deftest translate-fires-llm-hooks-once-and-no-tool-hooks-openai
+  (reset! executions 0)
+  (let [seen (atom [])]
+    (with-provider [openai-tool-turn]
+      (fn [{:keys [base]}]
+        (tr/translate (client-for "openai" base {:hooks (hook-recorder seen)})
+                      {:messages [{:role "user" :content "weather?"}]
+                       :toolkit (probe-toolkit)})
+        (testing "beforeLLM and afterLLM each fire exactly once, in that order"
+          (is (= [[:before-llm 0] [:after-llm 0]] @seen)))
+        (testing "no tool hook fires, because no tool runs"
+          (is (zero? @executions)))))))
+
+(deftest translate-fires-llm-hooks-once-and-no-tool-hooks-anthropic
+  (reset! executions 0)
+  (let [seen (atom [])]
+    (with-provider [anthropic-tool-turn]
+      (fn [{:keys [base]}]
+        (tr/translate (client-for "anthropic" base {:hooks (hook-recorder seen)})
+                      {:messages [{:role "user" :content "weather?"}]
+                       :toolkit (probe-toolkit)})
+        (is (= [[:before-llm 0] [:after-llm 0]] @seen))
+        (is (zero? @executions))))))
+
+(deftest translate-after-llm-sees-the-raw-provider-payload
+  (let [seen (atom [])]
+    (with-provider [openai-tool-turn]
+      (fn [{:keys [base]}]
+        (tr/translate (client-for "openai" base
+                                  {:hooks {:after-llm (fn [ev] (swap! seen conj ev) nil)}})
+                      {:messages [{:role "user" :content "hi"}]})
+        (is (= 1 (count @seen)))
+        (is (= "mock-model" (:model (first @seen))))
+        (is (= "tool_calls" (get-in (first @seen) [:response :choices 0 :finish_reason])))))))
+
+(deftest translate-before-llm-can-replace-messages-and-tools
+  (with-provider [openai-text-turn]
+    (fn [{:keys [base requests]}]
+      (tr/translate (client-for "openai" base
+                                {:hooks {:before-llm (fn [_ev]
+                                                       {:messages [{:role "user" :content "rewritten"}]
+                                                        :tools []})}})
+                    {:messages [{:role "user" :content "hi"}]
+                     :toolkit (probe-toolkit)})
+      (let [body (first @requests)]
+        (is (= [{:role "user" :content "rewritten"}] (:messages body)))
+        (is (nil? (:tools body)) "an empty tool list omits the key entirely")))))
+
+(deftest translate-before-llm-runs-before-request-params-and-body-transform
+  ;; SPEC.md §8 Gap 1 ordering, on the §11 path:
+  ;;   base body -> beforeLLM -> :request-params -> :body-transform -> wire
+  (with-provider [openai-text-turn]
+    (fn [{:keys [base requests]}]
+      (tr/translate (client-for "openai" base
+                                {:hooks {:before-llm (fn [_ev] {:messages [{:role "user" :content "hooked"}]})}
+                                 :request-params {:temperature 0.2}
+                                 :body-transform (fn [b]
+                                                   (is (= [{:role "user" :content "hooked"}] (:messages b)))
+                                                   (is (= 0.2 (:temperature b)))
+                                                   (assoc b :ordered "yes"))})
+                    {:messages [{:role "user" :content "hi"}]})
+      (let [body (first @requests)]
+        (is (= [{:role "user" :content "hooked"}] (:messages body)))
+        (is (= 0.2 (:temperature body)))
+        (is (= "yes" (:ordered body)))))))

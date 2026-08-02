@@ -41,7 +41,7 @@ was, so a tool that wants the context is written multi-arity:
 
 The context is whatever map the caller passes. The port itself puts exactly one thing there: when a
 tool suspends and a `:wait-for` resolves it, the client re-executes the same call with
-`\{:answer answer\}` as the context. That is the resume path of SPEC §10 — the first execution has
+`{:answer answer}` as the context. That is the resume path of SPEC §10 — the first execution has
 no context, the retry does, which is why the two-arity form is the portable contract here.
 
 [`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) takes a single-argument `:run`

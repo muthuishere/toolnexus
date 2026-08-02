@@ -46,7 +46,7 @@ by polling `GetTask`. Nothing a handler does can take the server down: a malform
 JSON-RPC `-32700`, an escaped exception becomes `-32603`, and a fulfilment that throws leaves a
 `failed` task rather than a thread that dies holding the task in `working` forever.
 
-Fulfilment comes from either `:client` (a client map — `serve` calls its `:run` with `\{:toolkit tk\}`)
+Fulfilment comes from either `:client` (a client map — `serve` calls its `:run` with `{:toolkit tk}`)
 or `:run` (a bare function of the task text returning a map with `:text`). Configure neither and
 every task fails loudly rather than hanging.
 
@@ -165,11 +165,11 @@ See [`toolnexus.serve/file-store`](/api/clojure/serve/task-store/).
 | `:a2a` | absent | §7B profile map — see [`agent-card`](/api/clojure/serve/agent-card/) for its keys. Absent ⇒ no card, no `/`. |
 | `:mcp` | absent | §7C profile map (`:name`, `:version`, `:protocolVersion`, `:tools`). Absent ⇒ no `/mcp`. |
 | `:skills` | none | The SkillSource the Agent Card advertises. Accepts a `list-skills` result, a name→info index, or a plain seq. |
-| `:client` | none | A client map; each task runs `((:run client) text \{:toolkit tk\})`. |
-| `:run` | none | A bare fulfilment `(fn [text] \{:text "..."\})`. Takes precedence over `:client`. |
+| `:client` | none | A client map; each task runs `((:run client) text {:toolkit tk})`. |
+| `:run` | none | A bare fulfilment `(fn [text] {:text "..."})`. Takes precedence over `:client`. |
 | `:store` | `"memory"` | `nil` / `"memory"`, `"file:<dir>"`, or a store map. See [`resolve-store`](/api/clojure/serve/task-store/). |
-| `:on-task` | none | Called with `\{:id :task :state :result\}` when a task settles. A throw inside it is swallowed. |
-| `:on-call` | none | Called with `\{:name :source :isError\}` per inbound `tools/call`. A throw inside it is swallowed. |
+| `:on-task` | none | Called with `{:id :task :state :result}` when a task settles. A throw inside it is swallowed. |
+| `:on-call` | none | Called with `{:name :source :isError}` per inbound `tools/call`. A throw inside it is swallowed. |
 
 ### The handle
 

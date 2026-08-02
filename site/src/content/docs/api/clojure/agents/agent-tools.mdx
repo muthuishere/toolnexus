@@ -95,10 +95,7 @@ Two peers up and one down yields the union of the two live catalogs. Note that �
 collide the moment two cards share a `name`, and a later tool wins the collision — give your peers
 distinct card names.
 
-### Peers from your own config file
-
-There is no built-in parser for an `agents` config block in this port — see
-[`agents / parse-config`](/api/clojure/agents/parse-config/). Reading one is a `map` over descriptors:
+### Peers from a config block
 
 ```clojure
 (require '[toolnexus.a2a :as a2a]
@@ -108,22 +105,22 @@ There is no built-in parser for an `agents` config block in this port — see
 
 (def cfg (json/read-str (fs/read-file "config.json")))
 
-(defn peer-descriptors
-  "A name -> {:card ... :pollEvery ... :disabled ...} block, sorted by name so two
-   runtimes agree on which peer registers first (§7A names collide on card name)."
-  [block]
-  (->> (sort (keys block))
-       (keep (fn [k]
-               (let [e (get block k)]
-                 (when (and (string? (:card e)) (not (true? (:disabled e))))
-                   (cond-> {:card (:card e)}
-                     (:headers e)   (assoc :headers (:headers e))
-                     (:timeout e)   (assoc :timeout (:timeout e))
-                     (:pollEvery e) (assoc :poll-every (:pollEvery e)))))))))
-
 (def tk
   (core/build {:tools (into [] (mapcat a2a/agent-tools)
-                            (peer-descriptors (:agents cfg)))}))
+                            (a2a/parse-agents-config (:agents cfg)))}))
+```
+
+[`parse-agents-config`](/api/clojure/agents/parse-config/) normalises the block into exactly the
+descriptors `agent-tools` accepts, drops disabled entries, and orders peers by name so two runtimes
+cannot disagree about who registered first.
+
+Most of the time you do not need either call:
+[`toolnexus.core/build`](/api/clojure/toolkit/create/) takes descriptors on `:agents` and resolves
+them itself — and reads a top-level `agents` block straight off a parsed `:mcp` config map.
+
+```clojure
+(core/build {:agents [{:card "http://127.0.0.1:8080/.well-known/agent-card.json"}]})
+(core/build {:mcp cfg})   ;; picks up cfg's "mcpServers" AND its "agents" block
 ```
 
 ## Options
@@ -147,5 +144,5 @@ Identical to [`remote-agent`](/api/clojure/agents/agent/):
 ## See also
 
 - [`toolnexus.a2a/remote-agent`](/api/clojure/agents/agent/) — the same call, plus `:card`, `:endpoint` and `:error`
-- [`agents / parse-config`](/api/clojure/agents/parse-config/) — the config-block parser this port does not ship
+- [`toolnexus.a2a/parse-agents-config`](/api/clojure/agents/parse-config/) — turn a config block into descriptors
 - [`toolnexus.core/build`](/api/clojure/toolkit/create/) — where the tools go

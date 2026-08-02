@@ -19,9 +19,50 @@ The opt-in built-in that lets a persona write durable notes to its own home.
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Two different things are called "memory", and this port ships one of them.
+
+**Transcript memory works.** Give a run a `:conversation-id` and the client's `:store` keeps the
+message history across turns, so the model remembers what it already did. That is
+[`toolnexus.client/in-memory-store`](/api/clojure/client/store/) by default, and a store is only
+`:get` and `:save`, so a file- or database-backed one is a few lines.
+
+**Durable notes the agent writes for itself do not.** There is no `memory` tool in the catalog, so a
+model has no way to record a fact for next week. Build it as a native tool over the same file you
+read the persona's identity from — it is a dozen lines, and unlike the built-in it is yours to scope:
+
+```clojure
+(require '[toolnexus.core :as core]
+         '[toolnexus.native :as native]
+         '[toolnexus.tool :as tool]
+         '[koine.fs :as fs])
+
+(def notes "agents/researcher/MEMORY.md")
+
+(def remember
+  (native/native-tool
+    {:name         "remember"
+     :description  "Append a durable note to your own memory file."
+     :input-schema {:type "object"
+                    :properties {:note {:type "string"}}
+                    :required ["note"]}
+     :run          (fn [args]
+                     (let [prev (if (fs/exists? notes) (fs/read-file notes) "")]
+                       (fs/write-file notes (str prev "- " (:note args) "\n"))
+                       (tool/success "noted")))}))
+
+;; the notes go back into the prompt at startup, the tool appends to them at run time
+(def tk (core/build {:tools [remember]}))
+```
+
+Two cautions. The file is read into `:system-prompt` when you build the client, so a note written
+mid-run is visible on the *next* run, not this one — re-read it if you need same-run visibility.
+And the `write` and `edit` built-ins already reach the filesystem: if they are enabled, a model can
+already clobber that file, which is an argument for `:builtins {:tools {:write false :edit false}}`
+alongside a narrow `remember` tool rather than for adding one more path to the same directory.
 
 ## See also
 
-- _TODO: related entry points_
+- [`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) — how the note-taking tool is built
+- [`toolnexus.client/in-memory-store`](/api/clojure/client/store/) — the transcript memory that does ship
+- [`toolnexus.client/run`](/api/clojure/client/run/) — `:conversation-id`, the key that turns it on
+- [`persona / compose-soul`](/api/clojure/persona/compose-soul/) — reading those notes back into the prompt

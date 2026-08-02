@@ -762,3 +762,195 @@
         (client/run c "two" {:toolkit (tool/toolkit tools)})
         (is (not-any? #{"one"} (mapv :content (:messages (last @requests))))
             "a one-shot run must not inherit a previous run's transcript")))))
+
+;; ---------------------------------------------------------------------------
+;; §8 hooks — beforeLLM / afterLLM / beforeTool / afterTool
+;; ---------------------------------------------------------------------------
+;;
+;; Written TEST-FIRST. Every expected value comes from SPEC.md §8 ("Hooks
+;; (lifecycle middleware)"), SPEC.md §8 Gap 1 (the ordering contract) and
+;; `js/src/client.ts` — never from this port's own output.
+;;
+;;   beforeLLM({messages, tools, model, turn}) -> {messages?, tools?}  (replace)
+;;   afterLLM({response, model, turn})                                 (observe)
+;;   beforeTool({name, args, id, turn}) -> {result} short-circuits, {args} rewrites
+;;   afterTool({name, args, result, id, turn}) -> {result} replaces
+;;
+;; and the ordering SPEC.md pins for the body:
+;;
+;;   base body -> beforeLLM hook -> :request-params merge -> :body-transform
+;;                -> marshal -> wire
+;;
+;; The hook map's keys are kebab-case because hooks never cross the wire; the
+;; ToolResult they carry keeps its pinned `:isError`.
+
+(deftest before-llm-fires-once-per-turn-with-the-turn-index
+  (with-llm "openai" [{:calls [{:id "c1" :name "upper" :args {:text "x"}}]} {:text "done"}]
+    (fn [{:keys [base]}]
+      (let [seen (atom [])
+            c    (client-for "openai" base
+                             {:hooks {:before-llm (fn [ev] (swap! seen conj ev) nil)}})]
+        (client/run c "hi" {:toolkit toolkit})
+        (testing "one call per LLM round trip, turn index 0-based"
+          (is (= [0 1] (mapv :turn @seen))))
+        (testing "the event carries the model and the live transcript + tools"
+          (is (= ["mock-model" "mock-model"] (mapv :model @seen)))
+          (is (every? (fn [ev] (seq (:tools ev))) @seen))
+          (is (= "hi" (:content (last (:messages (first @seen)))))))))))
+
+(deftest before-llm-can-replace-messages-and-tools
+  (with-llm "openai" [{:text "done"}]
+    (fn [{:keys [base requests]}]
+      (let [c (client-for "openai" base
+                          {:hooks {:before-llm (fn [_ev]
+                                                 {:messages [{:role "user" :content "rewritten"}]
+                                                  :tools []})}})]
+        (client/run c "hi" {:toolkit toolkit})
+        (let [body (first @requests)]
+          (testing "the replacement transcript is what goes on the wire"
+            (is (= [{:role "user" :content "rewritten"}] (:messages body))))
+          (testing "Gap 5 — an empty tool list omits `tools` (and `tool_choice`)"
+            (is (nil? (:tools body)))
+            (is (nil? (:tool_choice body)))))))))
+
+(deftest before-llm-replacement-persists-for-the-rest-of-the-run
+  ;; SPEC §8: "Returning `messages` replaces the working transcript for the rest
+  ;; of the run" — so a turn-0-only override must still be in force on turn 1.
+  (with-llm "openai" [{:calls [{:id "c1" :name "upper" :args {:text "x"}}]} {:text "done"}]
+    (fn [{:keys [base requests]}]
+      (let [c (client-for "openai" base
+                          {:hooks {:before-llm (fn [ev] (when (= 0 (:turn ev)) {:tools []}))}})]
+        (client/run c "hi" {:toolkit toolkit})
+        (is (= [nil nil] (mapv :tools @requests))
+            "tools replaced on turn 0 must stay replaced on turn 1")))))
+
+(deftest after-llm-observes-the-raw-provider-payload
+  (with-llm "openai" [{:calls [{:id "c1" :name "upper" :args {:text "x"}}]} {:text "done"}]
+    (fn [{:keys [base]}]
+      (let [seen (atom [])
+            c    (client-for "openai" base
+                             {:hooks {:after-llm (fn [ev] (swap! seen conj ev) nil)}})]
+        (client/run c "hi" {:toolkit toolkit})
+        (is (= [0 1] (mapv :turn @seen)))
+        (is (= ["mock-model" "mock-model"] (mapv :model @seen)))
+        (testing "`response` is the raw provider payload, and it carries usage"
+          (is (= 10 (get-in (first @seen) [:response :usage :prompt_tokens])))
+          (is (= "done" (get-in (last @seen) [:response :choices 0 :message :content]))))))))
+
+(deftest before-llm-runs-before-request-params-and-body-transform
+  ;; SPEC.md §8 Gap 1: base body -> BeforeLLM -> RequestParams -> BodyTransform.
+  (with-llm "openai" [{:text "done"}]
+    (fn [{:keys [base requests]}]
+      (let [c (client-for "openai" base
+                          {:hooks {:before-llm (fn [_ev] {:messages [{:role "user" :content "hooked"}]})}
+                           :request-params {:temperature 0.2}
+                           :body-transform (fn [b]
+                                             (is (= [{:role "user" :content "hooked"}] (:messages b))
+                                                 "body-transform must see the hook's messages")
+                                             (is (= 0.2 (:temperature b))
+                                                 "body-transform must see the merged request-params")
+                                             (assoc b :ordered "yes"))})]
+        (client/run c "hi" {:toolkit toolkit})
+        (let [body (first @requests)]
+          (is (= [{:role "user" :content "hooked"}] (:messages body)))
+          (is (= 0.2 (:temperature body)))
+          (is (= "yes" (:ordered body))))))))
+
+(deftest before-tool-can-rewrite-the-args
+  (with-llm "openai" [{:calls [{:id "c1" :name "upper" :args {:text "quiet"}}]} {:text "done"}]
+    (fn [{:keys [base]}]
+      (let [seen (atom [])
+            c    (client-for "openai" base
+                             {:hooks {:before-tool (fn [ev]
+                                                     (swap! seen conj ev)
+                                                     {:args {:text "loud"}})}})
+            rr   (client/run c "hi" {:toolkit toolkit})]
+        (is (= ["LOUD"] (outputs-of rr)) "the rewritten args are what the tool ran on")
+        (let [ev (first @seen)]
+          (is (= "upper" (:name ev)))
+          (is (= {:text "quiet"} (:args ev)))
+          (is (= "c1" (:id ev)))
+          (is (= 0 (:turn ev))))))))
+
+(deftest before-tool-result-short-circuits-the-tool
+  ;; `boom` throws when it runs. A short-circuit that returns a clean result
+  ;; therefore PROVES the real tool never ran (SPEC §8: "the real tool never
+  ;; runs").
+  (with-llm "openai" [{:calls [{:id "c1" :name "boom" :args {}}]} {:text "done"}]
+    (fn [{:keys [base]}]
+      (let [c  (client-for "openai" base
+                           {:hooks {:before-tool (fn [_ev] {:result (tool/success "denied")})}})
+            rr (client/run c "hi" {:toolkit toolkit})]
+        (is (= ["denied"] (outputs-of rr)))
+        (is (= [false] (mapv :isError (:tool-calls rr))))))))
+
+(deftest after-tool-can-replace-the-result
+  (with-llm "openai" [{:calls [{:id "c1" :name "upper" :args {:text "toolnexus"}}]} {:text "done"}]
+    (fn [{:keys [base]}]
+      (let [seen (atom [])
+            c    (client-for "openai" base
+                             {:hooks {:after-tool (fn [ev]
+                                                    (swap! seen conj ev)
+                                                    {:result (tool/success (str "[" (:output (:result ev)) "]"))})}})
+            rr   (client/run c "hi" {:toolkit toolkit})]
+        (is (= ["[TOOLNEXUS]"] (outputs-of rr)))
+        (let [ev (first @seen)]
+          (is (= "upper" (:name ev)))
+          (is (= {:text "toolnexus"} (:args ev)))
+          (is (= "TOOLNEXUS" (:output (:result ev))))
+          (is (= "c1" (:id ev)))
+          (is (= 0 (:turn ev))))))))
+
+(deftest after-tool-skips-a-suspension-and-sees-the-resolved-result
+  ;; js/src/client.ts runTool: `if (h?.afterTool && !pendingOf(result))` — a
+  ;; suspension is not a real result, so afterTool is skipped on it; the
+  ;; post-waitFor result still flows through afterTool in resolvePending.
+  (with-llm "openai" [{:calls [{:id "c1" :name "ask_city" :args {}}]} {:text "done"}]
+    (fn [{:keys [base]}]
+      (let [seen (atom [])
+            c    (client-for "openai" base
+                             {:wait-for wait-ok
+                              :hooks {:after-tool (fn [ev] (swap! seen conj ev) nil)}})
+            rr   (client/run c "hi" {:toolkit toolkit})]
+        (is (= 1 (count @seen)) "afterTool fires once — on the RESOLVED result, not the suspension")
+        (is (= "{\"city\":\"Chennai\"}" (:output (:result (first @seen)))))
+        (is (= ["{\"city\":\"Chennai\"}"] (outputs-of rr)))))))
+
+(deftest hooks-absent-leave-the-body-untouched
+  ;; The same guarantee the shaping options carry: absent => byte-identical.
+  (let [capture (fn [opts]
+                  (let [out (atom nil)]
+                    (with-llm "openai" [{:text "done"}]
+                      (fn [{:keys [base requests]}]
+                        (client/run (client-for "openai" base opts) "hi" {:toolkit toolkit})
+                        (reset! out (json/write-str (first @requests)))))
+                    @out))]
+    (is (= (capture {}) (capture {:hooks nil}))
+        "an explicitly-nil :hooks must be indistinguishable from an absent one")
+    (is (= (capture {}) (capture {:hooks {}}))
+        "an empty hook map must be indistinguishable from an absent one")))
+
+(deftest a-hook-returning-nil-changes-nothing
+  (with-llm "openai" [{:calls [{:id "c1" :name "upper" :args {:text "x"}}]} {:text "done"}]
+    (fn [{:keys [base]}]
+      (let [nilf (fn [_ev] nil)
+            c    (client-for "openai" base
+                             {:hooks {:before-llm nilf :after-llm nilf
+                                      :before-tool nilf :after-tool nilf}})
+            rr   (client/run c "hi" {:toolkit toolkit})]
+        (is (= "done" (:text rr)))
+        (is (= ["X"] (outputs-of rr)))))))
+
+(deftest hooks-fire-on-the-anthropic-style-too
+  (with-llm "anthropic" [{:calls [{:id "u1" :name "upper" :args {:text "x"}}]} {:text "done"}]
+    (fn [{:keys [base requests]}]
+      (let [seen (atom [])
+            c    (client-for "anthropic" base
+                             {:hooks {:before-llm (fn [ev] (swap! seen conj [:before (:turn ev)]) nil)
+                                      :after-llm  (fn [ev] (swap! seen conj [:after (:turn ev)]) nil)
+                                      :before-tool (fn [_ev] {:args {:text "loud"}})
+                                      :after-tool  (fn [ev] {:result (tool/success (str "<" (:output (:result ev)) ">"))})}})
+            rr   (client/run c "hi" {:toolkit toolkit})]
+        (is (= [[:before 0] [:after 0] [:before 1] [:after 1]] @seen))
+        (is (= ["<LOUD>"] (outputs-of rr)))
+        (is (seq (:tools (first @requests))))))))

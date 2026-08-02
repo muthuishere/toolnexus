@@ -105,7 +105,7 @@ truthfully rather than advertising a capability it would then fail to honour.
                   skills)
 ```
 
-`agent-card` accepts the `\{:skills [...] :skipped [...]\}` shape `list-skills` returns, a
+`agent-card` accepts the `{:skills [...] :skipped [...]}` shape `list-skills` returns, a
 name→info index, or a plain sequence of maps with `:name` and `:description` — so a data-defined
 skill list works without touching disk.
 
@@ -134,14 +134,14 @@ be the address that reaches your `serve` process, not the loopback one it bound 
 | `:description` | `""` | Free text. |
 | `:version` | `"0.1.0"` | Your agent's version. |
 | `:protocolVersion` | `"0.3.0"` | The A2A protocol version advertised. |
-| `:provider` | absent | Any map, e.g. `\{:organization ... :url ...\}`. Omitted from the card entirely when unset. |
+| `:provider` | absent | Any map, e.g. `{:organization ... :url ...}`. Omitted from the card entirely when unset. |
 | `:skills` | all | Allowlist of skill **names**. Unknown names are ignored, not errors. |
 
 ### Card fields
 
 | Field | Source |
 |---|---|
-| `:capabilities` | Always `\{:streaming false :pushNotifications false\}` — this port implements neither. |
+| `:capabilities` | Always `{:streaming false :pushNotifications false}` — this port implements neither. |
 | `:defaultInputModes` / `:defaultOutputModes` | Always `["text"]`. |
 | `:skills` | From the SkillSource, filtered, sorted by name. `:id` is sanitized; `:name` is verbatim; `:description` defaults to `""`. |
 | `:url` | `(str base "/")` — the JSON-RPC POST endpoint. |

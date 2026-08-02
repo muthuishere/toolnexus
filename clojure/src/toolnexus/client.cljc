@@ -133,6 +133,9 @@
     :headers        extra request headers
     :system-prompt  prepended to the toolkit's skills prompt
     :max-turns      default 10
+    :hooks          §8 lifecycle middleware — a map of any of
+                    {:before-llm :after-llm :before-tool :after-tool}; see
+                    `before-llm!` / `execute-tool`. Absent => nothing changes.
     :wait-for       (fn [request] answer) — the ONE host slot of §10.
 
   On the name of that slot: §10 says \"never `await`\" because `await` is
@@ -155,6 +158,55 @@
   even built."
   [client f]
   (when-let [on (:on-metric client)] (on (f)))
+  nil)
+
+;; ---------------------------------------------------------------------------
+;; §8 hooks — lifecycle middleware
+;; ---------------------------------------------------------------------------
+;;
+;;   :before-llm  {:messages :tools :model :turn}  -> {:messages? :tools?}
+;;   :after-llm   {:response :model :turn}         -> observe only
+;;   :before-tool {:name :args :id :turn}          -> {:result} short-circuits,
+;;                                                    {:args} rewrites
+;;   :after-tool  {:name :args :result :id :turn}  -> {:result} replaces
+;;
+;; The event maps are kebab-case because a hook never crosses the wire; the
+;; `ToolResult` one carries keeps its pinned `:isError`, because that one does.
+;;
+;; A hook returning nil (the common case — most hooks observe) changes nothing,
+;; which is why every application below is an `or` against the current value
+;; rather than a blind overwrite.
+
+(defn- hook-of [client k] (get-in client [:hooks k]))
+
+(defn before-llm!
+  "§8 `beforeLLM`, applied to ONE round trip. Returns `[messages tools]` — the
+  hook's replacements when it returned them, the originals otherwise.
+
+  Public because §11 `toolnexus.translate` must fire this hook exactly once for
+  its single call, and a second copy of the rule in that namespace is exactly
+  the drift the ports exist to prevent.
+
+  Ordering (SPEC.md §8 Gap 1, and it IS the spec):
+
+    base body -> beforeLLM hook -> :request-params merge -> :body-transform
+              -> marshal -> wire
+
+  so this runs BEFORE the body is assembled, and its `tools` replacement feeds
+  the same empty-list omission (Gap 5) the toolkit's own list does."
+  [client messages tools turn]
+  (if-let [f (hook-of client :before-llm)]
+    (let [ov (f {:messages messages :tools tools :model (:model client) :turn turn})]
+      [(or (:messages ov) messages) (or (:tools ov) tools)])
+    [messages tools]))
+
+(defn after-llm!
+  "§8 `afterLLM` — observe only (logging, cost, tracing). `:response` is the
+  provider's decoded payload, so it carries `usage`. Returns nil; a return value
+  from an observer would be a silent contract nobody could rely on."
+  [client response turn]
+  (when-let [f (hook-of client :after-llm)]
+    (f {:response response :model (:model client) :turn turn}))
   nil)
 
 (defn- system-message
@@ -425,6 +477,42 @@
 ;; the FIRST execution has no context to pass. That is the portable contract
 ;; here; see the report.
 
+(defn- execute-tool
+  "ONE tool call, through the §8 `:before-tool` / `:after-tool` hooks.
+
+    :before-tool -> {:result r}  SHORT-CIRCUITS: the real tool never runs
+                                 (deny / cache hit / dry-run)
+                 -> {:args a}    rewrites the call; those args are what runs,
+                                 what the transcript records, and what a §10
+                                 retry re-executes with
+    :after-tool  -> {:result r}  replaces the output (redact, annotate)
+
+  A SUSPENSION SKIPS `:after-tool` (js/src/client.ts: `if (h?.afterTool &&
+  !pendingOf(result))`) — a pending Request is not a real result, and the
+  resolved one still flows through the hook in `resolve-pending`.
+
+  A tool that throws must not park the caller's deref forever, so the execution
+  is wrapped: tool/execute already turns a throw into an isError result and the
+  catch here covers the residue."
+  [client toolkit call turn]
+  (let [before (hook-of client :before-tool)
+        after  (hook-of client :after-tool)
+        ov     (when before
+                 (before {:name (:name call) :args (:args call)
+                          :id (:id call) :turn turn}))]
+    (if (:result ov)
+      (assoc call :result (:result ov))
+      (let [args   (or (:args ov) (:args call))
+            result (try (tool/execute toolkit (:name call) args)
+                        (catch Throwable e
+                          (tool/failure (or (ex-message e) (str e)))))
+            result (if (and after (not (pending-of result)))
+                     (or (:result (after {:name (:name call) :args args :result result
+                                          :id (:id call) :turn turn}))
+                         result)
+                     result)]
+        (assoc call :args args :result result)))))
+
 (defn- execute-calls
   "§8 — the tool calls of one turn, in parallel, with the results in CALL ORDER
   regardless of completion order. Order is not cosmetic: a scrambled transcript
@@ -443,16 +531,13 @@
   A tool that throws must not park the deref forever, so the body is wrapped:
   tool/execute already converts a throw into an isError result, and the catch
   here covers the residue."
-  [client toolkit calls]
+  [client toolkit calls turn]
   (->> calls
        (mapv (fn [c]
                (let [p (promise)
                      t0 (ktime/now-ms)]
                  (proc/run-async!
-                  (fn [] (deliver p (assoc c :result
-                                           (try (tool/execute toolkit (:name c) (:args c))
-                                                (catch Throwable e
-                                                  (tool/failure (or (ex-message e) (str e)))))))))
+                  (fn [] (deliver p (execute-tool client toolkit c turn))))
                  [p t0])))
        (mapv (fn [pair]
                (let [r (deref (first pair))]
@@ -487,13 +572,20 @@
   scheduling. `wait-for` itself is a plain blocking (fn [request] answer): §10's
   async framing assumes a function-colouring problem Clojure does not have, so
   there is no channel, no core.async and no executor anywhere in this rule."
-  [client toolkit call request on-event]
+  [client toolkit call request on-event turn]
   (emit! on-event {:type "pending" :request request})   ; BEFORE wait-for runs
   (if-let [wait-for (:wait-for client)]
     (let [answer (wait-for request)]
       (if-not (:ok answer)
         {:result {:output (str "declined/expired: " (:prompt request)) :isError true}}
-        (let [retried (tool/execute toolkit (:name call) (:args call) {:answer answer})]
+        ;; §8: the RESOLVED result is a real result, so `:after-tool` sees it
+        ;; here — the suspension it replaces was skipped in `execute-tool`.
+        (let [retried (tool/execute toolkit (:name call) (:args call) {:answer answer})
+              retried (if-let [f (hook-of client :after-tool)]
+                        (or (:result (f {:name (:name call) :args (:args call) :result retried
+                                         :id (:id call) :turn turn}))
+                            retried)
+                        retried)]
           (if (pending-of retried)
             {:result {:output (str "unresolved: " (:prompt request)) :isError true}}
             {:result retried}))))
@@ -589,7 +681,11 @@
                      ;; a message; the openai style carries it as message 0.
                      (or anthropic? (str/blank? system)) []
                      :else [{:role "system" :content system}])]
+    ;; `tools` is loop state, not a constant: §8 says a `:before-llm` hook that
+    ;; returns `:messages`/`:tools` replaces them FOR THE REST OF THE RUN, so a
+    ;; turn-0 override must still be in force on turn 1.
     (loop [messages   (conj seed {:role "user" :content prompt})
+           tools      tools
            turn       0
            turns      0
            tool-calls []
@@ -599,8 +695,15 @@
               r    (finish! (run-result client text messages tool-calls turns usage true))]
           (emit! on-event {:type "done" :result r})
           r)
-        (let [body    (llm-call client system messages tools)
+        ;; §8 ordering: the hook sees (and may replace) the transcript and the
+        ;; tool list BEFORE the body is assembled, so :request-params and
+        ;; :body-transform both run downstream of it.
+        (let [hooked  (before-llm! client messages tools turn)
+              messages (first hooked)
+              tools    (second hooked)
+              body    (llm-call client system messages tools)
               usage   (add-usage usage client (:usage body))
+              _       (after-llm! client body turn)
               _       (emit! on-event {:type "usage" :usage usage})
               turns   (inc turns)
               msg     (assistant-message client body)
@@ -613,7 +716,7 @@
             (let [_       (doseq [c calls]
                             (emit! on-event {:type "tool_call" :id (:id c) :name (:name c) :args (:args c)}))
                   ;; parallel execution, results in call order …
-                  settled (execute-calls client toolkit calls)
+                  settled (execute-calls client toolkit calls turn)
                   ;; … then §10 resolution, sequential and in the same order.
                   settled (reduce (fn [acc s]
                                     (if (some :halt acc)
@@ -624,7 +727,7 @@
                                       acc
                                       (let [req (pending-of (:result s))]
                                         (conj acc (if req
-                                                    (merge s (resolve-pending client toolkit s req on-event))
+                                                    (merge s (resolve-pending client toolkit s req on-event turn))
                                                     s)))))
                                   [] settled)
                   ;; §10 durable halt: the transcript keeps the calls UP TO AND
@@ -647,4 +750,4 @@
                 (let [r (pending-result client halted msgs (into tool-calls records) turns usage)]
                   (emit! on-event {:type "done" :result r})
                   r)
-                (recur msgs (inc turn) turns (into tool-calls records) usage)))))))))
+                (recur msgs tools (inc turn) turns (into tool-calls records) usage)))))))))

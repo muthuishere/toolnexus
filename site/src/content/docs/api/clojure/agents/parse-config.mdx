@@ -1,8 +1,8 @@
 ---
-title: "parseAgentsConfig — agents from config"
+title: "toolnexus.a2a/parse-agents-config"
 description: "Declare remote peers in config the way MCP servers are declared, with precedence rules. — Clojure."
 sidebar:
-  label: "agents / parse-config"
+  label: "toolnexus.a2a/parse-agents-config"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -11,85 +11,144 @@ import { Aside } from '@astrojs/starlight/components';
 <strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/a2a.cljc">clojure/src/toolnexus/a2a.cljc</a>
 </p>
 
-<Aside type="caution" title="Not available in Clojure">
-There is no `agents` config-block parser in this port. `toolnexus.a2a` ships `remote-agent` and
-`agent-tools`, both of which take a descriptor map directly — construct peers in code and pass their
-tools to `toolnexus.core/build` via `:tools`.
+```clojure
+(toolnexus.a2a/parse-agents-config
+  {:planner {:card      "http://127.0.0.1:8080/.well-known/agent-card.json"
+             :headers   {"authorization" "Bearer ${PEER_TOKEN}"}
+             :timeout   30000
+             :pollEvery 250}
+   :retired {:card      "http://127.0.0.1:8082/.well-known/agent-card.json"
+             :disabled  true}})
+
+;; => [{:card       "http://127.0.0.1:8080/.well-known/agent-card.json"
+;;      :headers    {"authorization" "Bearer ${PEER_TOKEN}"}
+;;      :timeout    30000
+;;      :poll-every 250}]
+```
+
+`parse-agents-config` reads the top-level `agents` block of a parsed config object and returns a
+vector of descriptors — exactly the maps [`remote-agent`](/api/clojure/agents/agent/) and
+[`agent-tools`](/api/clojure/agents/agent-tools/) accept. It is pure: no network, no card fetched,
+nothing connected. Feed the result to either of those to actually reach the peers.
+
+The block is a **name → descriptor** map, mirroring `mcpServers` deliberately, and the same two
+disable spellings apply: `:disabled true` and `:enabled false` both drop an entry. So does an entry
+whose `:card` is missing or is not a string — that is not an agent, and §0.3's isolation rule reaches
+config parsing too, so it is skipped rather than raised.
+
+The output is **ordered by name**, not by insertion. Two runtimes reading the same config must not
+disagree about which peer registered first, because §7A tool names are derived from the card's own
+`name` and the later registration wins a collision. Sorting by key makes that deterministic across
+Clojure and cljgo.
+
+Config files spell the poll interval `pollEvery`; Clojure code spells it `:poll-every`. Both are read
+on the way in, and the descriptor always comes out kebab-case.
+
+## When to use it
+
+- **Peers live in a config file** — the same document that carries `mcpServers` can carry an
+  `agents` block, parsed here.
+- **Feature-flagging a peer off** — `:disabled true` stops an entry producing tools without deleting
+  it from the config.
+- **Validating before connecting** — the parse is offline, so a startup check can assert the shape of
+  the block without a single network call.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Build reads the block for you">
+[`toolnexus.core/build`](/api/clojure/toolkit/create/) already calls this on the `agents` key of a
+parsed `:mcp` config map, and its `:agents` option takes descriptors directly — so
+`(core/build {:mcp cfg})` picks up an `agents` block in the same document with no extra call. Reach
+for `parse-agents-config` when you want the descriptors as *data*: to inspect them, to log the peer
+list, to attach headers programmatically, or to resolve peers through
+[`remote-agent`](/api/clojure/agents/agent/) so a failure is visible.
 </Aside>
 
-Declare remote peers in config the way MCP servers are declared, with precedence rules.
+It never fetches, so a descriptor coming out of here says nothing about whether the peer is alive.
+Liveness is `remote-agent`'s `:error`.
 
-In the full-tier ports, an `agents` block sits beside `mcpServers` in the same config document: a
-name → descriptor map, with `disabled: true` / `enabled: false` turning an entry off and `pollEvery`
-spelled the config-file way. `parseAgentsConfig` normalises that block into descriptors and hands
-them to the resolver. Clojure has the resolver — [`remote-agent`](/api/clojure/agents/agent/) and
-[`agent-tools`](/api/clojure/agents/agent-tools/) — but not the block parser, so the four small rules
-that parser encodes (skip cardless entries, honour both disable spellings, alias `pollEvery`, order
-by name) are yours to write.
+## Examples
 
-## What to use instead
+### One config document, MCP servers and peers together
 
-Peers are ordinary maps. Building them in code needs no parser at all:
+```clojure
+(require '[toolnexus.core :as core]
+         '[koine.json :as json]
+         '[koine.fs :as fs])
+
+(def cfg (json/read-str (fs/read-file "config.json")))
+;; {"mcpServers": {...}, "agents": {"planner": {"card": "..."}}}
+
+;; build reads BOTH blocks off the same parsed map
+(def tk (core/build {:mcp cfg}))
+```
+
+To take the peers but not the MCP servers, parse the block yourself and pass descriptors:
 
 ```clojure
 (require '[toolnexus.a2a :as a2a]
          '[toolnexus.core :as core])
 
-(def tk
-  (core/build
-    {:skills "examples/skills"
-     :tools  (into []
-                   (mapcat a2a/agent-tools)
-                   [{:card "http://127.0.0.1:8080/.well-known/agent-card.json"}
-                    {:card "http://127.0.0.1:8081/.well-known/agent-card.json"
-                     :poll-every 250}])}))
+(def tk (core/build {:agents (a2a/parse-agents-config (:agents cfg))}))
 ```
 
-If the peer list genuinely has to live in a JSON file next to `mcpServers`, the parser is a dozen
-lines — and writing it yourself means the two behaviours that actually matter stay explicit:
+### Everything unusable is dropped, never raised
 
 ```clojure
-(require '[toolnexus.a2a :as a2a]
-         '[toolnexus.core :as core]
-         '[koine.fs :as fs]
-         '[koine.json :as json])
+(require '[toolnexus.a2a :as a2a])
 
-(defn peer-descriptors
-  "A name -> descriptor block, into the maps a2a/agent-tools accepts.
-
-   Sorted by NAME on purpose: §7A tool names are derived from the card's own name,
-   so two peers advertising the same name collide and the later registration wins.
-   Insertion order would make which one survives depend on the JSON decoder."
-  [block]
-  (->> (sort (keys block))
-       (keep (fn [k]
-               (let [e (get block k)]
-                 ;; no card ⇒ not an agent; the two disable spellings both mean off
-                 (when (and (map? e)
-                            (string? (:card e))
-                            (not (true? (:disabled e)))
-                            (not (false? (:enabled e))))
-                   (cond-> {:card (:card e)}
-                     (:headers e)   (assoc :headers (:headers e))
-                     (:timeout e)   (assoc :timeout (:timeout e))
-                     ;; config files spell it pollEvery; the API takes :poll-every
-                     (:pollEvery e) (assoc :poll-every (:pollEvery e)))))))
-       vec))
-
-(def cfg (json/read-str (fs/read-file "config.json")))
-
-(def tk
-  (core/build {:mcp   (:mcpServers cfg)
-               :tools (into [] (mapcat a2a/agent-tools)
-                            (peer-descriptors (:agents cfg)))}))
+(a2a/parse-agents-config nil)                                      ;; => []
+(a2a/parse-agents-config {})                                       ;; => []
+(a2a/parse-agents-config {:nocard {:timeout 1}})                   ;; => []
+(a2a/parse-agents-config {:off {:card "http://a" :disabled true}})  ;; => []
+(a2a/parse-agents-config {:off {:card "http://a" :enabled false}})  ;; => []
 ```
 
-Note that `agent-tools` swallows the reason a peer produced nothing. If a misconfigured or
-unreachable peer should be visible rather than silently absent, map over
-[`remote-agent`](/api/clojure/agents/agent/) instead and log its `:error` before taking `:tools`.
+A malformed `agents` block degrades to "no peers", which is still a working toolkit. Log the count
+yourself if a silently empty peer list would be a surprise.
+
+### Deterministic ordering, then resolve
+
+```clojure
+(require '[toolnexus.a2a :as a2a])
+
+(mapv :card (a2a/parse-agents-config {:zeta {:card "z-card"}
+                                      :mid  {:card "m-card"}
+                                      :alfa {:card "c-card"}}))
+;; => ["c-card" "m-card" "z-card"]   sorted by the entry NAME: alfa, mid, zeta
+
+;; resolve them with the failure reason visible, rather than silently empty
+(doseq [d (a2a/parse-agents-config (:agents cfg))]
+  (let [peer (a2a/remote-agent d)]
+    (println (:card d)
+             (if (:error peer)
+               (str "DOWN: " (:error peer))
+               (str "ok, " (count (:tools peer)) " tools")))))
+```
+
+## Config keys
+
+| Key | Effect |
+|---|---|
+| `:card` | Required, must be a string. Absent or non-string ⇒ the entry is skipped. |
+| `:headers` | Copied through verbatim; `${ENV_VAR}` is expanded later, at call time. |
+| `:timeout` | Copied through as `:timeout`. |
+| `:pollEvery` / `:poll-every` | Either spelling is read; the descriptor always carries `:poll-every`. |
+| `:disabled` | `true` skips the entry. |
+| `:enabled` | `false` skips the entry. |
+
+Keys other than these are not carried onto the descriptor.
+
+### What you get back
+
+| Shape | When |
+|---|---|
+| `[{:card ... :headers? ... :timeout? ... :poll-every? ...} ...]` | Sorted by entry name. Optional keys appear only when the config supplied them. |
+| `[]` | The argument was not a map, was empty, or every entry was skipped. |
 
 ## See also
 
-- [`toolnexus.a2a/remote-agent`](/api/clojure/agents/agent/) — resolve one descriptor into a card, an endpoint and tools
-- [`toolnexus.a2a/agent-tools`](/api/clojure/agents/agent-tools/) — the tools-only form, ready for `mapcat`
-- [`toolnexus.mcp/parse-config`](/api/clojure/mcp/parse-config/) — the `mcpServers` parser this port *does* ship, and the shape the `agents` block mirrors
+- [`toolnexus.a2a/agent-tools`](/api/clojure/agents/agent-tools/) — turn each descriptor into tools
+- [`toolnexus.a2a/remote-agent`](/api/clojure/agents/agent/) — same, plus the card and the failure reason
+- [`toolnexus.core/build`](/api/clojure/toolkit/create/) — the `:agents` option, and the automatic read off `:mcp`
+- [`toolnexus.mcp/parse-config`](/api/clojure/mcp/parse-config/) — the block this one mirrors

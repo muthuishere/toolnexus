@@ -1,27 +1,181 @@
 ---
-title: "Inbound translation — transcripts across providers"
+title: "toolnexus.translate/openai-messages-to-anthropic"
 description: "Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong. — Clojure."
 sidebar:
-  label: "translate / inbound"
+  label: "toolnexus.translate/openai-messages-to-anthropic"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a>
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/translate.cljc">clojure/src/toolnexus/translate.cljc</a>
 </p>
 
-<Aside type="caution" title="Not available in Clojure">
-Go keeps openAIMessagesToAnthropic unexported (golang/translate.go:283) — inbound translation is reachable only through Translate. The Clojure port does not implement SPEC §11 translate at all, so there is no inbound transcript conversion.
+```clojure
+(toolnexus.translate/openai-messages-to-anthropic messages)
+;; => {:messages [{:role "user"|"assistant" :content ...}]
+;;     :system   "hoisted system/developer text"}
+
+(toolnexus.translate/openai-tools-to-anthropic tools)
+;; => [{:name "..." :description "..." :input_schema {...}}]
+
+(toolnexus.translate/openai-tool-choice-to-anthropic choice)
+;; => {:type "any"|"none"|"tool" :name "..."} or nil
+```
+
+This is the inbound half of the §11 translator, exposed rather than hidden: the functions that take
+OpenAI-shaped input and produce Anthropic-native shapes.
+[`translate`](/api/clojure/translate/translate/) calls them on the anthropic path, and they are public
+because a transcript conversion is useful on its own — for tests, for a gateway that batches, for
+anything that needs the mapping without a provider call.
+
+The hard part is structure, not text. `openai-messages-to-anthropic` preserves exactly what a naive
+text-flattening translator destroys:
+
+- An assistant turn's `tool_calls` become `tool_use` blocks, with `arguments` re-parsed from its JSON
+  string back into an **object**.
+- A `tool`-role result becomes a `tool_result` block keyed by its `tool_call_id`, and **consecutive
+  results are merged into one user turn** — providers expect a single result-bearing turn answering
+  the preceding assistant turn, not one turn per result. Get this wrong and parallel tool calls fail
+  on the second result.
+- `system` and `developer` messages are **hoisted out** entirely, because Anthropic takes system
+  separately; several of them join with a blank line and come back on `:system`.
+
+Content is tolerant on the way in: a string, or a parts array, both flatten. An assistant turn with
+neither text nor tool calls is dropped rather than sent (a provider would reject it), and a user
+parts-array carrying no text — images, say — passes through untouched instead of being flattened away.
+
+## When to use it
+
+- **Asserting on the conversion in a test** — the transcript shape is the thing most likely to
+  regress, and this checks it without a network call or an API key.
+- **Building a request body yourself** — you want the provider call, headers or streaming under your
+  own control but not the message mapping.
+- **Migrating a stored transcript** — an archive of OpenAI-shaped conversations replayed against an
+  Anthropic-style provider.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use translate when you want the round trip">
+[`translate`](/api/clojure/translate/translate/) already calls all three of these, sends the request,
+and converts the response back into OpenAI shape — including reading `tool_use` blocks into
+`:toolCalls`. Reach for the inbound functions directly only when you are *not* making the call: a
+test, a migration, a hand-built body. If you want a turn's worth of work done, use `translate`.
 </Aside>
 
-Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong.
+Note the direction. These are OpenAI → Anthropic. The other direction, declaring a toolkit *out* to
+any of the three providers, is [`toolnexus.adapter`](/api/clojure/adapters/anthropic/); reading a
+response back into OpenAI shape happens inside `translate` and is not separately exposed.
 
-## What to use instead
+## Examples
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+### Tool calls and results survive the round trip
+
+```clojure
+(require '[toolnexus.translate :as translate])
+
+(translate/openai-messages-to-anthropic
+  [{:role "system" :content "You are terse."}
+   {:role "user" :content "weather in Chennai and Kochi?"}
+   {:role "assistant" :content ""
+    :tool_calls [{:id "c1" :type "function"
+                  :function {:name "get_weather" :arguments "{\"city\":\"Chennai\"}"}}
+                 {:id "c2" :type "function"
+                  :function {:name "get_weather" :arguments "{\"city\":\"Kochi\"}"}}]}
+   {:role "tool" :tool_call_id "c1" :content "33C"}
+   {:role "tool" :tool_call_id "c2" :content "29C"}])
+
+;; => {:system "You are terse."
+;;     :messages
+;;     [{:role "user" :content "weather in Chennai and Kochi?"}
+;;      {:role "assistant"
+;;       :content [{:type "tool_use" :id "c1" :name "get_weather" :input {:city "Chennai"}}
+;;                 {:type "tool_use" :id "c2" :name "get_weather" :input {:city "Kochi"}}]}
+;;      ;; ONE user turn carrying BOTH results — not two turns
+;;      {:role "user"
+;;       :content [{:type "tool_result" :tool_use_id "c1" :content "33C"}
+;;                 {:type "tool_result" :tool_use_id "c2" :content "29C"}]}]}
+```
+
+The assistant turn had empty text, so no `text` block was emitted — only the two `tool_use` blocks.
+And `arguments` arrived as a JSON string and left as a map, because that is what Anthropic's `input`
+field is.
+
+### Convert tool declarations and a tool choice
+
+```clojure
+(require '[toolnexus.translate :as translate])
+
+(translate/openai-tools-to-anthropic
+  [{:type "function"
+    :function {:name "get_weather"
+               :description "Current weather for a city"
+               :parameters {:type "object"
+                            :properties {:city {:type "string"}}
+                            :required ["city"]}}}
+   ;; no parameters ⇒ an empty object schema, not a missing key
+   {:type "function" :function {:name "ping"}}])
+;; => [{:name "get_weather" :description "Current weather for a city"
+;;      :input_schema {:type "object" :properties {:city {:type "string"}} :required ["city"]}}
+;;     {:name "ping" :input_schema {:type "object" :properties {}}}]
+
+(translate/openai-tool-choice-to-anthropic "required")   ;; => {:type "any"}
+(translate/openai-tool-choice-to-anthropic "none")       ;; => {:type "none"}
+(translate/openai-tool-choice-to-anthropic
+  {:type "function" :function {:name "get_weather"}})    ;; => {:type "tool" :name "get_weather"}
+(translate/openai-tool-choice-to-anthropic "auto")       ;; => nil — send nothing, provider decides
+```
+
+An entry that is already Anthropic-native (it has a top-level `:name` and no `:function`) passes
+through; anything unrecognized is skipped rather than raised.
+
+### Build the provider body yourself
+
+```clojure
+(require '[toolnexus.translate :as translate]
+         '[toolnexus.adapter :as adapter]
+         '[koine.env :as env]
+         '[koine.json :as json]
+         '[koine.http :as http])
+
+(let [{:keys [messages system]} (translate/openai-messages-to-anthropic openai-transcript)
+      body (cond-> {:model "claude-sonnet-4-6" :max_tokens 4096 :messages messages}
+             (not= "" system) (assoc :system system)
+             true             (assoc :tools (adapter/to-anthropic tk)))]
+  (http/request {:method  :post
+                 :url     "https://api.anthropic.com/v1/messages"
+                 :headers {"x-api-key" (env/get-env "ANTHROPIC_API_KEY")
+                           "anthropic-version" "2023-06-01"
+                           "content-type" "application/json"}
+                 :body    (json/write-str body)}))
+```
+
+You lose the shared retry/backoff and the `llm` metric event by going around
+[`translate`](/api/clojure/translate/translate/) — that is the trade for owning the transport.
+
+## The conversion rules
+
+| OpenAI input | Anthropic output |
+|---|---|
+| `system` / `developer` message | Hoisted to `:system`. Multiple ones join with a blank line. Empty content contributes nothing. |
+| `user` message, string or parts | `{:role "user" :content <text>}`; a text-free parts array passes through unchanged. |
+| `assistant` message | `{:role "assistant" :content [blocks]}` — a `text` block when there is text, then one `tool_use` per `tool_calls` entry. Dropped entirely when it would be empty. |
+| `tool` / `function` message | A `tool_result` block with `:tool_use_id` from `tool_call_id`, buffered and flushed as one `user` turn. |
+| anything not a map | Ignored. |
+
+### The three inbound functions
+
+| Function | In | Out |
+|---|---|---|
+| `openai-messages-to-anthropic` | OpenAI `messages` | `{:messages [...] :system "..."}` |
+| `openai-tools-to-anthropic` | OpenAI `tools` | Anthropic declarations with `:input_schema`. Missing `parameters` becomes `{:type "object" :properties {}}`; a nameless entry is skipped. |
+| `openai-tool-choice-to-anthropic` | OpenAI `tool_choice` | `{:type "any"\|"none"\|"tool"}` or `nil` for absent / `"auto"` / unrecognized. |
+
+Supporting readers in the same namespace: `content-text` (flatten a content value), `tool-calls-of`
+(read `tool_calls` off an assistant message), `has-system-message?`, `args-object` and `args-string`.
 
 ## See also
 
-- _TODO: related entry points_
+- [`toolnexus.translate/translate`](/api/clojure/translate/translate/) — the round trip that calls all of these
+- [`toolnexus.adapter/to-anthropic`](/api/clojure/adapters/anthropic/) — the outbound direction: a toolkit as declarations
+- [`toolnexus.client/run`](/api/clojure/client/run/) — when toolnexus should own the conversation instead

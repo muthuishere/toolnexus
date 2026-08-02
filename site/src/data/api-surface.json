@@ -173,9 +173,9 @@
         "java": "McpSource.elicitationToRequest",
         "csharp": "McpSource.ElicitationToRequest",
         "elixir": "Toolnexus.Mcp.Protocol.elicitation_to_request",
-        "clojure": null
+        "clojure": "toolnexus.mcp/elicitation->request"
       },
-      "parityNote": "Elixir's elicitation_to_request lives on Toolnexus.Mcp.Protocol, not Toolnexus.Mcp \u2014 there is no delegate on the top-level Mcp module. The Clojure port does not bridge MCP elicitation yet (recorded parity debt in clojure/README.md); a server's elicitation request is not mapped onto the \u00a710 suspension contract."
+      "parityNote": "Elixir's elicitation_to_request lives on Toolnexus.Mcp.Protocol, not Toolnexus.Mcp \u2014 there is no delegate on the top-level Mcp module."
     },
     {
       "id": "skills/load",
@@ -211,9 +211,8 @@
         "java": "SkillSource.loadWith",
         "csharp": "SkillSource.LoadWith",
         "elixir": "Toolnexus.Skill.load",
-        "clojure": null
-      },
-      "parityNote": "Clojure's toolnexus.skill/load-skills takes only filesystem roots (one string or a seq, earlier root wins). Skills-as-data, a lazy skill provider and the per-agent allowlist are recorded parity debt."
+        "clojure": "toolnexus.skill/load-skills"
+      }
     },
     {
       "id": "skills/list",
@@ -607,9 +606,8 @@
         "java": "A2A.parseAgentsConfig",
         "csharp": "A2A.ParseAgentsConfig",
         "elixir": "Toolnexus.A2a.parse_agents_config",
-        "clojure": null
-      },
-      "parityNote": "Clojure has no agents-config parser \u2014 construct peers with toolnexus.a2a/remote-agent and pass their tools to toolnexus.core/build via :tools."
+        "clojure": "toolnexus.a2a/parse-agents-config"
+      }
     },
     {
       "id": "serve/a2a",

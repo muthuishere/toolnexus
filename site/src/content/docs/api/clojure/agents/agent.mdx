@@ -90,6 +90,10 @@ reject the whole namespace, not just the one function.
 The toolkit is built either way. With the peer down you get your local tools plus a printed reason;
 with it up you additionally get one tool per advertised skill.
 
+If you do not need the reason, `:agents` on [`toolnexus.core/build`](/api/clojure/toolkit/create/)
+resolves descriptors for you — `(core/build {:agents [{:card "..."}]})` — and it also reads a
+top-level `agents` block off a parsed `:mcp` config map.
+
 ### Call a peer tool and read the task metadata
 
 ```clojure
@@ -165,5 +169,5 @@ A `failed` or `canceled` task comes back as a `toolnexus.tool/failure` whose out
 ## See also
 
 - [`toolnexus.a2a/agent-tools`](/api/clojure/agents/agent-tools/) — the tools-only shorthand
-- [`agents / parse-config`](/api/clojure/agents/parse-config/) — why there is no config-file peer block, and what to write instead
+- [`toolnexus.a2a/parse-agents-config`](/api/clojure/agents/parse-config/) — declare peers in config, the way `mcpServers` are declared
 - [`toolnexus.serve/serve`](/api/clojure/serve/a2a/) — the other direction: be the peer

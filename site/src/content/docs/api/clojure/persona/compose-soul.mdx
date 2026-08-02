@@ -12,16 +12,64 @@ import { Aside } from '@astrojs/starlight/components';
 </p>
 
 <Aside type="caution" title="Not available in Clojure">
-The Clojure port ships no §7E persona layer — no agent home, no soul composition (recorded parity debt).
+This port ships no §7E persona layer: there is no agent home, and nothing composes a system prompt
+out of one. The prompt this port assembles is the §0.10 rule — your `:system-prompt` joined to the
+toolkit's skills preamble — and nothing else.
 </Aside>
 
 Build a persona's system prompt from its home directory: identity, memory, skills.
 
+`composeSoul` is the convention-over-configuration half of §7E: a directory holds the agent's
+identity file, its accumulated memory and its skills, and one call folds all three into the system
+prompt. The appeal is that the persona is editable on disk, by a human, without touching code.
+
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+The two halves this port does compose are `:system-prompt` on the client and the skills preamble the
+toolkit builds. Reading identity off disk is a `slurp`-shaped line you write yourself:
+
+```clojure
+(require '[toolnexus.core :as core]
+         '[toolnexus.client :as client]
+         '[koine.fs :as fs])
+
+(def home "agents/researcher")
+
+(def tk (core/build {:skills (str home "/skills")}))
+
+(def c
+  (client/create-client
+    {:base-url      "https://api.anthropic.com"
+     :style         "anthropic"
+     :model         "claude-sonnet-4-6"
+     ;; the "soul": whatever you decide the home directory means
+     :system-prompt (str (fs/read-file (str home "/IDENTITY.md"))
+                         "\n\n"
+                         (when (fs/exists? (str home "/MEMORY.md"))
+                           (fs/read-file (str home "/MEMORY.md"))))}))
+
+;; at run time the client joins your prompt to the toolkit's skills preamble:
+;;   system = :system-prompt + "\n\n" + (core/skills-prompt tk)
+(core/skills-prompt tk)
+```
+
+The composition rule is fixed and worth knowing exactly: system prompt, then a blank line, then the
+skills preamble, with empty parts dropped — so a toolkit with no described skills yields just your
+prompt, and no leading blank lines. That is §0.10, and it is the only prompt assembly this port
+performs.
+
+What you are re-creating by hand is the *convention*: which filenames mean identity, whether memory
+is appended before or after, what happens when a file is missing. That is a dozen lines, and writing
+them yourself means the layout is yours rather than the spec's — but it also means two services in
+your fleet will not agree on the layout unless you factor it into a shared function.
+
+Note that memory here is read-only text you assembled at startup. Nothing writes back to it: this
+port has no memory built-in, so a persona cannot update its own notes mid-run. See
+[`persona / memory-tool`](/api/clojure/persona/memory-tool/).
 
 ## See also
 
-- _TODO: related entry points_
+- [`toolnexus.client/create-client`](/api/clojure/client/create/) — `:system-prompt`, the identity half
+- [`toolnexus.core/build`](/api/clojure/toolkit/create/) — `:skills`, `:skill-defs` and `:skill-provider`, the capability half
+- [`toolnexus.skill/load-skills`](/api/clojure/skills/load/) — how a skills directory becomes a catalog
+- [`persona / from-dir`](/api/clojure/persona/from-dir/) — the loader that would call this

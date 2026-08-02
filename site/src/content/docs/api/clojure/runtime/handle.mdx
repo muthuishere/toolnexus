@@ -12,16 +12,60 @@ import { Aside } from '@astrojs/starlight/components';
 </p>
 
 <Aside type="caution" title="Not available in Clojure">
-The Clojure port has no §7D handle type (recorded parity debt).
+There is no §7D handle type here, because there is no sub-agent runtime to hand one out. The nearest
+state machine this port ships is the A2A **Task** — `submitted`, `working`, then `completed`,
+`failed` or `canceled` — read through `GetTask` or straight out of the task store.
 </Aside>
 
 The state machine for one spawned agent: pending, running, suspended, done.
 
+A handle is the thing you hold *while* a child is working: it names the child, reports where it is,
+and gives you somewhere to hang a result. Its whole value is that the parent does not have to block.
+
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+An A2A task id is that handle. It is a string rather than an object, and its state lives in the
+store rather than in memory, which is exactly what makes it survive a restart:
+
+```clojure
+(require '[toolnexus.serve :as serve])
+
+(def store (serve/file-store "./tasks"))
+
+(defn task-state
+  "The handle's state machine, read from wherever the task actually lives."
+  [id]
+  (let [t ((:get store) id)]
+    (case (get-in t [:status :state])
+      "submitted" :queued
+      "working"   :running
+      "completed" {:done (->> (:artifacts t) (mapcat :parts) (map :text))}
+      "failed"    {:failed (get-in t [:status :message :parts 0 :text])}
+      nil         :unknown)))
+```
+
+The mapping is close but not complete. `submitted` and `working` cover pending and running;
+`completed` / `failed` / `canceled` cover done. There is no **suspended** state on a task — §10
+suspension is a property of the client loop, not of the serve lifecycle, so a child that needs an
+answer from a human surfaces through the parent's `:wait-for` rather than as a paused handle. And a
+process that dies mid-fulfilment leaves a task saved as `working` with nothing left to finish it;
+treat a long-stale `working` as failed, because nothing else will.
+
+On the parent side there is no handle at all — calling a peer's tool blocks until the task is
+terminal. The `:metadata` on the result is the post-hoc summary a handle would have carried live:
+
+```clojure
+;; => {:agent "researcher" :taskId "3f2c..." :state "completed" :polls 7 :ms 3480}
+(:metadata result)
+```
+
+If you want the parent to keep working while the child runs, hold the task id yourself: POST
+`SendMessage` directly (as in the [`serve`](/api/clojure/serve/a2a/) examples), stash the returned
+`:id`, and poll `GetTask` on your own schedule instead of going through the peer tool.
 
 ## See also
 
-- _TODO: related entry points_
+- [`toolnexus.serve/file-store`](/api/clojure/serve/task-store/) — where a task's state actually lives
+- [`toolnexus.serve/serve`](/api/clojure/serve/a2a/) — the `SendMessage` / `GetTask` lifecycle in full
+- [`toolnexus.a2a/remote-agent`](/api/clojure/agents/agent/) — the blocking parent-side call and its metadata
+- [`toolnexus.client/pending-of`](/api/clojure/suspension/pending-of/) — the port's real "paused" state, on the client loop

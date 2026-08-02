@@ -1,28 +1,205 @@
 ---
-title: "Elicitation bridge — server asks the user"
+title: "toolnexus.mcp/elicitation->request"
 description: "Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back. — Clojure."
 sidebar:
-  label: "mcp / elicitation"
+  label: "toolnexus.mcp/elicitation->request"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/mcp.cljc">clojure/src/toolnexus/mcp.cljc</a>
 </p>
 
-<Aside type="caution" title="Not available in Clojure">
-Elixir's elicitation_to_request lives on Toolnexus.Mcp.Protocol, not Toolnexus.Mcp — there is no delegate on the top-level Mcp module. The Clojure port does not bridge MCP elicitation yet (recorded parity debt in clojure/README.md); a server's elicitation request is not mapped onto the §10 suspension contract.
+```clojure
+;; MCP `elicitation/create` params -> a §10 Request
+(toolnexus.mcp/elicitation->request params)
+;; => {:id     "elc-<mono-ms>-<n>"
+;;     :kind   "input" | "authorization"
+;;     :prompt "…"
+;;     :url    "…"              ; URL mode only
+;;     :data   {:schema {…}}}   ; form mode only
+
+;; a resolved §10 Answer -> an MCP ElicitResult
+(toolnexus.mcp/answer->elicit-result answer)
+;; => {:action "accept" :content {…}} | {:action "decline"} | {:action "cancel"}
+
+;; one server-initiated JSON-RPC request -> the reply to write back, or nil
+(toolnexus.mcp/server-request-response wait-for msg)
+;; => {:jsonrpc "2.0" :id 77 :result {:action "accept" :content {…}}}
+;;  | {:jsonrpc "2.0" :id 9  :error  {:code -32601 :message "Method not found"}}
+```
+
+`elicitation/create` is the one place in SPEC §2 where traffic flows **server to client**: a
+connected server, in the middle of serving your `tools/call`, asks the user something. These three
+functions are the bridge from that reverse request onto §10 — the same suspension contract a tool of
+your own would use — and back again.
+
+The mapping is pinned, not improvised. **Form mode** (the default) becomes a `kind:"input"` Request
+and carries the server's `requestedSchema` at `data.schema`. **URL mode** becomes a
+`kind:"authorization"` Request carrying the `url` — and deliberately carries **no** schema, because
+a credential must never be collected through a form. The Answer maps back onto MCP's three actions:
+`ok` accepts (with `data` as the content), `reason "declined"` declines, and anything else —
+cancelled, expired, no reason at all — cancels.
+
+Both directions are **pure functions**, which is what makes them byte-parity testable against the
+other ports without a live peer. `server-request-response` is the one that joins them: it takes your
+`wait-for` and one inbound message and returns the JSON-RPC frame to write back.
+
+The wiring is automatic. Pass `{:wait-for f}` to [`from-config`](/api/clojure/mcp/load/) or
+`toolnexus.mcp/connect`, and the reader loop answers a server's elicitation **inline, on the reader
+thread**, while the `tools/call` that triggered it is still in flight. That is what §10 requires: the
+call resumes when the answer is written, and nothing re-executes. Without a `wait-for`, `initialize`
+never advertises `capabilities.elicitation`, so a spec-compliant server simply never asks — and one
+that asks anyway gets a clean `-32601 Method not found` rather than a hang.
+
+## When to use it
+
+- **You already pass `:wait-for`** and want to know exactly what your callback will receive and what
+  it is allowed to return. That is the mapping table below.
+- **Testing your host's resolver** — feed `elicitation->request` a params map and assert on the
+  Request, with no server, no socket and no timing.
+- **Implementing a different transport or host loop** — `server-request-response` is the whole
+  policy in one call, including the refusal and the throw-becomes-cancel rule.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="One resolver, not one per source">
+There is exactly one §10 host slot: [`:wait-for`](/api/clojure/suspension/wait-for/). The same
+function resolves a suspension raised by your own tool, by a builtin, and by an MCP server — you do
+not register a separate elicitation handler. So the thing to write is the resolver; these functions
+exist so you can see and test what crosses it. If you only want to suspend from a tool you wrote,
+use [`toolnexus.client/suspend`](/api/clojure/suspension/pending/) and never touch this namespace.
 </Aside>
 
-Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.
+Note the deliberate degradation: advertising a capability you would then have to refuse is worse
+than not advertising it. Absent a `wait-for`, the port promises nothing and the server routes around
+it.
 
-## What to use instead
+## The mapping, both directions
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+| MCP `elicitation/create` params | §10 Request |
+|---|---|
+| `mode` absent, or anything but `"url"` | `:kind "input"` |
+| `mode: "url"` | `:kind "authorization"`, with `:url` copied across |
+| `message` | `:prompt` — `""` when absent, never nil |
+| `requestedSchema`, form mode | `:data {:schema …}` |
+| `requestedSchema`, URL mode | **dropped** — no schema on an authorization request |
+| — | `:id`, always: `"elc-"` plus a monotonic reading plus a counter, unique per process |
+
+| §10 Answer | MCP ElicitResult |
+|---|---|
+| `{:ok true :data d}` | `{:action "accept" :content d}` |
+| `{:ok true}` | `{:action "accept" :content {}}` |
+| `{:ok false :reason "declined"}` | `{:action "decline"}` |
+| `{:ok false :reason "cancelled"}`, or no reason at all | `{:action "cancel"}` |
+| your resolver **throws** | `{:action "cancel"}` — §0.3 isolation holds at this boundary too |
+
+## Examples
+
+### 1. Turn it on: one option on the load
+
+```clojure
+(require '[toolnexus.mcp :as mcp]
+         '[toolnexus.client :as client])
+
+(defn resolve-request [request]
+  (case (:kind request)
+    ;; open a browser, wait for the callback, then say yes
+    "authorization" (client/make-answer (:id request) true)
+    ;; show a form built from (get-in request [:data :schema])
+    (client/make-answer (:id request) true {:name "Muthu"})))
+
+(def res
+  (mcp/from-config {:mcpServers {"forms" {:command ["node" "forms-server.js"] :timeout 5000}}}
+                   {:wait-for resolve-request}))
+
+(try
+  ;; a tools/call that triggers an elicitation now completes in ONE call —
+  ;; the answer is written back while the call is still in flight
+  (:statuses res)
+  (finally
+    (mcp/disconnect-all res)))
+```
+
+[`toolnexus.core/build`](/api/clojure/toolkit/create/) takes the same `:wait-for` and threads it into
+the MCP source for you, so an application normally sets it once, there.
+
+### 2. What your resolver actually receives
+
+```clojure
+(require '[toolnexus.mcp :as mcp])
+
+;; form mode
+(mcp/elicitation->request
+  {:message "What is your name?"
+   :requestedSchema {:type "object" :properties {:name {:type "string"}}}})
+;; => {:id "elc-…-1"
+;;     :kind "input"
+;;     :prompt "What is your name?"
+;;     :data {:schema {:type "object" :properties {:name {:type "string"}}}}}
+
+;; URL mode — carries the url, and no schema
+(mcp/elicitation->request
+  {:mode "url" :message "Authorize us"
+   :url "https://example.test/oauth"
+   :requestedSchema {:type "object"}})
+;; => {:id "elc-…-2" :kind "authorization" :prompt "Authorize us"
+;;     :url "https://example.test/oauth"}
+
+;; a params map with nothing in it still yields a usable Request
+(:prompt (mcp/elicitation->request {}))   ;; => ""
+```
+
+Ids are opaque and per-process, built from a monotonic reading plus a counter. Uniqueness is the only
+property anything depends on — and the counter, not the clock, is what guarantees it — so never
+compare an id across processes or across ports.
+
+### 3. The whole policy in one function
+
+```clojure
+(require '[toolnexus.mcp :as mcp])
+
+;; accept
+(mcp/server-request-response
+  (fn [request] {:ok true :data {:name "muthu"}})
+  {:jsonrpc "2.0" :id 77 :method "elicitation/create" :params {:message "Who are you?"}})
+;; => {:jsonrpc "2.0" :id 77 :result {:action "accept" :content {:name "muthu"}}}
+
+;; decline — the session carries on
+(mcp/server-request-response
+  (fn [_] {:ok false :reason "declined"})
+  {:id 3 :method "elicitation/create" :params {}})
+;; => {:jsonrpc "2.0" :id 3 :result {:action "decline"}}
+
+;; a resolver that blows up becomes a cancel, never a dead connection
+(mcp/server-request-response
+  (fn [_] (throw (ex-info "boom" {})))
+  {:id 4 :method "elicitation/create" :params {}})
+;; => {:jsonrpc "2.0" :id 4 :result {:action "cancel"}}
+
+;; anything else the server asks for is refused cleanly
+(mcp/server-request-response (fn [_] {:ok true}) {:id 9 :method "sampling/createMessage"})
+;; => {:jsonrpc "2.0" :id 9 :error {:code -32601 :message "Method not found"}}
+
+;; and with no resolver there is nothing to answer with
+(get-in (mcp/server-request-response nil {:id 1 :method "elicitation/create"}) [:error :code])
+;; => -32601
+```
+
+It returns `nil` for a message that is not a server-initiated request at all — a response to one of
+*our* ids, or an id-less notification. Only an inbound message carrying **both** an `id` and a
+`method` is a reverse request, which is exactly the distinction the reader loop makes before calling
+this.
+
+The reverse-request channel is wired on the stdio leg, where the reader loop is watching the child's
+stdout continuously; the `elicitation` capability itself is advertised on both transports whenever a
+`wait-for` is present.
 
 ## See also
 
-- [`toolnexus.mcp/from-config`](/api/clojure/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
-- [`toolnexus.mcp/parse-config`](/api/clojure/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
+- [`toolnexus.mcp/from-config`](/api/clojure/mcp/load/) — where the `:wait-for` option is supplied
+- [`toolnexus.client/wait-for`](/api/clojure/suspension/wait-for/) — the one §10 host slot
+- [`toolnexus.client/make-answer`](/api/clojure/suspension/resume/) — build the Answer this maps back
+- [`toolnexus.client/suspend`](/api/clojure/suspension/pending/) — the same contract, raised by your own tool
+- [`toolnexus.core/build`](/api/clojure/toolkit/create/) — set `:wait-for` once, for every source

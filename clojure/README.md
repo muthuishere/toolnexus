@@ -135,7 +135,16 @@ names to compare. Found by diffing modules against the JS port:
 | context compaction (§7F) | `agents/compaction.ts` |
 | agent home | `agents/home.ts` |
 
-Also absent: MCP elicitation bridging (§2), per-server tool allowlists, real SSE
+**MCP elicitation (§2/§10) is implemented — over stdio only.** A streamable-HTTP
+peer cannot hold `tools/call` open for a server→client reverse request, because
+`koine.http/request` returns a fully-buffered body; `koine.stream/sse-post` is
+incremental but exposes no response headers, and MCP's `Mcp-Session-Id` arrives
+in exactly those headers. So a consumer must choose streaming or the session id,
+and this port takes the session id. Requested upstream as an `:on-open` callback
+on `sse-post`; the five shipped ports get both halves from their MCP SDK, and
+this is the only port whose transport is written against a seam.
+
+Also absent: per-server tool allowlists, real SSE
 streaming (the loop buffers and emits no text deltas — faking them out of a
 buffered body would be a lie), and durable resume.
 

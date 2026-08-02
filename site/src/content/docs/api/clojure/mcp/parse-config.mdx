@@ -132,8 +132,8 @@ mcp/default-timeout-ms   ;; => 30000
 (assert (empty? broken) (str "unusable server blocks: " (mapv :name broken)))
 ```
 
-Also note that a bare map with no wrapper *is* the server map: `\{:builtins … :agents … :real
-\{:command ["x"]\}\}` parses to exactly one server, `"real"`. The four reserved keys are removed
+Also note that a bare map with no wrapper *is* the server map: a config carrying `:builtins`,
+`:agents` and one real entry parses to exactly one server. The four reserved keys are removed
 because they are sibling config sections, and this is the only place that distinction matters.
 
 ### 3. Headers — expanded for use, never for printing

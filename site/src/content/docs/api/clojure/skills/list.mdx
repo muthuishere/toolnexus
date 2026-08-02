@@ -12,10 +12,12 @@ import { Aside } from '@astrojs/starlight/components';
 </p>
 
 ```clojure
-(list-skills "examples/skills")                      ; one root
-(list-skills ["project/skills" "team/skills"])       ; several, earlier wins
-
-;; => {:skills  [{:name … :description … :location … :content … :dir …}]
+(list-skills input)
+;; input: every shape load-skills takes — a root, a seq of roots, skill
+;;        definitions, or the options map. :filter is accepted and IGNORED.
+;;
+;; => {:skills  [{:name … :description … :location … :content …
+;;                :dir … :base … :origin "fs" | "logical"}]
 ;;     :skipped [{:location "…/SKILL.md" :reason "malformed-frontmatter"}]}
 ```
 
@@ -29,32 +31,33 @@ The `:skipped` vector is the reason this function exists. `load-skills` quietly 
 that a capability you wrote is missing from the model's catalog. `list-skills` names the path and
 the reason, which is what turns that into a build failure.
 
-What it deliberately omits is `:by-name`. That is the key `skill-tool` and `execute-skill` read, so
-a report cannot be handed to them by accident: if you meant to load, you have to say so.
+It is deliberately **unfiltered**: `:filter` is stripped before discovery runs. The inventory is
+what you author an allowlist from, so filtering it would be circular. It also omits `:by-name`,
+the key `skill-tool` and `execute-skill` read — so a report cannot be handed to them by accident.
 
 ## When to use it
 
 - **A CI gate** — assert `:skipped` is empty, so a typo in frontmatter fails the build instead of
   vanishing a skill.
+- **Authoring an allowlist** — enumerate everything that exists, then feed names into
+  `load-skills`'s `:filter`. This is what the unfiltered inventory is for.
 - **Checking the frontmatter subset** — this port's parser is stricter than the other ports' (see
   below), and this is how you find out which of your skills fall outside it.
 - **Tooling** — a `skills list` command, an admin page, a doctor command. The report is data with
   no side effects, so it is safe to call from anywhere.
-- **Auditing a layered tree** — the `duplicate-name` skips are the only record of which copy of a
-  skill actually won.
 
 ## Why this and not the alternative
 
 <Aside type="tip" title="Use load-skills when you want a tool, not a report">
 [`toolnexus.skill/load-skills`](/api/clojure/skills/load/) is the runtime path: it returns
-`:by-name` for lookup, and it is what `skill-tool` and `skills-prompt` consume. Use `list-skills`
-when you want to *inspect* — the failures, or the parsed metadata — and are not about to call an
-LLM. Both take the same input, so one configuration value can be validated and then loaded without
-being written twice.
+`:by-name` for lookup, applies `:filter`, carries `:sample-limit` forward, and is what `skill-tool`
+and `skills-prompt` consume. Use `list-skills` when you want to *inspect* — the failures, or the
+full unfiltered set — and are not about to call an LLM.
 </Aside>
 
-The report is not cheap in the sense of being cached — it re-reads the tree on every call, exactly
-as `load-skills` does. Call it once at startup, not per request.
+Both take the same input, so one configuration value can be validated and then loaded without being
+written twice. Neither caches; both re-read the tree on every call, so call this once at startup
+rather than per request.
 
 ## Examples
 
@@ -70,8 +73,8 @@ as `load-skills` does. Call it once at startup, not per request.
 (map :name (:skills report))            ;=> ("hello-world")
 
 (let [hello (first (:skills report))]
+  (:origin hello)                       ;=> "fs"
   (:location hello)                     ;=> "examples/skills/hello-world/SKILL.md"
-  (:dir hello)                          ;=> "examples/skills/hello-world"
   ;; the instruction body is already parsed and available
   (str/includes? (:content hello) "# Hello World Skill"))     ;=> true
 ```
@@ -99,47 +102,52 @@ as `load-skills` does. Call it once at startup, not per request.
 
 | Reason | Cause |
 |---|---|
-| `"missing-name"` | Frontmatter parsed, but `name` is absent or blank. A file with no frontmatter at all lands here too. |
+| `"missing-name"` | Frontmatter parsed, but `name` is absent or blank. A file with no frontmatter at all lands here too, as does a data definition without a `:name`. |
 | `"malformed-frontmatter"` | The `---` fences are present and what sits between them is outside `toolnexus.frontmatter`'s accepted subset. |
 | `"duplicate-name"` | An earlier candidate already claimed that name. First wins. |
 | `"unreadable"` | The `SKILL.md` bytes could not be read — permissions, a dangling symlink. |
 
 <Aside type="caution" title="duplicate-name is decided by traversal order">
-Roots are visited in the order given, sorted within each root, and the **first** candidate wins.
-Which of two same-named skills survives is therefore a fact about where they sit on disk, not a
-preference you expressed. Treat a `duplicate-name` skip as a build failure rather than a default.
+Roots are visited in the order given, sorted within each root, and data definitions come after
+every root. Which of two same-named skills survives is therefore a fact about where they sit, not
+a preference you expressed. Treat a `duplicate-name` skip as a build failure rather than a default.
 </Aside>
 
-### A doctor command over the whole report
+### Validate a whole configuration, then load it
 
 ```clojure
 (require '[toolnexus.skill :as skill])
 
-(defn doctor [roots]
-  (let [{:keys [skills skipped]} (skill/list-skills roots)]
-    (doseq [s skills]
-      (println (format "ok    %-16s %s" (:name s) (:location s)))
-      ;; A skill with no description never reaches the model's catalog:
-      ;; skills-prompt lists only described skills.
-      (when (nil? (:description s))
-        (println (format "warn  %-16s no description — invisible in the prompt" (:name s)))))
-    (doseq [k skipped]
-      (println (format "SKIP  %-22s %s" (:reason k) (:location k))))
-    {:loaded (count skills) :skipped (count skipped)}))
+(def config
+  {:dirs   ["examples/skills"]
+   :skills [{:name "triage"  :description "Triage an incoming bug report" :content "1. Reproduce it."}
+            {:name "release" :description "Cut a release"                 :content "1. Bump the version."}
+            ;; no :name — a skip, not a crash
+            {:description "Anonymous" :content "…"}]})
 
-(doctor ["project/skills" "team/skills"])
-;; ok    deploy           project/skills/deploy/SKILL.md
-;; warn  postmortem       no description — invisible in the prompt
-;; SKIP  duplicate-name         team/skills/deploy/SKILL.md
-;;=> {:loaded 3 :skipped 1}
+(def report (skill/list-skills config))
+
+(sort (map :name (:skills report)))     ;=> ("hello-world" "release" "triage")
+(map :reason (:skipped report))         ;=> ("missing-name")
+
+;; Data-sourced skills carry a logical base and never touch disk.
+(map (juxt :name :origin) (:skills report))
+;; => (["hello-world" "fs"] ["triage" "logical"] ["release" "logical"])
+
+;; Now author the allowlist from the inventory and load only what this agent gets.
+(def loaded (skill/load-skills (assoc config :filter {"hello-world" true "triage" true})))
+(sort (map :name (:skills loaded)))     ;=> ("hello-world" "triage")
+
+;; list-skills stays UNFILTERED even when the filter is present — that is the point.
+(count (:skills (skill/list-skills (assoc config :filter {"hello-world" true}))))   ;=> 3
 ```
 
 | Return key | What it is |
 |---|---|
-| `:skills` | Parsed skills in discovery order, deduped by name. Each carries `:name`, `:description`, `:location`, `:content` and `:dir`. |
+| `:skills` | Parsed skills in discovery order, deduped by name, never filtered. Each carries `:name`, `:description`, `:location`, `:content`, `:dir`, `:base` and `:origin`. |
 | `:skipped` | One `{:location :reason}` map per rejected candidate. |
 
 ## See also
 
 - [`toolnexus.skill/load-skills`](/api/clojure/skills/load/) — Glob a skills directory and expose one skill tool with progressive disclosure.
-- [Data skills, providers and filters](/api/clojure/skills/load-with/) — what this port does not have beyond filesystem roots, and what to do instead.
+- [Data skills, filters and sampling](/api/clojure/skills/load-with/) — the option map both functions accept.

@@ -139,8 +139,8 @@ JSON got truncated are handled by the same branch.
 | Field | Present when |
 |---|---|
 | `:id` | Always. |
-| `:status` | Always — `\{:state "submitted"\|"working"\|"completed"\|"failed"\}`. |
-| `:artifacts` | Completed tasks only: `[\{:artifactId ... :parts [\{:kind "text" :text ...\}]\}]`. |
+| `:status` | Always — `{:state "submitted"\|"working"\|"completed"\|"failed"}`. |
+| `:artifacts` | Completed tasks only: `[{:artifactId ... :parts [{:kind "text" :text ...}]}]`. |
 | `:status :message` | Failed tasks only — the error text, as an agent-role message. |
 
 ## See also

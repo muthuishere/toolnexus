@@ -12,7 +12,8 @@ import { Aside } from '@astrojs/starlight/components';
 </p>
 
 ```clojure
-(toolnexus.mcp/from-config config)   ; config: a JSON string or an already-parsed map
+(toolnexus.mcp/from-config config)             ; config: a JSON string or an already-parsed map
+(toolnexus.mcp/from-config config conn-opts)   ; conn-opts: {:wait-for (fn [request] answer)}
 
 ;; =>
 {:tools       [{...} {...}]                          ; §0.1 Tools, sorted by name
@@ -28,7 +29,7 @@ every listed remote tool into an ordinary [Tool](/api/clojure/types/tool/) named
 `sanitize(server)_sanitize(tool)`.
 
 **Local stdio and remote streamable-HTTP are the same code path.** A transport here is data —
-`\{:rpc! fn :notify! fn :close! fn …\}` — so the two legs differ only in those closures, and
+`{:rpc! fn :notify! fn :close! fn …}` — so the two legs differ only in those closures, and
 everything above them (lifecycle, paging, result shaping, naming) is written exactly once and
 cannot drift between them.
 
@@ -41,6 +42,12 @@ exception crossing here is how "isolated" quietly becomes "fatal". Every failure
 stable name — `transport`, `http-status`, `malformed-body`, `rpc-error`, `timeout`, `peer-eof`,
 `closed` — the same vocabulary for both transports, so your retry logic never has to know which leg
 it is on.
+
+The optional second argument threads the §10 host resolver into every server it connects. With a
+`:wait-for` present, `initialize` advertises `capabilities.elicitation` and a server may ask the user
+something mid-`tools/call`; **without one the capability is not advertised at all**, so a
+spec-compliant server never asks. Promising a capability you would then have to refuse is worse than
+degrading quietly.
 
 ## When to use it
 
@@ -64,13 +71,12 @@ it when MCP is the only source, or when you want the raw connections; use `build
 Reach for [`parse-config`](/api/clojure/mcp/parse-config/) instead when you only want to know whether
 the config is well-formed. It touches no network and starts no process.
 
-## Config shapes it accepts
+## Arguments
 
-| Input | What happens |
+| Argument | What it accepts |
 |---|---|
-| A JSON string | Parsed with keyword keys, then treated as the map below. |
-| `\{:mcpServers \{…\}\}` | The wrapper is unwrapped. `servers` and `mcp` are accepted as aliases. |
-| A bare map of servers | The object itself is the server map, minus the reserved sibling keys `:builtins`, `:agents`, `:a2a`, `:mcpServer`. |
+| `config` | A JSON string, parsed with keyword keys · `{:mcpServers {…}}`, with `servers` and `mcp` as wrapper aliases · or a bare map of servers, in which case the object itself is the server map minus the reserved sibling keys `:builtins`, `:agents`, `:a2a`, `:mcpServer`. |
+| `conn-opts` | Optional. `{:wait-for (fn [request] answer)}` — the one §10 host resolver, applied to every server. Omit it and no server is told the client can be elicited. |
 
 ## What you get back
 
@@ -141,7 +147,28 @@ get back to the original.
 A disabled server is never contacted at all — `disabled:true` and `enabled:false` are the same
 statement, and both mean no process is spawned and no request is sent.
 
-### 3. Reading a failure properly, including the child's stderr
+### 3. Letting a server ask the user, mid-call
+
+```clojure
+(require '[toolnexus.mcp :as mcp]
+         '[toolnexus.client :as client])
+
+(def res
+  (mcp/from-config {:mcpServers {"forms" {:command ["node" "forms-server.js"] :timeout 5000}}}
+                   {:wait-for (fn [request]
+                                ;; a real host shows this to a human and blocks
+                                (println (:prompt request))
+                                (client/make-answer (:id request) true {:name "Muthu"}))}))
+```
+
+The elicitation is answered **inline**, while the `tools/call` that triggered it is still in flight —
+nothing re-executes and no suspension reaches your loop. Drop the second argument and the same
+config connects with a bare `capabilities`, which is the byte-identical behaviour of every version
+before this option existed. See
+[`elicitation->request`](/api/clojure/mcp/elicitation/) for what your resolver receives and what it
+may return.
+
+### 4. Reading a failure properly, including the child's stderr
 
 ```clojure
 (require '[toolnexus.mcp :as mcp])
@@ -168,6 +195,7 @@ it died; `mcp/stderr` says *why*.
 ## See also
 
 - [`toolnexus.mcp/parse-config`](/api/clojure/mcp/parse-config/) — validate the config offline first
+- [`toolnexus.mcp/elicitation->request`](/api/clojure/mcp/elicitation/) — the §10 bridge `:wait-for` drives
 - [Inventory without connecting](/api/clojure/mcp/list-tools/) — why `:statuses` is the closest thing
 - [Bounding a load](/api/clojure/mcp/load-with-context/) — `:timeout`, and how teardown is kept bounded
 - [`toolnexus.core/build`](/api/clojure/toolkit/create/) — MCP merged with every other source

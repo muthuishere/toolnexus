@@ -8,19 +8,71 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Clojure</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
 </p>
 
 <Aside type="caution" title="Not available in Clojure">
-Go additionally ships a separate, golang-only SPEC §10 preview (Client.RunWithAnswer/Client.AskWithAnswer) for durable, cross-process resume of a bare-client run — not part of the §0 conformance contract. Documented on Go's own page and cross-linked from suspension/relay. Clojure has no sub-agent runtime to resume into. A suspension is resolved in-process by the :wait-for slot on toolnexus.client/create-client; durable, cross-process resume is recorded parity debt.
+This port has no sub-agent runtime to resume into — there is no agent runtime, no sub-agent handle
+and no `resume`. A suspension is resolved **in process** by the `:wait-for` slot on
+`toolnexus.client/create-client`. Durable, cross-process resume is recorded parity debt; Go
+additionally ships its own SPEC §10 preview for it, outside the §0 conformance contract.
 </Aside>
 
 Route an Answer to the deepest suspended sub-agent handle and resume it in place.
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Resume the run yourself from the transcript. `run` hands back everything needed: when no
+`:wait-for` is configured, a suspension ends the run cleanly with `:status "pending"`, the
+`Request` on `:pending`, and `:messages` holding every call up to and including the parked one.
+Persist those two things, and when the human answers, start a **new** run whose `:wait-for` already
+knows the answer.
+
+```clojure
+(require '[toolnexus.client :as client])
+
+;; --- pass 1: no :wait-for, so the run returns instead of blocking -------------
+(def llm (client/create-client {:base-url "https://api.anthropic.com"
+                                :style    "anthropic"
+                                :model    "claude-sonnet-4-5"}))
+
+(let [r (client/run llm "Deploy release/1.4 to production" {:toolkit toolkit})]
+  (when (= "pending" (:status r))
+    (save-job! "job-77" {:request  (:pending r)      ; id, kind, prompt, url, data
+                         :messages (:messages r)})   ; the transcript so far
+    (ask-the-human! (:pending r))))
+
+;; --- pass 2: minutes or days later, in a different process -------------------
+(defn resume-job! [job-id answer-data approved?]
+  (let [{:keys [request messages]} (load-job! job-id)
+        ;; a :wait-for that answers the ONE request this job is parked on
+        resumed (client/create-client
+                  {:base-url "https://api.anthropic.com"
+                   :style    "anthropic"
+                   :model    "claude-sonnet-4-5"
+                   :wait-for (fn [req]
+                               (if (= (:id req) (:id request))
+                                 (client/make-answer (:id req) approved? answer-data
+                                                     (when-not approved? "declined by operator"))
+                                 ;; a NEW suspension in this pass: park it again
+                                 (client/make-answer (:id req) false nil "not this job's request")))})]
+    (client/run resumed "Continue." {:toolkit toolkit :history messages})))
+```
+
+Two things make this work rather than merely look like it works. The transcript in `:messages` is
+the provider's own message shape, so it goes straight back in as `:history` with no translation.
+And the model re-issues the tool call on the new run, at which point the tool suspends again with a
+**fresh** request id — which is why the `:wait-for` above compares against the saved request and
+declines anything else rather than answering blindly.
+
+The cost, stated plainly: the second pass replays the turn rather than continuing mid-turn, so you
+pay for the prompt again and any side effects your tools performed before the parked call are not
+repeated only because the transcript records them as done. Keep tools that run alongside a
+suspending one idempotent.
+
+If the human is reachable from the same thread, none of this is necessary — configure
+[`:wait-for`](/api/clojure/suspension/wait-for/) on the first client and the loop blocks, resolves,
+and re-executes the tool once, in place.
 
 ## See also
 

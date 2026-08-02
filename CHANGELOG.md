@@ -26,10 +26,28 @@ Also landed from the shared capability specs: `:request-params`, `:body-transfor
 `:http-client`, `:retries`/`:retry-base-ms`, `:timeout-ms`, `:on-error` (retry|fail — no
 failure-originated suspend tier), `:on-metric`, `:store` + conversation memory.
 
-**Not yet at parity**, tracked in `openspec/changes/complete-clojure-port-parity` and printed
-by name on every run of the option gate: six toolkit options, plus five whole subsystems the
-option gate structurally cannot see — §11 translate, agent runtime (§7D), subagents (§7E),
-context compaction (§7F), agent home.
+Since landed: **§11 single-turn translation**, the **MCP elicitation bridge** (§2/§10, stdio
+only — see below), and all twelve toolkit options (`:skill-provider`, `:skills-filter`,
+`:skill-sample-limit`, data skills, `:agents`, toolkit `:wait-for`, `:disable-tools` /
+`:disable-skills`).
+
+**Not yet at parity**, tracked in `openspec/changes/complete-clojure-port-parity` and printed by
+name on every run of the option gate: the `hooks` client option, plus three subsystems the
+option gate structurally cannot see — agent runtime (§7D), subagents (§7E), context compaction
+(§7F) and agent home. Note `:agents` is the **A2A** option (remote agents behind an Agent Card),
+which is a different capability from `openspec/specs/subagents` — that one remains unshipped
+here and is not satisfied by it.
+
+**MCP elicitation is stdio-only.** A streamable-HTTP peer cannot hold `tools/call` open for a
+server→client reverse request: `koine.http/request` buffers the whole body, and
+`koine.stream/sse-post` is incremental but exposes no response headers — where MCP's
+`Mcp-Session-Id` lives. A consumer must choose streaming or the session id. Raised upstream.
+
+**§11 divergence, recorded not resolved.** SPEC §11 says any tool call ⇒ `finishReason`
+`"tool_calls"`. js, go, python and elixir all prefer the provider's own `finish_reason` when
+present, so an OpenAI-style provider returning `"stop"` alongside tool calls yields `"stop"` —
+the prose is violated in four shipped ports. The Clojure port matches the five ports, not the
+prose. Correcting it is a cross-port change.
 
 **Verified in five execution modes**, not two: `jvm-main`, `jvm-repl`, `cljgo-aot`, `cljgo-run`,
 `cljgo-repl` — a REPL is where a human meets a library, and cljgo's own ADR 0007 calls a

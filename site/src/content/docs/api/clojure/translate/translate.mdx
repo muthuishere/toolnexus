@@ -167,9 +167,9 @@ Callers keep speaking OpenAI. Swapping the upstream is one binding.
 | Key | Type | What it is |
 |---|---|---|
 | `:text` | string | The assistant text. `""` when the turn was tool calls only. |
-| `:toolCalls` | vector | `[\{:id :name :arguments\}]`. `:arguments` is a **JSON string**, the OpenAI wire form. |
+| `:toolCalls` | vector | `[{:id :name :arguments}]`. `:arguments` is a **JSON string**, the OpenAI wire form. |
 | `:finishReason` | string | `"stop"`, `"tool_calls"`, `"length"` or `"content_filter"`. Tool calls always win; on the OpenAI path the provider's own `finish_reason` is preferred when it sent one. |
-| `:usage` | map | `\{:prompt-tokens :completion-tokens :total-tokens\}`. |
+| `:usage` | map | `{:prompt-tokens :completion-tokens :total-tokens}`. |
 | `:model` | string | The client's model. |
 | `:raw` | map | The provider's decoded response, untouched — read anything not surfaced above from here. |
 
@@ -178,7 +178,7 @@ Callers keep speaking OpenAI. Swapping the upstream is one binding.
 | Function | Use |
 |---|---|
 | `tool-calls-json` | Render `:toolCalls` as an OpenAI `tool_calls` array for an assistant message. |
-| `args-object` | Parse a call's `arguments` into a map. Accepts the object form too; malformed input yields `\{\}`. |
+| `args-object` | Parse a call's `arguments` into a map. Accepts the object form too; malformed input yields `{}`. |
 | `args-string` | The reverse — render arguments as the JSON string form. |
 | `finish-reason-for` | The mapping rule on its own, if you are assembling a response by hand. |
 

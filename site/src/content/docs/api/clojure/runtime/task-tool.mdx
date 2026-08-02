@@ -12,16 +12,57 @@ import { Aside } from '@astrojs/starlight/components';
 </p>
 
 <Aside type="caution" title="Not available in Clojure">
-Only JS exposes a constructible task tool symbol; elsewhere it is the `task` builtin, toggled on the runtime. Clojure has no task tool: it ships no sub-agent runtime for one to drive.
+There is no `task` tool among this port's ten built-ins, because there is no sub-agent runtime for one
+to drive. The built-ins are bash, read, write, edit, grep, glob, webfetch, question, apply_patch and
+todowrite.
 </Aside>
 
 The opt-in tool that lets the model itself spawn a teammate. Default OFF.
 
+The `task` tool is what turns delegation from something the *host* arranges into something the
+*model* decides: given a description of an available agent type, the model calls `task` and a child
+run happens. It is off by default in every port for the obvious reason — a model that can spawn
+agents can spawn a lot of them.
+
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Delegation the model can reach has to be an ordinary tool. Which means you choose the delegates up
+front, name them, and describe them — the model picks between named collaborators rather than
+inventing one:
+
+```clojure
+(require '[toolnexus.core :as core])
+
+;; each reachable peer becomes one tool per advertised skill,
+;; named <card-name>_<skill-id> and taking a single string `task`
+(def tk
+  (core/build
+    {:skills "examples/skills"
+     :agents [{:card "http://127.0.0.1:8081/.well-known/agent-card.json"}   ; researcher
+              {:card "http://127.0.0.1:8082/.well-known/agent-card.json"}]  ; writer
+     ;; and if one of them should not be model-callable after all:
+     :disable-tools ["writer_draft"]}))
+
+(core/tool-names tk)
+;; => [... "researcher_summarise"]
+```
+
+From the model's point of view that is the same affordance `task` offers — "hand this sentence to a
+teammate and get their answer back" — with the agent chosen at build time instead of at call time.
+The peer's schema is deliberately minimal: an object with one required string, `task`.
+
+For an in-process delegate, wrap a scoped client in a native tool, as shown on
+[`runtime / agent`](/api/clojure/runtime/agent/). Either way you keep the control that the `task`
+tool's default-OFF stance exists to protect: nothing is delegable unless you registered it, and
+`:disabled true` on a peer's config entry, `:disable-tools` on the build, or simply omitting the
+peer takes the option away again.
+
+If what you actually want is the model pausing to ask a *human* rather than an agent, that ships:
+the `question` built-in raises a §10 suspension answered through the client's `:wait-for`.
 
 ## See also
 
-- _TODO: related entry points_
+- [`toolnexus.a2a/agent-tools`](/api/clojure/agents/agent-tools/) — peers as ordinary, model-callable tools
+- [`runtime / agent`](/api/clojure/runtime/agent/) — an in-process delegate wrapped as a native tool
+- [`toolnexus.builtin/builtin-tools`](/api/clojure/builtins/create/) — the ten built-ins that do ship
+- [`toolnexus.client/wait-for`](/api/clojure/suspension/wait-for/) — delegating to a human instead
