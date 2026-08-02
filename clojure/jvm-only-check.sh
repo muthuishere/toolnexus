@@ -55,12 +55,20 @@ BIN="$WORK/poison-bin"
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$BIN"
 
-cat > "$BIN/cljgo" <<'POISON'
+# BOTH cljgo AND go are poisoned, not merely absent. On a developer machine
+# cljgo shares a directory with `clojure`; on a GitHub runner `go` lives in
+# /usr/bin alongside the coreutils the Clojure CLI needs. Neither can be removed
+# by editing PATH without taking the JVM toolchain with it — so instead of
+# arranging absence, make invocation LOUD. That is the stronger claim anyway:
+# absence proves nothing was found; a poison proves nothing even tried.
+for tool in cljgo go; do
+  cat > "$BIN/$tool" <<POISON
 #!/bin/sh
-echo "POISON: something invoked cljgo — args: $*" >&2
+echo "POISON: something invoked $tool — args: \$*" >&2
 exit 127
 POISON
-chmod +x "$BIN/cljgo"
+  chmod +x "$BIN/$tool"
+done
 
 # The consumer's view: sources and deps.edn, nothing cljgo ever produced.
 cp -r "$SRC/src" "$SRC/deps.edn" "$WORK/"
@@ -100,14 +108,14 @@ if [ "$real_cljgo" != "$BIN/cljgo" ]; then
   printf '{"check":"jvm-only","gate":"FAILED: sandbox leaked cljgo"}\n'
   exit 2
 fi
-if [ -n "$found_go" ]; then
-  echo "FAIL: sandbox leaked the Go toolchain at: $found_go" >&2
+if [ "$found_go" != "$BIN/go" ]; then
+  echo "FAIL: sandbox leaked a REAL Go toolchain at: ${found_go:-<none>}" >&2
   echo "      cljgo emits Go and shells out to it, so Go being present could" >&2
   echo "      mask a dependency a plain JVM user would hit." >&2
   printf '{"check":"jvm-only","gate":"FAILED: sandbox leaked go"}\n'
   exit 2
 fi
-echo "  ok   sandbox: cljgo ABSENT (poison only), go ABSENT" >&2
+echo "  ok   sandbox: cljgo and go are POISONED (a real one fails this check)" >&2
 
 # Sanity: the poison must actually fire when cljgo IS called. A poison that
 # never triggers would make this whole check vacuous.
