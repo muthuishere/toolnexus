@@ -1,0 +1,205 @@
+---
+title: "Home.memoryTool"
+description: "The opt-in built-in that lets a persona write durable notes to its own home. — Java."
+sidebar:
+  label: "Home.memoryTool"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/agents/Agents.java">agents/Agents.java</a>
+</p>
+
+```java
+public static Tool memoryTool(Path dir)
+```
+
+Builds the `memory` `Tool` — file-backed, **not** one of the default §4A builtins, present only
+when explicitly wired (as [`agentFromDir`](/api/java/persona/from-dir/) does automatically, or by
+calling `memoryTool` yourself and adding it to `AgentSpec.tools`). One tool, three actions:
+`add` appends an entry, `replace` swaps an existing substring, `remove` deletes one. `target=self`
+writes `MEMORY.md` (default); `target=user` writes `USER.md`. Every action writes straight to disk;
+a `replace`/`remove` whose substring is absent returns a loud `isError` and leaves the file
+untouched. The tool does **not** mutate the current session's live prompt — the write is only
+visible to the *next* session's `composeSoul`/`agentFromDir` call, which is the frozen-snapshot
+rule that keeps a long-lived persona cache-stable.
+
+## When to use it
+
+You are building a persona directly (not via `agentFromDir`) but still want it able to persist
+durable notes about itself or the user — a chat assistant that should remember a stated preference
+across restarts, a coordinator accumulating operating notes. Most callers get this for free through
+`agentFromDir`; call `memoryTool` directly only when you're assembling `AgentSpec.tools` by hand.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="memoryTool for durable notes, tool metadata for per-call bookkeeping">
+`memoryTool` is for facts that should outlive the process — onboarding notes, stated preferences,
+running summaries a persona re-reads next session. It is not for anything the model needs to see
+*this turn*: that's ordinary [`ToolResult`](/api/java/types/tool-result/) output. And it is not a
+substitute for [`Compaction.compactor`](/api/java/compaction/compactor/) — compaction keeps a
+*live* transcript inside budget; the memory tool persists facts *across* transcripts.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — add, replace, remove, all writing to disk
+
+```java test
+import io.github.muthuishere.toolnexus.Tool;
+import io.github.muthuishere.toolnexus.ToolContext;
+import io.github.muthuishere.toolnexus.ToolResult;
+import io.github.muthuishere.toolnexus.agents.Agents;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Path dir = Files.createTempDirectory("memory-home");
+        Files.writeString(dir.resolve("MEMORY.md"), "- Likes green tea.");
+
+        Tool memory = Agents.memoryTool(dir);
+        ToolContext ctx = new ToolContext();
+
+        memory.execute(Map.of("action", "add", "text", "Likes hiking"), ctx);
+        if (!Files.readString(dir.resolve("MEMORY.md")).contains("- Likes hiking")) {
+            throw new AssertionError("add did not persist");
+        }
+
+        memory.execute(Map.of("action", "replace", "text", "green tea", "with", "oolong"), ctx);
+        if (!Files.readString(dir.resolve("MEMORY.md")).contains("oolong")) {
+            throw new AssertionError("replace did not persist");
+        }
+
+        ToolResult removed = memory.execute(Map.of("action", "remove", "text", "- Likes hiking\n"), ctx);
+        if (removed.isError() || Files.readString(dir.resolve("MEMORY.md")).contains("hiking")) {
+            throw new AssertionError("remove did not persist: " + removed.output());
+        }
+
+        System.out.println("ok: " + Files.readString(dir.resolve("MEMORY.md")).strip());
+    }
+}
+```
+
+### 2. The realistic case — a missing substring is a loud error, and `target=user`
+
+```java test
+import io.github.muthuishere.toolnexus.Tool;
+import io.github.muthuishere.toolnexus.ToolContext;
+import io.github.muthuishere.toolnexus.ToolResult;
+import io.github.muthuishere.toolnexus.agents.Agents;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Path dir = Files.createTempDirectory("memory-home");
+        Files.writeString(dir.resolve("MEMORY.md"), "- Onboarded 2026-07.");
+
+        Tool memory = Agents.memoryTool(dir);
+        ToolContext ctx = new ToolContext();
+
+        String before = Files.readString(dir.resolve("MEMORY.md"));
+        ToolResult miss = memory.execute(Map.of("action", "replace", "text", "nonexistent", "with", "x"), ctx);
+        if (!miss.isError()) throw new AssertionError("expected isError on a missing substring");
+        if (!Files.readString(dir.resolve("MEMORY.md")).equals(before)) {
+            throw new AssertionError("a failed replace must not touch the file");
+        }
+
+        // target=user writes USER.md instead of MEMORY.md.
+        ToolResult userWrite = memory.execute(Map.of("action", "add", "target", "user", "text", "Speaks Tamil"), ctx);
+        if (userWrite.isError()) throw new AssertionError(userWrite.output());
+        if (!Files.readString(dir.resolve("USER.md")).contains("Speaks Tamil")) {
+            throw new AssertionError("target=user must write USER.md");
+        }
+        if (Files.readString(dir.resolve("MEMORY.md")).contains("Speaks Tamil")) {
+            throw new AssertionError("target=user must NOT touch MEMORY.md");
+        }
+
+        System.out.println("ok: " + miss.isError() + " | " + Files.readString(dir.resolve("USER.md")).strip());
+    }
+}
+```
+
+### 3. The full surface — a write lands on disk but the live session stays frozen
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.Json;
+import io.github.muthuishere.toolnexus.agents.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Path dir = Files.createTempDirectory("memory-home");
+        Files.writeString(dir.resolve("SOUL.md"), "You are Ava.");
+        Files.writeString(dir.resolve("MEMORY.md"), "- Onboarded 2026-07.");
+
+        // Turn 1: the model calls memory.add. Turn 2 (after seeing the tool result): confirms.
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                Map<String, Object> req = Json.toMap(body);
+                List<Object> msgs = (List<Object>) req.get("messages");
+                boolean sawToolResult = msgs.stream().anyMatch(m -> "tool".equals(((Map<?, ?>) m).get("role")));
+                String message;
+                if (!sawToolResult) {
+                    String callArgs = Json.stringify(Map.of("action", "add", "text", "Prefers dark roast"));
+                    message = "{\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\","
+                            + "\"function\":{\"name\":\"memory\",\"arguments\":" + Json.stringify(callArgs) + "}}]}";
+                } else {
+                    message = "{\"content\":\"noted\"}";
+                }
+                byte[] b = ("{\"choices\":[{\"message\":" + message + "}]}").getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+
+        try {
+            RuntimeOptions rtOpts = new RuntimeOptions()
+                    .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                    .apiKey("test-key");
+
+            Agents.Agent ava = Agents.agentFromDir(dir, new Agents.AgentSpec().model("test-model"));
+            TaskResult r = ava.run(rtOpts, "remember my coffee preference");
+
+            if (!"done".equals(r.status())) throw new AssertionError(r.status());
+            if (!Files.readString(dir.resolve("MEMORY.md")).contains("Prefers dark roast")) {
+                throw new AssertionError("the write must land on disk within THIS turn");
+            }
+
+            System.out.println("ok: " + r.text() + " | " + Files.readString(dir.resolve("MEMORY.md")).strip());
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
+```
+
+## Fields
+
+| Member | Type | What it is |
+|---|---|---|
+| `memoryTool(dir)` | `Tool` | The `memory` tool, file-backed over `dir`. |
+| `action` | `"add" \| "replace" \| "remove"` | Required. `replace`/`remove` need the substring in `text`. |
+| `target` | `"self" \| "user"` | `self` (default) writes `MEMORY.md`; `user` writes `USER.md`. |
+| `text` | `String` | Required. The entry (`add`) or the existing substring (`replace`/`remove`). |
+| `with` | `String` | The replacement, for `action=replace`. |
+
+## See also
+
+- [`Agents.composeSoul`](/api/java/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.
+- [`Agents.agentFromDir`](/api/java/persona/from-dir/) — Point at an agent home directory and get a configured agent back — wires this tool in automatically.

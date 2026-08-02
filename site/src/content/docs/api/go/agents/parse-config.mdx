@@ -1,0 +1,206 @@
+---
+title: "ParseAgentsConfig"
+description: "Declare remote peers in config the way MCP servers are declared, with precedence rules. — Go."
+sidebar:
+  label: "ParseAgentsConfig"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/a2a.go">golang/a2a.go</a>
+</p>
+
+```go
+type AgentConfig struct {
+	Card      string
+	Headers   map[string]string
+	Timeout   int
+	PollEvery int
+	Enabled   *bool
+	Disabled  *bool
+}
+type AgentsConfig map[string]AgentConfig
+
+func ParseAgentsConfig(block AgentsConfig) []Agent
+```
+
+`ParseAgentsConfig` turns an `agents` config block into `[]Agent` descriptors, mirroring how
+`mcpServers` blocks are declared (§2) — an identifier key, a body, and the same
+`enabled`/`disabled` precedence. The config key is only an identifier; the tool name prefix always
+comes from the fetched card's `name`, never the key.
+
+## When to use it
+
+Reach for `ParseAgentsConfig` when peers are declared in a config file (JSON, or a parsed
+`map[string]any`) alongside MCP servers, rather than built as `Agent` struct literals in code. It's
+what `CreateToolkit` calls internally for a top-level `agents` block on a parsed `McpConfig` map.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Building Agent values directly in code? Skip config parsing entirely">
+`ParseAgentsConfig` exists for the config-file path. If you're constructing `Agent{Card: ...}`
+literals in Go already, there's nothing to parse — hand them straight to
+[`Options.Agents`](/api/go/agents/agent/).
+</Aside>
+
+## Examples
+
+### 1. One enabled entry
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	parsed := toolnexus.ParseAgentsConfig(toolnexus.AgentsConfig{
+		"reviewer": {Card: "https://peer.example/.well-known/agent-card.json", PollEvery: 500},
+	})
+	if len(parsed) != 1 {
+		log.Fatalf("expected 1 agent, got %d", len(parsed))
+	}
+	if parsed[0].Card != "https://peer.example/.well-known/agent-card.json" || parsed[0].PollEvery != 500 {
+		log.Fatalf("unexpected: %+v", parsed[0])
+	}
+
+	fmt.Println("ok:", parsed[0].Card)
+}
+```
+
+### 2. `enabled`/`disabled` precedence — mirrors the MCP rule
+
+`disabled:true` always wins; else `enabled:false` skips the entry; both left unset ⇒ enabled.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func boolPtr(b bool) *bool { return &b }
+
+func main() {
+	parsed := toolnexus.ParseAgentsConfig(toolnexus.AgentsConfig{
+		"a": {Card: "http://x/1"},                                        // default: enabled
+		"b": {Card: "http://x/2", Disabled: boolPtr(true)},                // disabled wins
+		"c": {Card: "http://x/3", Enabled: boolPtr(false)},                // enabled:false skips
+		"d": {Card: "http://x/4", Enabled: boolPtr(true), Disabled: boolPtr(true)}, // disabled still wins
+	})
+	if len(parsed) != 1 {
+		log.Fatalf("expected only 1 survivor, got %d", len(parsed))
+	}
+	if parsed[0].Card != "http://x/1" {
+		log.Fatalf("unexpected survivor: %+v", parsed[0])
+	}
+
+	fmt.Println("ok: only", parsed[0].Card, "survived")
+}
+```
+
+### 3. The full surface — driven straight from `CreateToolkit`'s config map
+
+The same precedence applies when the `agents` block arrives as part of a parsed
+`McpConfig`-shaped `map[string]any` — the path `CreateToolkit` itself uses.
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func startPeer() *httptest.Server {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/.well-known/agent-card.json" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name": "rev", "url": srv.URL + "/",
+				"skills": []any{map[string]any{"id": "review", "name": "Review", "description": "Review code"}},
+			})
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var rpc struct {
+			ID     any    `json:"id"`
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(body, &rpc)
+		if rpc.Method == "SendMessage" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": rpc.ID,
+				"result": map[string]any{"id": "t1", "status": map[string]any{"state": "submitted"}}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": rpc.ID,
+			"result": map[string]any{"id": "t1", "status": map[string]any{"state": "completed"},
+				"artifacts": []any{map[string]any{"parts": []any{map[string]any{"kind": "text", "text": "LGTM"}}}}}})
+	}))
+	return srv
+}
+
+func main() {
+	peer := startPeer()
+	defer peer.Close()
+
+	cardURL := peer.URL + "/.well-known/agent-card.json"
+
+	off, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{
+		Builtins:  false,
+		McpConfig: map[string]any{"agents": map[string]any{"rev": map[string]any{"card": cardURL, "disabled": true}}},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if _, ok := off.Get("rev_review"); ok {
+		log.Fatal("disabled agent should be skipped")
+	}
+	off.Close()
+
+	on, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{
+		Builtins:  false,
+		McpConfig: map[string]any{"agents": map[string]any{"rev": map[string]any{"card": cardURL, "pollEvery": 5}}},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer on.Close()
+	if _, ok := on.Get("rev_review"); !ok {
+		log.Fatal("enabled agent should resolve from config")
+	}
+
+	fmt.Println("ok: config-driven agent resolved to rev_review")
+}
+```
+
+## Precedence
+
+| `disabled` | `enabled` | Result |
+|---|---|---|
+| `true` | any | skipped |
+| unset/`false` | `false` | skipped |
+| unset/`false` | unset/`true` | included |
+
+`Card == ""` is also skipped — an entry with no card has nothing to resolve.
+
+## See also
+
+- [`agents.New`](/api/go/agents/agent/) — Point at a remote agent's card and use it exactly like a local tool.
+- [`AgentTools`](/api/go/agents/agent-tools/) — Expand a remote agent card into one tool per advertised skill.

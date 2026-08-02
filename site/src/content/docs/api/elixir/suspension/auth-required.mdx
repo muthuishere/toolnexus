@@ -1,0 +1,48 @@
+---
+title: "authRequired — suspend for authorization"
+description: "The auth-shaped suspension: hand back a URL, resume once the user has granted access. — Elixir."
+sidebar:
+  label: "suspension / auth-required"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+<Aside type="caution" title="Not available in Elixir">
+Elixir ships no auth_required/pending producer helpers — build %ToolResult\{metadata: %\{pending: %Request\{\}\}\} by hand. Only the reader, ToolResult.pending?/1, exists.
+</Aside>
+
+The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+
+## What to use instead
+
+Build the auth-shaped suspension by hand: a `%Toolnexus.ToolResult{}` whose `metadata.pending`
+carries a `%Toolnexus.Request{kind: "authorization"}` with a `:url` instead of expecting typed
+input:
+
+```elixir
+%Toolnexus.ToolResult{
+  output: "Log in",
+  is_error: true,
+  metadata: %{
+    pending: %Toolnexus.Request{
+      id: "pnd-2",
+      kind: "authorization",
+      prompt: "Log in",
+      url: "https://example.com/login"
+    }
+  }
+}
+```
+
+Same wire shape as every other port's `authRequired/1`, same `id` correlation discipline as
+[`pending`](/api/elixir/suspension/pending/) — only the constructor is missing, not the behavior.
+`Toolnexus.ToolResult.pending?/1` reads either shape back identically.
+
+## See also
+
+- [`Toolnexus.Client.create`](/api/elixir/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`Toolnexus.Agents.Runtime.resume`](/api/elixir/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.

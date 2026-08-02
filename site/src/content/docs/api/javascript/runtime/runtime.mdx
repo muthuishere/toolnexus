@@ -1,0 +1,196 @@
+---
+title: "agents.AgentRuntime"
+description: "The six host verbs that drive sub-agents, plus the read-only list and inspect views. — JavaScript."
+sidebar:
+  label: "agents.AgentRuntime"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7d-sub-agents--agent-runtime-source-agent">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/agents/runtime.ts">js/src/agents/runtime.ts</a>
+</p>
+
+```ts
+class agents.AgentRuntime {
+  constructor(opts: RuntimeOptions)
+  readonly root: agents.Handle
+  readonly trace: string[]        // the §0 conformance artifact — one line per transition
+
+  spawn(parent: Handle, defName: string, budget?: Budget): Handle | VerbError
+  post(h: Handle, item: InboxItem): { ok: true } | { ok: false; error: string }
+  wake(h: Handle, prompt?: string): { ok: true } | { ok: false; error: string }
+  wait(h: Handle, opts?: { timeoutMs?: number; by?: Handle }): Promise<TaskResult>
+  interrupt(h: Handle): void
+  close(h: Handle, opts?: { force?: boolean; reason?: CloseReason }): Promise<void>
+
+  list(h?: Handle): HandleView[]
+  inspect(h: Handle): HandleView & { turns: number; poolTokens: number; pending?: Request }
+  resume(answer: Answer): Promise<void>       // §10 durable resume
+}
+```
+
+The substrate every `agents.agent(...).run()` call builds and tears down for you: a tree of
+`Handle`s driven by exactly **six host verbs** — `spawn`/`post`/`wake`/`wait`/`interrupt`/`close` —
+plus read-only `list`/`inspect` views. The SPEC pins **transitions**, never scheduling: conformance
+is an identical per-handle transition trace against the shared `examples/subagent-*` fixtures on a
+virtual clock, not a particular execution order.
+
+## When to use it
+
+Reach for `AgentRuntime` directly when `agents.agent(...).run()`'s one-shot shape doesn't fit — you
+need to hold multiple agents alive across many turns, post unsolicited events into a running
+agent's inbox, inspect the whole tree, or drive spawn/wake/wait/interrupt/close yourself instead of
+letting `.run()` fuse them.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use agents.agent(...).run() instead for a one-shot call">
+`Agent.run()` is `spawn → wake → wait → close` fused into one call against a private runtime it
+builds and owns. Reach for `AgentRuntime` yourself when you need the tree to **outlive** one call —
+a long-running desk with several named agents, a server holding handles open across HTTP requests,
+or tests asserting on `runtime.trace`/`runtime.list()` directly.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — spawn, wake, wait
+
+`registry` is a `Record<name, AgentDef>` — the same shape `Agent.registry()` builds from an
+`agents.agent(...)` declaration, but assembled by hand here to show the primitive underneath.
+
+```ts test
+import assert from "node:assert"
+import { agents } from "toolnexus"
+
+const canned: typeof fetch = async () =>
+  new Response(JSON.stringify({ choices: [{ message: { content: "Hello." } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } })
+
+const runtime = new agents.AgentRuntime({
+  fetch: canned,
+  registry: { greeter: { name: "greeter", does: "Greets people", model: "m" } },
+})
+
+const h = runtime.spawn(runtime.root, "greeter")
+assert.ok(!agents.isVerbError(h))
+runtime.wake(h as agents.Handle, "Say hi")
+const result = await runtime.wait(h as agents.Handle)
+
+assert.equal(result.status, "done")
+assert.equal(result.text, "Hello.")
+assert.equal((h as agents.Handle).state, "idle", "settled — back to idle, never auto-closed")
+
+await runtime.close(runtime.root)
+console.log("ok:", result.text)
+```
+
+### 2. A realistic case — two children, `list`/`inspect`, then close
+
+Deterministic parent-scoped ids (`root/explorer.1`, `root/explorer.2`), usage roll-up onto the
+spawner, and the read-only views a host UI or a debugger would use.
+
+```ts test
+import assert from "node:assert"
+import { agents } from "toolnexus"
+
+let n = 0
+const canned: typeof fetch = async () => {
+  n++
+  return new Response(JSON.stringify({ choices: [{ message: { content: `result ${n}` } }], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } }), { status: 200, headers: { "content-type": "application/json" } })
+}
+
+const runtime = new agents.AgentRuntime({
+  fetch: canned,
+  registry: { explorer: { name: "explorer", does: "Explores", model: "m" } },
+})
+
+const a = runtime.spawn(runtime.root, "explorer") as agents.Handle
+const b = runtime.spawn(runtime.root, "explorer") as agents.Handle
+assert.equal(a.id, "root/explorer.1")
+assert.equal(b.id, "root/explorer.2", "deterministic, parent-scoped, never random")
+
+runtime.wake(a, "task A")
+runtime.wake(b, "task B")
+const [ra, rb] = await Promise.all([runtime.wait(a), runtime.wait(b)])
+assert.equal(ra.status, "done")
+assert.equal(rb.status, "done")
+
+const view = runtime.list()
+assert.equal(view.length, 2)
+assert.ok(view.every((v) => v.state === "idle"))
+
+const detail = runtime.inspect(a)
+assert.equal(detail.turns, 1)
+assert.equal(detail.poolTokens, Number.POSITIVE_INFINITY, "no budget set ⇒ uncapped pool")
+
+await runtime.close(runtime.root) // stop-all: closes every child, leaf-first
+assert.equal(runtime.list().every((v) => v.state === "closed"), true)
+
+console.log("ok:", view.map((v) => v.id))
+```
+
+### 3. The full surface — `interrupt` mid-turn, the inbox restored
+
+`interrupt` aborts the in-flight Run and returns the handle to `idle` — never a kill, and any
+inbox items the turn had already drained are restored (the drain is transactional).
+
+```ts test
+import assert from "node:assert"
+import { agents } from "toolnexus"
+
+// A "slow" model: holds the request open until the AbortSignal fires.
+const slowFetch: typeof fetch = (_url, init) =>
+  new Promise((_resolve, reject) => {
+    const signal = init?.signal as AbortSignal | undefined
+    signal?.addEventListener("abort", () => reject(signal.reason ?? new Error("aborted")), { once: true })
+  })
+
+const runtime = new agents.AgentRuntime({
+  fetch: slowFetch,
+  registry: { worker: { name: "worker", does: "Slow worker", model: "m" } },
+})
+
+const h = runtime.spawn(runtime.root, "worker") as agents.Handle
+runtime.post(h, { from: "external", channel: "external", text: "seed item" })
+runtime.wake(h, "start")
+assert.equal(h.state, "running")
+
+// Give the turn a tick to actually start, then interrupt it.
+await new Promise((r) => setTimeout(r, 10))
+runtime.interrupt(h)
+const result = await runtime.wait(h)
+
+assert.equal(result.status, "interrupted")
+assert.equal(h.state, "idle", "interrupt → idle, never closed — the child can be woken again")
+assert.equal(h.inbox.length, 1, "the drained inbox item was restored, not lost")
+
+await runtime.close(runtime.root)
+console.log("ok:", result.status)
+```
+
+## Options
+
+| Field | Type | What it does |
+|---|---|---|
+| `registry` | `Record<string, AgentDef>` | Agent definitions by name; the `task` tool resolves targets here. **Required.** |
+| `llm` | `{ baseUrl?, style?, apiKey?, model? }` | Default LLM endpoint for agents whose `model` is `"inherit"`. |
+| `fetch` | `typeof fetch` | HTTP transport for every agent's client — the hermetic-test seam. |
+| `clock` | `Clock` | Time source for every timer/timeout/deadline. Default: the system clock; fixtures inject a virtual one. |
+| `store` | `ConversationStore` | ONE store for every handle (conversation id = handle id). Default: in-memory. |
+| `inboxCap` | `number` | Per-handle inbox capacity (gate 1). Default `8`. |
+| `maxConcurrentTurns` | `number` | Global concurrent-LLM-call cap (gate 3) — wraps only the HTTP call. Default `8`. |
+| `shutdownMs` | `number` | Graceful-close bound before `close()` escalates to abort. Default `200`. |
+| `hooks` / `onMetric` | `Hooks` / `(ev) => void` | §8 seams applied to every agent, unless that agent's def sets its own. |
+
+## What you get back
+
+The six verbs above, plus `list()`/`inspect()` read-only views and `resume(answer)` for §10 durable
+resume. `trace: string[]` accumulates one line per transition (`"root/x.1: idle→running (wake)"`)
+— the exact conformance artifact the shared fixtures assert against.
+
+## See also
+
+- [`agents.Agent`](/api/javascript/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`agents.Handle`](/api/javascript/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`agents.Budget`](/api/javascript/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+- [`agents.taskTool`](/api/javascript/runtime/task-tool/) — The opt-in tool that lets the model itself spawn a teammate. Default OFF.

@@ -1,0 +1,37 @@
+---
+title: "The task tool — model-facing delegation"
+description: "The opt-in tool that lets the model itself spawn a teammate. Default OFF. — Elixir."
+sidebar:
+  label: "runtime / task-tool"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+</p>
+
+<Aside type="caution" title="Not available in Elixir">
+Only JS exposes a constructible task tool symbol; elsewhere it is the `task` builtin, toggled on the runtime.
+</Aside>
+
+The opt-in tool that lets the model itself spawn a teammate. Default OFF.
+
+## What to use instead
+
+There is no constructible `task` tool symbol to import in this port — the `task` tool is a
+**runtime builtin**, assembled automatically by
+[`Toolnexus.Agents.Runtime`](/api/elixir/runtime/runtime/) for any handle whose
+[`AgentDef`](/api/elixir/runtime/agent/) declares a `:team`. Declaring `team: [explore]` on
+`Toolnexus.Agents.agent/2` is the whole opt-in — the parent gets a `task` tool scoped to exactly
+that team (sorted by name, description composed from each teammate's `does`); a child gets no
+`task` tool unless its own definition also declares a team (recursion is opt-in, never inherited).
+There is nothing to construct or toggle beyond that `:team` field — see the delegation example on
+[`Toolnexus.Agents.Runtime`](/api/elixir/runtime/runtime/#examples).
+
+## See also
+
+- [`Toolnexus.Agents`](/api/elixir/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`Toolnexus.Agents.Runtime`](/api/elixir/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`Toolnexus.Agents.Handle`](/api/elixir/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`Toolnexus.Agents budget`](/api/elixir/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

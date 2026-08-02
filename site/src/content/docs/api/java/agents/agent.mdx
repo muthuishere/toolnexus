@@ -1,0 +1,184 @@
+---
+title: "A2A.agent"
+description: "Point at a remote agent's card and use it exactly like a local tool. — Java."
+sidebar:
+  label: "A2A.agent"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/A2A.java">A2A.java</a>
+</p>
+
+```java
+public record Agent(String card, Map<String, String> headers, Long timeout, Long pollEvery) {}
+
+public static Agent agent(String card)
+public static Agent agent(String card, Map<String, String> headers, Long timeout, Long pollEvery)
+```
+
+A remote peer publishes an **Agent Card** at `/.well-known/agent-card.json` describing its
+skills. `A2A.agent` is just the descriptor pointing at that card — a URL, optional headers,
+and two timing knobs. Nothing is fetched yet; resolving the card into callable tools is
+[`A2A.agentTools`](/api/java/agents/agent-tools/).
+
+## When to use it
+
+Whenever you want a toolkit to call out to another agent — yours or someone else's — the same
+way it calls an MCP tool or a plain function. Build an `Agent` from a card URL and hand it to
+[`Toolkit.Options.agents(...)`](/api/java/toolkit/create/), or resolve it yourself with
+`agentTools` when you want the raw `List<Tool>`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="A2A is for peer agents, HTTP tools are for plain endpoints">
+If the remote side is a stateless REST endpoint, reach for an [`HttpTool`](/api/java/http/tool/)
+instead — one request, one response, no polling. `A2A.agent` is for a genuine **agent** that
+runs its own loop and may take a while: the wire protocol is JSON-RPC submit-then-poll
+(`SendMessage` → repeated `GetTask`), not a single HTTP call.
+</Aside>
+
+Declaring peers one at a time with `agent(...)` works for a couple of agents. For a whole
+`agents` config block — mirroring how `mcpServers` is declared — parse it in one call with
+[`A2A.parseAgentsConfig`](/api/java/agents/parse-config/) instead.
+
+## Examples
+
+### 1. The smallest useful call — a bare card URL
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+
+public class Example {
+    public static void main(String[] args) {
+        A2A.Agent ag = A2A.agent("https://example.com/.well-known/agent-card.json");
+
+        if (!ag.card().equals("https://example.com/.well-known/agent-card.json")) {
+            throw new AssertionError(ag.card());
+        }
+        // Unset knobs stay null — A2A.agentTools substitutes the defaults
+        // (timeout 300000ms, pollEvery 1000ms) when it resolves the card.
+        if (ag.headers() != null) throw new AssertionError("expected no headers");
+        if (ag.timeout() != null) throw new AssertionError("expected default timeout");
+        if (ag.pollEvery() != null) throw new AssertionError("expected default pollEvery");
+
+        System.out.println("ok: " + ag.card());
+    }
+}
+```
+
+### 2. The realistic case — headers, timeout and poll interval
+
+`headers` values expand `${ENV_VAR}` at call time (never logged) — the same mechanism
+[`McpSource`](/api/java/mcp/load/) uses for remote MCP servers, reused here so a bearer token
+never sits in the descriptor as a literal string.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Map<String, String> headers = Map.of("Authorization", "Bearer ${MY_AGENT_TOKEN}");
+        A2A.Agent ag = A2A.agent(
+                "https://peer.internal/.well-known/agent-card.json",
+                headers,
+                60_000L,   // overall poll budget
+                500L);     // poll every 500ms — a chattier peer than the 1000ms default
+
+        if (!ag.headers().get("Authorization").equals("Bearer ${MY_AGENT_TOKEN}")) {
+            throw new AssertionError("headers stored as-is; expanded only at call time");
+        }
+        if (ag.timeout() != 60_000L) throw new AssertionError(ag.timeout());
+        if (ag.pollEvery() != 500L) throw new AssertionError(ag.pollEvery());
+
+        System.out.println("ok: " + ag.timeout() + "ms / " + ag.pollEvery() + "ms poll");
+    }
+}
+```
+
+### 3. The full surface — wired into a Toolkit, real local round trip
+
+A hermetic peer — a plain `HttpServer` serving the Agent Card plus a JSON-RPC endpoint — stands
+in for a real remote agent. `Toolkit.Options.agents(...)` resolves the descriptor into tools at
+build time; the resulting tool speaks the same submit→poll protocol
+[`A2A.agentTools`](/api/java/agents/agent-tools/) documents in detail.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer peer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        peer.createContext("/", ex -> {
+            try {
+                String path = ex.getRequestURI().getPath();
+                int port = peer.getAddress().getPort();
+                if ("/.well-known/agent-card.json".equals(path)) {
+                    String card = "{\"name\":\"librarian\",\"skills\":[{\"id\":\"lookup\",\"description\":\"Look something up\"}],"
+                            + "\"url\":\"http://127.0.0.1:" + port + "/\"}";
+                    send(ex, 200, card);
+                    return;
+                }
+                String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                Map<String, Object> rpc = Json.toMap(body);
+                Object id = rpc.get("id");
+                send(ex, 200, "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"result\":"
+                        + "{\"id\":\"t1\",\"status\":{\"state\":\"completed\"},"
+                        + "\"artifacts\":[{\"parts\":[{\"kind\":\"text\",\"text\":\"call number QA76\"}]}]}}");
+            } catch (Exception e) {
+                send(ex, 500, "err");
+            }
+        });
+        peer.start();
+        int port = peer.getAddress().getPort();
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options()
+                .builtins(false)
+                .agents(A2A.agent("http://127.0.0.1:" + port + "/.well-known/agent-card.json")))) {
+
+            Tool lookup = tk.get("librarian_lookup");
+            if (lookup == null) throw new AssertionError("librarian_lookup should be registered");
+            if (!lookup.source().equals("a2a")) throw new AssertionError(lookup.source());
+
+            ToolResult r = tk.execute("librarian_lookup", Map.of("task", "find a book on graphs"));
+            if (r.isError() || !r.output().equals("call number QA76")) throw new AssertionError(r.output());
+
+            System.out.println("ok: " + r.output());
+        } finally {
+            peer.stop(0);
+        }
+    }
+
+    private static void send(com.sun.net.httpserver.HttpExchange ex, int status, String body) throws java.io.IOException {
+        byte[] b = body.getBytes(StandardCharsets.UTF_8);
+        ex.getResponseHeaders().add("Content-Type", "application/json");
+        ex.sendResponseHeaders(status, b.length);
+        try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+    }
+}
+```
+
+## Fields and overloads
+
+| Member | Type | What it is |
+|---|---|---|
+| `agent(card)` | `Agent` | Bare descriptor — `headers`/`timeout`/`pollEvery` all `null` (defaults apply at resolve time). |
+| `agent(card, headers, timeout, pollEvery)` | `Agent` | Full descriptor. `timeout` default 300000ms; `pollEvery` default 1000ms. |
+| `Agent.card()` | `String` | URL of the Agent Card (`/.well-known/agent-card.json`). |
+| `Agent.headers()` | `Map<String,String>` | `${ENV}`-expanding headers, sent on every JSON-RPC POST; never logged. |
+| `Agent.timeout()` | `Long` | Overall poll budget in ms before a call times out. |
+| `Agent.pollEvery()` | `Long` | Interval between `GetTask` polls in ms. |
+
+## See also
+
+- [`A2A.agentTools`](/api/java/agents/agent-tools/) — resolve the descriptor into one `Tool` per advertised skill.
+- [`A2A.parseAgentsConfig`](/api/java/agents/parse-config/) — declare a whole `agents` block in config, mirroring `mcpServers`.
+- [`Toolkit.create`](/api/java/toolkit/create/) — `agents(...)` wires descriptors into the aggregated toolkit for you.
+- [`A2AServer.start`](/api/java/serve/a2a/) — the inbound mirror: expose your own toolkit as an A2A peer.

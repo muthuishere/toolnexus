@@ -1,0 +1,188 @@
+---
+title: Toolnexus.Mcp.parse_config
+description: Parse and validate an mcp.json without connecting to anything — the fast fail for a malformed or misspelled server block. Elixir.
+sidebar:
+  label: Mcp.parse_config
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/mcp.ex">elixir/lib/toolnexus/mcp.ex</a>
+</p>
+
+```elixir
+def parse_config(input) when is_map(input)
+def parse_config(input) when is_binary(input)
+```
+
+Reads MCP server configuration and normalises it into a flat map of server name → config. It
+**connects to nothing** — no ports, no HTTP. That is the whole point: it is the cheap check you can
+run before paying for [`Toolnexus.Mcp.load/1`](/api/elixir/mcp/load/).
+
+## When to use it
+
+- **Validate at startup or in a test**, so a typo in `mcp.json` fails immediately rather than
+  halfway through connecting to five servers.
+- **Inspect or modify config before loading** — filter servers by environment, inject a header,
+  disable one in CI.
+- **Accept config from somewhere other than a file** — a database, an env var, an API response.
+
+## Why this and not just calling load
+
+<Aside type="tip" title="load already parses — use this when you need the config itself">
+[`Toolnexus.Mcp.load/1`](/api/elixir/mcp/load/) parses internally, so you do not need to call this
+first in the ordinary path. Reach for it when you want the *config as data*.
+</Aside>
+
+<Aside type="note" title="A binary is a path OR raw JSON">
+The binary clause checks the first non-whitespace character: a leading `{` is treated as raw JSON,
+anything else as a file path. That means you can pass either without saying which.
+</Aside>
+
+The map clause round-trips through `Jason.encode!/1` and `Jason.decode!/1`, which normalises atom
+keys to the JSON string shape — so `%{mcpServers: %{...}}` and `%{"mcpServers" => %{...}}` both
+work and both give you string keys back.
+
+## Examples
+
+### 1. Parse the shared fixture from disk
+
+This is `examples/mcp.json`, the fixture every port is tested against.
+
+```elixir test
+alias Toolnexus.Mcp
+
+# TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+repo = System.get_env("TOOLNEXUS_REPO") || "."
+fixture = Path.join([repo, "examples", "mcp.json"])
+
+config = Mcp.parse_config(fixture)
+
+# The `mcpServers` wrapper is unwrapped — you get the servers directly.
+names = config |> Map.keys() |> Enum.sort()
+true = names == ["everything", "example-remote"]
+
+local = config["everything"]
+true = local["type"] == "local"
+true = local["command"] == ["npx", "-y", "@modelcontextprotocol/server-everything"]
+true = local["timeout"] == 30_000
+
+remote = config["example-remote"]
+true = remote["url"] == "https://example.com/mcp"
+# Disabled servers are still returned — parsing does not filter.
+true = remote["enabled"] == false
+
+IO.puts("ok: #{Enum.join(names, ", ")}")
+```
+
+<Aside type="caution">
+Parsing does **not** drop disabled servers. `enabled: false` is preserved in the returned config
+and is honoured later, by `load/1`. If you are counting servers, count the enabled ones yourself.
+</Aside>
+
+### 2. Wrapper spellings, raw JSON, and atom keys
+
+`mcpServers`, `servers` and `mcp` all mean the same thing.
+
+```elixir test
+alias Toolnexus.Mcp
+
+server = %{"type" => "local", "command" => ["echo", "hi"]}
+
+for wrapper <- ["mcpServers", "servers", "mcp"] do
+  config = Mcp.parse_config(%{wrapper => %{"a" => server}})
+  true = Map.keys(config) == ["a"]
+  true = config["a"]["command"] == ["echo", "hi"]
+end
+
+# Raw JSON in a binary is detected by the leading brace.
+from_json = Mcp.parse_config(~s({"mcpServers":{"a":{"type":"local","command":["echo","hi"]}}}))
+true = Map.keys(from_json) == ["a"]
+
+# Atom keys are normalised to strings on the way through.
+from_atoms = Mcp.parse_config(%{mcpServers: %{a: %{type: "local", command: ["echo", "hi"]}}})
+true = Map.keys(from_atoms) == ["a"]
+true = from_atoms["a"]["type"] == "local"
+
+IO.puts("ok: 3 spellings + raw json + atom keys -> a")
+```
+
+That last case is the one to remember: you get **string keys back regardless of what you put in**.
+
+### 3. Validate before loading, and fail loudly
+
+The pattern this function exists for — check the config, then decide whether to connect.
+
+```elixir test
+alias Toolnexus.Mcp
+
+validate = fn raw ->
+  config = Mcp.parse_config(raw)
+
+  Enum.reduce(config, {[], []}, fn {name, cfg}, {enabled, problems} ->
+    # Disabled either way round: `enabled: false` or `disabled: true`.
+    if cfg["disabled"] == true or cfg["enabled"] == false do
+      {enabled, problems}
+    else
+      problem =
+        cond do
+          cfg["type"] == "remote" and (cfg["url"] in [nil, ""]) ->
+            "#{name}: remote server without a url"
+
+          cfg["type"] != "remote" and (cfg["command"] in [nil, []]) ->
+            "#{name}: local server without a command"
+
+          true ->
+            nil
+        end
+
+      {[name | enabled], if(problem, do: [problem | problems], else: problems)}
+    end
+  end)
+  |> then(fn {e, p} -> {Enum.sort(e), Enum.sort(p)} end)
+end
+
+{good_enabled, good_problems} =
+  validate.(~s({"mcpServers":{
+    "ok_local":{"type":"local","command":["npx","server"]},
+    "ok_remote":{"type":"remote","url":"https://example.com/mcp"},
+    "off":{"type":"local","command":["x"],"enabled":false}}}))
+
+true = good_enabled == ["ok_local", "ok_remote"]
+true = good_problems == []
+
+{_, bad_problems} =
+  validate.(~s({"mcpServers":{
+    "broken_remote":{"type":"remote"},
+    "broken_local":{"type":"local","command":[]}}}))
+
+true = length(bad_problems) == 2
+
+# Malformed JSON raises rather than returning a half-config.
+true =
+  try do
+    Mcp.parse_config(~s({not json))
+    false
+  rescue
+    _ -> true
+  end
+
+IO.puts("ok: #{Enum.join(good_enabled, ",")} | problems: #{length(bad_problems)}")
+```
+
+## Accepted input
+
+| Input | Behaviour |
+|---|---|
+| `"./mcp.json"` | A binary not starting with `{` — read from disk with `File.read!/1`. |
+| `~s({...})` | A binary starting with `{` — decoded directly. |
+| `%{...}` | A map — round-tripped through JSON, normalising atom keys to strings. |
+
+Wrapped under `mcpServers`, `servers` or `mcp` — all three are unwrapped.
+
+## See also
+
+- [`Toolnexus.Mcp.load`](/api/elixir/mcp/load/) — parse *and* connect
+- [`Toolnexus.Mcp.list_tools`](/api/elixir/mcp/list-tools/) — what each server would expose
+- [`Toolnexus.create_toolkit`](/api/elixir/toolkit/create/) — takes `:mcp_config` in these forms

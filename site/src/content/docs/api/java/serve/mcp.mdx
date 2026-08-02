@@ -1,0 +1,209 @@
+---
+title: "McpServe.build"
+description: "The inbound MCP profile: any MCP client can call your tools. — Java."
+sidebar:
+  label: "McpServe.build"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7C</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/McpServe.java">McpServe.java</a>
+</p>
+
+```java
+// the ergonomic entry — Toolkit.ServeOptions.mcp(...) opts in:
+public A2AServer.ServeHandle serve(String addr, Toolkit.ServeOptions opts)
+
+// the filtering helper used to build the exposed surface:
+public static List<Tool> exposedMcpTools(List<Tool> tools, McpServe.MCPServeConfig cfg)
+```
+
+Mounts a **streamable-HTTP MCP server** at `POST /mcp` on the same server `A2AServer.start`
+runs — built on the same official `io.modelcontextprotocol.sdk:mcp` the client side already
+uses. Where the [A2A profile](/api/java/serve/a2a/) advertises **skills** and fulfils a Task
+through the whole `LlmClient` loop, the MCP profile advertises the toolkit's **unified tools**
+(every source — mcp · skill · native · http · builtin · a2a) and dispatches each `tools/call`
+straight to `Tool.execute`. There is no `client`, no Task, and no `TaskStore` here — the calling
+MCP client *is* the LLM host.
+
+## When to use it
+
+Whenever you want toolnexus to act as a **universal MCP gateway**: aggregate N MCP servers plus
+skills plus your own native/HTTP tools behind one `Toolkit`, then re-expose the union as a single
+MCP server any MCP client — Claude Desktop, an IDE, another toolnexus toolkit — can connect to.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="MCP serve exposes raw tools; A2A serve exposes skills">
+Reach for the MCP profile when the caller already knows exactly which tool it wants — no model
+decides on your side, `tools/call` dispatches directly. Reach for the
+[A2A profile](/api/java/serve/a2a/) instead when the caller only has a natural-language task and
+needs *your* model to figure out which tools to call. Both profiles mount independently on the
+same `serve(addr, opts)` call — a toolkit can be both an MCP server and an A2A agent at once.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — `exposedMcpTools` filters by name
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Tool echo = NativeTool.of("echo", "echoes back",
+                Map.of("type", "object", "properties", Map.of("text", Map.of("type", "string"))),
+                (Map<String, Object> a) -> a.get("text"));
+        Tool ping = NativeTool.of("ping", "health check", Map.of("type", "object", "properties", Map.of()),
+                (Map<String, Object> a) -> "pong");
+        List<Tool> tools = List.of(echo, ping);
+
+        // No config ⇒ every tool is exposed.
+        List<Tool> all = McpServe.exposedMcpTools(tools, null);
+        if (all.size() != 2) throw new AssertionError(all.size());
+
+        // A named allowlist narrows the surface; an unknown name is simply ignored, never an error.
+        List<Tool> narrowed = McpServe.exposedMcpTools(tools,
+                new McpServe.MCPServeConfig().tools(List.of("echo", "does-not-exist")));
+        if (narrowed.size() != 1 || !narrowed.get(0).name().equals("echo")) throw new AssertionError(narrowed);
+
+        System.out.println("ok: " + all.size() + " tools total, " + narrowed.size() + " exposed");
+    }
+}
+```
+
+### 2. The realistic case — a real MCP client round trip over `/mcp`
+
+The port's own MCP client (the same SDK it uses to connect to remote servers) connects to a
+`toolkit.serve(...)` instance and drives `tools/list` + `tools/call` — a genuine local
+client↔server round trip, no external network.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import io.modelcontextprotocol.client.McpClient;
+import io.modelcontextprotocol.client.McpSyncClient;
+import io.modelcontextprotocol.client.transport.HttpClientStreamableHttpTransport;
+import io.modelcontextprotocol.json.jackson3.JacksonMcpJsonMapperSupplier;
+import io.modelcontextprotocol.spec.McpSchema;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Tool echo = NativeTool.of("echo", "echoes back",
+                Map.of("type", "object", "properties", Map.of("text", Map.of("type", "string")),
+                       "required", java.util.List.of("text")),
+                (Map<String, Object> a) -> a.get("text"));
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(echo))) {
+            A2AServer.ServeHandle handle = tk.serve("127.0.0.1:0",
+                    new Toolkit.ServeOptions().mcp(new McpServe.MCPServeConfig().name("gateway").version("1.0.0")));
+            try {
+                HttpClientStreamableHttpTransport transport = HttpClientStreamableHttpTransport
+                        .builder(handle.url() + "/mcp")
+                        .jsonMapper(new JacksonMcpJsonMapperSupplier().get())
+                        .build();
+                McpSyncClient client = McpClient.sync(transport)
+                        .clientInfo(new McpSchema.Implementation("docs-example", "1.0.0"))
+                        .build();
+                client.initialize();
+                try {
+                    if (!"gateway".equals(client.getServerInfo().name())) throw new AssertionError(client.getServerInfo());
+
+                    boolean hasEcho = client.listTools().tools().stream().anyMatch(t -> t.name().equals("echo"));
+                    if (!hasEcho) throw new AssertionError("echo should be advertised");
+
+                    McpSchema.CallToolResult res = client.callTool(
+                            new McpSchema.CallToolRequest("echo", Map.of("text", "over mcp")));
+                    String text = ((McpSchema.TextContent) res.content().get(0)).text();
+                    if (!"over mcp".equals(text)) throw new AssertionError(text);
+
+                    System.out.println("ok: " + text);
+                } finally {
+                    client.closeGracefully();
+                }
+            } finally {
+                handle.stop();
+            }
+        }
+    }
+}
+```
+
+### 3. The full surface — `onCall` telemetry, and an erroring tool never crashes the server
+
+`tools/call` maps a thrown exception to `isError:true` text, and the server keeps serving —
+`onCall` fires with the source and timing of every inbound call either way.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import io.modelcontextprotocol.client.McpClient;
+import io.modelcontextprotocol.client.McpSyncClient;
+import io.modelcontextprotocol.client.transport.HttpClientStreamableHttpTransport;
+import io.modelcontextprotocol.json.jackson3.JacksonMcpJsonMapperSupplier;
+import io.modelcontextprotocol.spec.McpSchema;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Tool boom = NativeTool.of("boom", "always throws", Map.of("type", "object", "properties", Map.of()),
+                (Map<String, Object> a) -> { throw new RuntimeException("kaboom"); });
+        List<McpServe.OnCallEvent> calls = new CopyOnWriteArrayList<>();
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(boom))) {
+            A2AServer.ServeHandle handle = tk.serve("127.0.0.1:0",
+                    new Toolkit.ServeOptions().mcp(new McpServe.MCPServeConfig()).onCall(calls::add));
+            try {
+                HttpClientStreamableHttpTransport transport = HttpClientStreamableHttpTransport
+                        .builder(handle.url() + "/mcp")
+                        .jsonMapper(new JacksonMcpJsonMapperSupplier().get())
+                        .build();
+                McpSyncClient client = McpClient.sync(transport)
+                        .clientInfo(new McpSchema.Implementation("docs-example", "1.0.0"))
+                        .build();
+                client.initialize();
+                try {
+                    McpSchema.CallToolResult res = client.callTool(new McpSchema.CallToolRequest("boom", Map.of()));
+                    if (!Boolean.TRUE.equals(res.isError())) throw new AssertionError("expected isError");
+                    String text = ((McpSchema.TextContent) res.content().get(0)).text();
+                    if (!text.contains("kaboom")) throw new AssertionError(text);
+
+                    if (calls.size() != 1) throw new AssertionError(calls.size());
+                    if (!calls.get(0).name().equals("boom") || !calls.get(0).isError()) throw new AssertionError(calls.get(0));
+
+                    // the server survives — it's still answering after the error.
+                    if (client.listTools().tools().isEmpty()) throw new AssertionError("server should still be up");
+
+                    System.out.println("ok: " + text + " (onCall fired " + calls.size() + "x)");
+                } finally {
+                    client.closeGracefully();
+                }
+            } finally {
+                handle.stop();
+            }
+        }
+    }
+}
+```
+
+## Fields and overloads
+
+| Member | Type | What it is |
+|---|---|---|
+| `Toolkit.ServeOptions.mcp` | `MCPServeConfig` | Opting in mounts `POST /mcp`; `null` (and no config-block fallback) ⇒ no MCP surface. |
+| `MCPServeConfig.name` / `.version` | `String` | `initialize` `serverInfo`; defaults `"toolnexus"` / `"0.1.0"`. |
+| `MCPServeConfig.tools` | `List<String>` | Allowlist by final exposed tool name; `null` ⇒ every toolkit tool. Unknown names ignored. |
+| `exposedMcpTools(tools, cfg)` | `List<Tool>` | The filtering step above, callable standalone. |
+| `tools/list` | — | `name` used **verbatim** (already sanitized at registration — not re-sanitized like A2A skill ids); `inputSchema` = `Tool.inputSchema()`. |
+| `tools/call` | — | Dispatches to `Tool.execute`; a throw becomes `isError:true`, never crashes the server. |
+| `OnCall` | functional interface | `accept(OnCallEvent{name, source, ms, isError})` per inbound `tools/call`. |
+
+## See also
+
+- [`A2AServer.start`](/api/java/serve/a2a/) — the sibling inbound profile: skills over A2A, with a model in the loop.
+- [`McpSource.load`](/api/java/mcp/load/) — the outbound mirror: connect to someone else's MCP server.
+- [`Toolkit.create`](/api/java/toolkit/create/) — aggregates every tool source this profile re-exposes.

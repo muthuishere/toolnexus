@@ -1,0 +1,285 @@
+---
+title: "Agent"
+description: "Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent. — Python."
+sidebar:
+  label: "Agent"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/agents/surface.py">python/src/toolnexus/agents/surface.py</a>
+</p>
+
+```python
+from toolnexus.agents import agent, Agent, Budget
+
+def agent(
+    name: str,
+    *,
+    does: str,
+    uses: dict | None = None,
+    soul: str | None = None,
+    soul_file: str | None = None,
+    team: list[Agent] | None = None,
+    budget: Budget | None = None,
+    model: str | None = None,          # default "inherit"
+    wait_for: Callable | None = None,
+    on_spawn: Callable | None = None,
+    on_close: Callable | None = None,
+    hooks: Any | None = None,
+    on_metric: Callable | None = None,
+) -> Agent
+
+# Agent.run(prompt, **runtime_opts) -> TaskResult      # one-shot: build → run → tear down
+# Agent.as_tool(**runtime_opts)     -> Tool             # the §7D axiom: an Agent IS a Tool
+```
+
+The one new noun of the §7D "Level-1 surface": `agent(...)` (sugar for the `Agent`
+class) bundles an identity (`does`, `soul`), a filtered toolkit view (`uses`), a
+`team` (delegation targets), and a `budget` into one composable value. `Agent.run`
+executes it standalone; `Agent.as_tool()` is the other half of the axiom — **an Agent
+IS a Tool** — dropping it straight into another toolkit's `extra_tools`.
+
+## When to use it
+
+- You want an isolated sub-conversation with its own system prompt and toolkit view,
+  invocable exactly like any other tool from a parent's model.
+- You are composing a small team: an `explorer` with read-only tools, a `coder` whose
+  `team=[explorer]` gives it access to delegate (the model-facing `task` tool, opt-in
+  — see [the task tool](/api/python/runtime/task-tool/)).
+- You want `.run(prompt)` directly — a one-shot call with no parent, useful for tests
+  or a standalone batch job that happens to use the §7D machinery (budgets, escalation).
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for AgentRuntime directly for multi-turn or fan-out control">
+`Agent.run` is Level 1: spawn → wake → wait → close, fused, one prompt in, one
+`TaskResult` out. For anything that needs the six verbs individually — posting
+follow-ups, waiting on several children concurrently, interrupting one without
+closing its siblings — build an [`AgentRuntime`](/api/python/runtime/runtime/)
+yourself and call `rt.spawn(rt.root, "name")`.
+</Aside>
+
+`Agent.as_tool()` is the axiom's payoff: a classic-API toolkit (`extra_tools=[...]`)
+never needs to know whether a tool is a plain function, an MCP call, or a whole
+isolated sub-agent — they are the same `Tool` shape. The sub-agent's own turns, tool
+calls and transcript never leak into the parent; only its final text plus
+`{agent, turns, totalTokens}` metadata cross the boundary.
+
+## Examples
+
+<Aside type="note" title="Hermetic on purpose">
+Every example scripts the LLM with a plain in-process `HttpTransport` stand-in —
+canned OpenAI-shaped replies keyed by model, popped in call order. No network, no
+external process; `AgentRuntime` accepts any object with a `.post()` method.
+</Aside>
+
+### 1. The smallest useful call — one agent, `.as_tool()`, no team
+
+```python test
+import asyncio
+
+from toolnexus.agents import agent
+
+
+class ScriptedTransport:
+    """Canned OpenAI-shaped replies, popped per model — no network, no real LLM."""
+
+    def __init__(self, scripts):
+        self._scripts = {k: list(v) for k, v in scripts.items()}
+
+    def post(self, url, headers, payload, timeout):
+        model = payload.get("model")
+        queue = self._scripts[model]
+        return queue.pop(0)
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError
+
+
+def reply(text):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+    }
+
+
+async def main():
+    explorer = agent("explorer", does="read-only research")
+    tool = explorer.as_tool(
+        transport=ScriptedTransport({"stub-model": [reply("found: Chennai is sunny")]}),
+        llm={"base_url": "http://mock.local", "style": "openai", "model": "stub-model", "api_key": "unused"},
+    )
+
+    assert tool.name == "explorer"
+    assert tool.description == "read-only research"
+
+    result = await tool.execute({"prompt": "what's the weather in Chennai?"})
+
+    assert result.is_error is False
+    assert result.output == "found: Chennai is sunny"
+    assert result.metadata == {"agent": "explorer", "turns": 1, "totalTokens": 8}
+
+    print("ok:", result.output, "|", result.metadata)
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — a toolkit view (`uses`), a scripted tool call, `.run()` directly
+
+```python test
+import asyncio
+
+from toolnexus import define_tool
+from toolnexus.agents import agent
+
+
+class ScriptedTransport:
+    def __init__(self, scripts):
+        self._scripts = {k: list(v) for k, v in scripts.items()}
+
+    def post(self, url, headers, payload, timeout):
+        return self._scripts[payload.get("model")].pop(0)
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError
+
+
+def tool_call_reply(name, args):
+    import json
+    return {
+        "choices": [{
+            "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": "c1", "type": "function",
+                                 "function": {"name": name, "arguments": json.dumps(args)}}],
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+
+
+def final_reply(text):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+    }
+
+
+async def main():
+    def lookup(order_id: str) -> str:
+        return f"{order_id}: shipped"
+
+    lookup_tool = define_tool(
+        lookup, name="lookup_order", description="Look up an order by id",
+        input_schema={"type": "object", "properties": {"order_id": {"type": "string"}}, "required": ["order_id"]},
+    )
+
+    support = agent("support", does="answers order-status questions", uses={"tools": [lookup_tool]})
+
+    scripts = {"stub-model": [
+        tool_call_reply("lookup_order", {"order_id": "A-42"}),
+        final_reply("Order A-42 has shipped."),
+    ]}
+    r = await support.run(
+        "where is order A-42?",
+        transport=ScriptedTransport(scripts),
+        llm={"base_url": "http://mock.local", "style": "openai", "model": "stub-model", "api_key": "unused"},
+    )
+
+    assert r.status == "done"
+    assert r.text == "Order A-42 has shipped."
+    assert r.turns == 2  # one tool-call round trip, one final answer
+    assert r.total_tokens == 15 + 6
+    assert r.is_error is False
+
+    print("ok:", r.text, "| turns:", r.turns)
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — a `team`, a `Budget`, and `.as_tool()` inside a parent toolkit
+
+Listing agents in `team=[...]` IS the wiring: it both scopes the model-facing `task`
+tool (§7D) to those names and becomes the registry a runtime builds. Nesting
+`.as_tool()` into `create_toolkit(extra_tools=[...])` shows the whole axiom at once.
+
+```python test
+import asyncio
+import json
+
+from toolnexus import create_toolkit
+from toolnexus.agents import agent, Budget
+
+
+class ScriptedTransport:
+    def __init__(self, scripts):
+        self._scripts = {k: list(v) for k, v in scripts.items()}
+
+    def post(self, url, headers, payload, timeout):
+        return self._scripts[payload.get("model")].pop(0)
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError
+
+
+def final_reply(text, tokens=6):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": tokens - 2, "completion_tokens": 2, "total_tokens": tokens},
+    }
+
+
+async def main():
+    explorer = agent("explorer", does="read-only research", budget=Budget(max_turns=2))
+    coordinator = agent(
+        "coordinator",
+        does="plans and delegates research",
+        team=[explorer],  # team membership = task-tool scope, §7D
+        budget=Budget(max_turns=3, max_tokens=1000),
+    )
+
+    coord_tool = coordinator.as_tool(
+        transport=ScriptedTransport({"stub-model": [final_reply("plan: ask explorer, then summarize")]}),
+        llm={"base_url": "http://mock.local", "style": "openai", "model": "stub-model", "api_key": "unused"},
+    )
+
+    # The axiom: drop a whole sub-agent (with its own team) into a classic toolkit.
+    parent_tk = await create_toolkit(builtins=False, extra_tools=[coord_tool])
+    try:
+        r = await parent_tk.execute("coordinator", {"prompt": "research the launch window"})
+        assert r.is_error is False
+        assert r.output == "plan: ask explorer, then summarize"
+        assert r.metadata["agent"] == "coordinator"
+
+        print("ok:", r.output, "|", r.metadata)
+    finally:
+        await parent_tk.close()
+
+
+asyncio.run(main())
+```
+
+## `agent(name, **spec)` fields
+
+| Field | Type | What it does |
+|---|---|---|
+| `does` | `str` | Required. The routing description a delegating model (or the `task` tool's listing) sees. |
+| `uses` | `dict \| None` | The toolkit view — `{"tools": [...]}`. Omit ⇒ the agent gets no tools beyond a `team`'s `task` tool. |
+| `soul` / `soul_file` | `str \| None` | Inline system prompt, or a path read at registry-build time. |
+| `team` | `list[Agent] \| None` | Delegation targets — presence is what opts an agent into the `task` tool. |
+| `budget` | `Budget \| None` | Hierarchical caps — see [`Budget`](/api/python/runtime/budgets/). |
+| `model` | `str \| None` | Default `"inherit"` — uses the runtime's configured model. |
+| `wait_for` | `Callable \| None` | §10 interpreter authority for this agent's own suspensions and any it escalates to. |
+| `on_spawn` / `on_close` | `Callable \| None` | Lifecycle hooks — once pre-first-turn, once pre-final-checkpoint. |
+| `hooks` / `on_metric` | `Any \| None` | The §8 seams, forwarded verbatim — replace, never merge, the runtime-wide values. |
+
+## See also
+
+- [`AgentRuntime`](/api/python/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`Handle`](/api/python/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`Budget`](/api/python/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

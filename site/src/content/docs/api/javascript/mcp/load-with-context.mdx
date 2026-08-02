@@ -1,0 +1,171 @@
+---
+title: "loadMcp"
+description: "The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process. — JavaScript."
+sidebar:
+  label: "loadMcp"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2 Gap 3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/mcp.ts">js/src/mcp.ts</a>
+</p>
+
+```ts
+function loadMcp(
+  input: string | object,
+  opts?: { waitFor?: (request: Request) => Promise<Answer>; signal?: AbortSignal }
+): Promise<McpSource>
+```
+
+This is [`loadMcp`](/api/javascript/mcp/load/) — one function, not an overload — looked at through
+its two time-bounding knobs instead of its happy path: a per-server `timeout` in the config, and
+`opts.signal` across the whole call. Both exist so a slow or hung MCP server never leaves your
+process waiting (or leaking a child) indefinitely.
+
+## When to use it
+
+- Your process has a deadline — a request handler, a CLI command with a `--timeout`, a cron job —
+  and MCP connects must not blow through it.
+- A server has hung before (a stdio child that started but never answers `tools/list`) and you
+  need that isolated as `"failed"` rather than freezing the whole load.
+- You are composing `loadMcp` under your own cancellation (a parent `AbortController` you already
+  have for the surrounding operation) and want it to propagate.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Skip this entirely if a hung server has never bitten you">
+Every config field here has a sane default: `timeout` defaults to 30s per server, and `signal` is
+optional. If you are prototyping against servers you trust, plain [`loadMcp`](/api/javascript/mcp/load/)
+with no `opts` is all you need — read this page when a specific server or deadline needs bounding.
+</Aside>
+
+The two knobs answer two different questions. A per-server `timeout` in the config answers "how
+long is *this* server allowed to take" and isolates just that server as `"failed"` — the others
+still connect. `opts.signal` answers "how long is the *whole call* allowed to take" and rejects
+`loadMcp` outright the moment it fires, mid-connect or mid-list, on every server at once.
+
+## Examples
+
+### 1. The smallest useful call — a signal that never fires
+
+Passing a signal costs nothing when nothing goes wrong. Wire it in from day one so a deadline
+added later needs no new code.
+
+```ts test
+import assert from "node:assert"
+import { loadMcp } from "toolnexus"
+
+const mcp = await loadMcp(
+  { search: { type: "remote", url: "https://example.com/mcp", enabled: false } },
+  { signal: AbortSignal.timeout(10_000) },
+)
+
+assert.deepEqual(mcp.status, { search: "disabled" })
+await mcp.close()
+
+console.log("ok:", JSON.stringify(mcp.status))
+```
+
+### 2. A per-server timeout isolates a hung server
+
+The realistic case: one real MCP server (over stdio) whose `tools/list` never answers, configured
+with a short `timeout`. The load still completes — the hung server is reported `"failed"`, bounded
+by its own timeout rather than hanging the whole call.
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import path from "node:path"
+import { loadMcp } from "toolnexus"
+
+// A real MCP server whose tools/list handler never resolves. Written next to
+// toolnexus's own source so it can resolve `@modelcontextprotocol/sdk` — a real
+// project just keeps a file like this alongside its own dependency on the SDK.
+const hangScript = `
+import { Server } from "@modelcontextprotocol/sdk/server/index.js"
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
+const server = new Server({ name: "hang", version: "0" }, { capabilities: { tools: {} } })
+server.setRequestHandler(ListToolsRequestSchema, () => new Promise(() => {}))
+await server.connect(new StdioServerTransport())
+`
+const scriptPath = path.resolve(process.cwd(), "js", `_docs_mcp_hang_demo_${Date.now()}.mjs`)
+fs.writeFileSync(scriptPath, hangScript)
+
+try {
+  const t0 = Date.now()
+  const mcp = await loadMcp({ hang: { type: "local", command: ["node", scriptPath], timeout: 400 } })
+  const elapsedMs = Date.now() - t0
+
+  assert.equal(mcp.status.hang, "failed", "bounded, isolated — not hung forever")
+  assert.ok(elapsedMs < 3_000, `bounded by the 400ms timeout, took ${elapsedMs}ms`)
+
+  await mcp.close()
+  console.log("ok:", mcp.status.hang, `in ${elapsedMs}ms`)
+} finally {
+  fs.rmSync(scriptPath, { force: true })
+}
+```
+
+### 3. The full surface — a parent AbortController cancels the whole load
+
+`opts.signal` firing rejects `loadMcp` promptly — it does not wait out the per-server timeout —
+and every client created so far, including one still mid-connect, still gets `close()`d. No
+orphaned child process, even on cancellation.
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import path from "node:path"
+import { loadMcp } from "toolnexus"
+
+const hangScript = `
+import { Server } from "@modelcontextprotocol/sdk/server/index.js"
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
+const server = new Server({ name: "hang", version: "0" }, { capabilities: { tools: {} } })
+server.setRequestHandler(ListToolsRequestSchema, () => new Promise(() => {}))
+await server.connect(new StdioServerTransport())
+`
+const scriptPath = path.resolve(process.cwd(), "js", `_docs_mcp_abort_demo_${Date.now()}.mjs`)
+fs.writeFileSync(scriptPath, hangScript)
+
+try {
+  const ctrl = new AbortController()
+  setTimeout(() => ctrl.abort(), 150)
+
+  const t0 = Date.now()
+  await assert.rejects(
+    // A generous per-server timeout — the PARENT signal is what actually cuts this short.
+    loadMcp({ hang: { type: "local", command: ["node", scriptPath], timeout: 60_000 } }, { signal: ctrl.signal }),
+    "parent abort rejects rather than waiting the full 60s timeout",
+  )
+  const elapsedMs = Date.now() - t0
+  assert.ok(elapsedMs < 3_000, `aborted promptly, took ${elapsedMs}ms`)
+
+  console.log("ok: aborted in", elapsedMs, "ms")
+} finally {
+  fs.rmSync(scriptPath, { force: true })
+}
+```
+
+<Aside type="caution">
+An already-connected server's `close()` is called for you when `loadMcp` throws — but only for
+servers `loadMcp` itself created. If you also hold a reference to `mcp.close` from a *previous*
+successful call, that one is unaffected; each `loadMcp` call owns only the clients it created.
+</Aside>
+
+## Options
+
+| Field | Type | Scope | What it does |
+|---|---|---|---|
+| `<server>.timeout` | `number` (ms) | one server | Bounds that server's connect + list. Default 30000. On expiry: `status[name] = "failed"`, isolated. |
+| `opts.signal` | `AbortSignal` | the whole call | Bounds every server at once. On abort: `loadMcp` **rejects**, and every client created so far is closed. |
+
+## See also
+
+- [`loadMcp`](/api/javascript/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+- [`listMcpTools`](/api/javascript/mcp/list-tools/) — List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+- [`parseMcpConfig`](/api/javascript/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
+- [`elicitationToRequest`](/api/javascript/mcp/elicitation/) — Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.

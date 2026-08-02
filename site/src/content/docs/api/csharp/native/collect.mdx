@@ -1,0 +1,129 @@
+---
+title: "Tools.FromObject"
+description: "Sweep a module or class and collect every function marked as a tool. — C#."
+sidebar:
+  label: "Tools.FromObject"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Tools.cs">Tools.cs</a>
+</p>
+
+```csharp
+public static List<ITool> FromObject(object target)
+```
+
+<Aside type="caution" title="It is Tools.FromObject, not Tools.FromObject">
+The C# public API names this method `FromObject`, not `Collect` — there is no `Tools.FromObject` symbol
+in the port. `FromObject` is what plays the role the other ports call "collect": reflect over
+`target`'s public instance methods, keep the ones carrying
+[`[ToolMethod]`](/api/csharp/native/reflect/), and turn each into an [`ITool`](/api/csharp/types/tool/)
+with `Source == "native"` — the schema inferred from the method's parameters and any `[Param]`
+attributes.
+</Aside>
+
+Order follows `GetMethods(BindingFlags.Public | BindingFlags.Instance)` — reflection's own method
+enumeration order, not source order. Methods without `[ToolMethod]` are skipped entirely, including
+every inherited `object` method (`ToString`, `Equals`, `GetHashCode`, `GetType`).
+
+## When to use it
+
+You have a class — a service, a repository, a facade over some subsystem — with several methods
+already marked `[ToolMethod]`, and you want the whole set as one call rather than building each tool
+by hand. It's also how you'd expose the *same* instance's tools to more than one toolkit or client
+without re-annotating anything.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="One call per instance, not per method">
+Call `FromObject` once per instance — it returns every annotated method on that object in one list.
+For a single standalone function that has nothing to do with a class, skip attributes entirely and
+use [`NativeTool.Of`](/api/csharp/native/define-tool/) directly.
+</Aside>
+
+## Examples
+
+### 1. Sweep a class with several annotated methods
+
+```csharp test
+using Toolnexus;
+
+var svc = new FileOpsService();
+var tools = Tools.FromObject(svc);
+
+var names = tools.Select(t => t.Name).OrderBy(n => n, StringComparer.Ordinal).ToList();
+if (!names.SequenceEqual(new[] { "list_files", "read_file" })) throw new Exception(string.Join(",", names));
+if (tools.Any(t => t.Source != "native")) throw new Exception("expected every tool to be native");
+
+Console.WriteLine($"ok: {string.Join(", ", names)}");
+
+class FileOpsService
+{
+    [ToolMethod(Name = "read_file", Description = "Read a file's contents")]
+    public string ReadFile(string path) => $"contents of {path}";
+
+    [ToolMethod(Name = "list_files", Description = "List files under a directory")]
+    public string ListFiles(string dir) => $"files under {dir}";
+
+    // No [ToolMethod] — never becomes a tool, no matter how public.
+    public string Helper() => "not a tool";
+}
+```
+
+### 2. Unannotated methods, including inherited ones, are skipped
+
+```csharp test
+using Toolnexus;
+
+var empty = new PlainService();
+var tools = Tools.FromObject(empty);
+
+// PlainService has public methods (ToString, Equals, DoWork) but none carry [ToolMethod].
+if (tools.Count != 0) throw new Exception($"expected 0 tools, got {tools.Count}: {string.Join(",", tools.Select(t => t.Name))}");
+
+Console.WriteLine("ok: an unannotated class collects 0 tools");
+
+class PlainService
+{
+    public string DoWork() => "done"; // not marked — not a tool
+}
+```
+
+### 3. The collected tools drop straight into a toolkit
+
+```csharp test
+using Toolnexus;
+
+var svc = new MathService();
+var collected = Tools.FromObject(svc);
+
+// Same path NativeTool tools take: ExtraTools on Toolkit.Options. The toolkit also carries the
+// built-in tools by default, so don't assert on a total count.
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = collected });
+
+if (tk.Get("add") == null) throw new Exception($"toolkit missing 'add': {string.Join(",", tk.Tools().Select(t => t.Name))}");
+
+var res = await tk.Get("add")!.ExecuteAsync(new Dictionary<string, object?> { ["a"] = 2, ["b"] = 3 });
+if (res.Output != "5") throw new Exception(res.Output);
+
+Console.WriteLine($"ok: add(2,3) -> {res.Output}");
+
+class MathService
+{
+    [ToolMethod(Name = "add", Description = "Add two integers")]
+    public string Add(int a, int b) => (a + b).ToString();
+}
+```
+
+## Parameters
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `target` | `object` | Any instance. Its public instance methods carrying `[ToolMethod]` become the returned tools. |
+
+## See also
+
+- [`NativeTool.Of`](/api/csharp/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.
+- [`ToolMethodAttribute`](/api/csharp/native/reflect/) — Derive the schema from the function signature or annotation instead of writing it by hand.

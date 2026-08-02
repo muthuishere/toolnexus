@@ -1,0 +1,191 @@
+---
+title: ToolContext
+description: The per-call context handed to ExecuteAsync — a CancellationToken, a timeout in milliseconds, and the answer that resolves a suspension. C#.
+sidebar:
+  label: ToolContext
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/ToolContext.cs">ToolContext.cs</a>
+</p>
+
+```csharp
+public sealed class ToolContext
+{
+    public ToolContext(long? timeoutMs = null, CancellationToken cancellationToken = default, Answer? answer = null);
+
+    public long? TimeoutMs { get; }
+    public CancellationToken CancellationToken { get; }
+    public Answer? Answer { get; }
+    public bool IsCancelled { get; }   // => CancellationToken.IsCancellationRequested
+}
+```
+
+The optional second argument to `ExecuteAsync`. It carries the three things a tool needs to be a
+good citizen: a cancellation token, a deadline, and — on a resumed call — the answer to a question
+it previously asked.
+
+## When to use it
+
+Read `ctx` when your tool does anything **slow or interactive**:
+
+- **`IsCancelled` / `CancellationToken`** — long work that should stop when the run is cancelled.
+- **`TimeoutMs`** — the caller's deadline for this specific call, in **milliseconds**.
+- **`Answer`** — you returned a suspension on a previous attempt and the host has now resolved it.
+
+A pure, fast, local computation can ignore `ctx` entirely.
+
+## Why a wrapper around CancellationToken
+
+<Aside type="tip" title="ctx is nullable — use ?. everywhere">
+`ExecuteAsync` declares `ToolContext? ctx = null`, so callers may omit it. Inside a tool write
+`ctx?.IsCancelled == true` rather than `ctx.IsCancelled` — the `== true` handles the `bool?` that
+`?.` produces.
+</Aside>
+
+.NET already has `CancellationToken`, so why the wrapper? Because the §1 contract carries two more
+things — a per-call timeout and the §10 `Answer` — and threading three parameters through every tool
+source would be worse. The `CancellationToken` is still in there, and you can hand it straight to
+any async API that accepts one.
+
+## Examples
+
+### 1. Respecting cancellation
+
+Check before starting work and between steps. A cancelled tool returns an error *result* promptly
+rather than throwing.
+
+```csharp test
+using Toolnexus;
+
+ToolResult Crunch(int steps, ToolContext? ctx)
+{
+    var done = 0;
+    for (var i = 0; i < steps; i++)
+    {
+        // ctx is nullable, and ?. on a bool yields bool? — compare against true.
+        if (ctx?.IsCancelled == true) return ToolResult.Error($"cancelled after {done} step(s)");
+        done++;
+    }
+    return ToolResult.Ok($"completed {done} step(s)");
+}
+
+// No context at all — the tool still runs.
+var plain = Crunch(3, null);
+if (plain.Output != "completed 3 step(s)") throw new Exception(plain.Output);
+
+// Cancelled before it starts.
+using var cts = new CancellationTokenSource();
+cts.Cancel();
+var stopped = Crunch(3, new ToolContext(cancellationToken: cts.Token));
+if (!stopped.IsError || stopped.Output != "cancelled after 0 step(s)") throw new Exception(stopped.Output);
+
+// A live token reads as not cancelled.
+using var live = new CancellationTokenSource();
+if (new ToolContext(cancellationToken: live.Token).IsCancelled) throw new Exception("should be live");
+
+Console.WriteLine($"ok: {plain.Output} | {stopped.Output}");
+```
+
+### 2. Honouring the caller's timeout
+
+`TimeoutMs` is a **`long?`** — `null` means "not set". Fall back to your own default rather than
+treating it as zero.
+
+```csharp test
+using Toolnexus;
+
+ToolResult Fetchish(string url, ToolContext? ctx)
+{
+    // null means unset — use your own default.
+    var budget = ctx?.TimeoutMs ?? 30_000L;
+
+    if (budget < 100) return ToolResult.Error($"budget {budget}ms is too small to try");
+    return ToolResult.Ok($"fetched {url} within {budget}ms");
+}
+
+var generous = Fetchish("/a", new ToolContext(5000));
+if (generous.Output != "fetched /a within 5000ms") throw new Exception(generous.Output);
+
+var stingy = Fetchish("/a", new ToolContext(10));
+if (!stingy.IsError) throw new Exception("expected the tiny budget to be refused");
+
+var defaulted = Fetchish("/a", new ToolContext());
+if (!defaulted.Output.Contains("30000ms")) throw new Exception(defaulted.Output);
+
+var noCtx = Fetchish("/a", null);
+if (!noCtx.Output.Contains("30000ms")) throw new Exception(noCtx.Output);
+
+Console.WriteLine($"ok: {generous.Output} | {stingy.Output}");
+```
+
+### 3. `Answer` — the second half of a suspension
+
+This is the property that makes the human-in-the-loop contract work. On the first call the tool
+returns a `Pending`. The host resolves it, then calls the **same tool again** with `Answer` set.
+
+```csharp test
+using Toolnexus;
+
+ToolResult Deploy(ToolContext? ctx)
+{
+    // Second pass: the host resolved the question and handed the answer back.
+    if (ctx?.Answer is { } answer)
+    {
+        if (!answer.Ok) return ToolResult.Error($"declined: {answer.Reason ?? "no reason"}");
+        // Data is IDictionary<string, object?> — TryGetValue, not GetValueOrDefault
+        // (that extension is declared on IReadOnlyDictionary and will not infer here).
+        object? env = null;
+        answer.Data?.TryGetValue("env", out env);
+        return ToolResult.Ok($"deployed to {env ?? "unknown"}");
+    }
+
+    // First pass: park the run and ask.
+    return ToolResult.Pending(new Request { Kind = "input", Prompt = "Which environment?" });
+}
+
+// First pass — a suspension, not an answer.
+var first = Deploy(null);
+var req = ToolResult.PendingOf(first);
+if (req is null || req.Kind != "input") throw new Exception("expected a suspension");
+
+// Second pass — the host supplies the resolution, echoing the request id.
+var resumed = new ToolContext(answer: new Answer
+{
+    Id = req.Id,
+    Ok = true,
+    Data = new Dictionary<string, object?> { ["env"] = "staging" },
+});
+var second = Deploy(resumed);
+if (second.IsError || second.Output != "deployed to staging") throw new Exception(second.Output);
+
+// A refusal is a normal outcome, not a crash.
+var declined = new ToolContext(answer: new Answer { Id = req.Id, Ok = false, Reason = "declined" });
+var refused = Deploy(declined);
+if (!refused.IsError) throw new Exception("expected an error result");
+
+Console.WriteLine($"ok: {second.Output} | {refused.Output}");
+```
+
+<Aside type="note" title="Read Answer.Data only when the answer IS the payload">
+For `Kind:"input"` the value you asked for lives in `Answer.Data`. For `Kind:"authorization"` the
+world changed out-of-band — the session is simply valid now — so you re-run the real work and
+ignore `Data`.
+</Aside>
+
+## Members
+
+| Member | Type | What it is |
+|---|---|---|
+| `TimeoutMs` | `long?` | This call's budget in **milliseconds**. `null` means unset. |
+| `CancellationToken` | `CancellationToken` | Hand it straight to any async API that takes one. |
+| `IsCancelled` | `bool` | Shorthand for `CancellationToken.IsCancellationRequested`. |
+| `Answer` | `Answer?` | Present **only** on a post-`WaitFor` retry. |
+
+## See also
+
+- [`ITool`](/api/csharp/types/tool/) — what receives this
+- [`ToolResult`](/api/csharp/types/tool-result/) — what `ExecuteAsync` returns
+- [`Suspension.Pending`](/api/csharp/suspension/pending/) — ask a question mid-call

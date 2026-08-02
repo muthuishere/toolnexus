@@ -1,0 +1,219 @@
+---
+title: "openai_messages_to_anthropic"
+description: "Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong. — Python."
+sidebar:
+  label: "openai_messages_to_anthropic"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/translate.py">python/src/toolnexus/translate.py</a>
+</p>
+
+```python
+from toolnexus.translate import openai_messages_to_anthropic
+
+def openai_messages_to_anthropic(messages: list[Any]) -> tuple[list[dict[str, Any]], str]
+```
+
+The structure-preserving half of inbound translation: converts an OpenAI-shaped `messages`
+array into Anthropic-native `messages` **plus** the extracted system prompt. An assistant
+turn's `tool_calls` become `tool_use` blocks (arguments parsed back from JSON string into an
+object); a `tool`-role result becomes a `tool_result` block keyed by `tool_call_id`, and
+**consecutive tool results are merged into a single `user` turn** — Anthropic expects one
+result-bearing turn answering the preceding assistant turn, not one turn per result.
+`system`/`developer` messages are hoisted out since Anthropic takes system separately. This
+function is *not* exported from the `toolnexus` package root — import it from
+`toolnexus.translate` directly, since it's the one piece of `translate`'s internals meant to
+be reused standalone.
+
+## When to use it
+
+- You have an OpenAI-shaped transcript (from your own history, a log, another tool) and need
+  to send the *same* conversation to an Anthropic-style endpoint — including multi-tool-call
+  turns — without hand-rolling the block conversion.
+- You're building something that needs the inbound half of translation without going through
+  [`Client.translate`](/api/python/translate/translate/)'s full request lifecycle (auth,
+  retries, the live HTTP call) — a transcript inspector, a format converter, a test fixture
+  builder.
+- You want to understand exactly what `Client.translate(..., style="anthropic")` does to your
+  `messages` before it reaches the wire, since this is the function it calls internally.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="A naive text-flattening translator merges wrong — or not at all">
+The obvious approach — flatten every message to a text block and hope the shapes line up —
+breaks exactly at multi-tool-call turns: Anthropic requires **one** `tool_result`-bearing user
+turn per preceding assistant turn, not one per tool call. `openai_messages_to_anthropic`
+performs that merge for you (see Example 2). If you only ever have plain text turns with no
+tool calls, a naive converter would happen to work — but the moment tools are involved, reach
+for this function rather than reimplementing the merge.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — plain text turns, system hoisted out
+
+```python test
+from toolnexus.translate import openai_messages_to_anthropic
+
+messages = [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "hello"},
+    {"role": "assistant", "content": "hi there"},
+]
+
+converted, system = openai_messages_to_anthropic(messages)
+
+assert system == "You are a helpful assistant."
+assert converted == [
+    {"role": "user", "content": "hello"},
+    {"role": "assistant", "content": [{"type": "text", "text": "hi there"}]},
+]
+
+print("ok:", system, "|", len(converted), "messages")
+```
+
+### 2. The realistic case — the merge a flattening translator gets wrong
+
+Two tool calls in one assistant turn produce two `tool` result messages in OpenAI shape.
+Anthropic wants those merged into **one** `user` turn carrying both `tool_result` blocks.
+
+```python test
+from toolnexus.translate import openai_messages_to_anthropic
+
+messages = [
+    {"role": "user", "content": "what's the weather in Chennai and Mumbai?"},
+    {
+        "role": "assistant", "content": None,
+        "tool_calls": [
+            {"id": "call_1", "type": "function", "function": {"name": "weather", "arguments": '{"city": "Chennai"}'}},
+            {"id": "call_2", "type": "function", "function": {"name": "weather", "arguments": '{"city": "Mumbai"}'}},
+        ],
+    },
+    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+    {"role": "tool", "tool_call_id": "call_2", "content": "rainy"},
+    {"role": "assistant", "content": "Chennai is sunny, Mumbai is rainy."},
+]
+
+converted, system = openai_messages_to_anthropic(messages)
+
+assert system == ""  # no system/developer message present
+assistant_turn = converted[1]
+assert assistant_turn["role"] == "assistant"
+assert [b["type"] for b in assistant_turn["content"]] == ["tool_use", "tool_use"]
+assert assistant_turn["content"][0]["input"] == {"city": "Chennai"}  # arguments parsed back to an object
+
+# The two tool results collapsed into ONE user turn — not two.
+results_turn = converted[2]
+assert results_turn["role"] == "user"
+assert len(results_turn["content"]) == 2
+assert [b["tool_use_id"] for b in results_turn["content"]] == ["call_1", "call_2"]
+assert [b["content"] for b in results_turn["content"]] == ["sunny", "rainy"]
+
+print("ok:", len(converted), "messages, merged tool_result turn has", len(results_turn["content"]), "blocks")
+```
+
+### 3. The full surface — this is what `Client.translate(style="anthropic")` runs internally
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client
+from toolnexus.translate import openai_messages_to_anthropic
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+async def main():
+    openai_messages = [
+        {"role": "system", "content": "Be concise."},
+        {"role": "user", "content": "add 2 and 2"},
+        {
+            "role": "assistant", "content": None,
+            "tool_calls": [{"id": "call_1", "type": "function",
+                             "function": {"name": "add", "arguments": '{"a": 2, "b": 2}'}}],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "4"},
+    ]
+
+    # What the client will send, computed with the SAME function this page documents —
+    # so this assertion is really "translate uses openai_messages_to_anthropic internally".
+    expected_msgs, expected_system = openai_messages_to_anthropic(openai_messages)
+
+    seen = {"body": None}
+
+    def anthropic_reply(body):
+        seen["body"] = body
+        return {
+            "content": [{"type": "text", "text": "the answer is 4"}],
+            "usage": {"input_tokens": 6, "output_tokens": 2},
+        }
+
+    with StubServer(anthropic_reply) as srv:
+        client = create_client(base_url=srv.base_url, style="anthropic", model="test-model", api_key="test-key")
+        result = await client.translate(openai_messages)
+
+    assert result.text == "the answer is 4"
+    sent = seen["body"]
+    assert sent["system"] == expected_system == "Be concise."
+    assert sent["messages"] == expected_msgs
+    assert sent["messages"][2]["role"] == "user"  # the merged tool_result turn survived the wire
+
+    print("ok:", result.text, "| system:", sent["system"])
+
+
+asyncio.run(main())
+```
+
+## Return shape
+
+| Value | Type | What it is |
+|---|---|---|
+| `messages` | `list[dict]` | Anthropic-native messages: `tool_use`/`tool_result` blocks, consecutive results merged. |
+| `system` | `str` | The hoisted, joined `system`/`developer` content (`""` if none present). |
+
+## See also
+
+- [`translate`](/api/python/translate/translate/) — Declare a toolkit to a provider and translate one request/response without executing anything or keeping state.

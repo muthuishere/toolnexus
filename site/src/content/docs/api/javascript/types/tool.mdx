@@ -1,0 +1,174 @@
+---
+title: Tool
+description: The uniform shape every tool source collapses to — name, description, JSON-Schema parameters, execute. JavaScript.
+sidebar:
+  label: Tool
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/types.ts">js/src/types.ts</a>
+</p>
+
+```ts
+interface Tool {
+  name: string
+  description: string
+  inputSchema: JSONSchema
+  source: ToolSource
+  execute(args: Record<string, unknown>, ctx?: ToolContext): Promise<ToolResult>
+}
+```
+
+The one interface. An MCP server tool, an agent skill, a built-in shell tool, a remote A2A agent,
+an HTTP endpoint and a plain function of your own are all *the same thing* to an LLM — a named,
+described, schema'd callable. `Tool` is that thing, and every source in toolnexus produces it.
+
+## When to use it
+
+You mostly **receive** `Tool`s rather than construct them: `tk.tools()` hands you a `Tool[]`, and
+that is the type you iterate, filter, and pass to an adapter.
+
+Construct one directly when you are writing a **new tool source** — something that produces tools
+from a shape toolnexus doesn't already cover (a database of prompts, an internal RPC registry, a
+plugin system). For a single ordinary function, don't hand-build this; see below.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use defineTool instead for your own functions">
+[`defineTool`](/api/javascript/native/define-tool/) builds a `Tool` for you and sets
+`source: "native"`. Hand-writing the interface just to wrap one function is more code and one more
+thing to keep in sync. Reach for the raw interface only when you are generating tools
+programmatically.
+</Aside>
+
+The fields are fixed because they are what every adapter reads. `name`, `description` and
+`inputSchema` become the provider's function schema; `source` is toolnexus bookkeeping that tells
+you where a tool came from after aggregation flattens everything into one list.
+
+## Examples
+
+### 1. The smallest possible tool
+
+A `Tool` is a plain object. Nothing is subclassed and nothing is registered — build it and it works.
+
+```ts test
+import assert from "node:assert"
+import type { Tool } from "toolnexus"
+
+const echo: Tool = {
+  name: "echo",
+  description: "Return whatever it is given",
+  inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+  source: "custom",
+  async execute(args) {
+    return { output: String(args.text), isError: false }
+  },
+}
+
+const res = await echo.execute({ text: "hello" })
+assert.equal(res.output, "hello")
+assert.equal(res.isError, false)
+console.log("ok:", res.output)
+```
+
+<Aside type="caution">
+`source` is not free-form. It is one of `"mcp" | "skill" | "builtin" | "native" | "http" | "a2a" |
+"custom"`. Use `"custom"` for tools you construct yourself — the other values mean "this came from
+that subsystem" and are what filtering over `tk.tools()` relies on.
+</Aside>
+
+### 2. Reporting failure, and carrying metadata
+
+A tool that fails does **not** throw — it returns `isError: true`. The loop feeds that text back to
+the model as the tool result, so the model can react to it. Throwing escapes the loop instead.
+
+```ts test
+import assert from "node:assert"
+import type { Tool } from "toolnexus"
+
+const divide: Tool = {
+  name: "divide",
+  description: "Divide two numbers",
+  inputSchema: {
+    type: "object",
+    properties: { a: { type: "number" }, b: { type: "number" } },
+    required: ["a", "b"],
+  },
+  source: "custom",
+  async execute(args) {
+    const a = Number(args.a)
+    const b = Number(args.b)
+    if (b === 0) {
+      // The model sees this text and can correct itself on the next turn.
+      return { output: "Cannot divide by zero", isError: true }
+    }
+    return {
+      output: String(a / b),
+      isError: false,
+      metadata: { title: "divide", operands: [a, b] },
+    }
+  },
+}
+
+const ok = await divide.execute({ a: 10, b: 4 })
+assert.equal(ok.output, "2.5")
+assert.deepEqual(ok.metadata?.operands, [10, 4])
+
+const bad = await divide.execute({ a: 1, b: 0 })
+assert.equal(bad.isError, true)
+console.log("ok:", ok.output, "| error path:", bad.output)
+```
+
+### 3. A generated tool source — the real reason this interface is public
+
+Producing many tools from data is where you build `Tool` directly. Here one row of config becomes
+one tool, and `sanitize` makes each name schema-safe.
+
+```ts test
+import assert from "node:assert"
+import { sanitize } from "toolnexus"
+import type { Tool } from "toolnexus"
+
+const endpoints = [
+  { key: "get user", path: "/users/:id" },
+  { key: "list orders", path: "/orders" },
+]
+
+const tools: Tool[] = endpoints.map((e) => ({
+  // Names must match [a-zA-Z0-9_-]; sanitize does exactly that (same rule as opencode).
+  name: sanitize(e.key),
+  description: `Call ${e.path}`,
+  inputSchema: { type: "object", properties: { id: { type: "string" } } },
+  source: "custom",
+  async execute(args, ctx) {
+    // ctx is optional — always guard it.
+    if (ctx?.signal?.aborted) return { output: "cancelled", isError: true }
+    return { output: `${e.path} <- ${JSON.stringify(args)}`, isError: false }
+  },
+}))
+
+assert.deepEqual(tools.map((t) => t.name), ["get_user", "list_orders"])
+
+const res = await tools[0].execute({ id: "42" })
+assert.equal(res.output, '/users/:id <- {"id":"42"}')
+console.log("ok:", tools.map((t) => t.name).join(", "))
+```
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `name` | `string` | The name the model calls. Must match `[a-zA-Z0-9_-]` — run it through `sanitize`. |
+| `description` | `string` | What the model reads to decide whether to call it. |
+| `inputSchema` | `JSONSchema` | A JSON-Schema **object** — `type: "object"`, plus `properties` and `required`. |
+| `source` | `ToolSource` | One of `mcp`, `skill`, `builtin`, `native`, `http`, `a2a`, `custom`. |
+| `execute` | `(args, ctx?) => Promise<ToolResult>` | Runs the tool. `ctx` is optional — guard it. |
+
+## See also
+
+- [`ToolResult`](/api/javascript/types/tool-result/) — what `execute` returns
+- [`ToolContext`](/api/javascript/types/context/) — what `execute` receives
+- [`defineTool`](/api/javascript/native/define-tool/) — build a `Tool` from a function
+- [`createToolkit`](/api/javascript/toolkit/create/) — aggregate tools from every source

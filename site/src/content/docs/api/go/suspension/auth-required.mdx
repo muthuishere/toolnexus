@@ -1,0 +1,202 @@
+---
+title: "AuthRequired"
+description: "The auth-shaped suspension: hand back a URL, resume once the user has granted access. — Go."
+sidebar:
+  label: "AuthRequired"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/types.go">golang/types.go</a>
+</p>
+
+```go
+func AuthRequired(url, prompt string) ToolResult
+```
+
+`AuthRequired` is sugar over [`Pending`](/api/go/suspension/pending/) for the single most
+common suspension shape: `kind: "authorization"` at a login URL. Pass `""` for `prompt` to get
+the default, `"Authorization required to continue"`. By SPEC convention `kind:"authorization"`
+follows OAuth2/OIDC authorization-code semantics — `url` is the authorize endpoint, and the
+host's `WaitFor` performs the redirect → consent → callback (and any token exchange)
+out-of-band. **The kernel stays OIDC-agnostic**: no OIDC library and no token logic live in
+toolnexus itself; that all lives inside the host's `WaitFor` at the edge.
+
+## When to use it
+
+Reach for `AuthRequired` from a tool that discovers, mid-call, that the caller's session has
+expired or was never established — a token expired, a scope is missing, a login page is the
+only way forward. It's the canonical instance the suspend/resume mechanism exists for, but
+it's *just data*: nothing in the loop treats `"authorization"` specially beyond this
+convention.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Not every suspension is a login">
+`AuthRequired` only fits the URL-driven, out-of-band-auth shape. For a question that needs a
+typed answer rather than a redirect — "which environment?", "confirm this refund" — use
+[`Pending`](/api/go/suspension/pending/) directly with `kind:"input"` or `kind:"approval"`. The
+SPEC's trust boundary is explicit here: `kind:"input"`/`kind:"question"` **must not** be used to
+collect credentials — passwords, API keys, tokens, or payment secrets always go through
+`kind:"authorization"` with a `url`, so the secret is entered out-of-band and never transits the
+tool's `Data`/`Answer` channel or the model's context.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — build the suspension and read it back
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	res := toolnexus.AuthRequired("https://example.com/login", "")
+
+	req := toolnexus.PendingOf(res)
+	if req == nil {
+		log.Fatal("expected a suspension")
+	}
+	if req.Kind != "authorization" || req.URL != "https://example.com/login" {
+		log.Fatalf("unexpected request: %+v", req)
+	}
+	if req.Prompt != "Authorization required to continue" {
+		log.Fatalf("expected the default prompt, got %q", req.Prompt)
+	}
+
+	fmt.Println("ok:", req.Kind, req.URL)
+}
+```
+
+### 2. The realistic case — a custom prompt, and the human-readable fallback text
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	res := toolnexus.AuthRequired("https://accounts.example.com/oauth/authorize?client=crm", "Connect your CRM account to continue")
+
+	req := toolnexus.PendingOf(res)
+	if req.Prompt != "Connect your CRM account to continue" {
+		log.Fatalf("unexpected prompt: %q", req.Prompt)
+	}
+	// Output is the human-readable fallback: prompt, then the URL on its own line.
+	if !strings.Contains(res.Output, "Connect your CRM account") || !strings.Contains(res.Output, "accounts.example.com") {
+		log.Fatalf("unexpected fallback output: %q", res.Output)
+	}
+	if !res.IsError {
+		log.Fatal("a parked call is not a success")
+	}
+
+	fmt.Println("ok:", res.Output)
+}
+```
+
+### 3. The full surface — wired into a live `Client.Run`, resolved by `WaitFor`
+
+The tool discovers it has no valid session, suspends with `AuthRequired`; `WaitFor` "performs"
+the OAuth dance (stubbed here) and answers `Ok: true`; the loop retries the same tool once with
+`ctx.Answer` set — and because this is `kind:"authorization"`, the tool ignores
+`Answer.Data` and just proceeds now that the world has changed.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	loggedIn := false // simulates session state the tool checks
+
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"fetch_crm_deals","arguments":"{}"}}]}}],"usage":{"prompt_tokens":4,"completion_tokens":4,"total_tokens":8}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"3 open deals"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
+	}))
+	defer srv.Close()
+
+	fetchDeals := toolnexus.Tool{
+		Name:        "fetch_crm_deals",
+		Description: "fetches open deals from the CRM",
+		InputSchema: toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+		Source:      toolnexus.SourceCustom,
+		Execute: func(_ map[string]any, ctx *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			if !loggedIn {
+				if ctx != nil && ctx.Answer != nil {
+					// The world changed out-of-band — the session is now valid, ignore Answer.Data.
+					loggedIn = true
+				} else {
+					return toolnexus.AuthRequired("https://crm.example.com/oauth/authorize", ""), nil
+				}
+			}
+			return toolnexus.ToolResult{Output: "3 open deals"}, nil
+		},
+	}
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: []toolnexus.Tool{fetchDeals}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	var sawAuth bool
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "gpt-4o-mini", APIKey: "test-key",
+		WaitFor: func(req toolnexus.Request) (toolnexus.Answer, error) {
+			if req.Kind != "authorization" {
+				log.Fatalf("unexpected request kind: %q", req.Kind)
+			}
+			sawAuth = true
+			// The host would redirect the user through OAuth here; stubbed as immediate success.
+			return toolnexus.Answer{ID: req.ID, Ok: true}, nil
+		},
+	})
+
+	res, err := client.Run(context.Background(), "how many open CRM deals do we have?", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if !sawAuth {
+		log.Fatal("expected WaitFor to see the authorization request")
+	}
+	if res.Status != "done" || res.Text != "3 open deals" {
+		log.Fatalf("unexpected: %+v", res)
+	}
+
+	fmt.Println("ok:", res.Text)
+}
+```
+
+## See also
+
+- [`Pending`](/api/go/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`WaitFor`](/api/go/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`PendingOf`](/api/go/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`Client.Resume`](/api/go/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.

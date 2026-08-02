@@ -1,0 +1,212 @@
+---
+title: ToolResult
+description: The result envelope every tool returns — output text, an error flag, and optional metadata that can carry a suspension. Go.
+sidebar:
+  label: ToolResult
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/types.go">golang/types.go</a>
+</p>
+
+```go
+type ToolResult struct {
+	Output   string         `json:"output"`
+	IsError  bool           `json:"isError"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+}
+```
+
+The first half of what every `Execute` returns. Three fields, and the whole tool-calling loop is
+built on them: `Output` is the text handed back to the model, `IsError` says whether the call
+failed, and `Metadata` is free-form — except for one reserved key that turns a result into a
+suspension.
+
+## When to use it
+
+Every time you write a tool. It is the first return value of
+[`Tool.Execute`](/api/go/types/tool/), so you construct one on every code path.
+
+## Why an error flag *and* a returned error
+
+<Aside type="caution" title="IsError and error are not the same thing">
+Go's `Execute` returns `(ToolResult, error)`. They mean different things and are not
+interchangeable:
+
+- **`IsError: true`** — an outcome. The text is fed back to the model, which can read "file not
+  found", pick another path, and carry on.
+- **a non-nil `error`** — your code failed. It does **not** become tool output.
+
+Use the flag for anything the model could plausibly recover from; return an `error` only for a
+genuine failure.
+</Aside>
+
+`Output` is always a `string` — it is what the model reads. Serialize structured data yourself
+(`json.Marshal`) rather than expecting the loop to do it.
+
+## Examples
+
+### 1. Success and failure on the same tool
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+var config = map[string]string{"region": "eu-west-1"}
+
+func readConfig(key string) toolnexus.ToolResult {
+	v, ok := config[key]
+	if !ok {
+		// Recoverable: the model can read this and try another key.
+		return toolnexus.ToolResult{Output: "No such config key: " + key, IsError: true}
+	}
+	return toolnexus.ToolResult{Output: v, IsError: false}
+}
+
+func main() {
+	found := readConfig("region")
+	if found.Output != "eu-west-1" || found.IsError {
+		log.Fatalf("unexpected: %+v", found)
+	}
+
+	missing := readConfig("nope")
+	if !missing.IsError {
+		log.Fatal("expected IsError")
+	}
+
+	fmt.Println("ok:", found.Output, "|", missing.Output)
+}
+```
+
+### 2. Structured output and metadata
+
+`Output` must be a string, so serialize deliberately. `Metadata` rides alongside for *your* code —
+the model never sees it, which makes it the right place for bookkeeping.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func search(q string) toolnexus.ToolResult {
+	hits := []struct {
+		ID    int
+		Title string
+	}{
+		{1, "Getting started"},
+		{2, "Advanced usage"},
+	}
+
+	var lines []string
+	var ids []int
+	for _, h := range hits {
+		lines = append(lines, fmt.Sprintf("#%d %s", h.ID, h.Title))
+		ids = append(ids, h.ID)
+	}
+
+	return toolnexus.ToolResult{
+		// The model reads this. Make it legible, not just valid.
+		Output:  strings.Join(lines, "\n"),
+		IsError: false,
+		// Your code reads this. The model never sees it.
+		Metadata: map[string]any{"title": "search: " + q, "count": len(hits), "ids": ids},
+	}
+}
+
+func main() {
+	res := search("usage")
+	if res.Metadata["count"] != 2 {
+		log.Fatalf("unexpected count: %v", res.Metadata["count"])
+	}
+	if !strings.Contains(res.Output, "Advanced usage") {
+		log.Fatal("expected the second hit in output")
+	}
+	fmt.Println("ok:", res.Metadata["title"])
+}
+```
+
+### 3. The reserved key — `Metadata["pending"]` is a suspension
+
+`Metadata` is free-form with one exception. A `pending` key holding a `Request` means "this tool
+cannot finish until something out-of-band happens" — the loop parks the run instead of returning.
+You rarely write this by hand; [`Pending`](/api/go/suspension/pending/) builds it for you.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	// Pending() returns a ToolResult carrying Metadata["pending"] = Request.
+	res := toolnexus.Pending(toolnexus.Request{Kind: "input", Prompt: "Which environment?"})
+
+	if !res.IsError {
+		log.Fatal("a parked call is not a success")
+	}
+	req := toolnexus.PendingOf(res)
+	if req == nil {
+		log.Fatal("PendingOf should read the suspension back off the result")
+	}
+	if req.Kind != "input" || req.Prompt != "Which environment?" {
+		log.Fatalf("unexpected request: %+v", req)
+	}
+	if req.ID == "" {
+		log.Fatal("an id is generated as the correlation key")
+	}
+
+	// AuthRequired is sugar for the login case. Go takes the prompt explicitly —
+	// pass "" to accept the default ("Authorization required to continue").
+	auth := toolnexus.AuthRequired("https://example.com/login", "")
+	authReq := toolnexus.PendingOf(auth)
+	if authReq.Kind != "authorization" || authReq.URL != "https://example.com/login" {
+		log.Fatalf("unexpected auth request: %+v", authReq)
+	}
+
+	// An ordinary result has no suspension.
+	if toolnexus.PendingOf(toolnexus.ToolResult{Output: "done"}) != nil {
+		log.Fatal("expected no suspension on a plain result")
+	}
+
+	fmt.Println("ok:", req.Kind, "|", authReq.Kind)
+}
+```
+
+<Aside type="caution">
+A suspension sets `IsError: true`. That is deliberate — a parked call has not produced an answer.
+Do not treat `IsError` alone as "the tool broke"; check
+[`PendingOf`](/api/go/suspension/pending-of/) when suspension is in play.
+</Aside>
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `Output` | `string` | The text handed to the model. Always a string — serialize structured data yourself. |
+| `IsError` | `bool` | Whether the call failed. Fed back to the model, distinct from a returned `error`. |
+| `Metadata` | `map[string]any` | Free-form, for your code. **Reserved:** `pending` holds a §10 `Request`. |
+
+## See also
+
+- [`Tool`](/api/go/types/tool/) — what returns this
+- [`ToolContext`](/api/go/types/context/) — what `Execute` receives
+- [`Pending`](/api/go/suspension/pending/) — build a suspending result
+- [`PendingOf`](/api/go/suspension/pending-of/) — read a suspension back off a result

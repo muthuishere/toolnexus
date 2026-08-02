@@ -1,0 +1,165 @@
+---
+title: "Toolnexus.Translate.openai_messages_to_anthropic"
+description: "Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong. — Elixir."
+sidebar:
+  label: "Toolnexus.Translate.openai_messages_to_anthropic"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/translate.ex">elixir/lib/toolnexus/translate.ex</a>
+</p>
+
+```elixir
+@spec openai_messages_to_anthropic([map()]) :: {[map()], String.t()}
+def openai_messages_to_anthropic(messages)
+```
+
+Converts an OpenAI `messages` list into Anthropic-native `messages` plus the extracted system
+prompt, returned as `{messages, system}`. This is the piece a naive text-flattening translator
+gets wrong: an assistant turn's `tool_calls` become `tool_use` blocks (with `arguments` parsed
+back from its JSON string into an object), a `tool`-role result becomes a `tool_result` block
+keyed by `tool_call_id`, and **consecutive tool results merge into a single user turn** — because
+Anthropic expects one result-bearing turn answering the preceding assistant turn, not one turn per
+result. `system`/`developer` messages are hoisted out into the returned `system` string, since
+Anthropic takes system separately from the transcript.
+
+`Toolnexus.Client.translate/3` calls this internally when `style: "anthropic"` — it's exposed
+directly for callers who need the conversion without also making a provider call.
+
+## When to use it
+
+- **You're proxying OpenAI-shaped requests to an Anthropic-style upstream** and need the
+  transcript itself, not just [`Client.translate/3`](/api/elixir/translate/translate/)'s
+  single-call result — e.g. building the request body for a different transport, or inspecting
+  the converted shape before sending it.
+- **You're storing transcripts in OpenAI shape** (the common wire format) but need to hand one to
+  an Anthropic-native client or SDK.
+- **You're testing tool-call round-tripping** across the two shapes without touching the network.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for Client.translate/3 for the everyday path">
+`openai_messages_to_anthropic/1` is the pure conversion — no HTTP, no client, just data in, data
+out. [`Toolnexus.Client.translate/3`](/api/elixir/translate/translate/) is what application code
+usually wants: it calls this function for you when `style: "anthropic"`, then actually makes the
+call and hands back an OpenAI-shaped `Toolnexus.Translate.Result`. Reach for this function
+directly when you need the converted transcript itself, decoupled from any network call.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — a plain user/assistant exchange, system hoisted out
+
+```elixir test
+alias Toolnexus.Translate
+
+messages = [
+  %{"role" => "system", "content" => "You are terse."},
+  %{"role" => "user", "content" => "capital of France?"},
+  %{"role" => "assistant", "content" => "Paris."}
+]
+
+{converted, system} = Translate.openai_messages_to_anthropic(messages)
+
+true = system == "You are terse."
+true = converted == [
+  %{"role" => "user", "content" => "capital of France?"},
+  %{"role" => "assistant", "content" => [%{"type" => "text", "text" => "Paris."}]}
+]
+
+IO.puts("ok: system hoisted (#{system}), #{length(converted)} message(s) converted")
+```
+
+### 2. The realistic case — a tool call and its result, correctly re-shaped
+
+The assistant's `tool_calls` become a `tool_use` block with `input` parsed back into a map; the
+matching `tool`-role result becomes a `tool_result` block keyed by `tool_call_id`.
+
+```elixir test
+alias Toolnexus.Translate
+
+messages = [
+  %{"role" => "user", "content" => "weather in Chennai?"},
+  %{
+    "role" => "assistant",
+    "content" => nil,
+    "tool_calls" => [
+      %{"id" => "c1", "type" => "function", "function" => %{"name" => "lookup_weather", "arguments" => ~s({"city":"Chennai"})}}
+    ]
+  },
+  %{"role" => "tool", "tool_call_id" => "c1", "content" => "28C, humid"}
+]
+
+{converted, system} = Translate.openai_messages_to_anthropic(messages)
+
+true = system == ""
+[user1, assistant, user2] = converted
+
+true = user1 == %{"role" => "user", "content" => "weather in Chennai?"}
+true = assistant == %{
+  "role" => "assistant",
+  "content" => [%{"type" => "tool_use", "id" => "c1", "name" => "lookup_weather", "input" => %{"city" => "Chennai"}}]
+}
+true = user2 == %{"role" => "user", "content" => [%{"type" => "tool_result", "tool_use_id" => "c1", "content" => "28C, humid"}]}
+
+IO.puts("ok: tool_calls -> tool_use, tool result -> tool_result, #{length(converted)} turn(s)")
+```
+
+### 3. The full surface — multiple parallel tool results merge into ONE user turn
+
+This is the case a flattening translator gets wrong: two consecutive `tool`-role messages
+(parallel tool calls answered in the same turn) merge into a **single** Anthropic user turn
+carrying both `tool_result` blocks, in order — not two separate user turns.
+
+```elixir test
+alias Toolnexus.Translate
+
+messages = [
+  %{"role" => "developer", "content" => "Be exact."},
+  %{"role" => "user", "content" => "compare weather in Chennai and Paris"},
+  %{
+    "role" => "assistant",
+    "content" => nil,
+    "tool_calls" => [
+      %{"id" => "c1", "type" => "function", "function" => %{"name" => "weather", "arguments" => ~s({"city":"Chennai"})}},
+      %{"id" => "c2", "type" => "function", "function" => %{"name" => "weather", "arguments" => ~s({"city":"Paris"})}}
+    ]
+  },
+  %{"role" => "tool", "tool_call_id" => "c1", "content" => "28C"},
+  %{"role" => "tool", "tool_call_id" => "c2", "content" => "12C"},
+  %{"role" => "assistant", "content" => "Chennai is warmer."}
+]
+
+{converted, system} = Translate.openai_messages_to_anthropic(messages)
+
+# "developer" is hoisted the same as "system"
+true = system == "Be exact."
+true = length(converted) == 4
+
+[_user, assistant_calls, merged_results, final] = converted
+true = length(assistant_calls["content"]) == 2
+true = merged_results == %{
+  "role" => "user",
+  "content" => [
+    %{"type" => "tool_result", "tool_use_id" => "c1", "content" => "28C"},
+    %{"type" => "tool_result", "tool_use_id" => "c2", "content" => "12C"}
+  ]
+}
+true = final == %{"role" => "assistant", "content" => [%{"type" => "text", "text" => "Chennai is warmer."}]}
+
+IO.puts("ok: 2 consecutive tool results merged into #{length(merged_results["content"])}-block user turn (not 2 turns)")
+```
+
+## Fields
+
+| | Type | What it is |
+|---|---|---|
+| `messages` (arg) | `[map()]` | OpenAI-shaped `messages`, string-keyed. |
+| `messages` (return) | `[map()]` | Anthropic-native `messages` — `tool_use`/`tool_result` blocks, merged where consecutive. |
+| `system` (return) | `String.t()` | Every `system`/`developer` message's text, joined with `"\n\n"`. |
+
+## See also
+
+- [`Toolnexus.Client.translate`](/api/elixir/translate/translate/) — the entry point that calls this internally, then makes the single provider call.

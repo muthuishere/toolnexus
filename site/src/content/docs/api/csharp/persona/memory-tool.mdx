@@ -1,0 +1,153 @@
+---
+title: "Home.MemoryTool"
+description: "The opt-in built-in that lets a persona write durable notes to its own home. — C#."
+sidebar:
+  label: "Home.MemoryTool"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Agents/Home.cs">Agents/Home.cs</a>
+</p>
+
+```csharp
+namespace Toolnexus.Agents;
+
+public static class Home
+{
+    public static ITool MemoryTool(string dir);
+}
+```
+
+A `memory` tool over a persona's home directory — **not** one of the default builtin tools; it
+only exists when a home is wired ([`Home.FromDir`](/api/csharp/persona/from-dir/) attaches it
+automatically, or add it to `Uses`/`ExtraTools` yourself). One tool, three actions —
+`add` appends an entry, `replace` swaps an existing substring, `remove` deletes one — against
+`target = "self"` (`MEMORY.md`, the default) or `target = "user"` (`USER.md`). **Every action
+writes to disk.** A `replace`/`remove` whose substring is not found is a loud `IsError` result the
+model can read and recover from.
+
+## When to use it
+
+You're giving a long-lived persona somewhere to put durable facts — "the user is in IST", "prefers
+terse replies" — that should survive past the current session. Writes land on disk immediately,
+but **not** in the live prompt: the frozen-snapshot rule (§7E) means a mid-session write is only
+visible the *next* time [`Home.ComposeSoul`](/api/csharp/persona/compose-soul/) runs, at the start
+of a new session. That is deliberate — it keeps a long conversation's system prompt cache-stable.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for a bespoke ITool when memory needs structure">
+`MemoryTool` is plain-text, append/replace/remove over two Markdown files — enough for a persona's
+running notes. If you need structured records (a database, a vector store, per-fact expiry), write
+your own `NativeTool` and skip this one; `FromDir`'s `Memory = false` lets you opt out while
+keeping everything else.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — add an entry
+
+```csharp test
+using Toolnexus.Agents;
+
+var dir = Directory.CreateTempSubdirectory("toolnexus-memory-").FullName;
+var memory = Home.MemoryTool(dir);
+
+var result = await memory.ExecuteAsync(new Dictionary<string, object?>
+{
+    ["action"] = "add",
+    ["text"] = "the user is in IST",
+});
+
+if (result.IsError) throw new Exception(result.Output);
+var memoryFile = Path.Combine(dir, "MEMORY.md");
+if (!File.ReadAllText(memoryFile).Contains("the user is in IST")) throw new Exception("entry missing");
+
+Console.WriteLine($"ok: {result.Output}");
+```
+
+### 2. `replace`/`remove`, `target = "user"`, and the loud error on a miss
+
+```csharp test
+using Toolnexus.Agents;
+
+var dir = Directory.CreateTempSubdirectory("toolnexus-memory-").FullName;
+var memory = Home.MemoryTool(dir);
+
+await memory.ExecuteAsync(new Dictionary<string, object?> { ["action"] = "add", ["text"] = "prefers Tamil greetings", ["target"] = "user" });
+
+var replaced = await memory.ExecuteAsync(new Dictionary<string, object?>
+{
+    ["action"] = "replace", ["text"] = "prefers Tamil greetings", ["with"] = "prefers English greetings", ["target"] = "user",
+});
+if (replaced.IsError) throw new Exception(replaced.Output);
+
+var userFile = Path.Combine(dir, "USER.md");
+var body = File.ReadAllText(userFile);
+if (!body.Contains("prefers English greetings") || body.Contains("Tamil")) throw new Exception(body);
+
+// A replace/remove of a substring that isn't there is a LOUD error — the model can read this back
+// and try something else, rather than the write silently no-op'ing.
+var miss = await memory.ExecuteAsync(new Dictionary<string, object?> { ["action"] = "remove", ["text"] = "not present anywhere", ["target"] = "user" });
+if (!miss.IsError) throw new Exception("expected a loud error on a missing substring");
+
+Console.WriteLine($"ok: {body.Trim()} | miss={miss.Output}");
+```
+
+### 3. Full surface — writes hit disk, but a live snapshot is frozen until next session
+
+```csharp test
+using Toolnexus.Agents;
+
+var dir = Directory.CreateTempSubdirectory("toolnexus-memory-").FullName;
+File.WriteAllText(Path.Combine(dir, "SOUL.md"), "You are Kavi.");
+
+// Compose once — this is the "frozen snapshot" a live session's system prompt would carry.
+var (soulBefore, _) = Home.ComposeSoul(dir);
+if (soulBefore.Contains("MEMORY.md")) throw new Exception("no MEMORY.md should exist yet");
+
+var memory = Home.MemoryTool(dir);
+var unknown = await memory.ExecuteAsync(new Dictionary<string, object?> { ["action"] = "bogus", ["text"] = "x" });
+if (!unknown.IsError) throw new Exception("an unknown action must be a loud error");
+
+var added = await memory.ExecuteAsync(new Dictionary<string, object?> { ["action"] = "add", ["text"] = "loves terse answers" });
+if (added.IsError) throw new Exception(added.Output);
+if (!added.Output.Contains("loads next session")) throw new Exception(added.Output); // the tool says so, in its own words
+
+// The write hit disk, but the snapshot taken BEFORE the write can't see it — the cache-stability
+// rule (SPEC §7E): mid-session writes only take effect on the NEXT ComposeSoul.
+if (soulBefore.Contains("loves terse answers")) throw new Exception("stale snapshot must not see the write");
+
+var (soulAfter, foundAfter) = Home.ComposeSoul(dir);
+if (!soulAfter.Contains("loves terse answers")) throw new Exception("a FRESH compose must see the write");
+if (!foundAfter.Contains("MEMORY.md")) throw new Exception(string.Join(",", foundAfter));
+
+Console.WriteLine($"ok: frozen snapshot unaffected; next session sees {foundAfter[^1]}");
+```
+
+<Aside type="caution">
+The tool never mutates the current session's prompt — it says so in its own description, so the
+model doesn't expect a write to be visible immediately. Don't build a persona that asks the model
+to "check what you just remembered" in the same turn; it won't be there until the next session.
+</Aside>
+
+## Actions
+
+| Action | Effect | Target file |
+|---|---|---|
+| `add` | Appends an entry as a new list item. | `self` → `MEMORY.md` (default), `user` → `USER.md` |
+| `replace` | Swaps an existing substring (`text`) for `with`. Loud `IsError` if `text` is absent. | same |
+| `remove` | Deletes an existing substring (`text`). Loud `IsError` if `text` is absent. | same |
+
+## Parameters
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `dir` | `string` | The persona's home directory — the same one passed to `ComposeSoul`/`FromDir`. |
+
+## See also
+
+- [`Home.ComposeSoul`](/api/csharp/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.
+- [`Home.FromDir`](/api/csharp/persona/from-dir/) — Point at an agent home directory and get a configured agent back.

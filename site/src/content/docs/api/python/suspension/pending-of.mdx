@@ -1,0 +1,208 @@
+---
+title: "pending_of"
+description: "Detect that a RunResult is parked rather than finished, and get the Request that parked it. — Python."
+sidebar:
+  label: "pending_of"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/types.py">python/src/toolnexus/types.py</a>
+</p>
+
+```python
+def pending_of(result: ToolResult) -> Request | None
+```
+
+Reads the suspension back off a `ToolResult`: `None` for an ordinary result (success or a
+genuine failure), the `Request` when `result.metadata["pending"]` is present. This is the one
+place the "is this a suspension, not a failure" check belongs — `is_error=True` alone can't
+tell you, since a `Pending` result also sets `is_error=True`.
+
+## When to use it
+
+- You're writing a tool that wraps another tool, a hook, or your own observability code, and
+  need to tell "this call is parked waiting on a human" apart from "this call genuinely
+  failed" — the two only differ by `metadata["pending"]`.
+- You're inspecting a `ToolResult` you got back from `toolkit.execute(...)` directly (outside
+  the client loop) and need to know whether to treat it as done or as awaiting an `Answer`.
+- You're building your own metrics/logging sink and want suspensions excluded from
+  error-rate counts, exactly as the built-in `tool` observability event does (`is_error:false`
+  + a `pending:true` marker on a suspended call).
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Don't branch on is_error alone">
+`result.is_error` is `True` for both a genuine tool failure and a `Pending` suspension — they
+are NOT the same outcome. `pending_of(result)` is the one place that distinction lives; check
+it before deciding a call "failed".
+</Aside>
+
+`pending_of` never raises and never needs a `try`/`except` — a `ToolResult` with no
+`metadata`, or with `metadata` that doesn't carry `"pending"`, is just `None`. Symmetric with
+[`pending`](/api/python/suspension/pending/): whatever `pending`/`auth_required` build,
+`pending_of` reads back.
+
+## Examples
+
+### 1. The smallest useful call — suspended vs. ordinary vs. genuinely failed
+
+```python test
+from toolnexus import ToolResult, auth_required, pending, pending_of
+
+suspended = pending(kind="input", prompt="which environment?")
+assert pending_of(suspended) is not None
+assert pending_of(suspended).kind == "input"
+
+authed = auth_required("https://example.com/login")
+assert pending_of(authed).kind == "authorization"
+
+ok = ToolResult(output="42", is_error=False)
+assert pending_of(ok) is None
+
+failed = ToolResult(output="file not found", is_error=True)  # a real failure, no metadata.pending
+assert failed.is_error is True
+assert pending_of(failed) is None  # is_error alone doesn't mean "suspended"
+
+print("ok:", pending_of(suspended).kind, "| failed but not pending:", pending_of(failed))
+```
+
+### 2. The realistic case — classifying a batch of results the way the loop does internally
+
+```python test
+from toolnexus import ToolResult, pending, pending_of
+
+
+def classify(results: list[ToolResult]) -> dict[str, int]:
+    """Mirrors the client's internal metric classification (client.py `_emit_tool`):
+    a suspension is never counted as an error."""
+    counts = {"success": 0, "error": 0, "suspended": 0}
+    for r in results:
+        if pending_of(r) is not None:
+            counts["suspended"] += 1
+        elif r.is_error:
+            counts["error"] += 1
+        else:
+            counts["success"] += 1
+    return counts
+
+
+batch = [
+    ToolResult(output="ok", is_error=False),
+    ToolResult(output="ok", is_error=False),
+    ToolResult(output="not found", is_error=True),
+    pending(kind="approval", prompt="OK to proceed?"),
+]
+
+counts = classify(batch)
+assert counts == {"success": 2, "error": 1, "suspended": 1}
+
+print("ok:", counts)
+```
+
+### 3. The full surface — the built-in `tool` metric applies the same rule live
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit, define_tool, pending
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+async def gate(args=None, ctx=None):
+    return pending(kind="approval", prompt="approve?")
+
+
+def scripted(body):
+    return {
+        "choices": [{
+            "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": "c1", "type": "function",
+                                 "function": {"name": "gate", "arguments": "{}"}}],
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 6, "completion_tokens": 2, "total_tokens": 8},
+    }
+
+
+async def main():
+    events: list[dict] = []
+
+    tk = await create_toolkit()
+    tk.register(define_tool(gate, name="gate", description="Needs approval."))
+    try:
+        with StubServer(scripted) as srv:
+            client = create_client(
+                base_url=srv.base_url, style="openai", model="test-model", api_key="test-key",
+                on_metric=lambda ev: events.append(ev),
+                # no wait_for -> the run halts durable, and the tool event fires on the way out.
+            )
+            result = await client.run("please proceed", tk)
+
+        assert result.status == "pending"
+
+        tool_events = [e for e in events if e.get("event") == "tool"]
+        assert len(tool_events) == 1
+        # Exactly the rule pending_of encodes: a suspension is is_error=False + pending=True,
+        # never counted as a tool failure.
+        assert tool_events[0]["is_error"] is False
+        assert tool_events[0]["pending"] is True
+
+        print("ok:", tool_events[0])
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+## See also
+
+- [`pending`](/api/python/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`auth_required`](/api/python/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`WaitFor`](/api/python/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`AgentRuntime.resume`](/api/python/suspension/resume/) — The answer-carrying entry point: resume a parked agent run after a durable suspension.

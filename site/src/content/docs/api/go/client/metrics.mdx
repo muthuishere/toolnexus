@@ -1,0 +1,258 @@
+---
+title: "MetricEvent"
+description: "Emit one metric event per model call and per tool call: tokens, latency, outcome. — Go."
+sidebar:
+  label: "MetricEvent"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/client.go">golang/client.go</a>
+</p>
+
+```go
+type MetricEvent struct {
+	Event   string // "llm" | "tool" | "run"
+	Model   string
+	Status  string // "ok" | "error" ("llm")
+	Ms      int64
+	// ... plus Event-specific fields (see the table below)
+}
+
+// ClientOptions.OnMetric func(MetricEvent)
+func (c *Client) Metrics() string // Prometheus text exposition
+```
+
+`OnMetric` is a semantic observability sink: the client calls it once per LLM call (`Event: "llm"`),
+once per tool call (`Event: "tool"`), and once per run/ask (`Event: "run"`), as the loop runs. It's a
+readable event, not a raw counter — forward it to statsd, structured logs, OpenTelemetry, anywhere.
+The same events also feed a built-in Prometheus registry, rendered by `Client.Metrics()`, at no cost
+when `OnMetric` is left `nil`.
+
+## When to use it
+
+Reach for `OnMetric` for observability that doesn't need to change anything: per-call cost tracking,
+structured logs of every LLM/tool call, dashboards, alerting on error rate or latency. Reach for
+`Client.Metrics()` when you already run a Prometheus scraper and just want a `/metrics` endpoint —
+its text output is byte-identical across all six ports.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Need to change behavior, not just observe it? Use Hooks">
+`OnMetric` only observes — it cannot deny a tool call, rewrite arguments, or replace an output.
+Reach for [`Hooks`](/api/go/client/hooks/) when you need interception (policy, redaction,
+short-circuiting); reach for `OnMetric` when you just need numbers and don't want the extra
+plumbing `Hooks` requires to also get a metric out.
+</Aside>
+
+## Examples
+
+Each example points `CreateClient` at a local `httptest.Server` — no real network call, no real API
+key.
+
+### 1. The smallest useful call — one `OnMetric` sink
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer srv.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	var events []toolnexus.MetricEvent
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "gpt-x", APIKey: "test-key",
+		OnMetric: func(ev toolnexus.MetricEvent) { events = append(events, ev) },
+	})
+
+	if _, err := client.Run(context.Background(), "hi", tk); err != nil {
+		log.Fatal(err)
+	}
+	if len(events) != 2 { // one "llm", one terminal "run"
+		log.Fatalf("events = %d, want 2", len(events))
+	}
+	if events[0].Event != "llm" || events[0].Status != "ok" || events[1].Event != "run" {
+		log.Fatalf("unexpected events: %+v", events)
+	}
+
+	fmt.Println("ok:", events[0].Event, events[1].Event)
+}
+```
+
+### 2. The realistic case — `llm`, `tool`, and `run` events for a tool-calling turn
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	add := toolnexus.NativeTool(
+		"add", "add two numbers",
+		toolnexus.JSONSchema{"type": "object", "properties": map[string]any{
+			"a": map[string]any{"type": "number"}, "b": map[string]any{"type": "number"},
+		}},
+		func(_ context.Context, args map[string]any) (string, error) {
+			a, _ := args["a"].(float64)
+			b, _ := args["b"].(float64)
+			return fmt.Sprintf("%v", a+b), nil
+		},
+	)
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: []toolnexus.Tool{add}, Builtins: false})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"add","arguments":"{\"a\":2,\"b\":3}"}}]}}],"usage":{"prompt_tokens":5,"completion_tokens":4,"total_tokens":9}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"5"}}],"usage":{"prompt_tokens":6,"completion_tokens":1,"total_tokens":7}}`))
+	}))
+	defer srv.Close()
+
+	var events []toolnexus.MetricEvent
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "gpt-x", APIKey: "test-key",
+		OnMetric: func(ev toolnexus.MetricEvent) { events = append(events, ev) },
+	})
+
+	if _, err := client.Run(context.Background(), "add them", tk); err != nil {
+		log.Fatal(err)
+	}
+
+	var llmCount int
+	var sawTool bool
+	for _, e := range events {
+		switch e.Event {
+		case "llm":
+			llmCount++
+		case "tool":
+			sawTool = true
+			if e.Tool != "add" || e.Source != "native" || e.IsError {
+				log.Fatalf("unexpected tool event: %+v", e)
+			}
+		}
+	}
+	if llmCount != 2 || !sawTool {
+		log.Fatalf("llmCount=%d sawTool=%v, want 2/true", llmCount, sawTool)
+	}
+	run := events[len(events)-1]
+	if run.Event != "run" || run.Turns != 2 || run.ToolCalls != 1 || run.TotalTokens != 16 {
+		log.Fatalf("unexpected run event: %+v", run)
+	}
+
+	fmt.Println("ok: llm x", llmCount, "tool calls:", run.ToolCalls, "tokens:", run.TotalTokens)
+}
+```
+
+### 3. The full surface — `Client.Metrics()` Prometheus text
+
+Every event that reaches `OnMetric` also feeds a built-in registry, rendered as Prometheus text
+exposition format — valid (only `# HELP`/`# TYPE` lines) even before any activity.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`))
+	}))
+	defer srv.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "gpt-x", APIKey: "test-key"})
+
+	// Before any activity: empty-but-valid — only comment lines, no samples.
+	before := client.Metrics()
+	if !strings.HasPrefix(before, "# HELP") {
+		log.Fatalf("expected Metrics() to start with a HELP comment, got %q", before)
+	}
+
+	if _, err := client.Run(context.Background(), "hi", tk); err != nil {
+		log.Fatal(err)
+	}
+
+	after := client.Metrics()
+	if !strings.Contains(after, `toolnexus_llm_requests_total{model="gpt-x",status="ok"} 1`) {
+		log.Fatalf("expected an llm_requests_total sample, got:\n%s", after)
+	}
+	if !strings.Contains(after, "toolnexus_run_errors_total") {
+		log.Fatalf("expected the run_errors_total series to exist, got:\n%s", after)
+	}
+
+	fmt.Println("ok: Metrics() grew from", len(before), "to", len(after), "bytes")
+}
+```
+
+## MetricEvent fields
+
+| Field | Populated on | What it holds |
+|---|---|---|
+| `Event` | always | `"llm"` \| `"tool"` \| `"run"`. |
+| `Model` | `"llm"`, `"run"` | The model used. |
+| `Status` | `"llm"` | `"ok"` \| `"error"`. |
+| `Ms` | always | Elapsed wall-clock time in milliseconds. |
+| `PromptTokens`, `CompletionTokens` | `"llm"` | Per-call token counts. |
+| `Tool`, `Source` | `"tool"` | Tool name; `"mcp"` \| `"skill"` \| `"native"` \| `"custom"`. |
+| `IsError` | `"tool"` | Whether the tool call failed. |
+| `Pending` | `"tool"` | `true` for a §10 suspension — classified `Pending`, never an error. |
+| `Turns`, `ToolCalls`, `TotalTokens` | `"run"` | Aggregated across the whole run. |
+| `Error` | `"run"` | The failure message, set only on a failed run. |
+
+## See also
+
+- [`CreateClient`](/api/go/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.Run`](/api/go/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Hooks`](/api/go/client/hooks/) — Intercept before/after model calls and tool calls when observing alone isn't enough.
+- [`ErrorInfo`](/api/go/client/resilience/) — Classify each failed LLM attempt; a failed run still fires a terminal `"run"` metric event with `Error` set.

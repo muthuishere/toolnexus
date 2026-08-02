@@ -1,0 +1,139 @@
+---
+title: "Toolnexus.A2a.parse_agents_config"
+description: "Declare remote peers in config the way MCP servers are declared, with precedence rules. — Elixir."
+sidebar:
+  label: "Toolnexus.A2a.parse_agents_config"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/a2a.ex">elixir/lib/toolnexus/a2a.ex</a>
+</p>
+
+```elixir
+@spec parse_agents_config(map() | nil) :: [map()]
+def parse_agents_config(block)
+
+# block = %{"<id>" => %{"card" => ..., "headers" => ..., "timeout" => ...,
+#                        "pollEvery" => ..., "enabled"/"disabled" => ...}}
+# nil ⇒ []
+```
+
+Parses an `agents` config block — the same shape as `mcpServers`, keyed by an arbitrary id — into
+a list of [`Toolnexus.A2a.agent/1`](/api/elixir/agents/agent/) descriptors. Entries are resolved in
+**sorted-key order**, disabled entries are skipped (MCP `isEnabled` precedence: `disabled: true`
+wins over `enabled: false`), and entries missing a `card` string are silently dropped. The config
+key is **only an identifier** — a tool's name prefix always comes from the fetched card's `name`,
+never the key.
+
+## When to use it
+
+- **Peers are declared in `mcp.json`** alongside `mcpServers` — a top-level `agents` block resolves
+  through `Toolnexus.create_toolkit!/1` automatically; you rarely call `parse_agents_config/1`
+  directly unless you are building the toolkit by hand.
+- **You want the same enable/disable precedence MCP servers get** — `disabled: true` beats
+  `enabled: false` beats "present", so ops can toggle a peer off without deleting its config.
+- **Testing config parsing in isolation** — pure function, no network, easy to unit test against a
+  literal map.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for agent/1 when you have exactly one peer, not a config block">
+[`Toolnexus.A2a.agent/1`](/api/elixir/agents/agent/) builds one descriptor by hand. Reach for
+`parse_agents_config/1` when peers are declared as data — a config file, a database row, anything
+that already looks like the `mcpServers` shape — and you want them all resolved with the same
+precedence rules in one pass.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — `nil` and an empty block
+
+```elixir test
+alias Toolnexus.A2a
+
+true = A2a.parse_agents_config(nil) == []
+true = A2a.parse_agents_config(%{}) == []
+
+IO.puts("ok: nil and {} both parse to []")
+```
+
+### 2. The realistic case — one enabled peer, two disabled, one malformed
+
+```elixir test
+alias Toolnexus.A2a
+
+block = %{
+  "calc" => %{"card" => "http://calc.local/card.json", "timeout" => 5_000, "pollEvery" => 250},
+  "off_via_disabled" => %{"card" => "http://x.local/card.json", "disabled" => true},
+  "off_via_enabled" => %{"card" => "http://y.local/card.json", "enabled" => false},
+  "malformed" => %{"nope" => "no card key"}
+}
+
+descriptors = A2a.parse_agents_config(block)
+
+true = descriptors == [
+  %{card: "http://calc.local/card.json", headers: nil, timeout: 5_000, poll_every: 250}
+]
+
+# pollEvery (config wire key) maps to :poll_every (the descriptor field)
+[only] = descriptors
+true = only.poll_every == 250
+
+IO.puts("ok: #{length(descriptors)} of #{map_size(block)} entries survived")
+```
+
+### 3. The full surface — sorted-key order feeds a live toolkit round trip
+
+```elixir test
+alias Toolnexus.{A2a, Client, Toolkit}
+
+Application.ensure_all_started(:req)
+
+llm_plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+
+  resp = %{
+    "choices" => [%{"message" => %{"role" => "assistant", "content" => "sunny"}}],
+    "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+  }
+
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+llm_client =
+  Client.create(base_url: "http://localhost", style: "openai", model: "gpt-x", api_key: "test-key", http_options: [plug: llm_plug])
+
+{:ok, peer_toolkit} =
+  Toolnexus.create_toolkit(skills: [%{name: "weather", description: "reports weather", content: "Say sunny."}], builtins: false)
+
+handle = Toolkit.serve(peer_toolkit, "127.0.0.1:0", client: llm_client, a2a: %{name: "Weather Agent"})
+
+# a config block, resolved and wired straight into a consuming toolkit
+config = %{"weather" => %{"card" => handle.url <> "/.well-known/agent-card.json", "pollEvery" => 10}}
+descriptors = A2a.parse_agents_config(config)
+
+tk = Toolnexus.create_toolkit!(agents: descriptors, builtins: false)
+true = Enum.map(Toolkit.tools(tk), & &1.name) == ["Weather_Agent_weather"]
+
+result = Toolkit.execute(tk, "Weather_Agent_weather", %{"task" => "how's the weather"})
+false = result.is_error
+true = result.output == "sunny"
+
+Toolnexus.Serve.stop(handle)
+
+IO.puts("ok: config block -> #{length(descriptors)} descriptor(s) -> live tool -> \"#{result.output}\"")
+```
+
+## What you get back
+
+`parse_agents_config/1` returns a list of the same descriptor maps `Toolnexus.A2a.agent/1` builds
+(see [its fields table](/api/elixir/agents/agent/#agent-descriptor-shape)) — `%{card, headers,
+timeout, poll_every}` — ready to pass straight to `agent_tools/1`, `create_toolkit!(agents: ...)`,
+or `Toolkit.add_agent/3`.
+
+## See also
+
+- [`Toolnexus.A2a.agent`](/api/elixir/agents/agent/) — point at a remote agent's card and use it exactly like a local tool.
+- [`Toolnexus.A2a.agent_tools`](/api/elixir/agents/agent-tools/) — expand a remote agent card into one tool per advertised skill.

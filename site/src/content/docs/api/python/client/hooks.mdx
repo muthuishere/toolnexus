@@ -1,0 +1,389 @@
+---
+title: "Hooks"
+description: "Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite. — Python."
+sidebar:
+  label: "Hooks"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/client.py">python/src/toolnexus/client.py</a>
+</p>
+
+```python
+Hooks = Any  # any dict/mapping or attribute-bearing object exposing:
+#   before_llm({"messages", "tools", "model", "turn"}) -> {"messages"?, "tools"?} | None
+#   after_llm({"response", "model", "turn"})           -> None
+#   before_tool({"name", "args", "id", "turn"})         -> {"result"?, "args"?} | None
+#   after_tool({"name", "args", "result", "id", "turn"}) -> {"result"?} | None
+```
+
+Lifecycle middleware for the tool-calling loop. Pass a dict (or any object with these
+attributes) as `hooks=` to `create_client`; each callable may be sync or async. `before_tool`
+returning `{"result": ...}` short-circuits the real tool entirely — the loop never calls it.
+
+## When to use it
+
+- **Audit** — log every model call and every tool call (`before_llm`/`after_llm`,
+  `before_tool`/`after_tool`) without touching the loop itself.
+- **Redact / rewrite** — `before_llm` can replace `messages` or `tools` before they're sent;
+  `before_tool` can rewrite `args` before the tool runs; `after_tool` can replace a tool's
+  `ToolResult` before it re-enters the transcript.
+- **Veto** — `before_tool` returning `{"result": ToolResult(..., is_error=True)}` denies a
+  tool call outright — a policy gate (deny a dangerous tool, cache a repeat call, dry-run) the
+  model never sees around.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Hooks intercept; wait_for suspends">
+Hooks observe and can veto/rewrite a call synchronously, in-loop. They are not for pausing a
+run to wait on an external event (approval, payment, a slow human) — that's the §10
+suspension contract (`Pending`/`wait_for`), a separate mechanism. Use hooks when the decision
+can be made immediately from what's already in scope.
+</Aside>
+
+## Examples
+
+<Aside type="note" title="Hermetic on purpose">
+Every example points `create_client` at a local `http.server` stub instead of a real LLM
+endpoint — no network, no API key.
+</Aside>
+
+### 1. The smallest useful call — `before_tool` short-circuits a call
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import ToolResult, create_client, create_toolkit, define_tool
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def scripted(body):
+    messages = body["messages"]
+    if not any(m.get("role") == "tool" for m in messages):
+        return {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "delete_all", "arguments": "{}"}}],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+        }
+    return {
+        "choices": [{"message": {"role": "assistant", "content": "done"}}],
+        "usage": {"prompt_tokens": 6, "completion_tokens": 1, "total_tokens": 7},
+    }
+
+
+async def main():
+    tk = await create_toolkit()
+    real_hits = {"n": 0}
+
+    def delete_all():
+        real_hits["n"] += 1
+        return "deleted everything"
+
+    tk.register(define_tool(delete_all, name="delete_all", description="Dangerous."))
+
+    def before_tool(ev):
+        if ev["name"] == "delete_all":
+            return {"result": ToolResult(output="DENIED by policy", is_error=True)}
+
+    try:
+        with StubServer(scripted) as srv:
+            client = create_client(
+                base_url=srv.base_url, style="openai", model="test-model", api_key="test-key",
+                hooks={"before_tool": before_tool},
+            )
+            result = await client.run("delete everything", tk)
+
+        assert real_hits["n"] == 0, "the real tool must never run"
+        assert result.tool_calls[0]["is_error"] is True
+        assert result.tool_calls[0]["output"] == "DENIED by policy"
+
+        print("ok:", result.tool_calls[0]["output"], "| real hits:", real_hits["n"])
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — `before_llm` rewrites the system prompt, `after_tool` redacts output
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import ToolResult, create_client, create_toolkit, define_tool
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+async def main():
+    tk = await create_toolkit()
+    seen_system = {"content": None}
+
+    def scripted(body):
+        if seen_system["content"] is None:
+            for m in body["messages"]:
+                if m.get("role") == "system":
+                    seen_system["content"] = m["content"]
+        if not any(m.get("role") == "tool" for m in body["messages"]):
+            return {
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "lookup_ssn", "arguments": "{}"}}],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+            }
+        return {"choices": [{"message": {"role": "assistant", "content": "handled"}}], "usage": {"prompt_tokens": 6, "completion_tokens": 1, "total_tokens": 7}}
+
+    tk.register(define_tool(lambda: "123-45-6789", name="lookup_ssn", description="Look up a secret."))
+
+    def before_llm(ev):
+        # Inject a compliance line into every system message this run sends.
+        rewritten = [
+            {**m, "content": m["content"] + " Redact any SSNs."} if m.get("role") == "system" else m
+            for m in ev["messages"]
+        ]
+        return {"messages": rewritten}
+
+    def after_tool(ev):
+        if ev["name"] == "lookup_ssn" and not ev["result"].is_error:
+            return {"result": ToolResult(output="[REDACTED]", is_error=False)}
+
+    try:
+        with StubServer(scripted) as srv:
+            client = create_client(
+                base_url=srv.base_url, style="openai", model="test-model", api_key="test-key",
+                system_prompt="You are an agent.",
+                hooks={"before_llm": before_llm, "after_tool": after_tool},
+            )
+            result = await client.run("look up the SSN", tk)
+
+        assert seen_system["content"] == "You are an agent. Redact any SSNs."
+        assert result.tool_calls[0]["output"] == "[REDACTED]"
+
+        print("ok: system prompt rewritten, tool output redacted to", result.tool_calls[0]["output"])
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — all four hooks firing on one run
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit, define_tool
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def scripted(body):
+    if not any(m.get("role") == "tool" for m in body["messages"]):
+        return {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "add", "arguments": '{"a": 2, "b": 3}'}}],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+        }
+    return {"choices": [{"message": {"role": "assistant", "content": "5"}}], "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6}}
+
+
+class Recorder:
+    """A plain attribute-bearing object also satisfies Hooks — not just a dict."""
+
+    def __init__(self):
+        self.counts = {"before_llm": 0, "after_llm": 0, "before_tool": 0, "after_tool": 0}
+
+    def before_llm(self, ev):
+        self.counts["before_llm"] += 1
+
+    def after_llm(self, ev):
+        self.counts["after_llm"] += 1
+
+    def before_tool(self, ev):
+        self.counts["before_tool"] += 1
+
+    def after_tool(self, ev):
+        self.counts["after_tool"] += 1
+
+
+async def main():
+    tk = await create_toolkit()
+    tk.register(define_tool(lambda a, b: str(a + b), name="add", description="Add.", input_schema={
+        "type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}, "required": ["a", "b"],
+    }))
+
+    recorder = Recorder()
+    try:
+        with StubServer(scripted) as srv:
+            client = create_client(
+                base_url=srv.base_url, style="openai", model="test-model", api_key="test-key",
+                hooks=recorder,  # an object works exactly like a dict of the same names
+            )
+            result = await client.run("add 2 and 3", tk)
+
+        assert recorder.counts == {"before_llm": 2, "after_llm": 2, "before_tool": 1, "after_tool": 1}
+        assert result.text == "5"
+
+        print("ok:", recorder.counts)
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+## Hook event shapes
+
+| Hook | Event fields | Return to act |
+|---|---|---|
+| `before_llm` | `messages`, `tools`, `model`, `turn` | `{"messages"?, "tools"?}` replaces them for this call. |
+| `after_llm` | `response`, `model`, `turn` | Observation only — return value is ignored. |
+| `before_tool` | `name`, `args`, `id`, `turn` | `{"result": ToolResult}` short-circuits (real tool never runs); `{"args": {...}}` rewrites the arguments. |
+| `after_tool` | `name`, `args`, `result`, `id`, `turn` | `{"result": ToolResult}` replaces the result before it enters the transcript. |
+
+## See also
+
+- [`create_client`](/api/python/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.run`](/api/python/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Client.stream`](/api/python/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Conversation`](/api/python/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.

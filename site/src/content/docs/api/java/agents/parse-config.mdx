@@ -1,0 +1,181 @@
+---
+title: "A2A.parseAgentsConfig"
+description: "Declare remote peers in config the way MCP servers are declared, with precedence rules. — Java."
+sidebar:
+  label: "A2A.parseAgentsConfig"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/A2A.java">A2A.java</a>
+</p>
+
+```java
+public static List<A2A.Agent> parseAgentsConfig(Map<String, Object> block)
+```
+
+Parses an `agents` config block — `Map<name, AgentConfig>` — into `A2A.Agent` descriptors,
+skipping disabled entries. The config **key is only an identifier**; a resulting tool's name
+prefix comes from the fetched card's `name`, not the key. Mirrors how a top-level `mcpServers`
+block is parsed for MCP.
+
+## When to use it
+
+When peers are declared in a config file or a parsed JSON `Map` alongside `mcpServers` —
+letting an operator add/remove/disable a remote agent without touching code. `Toolkit.create`
+already calls this for you whenever `mcpConfig` is a `Map` containing an `agents` key; reach for
+it directly only when you want the parsed `List<Agent>` before it becomes tools.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="One agent, or a handful — just call A2A.agent directly">
+`parseAgentsConfig` earns its keep once peers live in config, not code — an ops team adding a
+new agent by editing JSON, the same way they'd add an MCP server. For one or two peers known at
+compile time, [`A2A.agent(card, ...)`](/api/java/agents/agent/) is simpler and needs no config
+shape at all.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — one entry, card-only
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Map<String, Object> block = Map.of(
+                "librarian", Map.of("card", "https://library.internal/.well-known/agent-card.json"));
+
+        List<A2A.Agent> parsed = A2A.parseAgentsConfig(block);
+
+        if (parsed.size() != 1) throw new AssertionError(parsed.size());
+        if (!parsed.get(0).card().equals("https://library.internal/.well-known/agent-card.json")) {
+            throw new AssertionError(parsed.get(0).card());
+        }
+        // no headers/timeout/pollEvery given ⇒ null (defaults apply at resolve time)
+        if (parsed.get(0).timeout() != null) throw new AssertionError(parsed.get(0).timeout());
+
+        System.out.println("ok: " + parsed.get(0).card());
+    }
+}
+```
+
+### 2. The realistic case — `enabled`/`disabled` precedence
+
+The same MCP `isEnabled` rule applies: `disabled:true` wins outright, then `enabled:false`;
+everything else (including `enabled:true` with no `disabled`) is enabled.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Map<String, Object> block = new LinkedHashMap<>();
+        block.put("keep", Map.of("card", "http://x/1"));
+        block.put("skippedByDisabled", Map.of("card", "http://x/2", "disabled", true));
+        block.put("skippedByEnabledFalse", Map.of("card", "http://x/3", "enabled", false));
+        // disabled:true wins even when enabled:true is also present.
+        block.put("skippedPrecedence", Map.of("card", "http://x/4", "enabled", true, "disabled", true));
+        block.put("keptExplicitEnabled", Map.of("card", "http://x/5", "enabled", true));
+
+        List<A2A.Agent> parsed = A2A.parseAgentsConfig(block);
+        List<String> cards = parsed.stream().map(A2A.Agent::card).sorted().toList();
+
+        if (!cards.equals(List.of("http://x/1", "http://x/5"))) throw new AssertionError(cards);
+
+        System.out.println("ok: " + cards);
+    }
+}
+```
+
+### 3. The full surface — headers/timeout/pollEvery, wired into a Toolkit
+
+Parsed descriptors carry every field a hand-built `A2A.agent(...)` call would; feeding the block
+straight through `Toolkit.Options.mcpConfig(...)` proves the same top-level `agents` key
+`Toolkit.create` reads.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer peer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        peer.createContext("/", ex -> {
+            try {
+                String path = ex.getRequestURI().getPath();
+                if ("/.well-known/agent-card.json".equals(path)) {
+                    send(ex, 200, "{\"name\":\"planner\",\"skills\":[{\"id\":\"plan\",\"description\":\"Plan\"}]}");
+                    return;
+                }
+                String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                Map<String, Object> rpc = Json.toMap(body);
+                Object id = rpc.get("id");
+                send(ex, 200, "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"result\":"
+                        + "{\"id\":\"t1\",\"status\":{\"state\":\"completed\"},"
+                        + "\"artifacts\":[{\"parts\":[{\"kind\":\"text\",\"text\":\"planned\"}]}]}}");
+            } catch (Exception e) {
+                send(ex, 500, "err");
+            }
+        });
+        peer.start();
+        int port = peer.getAddress().getPort();
+        String cardUrl = "http://127.0.0.1:" + port + "/.well-known/agent-card.json";
+
+        // First: parse the block directly.
+        Map<String, Object> block = Map.of("planner", Map.of(
+                "card", cardUrl, "timeout", 5000, "pollEvery", 10,
+                "headers", Map.of("X-Trace", "abc")));
+        List<A2A.Agent> parsed = A2A.parseAgentsConfig(block);
+        if (parsed.get(0).timeout() != 5000L) throw new AssertionError(parsed.get(0).timeout());
+        if (!"abc".equals(parsed.get(0).headers().get("X-Trace"))) throw new AssertionError(parsed.get(0).headers());
+
+        // Second: the same shape, nested under a top-level `agents` key, resolved
+        // by Toolkit.create the way it would come out of a real mcp.json.
+        Map<String, Object> config = Map.of("agents", block);
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).mcpConfig(config))) {
+            ToolResult r = tk.execute("planner_plan", Map.of("task", "ship it"));
+            if (r.isError() || !r.output().equals("planned")) throw new AssertionError(r.output());
+            System.out.println("ok: " + r.output());
+        } finally {
+            peer.stop(0);
+        }
+    }
+
+    private static void send(com.sun.net.httpserver.HttpExchange ex, int status, String body) {
+        try {
+            byte[] b = body.getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(status, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        } catch (Exception ignored) { }
+    }
+}
+```
+
+## Fields and overloads
+
+| Member | Type | What it is |
+|---|---|---|
+| `parseAgentsConfig(block)` | `List<Agent>` | One `Agent` per non-disabled entry; `block == null` ⇒ empty list. |
+| entry `card` | `String` (required) | Entries without a string `card` are silently skipped. |
+| entry `headers` / `timeout` / `pollEvery` | — | Same fields as [`A2A.agent`](/api/java/agents/agent/)'s full overload. |
+| entry `enabled` / `disabled` | `boolean` | `disabled:true` wins, then `enabled:false`; otherwise enabled. |
+
+## See also
+
+- [`A2A.agent`](/api/java/agents/agent/) — the descriptor shape each parsed entry becomes.
+- [`A2A.agentTools`](/api/java/agents/agent-tools/) — resolve a descriptor into callable tools.
+- [`Toolkit.create`](/api/java/toolkit/create/) — reads a top-level `agents` block on a parsed config `Map` automatically.

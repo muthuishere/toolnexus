@@ -1,0 +1,213 @@
+---
+title: load_skills
+description: Glob a skills directory and expose one skill tool with progressive disclosure. Python.
+sidebar:
+  label: load_skills
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/skill.py">python/src/toolnexus/skill.py</a>
+</p>
+
+```python
+def load_skills(
+    dirs: str | list[str] | None = None,
+    *,
+    skills: list[SkillDef] | None = None,
+    filter: dict[str, bool] | None = None,
+    sample_limit: int = 0,
+) -> SkillSource
+```
+
+Walks one or more directories for `**/SKILL.md`, parses each file's YAML frontmatter, and returns a
+`SkillSource` holding two things: the parsed `skills` dict and **one** `Tool` named `skill`. That
+single tool is the whole point — the model sees a short catalog of skill names and descriptions in
+the system prompt, and only when it calls `skill(name=…)` does the full body arrive. That is
+progressive disclosure: N skills cost N one-line descriptions, not N full documents.
+
+## When to use it
+
+- You keep prompt-shaped know-how as Markdown on disk (a `skills/` folder, a plugin dir, a cloned
+  skills repo) and want the model to reach for it.
+- You want the catalog for the system prompt — `source.prompt()` renders it.
+- You want skills **without** MCP servers, builtins, or a toolkit — this function connects to
+  nothing and does no I/O beyond reading the files.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use create_toolkit when skills are one source among several">
+[`create_toolkit(skills_dir=…)`](/api/python/toolkit/create/) calls `load_skills` internally and
+merges the `skill` tool with MCP tools, builtins and your own — and its `skill_prompt` feeds the
+client. Prefer it instead in any real agent. Use `load_skills` directly when skills are the *only*
+source, when you are testing discovery, or when you need the `SkillSource` object itself.
+</Aside>
+
+For "what did discovery find, and what did it reject and why", use
+[`list_skills`](/api/python/skills/list/) — same inputs, no tool built, plus typed skip reasons.
+
+## Examples
+
+### 1. Load the shared fixture and read the catalog
+
+`examples/skills` is the fixture every port is tested against.
+
+```python test
+from toolnexus import load_skills
+
+source = load_skills("examples/skills")
+
+# One skill discovered, keyed by its frontmatter `name`.
+assert list(source.skills.keys()) == ["hello-world"]
+info = source.skills["hello-world"]
+assert info.description.startswith("A tiny example skill.")
+assert info.location.endswith("hello-world/SKILL.md")
+# The body is everything AFTER the frontmatter fence.
+assert info.content.lstrip().startswith("# Hello World Skill")
+
+# Exactly one tool, always named `skill`.
+assert source.tool.name == "skill"
+assert source.tool.source == "skill"
+assert source.tool.input_schema["required"] == ["name"]
+
+# The catalog you paste into the system prompt.
+prompt = source.prompt()
+assert "## Available Skills" in prompt
+assert "- **hello-world**:" in prompt
+
+print("ok:", ", ".join(source.skills))
+```
+
+<Aside type="caution">
+A skill's `location` is stored exactly as walked, so a **relative** `dirs` gives relative locations —
+and executing the `skill` tool then raises, because the base directory is emitted as a `file://` URI
+and a relative path has no URI form. Pass an absolute path (`os.path.abspath(...)`) whenever the
+tool will actually be called.
+</Aside>
+
+### 2. Calling the `skill` tool — what the model gets back
+
+The output is a fixed `<skill_content>` envelope: the body, a base directory, and a sampled file
+list. It is byte-identical across all six ports.
+
+```python test
+import asyncio
+import os
+from toolnexus import load_skills
+
+# Absolute, because executing the tool renders the base directory as a file:// URI.
+source = load_skills(os.path.abspath("examples/skills"))
+
+
+async def main():
+    res = await source.tool.execute({"name": "hello-world"})
+    assert res.is_error is False
+
+    lines = res.output.splitlines()
+    assert lines[0] == '<skill_content name="hello-world">'
+    assert lines[1] == "# Skill: hello-world"
+    assert lines[-1] == "</skill_content>"
+
+    # The base directory is a file:// URI; relative paths in the body resolve against it.
+    assert "Base directory for this skill: file://" in res.output
+    # Siblings are advertised, not inlined — the model reads them if it needs them.
+    assert "<skill_files>" in res.output
+    assert res.output.count("<file>") == 1
+    assert "scripts/greet.sh" in res.output
+    # metadata carries the plain directory, handy for your own file tools.
+    assert res.metadata["name"] == "hello-world"
+    assert res.metadata["dir"].endswith("hello-world")
+
+    # An unknown name is a tool ERROR, not an exception — the model can retry.
+    miss = await source.tool.execute({"name": "nope"})
+    assert miss.is_error is True
+    assert miss.output == 'Skill "nope" not found. Available skills: hello-world'
+
+    print("ok:", res.metadata["name"], "| files:", res.output.count("<file>"))
+
+
+asyncio.run(main())
+```
+
+### 3. Data skills, an allowlist, and the sample cap
+
+Skills need not be on disk. `skills=[SkillDef(...)]` supplies them as data — they get a logical
+`skill://name/` base and never touch the filesystem. `filter` narrows the catalog per agent, and
+`sample_limit=-1` drops the file list entirely.
+
+```python test
+import asyncio
+import os
+from toolnexus import load_skills, SkillDef
+
+source = load_skills(
+    os.path.abspath("examples/skills"),
+    skills=[
+        SkillDef(
+            name="refund-policy",
+            description="How to process a refund request.",
+            content="# Refunds\n\nAlways check the order age first.",
+            resources=["templates/email.md", "checklist.md"],
+        ),
+        SkillDef(name="internal-only", description="Not for this agent.", content="secret"),
+    ],
+    # Allowlist: at least one True ⇒ ONLY the True names survive.
+    filter={"hello-world": True, "refund-policy": True},
+    sample_limit=1,
+)
+
+# `internal-only` was discovered, then filtered out.
+assert sorted(source.skills) == ["hello-world", "refund-policy"]
+assert source.skills["refund-policy"].origin == "logical"
+
+
+async def main():
+    data = await source.tool.execute({"name": "refund-policy"})
+    # Logical base — no file:// and no disk access.
+    assert "Base directory for this skill: skill://refund-policy/" in data.output
+    # sample_limit=1 capped the two declared resources to one.
+    assert data.output.count("<file>") == 1
+    assert "<file>templates/email.md</file>" in data.output
+
+    # Filtered-out skills are not loadable, and not listed as available.
+    miss = await source.tool.execute({"name": "internal-only"})
+    assert miss.is_error is True
+    assert "internal-only" not in miss.output.split("Available skills: ")[1]
+
+    # sample_limit=-1 omits the <skill_files> block altogether.
+    quiet = load_skills(os.path.abspath("examples/skills"), sample_limit=-1)
+    out = (await quiet.tool.execute({"name": "hello-world"})).output
+    assert "<skill_files>" not in out
+
+    print("ok:", ", ".join(sorted(source.skills)))
+
+
+asyncio.run(main())
+```
+
+## Options
+
+| Option | Type | What it does |
+|---|---|---|
+| `dirs` | `str \| list[str] \| None` | Root(s) to walk for `**/SKILL.md`. `node_modules` and `.git` are skipped; symlink loops are guarded. A missing dir warns on stderr and yields nothing. |
+| `skills` | `list[SkillDef] \| None` | Skills supplied as data. Logical base `skill://<name>/` unless `SkillDef.base` is set; never touches disk. |
+| `filter` | `dict[str, bool] \| None` | Per-agent allowlist. Empty/`None` ⇒ all. Any `True` ⇒ allowlist. Only `False` values ⇒ drop-list over all-on. Unknown names warn once. |
+| `sample_limit` | `int` | `0` ⇒ default of 10 sampled sibling files. `n > 0` ⇒ cap at n. `-1` ⇒ omit the `<skill_files>` block. |
+
+## Returns — `SkillSource`
+
+| Member | Type | What it is |
+|---|---|---|
+| `skills` | `dict[str, SkillInfo]` | Surviving skills by name (after `filter`). |
+| `tool` | `Tool` | The single `skill` tool. `name="skill"`, `source="skill"`, one required `name` argument. |
+| `prompt()` | `str` | Markdown catalog for the system prompt. `"No skills are currently available."` when nothing has a description. |
+
+`SkillInfo` carries `name`, `description`, `location`, `content`, `origin` (`"fs"` or `"logical"`),
+and — for data skills — `resources` and `base`.
+
+## See also
+
+- [`list_skills`](/api/python/skills/list/) — the same discovery, plus why files were skipped
+- [`load_skills` with data and filters](/api/python/skills/load-with/) — the `skills` / `filter` surface in depth
+- [`create_toolkit`](/api/python/toolkit/create/) — takes `skills_dir`, `skills`, `skills_filter`, `skill_sample_limit`

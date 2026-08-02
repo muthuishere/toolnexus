@@ -1,0 +1,223 @@
+---
+title: "ComposeSoul"
+description: "Build a persona's system prompt from its home directory: identity, memory, skills. — Go."
+sidebar:
+  label: "ComposeSoul"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang/agents</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/agents/home.go">golang/agents/home.go</a>
+</p>
+
+```go
+var BootstrapOrder = []string{
+	"AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md", "HEARTBEAT.md", "MEMORY.md",
+}
+
+func ComposeSoul(dir string) (soul string, found []string)
+```
+
+`ComposeSoul` is the directory-is-the-agent primitive: it reads `BootstrapOrder`'s seven
+well-known filenames out of `dir`, in openclaw convention order (identity first, memory
+last), and joins each present one into a single soul string as a `"## <filename>"` section.
+Absent files are skipped silently. Each file is read with a 2 MB byte cap — a larger file is
+truncated with a notice appended, and the on-disk file is untouched. `found` lists exactly
+which files were present, in the order they were composed.
+
+## When to use it
+
+Reach for `ComposeSoul` when you're building a persona-shaped agent by hand — composing the
+soul yourself into `agents.Spec.Soul` — rather than going through [`FromDir`](/api/go/persona/from-dir/),
+which calls it for you. It's also the right call when you only want the composed prompt text
+(to log it, hash it for cache-stability checks, or feed it to a different agent constructor)
+without building a full `*agents.Agent`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Want a runnable Agent, not just the prompt string?">
+`ComposeSoul` only builds the soul text — it doesn't construct an agent, wire the `memory`
+tool, or pick a name. [`FromDir`](/api/go/persona/from-dir/) does all three in one call and is
+what nearly every persona should use; reach for `ComposeSoul` directly only when you need the
+composed string on its own or are assembling a `Spec` with non-default pieces.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — compose from two files
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func main() {
+	dir, err := os.MkdirTemp("", "persona-*")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	if err := os.WriteFile(filepath.Join(dir, "SOUL.md"), []byte("You are Kip, a terse assistant."), 0o644); err != nil {
+		log.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "MEMORY.md"), []byte("- prefers metric units"), 0o644); err != nil {
+		log.Fatal(err)
+	}
+
+	soul, found := agents.ComposeSoul(dir)
+	if len(found) != 2 || found[0] != "SOUL.md" || found[1] != "MEMORY.md" {
+		log.Fatalf("unexpected found order: %v", found)
+	}
+	if !strings.Contains(soul, "## SOUL.md") {
+		log.Fatalf("soul missing SOUL.md section: %s", soul)
+	}
+
+	fmt.Println("ok: composed from", found)
+}
+```
+
+### 2. The realistic case — absent files skip silently, order is fixed
+
+Only `AGENTS.md` and `USER.md` exist here; `ComposeSoul` still walks the full
+`BootstrapOrder`, composing only what it finds, in that canonical order — not directory
+listing order or creation order.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func main() {
+	dir, err := os.MkdirTemp("", "persona-*")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	// Write USER.md first, on disk, but BootstrapOrder still puts AGENTS.md ahead of it.
+	if err := os.WriteFile(filepath.Join(dir, "USER.md"), []byte("The user is Muthu."), 0o644); err != nil {
+		log.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("Reply in one line."), 0o644); err != nil {
+		log.Fatal(err)
+	}
+
+	soul, found := agents.ComposeSoul(dir)
+	if len(found) != 2 || found[0] != "AGENTS.md" || found[1] != "USER.md" {
+		log.Fatalf("expected AGENTS.md before USER.md, got %v", found)
+	}
+	if strings.Index(soul, "AGENTS.md") > strings.Index(soul, "USER.md") {
+		log.Fatal("expected AGENTS.md section to precede USER.md section in the composed text")
+	}
+
+	fmt.Println("ok: composed", found, "- SOUL.md/IDENTITY.md/etc were absent and skipped")
+}
+```
+
+### 3. The full surface — wired into an agent as `Spec.Soul`, and a truncation notice
+
+`ComposeSoul`'s output is exactly what `FromDir` assigns to `agents.Spec.Soul` — this example
+does that assembly explicitly, and also shows the 2 MB truncation notice on an oversized file.
+
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func main() {
+	dir, err := os.MkdirTemp("", "persona-*")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	if err := os.WriteFile(filepath.Join(dir, "IDENTITY.md"), []byte("You are Archivist."), 0o644); err != nil {
+		log.Fatal(err)
+	}
+	// One byte over the 2 MB cap: ComposeSoul truncates with a notice, on-disk file untouched.
+	oversized := bytes.Repeat([]byte("x"), 2*1024*1024+1)
+	if err := os.WriteFile(filepath.Join(dir, "TOOLS.md"), oversized, 0o644); err != nil {
+		log.Fatal(err)
+	}
+
+	soul, found := agents.ComposeSoul(dir)
+	if len(found) != 2 || found[0] != "IDENTITY.md" || found[1] != "TOOLS.md" {
+		log.Fatalf("unexpected found: %v", found)
+	}
+	if !strings.Contains(soul, "[truncated: exceeds 2 MB bootstrap cap]") {
+		log.Fatal("expected a truncation notice for the oversized TOOLS.md")
+	}
+	onDisk, _ := os.ReadFile(filepath.Join(dir, "TOOLS.md"))
+	if len(onDisk) != len(oversized) {
+		log.Fatal("on-disk file must stay untouched by the read-time truncation")
+	}
+
+	// Assign the composed soul exactly as FromDir does.
+	archivist := agents.New("archivist", agents.Spec{Does: "keeps records", Soul: soul, Model: "m-archivist"})
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body, _ := json.Marshal(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "archived"}}},
+			"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+	})
+	r, _ := archivist.Run(agents.Options{Transport: transport}, "file this")
+	if r.Status != "done" || r.Text != "archived" {
+		log.Fatalf("unexpected run result: %+v", r)
+	}
+
+	fmt.Println("ok: soul carries", len(found), "sections and truncates oversized files safely")
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+```
+
+## Fields and behavior
+
+| Aspect | Behavior |
+|---|---|
+| `BootstrapOrder` | `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `MEMORY.md` — fixed, identity-first, memory-last. |
+| Absent files | Skipped silently — no error, no placeholder section. |
+| Per-file cap | 2 MB (`2097152` bytes), byte-based (may split a multibyte character). Larger ⇒ truncated + `"\n[truncated: exceeds 2 MB bootstrap cap]"` appended; on-disk file is never modified. |
+| Section format | Each present file becomes `"## <filename>\n\n<trimmed body>"`, joined with `"\n\n"`. |
+| `found` | The ordered list of filenames that were actually present — use it to know what shaped the soul. |
+| Timing | Composition happens once, at session start — the soul is a **frozen snapshot** for the run (the cache-stability rule). |
+
+## See also
+
+- [`FromDir`](/api/go/persona/from-dir/) — Point at an agent home directory and get a configured agent back.
+- [`MemoryTool`](/api/go/persona/memory-tool/) — The opt-in built-in that lets a persona write durable notes to its own home.
+- [`agents.New`](/api/go/runtime/agent/) — the constructor `Spec.Soul` feeds into.

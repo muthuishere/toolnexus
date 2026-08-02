@@ -1,0 +1,256 @@
+---
+title: "Toolnexus.Agents.Runtime.resume"
+description: "The answer-carrying entry point: resume a parked run in a different process. — Elixir."
+sidebar:
+  label: "Toolnexus.Agents.Runtime.resume"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/agents/runtime.ex">elixir/lib/toolnexus/agents/runtime.ex</a>
+</p>
+
+```elixir
+@spec resume(pid(), map()) :: :ok
+def resume(rt, answer)
+
+# answer :: %{id: term, ok: boolean, data: map | nil, reason: String.t() | nil}
+```
+
+<Aside type="caution" title="Elixir's resume entry point lives on the §7D agent runtime, not Client">
+`Toolnexus.Client` has no `resume` — it only offers
+[`:wait_for`](/api/elixir/suspension/wait-for/), which resolves a suspension **synchronously,
+in-process**. The real answer-carrying re-entry point — resuming a suspended sub-agent handle,
+possibly from a different callback or long after the original call returned — is
+`Toolnexus.Agents.Runtime.resume/2` on the [§7D agent runtime](/api/elixir/runtime/runtime/), the
+same mechanism every other port ships under an `AgentRuntime.resume`-shaped name.
+</Aside>
+
+`resume/2` routes an `Answer` to the **deepest suspended handle** in the runtime's tree. That
+handle resumes from its checkpoint — turns and usage grow, they never reset — and then the
+upward cascade re-runs each suspended parent, whose re-invoked `task` call **reattaches** to the
+already-finished child by task key rather than re-executing it. A suspended turn commits nothing
+to the `ConversationStore`; `resume/2` replays the whole turn, and idempotency comes from that
+reattachment, never from a halted placeholder left in history.
+
+## When to use it
+
+- **The suspension will outlive the current process** — a human approves hours later, an OAuth
+  redirect lands after a redeploy, an answer arrives over a queue. Persist the `Request` (its
+  `id`, and for nested agents `data["path"]` to the leaf), tear nothing down, and call `resume/2`
+  whenever the `Answer` shows up — even in a fresh runtime rebuilt from the same registry and a
+  durable `ConversationStore`.
+- **You're driving `Toolnexus.Agents`, not the classic `Client` loop directly** — `resume/2` is a
+  runtime verb; it operates on a `Toolnexus.Agents.Runtime` pid, not a `Toolnexus.Client.t()`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for :wait_for when resolution is cheap and synchronous">
+[`:wait_for`](/api/elixir/suspension/wait-for/) resolves a suspension right where it happened,
+inside the same `Client.run/4` call — nothing to persist, nothing to look up later. Reach for
+`Runtime.resume/2` when that isn't true: the answer needs a real out-of-band round trip, and the
+run must survive until it arrives, possibly in a different process entirely.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — suspend with no resolver anywhere, then resume
+
+No `:wait_for` is configured on the agent or the runtime, so the tool's suspension surfaces all
+the way out as a durable pending run.
+
+```elixir test
+alias Toolnexus.{Agents, Context, Tool, ToolResult, Request}
+alias Toolnexus.Agents.Runtime
+
+approve_tool = %Tool{
+  name: "secret_action",
+  description: "does something that needs approval",
+  input_schema: %{"type" => "object", "properties" => %{}},
+  source: "native",
+  execute: fn _args, %Context{} = ctx ->
+    case ctx.answer do
+      nil -> %ToolResult{output: "approval required", is_error: true, metadata: %{pending: %Request{id: "req-1", kind: "authorization", prompt: "approve the secret action?"}}}
+      %{ok: true} -> ToolResult.ok("action performed")
+    end
+  end
+}
+
+approver = Agents.agent("approver", does: "does the secret thing", uses: %{tools: [approve_tool]}, model: "m-1")
+
+mock_transport = fn %{body: body} ->
+  msgs = body["messages"] || []
+  tool_msgs = Enum.filter(msgs, &(&1["role"] == "tool"))
+
+  resp =
+    if tool_msgs == [] do
+      %{
+        "choices" => [%{"message" => %{"role" => "assistant", "content" => nil, "tool_calls" => [
+          %{"id" => "c1", "type" => "function", "function" => %{"name" => "secret_action", "arguments" => "{}"}}
+        ]}}],
+        "usage" => %{"prompt_tokens" => 3, "completion_tokens" => 2, "total_tokens" => 5}
+      }
+    else
+      %{"choices" => [%{"message" => %{"role" => "assistant", "content" => hd(tool_msgs)["content"]}}], "usage" => %{"prompt_tokens" => 2, "completion_tokens" => 1, "total_tokens" => 3}}
+    end
+
+  {:ok, %{status: 200, headers: %{}, body: resp}}
+end
+
+rt = Runtime.new(%{transport: mock_transport, registry: Agents.registry(approver)})
+{:ok, h} = Runtime.spawn_agent(rt, Runtime.root(rt), "approver")
+Runtime.wake(rt, h, "do the secret thing")
+r1 = Runtime.wait(rt, h)
+
+true = r1.status == "pending"
+true = r1.pending.kind == "authorization"
+true = Runtime.snapshot(h).state == :suspended
+
+Runtime.resume(rt, %{id: r1.pending.id, ok: true})
+
+snap = Runtime.snapshot(h)
+true = snap.state == :idle
+true = snap.last_result.text == "action performed"
+
+Runtime.shutdown(rt)
+
+IO.puts("ok: resumed a durably-suspended handle — final text: #{snap.last_result.text}")
+```
+
+### 2. The realistic case — the runtime survives the wait; usage grows, not resets
+
+```elixir test
+alias Toolnexus.{Agents, Context, Tool, ToolResult, Request}
+alias Toolnexus.Agents.Runtime
+
+approve_tool = %Tool{
+  name: "secret_action",
+  description: "does something that needs approval",
+  input_schema: %{"type" => "object", "properties" => %{}},
+  source: "native",
+  execute: fn _args, %Context{} = ctx ->
+    case ctx.answer do
+      nil -> %ToolResult{output: "approval required", is_error: true, metadata: %{pending: %Request{id: "req-2", kind: "authorization", prompt: "approve?"}}}
+      %{ok: true} -> ToolResult.ok("action performed")
+    end
+  end
+}
+
+approver = Agents.agent("approver", does: "does the secret thing", uses: %{tools: [approve_tool]}, model: "m-1")
+
+mock_transport = fn %{body: body} ->
+  msgs = body["messages"] || []
+  tool_msgs = Enum.filter(msgs, &(&1["role"] == "tool"))
+
+  resp =
+    if tool_msgs == [] do
+      %{"choices" => [%{"message" => %{"role" => "assistant", "content" => nil, "tool_calls" => [
+        %{"id" => "c1", "type" => "function", "function" => %{"name" => "secret_action", "arguments" => "{}"}}
+      ]}}], "usage" => %{"prompt_tokens" => 3, "completion_tokens" => 2, "total_tokens" => 5}}
+    else
+      %{"choices" => [%{"message" => %{"role" => "assistant", "content" => hd(tool_msgs)["content"]}}], "usage" => %{"prompt_tokens" => 2, "completion_tokens" => 1, "total_tokens" => 3}}
+    end
+
+  {:ok, %{status: 200, headers: %{}, body: resp}}
+end
+
+rt = Runtime.new(%{transport: mock_transport, registry: Agents.registry(approver)})
+{:ok, h} = Runtime.spawn_agent(rt, Runtime.root(rt), "approver")
+Runtime.wake(rt, h, "do it")
+r1 = Runtime.wait(rt, h)
+true = r1.status == "pending"
+
+before_tokens = Runtime.snapshot(h).usage_total
+
+# The "different process" is simulated here by simply waiting before resuming — the
+# handle is genuinely parked (state: :suspended) the whole time, burning no tokens.
+Runtime.resume(rt, %{id: r1.pending.id, ok: true})
+
+after_snap = Runtime.snapshot(h)
+true = after_snap.state == :idle
+true = after_snap.usage_total > before_tokens
+true = after_snap.turns_total >= 2
+
+Runtime.shutdown(rt)
+
+IO.puts("ok: usage grew from #{before_tokens} to #{after_snap.usage_total} tokens across the suspend/resume boundary")
+```
+
+### 3. The full surface — a denial resolves the tool call as an error, not a crash
+
+A resume replays the suspended turn from its checkpoint — the tool is invoked fresh, raises the
+same suspension again, and `ok: false` resolves it to a generic `"declined/expired: <prompt>"`
+tool error (the same fallback [`:wait_for`](/api/elixir/suspension/wait-for/) uses for a
+declined answer) rather than re-invoking the tool with `ctx.answer` set — that re-invocation is
+reserved for `ok: true`.
+
+```elixir test
+alias Toolnexus.{Agents, Context, Tool, ToolResult, Request}
+alias Toolnexus.Agents.Runtime
+
+approve_tool = %Tool{
+  name: "secret_action",
+  description: "does something that needs approval",
+  input_schema: %{"type" => "object", "properties" => %{}},
+  source: "native",
+  execute: fn _args, %Context{} = ctx ->
+    case ctx.answer do
+      nil -> %ToolResult{output: "approval required", is_error: true, metadata: %{pending: %Request{id: "req-3", kind: "authorization", prompt: "approve?"}}}
+      %{ok: true} -> ToolResult.ok("action performed")
+    end
+  end
+}
+
+approver = Agents.agent("approver", does: "does the secret thing", uses: %{tools: [approve_tool]}, model: "m-1")
+
+mock_transport = fn %{body: body} ->
+  msgs = body["messages"] || []
+  tool_msgs = Enum.filter(msgs, &(&1["role"] == "tool"))
+
+  resp =
+    if tool_msgs == [] do
+      %{"choices" => [%{"message" => %{"role" => "assistant", "content" => nil, "tool_calls" => [
+        %{"id" => "c1", "type" => "function", "function" => %{"name" => "secret_action", "arguments" => "{}"}}
+      ]}}], "usage" => %{"prompt_tokens" => 3, "completion_tokens" => 2, "total_tokens" => 5}}
+    else
+      %{"choices" => [%{"message" => %{"role" => "assistant", "content" => hd(tool_msgs)["content"]}}], "usage" => %{"prompt_tokens" => 2, "completion_tokens" => 1, "total_tokens" => 3}}
+    end
+
+  {:ok, %{status: 200, headers: %{}, body: resp}}
+end
+
+rt = Runtime.new(%{transport: mock_transport, registry: Agents.registry(approver)})
+{:ok, h} = Runtime.spawn_agent(rt, Runtime.root(rt), "approver")
+Runtime.wake(rt, h, "do it")
+r1 = Runtime.wait(rt, h)
+true = r1.status == "pending"
+
+Runtime.resume(rt, %{id: r1.pending.id, ok: false, reason: "not authorized"})
+
+snap = Runtime.snapshot(h)
+true = snap.state == :idle
+# a "done" handle never surfaces is_error — a decline resolves to ordinary assistant text,
+# not a crashed run
+false = snap.last_result.is_error
+true = snap.last_result.text == "declined/expired: approve?"
+
+Runtime.shutdown(rt)
+
+IO.puts("ok: a declined Answer resolved to a normal turn — final text: #{snap.last_result.text}")
+```
+
+## `answer` fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `id` | `term()` | Correlates to the `Request.id` the suspended tool raised. |
+| `ok` | `boolean()` | `true` re-invokes with `ctx.answer` set; `false` is up to the tool to interpret (deny, fall back, etc). |
+| `data` | `map() \| nil` | Payload the tool reads back via `ctx.answer.data`. |
+| `reason` | `String.t() \| nil` | Optional human-readable reason, most useful on `ok: false`. |
+
+## See also
+
+- [`Toolnexus.Client.create`](/api/elixir/suspension/wait-for/) — the synchronous, in-process resolver (`:wait_for`); prefer it when resolution doesn't need to survive a restart.
+- [`Toolnexus.Agents.Runtime`](/api/elixir/runtime/runtime/) — the six host verbs `resume/2` is one of.
+- [`Toolnexus.ToolResult`](/api/elixir/types/tool-result/) — how a tool raises the suspension `resume/2` answers.

@@ -1,0 +1,176 @@
+---
+title: "SkillSource.loadWith"
+description: "Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist. — Java."
+sidebar:
+  label: "SkillSource.loadWith"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/SkillSource.java">SkillSource.java</a>
+</p>
+
+```java
+public static SkillSource loadWith(LoadOptions opts)
+
+public static final class LoadOptions {
+    public List<String> dirs;
+    public List<SkillDef> skills;
+    public Map<String, Boolean> filter;
+    public int sampleLimit; // 0 => default 10, n>0 => cap, -1 => omit <skill_files>
+
+    public LoadOptions dirs(List<String> v);
+    public LoadOptions dirs(String... v);
+    public LoadOptions skills(List<SkillDef> v);
+    public LoadOptions filter(Map<String, Boolean> v);
+    public LoadOptions sampleLimit(int v);
+}
+
+public static final class SkillDef {
+    public SkillDef(String name, String description, String content);
+    public SkillDef(String name, String description, String content, List<String> resources, String base);
+}
+```
+
+The general form behind [`SkillSource.load`](/api/java/skills/load/): `load(dirs)` is
+`loadWith` with only `dirs` set. `loadWith` additionally accepts skills supplied directly as
+**data** (`SkillDef`s — never touching disk, base defaults to `skill://<name>/`), a per-agent
+**allowlist** (`filter`), and a **sample cap** on how many sibling files the `skill` tool lists
+per call. Directory and data skills can both be supplied in one call — they merge, first-wins on
+a duplicate name.
+
+## When to use it
+
+When your skills are not (only) files on disk — rows from a database, a tenant's config, an
+allowlisted subset per agent role — or when you need to bound how many `<file>` entries the
+`skill` tool reports for a large skill directory. Reach for the plain
+[`SkillSource.load`](/api/java/skills/load/) when neither applies; it is the thin sugar over
+this call for the common directory-only case.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Data skills never touch disk">
+A directory-sourced skill (`dirs`) keeps the exact `file://` base and samples sibling files from
+disk — byte-identical to `load`. A data-sourced skill (`skills`) uses a logical `skill://name/`
+base and reports exactly the `resources` list you supplied, sampled the same way; nothing is
+read from the filesystem for it. Use `skills` when the skill body itself comes from somewhere
+other than a `SKILL.md` file — you still get the identical `<skill_content>` envelope.
+</Aside>
+
+`filter` and `sampleLimit` apply uniformly to both sources — an allowlist or sample cap does not
+care whether a skill came from a directory or from data.
+
+## Examples
+
+### 1. Skills supplied as data — no filesystem involved
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        SkillSource.SkillDef def = new SkillSource.SkillDef(
+            "greet", "Say hello to someone", "Greet the user by name, warmly.",
+            List.of("templates/greeting.txt"), null // null base -> defaults to skill://greet/
+        );
+
+        SkillSource src = SkillSource.loadWith(new SkillSource.LoadOptions().skills(List.of(def)));
+
+        SkillSource.SkillInfo info = src.skills().get("greet");
+        if (info == null) throw new AssertionError("expected greet");
+        if (!"logical".equals(info.origin)) throw new AssertionError(info.origin);
+        if (!"skill://greet/".equals(info.base)) throw new AssertionError(info.base);
+
+        ToolResult res = src.tool().execute(Map.of("name", "greet"), new ToolContext());
+        if (res.isError()) throw new AssertionError(res.output());
+        if (!res.output().contains("Base directory for this skill: skill://greet/")) {
+            throw new AssertionError(res.output());
+        }
+        if (!res.output().contains("<file>templates/greeting.txt</file>")) throw new AssertionError(res.output());
+
+        System.out.println("ok: " + info.origin + " " + info.base);
+    }
+}
+```
+
+### 2. A per-agent allowlist narrows a directory's skills
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        SkillSource.LoadOptions opts = new SkillSource.LoadOptions()
+            .dirs("examples/skills")
+            .filter(Map.of("hello-world", true)); // allowlist: only true names load
+
+        SkillSource src = SkillSource.loadWith(opts);
+
+        if (!src.skills().containsKey("hello-world")) throw new AssertionError(src.skills().keySet());
+
+        // A name the filter never mentions is simply absent from the resolved set —
+        // not an error, since only-true filter entries mean "allowlist mode".
+        SkillSource.LoadOptions dropOpts = new SkillSource.LoadOptions()
+            .dirs("examples/skills")
+            .filter(Map.of("hello-world", false)); // drop-list mode: only false entries present
+        SkillSource dropped = SkillSource.loadWith(dropOpts);
+        if (dropped.skills().containsKey("hello-world")) throw new AssertionError("should be dropped");
+
+        System.out.println("ok: allowlist=" + src.skills().keySet() + " droplist=" + dropped.skills().keySet());
+    }
+}
+```
+
+### 3. Sample cap — bound how many sibling files the `skill` tool reports
+
+`sampleLimit == -1` omits the `<skill_files>` block entirely; `0` means the default of 10; a
+positive `n` caps the sample at `n` even when more resources exist.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        List<String> manyFiles = List.of("a.txt", "b.txt", "c.txt", "d.txt");
+        SkillSource.SkillDef def = new SkillSource.SkillDef(
+            "many", "Has several resources", "Body.", manyFiles, null
+        );
+
+        // Capped to 2, even though 4 resources exist.
+        SkillSource capped = SkillSource.loadWith(new SkillSource.LoadOptions().skills(List.of(def)).sampleLimit(2));
+        ToolResult cappedRes = capped.tool().execute(Map.of("name", "many"), new ToolContext());
+        long cappedFiles = cappedRes.output().lines().filter(l -> l.contains("<file>")).count();
+        if (cappedFiles != 2) throw new AssertionError("expected 2, got " + cappedFiles);
+
+        // -1 omits <skill_files> entirely.
+        SkillSource omitted = SkillSource.loadWith(new SkillSource.LoadOptions().skills(List.of(def)).sampleLimit(-1));
+        ToolResult omittedRes = omitted.tool().execute(Map.of("name", "many"), new ToolContext());
+        if (omittedRes.output().contains("<skill_files>")) throw new AssertionError(omittedRes.output());
+
+        System.out.println("ok: capped=" + cappedFiles + " omitted=" + !omittedRes.output().contains("<skill_files>"));
+    }
+}
+```
+
+## Fields
+
+| Member | Type | What it is |
+|---|---|---|
+| `LoadOptions.dirs` | `List<String>` | Filesystem roots, walked for `**/SKILL.md` — same as `load`. |
+| `LoadOptions.skills` | `List<SkillDef>` | Skills supplied directly as data; merged with `dirs`, first-wins on a duplicate name. |
+| `LoadOptions.filter` | `Map<String,Boolean>` | `null`/empty ⇒ all; ≥1 `true` ⇒ allowlist; only `false` entries ⇒ drop-list over all-on. Unknown names warn once. |
+| `LoadOptions.sampleLimit` | `int` | `0` ⇒ default 10, `n>0` ⇒ cap, `-1` ⇒ omit `<skill_files>` entirely. |
+| `SkillDef(name, description, content)` | constructor | Instruction-only skill, no resources, base defaults to `skill://<name>/`. |
+| `SkillDef(name, description, content, resources, base)` | constructor | Full form — `resources` sampled like on-disk siblings; `base` overrides the default logical URI. |
+
+## See also
+
+- [`SkillSource.load`](/api/java/skills/load/) — the directory-only sugar over this call.
+- [`SkillSource.listSkills`](/api/java/skills/list/) — enumerate discovered skills and, crucially, the ones that were skipped and why.
+- [`Toolkit.create`](/api/java/toolkit/create/) — `skills(...)`, `skillProvider(...)`, `skillsFilter(...)` and `skillSampleLimit(...)` wire this into a toolkit alongside every other source.

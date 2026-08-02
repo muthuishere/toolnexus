@@ -1,0 +1,193 @@
+---
+title: list_skills
+description: Enumerate discovered skills and, crucially, the ones that were skipped and why. Python.
+sidebar:
+  label: list_skills
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/skill.py">python/src/toolnexus/skill.py</a>
+</p>
+
+```python
+def list_skills(
+    dirs: str | list[str] | None = None,
+    *,
+    skills: list[SkillDef] | None = None,
+) -> SkillInventory
+```
+
+Runs exactly the discovery [`load_skills`](/api/python/skills/load/) runs — same walk, same
+frontmatter parse, same duplicate resolution — but builds **no tool**. You get a `SkillInventory`:
+the skills that parsed, and a typed list of the files that did not, each with a reason.
+
+That second list is the reason this function exists. Skipping is silent by design in the loading
+path (a broken `SKILL.md` must not take the agent down), so without an inventory a skill that never
+shows up looks identical to a skill that was never written.
+
+## When to use it
+
+- **A skill isn't showing up.** Ask what got skipped and why, instead of guessing at YAML.
+- **CI gate.** Fail the build when `inventory.skipped` is non-empty, so a malformed skill is caught
+  at merge, not at runtime.
+- **Authoring the allowlist.** The inventory is deliberately **unfiltered**, so it is the correct
+  source for the `filter` map you then pass to `load_skills`.
+- **Rendering a picker** — a UI listing every available skill with its description.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use load_skills when you want the tool">
+[`load_skills`](/api/python/skills/load/) returns the same skills *plus* the `skill` tool and the
+`prompt()` catalog, and applies `filter`. Prefer it instead in an agent — that is the production
+path. Reach for `list_skills` for diagnostics, validation, and building the filter itself.
+</Aside>
+
+`list_skills` takes no `filter` and no `sample_limit`: filtering would hide the very entries you
+called it to see.
+
+## Examples
+
+### 1. Inventory the shared fixture
+
+```python test
+from toolnexus import list_skills
+
+inventory = list_skills("examples/skills")
+
+# A list of SkillInfo, not a dict — inventory order, not lookup.
+assert [s.name for s in inventory.skills] == ["hello-world"]
+info = inventory.skills[0]
+assert info.description.startswith("A tiny example skill.")
+assert info.origin == "fs"
+assert info.location.endswith("hello-world/SKILL.md")
+
+# A clean tree skips nothing.
+assert inventory.skipped == []
+
+print("ok:", inventory.skills[0].name, "| skipped:", len(inventory.skipped))
+```
+
+### 2. Why a skill went missing
+
+Four typed reasons: `missing-name`, `malformed-frontmatter`, `duplicate-name`, `unreadable`. Here a
+throwaway tree exercises the first three against a real walk.
+
+```python test
+import os
+import tempfile
+from toolnexus import list_skills
+
+root = tempfile.mkdtemp()
+for sub in ("good", "nameless", "broken", "clash"):
+    os.makedirs(os.path.join(root, sub))
+
+
+def write(sub, text):
+    with open(os.path.join(root, sub, "SKILL.md"), "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+write("good", "---\nname: alpha\ndescription: The good one.\n---\nbody\n")
+# No `name:` in the frontmatter — the one field that is mandatory.
+write("nameless", "---\ndescription: I forgot my name.\n---\nbody\n")
+# Fences present, YAML unparseable.
+write("broken", "---\nname: [oops\n---\nbody\n")
+# A second skill claiming a name already taken — first wins.
+write("clash", "---\nname: alpha\ndescription: The duplicate.\n---\nbody\n")
+
+inventory = list_skills(root)
+
+# Exactly one `alpha` survives; walk order decides which file won.
+assert [s.name for s in inventory.skills] == ["alpha"]
+
+reasons = sorted(s.reason for s in inventory.skipped)
+assert reasons == ["duplicate-name", "malformed-frontmatter", "missing-name"]
+# Every skip names the file it came from, so the report is actionable.
+assert all(s.location.endswith("SKILL.md") for s in inventory.skipped)
+
+print("ok: kept", len(inventory.skills), "| skipped:", ", ".join(reasons))
+```
+
+<Aside type="caution">
+`duplicate-name` is resolved **first-wins**, and directory walk order is not alphabetical — which of
+two same-named skills survives is not something to depend on. Treat any `duplicate-name` skip as a
+bug to fix, not a precedence rule to exploit.
+</Aside>
+
+### 3. A validation gate that also authors the allowlist
+
+The full surface: disk plus data skills, one report, and the `filter` map handed straight to
+`load_skills`.
+
+```python test
+import asyncio
+import os
+from toolnexus import list_skills, load_skills, SkillDef
+
+DATA_SKILLS = [
+    SkillDef(name="refund-policy", description="How to process a refund.", content="# Refunds"),
+    # No name — data skills are validated too.
+    SkillDef(name="", description="Broken.", content="x"),
+]
+
+inventory = list_skills(os.path.abspath("examples/skills"), skills=DATA_SKILLS)
+
+names = sorted(s.name for s in inventory.skills)
+assert names == ["hello-world", "refund-policy"]
+# Disk and data skills are distinguishable by `origin`.
+by_name = {s.name: s for s in inventory.skills}
+assert by_name["hello-world"].origin == "fs"
+assert by_name["refund-policy"].origin == "logical"
+
+# The gate: one bad definition, reported with its logical location.
+assert [s.reason for s in inventory.skipped] == ["missing-name"]
+assert inventory.skipped[0].location == "skill://"
+
+# The inventory is UNFILTERED, so it is the right place to author the allowlist.
+allowlist = {s.name: (s.description is not None) for s in inventory.skills}
+source = load_skills(
+    os.path.abspath("examples/skills"), skills=DATA_SKILLS, filter=allowlist
+)
+assert sorted(source.skills) == names
+
+
+async def main():
+    res = await source.tool.execute({"name": "refund-policy"})
+    assert res.is_error is False
+    assert "# Skill: refund-policy" in res.output
+    print("ok:", ", ".join(names), "| skipped:", len(inventory.skipped))
+
+
+asyncio.run(main())
+```
+
+## Options
+
+| Option | Type | What it does |
+|---|---|---|
+| `dirs` | `str \| list[str] \| None` | Root(s) to walk for `**/SKILL.md`. Same walk as `load_skills` — `node_modules` and `.git` skipped, symlink loops guarded. |
+| `skills` | `list[SkillDef] \| None` | Data-supplied skills, validated alongside the on-disk ones. |
+
+Deliberately absent: `filter` and `sample_limit`. The inventory reports everything found.
+
+## Returns — `SkillInventory`
+
+| Field | Type | What it is |
+|---|---|---|
+| `skills` | `list[SkillInfo]` | Skills that parsed and won their name. Unfiltered. |
+| `skipped` | `list[SkillSkip]` | One entry per rejected candidate: `location` + `reason`. |
+
+| `SkillSkip.reason` | Means |
+|---|---|
+| `missing-name` | Frontmatter parsed, but no `name` — the only required field. |
+| `malformed-frontmatter` | `---` fences present, YAML failed to parse. |
+| `duplicate-name` | Another skill already claimed that name; first wins. |
+| `unreadable` | The file could not be read (permissions, a dangling symlink). |
+
+## See also
+
+- [`load_skills`](/api/python/skills/load/) — the same discovery, plus the `skill` tool
+- [`load_skills` with data and filters](/api/python/skills/load-with/) — what the allowlist you author here plugs into
+- [`create_toolkit`](/api/python/toolkit/create/) — the production path that wires skills in

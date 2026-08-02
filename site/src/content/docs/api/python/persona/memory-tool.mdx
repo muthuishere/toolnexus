@@ -1,0 +1,179 @@
+---
+title: "memory_tool"
+description: "The opt-in built-in that lets a persona write durable notes to its own home. — Python."
+sidebar:
+  label: "memory_tool"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/agents/surface.py">python/src/toolnexus/agents/surface.py</a>
+</p>
+
+```python
+def memory_tool(dir: str) -> Tool
+```
+
+Builds the `memory` builtin (§7E): one `Tool` named `"memory"`, three actions —
+`add` (append an entry), `replace` (swap an existing substring), `remove` (delete an existing
+substring) — over `target="self"` (`MEMORY.md`, default) or `target="user"` (`USER.md`) inside
+`dir`. **Not** one of the default §4A builtins — it only exists when you wire it in, either
+directly (`extra_tools=[memory_tool(dir)]`) or via [`agent_from_dir`](/api/python/persona/from-dir/)
+(`memory=True`, the default there).
+
+## When to use it
+
+- You're composing a toolkit by hand (`create_toolkit(extra_tools=[...])`) and want a
+  persona to be able to persist notes about itself or the user, without pulling in the
+  whole `Agent`/`agent_from_dir` surface.
+- You want file-backed memory scoped to a specific directory that isn't necessarily the
+  persona's full home — `memory_tool` only needs a path, not a `compose_soul`-shaped folder.
+- You're building a custom persona surface and want the exact §7E write semantics
+  (loud error on a missing `replace`/`remove` target, `target=user` vs `target=self`) without
+  reimplementing them.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for agent_from_dir when the tool AND the soul come from the same directory">
+`agent_from_dir(dir)` calls `memory_tool(dir)` for you and adds it to `uses["tools"]`
+automatically (`memory=True` is the default) — that's the common case, one directory is both
+the soul source and the memory store. Call `memory_tool` directly only when you want the tool
+without the rest of `agent_from_dir` (a custom `Agent`, or a classic `create_toolkit` call with
+no `Agent` involved at all).
+</Aside>
+
+The tool **writes to disk immediately** on every action, but per SPEC §7E it deliberately does
+**not** mutate the current session's prompt — the tool's own description tells the model this,
+so it doesn't expect its next turn to already reflect the write. A `replace`/`remove` whose
+`text` isn't found in the target file is a loud `is_error=True`, never a silent no-op, so the
+model (or your code) can tell a real edit from a missed one.
+
+## Examples
+
+### 1. The smallest useful call — `add`, called directly
+
+```python test
+import asyncio
+import os
+import tempfile
+
+from toolnexus.agents import memory_tool
+
+
+async def main():
+    with tempfile.TemporaryDirectory() as home:
+        tool = memory_tool(home)
+        assert tool.name == "memory"
+
+        res = await tool.execute({"action": "add", "text": "prefers dark mode"})
+
+        assert res.is_error is False
+        assert "MEMORY.md" in res.output
+
+        memory_path = os.path.join(home, "MEMORY.md")
+        with open(memory_path, encoding="utf-8") as f:
+            saved = f.read()
+        assert "prefers dark mode" in saved
+
+        print("ok:", res.output, "|", saved.strip())
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — `replace`, `remove`, and `target="user"`
+
+```python test
+import asyncio
+import os
+import tempfile
+
+from toolnexus.agents import memory_tool
+
+
+async def main():
+    with tempfile.TemporaryDirectory() as home:
+        tool = memory_tool(home)
+
+        # target="self" (default) -> MEMORY.md
+        await tool.execute({"action": "add", "text": "timezone: UTC"})
+        replaced = await tool.execute({"action": "replace", "text": "timezone: UTC", "with": "timezone: IST"})
+        assert replaced.is_error is False
+
+        with open(os.path.join(home, "MEMORY.md"), encoding="utf-8") as f:
+            memory = f.read()
+        assert "timezone: IST" in memory
+        assert "timezone: UTC" not in memory
+
+        # target="user" -> USER.md, a separate file
+        await tool.execute({"action": "add", "target": "user", "text": "name: Muthu"})
+        with open(os.path.join(home, "USER.md"), encoding="utf-8") as f:
+            user = f.read()
+        assert "name: Muthu" in user
+
+        removed = await tool.execute({"action": "remove", "target": "user", "text": "name: Muthu"})
+        assert removed.is_error is False
+        with open(os.path.join(home, "USER.md"), encoding="utf-8") as f:
+            user_after = f.read()
+        assert "name: Muthu" not in user_after
+
+        print("ok:", memory.strip(), "|", user_after.strip() or "(empty)")
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — a missing substring is a loud error, and it works through a toolkit
+
+```python test
+import asyncio
+import os
+import tempfile
+
+from toolnexus import create_toolkit
+from toolnexus.agents import memory_tool
+
+
+async def main():
+    with tempfile.TemporaryDirectory() as home:
+        # A replace/remove against text that was never written is a loud is_error, never silent.
+        tool = memory_tool(home)
+        missing = await tool.execute({"action": "replace", "text": "nope", "with": "x"})
+        assert missing.is_error is True
+        assert missing.output == "not found: nope"
+
+        unknown = await tool.execute({"action": "bogus", "text": "x"})
+        assert unknown.is_error is True
+
+        # The common path: wired into a toolkit, invoked by its exposed name like any tool.
+        tk = await create_toolkit(builtins=False, extra_tools=[memory_tool(home)])
+        try:
+            res = await tk.execute("memory", {"action": "add", "text": "likes concise answers"})
+            assert res.is_error is False
+        finally:
+            await tk.close()
+
+        with open(os.path.join(home, "MEMORY.md"), encoding="utf-8") as f:
+            saved = f.read()
+        assert "likes concise answers" in saved
+
+        print("ok:", missing.output, "|", saved.strip())
+
+
+asyncio.run(main())
+```
+
+## `Tool` fields this builds
+
+| Field | Value |
+|---|---|
+| `name` | `"memory"` |
+| `source` | `"native"` |
+| `input_schema` | `{action: add\|replace\|remove, target: self\|user, text, with}` — `action`/`text` required. |
+| `execute` | Async; writes to `MEMORY.md` (`target="self"`) or `USER.md` (`target="user"`) under `dir`. |
+
+## See also
+
+- [`compose_soul`](/api/python/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.
+- [`agent_from_dir`](/api/python/persona/from-dir/) — Point at an agent home directory and get a configured agent back.

@@ -1,0 +1,146 @@
+---
+title: "The task tool — model-facing delegation"
+description: "The opt-in tool that lets the model itself spawn a teammate. Default OFF. — Go."
+sidebar:
+  label: "runtime / task-tool"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang/agents</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/agents/runtime.go">golang/agents/runtime.go</a>
+</p>
+
+<Aside type="caution" title="Not available as a constructible symbol in Go">
+Only JS exposes a public `agents.taskTool(...)` you can build by hand. In Go the `task` tool is an
+unexported runtime detail (`(*Runtime).taskTool`) — you never construct or name it directly.
+</Aside>
+
+The opt-in tool that lets the model itself spawn a teammate. Default OFF.
+
+## What to use instead
+
+Declare [`Spec.Team`](/api/go/runtime/agent/) on an agent — a non-empty `Team` is what turns the
+`task` tool on for that agent, scoped to exactly those names. There is nothing further to build:
+
+```go
+coordinator := agents.New("coordinator", agents.Spec{
+	Does: "splits work and delegates",
+	Team: []*agents.Agent{explorer, coder}, // ⇒ a "task" tool appears, targets = these two
+})
+```
+
+An agent with an EMPTY `Team` gets no `task` tool at all — delegation (and recursion) is opt-in,
+never a default. The tool's description is generated for you: each teammate's name plus its `Does`
+string, sorted by name — the same pattern the §3 `skill` tool uses to describe what it can load.
+
+## Examples
+
+Hermetic: a scripted `http.RoundTripper` in place of a real model, same pattern as every other
+`runtime/*` page.
+
+### The tool the model sees, team scoping, and idempotent reattachment
+
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func openaiResp(msg map[string]any) *http.Response {
+	full := map[string]any{"role": "assistant"}
+	for k, v := range msg {
+		full[k] = v
+	}
+	b, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": full}},
+		"usage":   map[string]any{"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+	})
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}
+}
+
+// rogueLLM tries to delegate OUTSIDE its declared team — proves the refusal.
+type rogueLLM struct{}
+
+func (rogueLLM) RoundTrip(req *http.Request) (*http.Response, error) {
+	b, _ := io.ReadAll(req.Body)
+	var parsed struct {
+		Model    string           `json:"model"`
+		Messages []map[string]any `json:"messages"`
+	}
+	_ = json.Unmarshal(b, &parsed)
+	sawToolResult := false
+	for _, m := range parsed.Messages {
+		if m["role"] == "tool" {
+			sawToolResult = true
+		}
+	}
+	if parsed.Model == "m-rogue" && !sawToolResult {
+		args, _ := json.Marshal(map[string]any{"agent": "stranger", "prompt": "hi"})
+		return openaiResp(map[string]any{"content": nil, "tool_calls": []any{
+			map[string]any{"id": "c1", "type": "function", "function": map[string]any{"name": "task", "arguments": string(args)}},
+		}}), nil
+	}
+	// Echo the tool result back verbatim, so the final answer proves what the
+	// task tool actually returned (rather than masking it with a fixed reply).
+	last := ""
+	for _, m := range parsed.Messages {
+		if m["role"] == "tool" {
+			if s, ok := m["content"].(string); ok {
+				last = s
+			}
+		}
+	}
+	return openaiResp(map[string]any{"content": last}), nil
+}
+
+func main() {
+	explorer := agents.New("explorer", agents.Spec{Does: "read-only research", Model: "m-explorer"})
+	rogue := agents.New("rogue", agents.Spec{
+		Does: "tries to delegate outside its team", Model: "m-rogue", Team: []*agents.Agent{explorer},
+	})
+
+	// A def with NO Team declared gets no task tool at all.
+	solo := agents.New("solo", agents.Spec{Does: "works alone", Model: "m-solo"})
+	if len(solo.Registry()) != 1 {
+		log.Fatal("a teamless agent's registry should contain only itself")
+	}
+
+	r, _ := rogue.Run(agents.Options{Transport: rogueLLM{}}, "delegate to a stranger")
+	if !strings.Contains(r.Text, "not in this agent's team") || !strings.Contains(r.Text, "explorer") {
+		log.Fatalf("expected an out-of-team refusal naming the real team, got %q", r.Text)
+	}
+
+	fmt.Println("ok:", r.Text)
+}
+```
+
+## What the tool looks like to the model
+
+| | Value |
+|---|---|
+| `name` | `"task"` |
+| `description` | `"Delegate a subtask to an isolated subagent. Available agents — <name>: <does>; ..."` (team, name-sorted) |
+| `inputSchema` | `{agent: string, prompt: string}`, both required |
+
+A call outside the declared team is refused with the team names listed — never silently ignored.
+A repeated call with the same `(agent, prompt)` pair REATTACHES to the existing child (by task
+key) instead of spawning a duplicate: settled ⇒ its recorded result, suspended ⇒ its pending,
+running ⇒ awaited. This is what makes a durable §10 resume idempotent across a re-invoked `task`
+call.
+
+## See also
+
+- [`agents.New`](/api/go/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`NewRuntime`](/api/go/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`agents.Handle`](/api/go/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`agents.Budget`](/api/go/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

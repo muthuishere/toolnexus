@@ -1,0 +1,33 @@
+---
+title: "Relay tools — declaration-only"
+description: "Declare a tool the host executes, not the library: the call rides out on the suspension. — Elixir."
+sidebar:
+  label: "suspension / relay"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+<Aside type="caution" title="Not available in Elixir">
+Go-only today (golang/relay.go). SPEC §10 addendum landed as a Go preview; the other five ports do not ship a relay tool yet.
+</Aside>
+
+Declare a tool the host executes, not the library: the call rides out on the suspension.
+
+## What to use instead
+
+There is no declaration-only relay tool in Elixir today — every tool the loop knows about is
+executable in-process. The closest available shape is an ordinary tool whose `execute` itself
+returns a §10 suspension (`metadata.pending`, see [`pending`](/api/elixir/suspension/pending/)):
+the model still calls it like a normal tool, but the call "rides out" as a `Request` for the host
+to answer, exactly as a relay declaration would — the difference is Elixir's version always runs
+*some* code locally first (even if that code's only job is to raise the suspension), where a true
+relay tool is declared but never invoked by the library at all.
+
+## See also
+
+- [`Toolnexus.Client.create`](/api/elixir/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`Toolnexus.Agents.Runtime.resume`](/api/elixir/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.

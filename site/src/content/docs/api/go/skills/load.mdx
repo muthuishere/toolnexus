@@ -1,0 +1,266 @@
+---
+title: "LoadSkills"
+description: "Glob a skills directory and expose one skill tool with progressive disclosure. Go."
+sidebar:
+  label: "LoadSkills"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/skill.go">golang/skill.go</a>
+</p>
+
+```go
+func LoadSkills(dirs ...string) *SkillSource
+
+type SkillSource struct {
+	Skills map[string]SkillInfo
+	Tool   Tool
+}
+
+func (s *SkillSource) Prompt() string
+```
+
+Walks one or more roots for `**/SKILL.md`, parses each file's YAML frontmatter, and returns a
+`SkillSource` holding the discovered skills plus **one** tool named `skill`. That single tool is the
+whole point: the model sees a short catalog in the system prompt and pays for a skill's full
+instructions only when it loads one. That is progressive disclosure.
+
+## When to use it
+
+- **You keep prompt playbooks on disk** — a `skills/` folder of markdown files, each with a name and
+  a description — and want the model to pull them in on demand.
+- **You want a catalog, not N tools.** Twenty skills still cost one tool slot and twenty catalog
+  lines, instead of twenty full schemas.
+- **You are wiring a toolkit by hand** and want the `skill` tool without the rest of
+  [`CreateToolkit`](/api/go/toolkit/create/).
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use LoadSkillsWith for anything beyond plain directories">
+[`LoadSkillsWith`](/api/go/skills/load-with/) takes a `LoadSkillsOptions` struct and is the one to
+reach for *instead* of this when your skills do not come from a plain directory — supplied as data
+(`Skills []SkillDef`), narrowed per agent (`Filter`), or with the sibling-file sample capped
+(`SampleLimit`). `LoadSkills(dirs...)` is exactly `LoadSkillsWith(LoadSkillsOptions{Dirs: dirs})`,
+kept as the short variadic path for the common case.
+</Aside>
+
+<Aside type="caution" title="A missing directory is a log line, not an error">
+`LoadSkills` returns no error. A root that does not exist logs `[toolnexus] skills dir not found`
+and yields zero skills — so an empty `Skills` map is your signal that a path is wrong.
+</Aside>
+
+## Examples
+
+### 1. Load the shared fixture directory
+
+`examples/skills` is the fixture every port is tested against.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	// TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+	dir := filepath.Join(os.Getenv("TOOLNEXUS_REPO"), "examples", "skills")
+
+	src := toolnexus.LoadSkills(dir)
+
+	info, ok := src.Skills["hello-world"]
+	if !ok {
+		log.Fatalf("expected hello-world, got %v", src.Skills)
+	}
+	if info.Description == "" {
+		log.Fatal("description comes from the SKILL.md frontmatter")
+	}
+	// Location is the ABSOLUTE path of the SKILL.md itself, not its directory.
+	if filepath.Base(info.Location) != "SKILL.md" {
+		log.Fatalf("unexpected location: %s", info.Location)
+	}
+
+	// One tool, always named "skill", regardless of how many skills were found.
+	if src.Tool.Name != "skill" || src.Tool.Source != toolnexus.SourceSkill {
+		log.Fatalf("unexpected tool: %+v", src.Tool)
+	}
+
+	fmt.Println("ok:", info.Name, "| tool:", src.Tool.Name)
+}
+```
+
+### 2. Actually load a skill — what the model gets back
+
+The `skill` tool takes `{"name": "<skill>"}` and returns the instructions wrapped in
+`<skill_content>`, plus a base directory and a sampled file list.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	// TOOLNEXUS_REPO is a docs-runner detail; use your own path in real code.
+	dir := filepath.Join(os.Getenv("TOOLNEXUS_REPO"), "examples", "skills")
+	src := toolnexus.LoadSkills(dir)
+
+	res, err := src.Tool.Execute(map[string]any{"name": "hello-world"}, nil)
+	if err != nil || res.IsError {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+
+	for _, want := range []string{
+		`<skill_content name="hello-world">`,
+		"# Skill: hello-world",
+		"Base directory for this skill: file://",
+		"<skill_files>",
+		"</skill_content>",
+	} {
+		if !strings.Contains(res.Output, want) {
+			log.Fatalf("missing %q in output:\n%s", want, res.Output)
+		}
+	}
+
+	// Metadata carries the skill name and its on-disk directory.
+	if res.Metadata["name"] != "hello-world" {
+		log.Fatalf("unexpected metadata: %v", res.Metadata)
+	}
+
+	// An unknown name is an error RESULT the model can recover from, not a Go error.
+	miss, err := src.Tool.Execute(map[string]any{"name": "nope"}, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if !miss.IsError || !strings.Contains(miss.Output, "Available skills:") {
+		log.Fatalf("expected a recoverable miss, got %+v", miss)
+	}
+
+	fmt.Println("ok: loaded hello-world,", len(res.Output), "bytes")
+}
+```
+
+### 3. Catalog, multiple roots, and wiring it into a prompt
+
+`Prompt()` is what you paste into the system prompt: a fixed preamble plus one line per **described**
+skill, sorted by name.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	repo := os.Getenv("TOOLNEXUS_REPO") // docs-runner detail
+	shared := filepath.Join(repo, "examples", "skills")
+
+	// A second root written on the fly — roots are merged, first name wins.
+	extra, err := os.MkdirTemp("", "skills")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(extra)
+	deploy := filepath.Join(extra, "deploy")
+	if err := os.MkdirAll(deploy, 0o755); err != nil {
+		log.Fatal(err)
+	}
+	skillMD := "---\nname: deploy\ndescription: Ship the service to prod.\n---\n\nRun the taskfile.\n"
+	if err := os.WriteFile(filepath.Join(deploy, "SKILL.md"), []byte(skillMD), 0o644); err != nil {
+		log.Fatal(err)
+	}
+	// A SKILL.md with no name in its frontmatter is silently skipped.
+	nameless := filepath.Join(extra, "nameless")
+	if err := os.MkdirAll(nameless, 0o755); err != nil {
+		log.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nameless, "SKILL.md"), []byte("no frontmatter here\n"), 0o644); err != nil {
+		log.Fatal(err)
+	}
+
+	src := toolnexus.LoadSkills(shared, extra)
+	if len(src.Skills) != 2 {
+		log.Fatalf("expected hello-world + deploy, got %v", src.Skills)
+	}
+
+	prompt := src.Prompt()
+	if !strings.HasPrefix(prompt, toolnexus.SkillsPromptPreamble) {
+		log.Fatalf("unexpected preamble:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "## Available Skills") {
+		log.Fatal("expected the catalog header")
+	}
+	// Sorted by name: deploy before hello-world.
+	if strings.Index(prompt, "**deploy**") > strings.Index(prompt, "**hello-world**") {
+		log.Fatalf("catalog not sorted:\n%s", prompt)
+	}
+
+	// A skill from the second root loads through the very same tool.
+	res, err := src.Tool.Execute(map[string]any{"name": "deploy"}, nil)
+	if err != nil || res.IsError || !strings.Contains(res.Output, "Run the taskfile.") {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+
+	// No skills at all still gives you a usable source and tool.
+	empty := toolnexus.LoadSkills()
+	if len(empty.Skills) != 0 || empty.Tool.Name != "skill" {
+		log.Fatalf("unexpected empty source: %+v", empty)
+	}
+	if empty.Prompt() != "No skills are currently available." {
+		log.Fatalf("unexpected empty prompt: %q", empty.Prompt())
+	}
+
+	fmt.Println("ok: 2 skills across 2 roots")
+}
+```
+
+## What you get back
+
+| Field / method | Type | What it is |
+|---|---|---|
+| `Skills` | `map[string]SkillInfo` | Discovered skills keyed by frontmatter `name`. Unordered — sort before printing. |
+| `Tool` | `Tool` | The single loader tool, always named `skill`, `Source: "skill"`. |
+| `Prompt()` | `string` | Catalog for the system prompt; `"No skills are currently available."` when empty. |
+
+`SkillInfo` fields:
+
+| Field | Type | What it is |
+|---|---|---|
+| `Name` | `string` | From frontmatter. A file without one is skipped. |
+| `Description` | `string` | From frontmatter. Skills with none are discovered but omitted from `Prompt()`. |
+| `Location` | `string` | Absolute path to the `SKILL.md` (directory-sourced) or the logical base (data-sourced). |
+| `Content` | `string` | The body after the frontmatter. |
+| `Origin` | `string` | `"fs"` or `"logical"` — how the skill was sourced. |
+| `Resources` | `[]string` | Logical resource list; data-sourced skills only. |
+| `Base` | `string` | Logical base; data-sourced skills only. |
+
+Discovery skips `node_modules` and `.git`, follows symlinks once (cycle-safe), and samples up to 10
+sibling files into `<skill_files>`.
+
+## See also
+
+- [`LoadSkillsWith`](/api/go/skills/load-with/) — data skills, allowlists, sample caps
+- [`ListSkills`](/api/go/skills/list/) — inventory plus the skips and why
+- [`CreateToolkit`](/api/go/toolkit/create/) — takes `skills` directly and wires this for you
+- [`Tool`](/api/go/types/tool/) — what `Tool` is

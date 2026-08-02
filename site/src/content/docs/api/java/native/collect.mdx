@@ -1,0 +1,183 @@
+---
+title: "Tools.fromObject"
+description: "Sweep a module or class and collect every function marked as a tool. — Java."
+sidebar:
+  label: "Tools.fromObject"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/Tools.java">Tools.java</a>
+</p>
+
+```java
+public static List<Tool> fromObject(Object target)
+```
+
+<Aside type="caution" title="Real symbol differs from the cross-port name">
+The other ports' equivalent is named `collectTools` (JS) / `Tools.FromObject` (C#). The Java port's
+public method that does this — sweep an object for `@ToolMethod`-annotated methods and build a
+`Tool` for each — is `Tools.fromObject`, not `Tools.fromObject`. There is no `Tools.fromObject` method
+in this codebase; `fromObject` is the real, public, shipped symbol for this capability.
+</Aside>
+
+Scans every public method on `target`'s class for the [`@ToolMethod`](/api/java/native/reflect/)
+annotation and turns each match into a `Tool` (source `"native"`) — the object itself supplies
+the method bodies, `fromObject` supplies the discovery + schema inference + `Tool` wrapping.
+
+## When to use it
+
+When you have a plain object — a service, a small "tools" class — with one or more
+`@ToolMethod`-annotated methods, and want every one of them as `Tool`s in a single call, rather
+than wrapping each with [`NativeTool.of`](/api/java/native/define-tool/) by hand.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="One object, many tools">
+`NativeTool.of` builds exactly one `Tool` from one function you already have in hand.
+`Tools.fromObject` builds **all** of them from one object in one call — reach for it as soon as
+you have more than a couple of related tool methods grouped on a class, since it also saves you
+from writing each `inputSchema` by hand.
+</Aside>
+
+`Toolkit.Options.annotatedObjects` calls `fromObject` on every object you add there internally —
+use `fromObject` directly when you want the `List<Tool>` itself (to register selectively, filter,
+or hand to an adapter) rather than a fully assembled `Toolkit`.
+
+## Examples
+
+### 1. Sweeping a class with two annotated methods
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import io.github.muthuishere.toolnexus.annotations.Param;
+import io.github.muthuishere.toolnexus.annotations.ToolMethod;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    static final class MathTools {
+        @ToolMethod(name = "add", description = "Add two numbers")
+        public String add(@Param(name = "a") double a, @Param(name = "b") double b) {
+            return String.valueOf(a + b);
+        }
+
+        @ToolMethod(name = "negate", description = "Negate a number")
+        public String negate(@Param(name = "a") double a) {
+            return String.valueOf(-a);
+        }
+
+        // Not annotated — never collected.
+        public String helper() {
+            return "not a tool";
+        }
+    }
+
+    public static void main(String[] args) {
+        List<Tool> tools = Tools.fromObject(new MathTools());
+        if (tools.size() != 2) throw new AssertionError("expected 2, got " + tools.size());
+
+        List<String> names = tools.stream().map(Tool::name).sorted().toList();
+        if (!names.equals(List.of("add", "negate"))) throw new AssertionError(names);
+
+        System.out.println("ok: " + names);
+    }
+}
+```
+
+### 2. Instance state — the object is captured, not just its class
+
+`fromObject` binds to a specific instance: methods run against that instance's fields, so two
+objects of the same class produce independent tools.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import io.github.muthuishere.toolnexus.annotations.Param;
+import io.github.muthuishere.toolnexus.annotations.ToolMethod;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    static final class Counter {
+        private int count;
+
+        @ToolMethod(name = "increment", description = "Increment and return the counter")
+        public String increment(@Param(name = "by", required = false) Integer by) {
+            count += (by == null ? 1 : by);
+            return String.valueOf(count);
+        }
+    }
+
+    public static void main(String[] args) {
+        Counter a = new Counter();
+        Counter b = new Counter();
+
+        Tool toolA = Tools.fromObject(a).get(0);
+        Tool toolB = Tools.fromObject(b).get(0);
+
+        toolA.execute(Map.of(), new ToolContext());
+        toolA.execute(Map.of(), new ToolContext());
+        ToolResult resA = toolA.execute(Map.of("by", 5), new ToolContext());
+        ToolResult resB = toolB.execute(Map.of(), new ToolContext());
+
+        if (!resA.output().equals("7")) throw new AssertionError(resA.output()); // 1 + 1 + 5
+        if (!resB.output().equals("1")) throw new AssertionError(resB.output()); // independent state
+
+        System.out.println("ok: a=" + resA.output() + " b=" + resB.output());
+    }
+}
+```
+
+### 3. Registering collected tools alongside every other source
+
+The result is an ordinary `List<Tool>` — mix it into a `Toolkit` via `register`, exactly like a
+tool from any other source.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import io.github.muthuishere.toolnexus.annotations.Param;
+import io.github.muthuishere.toolnexus.annotations.ToolMethod;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    static final class TimeTools {
+        @ToolMethod(name = "epoch_zero", description = "Return the fixed epoch, for a deterministic doc example")
+        public String epochZero() {
+            return "1970-01-01T00:00:00Z";
+        }
+    }
+
+    public static void main(String[] args) {
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+            for (Tool t : Tools.fromObject(new TimeTools())) {
+                tk.register(t);
+            }
+
+            Tool found = tk.get("epoch_zero");
+            if (found == null) throw new AssertionError("not registered");
+            if (!found.source().equals("native")) throw new AssertionError(found.source());
+
+            ToolResult res = found.execute(Map.of(), new ToolContext());
+            if (!res.output().equals("1970-01-01T00:00:00Z")) throw new AssertionError(res.output());
+
+            System.out.println("ok: " + found.name() + " -> " + res.output());
+        }
+    }
+}
+```
+
+## Fields
+
+| Member | Type | What it is |
+|---|---|---|
+| `fromObject(target)` | `List<Tool>` | One `Tool` per `@ToolMethod`-annotated public method on `target`'s class, in declaration order. |
+| Unannotated methods | — | Silently skipped — never collected, never an error. |
+| Binding | — | Each returned `Tool.execute` invokes the method against the **same** `target` instance passed in. |
+
+## See also
+
+- [`@ToolMethod annotation`](/api/java/native/reflect/) — what marks a method as collectible, and how its schema is inferred.
+- [`NativeTool.of`](/api/java/native/define-tool/) — build a single `Tool` by hand when you don't want annotation-driven inference.
+- [`Toolkit.create`](/api/java/toolkit/create/) — `annotatedObjects(...)` calls `fromObject` for you.

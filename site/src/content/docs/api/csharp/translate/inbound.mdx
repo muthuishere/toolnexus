@@ -1,0 +1,246 @@
+---
+title: "Translate.OpenAIMessagesToAnthropic"
+description: "Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong. — C#."
+sidebar:
+  label: "Translate.OpenAIMessagesToAnthropic"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Translate.cs">Translate.cs</a>
+</p>
+
+```csharp
+public static class Translate
+{
+    public sealed record Converted(List<object?> Messages, string System);
+
+    public static Converted OpenAIMessagesToAnthropic(IEnumerable<object?>? messages);
+}
+```
+
+Converts an OpenAI `messages` array into Anthropic-native messages plus the extracted system
+prompt — the exact conversion [`LlmClient.TranslateAsync`](/api/csharp/translate/translate/) uses
+internally when `Style = "anthropic"`. Three rules a naive text-flattening translator gets wrong:
+an assistant turn's `tool_calls` become `tool_use` blocks (arguments parsed back from their JSON
+string into an object); a `tool`-role result becomes a `tool_result` block keyed by
+`tool_call_id`; and **consecutive tool results merge into one user turn**, because Anthropic
+expects a single result-bearing turn answering the preceding assistant turn, not one turn per
+result. `system`/`developer` messages are hoisted out into the returned `System` string.
+
+## When to use it
+
+You're building your own translation path — a custom proxy, a test harness, tooling that inspects
+what an OpenAI-shaped transcript would look like on Anthropic's wire — and want exactly this
+conversion without going through a live provider call. It's also the reference to check your own
+work against if you ever need to hand-roll a similar conversion for a different provider shape.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for TranslateAsync when you also need to make the call">
+`OpenAIMessagesToAnthropic` is a pure, synchronous function — no network, no client, no retries.
+If you actually need to send the converted request to Anthropic and get an OpenAI-shaped result
+back, skip straight to [`LlmClient.TranslateAsync`](/api/csharp/translate/translate/)
+(`Style = "anthropic"`), which calls this internally and adds usage accounting, retries, and the
+`llm` observability event on top.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — a plain user turn plus a hoisted system message
+
+```csharp test
+using Toolnexus;
+
+object? Msg(string role, string content) => new Dictionary<string, object?> { ["role"] = role, ["content"] = content };
+
+var messages = new List<object?>
+{
+    Msg("system", "You are terse."),
+    Msg("user", "hello"),
+};
+
+var converted = Translate.OpenAIMessagesToAnthropic(messages);
+
+if (converted.System != "You are terse.") throw new Exception(converted.System);
+if (converted.Messages.Count != 1) throw new Exception($"expected 1 message, got {converted.Messages.Count}");
+var only = (IDictionary<string, object?>)converted.Messages[0]!;
+if (only["role"] as string != "user" || only["content"] as string != "hello") throw new Exception("user turn mismatch");
+
+Console.WriteLine($"ok: system='{converted.System}', {converted.Messages.Count} message(s)");
+```
+
+### 2. The realistic case — tool calls become `tool_use`, results MERGE into one user turn
+
+```csharp test
+using System.Linq;
+using Toolnexus;
+
+object? Msg(string role, string content) => new Dictionary<string, object?> { ["role"] = role, ["content"] = content };
+object? AssistantToolCalls(params (string id, string name, string args)[] calls) => new Dictionary<string, object?>
+{
+    ["role"] = "assistant", ["content"] = (string?)null,
+    ["tool_calls"] = calls.Select(c => (object?)new Dictionary<string, object?>
+    {
+        ["id"] = c.id, ["type"] = "function",
+        ["function"] = new Dictionary<string, object?> { ["name"] = c.name, ["arguments"] = c.args },
+    }).ToList(),
+};
+object? ToolResult(string id, string output) => new Dictionary<string, object?> { ["role"] = "tool", ["tool_call_id"] = id, ["content"] = output };
+
+var messages = new List<object?>
+{
+    Msg("user", "check the weather and the time in Chennai"),
+    // The model called TWO tools in one turn — two OpenAI tool_calls, two tool-role results.
+    AssistantToolCalls(("c1", "get_weather", "{\"city\":\"Chennai\"}"), ("c2", "get_time", "{\"city\":\"Chennai\"}")),
+    ToolResult("c1", "31C, humid"),
+    ToolResult("c2", "14:20 IST"),
+};
+
+var converted = Translate.OpenAIMessagesToAnthropic(messages);
+
+// [user, assistant(tool_use x2), user(tool_result x2)] — the two consecutive tool results MERGE
+// into ONE user turn, exactly as Anthropic expects.
+if (converted.Messages.Count != 3) throw new Exception($"expected 3 messages, got {converted.Messages.Count}");
+
+var assistantMsg = (IDictionary<string, object?>)converted.Messages[1]!;
+var blocks = (List<object?>)assistantMsg["content"]!;
+if (blocks.Count != 2) throw new Exception($"expected 2 tool_use blocks, got {blocks.Count}");
+var firstUse = (IDictionary<string, object?>)blocks[0]!;
+if (firstUse["type"] as string != "tool_use" || firstUse["name"] as string != "get_weather") throw new Exception("tool_use shape");
+// arguments parsed BACK from JSON string into an object.
+var input = (IDictionary<string, object?>)firstUse["input"]!;
+if (input["city"] as string != "Chennai") throw new Exception("arguments must be parsed, not left as a string");
+
+var mergedResults = (IDictionary<string, object?>)converted.Messages[2]!;
+var resultBlocks = (List<object?>)mergedResults["content"]!;
+if (mergedResults["role"] as string != "user" || resultBlocks.Count != 2)
+    throw new Exception("both tool results must merge into ONE user turn");
+
+Console.WriteLine($"ok: {converted.Messages.Count} messages, {resultBlocks.Count} tool_result blocks merged into 1 turn");
+```
+
+### 3. Full surface — feeding the conversion into a real Anthropic-shaped call
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+var receivedBody = "";
+using var stub = new Stub(ctx =>
+{
+    using var reader = new StreamReader(ctx.Request.InputStream);
+    receivedBody = reader.ReadToEnd();
+    Stub.Json(ctx, 200, """
+    {"id":"m1","model":"claude-3-5-sonnet","stop_reason":"end_turn","content":[{"type":"text","text":"It's 31C and 14:20 IST in Chennai."}],"usage":{"input_tokens":30,"output_tokens":10}}
+    """);
+});
+
+object? Msg(string role, string content) => new Dictionary<string, object?> { ["role"] = role, ["content"] = content };
+object? ToolResult(string id, string output) => new Dictionary<string, object?> { ["role"] = "tool", ["tool_call_id"] = id, ["content"] = output };
+object? AssistantToolCalls((string id, string name, string args) c) => new Dictionary<string, object?>
+{
+    ["role"] = "assistant", ["content"] = (string?)null,
+    ["tool_calls"] = new List<object?> { new Dictionary<string, object?> { ["id"] = c.id, ["type"] = "function",
+        ["function"] = new Dictionary<string, object?> { ["name"] = c.name, ["arguments"] = c.args } } },
+};
+
+// Confirm the pure conversion first, standalone.
+var converted = Translate.OpenAIMessagesToAnthropic(new List<object?>
+{
+    Msg("system", "Answer in one sentence."),
+    Msg("user", "weather and time in Chennai?"),
+    AssistantToolCalls(("c1", "get_weather_and_time", "{\"city\":\"Chennai\"}")),
+    ToolResult("c1", "31C, humid; 14:20 IST"),
+});
+if (converted.System != "Answer in one sentence.") throw new Exception(converted.System);
+
+// Then confirm TranslateAsync uses that SAME conversion end-to-end (Style = "anthropic").
+var client = LlmClient.Create(new LlmClient.Options { BaseUrl = stub.BaseUrl, Style = "anthropic", Model = "claude-3-5-sonnet", ApiKey = "test-key" });
+var result = await client.TranslateAsync(new Translate.Request
+{
+    Messages = new List<object?>
+    {
+        Msg("system", "Answer in one sentence."),
+        Msg("user", "weather and time in Chennai?"),
+        AssistantToolCalls(("c1", "get_weather_and_time", "{\"city\":\"Chennai\"}")),
+        ToolResult("c1", "31C, humid; 14:20 IST"),
+    },
+});
+
+if (result.Text != "It's 31C and 14:20 IST in Chennai.") throw new Exception(result.Text);
+if (!receivedBody.Contains("\"system\":\"Answer in one sentence.\"")) throw new Exception("hoisted system must reach the wire");
+if (!receivedBody.Contains("tool_result")) throw new Exception("the merged tool_result block must reach the wire");
+
+Console.WriteLine($"ok: {result.Text}");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+<Aside type="caution">
+An empty assistant turn (no text, no tool calls after filtering) is dropped rather than emitted —
+Anthropic rejects a content-less assistant message. If your input transcript has one, it silently
+disappears from `Converted.Messages` rather than erroring.
+</Aside>
+
+## Parameters
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `messages` | `IEnumerable<object?>?` | An OpenAI `messages` array. `null` is treated as empty. |
+
+## Returns (`Converted`)
+
+| Field | Type | What it is |
+|---|---|---|
+| `Messages` | `List<object?>` | Anthropic-native messages: `tool_use`/`tool_result` blocks, consecutive tool results merged. |
+| `System` | `string` | The hoisted `system`/`developer` content, joined with blank lines. `""` if none was present. |
+
+## See also
+
+- [`LlmClient.TranslateAsync`](/api/csharp/translate/translate/) — Uses this conversion internally for an Anthropic-style upstream, plus the live provider call.

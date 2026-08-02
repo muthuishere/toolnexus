@@ -1,0 +1,210 @@
+---
+title: "Adapters.toGemini"
+description: "Render the toolkit as Gemini function-declaration schema. — Java."
+sidebar:
+  label: "Adapters.toGemini"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/Adapters.java">Adapters.java</a>
+</p>
+
+```java
+public static List<Map<String, Object>> toGemini(List<Tool> tools)
+```
+
+Turns a `List<Tool>` into the `tools` array a Gemini `generateContent` request expects. Gemini
+groups every callable into **one** entry holding a `functionDeclarations` array — so the returned
+list has one element regardless of how many tools went in.
+
+## When to use it
+
+When you drive Gemini yourself — the Google GenAI Java SDK, Vertex AI, or a raw `HttpClient` POST
+to `generateContent` — and need the `tools` block for the request body.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Skip this entirely if you use LlmClient.create">
+[`LlmClient.create`](/api/java/client/create/) picks the adapter from its style option and runs the
+whole tool-calling loop. Reach for `toGemini` **instead** when you already own the loop and want
+toolnexus only for tool *aggregation*.
+</Aside>
+
+Against [`Adapters.toOpenAI`](/api/java/adapters/openai/) and
+[`Adapters.toAnthropic`](/api/java/adapters/anthropic/): those return **one entry per tool**;
+`toGemini` returns **one entry, always** — the nesting level differs, so `schema.size()` is not the
+tool count here. All three return the same Java type, so a mix-up surfaces as a provider error, not
+a compile error.
+
+## Examples
+
+### 1. One tool to Gemini schema
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Tool weather = NativeTool.of(
+            "get_weather",
+            "Current weather for a city",
+            Map.of("type", "object",
+                   "properties", Map.of("city", Map.of("type", "string")),
+                   "required", List.of("city")),
+            (Map<String, Object> a) -> "sunny in " + a.get("city")
+        );
+
+        List<Map<String, Object>> schema = Adapters.toGemini(List.of(weather));
+
+        // Always exactly one wrapper entry — not one per tool.
+        if (schema.size() != 1) throw new AssertionError("expected 1 wrapper, got " + schema.size());
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> decls =
+            (List<Map<String, Object>>) schema.get(0).get("functionDeclarations");
+        if (decls.size() != 1) throw new AssertionError("expected 1 declaration");
+        if (!decls.get(0).get("name").equals("get_weather")) throw new AssertionError("name");
+        if (!decls.get(0).containsKey("parameters")) throw new AssertionError("expected parameters");
+
+        System.out.println("ok: " + decls.get(0).get("name"));
+    }
+}
+```
+
+`inputSchema()` becomes `parameters` — the same rename OpenAI uses, one level deeper.
+
+### 2. Many tools, still one wrapper
+
+This is the shape mistake people make: they iterate the outer list expecting tools.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    static Tool mk(String name, String desc) {
+        return NativeTool.of(name, desc,
+            Map.of("type", "object", "properties", Map.of()),
+            (Map<String, Object> a) -> name);
+    }
+
+    public static void main(String[] args) {
+        List<Tool> tools = List.of(mk("search", "Search the docs"), mk("ping", "Health check"));
+
+        Map<String, Object> body = Map.of(
+            "contents", List.of(Map.of(
+                "role", "user",
+                "parts", List.of(Map.of("text", "search for adapters")))),
+            "tools", Adapters.toGemini(tools)
+        );
+        // The key is read from the environment at call time — never hardcoded.
+        String apiKey = System.getenv("GEMINI_API_KEY");
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> wrappers = (List<Map<String, Object>>) body.get("tools");
+        if (wrappers.size() != 1) throw new AssertionError("two tools still means one wrapper");
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> decls =
+            (List<Map<String, Object>>) wrappers.get(0).get("functionDeclarations");
+
+        // Order is preserved inside the declarations array.
+        List<String> names = new ArrayList<>();
+        for (Map<String, Object> d : decls) names.add((String) d.get("name"));
+        if (!names.equals(List.of("search", "ping"))) throw new AssertionError("order: " + names);
+
+        System.out.println("ok: " + String.join(", ", names) + " (key configured: " + (apiKey != null) + ")");
+    }
+}
+```
+
+### 3. Round-tripping a `functionCall` part back to the tool
+
+Gemini sends `args` as a real JSON **object**, so it maps straight to `execute`'s
+`Map<String, Object>` — no string parsing.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Tool weather = NativeTool.of(
+            "get_weather",
+            "Current weather for a city",
+            Map.of("type", "object",
+                   "properties", Map.of("city", Map.of("type", "string")),
+                   "required", List.of("city")),
+            (Map<String, Object> a) -> "sunny in " + a.get("city")
+        );
+        List<Tool> tools = List.of(weather);
+
+        // A `functionCall` part from Gemini, decoded.
+        Map<String, Object> functionCall = Map.of(
+            "name", "get_weather",
+            "args", Map.of("city", "Chennai")
+        );
+
+        Tool called = tools.stream()
+            .filter(t -> t.name().equals(functionCall.get("name")))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("the advertised name should resolve back"));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> callArgs = (Map<String, Object>) functionCall.get("args");
+        ToolResult res = called.execute(callArgs, new ToolContext());
+        if (res.isError() || !res.output().equals("sunny in Chennai")) {
+            throw new AssertionError(res.output());
+        }
+
+        // The reply part you send back on the next turn.
+        Map<String, Object> responsePart = Map.of("functionResponse", Map.of(
+            "name", functionCall.get("name"),
+            "response", Map.of("result", res.output())
+        ));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> fr = (Map<String, Object>) responsePart.get("functionResponse");
+        if (!fr.get("name").equals("get_weather")) throw new AssertionError("name");
+
+        // An empty tool list still yields the wrapper — with an empty declarations array.
+        List<Map<String, Object>> empty = Adapters.toGemini(List.of());
+        if (empty.size() != 1) throw new AssertionError("expected the wrapper even when empty");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> emptyDecls =
+            (List<Map<String, Object>>) empty.get(0).get("functionDeclarations");
+        if (!emptyDecls.isEmpty()) throw new AssertionError("expected no declarations");
+
+        System.out.println("ok: " + functionCall.get("name") + " -> " + res.output());
+    }
+}
+```
+
+<Aside type="caution">
+An empty tool list does **not** produce an empty array — it produces one wrapper with an empty
+`functionDeclarations`. Some Gemini endpoints reject that; drop the `tools` key entirely when you
+have no tools.
+</Aside>
+
+## Shape
+
+| Path | From | Notes |
+|---|---|---|
+| `[0]` | — | The single wrapper object. Always exactly one, whatever the tool count. |
+| `[0].functionDeclarations` | the tool list | One entry per tool, in input order. |
+| `[0].functionDeclarations[].name` | `Tool.name()` | What the model calls back with in `functionCall.name`. |
+| `[0].functionDeclarations[].description` | `Tool.description()` | |
+| `[0].functionDeclarations[].parameters` | `Tool.inputSchema()` | Renamed — `inputSchema` → `parameters`. |
+
+## See also
+
+- [`Adapters.toOpenAI`](/api/java/adapters/openai/) — the nested `{"type":"function"}` shape
+- [`Adapters.toAnthropic`](/api/java/adapters/anthropic/) — the flat `input_schema` shape
+- [`Toolkit.create`](/api/java/toolkit/create/) — `tk.toGemini()` is this, applied to the toolkit
+- [`LlmClient.create`](/api/java/client/create/) — calls the adapter for you

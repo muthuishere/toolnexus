@@ -1,0 +1,148 @@
+---
+title: "McpSource.LoadAsync"
+description: "Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool. — C#."
+sidebar:
+  label: "McpSource.LoadAsync"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/McpSource.cs">McpSource.cs</a>
+</p>
+
+```csharp
+public static Task<McpSource> LoadAsync(object input, Func<Request, Task<Answer>>? waitFor = null,
+    CancellationToken cancellationToken = default)
+```
+
+Parses `input` (a path, a raw JSON string, or a parsed config dictionary — same acceptance rules as
+[`ParseConfig`](/api/csharp/mcp/parse-config/)), then connects to every **enabled** server
+concurrently: stdio for `local`, streamable-HTTP for `remote`. Each listed server tool becomes a
+uniform [`ITool`](/api/csharp/types/tool/) with `Source == "mcp"`. The result is an `IAsyncDisposable`
+`McpSource` carrying `.Tools` and `.Status` (`server → "connected" | "disabled" | "failed"`).
+
+A bad server never sinks the whole call — its failure is isolated to `Status[name] == "failed"` and
+every other server still loads. This page covers `input` and per-server status; the `waitFor` and
+`cancellationToken` parameters are covered on
+[the ctx-aware page](/api/csharp/mcp/load-with-context/).
+
+## When to use it
+
+At startup, once you have a real (or user-supplied) `mcp.json` and want live, callable tools —
+not just the config. This is the "connect for real" half of the pair;
+[`ListMcpToolsAsync`](/api/csharp/mcp/list-tools/) is the "look, don't touch" half.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Prefer Toolkit.CreateAsync in an app">
+`LoadAsync` is what [`Toolkit.CreateAsync`](/api/csharp/toolkit/create/) calls internally to add MCP
+tools alongside skills, builtins, and your own. Reach for `McpSource.LoadAsync` directly when you want
+**only** MCP tools, or need the `McpSource` object itself (its `.Status` map, its lifetime) rather than
+a merged toolkit.
+</Aside>
+
+Unlike [`ParseConfig`](/api/csharp/mcp/parse-config/), this method does real I/O — it spawns child
+processes and opens HTTP connections — so it is `async` and returns a resource you must dispose
+(`await using`).
+
+## Examples
+
+### 1. A disabled server never connects
+
+```csharp test
+using Toolnexus;
+
+var config = new Dictionary<string, object?>
+{
+    ["mcpServers"] = new Dictionary<string, object?>
+    {
+        ["docs_demo"] = new Dictionary<string, object?>
+        {
+            ["type"] = "local",
+            ["command"] = new[] { "echo", "hi" },
+            ["enabled"] = false,
+        },
+    },
+};
+
+await using var mcp = await McpSource.LoadAsync(config);
+
+if (mcp.Status["docs_demo"] != "disabled") throw new Exception($"status: {mcp.Status["docs_demo"]}");
+if (mcp.Tools.Count != 0) throw new Exception("expected no tools from a disabled server");
+
+Console.WriteLine($"ok: {mcp.Status["docs_demo"]}");
+```
+
+### 2. A server that can't spawn is isolated, not fatal
+
+```csharp test
+using Toolnexus;
+
+var config = new Dictionary<string, object?>
+{
+    ["mcpServers"] = new Dictionary<string, object?>
+    {
+        ["broken"] = new Dictionary<string, object?>
+        {
+            ["type"] = "local",
+            // No such binary — spawning fails immediately. No network involved.
+            ["command"] = new[] { "toolnexus-docs-nonexistent-binary-xyz" },
+            ["timeout"] = 2_000,
+        },
+    },
+};
+
+await using var mcp = await McpSource.LoadAsync(config);
+
+// LoadAsync itself never throws for a bad server — the failure lands in Status.
+if (mcp.Status["broken"] != "failed") throw new Exception($"status: {mcp.Status["broken"]}");
+if (mcp.Tools.Count != 0) throw new Exception("expected no tools from a failed server");
+
+Console.WriteLine($"ok: {mcp.Status["broken"]}");
+```
+
+### 3. The realistic flow: parse from disk, then gate, then load
+
+```csharp test
+using Toolnexus;
+
+var repo = Environment.GetEnvironmentVariable("TOOLNEXUS_REPO") ?? ".";
+var fixture = Path.Combine(repo, "examples", "mcp.json");
+
+// Parse first (cheap, no I/O beyond the read) — same pattern as ParseConfig's "validate before
+// loading" example. This doc forces every server off so it never dials out in CI, but the shape
+// (parse -> gate -> LoadAsync) is exactly what a real startup path runs.
+var config = McpSource.ParseConfig(fixture);
+foreach (var (_, value) in config)
+    ((IDictionary<string, object?>)value!)["enabled"] = false;
+
+await using var mcp = await McpSource.LoadAsync(config);
+
+var statuses = mcp.Status.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}={kv.Value}").ToList();
+if (mcp.Status.Values.Any(s => s != "disabled")) throw new Exception($"unexpected: {string.Join(",", statuses)}");
+
+Console.WriteLine($"ok: {string.Join(", ", statuses)}");
+```
+
+<Aside type="caution">
+`LoadAsync` connects to every **enabled** server concurrently — one slow server does not block the
+others. A per-server `timeout` config value bounds that one server; see
+[the ctx-aware page](/api/csharp/mcp/load-with-context/) for how it interacts with the caller's
+`CancellationToken`.
+</Aside>
+
+## Parameters
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `input` | `object` | Path, raw JSON string, or parsed config — same as [`ParseConfig`](/api/csharp/mcp/parse-config/). |
+| `waitFor` | `Func<Request, Task<Answer>>?` | §10 resolver for MCP elicitation. `null` ⇒ elicitation not advertised. |
+| `cancellationToken` | `CancellationToken` | Covered on [the ctx-aware page](/api/csharp/mcp/load-with-context/). |
+
+## See also
+
+- [`McpSource.LoadAsync`](/api/csharp/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+- [`McpSource.ListMcpToolsAsync`](/api/csharp/mcp/list-tools/) — List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+- [`McpSource.ParseConfig`](/api/csharp/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
+- [`McpSource.ElicitationToRequest`](/api/csharp/mcp/elicitation/) — Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.

@@ -1,0 +1,72 @@
+{
+ "finishStop": "length",
+ "finishTools": "tool_calls",
+ "messages": [
+  {
+   "content": "part one part two",
+   "role": "user"
+  },
+  {
+   "content": [
+    {
+     "text": "thinking",
+     "type": "text"
+    },
+    {
+     "id": "c1",
+     "input": {
+      "n": 1
+     },
+     "name": "alpha",
+     "type": "tool_use"
+    },
+    {
+     "id": "c2",
+     "input": {
+      "n": 2
+     },
+     "name": "beta",
+     "type": "tool_use"
+    }
+   ],
+   "role": "assistant"
+  },
+  {
+   "content": [
+    {
+     "content": "ra",
+     "tool_use_id": "c1",
+     "type": "tool_result"
+    },
+    {
+     "content": "rb",
+     "tool_use_id": "c2",
+     "type": "tool_result"
+    }
+   ],
+   "role": "user"
+  },
+  {
+   "content": "and now?",
+   "role": "user"
+  }
+ ],
+ "system": "Be terse.",
+ "toolChoice": {
+  "type": "any"
+ },
+ "tools": [
+  {
+   "description": "d",
+   "input_schema": {
+    "properties": {
+     "n": {
+      "type": "number"
+     }
+    },
+    "type": "object"
+   },
+   "name": "alpha"
+  }
+ ]
+}

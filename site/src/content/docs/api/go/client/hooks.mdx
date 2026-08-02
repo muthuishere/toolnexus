@@ -1,0 +1,295 @@
+---
+title: "Hooks"
+description: "Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite. — Go."
+sidebar:
+  label: "Hooks"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/client.go">golang/client.go</a>
+</p>
+
+```go
+type Hooks struct {
+	BeforeLLM  func(ctx context.Context, ev BeforeLLMEvent) (*LLMOverride, error)
+	AfterLLM   func(ctx context.Context, ev AfterLLMEvent) error
+	BeforeTool func(ctx context.Context, ev BeforeToolEvent) (*ToolOverride, error)
+	AfterTool  func(ctx context.Context, ev AfterToolEvent) (*ToolOverride, error)
+}
+```
+
+Four lifecycle callbacks wired around the agent loop via `ClientOptions.Hooks`. A `nil` field is
+skipped — set only the ones you need. Any hook returning a non-nil `error` aborts the run with that
+error. `BeforeTool` and `BeforeLLM` can also mutate or short-circuit what happens next by returning
+a non-nil override.
+
+## When to use it
+
+Reach for `Hooks` whenever behavior needs to live *around* the loop rather than inside a tool:
+structured logging of every model/tool call, redacting secrets out of a tool's output before it
+reaches the model, denying a dangerous tool call by policy, injecting or trimming conversation
+history before a call, or capturing cost/latency per call for your own telemetry pipeline.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Only need numbers, not control? Use OnMetric instead">
+`Hooks` gives you the actual request/response payloads and the power to change them —
+`BeforeTool` can deny a call outright, `AfterTool` can redact an output, `BeforeLLM` can rewrite the
+message history sent to the model. If all you want is counts/latency/tokens for observability with
+no interception, [`OnMetric`](/api/go/client/metrics/) is a lighter fit — it only observes, and it
+also feeds the built-in Prometheus registry (`Client.Metrics()`) for free.
+</Aside>
+
+## Examples
+
+Each example points `CreateClient` at a local `httptest.Server` — no real network call, no real API
+key — so the hooks can be exercised deterministically.
+
+### 1. The smallest useful call — deny a tool call with `BeforeTool`
+
+Returning a `ToolOverride` with `Result` set short-circuits the tool: the real function never runs.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	ran := false
+	deleteAll := toolnexus.NativeTool(
+		"delete_all", "delete everything",
+		toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+		func(_ context.Context, _ map[string]any) (string, error) {
+			ran = true // must never fire — the hook denies it first
+			return "deleted", nil
+		},
+	)
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: []toolnexus.Tool{deleteAll}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"delete_all","arguments":"{}"}}]}}]}`))
+	}))
+	defer srv.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "test-key",
+		Hooks: &toolnexus.Hooks{
+			BeforeTool: func(_ context.Context, ev toolnexus.BeforeToolEvent) (*toolnexus.ToolOverride, error) {
+				if ev.Name == "delete_all" {
+					return &toolnexus.ToolOverride{Result: &toolnexus.ToolResult{Output: "denied by policy", IsError: true}}, nil
+				}
+				return nil, nil
+			},
+		},
+	})
+
+	res, err := client.Run(context.Background(), "delete everything", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if ran {
+		log.Fatal("the real tool ran — BeforeTool should have short-circuited it")
+	}
+	if res.ToolCalls[0].Output != "denied by policy" || !res.ToolCalls[0].IsError {
+		log.Fatalf("unexpected tool call record: %+v", res.ToolCalls[0])
+	}
+
+	fmt.Println("ok:", res.ToolCalls[0].Output)
+}
+```
+
+### 2. The realistic case — audit with `AfterLLM`, redact with `AfterTool`
+
+`AfterLLM` observes each raw model response (useful for cost/tracing); `AfterTool` can rewrite a
+tool's output before it goes back to the model — here, redacting a secret leaking out of a tool.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	lookup := toolnexus.NativeTool(
+		"lookup_config", "lookup a config value",
+		toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+		func(_ context.Context, _ map[string]any) (string, error) {
+			return "db_password=hunter2", nil // a tool that accidentally over-shares
+		},
+	)
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: []toolnexus.Tool{lookup}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"lookup_config","arguments":"{}"}}]}}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}]}`))
+	}))
+	defer srv.Close()
+
+	var llmCalls int
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "test-key",
+		Hooks: &toolnexus.Hooks{
+			AfterLLM: func(_ context.Context, _ toolnexus.AfterLLMEvent) error {
+				llmCalls++ // audit hook — just counts, changes nothing
+				return nil
+			},
+			AfterTool: func(_ context.Context, ev toolnexus.AfterToolEvent) (*toolnexus.ToolOverride, error) {
+				if strings.Contains(ev.Result.Output, "password=") {
+					redacted := ev.Result
+					redacted.Output = "db_password=***REDACTED***"
+					return &toolnexus.ToolOverride{Result: &redacted}, nil
+				}
+				return nil, nil
+			},
+		},
+	})
+
+	res, err := client.Run(context.Background(), "what's the db password?", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if llmCalls != 2 {
+		log.Fatalf("AfterLLM fired %d times, want 2", llmCalls)
+	}
+	if res.ToolCalls[0].Output != "db_password=***REDACTED***" {
+		log.Fatalf("AfterTool did not redact: %+v", res.ToolCalls[0])
+	}
+
+	fmt.Println("ok: redacted ->", res.ToolCalls[0].Output)
+}
+```
+
+### 3. The full surface — all four hooks in one run
+
+`BeforeLLM` trims the message history before it goes out; `BeforeTool` rewrites the call's
+arguments; the loop still runs the same request/response cycle underneath.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	echo := toolnexus.NativeTool(
+		"echo", "echo a value",
+		toolnexus.JSONSchema{"type": "object", "properties": map[string]any{"v": map[string]any{"type": "string"}}},
+		func(_ context.Context, args map[string]any) (string, error) {
+			return fmt.Sprintf("%v", args["v"]), nil
+		},
+	)
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: []toolnexus.Tool{echo}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"echo","arguments":"{\"v\":\"original\"}"}}]}}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	var beforeLLMTurns, afterLLMTurns, beforeToolCalls, afterToolCalls int
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "test-key",
+		SystemPrompt: "SYS",
+		Hooks: &toolnexus.Hooks{
+			BeforeLLM: func(_ context.Context, ev toolnexus.BeforeLLMEvent) (*toolnexus.LLMOverride, error) {
+				beforeLLMTurns++
+				return nil, nil // observe only — a non-nil override would replace Messages/Tools
+			},
+			AfterLLM: func(_ context.Context, _ toolnexus.AfterLLMEvent) error {
+				afterLLMTurns++
+				return nil
+			},
+			BeforeTool: func(_ context.Context, ev toolnexus.BeforeToolEvent) (*toolnexus.ToolOverride, error) {
+				beforeToolCalls++
+				// Rewrite the call's arguments before it runs.
+				return &toolnexus.ToolOverride{Args: map[string]any{"v": "rewritten"}}, nil
+			},
+			AfterTool: func(_ context.Context, ev toolnexus.AfterToolEvent) (*toolnexus.ToolOverride, error) {
+				afterToolCalls++
+				return nil, nil // observe only
+			},
+		},
+	})
+
+	res, err := client.Run(context.Background(), "echo original", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if beforeLLMTurns != 2 || afterLLMTurns != 2 || beforeToolCalls != 1 || afterToolCalls != 1 {
+		log.Fatalf("hook counts = %d/%d/%d/%d, want 2/2/1/1", beforeLLMTurns, afterLLMTurns, beforeToolCalls, afterToolCalls)
+	}
+	if res.ToolCalls[0].Output != "rewritten" {
+		log.Fatalf("BeforeTool did not rewrite args: %+v", res.ToolCalls[0])
+	}
+
+	fmt.Println("ok:", res.ToolCalls[0].Output)
+}
+```
+
+## Event and override types
+
+| Type | Passed to | Fields |
+|---|---|---|
+| `BeforeLLMEvent` | `BeforeLLM` | `Messages`, `Tools`, `Model`, `Turn`. |
+| `LLMOverride` | returned from `BeforeLLM` | `Messages`, `Tools` — a non-nil slice replaces that value. |
+| `AfterLLMEvent` | `AfterLLM` | `Response` (decoded provider payload, carries usage), `Model`, `Turn`. |
+| `BeforeToolEvent` | `BeforeTool` | `Name`, `Args`, `ID`, `Turn`. |
+| `AfterToolEvent` | `AfterTool` | `Name`, `Args`, `Result`, `ID`, `Turn`. |
+| `ToolOverride` | returned from `BeforeTool` / `AfterTool` | In `BeforeTool`: `Result` short-circuits (the real tool never runs), else `Args` rewrites the call. In `AfterTool`: `Result` replaces the result. |
+
+## See also
+
+- [`CreateClient`](/api/go/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.Run`](/api/go/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Client.Stream`](/api/go/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`MetricEvent`](/api/go/client/metrics/) — A lighter, observe-only alternative when you don't need to intercept.

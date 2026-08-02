@@ -1,0 +1,146 @@
+---
+title: "A2AServer.BuildAgentCard"
+description: "Construct the Agent Card that advertises your name, skills and endpoint. — C#."
+sidebar:
+  label: "A2AServer.BuildAgentCard"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/A2AServer.cs">A2AServer.cs</a>
+</p>
+
+```csharp
+public static Dictionary<string, object?> BuildAgentCard(
+    A2AConfig cfg, IReadOnlyList<SkillSource.SkillInfo> skills, string url)
+```
+
+The pure function [`A2AServer.StartAsync`](/api/csharp/serve/a2a/) calls to answer
+`GET /.well-known/agent-card.json`: it turns an `A2AConfig` plus a toolkit's skills into the plain
+`Dictionary<string, object?>` card body — name, description, version, protocol/capabilities,
+`skills[]` (each `{id, name, description}`, filtered to `cfg.Skills` when set), and `url`, the
+JSON-RPC endpoint. No I/O, no server — just the shaping.
+
+## When to use it
+
+You want the exact card JSON your served toolkit would publish, without actually starting an HTTP
+listener — for a snapshot test, to hand a card to a caller out-of-band, or to inspect what a given
+`A2AConfig` + skill set produces before wiring up `ServeAsync`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="ServeAsync calls this for you">
+`ServeAsync` builds the card on every `GET` request using the toolkit's live skill list, so in an
+app you rarely call `BuildAgentCard` directly. Reach for it when you want the card **without**
+standing up a server, or need to unit-test card shaping (filtering, defaults, provider block) in
+isolation from HTTP.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — defaults, no skills
+
+```csharp test
+using Toolnexus;
+
+var card = A2AServer.BuildAgentCard(
+    new A2AConfig(),
+    Array.Empty<SkillSource.SkillInfo>(),
+    "http://localhost:9/");
+
+if (card["name"] as string != "toolnexus-agent") throw new Exception(card["name"] as string);
+if (card["description"] as string != "") throw new Exception(card["description"] as string);
+if (card["version"] as string != "0.1.0") throw new Exception(card["version"] as string);
+if (card["protocolVersion"] as string != "0.3.0") throw new Exception(card["protocolVersion"] as string);
+var caps = (IDictionary<string, object?>)card["capabilities"]!;
+if (!Equals(caps["streaming"], false)) throw new Exception("streaming");
+if (((IEnumerable<object?>)card["skills"]!).Any()) throw new Exception("expected no skills");
+
+Console.WriteLine($"ok: {card["name"]} v{card["version"]}");
+```
+
+### 2. The realistic case — skills mapped, filtered to a subset
+
+```csharp test
+using Toolnexus;
+
+var skills = new List<SkillSource.SkillInfo>
+{
+    new("greet", "says hello", "loc1", "body1"),
+    new("farewell", "says goodbye", "loc2", "body2"),
+    new("internal-only", "not for peers", "loc3", "body3"),
+};
+
+var card = A2AServer.BuildAgentCard(
+    new A2AConfig { Name = "desk", Description = "a friendly desk", Skills = new List<string> { "greet", "farewell" } },
+    skills,
+    "http://localhost:9/");
+
+var names = ((IEnumerable<object?>)card["skills"]!)
+    .Select(s => ((IDictionary<string, object?>)s!)["name"] as string)
+    .OrderBy(n => n, StringComparer.Ordinal)
+    .ToList();
+if (!names.SequenceEqual(new[] { "farewell", "greet" })) throw new Exception(string.Join(",", names));
+
+// id == name, never a raw tool name — the card advertises SKILLS.
+foreach (var s in (IEnumerable<object?>)card["skills"]!)
+{
+    var d = (IDictionary<string, object?>)s!;
+    if (!Equals(d["id"], d["name"])) throw new Exception("id should equal name");
+}
+
+Console.WriteLine($"ok: {card["name"]} advertises {string.Join(",", names)}");
+```
+
+### 3. Full surface — a provider block, and the URL you pass through verbatim
+
+```csharp test
+using Toolnexus;
+
+var skills = new List<SkillSource.SkillInfo> { new("audit", "runs an audit", "loc", "body") };
+
+var card = A2AServer.BuildAgentCard(
+    new A2AConfig
+    {
+        Name = "audit-desk",
+        Description = "runs compliance audits",
+        Version = "2.3.0",
+        Provider = new A2AProvider { Organization = "Acme Corp", Url = "https://acme.example" },
+    },
+    skills,
+    "http://127.0.0.1:5100/");
+
+if (card["version"] as string != "2.3.0") throw new Exception(card["version"] as string);
+// url is exactly what the caller passed — BuildAgentCard never rewrites it.
+if (card["url"] as string != "http://127.0.0.1:5100/") throw new Exception(card["url"] as string);
+var provider = (IDictionary<string, object?>)card["provider"]!;
+if (provider["organization"] as string != "Acme Corp") throw new Exception(provider["organization"] as string);
+
+// no Skills filter set ⇒ every skill is advertised.
+var names = ((IEnumerable<object?>)card["skills"]!)
+    .Select(s => ((IDictionary<string, object?>)s!)["name"] as string).ToList();
+if (!names.SequenceEqual(new[] { "audit" })) throw new Exception(string.Join(",", names));
+
+Console.WriteLine($"ok: {card["name"]} by {provider["organization"]}, url={card["url"]}");
+```
+
+<Aside type="caution">
+`skills` here is the toolkit's `SkillSource.SkillInfo` list — never raw `ITool`s. A card can never
+leak builtin/native/MCP tool names; that isolation is why the parameter type is deliberately
+narrower than "everything the toolkit knows about".
+</Aside>
+
+## Parameters
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `cfg` | `A2AConfig` | Name/description/version/provider + optional `Skills` allowlist. |
+| `skills` | `IReadOnlyList<SkillSource.SkillInfo>` | The toolkit's skill catalog — filtered to `cfg.Skills` when set, else all. |
+| `url` | `string` | The JSON-RPC endpoint to publish as `card.url` (peers `POST` here). |
+
+## See also
+
+- [`A2AServer.Start`](/api/csharp/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+- [`A2AServer.FileTaskStore`](/api/csharp/serve/task-store/) — Persist inbound A2A tasks so a suspended request survives a restart.
+- [`McpServe.Build`](/api/csharp/serve/mcp/) — The inbound MCP profile: any MCP client can call your tools.

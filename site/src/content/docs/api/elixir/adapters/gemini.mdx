@@ -1,0 +1,191 @@
+---
+title: Toolnexus.Adapters.to_gemini
+description: Render any tool list as Gemini function-declaration schema. Elixir.
+sidebar:
+  label: Adapters.to_gemini
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/adapters.ex">elixir/lib/toolnexus/adapters.ex</a>
+</p>
+
+```elixir
+@spec to_gemini([Toolnexus.Tool.t()]) :: [map()]
+def to_gemini(tools)
+```
+
+Turns a list of tools into the `tools` array Gemini's `generateContent` expects. Gemini is the odd
+one out: every declaration lives inside **one** wrapper element keyed `functionDeclarations`, so the
+returned list always has exactly one entry no matter how many tools you passed.
+
+## When to use it
+
+When you are calling the Gemini REST API (or Vertex AI) yourself and need the `tools` field of the
+request body. This is also the shape `google-genai`-style SDKs accept when you hand them raw
+declarations rather than typed objects.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Skip this entirely if you use Toolnexus.Client">
+[`Toolnexus.Client.create`](/api/elixir/client/create/) selects the adapter from its style option and
+runs the whole tool-calling loop for you. Use `to_gemini` **instead** only when you already own the
+request/response loop and want toolnexus purely for tool aggregation.
+</Aside>
+
+`Toolnexus.Toolkit.to_gemini/1` takes a toolkit and delegates straight here with its tools — use
+that when you have a toolkit, and this when you have a bare list.
+
+## Examples
+
+### 1. One tool, and the wrapper that surprises everyone
+
+The top-level list is a list of *tool groups*, not of tools. Destructure it before you look for names.
+
+```elixir test
+alias Toolnexus.{Adapters, Native}
+
+weather =
+  Native.define_tool(%{
+    name: "get_weather",
+    description: "Current weather for a city",
+    input_schema: %{
+      "type" => "object",
+      "properties" => %{"city" => %{"type" => "string"}},
+      "required" => ["city"]
+    },
+    execute: fn args, _ctx -> "sunny in #{args["city"]}" end
+  })
+
+result = Adapters.to_gemini([weather])
+
+# Always exactly ONE element, whatever the tool count.
+1 = length(result)
+[%{"functionDeclarations" => decls}] = result
+
+1 = length(decls)
+[decl] = decls
+true = decl |> Map.keys() |> Enum.sort() == ["description", "name", "parameters"]
+true = decl["name"] == "get_weather"
+# input_schema is renamed to `parameters`, as with OpenAI.
+true = decl["parameters"]["required"] == ["city"]
+
+IO.puts("ok: #{decl["name"]}")
+```
+
+### 2. Many tools, one wrapper, straight into a request body
+
+```elixir test
+alias Toolnexus.{Adapters, Native}
+
+mk = fn name, desc ->
+  Native.define_tool(%{
+    name: name,
+    description: desc,
+    input_schema: %{"type" => "object", "properties" => %{}},
+    execute: fn _args, _ctx -> name end
+  })
+end
+
+tools = [mk.("search", "Search the docs"), mk.("ping", "Health check"), mk.("kv_get", "Read a key")]
+
+body = %{
+  "contents" => [%{"role" => "user", "parts" => [%{"text" => "search for adapters"}]}],
+  "tools" => Adapters.to_gemini(tools)
+}
+
+# Three tools still means ONE wrapper with three declarations.
+1 = length(body["tools"])
+[%{"functionDeclarations" => decls}] = body["tools"]
+3 = length(decls)
+
+names = Enum.map(decls, & &1["name"])
+true = names == ["search", "ping", "kv_get"]
+
+json = Jason.encode!(body)
+true = String.contains?(json, ~s("functionDeclarations"))
+
+# The key comes from the environment, never a literal in your source.
+api_key = System.get_env("GEMINI_API_KEY") || "YOUR_KEY_HERE"
+true = is_binary(api_key)
+
+IO.puts("ok: #{Enum.join(names, ", ")}")
+```
+
+<Aside type="note" title="The empty case is not empty">
+With zero tools you still get `[%{"functionDeclarations" => []}]`, not `[]`. That is deliberate JS
+parity (SPEC §0.7) — every port emits the wrapper. If your provider rejects an empty declaration
+list, omit the `tools` field yourself rather than expecting the adapter to.
+</Aside>
+
+### 3. Round-tripping a `functionCall` part back to the tool
+
+Gemini returns `args` as a **real map** (like Anthropic, unlike OpenAI's JSON string), and expects a
+`functionResponse` part back.
+
+```elixir test
+alias Toolnexus.{Adapters, Context, Native}
+
+weather =
+  Native.define_tool(%{
+    name: "get_weather",
+    description: "Current weather for a city",
+    input_schema: %{
+      "type" => "object",
+      "properties" => %{"city" => %{"type" => "string"}},
+      "required" => ["city"]
+    },
+    execute: fn args, _ctx ->
+      if args["city"] in [nil, ""], do: raise("city is required"), else: "sunny in #{args["city"]}"
+    end
+  })
+
+tools = [weather]
+[%{"functionDeclarations" => [_decl]}] = Adapters.to_gemini(tools)
+
+# A part exactly as the model returns it.
+part = %{"functionCall" => %{"name" => "get_weather", "args" => %{"city" => "Chennai"}}}
+call = part["functionCall"]
+
+called = Enum.find(tools, &(&1.name == call["name"]))
+true = called != nil
+
+res = called.execute.(call["args"], %Context{})
+false = res.is_error
+true = res.output == "sunny in Chennai"
+
+# What you append to `contents` for the next turn.
+response_part = %{
+  "functionResponse" => %{"name" => call["name"], "response" => %{"output" => res.output}}
+}
+
+true = response_part["functionResponse"]["response"]["output"] == "sunny in Chennai"
+
+# Failure is data, not an exception — feed the text back the same way.
+bad = called.execute.(%{}, %Context{})
+true = bad.is_error
+true = bad.output == "city is required"
+
+# Zero tools: the wrapper survives, the declarations list is empty.
+[%{"functionDeclarations" => []}] = Adapters.to_gemini([])
+
+IO.puts("ok: #{call["name"]} -> #{res.output}")
+```
+
+## Shape
+
+| Path | From | Notes |
+|---|---|---|
+| `[0]` | — | The single wrapper map. There is never a second element. |
+| `[0]["functionDeclarations"]` | the tool list | One declaration per tool, order preserved. |
+| `…[]["name"]` | `Tool.name` | What comes back in `functionCall.name`. |
+| `…[]["description"]` | `Tool.description` | |
+| `…[]["parameters"]` | `Tool.input_schema` | Renamed — `input_schema` → `parameters`, as with OpenAI. |
+
+## See also
+
+- [`Adapters.to_openai`](/api/elixir/adapters/openai/) · [`Adapters.to_anthropic`](/api/elixir/adapters/anthropic/)
+- [`Toolnexus.create_toolkit`](/api/elixir/toolkit/create/) — `Toolkit.to_gemini/1` delegates here
+- [`Toolnexus.Client.create`](/api/elixir/client/create/) — calls the adapter for you
+- [`Toolnexus.Tool`](/api/elixir/types/tool/) — where `name`, `description` and `input_schema` come from

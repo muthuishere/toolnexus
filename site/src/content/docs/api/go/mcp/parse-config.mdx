@@ -1,0 +1,218 @@
+---
+title: ParseMcpConfig
+description: Parse and validate an mcp.json without connecting to anything — the fast fail for a malformed or misspelled server block. Go.
+sidebar:
+  label: ParseMcpConfig
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/mcp.go">golang/mcp.go</a>
+</p>
+
+```go
+func ParseMcpConfig(input any) (McpConfig, error)
+```
+
+Reads MCP server configuration and normalises it into a flat map of server name → config. It
+**connects to nothing** — no child processes, no HTTP. That is the whole point: it is the cheap
+check you can run before paying for [`LoadMcp`](/api/go/mcp/load/).
+
+## When to use it
+
+- **Validate at startup or in a test**, so a typo in `mcp.json` fails immediately rather than
+  halfway through connecting to five servers.
+- **Inspect or modify config before loading** — filter servers by environment, inject a header,
+  disable one in CI.
+- **Accept config from somewhere other than a file** — a database, an env var, an API response.
+
+## Why this and not just calling LoadMcp
+
+<Aside type="tip" title="LoadMcp already parses — use this when you need the config itself">
+[`LoadMcp`](/api/go/mcp/load/) calls `ParseMcpConfig` internally, so you do not need to call it
+first in the ordinary path. Reach for it when you want the *config as data*: to check it, change
+it, or report on it without launching anything.
+</Aside>
+
+<Aside type="caution" title="Go returns an error rather than panicking">
+`ParseMcpConfig` returns `(McpConfig, error)` where JavaScript, Python, Java and C# raise. Check
+the error — a malformed file gives you a zero config, not a partial one.
+</Aside>
+
+The `input` is `any` because it accepts a path string, raw JSON bytes, an already-typed
+`McpConfig`, or a parsed `map[string]any`.
+
+## Examples
+
+### 1. Parse the shared fixture from disk
+
+This is `examples/mcp.json`, the fixture every port is tested against.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"sort"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	// TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+	fixture := filepath.Join(os.Getenv("TOOLNEXUS_REPO"), "examples", "mcp.json")
+
+	config, err := toolnexus.ParseMcpConfig(fixture)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// The `mcpServers` wrapper is unwrapped — you get the servers directly.
+	var names []string
+	for name := range config {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) != 2 || names[0] != "everything" || names[1] != "example-remote" {
+		log.Fatalf("unexpected servers: %v", names)
+	}
+
+	// Disabled servers are still returned — parsing does not filter.
+	fmt.Println("ok:", names)
+}
+```
+
+<Aside type="caution">
+Parsing does **not** drop disabled servers. `enabled: false` is preserved in the returned config
+and is honoured later, by `LoadMcp`. If you are counting servers, count the enabled ones yourself.
+</Aside>
+
+### 2. Wrapper spellings and raw bytes
+
+`mcpServers`, `servers` and `mcp` all mean the same thing, and raw JSON bytes are accepted too.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	for _, raw := range []string{
+		`{"mcpServers":{"a":{"type":"local","command":["echo","hi"]}}}`,
+		`{"servers":{"a":{"type":"local","command":["echo","hi"]}}}`,
+		`{"mcp":{"a":{"type":"local","command":["echo","hi"]}}}`,
+	} {
+		config, err := toolnexus.ParseMcpConfig([]byte(raw))
+		if err != nil {
+			log.Fatal(err)
+		}
+		if len(config) != 1 {
+			log.Fatalf("expected one server, got %d", len(config))
+		}
+		if _, ok := config["a"]; !ok {
+			log.Fatalf("expected server 'a' in %v", config)
+		}
+	}
+
+	fmt.Println("ok: 3 spellings -> a")
+}
+```
+
+### 3. Validate before loading, and surface the error
+
+The pattern this function exists for — check the config, then decide whether to connect.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"sort"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func validate(raw string) (enabled []string, problems []string, err error) {
+	config, err := toolnexus.ParseMcpConfig([]byte(raw))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	for name, cfg := range config {
+		// Disabled either way round. BOTH flags are *bool, so nil means "not set"
+		// — dereference only after a nil check.
+		if (cfg.Disabled != nil && *cfg.Disabled) || (cfg.Enabled != nil && !*cfg.Enabled) {
+			continue
+		}
+		enabled = append(enabled, name)
+
+		if cfg.Type == "remote" {
+			if cfg.URL == "" {
+				problems = append(problems, name+": remote server without a url")
+			}
+		} else if len(cfg.Command) == 0 {
+			problems = append(problems, name+": local server without a command")
+		}
+	}
+	sort.Strings(enabled)
+	sort.Strings(problems)
+	return enabled, problems, nil
+}
+
+func main() {
+	enabled, problems, err := validate(`{"mcpServers":{
+		"ok_local":{"type":"local","command":["npx","server"]},
+		"ok_remote":{"type":"remote","url":"https://example.com/mcp"},
+		"off":{"type":"local","command":["x"],"enabled":false}}}`)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(enabled) != 2 || len(problems) != 0 {
+		log.Fatalf("unexpected: %v %v", enabled, problems)
+	}
+
+	_, badProblems, err := validate(`{"mcpServers":{
+		"broken_remote":{"type":"remote"},
+		"broken_local":{"type":"local","command":[]}}}`)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(badProblems) != 2 {
+		log.Fatalf("expected 2 problems, got %v", badProblems)
+	}
+
+	// Malformed JSON is an error, not a panic and not a partial config.
+	if _, err := toolnexus.ParseMcpConfig([]byte(`{not json`)); err == nil {
+		log.Fatal("expected a parse error")
+	}
+
+	fmt.Println("ok:", enabled, "| problems:", len(badProblems))
+}
+```
+
+## Accepted input
+
+| Input | Behaviour |
+|---|---|
+| `"./mcp.json"` (string) | Read from disk and unmarshalled. Error if missing or malformed. |
+| `[]byte(...)` | Raw JSON, unmarshalled directly. |
+| `McpConfig` | Returned as-is. |
+| `map[string]any` | Normalised. |
+
+Wrapped under `mcpServers`, `servers` or `mcp` — all three are unwrapped.
+
+## See also
+
+- [`LoadMcp`](/api/go/mcp/load/) — parse *and* connect
+- [`ListMcpTools`](/api/go/mcp/list-tools/) — what each server would expose
+- [`CreateToolkit`](/api/go/toolkit/create/) — takes `McpConfig` in exactly these forms

@@ -1,0 +1,235 @@
+---
+title: "Toolnexus.Client.create"
+description: "The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract. — Elixir."
+sidebar:
+  label: "Toolnexus.Client.create"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/client.ex">elixir/lib/toolnexus/client.ex</a>
+</p>
+
+```elixir
+Toolnexus.Client.create(base_url: ..., style: ..., model: ..., wait_for: wait_for, ...)
+
+# wait_for :: (Toolnexus.Request.t() -> Toolnexus.Answer.t() | %{ok: boolean, id: term, data: map, reason: String.t()})
+```
+
+`:wait_for` is not a separate type in Elixir — it is one option on
+[`Toolnexus.Client.create/1`](/api/elixir/client/create/): a 1-arity function from a §10
+`Request` to an `Answer`. When a tool's `ToolResult` carries `metadata.pending` (a suspension —
+see [`Toolnexus.ToolResult`](/api/elixir/types/tool-result/)), the loop calls `wait_for.(request)`
+**in-process, synchronously**, right where the suspension happened. If the answer is `ok: true`,
+the tool is re-invoked with `ctx.answer` set and the run continues as if nothing paused; if
+`ok: false`, the suspension resolves to an error result fed back to the model. With no `:wait_for`
+configured, the run halts instead — `RunResult.status == "pending"` and `RunResult.pending` holds
+the `Request` for the host to resolve out-of-band.
+
+## When to use it
+
+- **You can resolve the suspension right here** — a CLI prompt, an in-memory approval queue, a
+  synchronous call to another service — anything that can answer before the current process
+  returns.
+- **You want the loop to "just work" through a suspension** without the caller having to notice
+  `status == "pending"` and drive a separate resume path.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="No wait_for -> the run halts and YOU resume it later">
+Omit `:wait_for` (or the request outlives your process) and `Client.run/4` returns with
+`status: "pending"` and `pending: %Request{}` instead of blocking. That is the durable path — see
+[`Toolnexus.Agents.Runtime.resume/2`](/api/elixir/suspension/resume/) for resuming an agent run
+from a **different** process, potentially after a restart. Use `:wait_for` when resolution is
+cheap and synchronous; use durable resume when it isn't (a human replies hours later, a webhook
+lands after a redeploy).
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — no `:wait_for`, the run halts
+
+```elixir test
+alias Toolnexus.{Client, Context, Tool, ToolResult, Request}
+
+approve = %Tool{
+  name: "delete_account",
+  description: "delete the user's account",
+  input_schema: %{"type" => "object", "properties" => %{}},
+  source: "native",
+  execute: fn _args, %Context{} ->
+    %ToolResult{
+      output: "approval required",
+      is_error: true,
+      metadata: %{pending: %Request{id: "req-1", kind: "authorization", prompt: "Delete this account?"}}
+    }
+  end
+}
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+
+  resp = %{
+    "choices" => [%{"message" => %{"role" => "assistant", "content" => nil, "tool_calls" => [
+      %{"id" => "c1", "type" => "function", "function" => %{"name" => "delete_account", "arguments" => "{}"}}
+    ]}}],
+    "usage" => %{"prompt_tokens" => 4, "completion_tokens" => 2, "total_tokens" => 6}
+  }
+
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client = Client.create(base_url: "http://localhost", style: "openai", model: "gpt-x", api_key: "test-key", http_options: [plug: plug])
+
+result = Client.run(client, "delete my account", [approve])
+
+true = result.status == "pending"
+true = result.pending.id == "req-1"
+true = result.pending.kind == "authorization"
+true = result.pending.prompt == "Delete this account?"
+
+IO.puts("ok: run halted — pending #{result.pending.kind} request #{result.pending.id}")
+```
+
+### 2. The realistic case — `:wait_for` resolves it in-process, the run completes
+
+```elixir test
+alias Toolnexus.{Client, Context, Tool, ToolResult, Request, Answer}
+
+approve = %Tool{
+  name: "delete_account",
+  description: "delete the user's account",
+  input_schema: %{"type" => "object", "properties" => %{}},
+  source: "native",
+  execute: fn _args, %Context{} = ctx ->
+    case ctx.answer do
+      nil ->
+        %ToolResult{
+          output: "approval required",
+          is_error: true,
+          metadata: %{pending: %Request{id: "req-2", kind: "authorization", prompt: "Delete this account?"}}
+        }
+
+      %Answer{ok: true} ->
+        ToolResult.ok("account deleted")
+    end
+  end
+}
+
+{:ok, calls} = Agent.start_link(fn -> 0 end)
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  n = Agent.get_and_update(calls, fn c -> {c + 1, c + 1} end)
+
+  resp =
+    if n == 1 do
+      %{
+        "choices" => [%{"message" => %{"role" => "assistant", "content" => nil, "tool_calls" => [
+          %{"id" => "c1", "type" => "function", "function" => %{"name" => "delete_account", "arguments" => "{}"}}
+        ]}}],
+        "usage" => %{"prompt_tokens" => 4, "completion_tokens" => 2, "total_tokens" => 6}
+      }
+    else
+      %{"choices" => [%{"message" => %{"role" => "assistant", "content" => "done — account deleted"}}], "usage" => %{"prompt_tokens" => 3, "completion_tokens" => 2, "total_tokens" => 5}}
+    end
+
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+wait_for = fn %Request{id: id} -> %Answer{id: id, ok: true} end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "openai",
+    model: "gpt-x",
+    api_key: "test-key",
+    wait_for: wait_for,
+    http_options: [plug: plug]
+  )
+
+result = Client.run(client, "delete my account", [approve])
+
+true = result.status == "done"
+true = result.text == "done — account deleted"
+[%{name: "delete_account", output: "account deleted", is_error: false}] = result.tool_calls
+
+IO.puts("ok: #{result.text} (suspension resolved in-process, no caller-visible pending)")
+```
+
+### 3. The full surface — a denial feeds back as a tool error, the model keeps going
+
+```elixir test
+alias Toolnexus.{Client, Context, Tool, ToolResult, Request, Answer}
+
+approve = %Tool{
+  name: "delete_account",
+  description: "delete the user's account",
+  input_schema: %{"type" => "object", "properties" => %{}},
+  source: "native",
+  execute: fn _args, %Context{} = ctx ->
+    case ctx.answer do
+      nil -> %ToolResult{output: "approval required", is_error: true, metadata: %{pending: %Request{id: "req-3", kind: "authorization", prompt: "Delete this account?"}}}
+      %Answer{ok: true} -> ToolResult.ok("account deleted")
+    end
+  end
+}
+
+{:ok, calls} = Agent.start_link(fn -> 0 end)
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  n = Agent.get_and_update(calls, fn c -> {c + 1, c + 1} end)
+
+  resp =
+    if n == 1 do
+      %{
+        "choices" => [%{"message" => %{"role" => "assistant", "content" => nil, "tool_calls" => [
+          %{"id" => "c1", "type" => "function", "function" => %{"name" => "delete_account", "arguments" => "{}"}}
+        ]}}],
+        "usage" => %{"prompt_tokens" => 4, "completion_tokens" => 2, "total_tokens" => 6}
+      }
+    else
+      %{"choices" => [%{"message" => %{"role" => "assistant", "content" => "understood, I won't delete it"}}], "usage" => %{"prompt_tokens" => 3, "completion_tokens" => 2, "total_tokens" => 5}}
+    end
+
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+# The host declines — ok: false. The loop never re-invokes the tool with this answer.
+wait_for = fn %Request{id: id} -> %Answer{id: id, ok: false, reason: "user declined"} end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "openai",
+    model: "gpt-x",
+    api_key: "test-key",
+    wait_for: wait_for,
+    http_options: [plug: plug]
+  )
+
+result = Client.run(client, "delete my account", [approve])
+
+true = result.status == "done"
+true = result.text == "understood, I won't delete it"
+[%{name: "delete_account", is_error: true, output: output}] = result.tool_calls
+true = String.starts_with?(output, "declined/expired:")
+
+IO.puts("ok: denial fed back as a tool error — model replied: #{result.text}")
+```
+
+## `wait_for` contract
+
+| | Type | What it is |
+|---|---|---|
+| in | `Toolnexus.Request.t()` | The suspension the tool raised (`id`, `kind`, `prompt`, `url?`, `data?`). |
+| out | `Toolnexus.Answer.t()` | `%{id, ok, data?, reason?}`. `ok: true` re-invokes the tool with `ctx.answer` set; `ok: false` resolves to a `"declined/expired: <prompt>"` error result. |
+
+## See also
+
+- [`Toolnexus.ToolResult`](/api/elixir/types/tool-result/) — how a tool raises a suspension (`metadata.pending`).
+- [`Toolnexus.Agents.Runtime.resume`](/api/elixir/suspension/resume/) — the durable path, for resuming after `status == "pending"` from a different process.
+- [`Toolnexus.Client.run`](/api/elixir/client/run/) — the loop this option configures.

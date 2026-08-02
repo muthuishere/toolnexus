@@ -1,0 +1,261 @@
+---
+title: ToolContext
+description: The optional per-call context handed to Execute — a context.Context for cancellation, a timeout override, and the answer that resolves a suspension. Go.
+sidebar:
+  label: ToolContext
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/types.go">golang/types.go</a>
+</p>
+
+```go
+type ToolContext struct {
+	// Ctx carries cancellation (mirrors the JS AbortSignal).
+	Ctx context.Context
+	// Timeout overrides the tool's default timeout, in milliseconds.
+	Timeout int
+	// Answer is present ONLY on a post-WaitFor retry (§10).
+	Answer *Answer
+}
+```
+
+The second argument to `Execute`. It is a **pointer and may be nil**, and every field inside may be
+zero — so a tool that ignores it still works. But these three things are how a tool participates in
+cancellation, honours a deadline, and receives the answer to a question it asked.
+
+## When to use it
+
+Read `ctx` when your tool does anything **slow or interactive**:
+
+- **`Ctx`** — long work that should stop when the run is cancelled.
+- **`Timeout`** — the caller's deadline for this specific call, in **milliseconds**.
+- **`Answer`** — you returned a suspension on a previous attempt and the host has now resolved it.
+
+A pure, fast, local computation can ignore `ctx` entirely.
+
+## Why a struct pointer and not a plain context.Context
+
+<Aside type="caution" title="Always nil-check, twice">
+`ctx` is `*ToolContext` and may be nil, **and** `ctx.Ctx` may itself be nil. The safe form is
+`if ctx != nil && ctx.Ctx != nil && ctx.Ctx.Err() != nil`. `Execute` is called from the client
+loop, from a direct `tk.Execute()`, and from your own tests, and not all of them have a context to
+give.
+</Aside>
+
+Go idiom would normally pass `context.Context` as the first argument. toolnexus wraps it in a
+struct because the §1 contract carries two more things — a per-call timeout and the §10 `Answer` —
+and threading three parameters through every tool source would be worse. The `context.Context` is
+still in there, doing its ordinary job.
+
+## Examples
+
+### 1. Respecting cancellation
+
+Check `Ctx.Err()` before starting work and between steps. A cancelled tool should return promptly
+with an error *result*, not a returned `error`.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	crunch := toolnexus.Tool{
+		Name:        "crunch",
+		Description: "Do some work in steps, stopping if cancelled",
+		InputSchema: toolnexus.JSONSchema{"type": "object"},
+		Source:      "custom",
+		Execute: func(args map[string]any, ctx *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			steps := 3
+			done := 0
+			for i := 0; i < steps; i++ {
+				// Nil-check both levels.
+				if ctx != nil && ctx.Ctx != nil && ctx.Ctx.Err() != nil {
+					return toolnexus.ToolResult{
+						Output:  fmt.Sprintf("cancelled after %d step(s)", done),
+						IsError: true,
+					}, nil
+				}
+				done++
+			}
+			return toolnexus.ToolResult{
+				Output:  fmt.Sprintf("completed %d step(s)", done),
+				IsError: false,
+			}, nil
+		},
+	}
+
+	// No context at all — the tool still runs.
+	plain, err := crunch.Execute(map[string]any{}, nil)
+	if err != nil || plain.Output != "completed 3 step(s)" {
+		log.Fatalf("unexpected: %+v %v", plain, err)
+	}
+
+	// Cancelled before it starts.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	stopped, err := crunch.Execute(map[string]any{}, &toolnexus.ToolContext{Ctx: cancelled})
+	if err != nil || !stopped.IsError || stopped.Output != "cancelled after 0 step(s)" {
+		log.Fatalf("unexpected: %+v %v", stopped, err)
+	}
+
+	fmt.Println("ok:", plain.Output, "|", stopped.Output)
+}
+```
+
+### 2. Honouring the caller's timeout
+
+`Timeout` is **milliseconds**, and its zero value means "not set" — so treat `0` as "use my
+default", not as "no time at all".
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	fetchish := toolnexus.Tool{
+		Name:        "fetchish",
+		Description: "Pretend to fetch, bounded by the caller's timeout",
+		InputSchema: toolnexus.JSONSchema{"type": "object"},
+		Source:      "custom",
+		Execute: func(args map[string]any, ctx *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			// Zero means "unset" — fall back to your own default.
+			budget := 30000
+			if ctx != nil && ctx.Timeout > 0 {
+				budget = ctx.Timeout
+			}
+			if budget < 100 {
+				return toolnexus.ToolResult{
+					Output:  fmt.Sprintf("budget %dms is too small to try", budget),
+					IsError: true,
+				}, nil
+			}
+			return toolnexus.ToolResult{
+				Output:  fmt.Sprintf("fetched %v within %dms", args["url"], budget),
+				IsError: false,
+			}, nil
+		},
+	}
+
+	generous, _ := fetchish.Execute(map[string]any{"url": "/a"}, &toolnexus.ToolContext{Timeout: 5000})
+	if generous.Output != "fetched /a within 5000ms" {
+		log.Fatalf("unexpected: %+v", generous)
+	}
+
+	stingy, _ := fetchish.Execute(map[string]any{"url": "/a"}, &toolnexus.ToolContext{Timeout: 10})
+	if !stingy.IsError {
+		log.Fatal("expected the tiny budget to be refused")
+	}
+
+	defaulted, _ := fetchish.Execute(map[string]any{"url": "/a"}, nil)
+	if !strings.Contains(defaulted.Output, "30000ms") {
+		log.Fatalf("expected the default budget, got %q", defaulted.Output)
+	}
+
+	fmt.Println("ok:", generous.Output, "|", stingy.Output)
+}
+```
+
+### 3. `Answer` — the second half of a suspension
+
+This is the field that makes the human-in-the-loop contract work. On the first call the tool
+returns a `Pending`. The host resolves it, then calls the **same tool again** with `ctx.Answer`
+set. The tool branches on whether the answer is there.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	deploy := toolnexus.Tool{
+		Name:        "deploy",
+		Description: "Deploy, asking which environment first",
+		InputSchema: toolnexus.JSONSchema{"type": "object"},
+		Source:      "custom",
+		Execute: func(args map[string]any, ctx *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			// Second pass: the host resolved the question and handed the answer back.
+			if ctx != nil && ctx.Answer != nil {
+				if !ctx.Answer.Ok {
+					reason := ctx.Answer.Reason
+					if reason == "" {
+						reason = "no reason"
+					}
+					return toolnexus.ToolResult{Output: "declined: " + reason, IsError: true}, nil
+				}
+				env := fmt.Sprint(ctx.Answer.Data["env"])
+				return toolnexus.ToolResult{Output: "deployed to " + env, IsError: false}, nil
+			}
+			// First pass: park the run and ask.
+			return toolnexus.Pending(toolnexus.Request{Kind: "input", Prompt: "Which environment?"}), nil
+		},
+	}
+
+	// First pass — a suspension, not an answer.
+	first, _ := deploy.Execute(map[string]any{}, nil)
+	req := toolnexus.PendingOf(first)
+	if req == nil || req.Kind != "input" {
+		log.Fatalf("expected an input suspension, got %+v", req)
+	}
+
+	// Second pass — the host supplies the resolution, echoing the request id.
+	second, _ := deploy.Execute(map[string]any{}, &toolnexus.ToolContext{
+		Answer: &toolnexus.Answer{ID: req.ID, Ok: true, Data: map[string]any{"env": "staging"}},
+	})
+	if second.IsError || second.Output != "deployed to staging" {
+		log.Fatalf("unexpected: %+v", second)
+	}
+
+	// A refusal is a normal outcome, not a crash.
+	refused, _ := deploy.Execute(map[string]any{}, &toolnexus.ToolContext{
+		Answer: &toolnexus.Answer{ID: req.ID, Ok: false, Reason: "declined"},
+	})
+	if !refused.IsError {
+		log.Fatal("expected a declined answer to be an error result")
+	}
+
+	fmt.Println("ok:", second.Output, "|", refused.Output)
+}
+```
+
+<Aside type="note" title="Read Answer.Data only when the answer IS the payload">
+For `Kind: "input"` the value you asked for lives in `Answer.Data`. For `Kind: "authorization"` the
+world changed out-of-band — the session is simply valid now — so you re-run the real work and
+ignore `Data`.
+</Aside>
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `Ctx` | `context.Context` | Cancellation. Nil-check **both** `ctx` and `ctx.Ctx`. |
+| `Timeout` | `int` | This call's budget, in **milliseconds**. Zero means unset. |
+| `Answer` | `*Answer` | Present **only** on a post-`WaitFor` retry — the resolution of a prior suspension. |
+
+## See also
+
+- [`Tool`](/api/go/types/tool/) — what receives this
+- [`ToolResult`](/api/go/types/tool-result/) — what `Execute` returns
+- [`Pending`](/api/go/suspension/pending/) — ask a question mid-call
+- [`WaitFor`](/api/go/suspension/wait-for/) — the host slot that produces `Answer`

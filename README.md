@@ -8,6 +8,7 @@
 [![Hex.pm](https://img.shields.io/hexpm/v/toolnexus?logo=elixir&label=Hex)](https://hex.pm/packages/toolnexus)
 [![Go Reference](https://pkg.go.dev/badge/github.com/muthuishere/toolnexus/golang.svg)](https://pkg.go.dev/github.com/muthuishere/toolnexus/golang)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Discord](https://img.shields.io/badge/AgentNexus-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/V9C2kvHC8D)
 
 ### Your LLM, with MCP tools and agent skills built in — in 3 lines, in 6 languages.
 
@@ -26,7 +27,7 @@ pip install toolnexus                             # Python
 go get github.com/muthuishere/toolnexus/golang    # Go
 dotnet add package Toolnexus                       # C#
 {:toolnexus, "~> 0.11"}                             # Elixir (mix.exs deps)
-# Java (Maven): io.github.muthuishere:toolnexus:0.11.0
+# Java (Maven): io.github.muthuishere:toolnexus:0.12.0
 ```
 
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
@@ -393,6 +394,9 @@ implementation's examples and tests. The cross-language contract lives in [SPEC.
 - ✅ Verified with live OpenRouter tool-calling round trips (every port)
 - ✅ Published on all six registries: **npm** · **PyPI** · **Go module** · **NuGet** · **Maven Central** · **Hex**
 - ⏳ OpenAPI bulk import + MCP OAuth — follow-ups (pass a bearer token via `headers` for now)
+- 🚫 In-browser bundle — out of scope by design. All six ports target server/Node-style
+  runtimes (MCP stdio child processes, `fs`-based skills, HTTP `serve`); a from-scratch,
+  browser-native tool-calling library is a separate project, not a mode of toolnexus.
 
 ## Tests
 
@@ -413,6 +417,11 @@ cd elixir && mix test                 # ExUnit
 The end-to-end agent loop (MCP + skills + native + HTTP through the host loop) is
 additionally verified live against OpenRouter per language via the `examples/agent.*`
 runners (need `OPENROUTER_API_KEY`).
+
+## Community
+
+Questions, ideas, or built something with this? Join **[AgentNexus](https://discord.gg/V9C2kvHC8D)** — a Discord
+for people building with AI agents and open tools. This project lives in **#toolnexus**.
 
 ## License
 

@@ -1,0 +1,47 @@
+---
+title: "collectTools — gather decorated functions"
+description: "Sweep a module or class and collect every function marked as a tool. — Go."
+sidebar:
+  label: "native / collect"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
+</p>
+
+<Aside type="caution" title="Not available in Go">
+JS/Java/C# expose an explicit collector; Python, Go and Elixir have no equivalent public symbol.
+</Aside>
+
+Sweep a module or class and collect every function marked as a tool.
+
+## What to use instead
+
+Go has no reflection-based "sweep a package/struct for tool-marked methods" collector — Go's
+reflection cannot enumerate a package's top-level functions or discover a struct method by an
+attribute the way JS decorators, Java annotations, or C# attributes can. Build the list explicitly
+instead:
+
+- **[`NativeTool`](/api/go/native/define-tool/)** for one tool at a time, with a hand-written schema.
+- **[`NativeToolReflect`](/api/go/native/reflect/)** when the input is a fixed-shape struct — it
+  derives the schema from the struct's `json` tags, which is the closest Go gets to "derive from
+  the signature."
+- A plain `[]toolnexus.Tool{...}` slice literal you assemble yourself and pass to
+  `Options.ExtraTools` on [`CreateToolkit`](/api/go/toolkit/create/) — this is the idiomatic
+  stand-in for a "collect them all" call: you already have to name every tool once to construct it,
+  so a collector would only save one line, not a whole discovery mechanism.
+
+```go
+tools := []toolnexus.Tool{
+	toolnexus.NativeToolReflect[SearchInput]("search", "Search the docs", searchFn),
+	toolnexus.NativeToolReflect[PingInput]("ping", "Health check", pingFn),
+}
+tk, err := toolnexus.CreateToolkit(ctx, toolnexus.Options{ExtraTools: tools})
+```
+
+## See also
+
+- [`NativeTool`](/api/go/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.
+- [`NativeToolReflect`](/api/go/native/reflect/) — Derive the schema from the function signature or annotation instead of writing it by hand.

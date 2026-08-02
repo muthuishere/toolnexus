@@ -1,0 +1,153 @@
+---
+title: Toolnexus.Mcp.list_tools
+description: Connect, list every server's original tool definitions, and disconnect — an inventory that leaves nothing running. Elixir.
+sidebar:
+  label: Mcp.list_tools
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/mcp.ex">elixir/lib/toolnexus/mcp.ex</a>
+</p>
+
+```elixir
+@spec list_tools(String.t() | map(), keyword()) :: Toolnexus.Mcp.Inventory.t()
+def list_tools(input, opts \\ [])
+
+# %Toolnexus.Mcp.Inventory{
+#   tools: %{String.t() => [%{"name" => String.t(), "description" => String.t(), "inputSchema" => map()}]},
+#   status: %{String.t() => "connected" | "failed" | "disabled"}
+# }
+```
+
+Connects to every enabled server, calls `tools/list`, and disconnects everything **before
+returning** — no supervisor to close, no connection left running. Unlike
+[`Toolnexus.Mcp.load/2`](/api/elixir/mcp/load/), the tool names in the result are the servers'
+**original, unprefixed** names, and any per-server `"tools"` allowlist in the config is
+**ignored** — this is a raw inventory of what a server *would* expose, not what an agent would
+actually see wired up.
+
+## When to use it
+
+- **Inspect a config before committing to it** — see what each server offers, without holding a
+  process open or filtering by an allowlist you have not written yet.
+- **Author a `tools` allowlist** — call `list_tools/2` first to see every tool's real name, then
+  write the per-server `"tools"` map that [`load/2`](/api/elixir/mcp/load/) will apply.
+- **A doctor / CI check** — assert a server's tool surface hasn't silently changed, with nothing
+  left connected afterward.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use load when you actually want to call the tools">
+[`Toolnexus.Mcp.load/2`](/api/elixir/mcp/load/) keeps the connections open, prefixes tool names
+with the server name to avoid collisions, applies any per-server `tools` allowlist, and returns
+callable [`Toolnexus.Tool`](/api/elixir/types/tool/) structs. Reach for `list_tools/2` **instead**
+when you want the inventory as data and do not intend to call anything right now.
+</Aside>
+
+## Examples
+
+### 1. A disabled server contributes nothing, and nothing is left running
+
+```elixir test
+alias Toolnexus.Mcp
+
+config = %{
+  "mcpServers" => %{
+    "off" => %{"type" => "local", "command" => ["true"], "enabled" => false}
+  }
+}
+
+inventory = Mcp.list_tools(config)
+
+true = inventory.status == %{"off" => "disabled"}
+true = inventory.tools == %{}
+
+IO.puts("ok: #{inspect(inventory.status)}")
+```
+
+### 2. Per-server isolation — a failing server doesn't block the others' entries
+
+```elixir test
+alias Toolnexus.Mcp
+
+config = %{
+  "mcpServers" => %{
+    "off" => %{"type" => "local", "command" => ["true"], "enabled" => false},
+    "broken" => %{
+      "type" => "local",
+      "command" => ["/nonexistent-toolnexus-docs-binary"],
+      "timeout" => 500
+    }
+  }
+}
+
+inventory = Mcp.list_tools(config)
+
+true = inventory.status["off"] == "disabled"
+true = inventory.status["broken"] == "failed"
+# A failed server has no entry in `tools` at all — not even an empty list.
+false = Map.has_key?(inventory.tools, "broken")
+
+IO.puts("ok: #{inspect(inventory.status)}")
+```
+
+### 3. Malformed config raises, and a deadline bounds a hung server
+
+`list_tools/2` parses config the same way `load/2` does — a JSON error raises before anything
+connects. It also accepts the same `:deadline`/`:timeout` option, since listing has the identical
+"one server can hang" problem as loading does.
+
+```elixir test
+alias Toolnexus.Mcp
+
+raised_on_bad_json? =
+  try do
+    Mcp.list_tools(~s({not valid json))
+    false
+  rescue
+    _ -> true
+  end
+
+true = raised_on_bad_json?
+
+config = %{
+  "mcpServers" => %{
+    "slow" => %{"type" => "local", "command" => ["sleep", "5"], "timeout" => 30_000}
+  }
+}
+
+{message, raised_on_deadline?} =
+  try do
+    Mcp.list_tools(config, deadline: 100)
+    {nil, false}
+  rescue
+    e -> {Exception.message(e), true}
+  end
+
+true = raised_on_deadline?
+true = String.contains?(message, "deadline")
+
+IO.puts("ok: malformed config raised, deadline exceeded raised (#{message})")
+```
+
+## Options
+
+| Option | Aliases | Default | Effect |
+|---|---|---|---|
+| `:deadline` | `:timeout` | `:infinity` | Overall bound in ms across all servers; on exceed, raises `"toolnexus: MCP list deadline exceeded"`. Same semantics as `load/2`'s deadline. |
+
+## What you get back
+
+| Field | Type | What it is |
+|---|---|---|
+| `tools` | `%{server => [%{"name", "description", "inputSchema"}]}` | Original (unprefixed) tool definitions per **connected** server only. |
+| `status` | `%{server => status}` | `"connected"`, `"failed"`, or `"disabled"` per configured server. |
+
+## See also
+
+- [`Toolnexus.Mcp.load`](/api/elixir/mcp/load/) — connect and get callable, prefixed, filtered tools
+- [`Toolnexus.Mcp.load` (ctx-aware form)](/api/elixir/mcp/load-with-context/) — `:deadline` and `:wait_for` in depth
+- [`Toolnexus.Mcp.parse_config`](/api/elixir/mcp/parse-config/) — parse and validate config without connecting
+- [`Toolnexus.Mcp.Protocol.elicitation_to_request`](/api/elixir/mcp/elicitation/) — the §10 elicitation bridge

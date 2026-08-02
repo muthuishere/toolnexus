@@ -1,0 +1,190 @@
+---
+title: "ElicitationToRequest"
+description: "Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back. — Go."
+sidebar:
+  label: "ElicitationToRequest"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/mcp.go">golang/mcp.go</a>
+</p>
+
+```go
+func ElicitationToRequest(params mcp.ElicitationParams) Request
+func AnswerToElicitResult(answer Answer) *mcp.ElicitationResult
+```
+
+An MCP server can reach back mid-`tools/call` and ask the human for input — `elicitation/create` is
+a **reverse request**, server → client. `ElicitationToRequest` maps that request onto toolnexus's
+own suspension contract ([`Request`](/api/go/types/tool/)), so a host that already knows how to
+resolve a §10 suspension (a form, an auth link) can resolve an MCP elicitation the same way, with no
+separate code path. `AnswerToElicitResult` maps the resolution back onto the shape the MCP SDK
+expects.
+
+<Aside type="note" title="Two elicitation modes, two Request kinds">
+`params.Mode == "url"` becomes `Kind: "authorization"` with `URL` set — the server wants the human
+to complete something at a link (e.g. an OAuth flow). Anything else (the default, `"form"`) becomes
+`Kind: "input"`, with the server's JSON-Schema carried at `Data["schema"]` for the host to render a
+form from.
+</Aside>
+
+## When to use it
+
+You call these two functions directly only if you are building your **own** MCP client integration
+outside `LoadMcp`/`LoadMcpWithContext`. In the normal path you never call them — you pass a `waitFor
+func(Request) (Answer, error)` to `LoadMcp`, and toolnexus wires this mapping internally (the
+`elicitationBridge` in `golang/mcp.go`). Reach for them directly when writing a test double for a
+host resolver, or when porting the same mapping into your own MCP client.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="waitFor on LoadMcp is the ordinary integration point">
+Passing `waitFor` to [`LoadMcp`](/api/go/mcp/load/) gets you this mapping for free — every connected
+client advertises the elicitation capability and routes through it automatically. Reach for
+`ElicitationToRequest`/`AnswerToElicitResult` directly only when `LoadMcp`'s bridge is not the code
+path you are exercising (custom client, unit test, a different transport).
+</Aside>
+
+## Examples
+
+### 1. Form-mode elicitation becomes a `kind:"input"` Request
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	params := mcp.ElicitationParams{
+		Mode:    "form",
+		Message: "What is your deployment region?",
+		RequestedSchema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"region": map[string]any{"type": "string"}},
+		},
+	}
+
+	req := toolnexus.ElicitationToRequest(params)
+
+	if req.Kind != "input" {
+		log.Fatalf("expected kind=input, got %q", req.Kind)
+	}
+	if req.Prompt != params.Message {
+		log.Fatalf("expected prompt to carry the message, got %q", req.Prompt)
+	}
+	if req.ID == "" {
+		log.Fatal("expected a generated, unique request id")
+	}
+	schema, ok := req.Data["schema"]
+	if !ok || schema == nil {
+		log.Fatal("expected the requested schema under data.schema")
+	}
+
+	fmt.Println("ok:", req.Kind, "|", req.Prompt)
+}
+```
+
+### 2. URL-mode elicitation becomes a `kind:"authorization"` Request
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	params := mcp.ElicitationParams{
+		Mode:    "url",
+		Message: "Sign in to continue",
+		URL:     "https://example.com/oauth/authorize",
+	}
+
+	req := toolnexus.ElicitationToRequest(params)
+
+	if req.Kind != "authorization" {
+		log.Fatalf("expected kind=authorization, got %q", req.Kind)
+	}
+	if req.URL != params.URL {
+		log.Fatalf("expected url to carry through, got %q", req.URL)
+	}
+
+	fmt.Println("ok:", req.Kind, "|", req.URL)
+}
+```
+
+### 3. Round-tripping an Answer back to an ElicitationResult
+
+`AnswerToElicitResult` covers three outcomes: accepted (with data), explicitly declined, and
+everything else treated as a cancellation — a dismissal, a timeout, an unspecified reason.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	accepted := toolnexus.AnswerToElicitResult(toolnexus.Answer{
+		Ok:   true,
+		Data: map[string]any{"region": "apac"},
+	})
+	if accepted.Action != mcp.ElicitationResponseActionAccept {
+		log.Fatalf("expected accept, got %v", accepted.Action)
+	}
+	if content, ok := accepted.Content.(map[string]any); !ok || content["region"] != "apac" {
+		log.Fatalf("expected content to carry the answer data, got %v", accepted.Content)
+	}
+
+	declined := toolnexus.AnswerToElicitResult(toolnexus.Answer{Ok: false, Reason: "declined"})
+	if declined.Action != mcp.ElicitationResponseActionDecline {
+		log.Fatalf("expected decline, got %v", declined.Action)
+	}
+
+	cancelled := toolnexus.AnswerToElicitResult(toolnexus.Answer{Ok: false, Reason: "expired"})
+	if cancelled.Action != mcp.ElicitationResponseActionCancel {
+		log.Fatalf("expected cancel for a non-declined refusal, got %v", cancelled.Action)
+	}
+
+	fmt.Println("ok:", accepted.Action, declined.Action, cancelled.Action)
+}
+```
+
+## Mapping
+
+| `ElicitationParams` | `Request` |
+|---|---|
+| `Mode == "url"` | `Kind: "authorization"`, `URL: params.URL` |
+| `Mode != "url"` (form, default) | `Kind: "input"`, `Data["schema"]: params.RequestedSchema` |
+| `Message` | `Prompt` |
+| — | `ID` — freshly generated, unique per call |
+
+| `Answer` | `ElicitationResult` |
+|---|---|
+| `Ok: true` | `Action: accept`, `Content: Answer.Data` (or `{}` if nil) |
+| `Ok: false, Reason: "declined"` | `Action: decline` |
+| `Ok: false`, any other reason | `Action: cancel` |
+
+## See also
+
+- [`LoadMcp`](/api/go/mcp/load/) — pass `waitFor` here for the ordinary integration path; this mapping runs automatically.
+- [`LoadMcpWithContext`](/api/go/mcp/load-with-context/) — the ctx-aware load, same elicitation bridge.
+- [`ListMcpTools`](/api/go/mcp/list-tools/) — list what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+- [`ParseMcpConfig`](/api/go/mcp/parse-config/) — parse and validate config without connecting — the fast fail for a malformed or misspelled server block.

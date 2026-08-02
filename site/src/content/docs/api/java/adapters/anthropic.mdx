@@ -1,0 +1,203 @@
+---
+title: "Adapters.toAnthropic"
+description: "Render the toolkit as Anthropic tool-use schema. — Java."
+sidebar:
+  label: "Adapters.toAnthropic"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/Adapters.java">Adapters.java</a>
+</p>
+
+```java
+public static List<Map<String, Object>> toAnthropic(List<Tool> tools)
+```
+
+Turns a `List<Tool>` into the `tools` array an Anthropic Messages request expects. Same tools, same
+execution — only the schema envelope differs from OpenAI's.
+
+## When to use it
+
+When you drive the Anthropic Messages API yourself — the official Java SDK, a raw `HttpClient`
+call, or Claude on Bedrock / Vertex — and need the `tools` block for the request body.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Skip this entirely if you use LlmClient.create">
+[`LlmClient.create`](/api/java/client/create/) picks the adapter from its style option and runs the
+whole tool-calling loop — schema, dispatch, result messages, retries. Reach for `toAnthropic`
+**instead** when you already own the request/response loop and want toolnexus only for tool
+*aggregation*.
+</Aside>
+
+Against [`Adapters.toOpenAI`](/api/java/adapters/openai/): Anthropic has **no `function` wrapper**
+and names the schema key `input_schema`, not `parameters`. Both methods return the same Java type,
+so picking the wrong one is a 400 from the provider, not a compile error.
+
+`tk.toAnthropic()` on a [`Toolkit`](/api/java/toolkit/create/) is this same function applied to that
+toolkit's tools — use the static method when you have a bare list.
+
+## Examples
+
+### 1. One tool to Anthropic schema
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Tool weather = NativeTool.of(
+            "get_weather",
+            "Current weather for a city",
+            Map.of("type", "object",
+                   "properties", Map.of("city", Map.of("type", "string")),
+                   "required", List.of("city")),
+            (Map<String, Object> a) -> "sunny in " + a.get("city")
+        );
+
+        List<Map<String, Object>> schema = Adapters.toAnthropic(List.of(weather));
+
+        if (schema.size() != 1) throw new AssertionError("expected 1 entry");
+        Map<String, Object> entry = schema.get(0);
+
+        // Flat — no {"type":"function"} wrapper, unlike OpenAI.
+        if (entry.containsKey("function")) throw new AssertionError("unexpected function wrapper");
+        if (!entry.get("name").equals("get_weather")) throw new AssertionError("name");
+        if (!entry.get("description").equals("Current weather for a city")) throw new AssertionError("description");
+        if (!entry.containsKey("input_schema")) throw new AssertionError("expected input_schema");
+
+        System.out.println("ok: " + entry.get("name"));
+    }
+}
+```
+
+Three keys, no nesting: `name`, `description`, `input_schema`. The `inputSchema()` map is passed
+through untouched — only the key is renamed.
+
+### 2. Feeding it straight into a Messages request body
+
+The output is plain `Map`s and `List`s, so any JSON library serializes it without help.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    static Tool mk(String name, String desc) {
+        return NativeTool.of(name, desc,
+            Map.of("type", "object", "properties", Map.of()),
+            (Map<String, Object> a) -> name);
+    }
+
+    public static void main(String[] args) {
+        List<Tool> tools = List.of(mk("search", "Search the docs"), mk("ping", "Health check"));
+
+        Map<String, Object> body = Map.of(
+            "model", "claude-sonnet-4-5",
+            "max_tokens", 1024,
+            "messages", List.of(Map.of("role", "user", "content", "search for adapters")),
+            "tools", Adapters.toAnthropic(tools)
+        );
+        // The key is read from the environment at call time — never hardcoded.
+        String apiKey = System.getenv("ANTHROPIC_API_KEY");
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> entries = (List<Map<String, Object>>) body.get("tools");
+        if (entries.size() != 2) throw new AssertionError("expected 2 tools");
+
+        // Order is preserved — list order in, array order out.
+        List<String> names = new ArrayList<>();
+        for (Map<String, Object> e : entries) names.add((String) e.get("name"));
+        if (!names.equals(List.of("search", "ping"))) throw new AssertionError("order: " + names);
+
+        System.out.println("ok: " + String.join(", ", names) + " (key configured: " + (apiKey != null) + ")");
+    }
+}
+```
+
+### 3. Round-tripping a `tool_use` block back to the tool
+
+Schema out, tool call in. Anthropic sends `input` as a real JSON **object**, so it maps straight to
+`execute`'s `Map<String, Object>` — no string-parsing step, unlike OpenAI.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Tool weather = NativeTool.of(
+            "get_weather",
+            "Current weather for a city",
+            Map.of("type", "object",
+                   "properties", Map.of("city", Map.of("type", "string")),
+                   "required", List.of("city")),
+            (Map<String, Object> a) -> "sunny in " + a.get("city")
+        );
+        List<Tool> tools = List.of(weather);
+
+        // A `tool_use` content block from Claude, decoded.
+        Map<String, Object> toolUse = Map.of(
+            "type", "tool_use",
+            "id", "toolu_01ABC",
+            "name", "get_weather",
+            "input", Map.of("city", "Chennai")
+        );
+
+        Tool called = tools.stream()
+            .filter(t -> t.name().equals(toolUse.get("name")))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("the advertised name should resolve back"));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> input = (Map<String, Object>) toolUse.get("input");
+        ToolResult res = called.execute(input, new ToolContext());
+        if (res.isError() || !res.output().equals("sunny in Chennai")) {
+            throw new AssertionError(res.output());
+        }
+
+        // The reply block you send back on the next turn — isError maps to is_error.
+        Map<String, Object> resultBlock = Map.of(
+            "type", "tool_result",
+            "tool_use_id", toolUse.get("id"),
+            "content", res.output(),
+            "is_error", res.isError()
+        );
+        if (!resultBlock.get("content").equals("sunny in Chennai")) throw new AssertionError("content");
+
+        // An empty tool list is valid — it just means "no tools this turn".
+        if (!Adapters.toAnthropic(List.of()).isEmpty()) throw new AssertionError("expected empty");
+
+        System.out.println("ok: " + toolUse.get("name") + " -> " + res.output());
+    }
+}
+```
+
+<Aside type="caution">
+Forward `isError()` into `is_error` on the `tool_result` block. A failed tool reported as a success
+teaches the model the wrong thing about its own call, and it will not correct itself.
+</Aside>
+
+## Shape
+
+| Path | From | Notes |
+|---|---|---|
+| `[].name` | `Tool.name()` | What the model calls back with in `tool_use.name`. |
+| `[].description` | `Tool.description()` | |
+| `[].input_schema` | `Tool.inputSchema()` | Renamed — `inputSchema` → `input_schema`. |
+
+There is no `type` key and no `function` wrapper — that is the OpenAI shape.
+
+## See also
+
+- [`Adapters.toOpenAI`](/api/java/adapters/openai/) — the nested `{"type":"function"}` shape
+- [`Adapters.toGemini`](/api/java/adapters/gemini/) — the single-wrapper `functionDeclarations` shape
+- [`Toolkit.create`](/api/java/toolkit/create/) — `tk.toAnthropic()` is this, applied to the toolkit
+- [`LlmClient.create`](/api/java/client/create/) — calls the adapter for you

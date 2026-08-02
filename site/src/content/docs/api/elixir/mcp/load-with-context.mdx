@@ -1,0 +1,153 @@
+---
+title: Toolnexus.Mcp.load (ctx-aware)
+description: Bound how long the overall MCP connect phase may take, and bridge server-initiated elicitation onto your own prompt handler. Elixir.
+sidebar:
+  label: Mcp.load (ctx-aware)
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/mcp.ex">elixir/lib/toolnexus/mcp.ex</a>
+</p>
+
+```elixir
+@spec load(String.t() | map(), keyword()) :: Toolnexus.Mcp.Source.t()
+def load(input, opts \\ [])
+
+# opts:
+#   :deadline (alias :timeout) — ms, default :infinity
+#   :wait_for — (Toolnexus.Request.t() -> Toolnexus.Answer.t())
+```
+
+There is no separate function here — Elixir's `load/2` is *always* the ctx-aware form; the plain
+call on [the load page](/api/elixir/mcp/load/) is this same function with the options omitted.
+This page is scoped to the two options that make it cancellation-aware: `:deadline` (bound the
+whole connect phase) and `:wait_for` (bridge inbound elicitation).
+
+## When to use it
+
+- **A hung or slow stdio server must not stall your agent's boot.** Without `:deadline`, a server
+  that starts but never completes its `initialize` handshake blocks `load/2` forever. With it,
+  the whole load aborts at the deadline — in-flight connects are torn down (`brutal_kill`), no
+  child process is left running.
+- **A server wants to ask the human something mid-connect** (a form, an OAuth URL) via MCP
+  elicitation. Pass `:wait_for` and the client advertises the `elicitation` capability and routes
+  the server's `elicitation/create` through your handler as a §10
+  `Toolnexus.Request`/`Toolnexus.Answer` — see
+  [`Toolnexus.Mcp.Protocol.elicitation_to_request`](/api/elixir/mcp/elicitation/) for the exact mapping.
+- **Both together** — a `:wait_for` that itself might hang waiting on a human is exactly the case
+  `:deadline` exists to bound.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Skip the options when a fixed process boundary is enough">
+If your servers are trusted and fast, and nothing ever elicits, the plain
+[`Toolnexus.Mcp.load/1`](/api/elixir/mcp/load/) call (no opts) is all you need — a hung server is
+still an edge case worth defending against in anything long-running, but it costs nothing extra
+to add `:deadline` later.
+</Aside>
+
+<Aside type="note" title="Per-server timeout vs overall deadline">
+Each server config can carry its own `"timeout"` (default 30s) — that bounds *that server's*
+handshake. `:deadline` is a *second*, outer bound across the whole `load/2` call, covering every
+server concurrently. Set both: a generous per-server timeout for slow-but-fine servers, and a
+tighter `:deadline` as the hard stop for the agent boot as a whole.
+</Aside>
+
+## Examples
+
+### 1. Deadline exceeded aborts the whole load
+
+`["sleep", "5"]` is a local process that never speaks MCP — it stands in for a hung server without
+touching the network. A `:deadline` shorter than that raises, and no server ends up connected.
+
+```elixir test
+alias Toolnexus.Mcp
+
+config = %{
+  "mcpServers" => %{
+    "slow" => %{"type" => "local", "command" => ["sleep", "5"], "timeout" => 30_000}
+  }
+}
+
+{message, raised?} =
+  try do
+    Mcp.load(config, deadline: 100)
+    {nil, false}
+  rescue
+    e -> {Exception.message(e), true}
+  end
+
+true = raised?
+true = String.contains?(message, "deadline")
+
+IO.puts("ok: #{message}")
+```
+
+### 2. `:timeout` is accepted as the same option
+
+```elixir test
+alias Toolnexus.Mcp
+
+config = %{
+  "mcpServers" => %{
+    "slow" => %{"type" => "local", "command" => ["sleep", "5"], "timeout" => 30_000}
+  }
+}
+
+raised? =
+  try do
+    # :timeout is read as a fallback for :deadline — same effect, same message.
+    Mcp.load(config, timeout: 100)
+    false
+  rescue
+    _ -> true
+  end
+
+true = raised?
+
+IO.puts("ok: :timeout aborted the load")
+```
+
+### 3. `:wait_for` alongside a bounded deadline, with server isolation intact
+
+Passing `:wait_for` never changes how disabled or failing servers are handled — it only affects
+servers that actually elicit. Here nothing elicits, so this demonstrates the option is safe to
+always pass, combined with a real deadline.
+
+```elixir test
+alias Toolnexus.{Answer, Mcp, Request}
+
+# A wait_for you would actually wire up: auto-decline every elicitation.
+wait_for = fn %Request{id: id} -> %Answer{id: id, ok: false, reason: "declined"} end
+
+config = %{
+  "mcpServers" => %{
+    "off" => %{"type" => "local", "command" => ["true"], "enabled" => false}
+  }
+}
+
+source = Mcp.load(config, wait_for: wait_for, deadline: 5_000)
+
+true = source.status == %{"off" => "disabled"}
+[] = source.tools
+
+Mcp.close(source)
+
+IO.puts("ok: wait_for + deadline together, disabled server unaffected")
+```
+
+## Options
+
+| Option | Aliases | Default | Effect |
+|---|---|---|---|
+| `:deadline` | `:timeout` | `:infinity` | Overall connect-phase bound in ms. On exceed: every in-flight connect task is killed (`Task.shutdown/2` with `:brutal_kill`), the supervisor is stopped, and `load/2` raises `"toolnexus: MCP load deadline exceeded"`. |
+| `:wait_for` | — | `nil` | `(Request.t() -> Answer.t())`. Advertises the `elicitation` MCP capability; an inbound `elicitation/create` is mapped through [`elicitation_to_request/1`](/api/elixir/mcp/elicitation/), your function is called, and the answer is mapped back. Without it, the capability is not advertised and a compliant server will not elicit. |
+
+## See also
+
+- [`Toolnexus.Mcp.load`](/api/elixir/mcp/load/) — the base call this page's options extend
+- [`Toolnexus.Mcp.list_tools`](/api/elixir/mcp/list-tools/) — inventory without leaving anything connected
+- [`Toolnexus.Mcp.parse_config`](/api/elixir/mcp/parse-config/) — parse and validate config without connecting
+- [`Toolnexus.Mcp.Protocol.elicitation_to_request`](/api/elixir/mcp/elicitation/) — what `:wait_for` receives and returns

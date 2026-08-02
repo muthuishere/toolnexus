@@ -1,0 +1,192 @@
+---
+title: Adapters.ToGemini
+description: Render any tool list as Gemini function-declaration schema. C#.
+sidebar:
+  label: Adapters.ToGemini
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Adapters.cs">Adapters.cs</a>
+</p>
+
+```csharp
+public static List<Dictionary<string, object?>> ToGemini(IEnumerable<ITool> tools)
+```
+
+Turns tools into the `tools` array a Gemini `generateContent` request expects. Same tools, same
+execution — only the schema envelope differs.
+
+Gemini is the odd one out: it groups **all** tools inside a single wrapper object under
+`functionDeclarations`. So the returned list always has exactly **one** entry, no matter how many
+tools you passed.
+
+## When to use it
+
+When you are driving `generateContent` yourself — the Google GenAI SDK, a raw `HttpClient`, or
+Vertex AI — and need schema for the request body.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Skip this entirely if you use LlmClient.Create">
+[`LlmClient.Create`](/api/csharp/client/create/) picks the adapter from its style option and runs
+the whole tool-calling loop for you. Reach for `ToGemini` when you already own the loop and want
+toolnexus only for tool *aggregation*. For an OpenAI-compatible endpoint — including Gemini's own
+OpenAI compatibility layer — use [`Adapters.ToOpenAI`](/api/csharp/adapters/openai/) instead; the
+envelopes are not interchangeable.
+</Aside>
+
+## Examples
+
+### 1. One tool to Gemini schema
+
+```csharp test
+using Toolnexus;
+
+var weather = NativeTool.Of(
+    "get_weather",
+    "Current weather for a city",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["city"] = new Dictionary<string, object?> { ["type"] = "string" } },
+        ["required"] = new[] { "city" },
+    },
+    (IDictionary<string, object?> a) => $"sunny in {a["city"]}");
+
+var schema = Adapters.ToGemini(new ITool[] { weather });
+
+// ONE wrapper entry, always — the tools live inside it.
+if (schema.Count != 1) throw new Exception($"expected 1 wrapper, got {schema.Count}");
+
+var decls = (List<object?>)schema[0]["functionDeclarations"]!;
+if (decls.Count != 1) throw new Exception("expected 1 declaration");
+
+var fn = (IDictionary<string, object?>)decls[0]!;
+if (fn["name"] as string != "get_weather") throw new Exception("name");
+if (fn["description"] as string != "Current weather for a city") throw new Exception("description");
+if (!fn.ContainsKey("parameters")) throw new Exception("parameters");
+
+Console.WriteLine($"ok: {fn["name"]}");
+```
+
+Note the nesting and the cast: the wrapper's value is a `List<object?>`, and each element is an
+`IDictionary<string, object?>`. `ITool.InputSchema` becomes `parameters` — same rename as OpenAI,
+one nesting level shallower.
+
+### 2. Feeding it straight into a generateContent body
+
+The output is plain dictionaries and lists, so `System.Text.Json` serializes it with no converter.
+
+```csharp test
+using System.Text.Json;
+using Toolnexus;
+
+ITool Mk(string name, string desc) => NativeTool.Of(
+    name, desc,
+    new Dictionary<string, object?> { ["type"] = "object", ["properties"] = new Dictionary<string, object?>() },
+    (IDictionary<string, object?> a) => name);
+
+var tools = new[] { Mk("search", "Search the docs"), Mk("ping", "Health check") };
+
+var body = new Dictionary<string, object?>
+{
+    ["contents"] = new[]
+    {
+        new Dictionary<string, object?>
+        {
+            ["role"] = "user",
+            ["parts"] = new[] { new Dictionary<string, object?> { ["text"] = "search for adapters" } },
+        },
+    },
+    ["tools"] = Adapters.ToGemini(tools),
+};
+
+// Two tools still means ONE wrapper.
+var wrappers = (List<Dictionary<string, object?>>)body["tools"]!;
+if (wrappers.Count != 1) throw new Exception($"expected 1 wrapper, got {wrappers.Count}");
+
+var decls = (List<object?>)wrappers[0]["functionDeclarations"]!;
+// Order is preserved.
+var names = decls.Select(d => (string)((IDictionary<string, object?>)d!)["name"]!).ToList();
+if (names[0] != "search" || names[1] != "ping") throw new Exception($"order: {string.Join(",", names)}");
+
+var json = JsonSerializer.Serialize(body);
+if (!json.Contains("\"functionDeclarations\"")) throw new Exception("expected functionDeclarations on the wire");
+
+Console.WriteLine($"ok: {string.Join(", ", names)}");
+```
+
+<Aside type="note" title="camelCase, not snake_case">
+`functionDeclarations` is camelCase — that is the Gemini REST convention, and it is emitted
+literally. Do not run the body through a snake_case naming policy.
+</Aside>
+
+### 3. Round-tripping a `functionCall` back, and the empty-list trap
+
+```csharp test
+using System.Text.Json;
+using Toolnexus;
+
+var weather = NativeTool.Of(
+    "get_weather",
+    "Current weather for a city",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["city"] = new Dictionary<string, object?> { ["type"] = "string" } },
+        ["required"] = new[] { "city" },
+    },
+    (IDictionary<string, object?> a) => $"sunny in {a["city"]}");
+
+var tools = new ITool[] { weather };
+
+// What a model would send back: a part with `args` as a real JSON OBJECT.
+const string part = """
+{"functionCall":{"name":"get_weather","args":{"city":"Chennai"}}}
+""";
+
+var call = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(part)!["functionCall"];
+var calledName = call.GetProperty("name").GetString()!;
+// NB: `args` is already the implicit parameter of a top-level program — pick another name.
+var callArgs = call.GetProperty("args").EnumerateObject()
+    .ToDictionary(p => p.Name, p => (object?)p.Value.ToString());
+
+var called = tools.FirstOrDefault(t => t.Name == calledName)
+    ?? throw new Exception("the advertised name should resolve back to the tool");
+
+var res = await called.ExecuteAsync(callArgs);
+if (res.IsError || res.Output != "sunny in Chennai") throw new Exception(res.Output);
+
+// The trap: NO tools still yields one wrapper, with an empty declaration list —
+// unlike ToOpenAI/ToAnthropic, which return an empty list. Omit `tools` yourself
+// when you have none.
+var empty = Adapters.ToGemini(Array.Empty<ITool>());
+if (empty.Count != 1) throw new Exception($"expected 1 wrapper, got {empty.Count}");
+if (((List<object?>)empty[0]["functionDeclarations"]!).Count != 0) throw new Exception("expected 0 declarations");
+
+Console.WriteLine($"ok: {calledName} -> {res.Output} | empty wrappers: {empty.Count}");
+```
+
+<Aside type="caution">
+Gemini returns a `functionCall` part whose `args` is a **JSON object**, not a JSON string. The
+reply goes back as a `functionResponse` part with the matching `name`.
+</Aside>
+
+## Shape
+
+| Path | From | Notes |
+|---|---|---|
+| `[0]` | — | The single wrapper entry. Always present, even for zero tools. |
+| `[0]["functionDeclarations"]` | — | `List<object?>` — one element per tool, in order. |
+| `…[i]["name"]` | `ITool.Name` | What the model calls back with. |
+| `…[i]["description"]` | `ITool.Description` | |
+| `…[i]["parameters"]` | `ITool.InputSchema` | Renamed — `InputSchema` → `parameters`. |
+
+## See also
+
+- [`Adapters.ToOpenAI`](/api/csharp/adapters/openai/) · [`Adapters.ToAnthropic`](/api/csharp/adapters/anthropic/)
+- [`Toolkit.CreateAsync`](/api/csharp/toolkit/create/) — the toolkit exposes this applied to its own tools
+- [`LlmClient.Create`](/api/csharp/client/create/) — calls the adapter for you
+- [`ITool`](/api/csharp/types/tool/) — the four members the adapter reads

@@ -1,0 +1,176 @@
+---
+title: "McpSource.elicitationToRequest"
+description: "Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back. — Java."
+sidebar:
+  label: "McpSource.elicitationToRequest"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/McpSource.java">McpSource.java</a>
+</p>
+
+```java
+// package-private in the Java port — see the note below
+static Request elicitationToRequest(McpSchema.ElicitRequest params)
+static McpSchema.ElicitResult answerToElicitResult(Answer answer)
+```
+
+<Aside type="caution" title="Not a public symbol in this port">
+Unlike JavaScript (`elicitationToRequest`), Python (`elicitation_to_request`) and Go
+(`ElicitationToRequest`), Java's mapping functions are **package-private** — internal wiring
+inside `McpSource`, not something you call directly from your own code. The behavior they
+implement is fully shipped and tested; you reach it exclusively through
+[`McpSource.load(config, waitFor, …)`](/api/java/mcp/load/), which wires the bridge for you.
+This page documents the *contract* those internal functions implement, since that contract is
+what you need to know to write a correct `waitFor`.
+</Aside>
+
+When a connected MCP server calls `elicitation/create` mid-`tools/call` — asking the human for a
+value, or to complete a login at a URL — `McpSource.load` bridges that reverse-request onto the
+one §10 suspension contract: `Function<Request, Answer> waitFor`. Form-mode elicitation becomes
+a `Request` with `kind:"input"` (the JSON Schema in `data.schema`); URL-mode becomes
+`kind:"authorization"` (the link in `url`). Your `waitFor`'s `Answer` is mapped back:
+`ok:true` → accept (content = `answer.data()`), `reason:"declined"` → decline, anything else
+(cancelled, expired, timed out) → cancel.
+
+## When to use it
+
+You do not call this mapping directly. You use it by passing a `waitFor` to
+[`McpSource.load`](/api/java/mcp/load/) or [`Toolkit.Options.waitFor`](/api/java/toolkit/create/)
+— the same resolver you already use for tool-level suspensions (§10). Read this page when you
+need to know exactly what shape of `Request` your `waitFor` will see for an MCP elicitation, and
+exactly how your `Answer` is interpreted.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="One waitFor, two suspension sources">
+A tool can suspend by returning `ToolResult{metadata.pending = Request}` (SPEC §10), and now an
+MCP server can *also* suspend the run by calling `elicitation/create`. Both resolve through the
+same `waitFor` — your host code does not need to know or care which one triggered it. Pass
+`waitFor` once to `McpSource.load`/`Toolkit`, and both paths are covered.
+</Aside>
+
+Omit `waitFor` (or pass `null`) and the client degrades cleanly: the elicitation capability is
+never advertised to the server, so a server that requires it will simply not offer that
+interaction — no crash, no dangling suspension.
+
+## Examples
+
+### 1. The `Request` shapes the bridge produces — form vs. URL
+
+The mapping is pure data-shuffling: `kind`, `prompt`, `url`, and `data.schema` are the exact
+fields SPEC §10 pins across all six ports. This example builds the two shapes by hand to pin the
+contract your `waitFor` must handle — the same shapes `McpSource.load`'s internal bridge
+produces from a real `elicitation/create`.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        // Form mode: kind:"input", the requested schema travels in data.schema.
+        Map<String, Object> schema = Map.of(
+            "type", "object",
+            "properties", Map.of("name", Map.of("type", "string")),
+            "required", List.of("name")
+        );
+        Request formReq = new Request("elc-1", "input", "Your name?", null, Map.of("schema", schema), null);
+        if (!formReq.kind().equals("input")) throw new AssertionError(formReq.kind());
+        if (!formReq.data().get("schema").equals(schema)) throw new AssertionError(formReq.data());
+        if (formReq.url() != null) throw new AssertionError("form mode carries no url");
+
+        // URL mode: kind:"authorization", the link travels in url, no schema.
+        Request urlReq = new Request("elc-2", "authorization", "Log in", "https://x/auth", null, null);
+        if (!urlReq.kind().equals("authorization")) throw new AssertionError(urlReq.kind());
+        if (!urlReq.url().equals("https://x/auth")) throw new AssertionError(urlReq.url());
+        if (urlReq.data() != null) throw new AssertionError("url mode carries no data");
+
+        System.out.println("ok: " + formReq.kind() + " / " + urlReq.kind());
+    }
+}
+```
+
+### 2. Wiring `waitFor` into `McpSource.load` — the real entry point
+
+The mapping function itself is internal; what you actually write is a `waitFor` and hand it to
+`load`. With every server disabled this is fully hermetic — `waitFor` is never invoked because
+no server connects to elicit anything, but the wiring compiles and runs exactly as it would with
+a live, elicitation-capable server.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Map;
+import java.util.function.Function;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Map<String, Object> config = Map.of(
+            "mcpServers", Map.of("off", Map.of("command", java.util.List.of("x"), "enabled", false))
+        );
+
+        // A real host would prompt a human here. This one always accepts.
+        Function<Request, Answer> waitFor = req -> new Answer(req.id(), true, Map.of("name", "Ada"));
+
+        try (McpSource src = McpSource.load(config, waitFor)) {
+            // No connected server ⇒ elicitation never fires ⇒ status is just "disabled".
+            if (!"disabled".equals(src.status().get("off"))) throw new AssertionError(src.status());
+            System.out.println("ok: waitFor wired, " + src.status());
+        }
+    }
+}
+```
+
+### 3. How an `Answer` maps back — accept, decline, cancel
+
+The rule `McpSource`'s internal `answerToElicitResult` applies: `ok:true` → accept;
+`ok:false` with `reason:"declined"` → decline; anything else `ok:false` (cancelled, expired,
+unspecified) → cancel. This example asserts the *documented* rule against the public `Answer`
+shape so the contract is checkable without reaching into the package-private function.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Map;
+
+public class Example {
+    // Mirrors the rule documented on McpSource.answerToElicitResult (package-private).
+    static String classify(Answer a) {
+        if (a.ok()) return "accept";
+        return "declined".equals(a.reason()) ? "decline" : "cancel";
+    }
+
+    public static void main(String[] args) {
+        Answer accepted = new Answer("id-1", true, Map.of("name", "Ada"));
+        Answer declined = new Answer("id-2", false, null, "declined");
+        Answer expired = new Answer("id-3", false, null, "expired");
+        Answer noReason = new Answer("id-4", false, null, null);
+
+        if (!classify(accepted).equals("accept")) throw new AssertionError();
+        if (!classify(declined).equals("decline")) throw new AssertionError();
+        if (!classify(expired).equals("cancel")) throw new AssertionError();
+        if (!classify(noReason).equals("cancel")) throw new AssertionError();
+
+        System.out.println("ok: accept/decline/cancel classification matches the bridge rule");
+    }
+}
+```
+
+## Fields
+
+| Field | What it is |
+|---|---|
+| `Request.kind()` | `"input"` for form-mode elicitation, `"authorization"` for URL-mode. |
+| `Request.prompt()` | The server's `message`, verbatim (empty string if absent). |
+| `Request.data()` | `{"schema": <requestedSchema>}` for form mode; `null` for URL mode. |
+| `Request.url()` | The link for URL mode; `null` for form mode. |
+| `Answer.ok()` | `true` → MCP `accept` (content = `answer.data()`, or `{}`). |
+| `Answer.reason()` | `"declined"` → MCP `decline`; any other non-ok reason (or none) → MCP `cancel`. |
+
+## See also
+
+- [`McpSource.load`](/api/java/mcp/load/) — the entry point that actually wires this bridge via `waitFor`.
+- [`McpSource.loadWith`](/api/java/mcp/load-with-context/) — the same `waitFor` argument, plus cancellation.
+- [`McpSource.listMcpTools`](/api/java/mcp/list-tools/) — list what each configured server would expose, plus per-server status, without wiring it into a toolkit.

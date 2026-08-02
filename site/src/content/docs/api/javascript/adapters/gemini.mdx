@@ -1,0 +1,181 @@
+---
+title: "toGemini"
+description: "Render the toolkit as Gemini function-declaration schema. — JavaScript."
+sidebar:
+  label: "toGemini"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/adapters.ts">js/src/adapters.ts</a>
+</p>
+
+```ts
+function toGemini(tools: Tool[]): [{
+  functionDeclarations: { name: string; description: string; parameters: JSONSchema }[]
+}]
+```
+
+Turns a `Tool[]` into the `tools` value a Gemini `generateContent` request expects. Gemini is the
+odd one out: it does **not** take a list of tools. It takes a list of *tool groups*, and every
+toolnexus tool goes into a single group's `functionDeclarations` array.
+
+## When to use it
+
+When you are calling Gemini yourself — `@google/genai`, the REST `generateContent` endpoint, or
+Vertex AI — and need schema for the request body. The returned array is already the outer `tools`
+value; assign it directly, do not wrap it again.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use createClient instead if you want the loop too">
+[`createClient`](/api/javascript/client/create/) with `style: "gemini"` calls this adapter for you
+and then runs the whole loop — schema out, `functionCall` parts in, `functionResponse` parts back.
+Prefer it unless you already have your own loop or framework; reach for `toGemini` when you want
+toolnexus purely for tool *aggregation*.
+</Aside>
+
+`tk.toGemini()` on a [`Toolkit`](/api/javascript/toolkit/create/) is this same function applied to
+that toolkit's tools — use the method when you have a toolkit, the free function when you have a
+bare array.
+
+## Examples
+
+### 1. One tool to Gemini schema
+
+Note the extra level: `result[0].functionDeclarations[0]` is the tool, not `result[0]`.
+
+```ts test
+import assert from "node:assert"
+import { toGemini, defineTool } from "toolnexus"
+
+const weather = defineTool({
+  name: "get_weather",
+  description: "Current weather for a city",
+  inputSchema: {
+    type: "object",
+    properties: { city: { type: "string" } },
+    required: ["city"],
+  },
+  run: async ({ city }) => `sunny in ${city}`,
+})
+
+const schema = toGemini([weather])
+
+// Always exactly ONE group, however many tools you pass.
+assert.equal(schema.length, 1)
+assert.equal(schema[0].functionDeclarations.length, 1)
+
+const decl = schema[0].functionDeclarations[0]
+assert.equal(decl.name, "get_weather")
+assert.equal(decl.description, "Current weather for a city")
+// Renamed, like OpenAI: inputSchema -> parameters.
+assert.deepEqual(decl.parameters.required, ["city"])
+
+console.log("ok:", decl.name)
+```
+
+### 2. Feeding it straight into a generateContent body
+
+```ts test
+import assert from "node:assert"
+import { toGemini, defineTool } from "toolnexus"
+
+const tools = [
+  defineTool({
+    name: "search",
+    description: "Search the docs",
+    inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] },
+    run: async ({ q }) => `results for ${q}`,
+  }),
+  defineTool({
+    name: "ping",
+    description: "Health check",
+    inputSchema: { type: "object", properties: {} },
+    run: async () => "pong",
+  }),
+]
+
+const body = {
+  contents: [{ role: "user", parts: [{ text: "search for adapters" }] }],
+  // Already the outer `tools` value — do not wrap it in another array.
+  tools: toGemini(tools),
+}
+
+assert.equal(body.tools.length, 1)
+assert.deepEqual(
+  body.tools[0].functionDeclarations.map((d) => d.name),
+  ["search", "ping"],
+)
+assert.ok(JSON.stringify(body).length > 0)
+
+console.log("ok:", body.tools[0].functionDeclarations.map((d) => d.name).join(", "))
+```
+
+<Aside type="caution">
+Two tools produce **one** group with two declarations — not two groups. Wrapping the result again
+(`tools: [toGemini(tools)]`) is the classic mistake and Gemini rejects the request.
+</Aside>
+
+### 3. Round-tripping a `functionCall` part back to the tool
+
+Gemini returns a `functionCall` part whose `args` is already a parsed object, and expects a
+`functionResponse` part back on the next turn.
+
+```ts test
+import assert from "node:assert"
+import { toGemini, defineTool } from "toolnexus"
+
+const weather = defineTool({
+  name: "get_weather",
+  description: "Current weather for a city",
+  inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+  run: async ({ city }) => `sunny in ${city}`,
+})
+
+const tools = [weather]
+const schema = toGemini(tools)
+
+// What a model would send back for that schema.
+const part = { functionCall: { name: "get_weather", args: { city: "Chennai" } } }
+
+const called = tools.find((t) => t.name === part.functionCall.name)
+assert.ok(called, "the advertised name resolves back to the tool")
+
+const res = await called.execute(part.functionCall.args)
+assert.equal(res.output, "sunny in Chennai")
+assert.equal(res.isError, false)
+
+// The part you send on the next turn — response is an OBJECT, not a bare string.
+const responsePart = {
+  functionResponse: { name: part.functionCall.name, response: { result: res.output } },
+}
+assert.equal(responsePart.functionResponse.response.result, "sunny in Chennai")
+
+// An empty tool list still yields the group — with zero declarations.
+assert.deepEqual(toGemini([]), [{ functionDeclarations: [] }])
+
+console.log("ok:", schema[0].functionDeclarations[0].name, "->", res.output)
+```
+
+That last assertion is the one to remember: `toGemini([])` is **not** `[]`. It is one group holding
+an empty declaration list — a real difference from `toOpenAI` and `toAnthropic`, which both return
+an empty array.
+
+## Shape
+
+| Path | From | Notes |
+|---|---|---|
+| `[0]` | — | The single tool *group*. There is always exactly one. |
+| `[0].functionDeclarations` | `tools` | One entry per tool, order preserved. |
+| `[0].functionDeclarations[].name` | `Tool.name` | What the model calls back with in `functionCall.name`. |
+| `[0].functionDeclarations[].description` | `Tool.description` | |
+| `[0].functionDeclarations[].parameters` | `Tool.inputSchema` | Renamed — `inputSchema` → `parameters`. |
+
+## See also
+
+- [`toOpenAI`](/api/javascript/adapters/openai/) · [`toAnthropic`](/api/javascript/adapters/anthropic/)
+- [`createToolkit`](/api/javascript/toolkit/create/) — `tk.toGemini()` is this, applied to the toolkit
+- [`createClient`](/api/javascript/client/create/) — calls the adapter for you
+- [`Tool`](/api/javascript/types/tool/) — the input shape every adapter reads

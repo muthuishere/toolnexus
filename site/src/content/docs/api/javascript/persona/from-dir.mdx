@@ -1,0 +1,179 @@
+---
+title: "fromDir"
+description: "Point at an agent home directory and get a configured agent back. — JavaScript."
+sidebar:
+  label: "fromDir"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7e-agent-home--personas-source-agent-persona-surface">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/agents/home.ts">js/src/agents/home.ts</a>
+</p>
+
+```ts
+function fromDir(dir: string, opts?: FromDirOptions): Agent
+
+interface FromDirOptions {
+  does?: string       // routing description a delegating model sees; default derived from dir
+  name?: string        // agent name; default the directory's basename
+  model?: string        // model id; default "inherit" (the runtime's llm.model)
+  tools?: Tool[]         // extra tools beyond the memory builtin
+  memory?: boolean        // set false to omit the memory tool (a read-only persona)
+}
+```
+
+The directory **is** the agent. `fromDir` calls [`composeSoul`](/api/javascript/persona/compose-soul/)
+on `dir` to build the system prompt, wires a [`memoryTool(dir)`](/api/javascript/persona/memory-tool/)
+over the same directory (unless `memory: false`), and hands both to
+[`agent(name, spec)`](/api/javascript/runtime/agent/). What comes back is a plain
+[`agents.Agent`](/api/javascript/runtime/agent/) — `.run()`, `.asTool()`, and
+[`agents.startAgent`](/api/javascript/runtime/runtime/) all apply exactly as they do to any other
+agent. Nothing new rides on top: this is composition, not a new runtime concept.
+
+## When to use it
+
+Reach for `fromDir` any time a persona's identity lives in files you want to edit outside code —
+a product-owned `SOUL.md`, an ops team's `AGENTS.md`, notes an agent accumulates for itself in
+`MEMORY.md`. The directory becomes the unit of deployment: check it into a repo, mount it into a
+container, point `fromDir` at it, and the agent is fully specified without touching TypeScript.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use agent(name, spec) directly when the soul is inline or generated">
+`fromDir` is a thin convenience over [`agent`](/api/javascript/runtime/agent/) +
+[`composeSoul`](/api/javascript/persona/compose-soul/) +
+[`memoryTool`](/api/javascript/persona/memory-tool/) — nothing it does is unavailable by calling
+those three yourself. Skip it when the soul text is built in code (a template, a database row) or
+when you never want the file-backed `memory` tool at all; `agent(name, { soul, uses: { tools } })`
+is exactly as capable and one call flatter.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — one soul file, run once
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { agents } from "toolnexus"
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "persona-"))
+fs.writeFileSync(path.join(dir, "SOUL.md"), "You are Ava, a calm and precise ops assistant.")
+
+const ava = agents.fromDir(dir)
+assert.equal(ava.name, path.basename(dir)) // default name = directory basename
+assert.equal(ava.spec.uses?.tools?.length, 1) // the memory tool, wired by default
+
+const canned: typeof fetch = async () =>
+  new Response(JSON.stringify({
+    choices: [{ message: { content: "Hi, I'm Ava." } }],
+    usage: { prompt_tokens: 5, completion_tokens: 4, total_tokens: 9 },
+  }), { status: 200, headers: { "content-type": "application/json" } })
+
+const result = await ava.run("Who are you?", { fetch: canned })
+assert.equal(result.status, "done")
+assert.equal(result.text, "Hi, I'm Ava.")
+
+console.log("ok:", ava.name, "->", result.text)
+```
+
+### 2. A read-only persona — `memory: false` plus your own extra tools
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { agents, defineTool } from "toolnexus"
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "persona-"))
+fs.writeFileSync(path.join(dir, "SOUL.md"), "You are Reporter, a read-only status agent.")
+
+const lookup = defineTool({
+  name: "system_status",
+  description: "Read the current system status",
+  inputSchema: { type: "object", properties: {} },
+  run: () => "all systems nominal",
+})
+
+const reporter = agents.fromDir(dir, { name: "reporter", memory: false, tools: [lookup] })
+
+// No memory tool wired: `memory: false` means read-only — only `lookup` is on the toolkit view.
+assert.equal(reporter.spec.uses?.tools?.length, 1)
+assert.equal(reporter.spec.uses?.tools?.[0].name, "system_status")
+
+console.log("ok:", reporter.name, "tools:", reporter.spec.uses?.tools?.map((t) => t.name))
+```
+
+### 3. Custom `does`/`model`, bridged into a classic run via `.asTool()`
+
+A `fromDir` agent is an ordinary `Agent` — `.asTool()` drops it straight into a classic
+`createClient` run's `extraTools`, exactly as it does for `agent()`-declared agents
+(see [`agents.Agent`](/api/javascript/runtime/agent/) example 3).
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { agents, createClient, createToolkit } from "toolnexus"
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "persona-"))
+fs.writeFileSync(path.join(dir, "SOUL.md"), "You are Ava, an ops assistant.")
+
+const ava = agents.fromDir(dir, { does: "ops status persona", name: "ava", model: "m-ava" })
+assert.equal(ava.spec.does, "ops status persona")
+assert.equal(ava.spec.model, "m-ava")
+
+const avaFetch: typeof fetch = async () =>
+  new Response(JSON.stringify({
+    choices: [{ message: { content: "Ava here — all green." } }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  }), { status: 200, headers: { "content-type": "application/json" } })
+
+let calls = 0
+const outerFetch: typeof fetch = async () => {
+  calls++
+  if (calls === 1) {
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: null, tool_calls: [{ id: "o1", type: "function", function: { name: "ava", arguments: JSON.stringify({ prompt: "status check" }) } }] } }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }), { status: 200, headers: { "content-type": "application/json" } })
+  }
+  return new Response(JSON.stringify({
+    choices: [{ message: { content: "Relayed: Ava here — all green." } }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  }), { status: 200, headers: { "content-type": "application/json" } })
+}
+
+const tk = await createToolkit({ builtins: false, extraTools: [ava.asTool({ fetch: avaFetch })] })
+const client = createClient({ baseUrl: "http://mock.local", style: "openai", model: "outer", apiKey: "k", fetch: outerFetch })
+
+const res = await client.run("check on ava", { toolkit: tk })
+
+assert.equal(res.toolCalls[0].name, "ava")
+assert.match(res.text, /Relayed: Ava here/)
+
+await tk.close()
+console.log("ok:", res.text)
+```
+
+## Options
+
+| Option | Type | What it does |
+|---|---|---|
+| `does` | `string` | Routing description a delegating model sees. Default derived from the directory. |
+| `name` | `string` | Agent name. Default the directory's basename. |
+| `model` | `string` | Model id for this agent's client. Default `"inherit"`. |
+| `tools` | `Tool[]` | Extra tools alongside the memory builtin. |
+| `memory` | `boolean` | Set `false` to omit the `memory` tool — a read-only persona. Default `true`. |
+
+## See also
+
+- [`composeSoul`](/api/javascript/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.
+- [`memoryTool`](/api/javascript/persona/memory-tool/) — The opt-in built-in that lets a persona write durable notes to its own home.
+- [`agents.Agent`](/api/javascript/runtime/agent/) — What `fromDir` returns; `soul`/`uses.tools` are just spec fields.
+- [`agents.AgentRuntime`](/api/javascript/runtime/runtime/) — What actually runs the agent underneath `.run()`.

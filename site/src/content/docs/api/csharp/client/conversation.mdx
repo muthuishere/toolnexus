@@ -1,0 +1,340 @@
+---
+title: "LlmClient.Conversation"
+description: "Keep a transcript across turns so the model remembers what it already did. — C#."
+sidebar:
+  label: "LlmClient.Conversation"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/LlmClient.cs">LlmClient.cs</a>
+</p>
+
+```csharp
+public LlmClient.Conversation NewConversation(Toolkit toolkit)
+
+public sealed class Conversation
+{
+    public Task<RunResult> SendAsync(string prompt, CancellationToken cancellationToken = default);
+    public List<object?> Messages { get; }
+    public void Reset();
+}
+```
+
+An in-process object that carries a transcript forward for you. `client.NewConversation(toolkit)`
+returns one bound to that `Toolkit`; each `SendAsync` call runs
+[`RunAsync`](/api/csharp/client/run/) with the accumulated `Messages` as history, then replaces
+`Messages` with the result's updated transcript — so the *next* `SendAsync` on the same instance
+continues where the last one left off, with no id and no store plumbing. `Reset()` drops the
+transcript and starts over.
+
+## When to use it
+
+A short-lived, single-process multi-turn exchange — a REPL, a CLI session, a single request
+handler juggling one chat — where the transcript only needs to live as long as the `Conversation`
+object does.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for AskAsync/IConversationStore when the transcript must outlive the process">
+`Conversation` keeps its transcript as a private field — it vanishes when the object does. If a
+conversation needs to survive a process restart, or several processes need to share one thread by
+id, drive it through [`LlmClient.AskAsync`](/api/csharp/client/create/) with an `id` and a real
+[`IConversationStore`](/api/csharp/client/store/) instead. `Conversation` is the zero-plumbing
+in-memory shortcut for everything else.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful conversation — two turns, one object
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+var turn = 0;
+using var stub = new Stub(ctx =>
+{
+    turn++;
+    var text = turn == 1 ? "hi there" : "still here";
+    var body = """
+    {"id":"cN","choices":[{"message":{"role":"assistant","content":"TEXT"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}
+    """.Replace("cN", "c" + turn).Replace("TEXT", text);
+    Stub.Json(ctx, 200, body);
+});
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+var conv = client.NewConversation(tk);
+
+var first = await conv.SendAsync("hello");
+var second = await conv.SendAsync("still there?");
+
+if (first.Text != "hi there") throw new Exception(first.Text);
+if (second.Text != "still here") throw new Exception(second.Text);
+
+Console.WriteLine($"ok: {first.Text} -> {second.Text}");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+### 2. Inspecting `Messages`, then `Reset()`
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+using var stub = new Stub(ctx =>
+{
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":"noted"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}
+    """);
+});
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+    SystemPrompt = "You are terse.",
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+var conv = client.NewConversation(tk);
+
+await conv.SendAsync("remember: the sky is blue");
+
+// system + user + assistant = 3 messages after one turn.
+if (conv.Messages.Count != 3) throw new Exception($"expected 3 messages, got {conv.Messages.Count}");
+
+conv.Reset();
+if (conv.Messages.Count != 0) throw new Exception("Reset should drop the transcript entirely");
+
+Console.WriteLine($"ok: 3 messages before reset, {conv.Messages.Count} after");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+### 3. Full surface — several turns, a tool call in the middle, and independent conversations
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+var turn = 0;
+using var stub = new Stub(ctx =>
+{
+    turn++;
+    if (turn == 1)
+    {
+        Stub.Json(ctx, 200, """
+        {"id":"c1","choices":[{"message":{"role":"assistant","content":"hi Ada"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}
+        """);
+    }
+    else if (turn == 2)
+    {
+        Stub.Json(ctx, 200, """
+        {"id":"c2","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"double","arguments":"{\"n\":21}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}
+        """);
+    }
+    else
+    {
+        Stub.Json(ctx, 200, """
+        {"id":"c3","choices":[{"message":{"role":"assistant","content":"double of 21 is 42"},"finish_reason":"stop"}],"usage":{"prompt_tokens":14,"completion_tokens":5,"total_tokens":19}}
+        """);
+    }
+});
+
+var doubleTool = NativeTool.Of("double", "Double a number", null,
+    (IDictionary<string, object?> a) => (Convert.ToInt32(a["n"]) * 2).ToString());
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = new List<ITool> { doubleTool } });
+
+// Two independent conversations on the same client/toolkit never share a transcript.
+var alice = client.NewConversation(tk);
+var bob = client.NewConversation(tk);
+
+var r1 = await alice.SendAsync("I'm Ada");
+if (r1.Text != "hi Ada") throw new Exception(r1.Text);
+
+var r2 = await alice.SendAsync("what's double 21?"); // spans two stub turns (tool call + answer)
+if (r2.Text != "double of 21 is 42") throw new Exception(r2.Text);
+if (r2.ToolCallCount != 1 || r2.ToolCalls[0].Output != "42") throw new Exception(r2.ToolCalls[0].Output);
+
+if (bob.Messages.Count != 0) throw new Exception("a fresh Conversation must start with no history");
+if (alice.Messages.Count == 0) throw new Exception("alice's transcript should have accumulated");
+
+Console.WriteLine($"ok: {r2.Text} | alice has {alice.Messages.Count} messages, bob has {bob.Messages.Count}");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+<Aside type="caution">
+`Conversation` is a thin client-side wrapper, not a durable store — it never touches
+`IConversationStore`. Two `NewConversation(tk)` calls on the same `LlmClient` are always
+independent transcripts, even if you never call `Reset()`.
+</Aside>
+
+## Members
+
+| Member | Type | What it is |
+|---|---|---|
+| `SendAsync(prompt, cancellationToken)` | `Task<RunResult>` | Run one turn with the accumulated history, then replace `Messages` with the result's updated transcript. |
+| `Messages` | `List<object?>` | The current transcript, in provider message shape. Read-only view — mutate via `SendAsync`/`Reset`. |
+| `Reset()` | `void` | Drop the transcript; the next `SendAsync` starts fresh. |
+
+## See also
+
+- [`LlmClient.Create`](/api/csharp/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`LlmClient.RunAsync`](/api/csharp/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`LlmClient.StreamAsync`](/api/csharp/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`LlmClient.Hooks`](/api/csharp/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

@@ -1,0 +1,241 @@
+---
+title: "AgentRuntime"
+description: "The six host verbs that drive sub-agents, plus the read-only list and inspect views. — C#."
+sidebar:
+  label: "AgentRuntime"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Agents/AgentRuntime.cs">Agents/AgentRuntime.cs</a>
+</p>
+
+```csharp
+public sealed class AgentRuntime
+{
+    public AgentRuntime(RuntimeOptions opts);
+
+    public Handle Root { get; }
+    public IConversationStore ConversationStore { get; }
+
+    public SpawnResult Spawn(Handle parent, string defName, Budget? budget = null);
+    public PostResult Post(Handle h, InboxItem item);
+    public PostResult Wake(Handle h, string? prompt = null);
+    public Task<AgentResult> WaitAsync(Handle h, int? timeoutMs = null);
+    public void Interrupt(Handle h);
+    public Task CloseAsync(Handle h, bool force = false, string? reason = null);
+
+    public List<HandleView> List();
+    public HandleView? Inspect(string id);
+}
+```
+
+The full host surface behind [`Agent`](/api/csharp/runtime/agent/): six verbs —
+`Spawn`/`Post`/`Wake`/`WaitAsync`/`Interrupt`/`CloseAsync` — over a tree of
+[`Handle`](/api/csharp/runtime/handle/)s rooted at `Root`, plus read-only `List`/`Inspect` views.
+Everything rides shipped machinery: the `LlmClient` loop, §10 pending/`WaitFor`, `Toolkit` views,
+one runtime-wide `ConversationStore` (conversation id = handle id), and — via `RuntimeOptions.Clock`
+— an injectable `TimeProvider` so fixtures can run on a virtual clock.
+
+## When to use it
+
+You need more than `Agent.RunAsync`'s one-shot spawn→wake→wait→close: posting to a running agent's
+inbox mid-turn, interrupting a stuck run, keeping several handles alive across many turns, or
+inspecting the whole tree (`List`) for a dashboard or ops tool. One `AgentRuntime` owns the whole
+tree — spawn every agent you need from `Root` (or from each other) rather than building a runtime
+per agent.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Agent.RunAsync is this, pre-wired for the common case">
+`Agent.RunAsync` builds exactly this — a fresh `AgentRuntime`, one spawn, one wake, one wait, one
+close — and throws the runtime away afterward. Reach for `AgentRuntime` directly the moment you
+need the tree to **outlive** a single prompt: a long-running coordinator, a dashboard polling
+`List()`, or a caller that wants to `Interrupt` a handle it doesn't own the whole lifecycle of.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — spawn, wake, wait
+
+```csharp test
+using Toolnexus.Agents;
+
+var llm = new MockLlm(_ => Task.FromResult(MockLlm.Text("done")));
+var rt = new AgentRuntime(new RuntimeOptions
+{
+    ApiKey = "test-key",
+    Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
+    Registry = new Dictionary<string, AgentDef> { ["worker"] = new() { Name = "worker", Does = "does work" } },
+});
+
+var spawned = rt.Spawn(rt.Root, "worker");
+if (spawned.Error != null) throw new Exception(spawned.Error);
+
+var wait = rt.WaitAsync(spawned.Handle!);
+rt.Wake(spawned.Handle!, "get to work");
+var result = await wait;
+
+if (result.Status != "done") throw new Exception(result.Status);
+if (result.Text != "done") throw new Exception(result.Text);
+
+await rt.CloseAsync(rt.Root);
+Console.WriteLine($"ok: {spawned.Handle!.Id} -> {result.Status}");
+
+sealed class MockLlm : System.Net.Http.HttpMessageHandler
+{
+    readonly Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> _respond;
+    public MockLlm(Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> respond) => _respond = respond;
+    protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+        System.Net.Http.HttpRequestMessage request, CancellationToken ct) => _respond(request);
+    public static System.Net.Http.HttpResponseMessage Text(string content) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new System.Net.Http.StringContent(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { role = "assistant", content } } },
+            usage = new { prompt_tokens = 5, completion_tokens = 3, total_tokens = 8 },
+        }), System.Text.Encoding.UTF8, "application/json"),
+    };
+}
+```
+
+### 2. The realistic case — `Post` to the inbox, then `Wake` drains it
+
+```csharp test
+using Toolnexus.Agents;
+
+var seenInbox = "";
+var llm = new MockLlm(async req =>
+{
+    var body = await req.Content!.ReadAsStringAsync();
+    if (body.Contains("[inbox:")) seenInbox = body;
+    return MockLlm.Text("processed");
+});
+var rt = new AgentRuntime(new RuntimeOptions
+{
+    ApiKey = "test-key",
+    Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
+    Registry = new Dictionary<string, AgentDef> { ["watcher"] = new() { Name = "watcher", Does = "watches events" } },
+});
+
+var spawned = rt.Spawn(rt.Root, "watcher");
+var h = spawned.Handle!;
+
+// Post is unsolicited — it appends to the inbox with NO state transition.
+var posted = rt.Post(h, new InboxItem("external", "webhook", "order #42 shipped"));
+if (!posted.Ok) throw new Exception(posted.Error);
+if (h.InboxCount != 1) throw new Exception($"expected 1 queued item, got {h.InboxCount}");
+
+// Wake drains the whole inbox into ONE turn's input.
+var wait = rt.WaitAsync(h);
+rt.Wake(h);
+var result = await wait;
+
+if (result.Status != "done") throw new Exception(result.Status);
+if (h.InboxCount != 0) throw new Exception("inbox should be drained after a completed turn");
+if (!seenInbox.Contains("order #42 shipped")) throw new Exception("the LLM never saw the posted item");
+if (!seenInbox.Contains("from=external channel=webhook")) throw new Exception("missing provenance");
+
+await rt.CloseAsync(rt.Root);
+Console.WriteLine($"ok: {result.Text}, inbox drained with provenance intact");
+
+sealed class MockLlm : System.Net.Http.HttpMessageHandler
+{
+    readonly Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> _respond;
+    public MockLlm(Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> respond) => _respond = respond;
+    protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+        System.Net.Http.HttpRequestMessage request, CancellationToken ct) => _respond(request);
+    public static System.Net.Http.HttpResponseMessage Text(string content) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new System.Net.Http.StringContent(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { role = "assistant", content } } },
+            usage = new { prompt_tokens = 5, completion_tokens = 3, total_tokens = 8 },
+        }), System.Text.Encoding.UTF8, "application/json"),
+    };
+}
+```
+
+### 3. Full surface — `List`/`Inspect`, then a graceful `CloseAsync(Root)` tears down the whole tree
+
+```csharp test
+using Toolnexus.Agents;
+
+var llm = new MockLlm(_ => Task.FromResult(MockLlm.Text("ok")));
+var rt = new AgentRuntime(new RuntimeOptions
+{
+    ApiKey = "test-key",
+    Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
+    Registry = new Dictionary<string, AgentDef>
+    {
+        ["scout-a"] = new() { Name = "scout-a", Does = "scouts region A" },
+        ["scout-b"] = new() { Name = "scout-b", Does = "scouts region B" },
+    },
+});
+
+var a = rt.Spawn(rt.Root, "scout-a").Handle!;
+var b = rt.Spawn(rt.Root, "scout-b").Handle!;
+// Register both waits BEFORE waking (no completion race), then wake both siblings.
+var waitA = rt.WaitAsync(a);
+var waitB = rt.WaitAsync(b);
+rt.Wake(a, "scout region A");
+rt.Wake(b, "scout region B");
+await Task.WhenAll(waitA, waitB);
+
+var views = rt.List();
+if (views.Count != 2) throw new Exception($"expected 2 handles, got {views.Count}");
+if (views.All(v => v.State != "idle")) throw new Exception("expected both settled to idle");
+
+var inspected = rt.Inspect(a.Id);
+if (inspected == null || inspected.Id != a.Id) throw new Exception("Inspect should find the spawned handle");
+
+// Stop-all = CloseAsync(Root) — leaf-first, graceful.
+await rt.CloseAsync(rt.Root);
+if (a.State != "closed" || b.State != "closed") throw new Exception($"{a.State},{b.State}");
+if (!rt.TraceContains($"{a.Id}: spawned")) throw new Exception("expected a spawn trace line");
+
+Console.WriteLine($"ok: {views.Count} handles listed, both closed via CloseAsync(Root)");
+
+sealed class MockLlm : System.Net.Http.HttpMessageHandler
+{
+    readonly Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> _respond;
+    public MockLlm(Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> respond) => _respond = respond;
+    protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+        System.Net.Http.HttpRequestMessage request, CancellationToken ct) => _respond(request);
+    public static System.Net.Http.HttpResponseMessage Text(string content) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new System.Net.Http.StringContent(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { role = "assistant", content } } },
+            usage = new { prompt_tokens = 5, completion_tokens = 3, total_tokens = 8 },
+        }), System.Text.Encoding.UTF8, "application/json"),
+    };
+}
+```
+
+<Aside type="caution">
+`Wake` on a `running` or `suspended` handle is **not an error** — it's a no-op on `running` (the
+inbox just drains into the next turn) and buffers on `suspended` (only the matching `Answer`
+resumes it). Only `Post`'s inbox-full case and `Spawn`'s cap checks are loud, synchronous
+rejections.
+</Aside>
+
+## Parameters (`RuntimeOptions`)
+
+| Field | Type | What it is |
+|---|---|---|
+| `Handler` | `HttpMessageHandler?` | The LLM HTTP seam — inject a scripted handler for tests; `null` ⇒ the real HTTP stack. |
+| `Registry` | `Dictionary<string, AgentDef>` | name → definition; `Agent.Registry()` builds this from a team graph, or hand-roll it as shown above. |
+| `InboxCap` | `int` | Bounded inbox per handle; default `8`. |
+| `MaxConcurrentTurns` | `int` | Global cap on simultaneous LLM HTTP calls; default `8`. |
+| `ShutdownMs` | `int` | Graceful-close bound before `CloseAsync` escalates to interrupt; default `200`. |
+| `Store` | `IConversationStore?` | The one runtime-wide store; `null` ⇒ a fresh in-memory store. |
+| `Clock` | `TimeProvider?` | Injectable clock for every timer/timeout; `null` ⇒ the system clock. |
+| `BaseUrl` / `Style` / `Model` / `ApiKey` | — | LLM endpoint defaults; a def's `Model == "inherit"` resolves to `Model` here. |
+
+## See also
+
+- [`Agent`](/api/csharp/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`Handle`](/api/csharp/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`AgentTypes.Budget`](/api/csharp/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

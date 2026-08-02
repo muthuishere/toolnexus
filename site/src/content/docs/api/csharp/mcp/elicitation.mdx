@@ -1,0 +1,141 @@
+---
+title: "McpSource.ElicitationToRequest"
+description: "Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back. — C#."
+sidebar:
+  label: "McpSource.ElicitationToRequest"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/McpSource.cs">McpSource.cs</a>
+</p>
+
+```csharp
+public static Request ElicitationToRequest(ElicitRequestParams p)
+public static ElicitResult AnswerToElicitResult(Answer answer)
+```
+
+The bridge between MCP's `elicitation/create` (a server asking **you** for input mid-`tools/call`)
+and toolnexus's own §10 suspension contract (`Request` / `Answer`, in
+[`Suspension.cs`](https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Suspension.cs))
+that a host resolves through `waitFor`. Two pure, byte-parity-tested mappings, always used
+as a pair:
+
+- `ElicitationToRequest` — an MCP `ElicitRequestParams` becomes a `Request`. Form mode (a JSON-Schema
+  prompt) maps to `Kind == "input"` with the schema carried in `Data["schema"]`. URL mode maps to
+  `Kind == "authorization"` with the `Url` set and no `Data`.
+- `AnswerToElicitResult` — the resolved `Answer` maps back to MCP's `ElicitResult`: `Ok == true` →
+  `"accept"` (with `Data` as the result content); `Ok == false, Reason == "declined"` → `"decline"`;
+  anything else (cancelled, expired, no reason) → `"cancel"`.
+
+Both are used internally by [`McpSource.LoadAsync`](/api/csharp/mcp/load/)'s `waitFor` wiring — you
+call them directly only when building your own elicitation handler or testing the mapping itself.
+
+## When to use it
+
+You are wiring a **custom** MCP client options / elicitation handler and want the exact same
+`Request`/`Answer` shape the built-in `waitFor` bridge produces — so a UI or approval flow written
+against §10 handles MCP elicitation identically to every other suspension source (the `question`
+builtin, HTTP auth, anything else that suspends).
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Pass waitFor to LoadAsync for the ordinary path">
+If you just want elicitation to work, pass a `waitFor` resolver to
+[`McpSource.LoadAsync`](/api/csharp/mcp/load/) — it calls both of these mappings for you. Reach for
+`ElicitationToRequest` / `AnswerToElicitResult` directly only when you're building the client options
+yourself, or unit-testing the mapping in isolation.
+</Aside>
+
+## Examples
+
+### 1. Form mode maps to `kind:"input"` with the schema
+
+```csharp test
+using ModelContextProtocol.Protocol;
+using Toolnexus;
+
+var schema = new ElicitRequestParams.RequestSchema
+{
+    Properties = new Dictionary<string, ElicitRequestParams.PrimitiveSchemaDefinition>
+    {
+        ["name"] = new ElicitRequestParams.StringSchema(),
+    },
+    Required = new List<string> { "name" },
+};
+
+var req = McpSource.ElicitationToRequest(new ElicitRequestParams { Message = "Your name?", RequestedSchema = schema });
+
+if (req.Kind != "input") throw new Exception(req.Kind);
+if (req.Prompt != "Your name?") throw new Exception(req.Prompt);
+if (req.Url != null) throw new Exception("form mode carries no url");
+if (!ReferenceEquals(req.Data!["schema"], schema)) throw new Exception("schema not carried through");
+
+Console.WriteLine($"ok: {req.Kind} — {req.Prompt}");
+```
+
+### 2. URL mode maps to `kind:"authorization"` with the URL
+
+```csharp test
+using ModelContextProtocol.Protocol;
+using Toolnexus;
+
+var req = McpSource.ElicitationToRequest(new ElicitRequestParams
+{
+    Mode = "url",
+    Message = "Log in to continue",
+    Url = "https://example.com/auth",
+});
+
+if (req.Kind != "authorization") throw new Exception(req.Kind);
+if (req.Url != "https://example.com/auth") throw new Exception(req.Url);
+if (req.Data != null) throw new Exception("url mode carries no schema");
+
+Console.WriteLine($"ok: {req.Kind} -> {req.Url}");
+```
+
+### 3. Answer round-trips to accept / decline / cancel
+
+```csharp test
+using Toolnexus;
+
+var accept = McpSource.AnswerToElicitResult(new Answer
+{
+    Id = "1", Ok = true, Data = new Dictionary<string, object?> { ["name"] = "Ada" },
+});
+if (accept.Action != "accept") throw new Exception(accept.Action);
+if (accept.Content!["name"].GetString() != "Ada") throw new Exception("content not carried through");
+
+var declined = McpSource.AnswerToElicitResult(new Answer { Id = "1", Ok = false, Reason = "declined" });
+if (declined.Action != "decline") throw new Exception(declined.Action);
+
+// Anything that isn't an explicit "declined" reason — including no reason at all — is a cancel.
+var expired = McpSource.AnswerToElicitResult(new Answer { Id = "1", Ok = false, Reason = "expired" });
+var noReason = McpSource.AnswerToElicitResult(new Answer { Id = "1", Ok = false });
+if (expired.Action != "cancel" || noReason.Action != "cancel")
+    throw new Exception($"{expired.Action},{noReason.Action}");
+
+Console.WriteLine($"ok: {accept.Action} / {declined.Action} / {expired.Action}");
+```
+
+## Mapping
+
+| MCP `ElicitRequestParams` | `Request` | |
+|---|---|---|
+| `Mode` absent / `"form"` | `Kind = "input"` | `Data["schema"] = RequestedSchema` |
+| `Mode = "url"` | `Kind = "authorization"` | `Url = Url`, no `Data` |
+| `Message` | `Prompt` | |
+
+| `Answer` | MCP `ElicitResult.Action` |
+|---|---|
+| `Ok = true` | `"accept"` (`Content` from `Answer.Data`) |
+| `Ok = false, Reason = "declined"` | `"decline"` |
+| `Ok = false`, any other/no reason | `"cancel"` |
+
+## See also
+
+- [`McpSource.LoadAsync`](/api/csharp/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+- [`McpSource.LoadAsync`](/api/csharp/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+- [`McpSource.ListMcpToolsAsync`](/api/csharp/mcp/list-tools/) — List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+- [`McpSource.ParseConfig`](/api/csharp/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.

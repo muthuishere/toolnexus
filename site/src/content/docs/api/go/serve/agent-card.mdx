@@ -1,0 +1,198 @@
+---
+title: "BuildAgentCard"
+description: "Construct the Agent Card that advertises your name, skills and endpoint. — Go."
+sidebar:
+  label: "BuildAgentCard"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/serve.go">golang/serve.go</a>
+</p>
+
+```go
+func BuildAgentCard(cfg *A2AConfig, skills []SkillInfo, url string) servedAgentCard
+```
+
+`BuildAgentCard` is the exact function [`Toolkit.Serve`](/api/go/serve/a2a/) calls to answer
+`GET /.well-known/agent-card.json` — exposed directly so you can build or inspect a card without
+standing up a server. `skills` must be the toolkit's `SkillSource` entries (never raw tools, §7B);
+filtered to `cfg.Skills` when that's set.
+
+<Aside type="note" title="The return type is unexported">
+`servedAgentCard` is a private struct — you never name it. Capture the result with `:=` and
+`json.Marshal` it to see the wire shape; that's exactly what a real peer receives.
+</Aside>
+
+## When to use it
+
+Reach for `BuildAgentCard` in a test or a tool that wants to assert on the card's shape without an
+HTTP round trip, or if you're building your own transport around the A2A profile instead of using
+`Serve`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Serving for real? Use Toolkit.Serve">
+`Serve` calls `BuildAgentCard` on every `GET` automatically and wires the matching `POST /`
+JSON-RPC handler alongside it. Reach for `BuildAgentCard` directly only when you want the card
+value itself, decoupled from a running server.
+</Aside>
+
+## Examples
+
+### 1. Defaults — no config, no skills
+
+```go test
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	card := toolnexus.BuildAgentCard(nil, nil, "http://localhost:8080/")
+
+	b, _ := json.Marshal(card)
+	var got map[string]any
+	_ = json.Unmarshal(b, &got)
+
+	if got["name"] != "toolnexus-agent" || got["version"] != "0.1.0" || got["protocolVersion"] != "0.3.0" {
+		log.Fatalf("unexpected defaults: %v", got)
+	}
+	caps := got["capabilities"].(map[string]any)
+	if caps["streaming"] != false || caps["pushNotifications"] != false {
+		log.Fatalf("unexpected capabilities: %v", caps)
+	}
+	if skills, ok := got["skills"].([]any); !ok || len(skills) != 0 {
+		log.Fatalf("expected an empty skills array, got %v", got["skills"])
+	}
+
+	fmt.Println("ok: defaults —", got["name"], got["version"])
+}
+```
+
+### 2. Named agent, filtered to a subset of skills
+
+```go test
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	skills := []toolnexus.SkillInfo{
+		{Name: "search", Description: "Search the docs"},
+		{Name: "admin", Description: "Dangerous — internal only"},
+	}
+	cfg := &toolnexus.A2AConfig{
+		Name:        "video-desk",
+		Description: "Transcribes and summarizes video",
+		Skills:      []string{"search"}, // never advertise "admin"
+	}
+
+	card := toolnexus.BuildAgentCard(cfg, skills, "http://localhost:8080/")
+	b, _ := json.Marshal(card)
+	var got map[string]any
+	_ = json.Unmarshal(b, &got)
+
+	if got["name"] != "video-desk" {
+		log.Fatalf("unexpected name: %v", got["name"])
+	}
+	cardSkills := got["skills"].([]any)
+	if len(cardSkills) != 1 {
+		log.Fatalf("expected exactly the filtered skill, got %v", cardSkills)
+	}
+	first := cardSkills[0].(map[string]any)
+	if first["id"] != "search" || first["name"] != "search" || first["description"] != "Search the docs" {
+		log.Fatalf("unexpected skill entry: %v", first)
+	}
+
+	fmt.Println("ok:", got["name"], "advertises", len(cardSkills), "of", len(skills), "skills")
+}
+```
+
+### 3. The full surface — provider, version override, and the URL param
+
+```go test
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	skills := []toolnexus.SkillInfo{{Name: "hello-world", Description: "says hello"}}
+	cfg := &toolnexus.A2AConfig{
+		Name:    "greeter",
+		Version: "2.3.1",
+		Provider: &toolnexus.A2AProvider{
+			Organization: "acme corp",
+			URL:          "https://acme.example",
+		},
+	}
+
+	card := toolnexus.BuildAgentCard(cfg, skills, "http://localhost:9090/")
+	b, _ := json.Marshal(card)
+	var got map[string]any
+	_ = json.Unmarshal(b, &got)
+
+	if got["version"] != "2.3.1" {
+		log.Fatalf("expected the version override, got %v", got["version"])
+	}
+	if got["url"] != "http://localhost:9090/" {
+		log.Fatalf("url should be exactly the caller-supplied endpoint, got %v", got["url"])
+	}
+	provider := got["provider"].(map[string]any)
+	if provider["organization"] != "acme corp" || provider["url"] != "https://acme.example" {
+		log.Fatalf("unexpected provider: %v", provider)
+	}
+
+	// Omitting Provider entirely omits it from the JSON, not a null field.
+	bare := toolnexus.BuildAgentCard(&toolnexus.A2AConfig{Name: "bare"}, nil, "http://x/")
+	bb, _ := json.Marshal(bare)
+	var bareGot map[string]any
+	_ = json.Unmarshal(bb, &bareGot)
+	if _, ok := bareGot["provider"]; ok {
+		log.Fatal("expected provider omitted when not configured")
+	}
+
+	fmt.Println("ok:", got["name"], got["version"], "by", provider["organization"])
+}
+```
+
+## Parameters and defaults
+
+| | Type | What it does |
+|---|---|---|
+| `cfg` | `*A2AConfig` | `nil` ⇒ every field below falls back to its default. |
+| `skills` | `[]SkillInfo` | The toolkit's advertised skills; filtered to `cfg.Skills` when set (non-nil, even empty, filters to exactly that set). |
+| `url` | `string` | The JSON-RPC endpoint peers `POST` to — used verbatim as `card.url`. |
+
+| Field | Default when `cfg` (or the field) is unset |
+|---|---|
+| `name` | `"toolnexus-agent"` |
+| `description` | `""` |
+| `version` | `"0.1.0"` |
+| `protocolVersion` | always `"0.3.0"` |
+| `capabilities` | `{streaming:false, pushNotifications:false}` |
+| `provider` | omitted from the JSON entirely |
+
+## See also
+
+- [`Toolkit.Serve`](/api/go/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+- [`NewFileTaskStore`](/api/go/serve/task-store/) — Persist inbound A2A tasks so a suspended request survives a restart.
+- [`ExposedMcpTools`](/api/go/serve/mcp/) — The inbound MCP profile: any MCP client can call your tools.

@@ -1,0 +1,241 @@
+---
+title: "LlmClient.translate"
+description: "Declare a toolkit to a provider and translate one request/response without executing anything or keeping state. — Java."
+sidebar:
+  label: "LlmClient.translate"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/LlmClient.java">LlmClient.java</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/Translate.java">Translate.java</a>
+</p>
+
+```java
+public Translate.Result translate(Translate.Request req)   // instance method on LlmClient
+```
+
+toolnexus used as a pure wire-format translator: OpenAI shapes in, exactly **one** provider call,
+OpenAI shapes out. No agent loop, no tool execution, no conversation state — the inbound half of
+the §5 adapters (those send declarations *out*; `translate` reads the provider's tool calls back
+*in*). Use it when the **caller** owns the conversation and executes tools itself — the standard
+OpenAI function-calling posture, where every request already carries the full history including
+prior tool results. When toolnexus should own the conversation instead, use the agent loop with
+[`LlmClient.run`](/api/java/client/run/) (relay tools + durable resume are the Go-only alternative
+covered in [`suspension/relay`](/api/java/suspension/relay/)).
+
+## When to use it
+
+You are building a gateway or proxy that speaks the standard OpenAI function-calling contract to
+its own callers but wants to route the underlying model call through any of the styles/providers
+`LlmClient` supports — including Anthropic, where tool structure is native content blocks, not text.
+`translate` gives every caller-side tool source (MCP, skills, native functions, A2A agents,
+builtins) for free via an ordinary `Toolkit`, declared but never executed, plus the resilience,
+request-shaping and observability the loop already has (§7/§8/§9) — without adopting the
+conversation-owning agent loop.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="translate when the CALLER executes tools, run when toolnexus should">
+Reach for `translate` specifically because you already have a place that executes tool calls and
+manages history — you just want one provider round trip translated cleanly. Reach for
+[`LlmClient.run`](/api/java/client/run/) when you want toolnexus itself to run the whole
+tool-calling loop (parallel calls, retries, suspension, memory). The two are not layered — pick the
+one that matches who owns the conversation.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — an Anthropic tool_use comes back as an OpenAI tool call
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        // A hermetic stub standing in for an Anthropic-shaped endpoint — no network, no real key.
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            String json = Json.stringify(Map.of(
+                    "content", List.of(Map.of("type", "tool_use", "id", "toolu_1",
+                            "name", "get_weather", "input", Map.of("city", "Chennai"))),
+                    "stop_reason", "tool_use",
+                    "usage", Map.of("input_tokens", 10, "output_tokens", 5)));
+            byte[] b = json.getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+
+        try {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort())
+                    .style("anthropic").model("test-model").apiKey("test-key"));
+
+            List<Object> tools = List.of(Map.of("type", "function", "function", Map.of(
+                    "name", "get_weather", "description", "Get the weather",
+                    "parameters", Map.of("type", "object",
+                            "properties", Map.of("city", Map.of("type", "string")),
+                            "required", List.of("city")))));
+
+            Translate.Result res = client.translate(new Translate.Request()
+                    .messages(List.of(Map.of("role", "user", "content", "weather in Chennai?")))
+                    .tools(tools));
+
+            if (!res.finishReason.equals("tool_calls")) throw new AssertionError(res.finishReason);
+            if (res.toolCalls.size() != 1) throw new AssertionError(res.toolCalls.size());
+            // arguments is a JSON STRING — the OpenAI wire shape, echoable byte-for-byte.
+            Map<String, Object> parsed = Json.toMap(res.toolCalls.get(0).arguments());
+            if (!"Chennai".equals(parsed.get("city"))) throw new AssertionError(parsed);
+
+            System.out.println("ok: " + res.toolCalls.get(0).name() + "(" + res.toolCalls.get(0).arguments() + ")");
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 2. The realistic case — nothing ever executes, even with a real Toolkit attached
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        AtomicInteger ran = new AtomicInteger();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            String json = Json.stringify(Map.of(
+                    "content", List.of(Map.of("type", "tool_use", "id", "t1",
+                            "name", "danger", "input", Map.of())),
+                    "stop_reason", "tool_use"));
+            byte[] b = json.getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+
+        Tool danger = NativeTool.of("danger", "must not run",
+                Map.of("type", "object", "properties", Map.of()),
+                callArgs -> { ran.incrementAndGet(); return "RAN"; });
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(List.of(danger)))) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort())
+                    .style("anthropic").model("test-model").apiKey("test-key"));
+
+            for (int i = 0; i < 3; i++) {
+                Translate.Result res = client.translate(new Translate.Request()
+                        .messages(List.of(Map.of("role", "user", "content", "go")))
+                        .toolkit(tk));
+                if (res.toolCalls.size() != 1 || !res.toolCalls.get(0).name().equals("danger")) {
+                    throw new AssertionError(res.toolCalls);
+                }
+            }
+
+            if (ran.get() != 0) throw new AssertionError("translate must never execute a tool: ran=" + ran.get());
+
+            System.out.println("ok: declared 3 times, executed " + ran.get() + " times");
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 3. The full surface — a multi-turn tool exchange survives, on an OpenAI upstream too
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            String json = Json.stringify(Map.of(
+                    "content", List.of(Map.of("type", "text", "text", "It is 31C in Chennai.")),
+                    "stop_reason", "end_turn",
+                    "usage", Map.of("input_tokens", 20, "output_tokens", 8)));
+            byte[] b = json.getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+
+        try {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort())
+                    .style("anthropic").model("test-model").apiKey("test-key"));
+
+            // The CALLER already ran the tool and is handing back the full history, tool result
+            // included — translate's job is only to shape this one round trip correctly.
+            Map<String, Object> assistant = new LinkedHashMap<>();
+            assistant.put("role", "assistant");
+            assistant.put("tool_calls", List.of(Map.of(
+                    "id", "call_abc", "type", "function",
+                    "function", Map.of("name", "get_weather", "arguments", "{\"city\":\"Chennai\"}"))));
+
+            Translate.Result res = client.translate(new Translate.Request()
+                    .messages(List.of(
+                            Map.of("role", "system", "content", "Be terse."),
+                            Map.of("role", "user", "content", "weather in Chennai?"),
+                            assistant,
+                            Map.of("role", "tool", "tool_call_id", "call_abc", "content", "31C, clear"))));
+
+            if (!res.finishReason.equals("stop")) throw new AssertionError(res.finishReason);
+            if (!res.text.equals("It is 31C in Chennai.")) throw new AssertionError(res.text);
+            if (res.usage.totalTokens <= 0) throw new AssertionError("usage not reported");
+
+            System.out.println("ok: " + res.text + " (finish=" + res.finishReason + ")");
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+## Fields
+
+| Member | Type | What it is |
+|---|---|---|
+| `translate(req)` | `Translate.Result` | Declares tools, makes exactly one provider call, returns the translated result. |
+| `Request.messages` | `List<Object>` | OpenAI `messages`, verbatim — including assistant `tool_calls` and `tool`-role results. |
+| `Request.tools` | `List<Object>` | OpenAI `tools`, verbatim. Declaration-only. |
+| `Request.toolkit` | `Toolkit` | An ordinary toolkit, declared to the provider but **never executed**. Composes with `tools`. |
+| `Request.toolChoice` | `Object` | OpenAI `tool_choice`, verbatim. |
+| `Request.system` | `String` | Overrides the system prompt. |
+| `Request.maxTokens` | `int` | Per-provider default when `0`/unset. |
+| `Result.text` | `String` | `""` when the model only called tools. |
+| `Result.toolCalls` | `List<ToolCall>` | In provider order, none dropped; `arguments` is a JSON string. |
+| `Result.finishReason` | `String` | Any tool call ⇒ always `"tool_calls"`; otherwise `stop`/`length`/`content_filter`. |
+| `Result.usage` | `LlmClient.Usage` | This single call's token usage. |
+
+## See also
+
+- [`Translate.openAIMessagesToAnthropic`](/api/java/translate/inbound/) — Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong.
+- [`LlmClient.run`](/api/java/client/run/) — The alternative posture: toolnexus owns the conversation and executes tools itself.
+- [`LlmClient.Hooks`](/api/java/client/hooks/) — `beforeLLM`/`afterLLM` fire exactly once around a `translate` call; tool hooks never fire.

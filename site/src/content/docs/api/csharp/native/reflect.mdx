@@ -1,0 +1,175 @@
+---
+title: "ToolMethodAttribute"
+description: "Derive the schema from the function signature or annotation instead of writing it by hand. — C#."
+sidebar:
+  label: "ToolMethodAttribute"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Annotations.cs">Annotations.cs</a>
+</p>
+
+```csharp
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class ToolMethodAttribute : Attribute
+{
+    public string Name { get; set; } = "";        // defaults to the method name
+    public string Description { get; set; } = "";
+}
+
+[AttributeUsage(AttributeTargets.Parameter)]
+public sealed class ParamAttribute : Attribute
+{
+    public string Name { get; set; } = "";         // defaults to the parameter name
+    public string Description { get; set; } = "";
+    public bool Required { get; set; } = true;
+}
+```
+
+Mark an ordinary public instance method `[ToolMethod]` and it becomes a tool: the JSON-Schema
+`InputSchema` is inferred from the method's own parameter types, `[Param]` adds a per-parameter
+description or an explicit name/required flag, and a `ToolContext` parameter is recognized and
+injected rather than turned into a schema property. Nothing here builds a tool by itself — the
+attributes only *mark* the method; [`Tools.FromObject`](/api/csharp/native/collect/) is what reads the
+attributes and produces the `ITool` list.
+
+## When to use it
+
+You already have (or are writing) a plain C# class whose methods are the logic you want the model to
+call — a service, a repository, a set of internal operations. Annotating each method is less
+ceremony than hand-writing a `NativeTool.Of` schema for every one of them, and the schema can't drift
+from the real parameter list because it's read from that list.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="NativeTool.Of for one or two tools, attributes for a whole class">
+[`NativeTool.Of`](/api/csharp/native/define-tool/) is right for a handful of standalone functions.
+`[ToolMethod]` + [`Tools.FromObject`](/api/csharp/native/collect/) pays off once you have a class with
+several methods that should all become tools — you annotate once, per method, and sweep the whole
+class in one call.
+</Aside>
+
+<Aside type="note" title="No Elixir equivalent">
+Elixir has no reflection-based tool builder — there is no dynamic type inspection to read parameter
+names/types from at runtime the way .NET, JVM, and V8 reflection allow. Use
+`Toolnexus.Native.define_tool/1` with an explicit `input_schema` there instead.
+</Aside>
+
+## Examples
+
+### 1. The smallest annotated method
+
+```csharp test
+using Toolnexus;
+
+var service = new WeatherService();
+var tools = Tools.FromObject(service);
+
+if (tools.Count != 1) throw new Exception($"expected 1 tool, got {tools.Count}");
+// A bare [ToolMethod] with no Name uses the method's own name verbatim — no casing change.
+if (tools[0].Name != "GetWeather") throw new Exception(tools[0].Name);
+if (tools[0].Source != "native") throw new Exception(tools[0].Source);
+
+var res = await tools[0].ExecuteAsync(new Dictionary<string, object?> { ["city"] = "Chennai" });
+if (res.IsError || res.Output != "sunny in Chennai") throw new Exception(res.Output);
+
+Console.WriteLine($"ok: {tools[0].Name} -> {res.Output}");
+
+class WeatherService
+{
+    [ToolMethod(Description = "Current weather for a city")]
+    public string GetWeather(string city) => $"sunny in {city}";
+}
+```
+
+<Aside type="caution" title="Set Name explicitly for a model-friendly tool name">
+`Name` defaults to `method.Name` verbatim — `GetWeather`, not `get_weather`. If you want a
+lowercase/underscored tool name (as most fixtures use), set `[ToolMethod(Name = "...")]`, as the
+next example does.
+</Aside>
+
+### 2. Custom name, `[Param]` descriptions, and an optional parameter
+
+```csharp test
+using Toolnexus;
+
+var svc = new SearchService();
+var tools = Tools.FromObject(svc);
+var search = tools.Single(t => t.Name == "search_docs");
+
+var props = (IDictionary<string, object?>)search.InputSchema["properties"]!;
+var query = (IDictionary<string, object?>)props["query"]!;
+if (query["description"] as string != "What to search for") throw new Exception("query description");
+
+var required = (IEnumerable<object?>)search.InputSchema["required"]!;
+// "limit" is optional (Required = false) — only "query" is required.
+if (!required.Contains("query") || required.Contains("limit")) throw new Exception("required set");
+
+var withLimit = await search.ExecuteAsync(new Dictionary<string, object?> { ["query"] = "toolnexus", ["limit"] = 1 });
+if (withLimit.Output != "1 results for toolnexus") throw new Exception(withLimit.Output);
+
+// Omitting an optional argument does NOT run the method's own C# default — reflection always
+// passes an explicit value, coerced from "missing" to the parameter type's zero value (0 for int).
+var omitted = await search.ExecuteAsync(new Dictionary<string, object?> { ["query"] = "toolnexus" });
+if (omitted.Output != "0 results for toolnexus") throw new Exception(omitted.Output);
+
+Console.WriteLine($"ok: {withLimit.Output} | {omitted.Output}");
+
+class SearchService
+{
+    [ToolMethod(Name = "search_docs", Description = "Search the documentation")]
+    public string Search(
+        [Param(Description = "What to search for")] string query,
+        [Param(Description = "Max results", Required = false)] int limit)
+        => $"{limit} results for {query}";
+}
+```
+
+### 3. `ToolContext` injection, alongside a plain `NativeTool`
+
+```csharp test
+using Toolnexus;
+
+var ops = new OpsService();
+var reflected = Tools.FromObject(ops);
+var whoami = reflected.Single(t => t.Name == "Whoami");
+
+var res = await whoami.ExecuteAsync(new Dictionary<string, object?>(), new ToolContext(timeoutMs: 2_500));
+if (res.Output != "timeout=2500") throw new Exception(res.Output);
+
+// A method's ToolContext parameter is never part of the JSON schema — only real args are.
+if (((IDictionary<string, object?>)whoami.InputSchema["properties"]!).Count != 0)
+    throw new Exception("ctx parameter leaked into the schema");
+
+// Reflected tools sit alongside hand-built NativeTool instances in the same list — the model
+// can't tell them apart; both are Source == "native".
+var manual = NativeTool.Of("ping", "Health check", null, (IDictionary<string, object?> a) => "pong");
+var all = new List<ITool>(reflected) { manual };
+if (all.Select(t => t.Source).Distinct().Single() != "native") throw new Exception("source mismatch");
+
+Console.WriteLine($"ok: {res.Output} | {string.Join(", ", all.Select(t => t.Name))}");
+
+class OpsService
+{
+    [ToolMethod(Description = "Report the deadline the caller imposed")]
+    public string Whoami(ToolContext? ctx) => $"timeout={ctx?.TimeoutMs?.ToString() ?? "none"}";
+}
+```
+
+## Members
+
+| Member | Applies to | What it is |
+|---|---|---|
+| `ToolMethodAttribute.Name` | method | Tool name; defaults to `method.Name`. |
+| `ToolMethodAttribute.Description` | method | What the model reads to decide whether to call it. |
+| `ParamAttribute.Name` | parameter | Schema property name; defaults to the parameter name. |
+| `ParamAttribute.Description` | parameter | Schema `description` for that property. |
+| `ParamAttribute.Required` | parameter | Defaults to `true`. `false` drops it from `required` and lets a C# default apply. |
+| `ToolContext` parameter | parameter | Recognized by type and injected — never becomes a schema property. |
+
+## See also
+
+- [`NativeTool.Of`](/api/csharp/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.
+- [`Tools.FromObject`](/api/csharp/native/collect/) — Sweep a module or class and collect every function marked as a tool.

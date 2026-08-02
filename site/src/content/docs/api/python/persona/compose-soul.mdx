@@ -1,0 +1,147 @@
+---
+title: "compose_soul"
+description: "Build a persona's system prompt from its home directory: identity, memory, skills. — Python."
+sidebar:
+  label: "compose_soul"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/agents/surface.py">python/src/toolnexus/agents/surface.py</a>
+</p>
+
+```python
+def compose_soul(dir: str) -> tuple[str, list[str]]
+```
+
+Reads a persona's home directory for the fixed `BOOTSTRAP_ORDER` of bootstrap files
+(`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `MEMORY.md`),
+folds each present file into a `## <filename>` section, and returns `(soul, found)` — the
+composed system prompt and the ordered list of files that were actually there. Absent files
+are silently skipped; nothing is required.
+
+## When to use it
+
+- You are building a persona's system prompt from files on disk and want the same
+  discovery-order, section-naming and truncation rules [`agent_from_dir`](/api/python/persona/from-dir/)
+  uses internally, without going through the full `Agent` wrapper.
+- You want to inspect *which* bootstrap files a directory actually supplies (`found`) —
+  for a diagnostics tool, a "is this persona configured" check, or a docs generator.
+- You're composing your own agent surface on top of the §7D runtime and want the §7E
+  file-to-soul convention without adopting the rest of `Agent`/`AgentRuntime`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for agent_from_dir when you also want the memory tool and an Agent">
+`compose_soul` is the pure, single-purpose half: directory in, soul string out. If you also
+want the `memory` builtin wired up and an `Agent` object ready for `.run()`/`.as_tool()`, use
+[`agent_from_dir`](/api/python/persona/from-dir/) — it calls `compose_soul` internally and adds
+that machinery. Reach for `compose_soul` directly when you only need the prompt text, or when
+you're building a custom persona surface that does not want `agent_from_dir`'s opinions.
+</Aside>
+
+Composition happens once, at the point you call it — the returned `soul` is a frozen
+snapshot, never re-read mid-session. That is deliberate (SPEC §7E): a long-lived agent's
+system prompt must stay stable within a run so caching (and the model's sense of its own
+identity) doesn't shift turn to turn. To pick up edits — including ones the `memory` tool
+just wrote to `MEMORY.md` — call `compose_soul` again at the *start* of the next session.
+
+## Examples
+
+### 1. The smallest useful call — one file, one section
+
+```python test
+import os
+import tempfile
+
+from toolnexus.agents import compose_soul
+
+with tempfile.TemporaryDirectory() as home:
+    with open(os.path.join(home, "SOUL.md"), "w", encoding="utf-8") as f:
+        f.write("You are Aster, a calm and precise research assistant.")
+
+    soul, found = compose_soul(home)
+
+    assert found == ["SOUL.md"]
+    assert soul == "## SOUL.md\n\nYou are Aster, a calm and precise research assistant."
+
+    print("ok:", found, "|", len(soul), "chars")
+```
+
+### 2. The realistic case — discovery order wins, absent files are skipped
+
+Files are folded in `BOOTSTRAP_ORDER`, not creation order or directory-listing order — write
+`MEMORY.md` before `AGENTS.md` on disk and the composed soul still puts `AGENTS.md` first.
+`IDENTITY.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md` are simply absent here and contribute
+nothing.
+
+```python test
+import os
+import tempfile
+
+from toolnexus.agents import compose_soul
+
+with tempfile.TemporaryDirectory() as home:
+    # Write MEMORY.md first on disk — BOOTSTRAP_ORDER still wins over write order.
+    with open(os.path.join(home, "MEMORY.md"), "w", encoding="utf-8") as f:
+        f.write("- prefers metric units\n- last project: rag_go")
+    with open(os.path.join(home, "AGENTS.md"), "w", encoding="utf-8") as f:
+        f.write("Always cite your sources.")
+    with open(os.path.join(home, "SOUL.md"), "w", encoding="utf-8") as f:
+        f.write("You are Aster.")
+
+    soul, found = compose_soul(home)
+
+    assert found == ["AGENTS.md", "SOUL.md", "MEMORY.md"]  # bootstrap order, not write order
+    assert soul.index("## AGENTS.md") < soul.index("## SOUL.md") < soul.index("## MEMORY.md")
+    assert "prefers metric units" in soul
+    # IDENTITY.md / USER.md / TOOLS.md / HEARTBEAT.md were never written — no sections, no error.
+    assert "## IDENTITY.md" not in soul
+
+    print("ok:", found)
+```
+
+### 3. The full surface — the 2 MB byte cap truncates, never errors
+
+Each bootstrap file is read with a hard 2 MB cap measured in **bytes**. Over the cap, the
+file is truncated at that byte boundary and a notice is appended — the on-disk file itself
+is left untouched.
+
+```python test
+import os
+import tempfile
+
+from toolnexus.agents import compose_soul
+
+CAP = 2 * 1024 * 1024  # MAX_BOOTSTRAP_FILE_BYTES
+
+with tempfile.TemporaryDirectory() as home:
+    oversized_path = os.path.join(home, "AGENTS.md")
+    with open(oversized_path, "wb") as f:
+        f.write(b"x" * (CAP + 1024))  # 1 KB over the cap
+
+    with open(os.path.join(home, "SOUL.md"), "w", encoding="utf-8") as f:
+        f.write("You are Aster.")
+
+    soul, found = compose_soul(home)
+
+    assert found == ["AGENTS.md", "SOUL.md"]
+    assert "[truncated: exceeds 2 MB bootstrap cap]" in soul
+    # The on-disk file is untouched — still oversized.
+    assert os.path.getsize(oversized_path) == CAP + 1024
+
+    print("ok: truncated at", CAP, "bytes; found", found)
+```
+
+## `compose_soul(dir)` fields
+
+| Value | Type | What it is |
+|---|---|---|
+| `soul` | `str` | The composed system prompt: `## <file>` sections, in `BOOTSTRAP_ORDER`, joined with blank lines. |
+| `found` | `list[str]` | The bootstrap filenames actually present, in the same order they appear in `soul`. |
+
+## See also
+
+- [`agent_from_dir`](/api/python/persona/from-dir/) — Point at an agent home directory and get a configured agent back.
+- [`memory_tool`](/api/python/persona/memory-tool/) — The opt-in built-in that lets a persona write durable notes to its own home.

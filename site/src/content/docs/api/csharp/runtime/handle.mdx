@@ -1,0 +1,243 @@
+---
+title: "Handle"
+description: "The state machine for one spawned agent: pending, running, suspended, done. — C#."
+sidebar:
+  label: "Handle"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Agents/Handle.cs">Agents/Handle.cs</a>
+</p>
+
+```csharp
+public sealed class Handle
+{
+    public string Id { get; }
+    public AgentDef Def { get; }
+    public Handle? Parent { get; }
+    public int Depth { get; }
+
+    public string State { get; }          // "idle" | "running" | "suspended" | "closed"
+    public long PoolTokens { get; }
+    public long PoolToolCalls { get; }
+    public DateTimeOffset? WallDeadline { get; }
+
+    public long UsageTotal { get; }
+    public int TurnsTotal { get; }
+    public long ToolCallsTotal { get; }
+
+    public Request? PendingRequest { get; }
+    public AgentResult? LastResult { get; }
+    public int InboxCount { get; }
+    public IReadOnlyList<Handle> Children { get; }
+    public string ConvId { get; }          // == Id — the conversation store key
+}
+```
+
+One live spawned agent. `Handle`s are never constructed directly — `AgentRuntime.Spawn` returns
+them — and every mutable field is a read-only view onto state the runtime owns under its lock.
+State machine: `idle → running → (idle | suspended | closed)`; `suspended → running` **only** via
+the `Answer` to `PendingRequest`. Ids are deterministic and parent-scoped
+(`root/coordinator.1/explore.2`), never random.
+
+## When to use it
+
+You hold a `Handle` — from `Spawn`, from a `Team` graph, from `List()`/`Inspect()` — and want to
+read its live state: is it `idle`/`running`/`suspended`/`closed`, how many tokens/tool calls has it
+spent, what is it waiting on, how many children does it have. `Handle`s are **capabilities**: you
+may `Post`/`Wake`/`Interrupt`/`Close` a handle you hold, and `Wait` only on one you spawned
+yourself.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Read the state; drive it through AgentRuntime">
+`Handle` itself exposes no verbs — every state transition goes through the six
+[`AgentRuntime`](/api/csharp/runtime/runtime/) methods, which take a `Handle` as their first
+argument. Treat `Handle` as the read model and `AgentRuntime` as the write model, the same split
+`HandleView` (from `List`/`Inspect`) offers at arm's length for read-only tooling.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — the state machine, idle → running → idle
+
+```csharp test
+using Toolnexus.Agents;
+
+var llm = new MockLlm(_ => Task.FromResult(MockLlm.Text("all clear")));
+var rt = new AgentRuntime(new RuntimeOptions
+{
+    ApiKey = "test-key",
+    Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
+    Registry = new Dictionary<string, AgentDef> { ["sentry"] = new() { Name = "sentry", Does = "checks status" } },
+});
+
+var h = rt.Spawn(rt.Root, "sentry").Handle!;
+if (h.State != "idle") throw new Exception(h.State);
+if (h.Id != "root/sentry.1") throw new Exception(h.Id); // deterministic, parent-scoped
+
+var wait = rt.WaitAsync(h);
+rt.Wake(h, "status check");
+var result = await wait;
+
+if (h.State != "idle") throw new Exception(h.State); // running -> idle once the turn settles
+if (h.TurnsTotal != 1) throw new Exception($"expected 1 turn, got {h.TurnsTotal}");
+if (h.LastResult?.Text != "all clear") throw new Exception(h.LastResult?.Text);
+var settledState = h.State;
+
+await rt.CloseAsync(rt.Root);
+Console.WriteLine($"ok: {h.Id} idle -> running -> {settledState} ({h.TurnsTotal} turn)");
+
+sealed class MockLlm : System.Net.Http.HttpMessageHandler
+{
+    readonly Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> _respond;
+    public MockLlm(Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> respond) => _respond = respond;
+    protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+        System.Net.Http.HttpRequestMessage request, CancellationToken ct) => _respond(request);
+    public static System.Net.Http.HttpResponseMessage Text(string content) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new System.Net.Http.StringContent(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { role = "assistant", content } } },
+            usage = new { prompt_tokens = 5, completion_tokens = 3, total_tokens = 8 },
+        }), System.Text.Encoding.UTF8, "application/json"),
+    };
+}
+```
+
+### 2. The realistic case — a live ledger: usage rolls up as the turn runs
+
+```csharp test
+using Toolnexus.Agents;
+
+var llm = new MockLlm(_ => Task.FromResult(MockLlm.Text("report filed")));
+var rt = new AgentRuntime(new RuntimeOptions
+{
+    ApiKey = "test-key",
+    Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
+    Registry = new Dictionary<string, AgentDef>
+    {
+        ["clerk"] = new() { Name = "clerk", Does = "files reports", Budget = new Budget { MaxTokens = 1_000 } },
+    },
+});
+
+var h = rt.Spawn(rt.Root, "clerk").Handle!;
+if (h.PoolTokens != 1_000) throw new Exception($"expected the carved pool, got {h.PoolTokens}");
+
+await rt.RunTurnAsync(h, "file the quarterly report");
+
+// The mock's usage (8 tokens) drained live out of the pool — the roll-up IS the ledger.
+if (h.PoolTokens != 992) throw new Exception($"expected 992 remaining, got {h.PoolTokens}");
+if (h.UsageTotal != 8) throw new Exception($"expected 8 spent, got {h.UsageTotal}");
+if (h.LastResult?.Status != "done") throw new Exception(h.LastResult?.Status);
+
+await rt.CloseAsync(rt.Root);
+Console.WriteLine($"ok: pool {h.PoolTokens}/1000 remaining after {h.UsageTotal} tokens spent");
+
+sealed class MockLlm : System.Net.Http.HttpMessageHandler
+{
+    readonly Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> _respond;
+    public MockLlm(Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> respond) => _respond = respond;
+    protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+        System.Net.Http.HttpRequestMessage request, CancellationToken ct) => _respond(request);
+    public static System.Net.Http.HttpResponseMessage Text(string content) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new System.Net.Http.StringContent(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { role = "assistant", content } } },
+            usage = new { prompt_tokens = 5, completion_tokens = 3, total_tokens = 8 },
+        }), System.Text.Encoding.UTF8, "application/json"),
+    };
+}
+```
+
+### 3. Full surface — `Interrupt` mid-turn restores the inbox (never a kill)
+
+```csharp test
+using Toolnexus.Agents;
+
+// A mutable holder so the mock can be re-armed for the SECOND turn with a fresh gate — reusing
+// one already-raced TaskCompletionSource.Task across turns is not the pattern; a fresh gate per
+// turn is (mirrors the port's own AgentRuntimeTests.cs).
+var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+var llm = new MockLlm(async ct =>
+{
+    // parks here until the test lets it through, or Interrupt cancels this very token
+    await gate.Task.WaitAsync(ct);
+    return MockLlm.Text("finished late");
+});
+var rt = new AgentRuntime(new RuntimeOptions
+{
+    ApiKey = "test-key",
+    Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock",
+    Registry = new Dictionary<string, AgentDef> { ["stalled"] = new() { Name = "stalled", Does = "gets interrupted" } },
+});
+
+var h = rt.Spawn(rt.Root, "stalled").Handle!;
+rt.Post(h, new InboxItem("external", "webhook", "urgent update"));
+
+var wait = rt.WaitAsync(h);
+rt.Wake(h, "start working");
+await Task.Delay(60); // let the turn genuinely reach the still-parked mock LLM call
+if (h.State != "running") throw new Exception($"expected the turn mid-flight, got {h.State}");
+
+rt.Interrupt(h); // NOT a kill: running -> idle, drained inbox restored
+var result = await wait;
+
+if (result.Status != "interrupted") throw new Exception(result.Status);
+if (h.State != "idle") throw new Exception(h.State);
+// the posted item was drained INTO the aborted turn, then restored on interrupt — never lost.
+if (h.InboxCount != 1) throw new Exception($"expected the inbox item restored, got {h.InboxCount}");
+
+// Not a kill — a subsequent wake runs normally. Re-arm with a fresh, already-released gate.
+gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+gate.TrySetResult();
+var result2 = await rt.RunTurnAsync(h, "work again");
+if (result2.Status != "done" || result2.Text != "finished late") throw new Exception($"{result2.Status} {result2.Text}");
+
+await rt.CloseAsync(rt.Root);
+Console.WriteLine($"ok: interrupted -> idle (inbox intact), then a normal wake -> {result2.Status}");
+
+sealed class MockLlm : System.Net.Http.HttpMessageHandler
+{
+    readonly Func<CancellationToken, Task<System.Net.Http.HttpResponseMessage>> _respond;
+    public MockLlm(Func<CancellationToken, Task<System.Net.Http.HttpResponseMessage>> respond) => _respond = respond;
+    protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+        System.Net.Http.HttpRequestMessage request, CancellationToken ct) => _respond(ct);
+    public static System.Net.Http.HttpResponseMessage Text(string content) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new System.Net.Http.StringContent(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { role = "assistant", content } } },
+            usage = new { prompt_tokens = 5, completion_tokens = 3, total_tokens = 8 },
+        }), System.Text.Encoding.UTF8, "application/json"),
+    };
+}
+```
+
+<Aside type="caution">
+On a `suspended` handle, `Interrupt` means something different: it cancels the pending `Request`
+itself (the operator's escape hatch out of a stuck approval/auth wait) and returns straight to
+`idle` — there is no in-flight HTTP call to abort in that state.
+</Aside>
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `Id` | `string` | Deterministic, parent-scoped (`root/coordinator.1/explore.2`). |
+| `State` | `string` | `"idle"` \| `"running"` \| `"suspended"` \| `"closed"`. |
+| `PoolTokens` / `PoolToolCalls` | `long` | Remaining budget — live ledger, drains on every ancestor as usage rolls up. |
+| `WallDeadline` | `DateTimeOffset?` | From `Budget.MaxWallMs` at spawn, min'd against the parent's. |
+| `PendingRequest` | `Request?` | Set only while `State == "suspended"`. |
+| `LastResult` | `AgentResult?` | The most recently completed turn's outcome. |
+| `Children` | `IReadOnlyList<Handle>` | Direct children only. |
+| `ConvId` | `string` | `== Id` — the key into the runtime's `ConversationStore`. |
+
+## See also
+
+- [`Agent`](/api/csharp/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`AgentRuntime`](/api/csharp/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`AgentTypes.Budget`](/api/csharp/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

@@ -1,0 +1,45 @@
+---
+title: "Relay tools — declaration-only"
+description: "Declare a tool the host executes, not the library: the call rides out on the suspension. — JavaScript."
+sidebar:
+  label: "suspension / relay"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+<Aside type="caution" title="Not available in JavaScript">
+Go-only today (golang/relay.go). SPEC §10 addendum landed as a Go preview; the other five ports do not ship a relay tool yet.
+</Aside>
+
+Declare a tool the host executes, not the library: the call rides out on the suspension.
+
+## What to use instead
+
+A relay tool declares a schema but runs nothing in toolnexus — the model's call is surfaced (via
+the §10 suspension primitive, `kind: "tool_call"`) and the **host** executes it and feeds the
+output back. It exists so a Go proxy can hold client-executed OpenAI function calling on top of
+the agent loop it already runs.
+
+JavaScript has no suspension-shaped stand-in for this today. For the actual use case relay serves
+— a caller that owns the conversation and executes tools itself — reach for
+[`client.translate(req)`](/api/javascript/translate/translate/) (§11) instead: declare a
+[`Toolkit`](/api/javascript/toolkit/create/) or a raw `tools[]` array, get exactly one provider
+call translated to OpenAI shape, and dispatch the returned `toolCalls` yourself. `translate` is
+**stateless** (no conversation, no suspension, no `waitFor`) where relay is a **stateful**
+in-process trampoline (a parked run per conversation) — and per ADR-0011, `translate` is the
+mechanism this repo now recommends for the pass-through posture across all six ports, relay having
+been the answer only until translate shipped. If your caller already resends full history on every
+request (the standard OpenAI posture), `translate` is a straight fit; if you specifically need
+toolnexus to hold the conversation while a client executes calls turn by turn, there is no JS
+equivalent to `RelayTool` yet.
+
+## See also
+
+- [`pending`](/api/javascript/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`authRequired`](/api/javascript/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`waitFor`](/api/javascript/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`pendingOf`](/api/javascript/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.

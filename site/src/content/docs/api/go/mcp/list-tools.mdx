@@ -1,0 +1,165 @@
+---
+title: "ListMcpTools"
+description: "List what each configured server would expose, plus per-server status, without wiring it into a toolkit. — Go."
+sidebar:
+  label: "ListMcpTools"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/mcp.go">golang/mcp.go</a>
+</p>
+
+```go
+func ListMcpTools(ctx context.Context, input any) (*McpInventory, error)
+```
+
+Connects to every **enabled** server in the config, lists its tool definitions, and
+**disconnects before returning** — no `Tool.Execute` wiring, no live process left running, nothing
+to `Close()`. A bad server is isolated the same way as [`LoadMcp`](/api/go/mcp/load/): its status is
+`"failed"` and the call as a whole still succeeds.
+
+<Aside type="note" title="Unfiltered by design">
+`McpInventory.Tools` is **not** filtered by each server's `ServerConfig.Tools` allowlist — it exists
+so you can *see* every tool a server offers in order to author or validate that allowlist in the
+first place. [`LoadMcp`](/api/go/mcp/load/) is what applies the filter.
+</Aside>
+
+## When to use it
+
+Reach for `ListMcpTools` when you want to **inspect** a server's surface without committing to a
+live connection — building a CLI that prints "what would connect here," validating an `mcp.json`
+in CI, or generating a per-server tool allowlist to hand back to `LoadMcp`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use LoadMcp when you intend to call the tools">
+`ListMcpTools` connects, lists, and disconnects in one shot — the returned `ToolInfo` values have
+no `Execute`. Reach for [`LoadMcp`](/api/go/mcp/load/) / [`LoadMcpWithContext`](/api/go/mcp/load-with-context/)
+instead the moment you actually intend to call a tool; reach for
+[`ParseMcpConfig`](/api/go/mcp/parse-config/) instead of `ListMcpTools` when you only need the
+config itself, with no network or process involved at all.
+</Aside>
+
+## Examples
+
+### 1. Inventory the shared fixture
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	fixture := filepath.Join(os.Getenv("TOOLNEXUS_REPO"), "examples", "mcp.json")
+
+	inv, err := toolnexus.ListMcpTools(context.Background(), fixture)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if inv.Status["example-remote"] != toolnexus.StatusDisabled {
+		log.Fatalf("expected example-remote disabled, got %v", inv.Status["example-remote"])
+	}
+	// Disabled servers never get a Tools entry.
+	if _, ok := inv.Tools["example-remote"]; ok {
+		log.Fatal("expected no tool listing for a disabled server")
+	}
+
+	fmt.Println("ok: example-remote status =", inv.Status["example-remote"])
+}
+```
+
+### 2. A bad server is isolated, and nothing is left connected
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	config := toolnexus.McpConfig{
+		"broken": toolnexus.ServerConfig{
+			Type:    "local",
+			Command: []string{"toolnexus-docs-does-not-exist"},
+		},
+	}
+
+	inv, err := toolnexus.ListMcpTools(context.Background(), config)
+	if err != nil {
+		log.Fatalf("ListMcpTools itself should not fail: %v", err)
+	}
+
+	if inv.Status["broken"] != toolnexus.StatusFailed {
+		log.Fatalf("expected 'broken' marked failed, got %v", inv.Status["broken"])
+	}
+	if len(inv.Tools["broken"]) != 0 {
+		log.Fatalf("expected no tool listing from a failed server, got %d", len(inv.Tools["broken"]))
+	}
+	// ListMcpTools never returns a live client to close — nothing to leak.
+
+	fmt.Println("ok: broken server isolated as", inv.Status["broken"])
+}
+```
+
+### 3. Malformed config fails fast
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	_, err := toolnexus.ListMcpTools(context.Background(), []byte(`{not valid json`))
+	if err == nil {
+		log.Fatal("expected a parse error for malformed config")
+	}
+
+	fmt.Println("ok: malformed config rejected before connecting:", err)
+}
+```
+
+## Parameters
+
+| Parameter | Type | What it does |
+|---|---|---|
+| `ctx` | `context.Context` | Bounds connect + list for every server. |
+| `input` | `any` | Anything [`ParseMcpConfig`](/api/go/mcp/parse-config/) accepts. |
+
+## Return value
+
+| Field | Type | What it holds |
+|---|---|---|
+| `McpInventory.Tools` | `map[string][]ToolInfo` | Server name → its full listed tool defs (original, unprefixed names). |
+| `McpInventory.Status` | `map[string]McpStatus` | Per-server `"connected"`, `"disabled"`, or `"failed"`. |
+
+`ToolInfo` mirrors the `Name`, `Description`, and `InputSchema` a converted `Tool` would carry,
+minus `Execute`.
+
+## See also
+
+- [`LoadMcp`](/api/go/mcp/load/) — read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+- [`LoadMcpWithContext`](/api/go/mcp/load-with-context/) — the ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+- [`ParseMcpConfig`](/api/go/mcp/parse-config/) — parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
+- [`ElicitationToRequest`](/api/go/mcp/elicitation/) — map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.

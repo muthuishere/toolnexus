@@ -1,0 +1,223 @@
+---
+title: "Pending"
+description: "Return a Pending from a tool to park the run until someone answers. — Go."
+sidebar:
+  label: "Pending"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/types.go">golang/types.go</a>
+</p>
+
+```go
+type Request struct {
+	ID        string
+	Kind      string         // "authorization" | "approval" | "input" | ... (open vocabulary)
+	Prompt    string
+	URL       string         `json:"url,omitempty"`
+	Data      map[string]any `json:"data,omitempty"`
+	ExpiresAt string         `json:"expiresAt,omitempty"`
+}
+
+func Pending(req Request) ToolResult
+```
+
+`Pending` is the producer helper for a suspension: it wraps `req` into a `ToolResult` whose
+`Metadata["pending"]` holds the `Request`, `IsError` set to `true`, and `Output` set to a
+human-readable fallback (`req.Prompt`, plus `req.URL` on a new line when present). If
+`req.ID` is empty, a unique id is generated for you. This is sugar — any `ToolResult` whose
+`Metadata["pending"]` is a `Request` counts as a suspension — but it's the way every port
+builds one.
+
+## When to use it
+
+Reach for `Pending` inside any `Tool.Execute` that can't finish in one shot: it needs a human
+to log in, approve something, answer a question, or supply data that isn't available yet.
+Return `Pending(req)` instead of a normal result and the client loop takes over — calling
+`WaitFor` if one is configured, or halting the run with `RunResult.Status == "pending"`
+otherwise.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Building the ToolResult by hand instead?">
+You can construct `ToolResult{IsError: true, Metadata: map[string]any{"pending": req}}`
+yourself — the signature is untouched, so nothing stops you. `Pending` exists because it fills
+in the id (a `pnd-` prefixed, monotonic, collision-resistant value) and the human-readable
+`Output` fallback consistently, so every tool in a toolkit produces the same shape. For the
+specific "login required" case, reach for [`AuthRequired`](/api/go/suspension/auth-required/)
+instead — it's `Pending` pre-filled for `kind:"authorization"`.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — a tool that suspends on first call
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	res := toolnexus.Pending(toolnexus.Request{Kind: "input", Prompt: "Which environment?"})
+
+	if !res.IsError {
+		log.Fatal("a parked call is not a success")
+	}
+	req := toolnexus.PendingOf(res)
+	if req == nil || req.Kind != "input" || req.Prompt != "Which environment?" {
+		log.Fatalf("unexpected request: %+v", req)
+	}
+	if req.ID == "" {
+		log.Fatal("expected a generated correlation id")
+	}
+
+	fmt.Println("ok:", req.Kind, req.ID != "")
+}
+```
+
+### 2. The realistic case — a tool that suspends until it has a decision
+
+`kind` is an open vocabulary — `"approval"` here is just data the host's `WaitFor` interprets
+however it likes; the mechanism doesn't care what the string is.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func approveRefund(amount float64) toolnexus.ToolResult {
+	if amount > 100 {
+		return toolnexus.Pending(toolnexus.Request{
+			Kind:   "approval",
+			Prompt: fmt.Sprintf("Approve a $%.2f refund?", amount),
+			Data:   map[string]any{"amount": amount},
+		})
+	}
+	return toolnexus.ToolResult{Output: "refund processed automatically"}
+}
+
+func main() {
+	small := approveRefund(20)
+	if small.IsError {
+		log.Fatal("small refunds should not suspend")
+	}
+
+	big := approveRefund(500)
+	req := toolnexus.PendingOf(big)
+	if req == nil || req.Kind != "approval" {
+		log.Fatalf("expected an approval suspension, got %+v", req)
+	}
+	if req.Data["amount"] != 500.0 {
+		log.Fatalf("expected the amount to ride Data, got %v", req.Data)
+	}
+
+	fmt.Println("ok:", small.Output, "|", req.Prompt)
+}
+```
+
+### 3. The full surface — wired into a live `Client.Run`, resolved by `WaitFor`
+
+A first call returns `Pending`; the loop calls `WaitFor`, then re-executes the same tool once
+with `ctx.Answer` set — the tool reads `Answer.Data` because this is a `kind:"input"`
+resolution.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"pick_env","arguments":"{}"}}]}}],"usage":{"prompt_tokens":4,"completion_tokens":4,"total_tokens":8}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"deploying to prod"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
+	}))
+	defer srv.Close()
+
+	pickEnv := toolnexus.Tool{
+		Name:        "pick_env",
+		Description: "asks which environment to deploy to",
+		InputSchema: toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+		Source:      toolnexus.SourceCustom,
+		Execute: func(_ map[string]any, ctx *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			if ctx != nil && ctx.Answer != nil {
+				env, _ := ctx.Answer.Data["env"].(string)
+				return toolnexus.ToolResult{Output: env}, nil
+			}
+			return toolnexus.Pending(toolnexus.Request{Kind: "input", Prompt: "Which environment?"}), nil
+		},
+	}
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: []toolnexus.Tool{pickEnv}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "gpt-4o-mini", APIKey: "test-key",
+		WaitFor: func(req toolnexus.Request) (toolnexus.Answer, error) {
+			if req.Kind != "input" {
+				log.Fatalf("unexpected request kind: %q", req.Kind)
+			}
+			return toolnexus.Answer{ID: req.ID, Ok: true, Data: map[string]any{"env": "prod"}}, nil
+		},
+	})
+
+	res, err := client.Run(context.Background(), "deploy the app", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if res.Status != "done" || res.Text != "deploying to prod" {
+		log.Fatalf("unexpected: %+v", res)
+	}
+
+	fmt.Println("ok:", res.Text)
+}
+```
+
+## Request fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `ID` | `string` | Unique per suspension; the correlation key. Auto-generated by `Pending` when empty. |
+| `Kind` | `string` | `"authorization"` \| `"approval"` \| `"input"` \| … — open vocabulary. |
+| `Prompt` | `string` | What is being asked, in human words. |
+| `URL` | `string` (omitempty) | Present when the action happens at a link. |
+| `Data` | `map[string]any` (omitempty) | Kind-specific extra (choices, schema, …). |
+| `ExpiresAt` | `string` (omitempty) | RFC3339; the request is stale after this. |
+
+`Request`/`Answer` keys are fixed across all ports (they serialize over the wire and cross
+agent boundaries) — pinned exactly as above, not idiomatic-cased like `RunResult`.
+
+## See also
+
+- [`AuthRequired`](/api/go/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`WaitFor`](/api/go/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`PendingOf`](/api/go/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`Client.Resume`](/api/go/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.

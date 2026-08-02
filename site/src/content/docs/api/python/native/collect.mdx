@@ -1,0 +1,60 @@
+---
+title: "collectTools — gather decorated functions"
+description: "Sweep a module or class and collect every function marked as a tool. — Python."
+sidebar:
+  label: "native / collect"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
+</p>
+
+<Aside type="caution" title="Not available in Python">
+JS/Java/C# expose an explicit collector; Python, Go and Elixir have no equivalent public symbol.
+</Aside>
+
+Sweep a module or class and collect every function marked as a tool.
+
+## What to use instead
+
+Python has no reflection-based sweep that walks a module or class and pulls out every
+`@tool`-decorated function automatically — there is no registry a decorator writes into, and
+`@tool` (see [`tool`](/api/python/native/reflect/)) rebinds the decorated name to the resulting
+`Tool` in place, so the functions are already sitting wherever you defined them.
+
+Build the same outcome explicitly instead: keep a plain `list[Tool]` (or `dict[str, Tool]`) next to
+where the `@tool`-decorated functions live, and pass it straight to
+[`create_toolkit(extra_tools=...)`](/api/python/toolkit/create/):
+
+```python
+from toolnexus import tool
+
+
+@tool
+def add(a: int, b: int) -> str:
+    """Add two numbers."""
+    return str(a + b)
+
+
+@tool
+def ping() -> str:
+    """Health check."""
+    return "pong"
+
+
+# The "collection" step, done by hand — one list, right where the tools are defined.
+MY_TOOLS = [add, ping]
+```
+
+If the functions genuinely live scattered across a module and a decorator-based registry would be
+convenient, [`inspect.getmembers`](https://docs.python.org/3/library/inspect.html#inspect.getmembers)
+over the module combined with `isinstance(obj, Tool)` gets you the same sweep JS's `collectTools`
+does — `@tool` already leaves a `Tool` instance bound to the name, so filtering a module's members
+by type *is* the collector, without toolnexus needing to ship one.
+
+## See also
+
+- [`define_tool`](/api/python/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.
+- [`tool`](/api/python/native/reflect/) — Derive the schema from the function signature or annotation instead of writing it by hand.

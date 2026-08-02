@@ -1,0 +1,155 @@
+---
+title: "elicitation_to_request"
+description: "Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back. — Python."
+sidebar:
+  label: "elicitation_to_request"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/mcp_source.py">python/src/toolnexus/mcp_source.py</a>
+</p>
+
+```python
+def elicitation_to_request(params: Any) -> Request
+
+def answer_to_elicit_result(answer: Answer) -> ElicitResult
+```
+
+The MCP elicitation bridge: an MCP server can send a **reverse request** mid-`tools/call` — "I need
+a value from the user" (form mode) or "go authorize at this URL" (URL mode). toolnexus does not
+invent a second suspension mechanism for that; it maps the server's `elicitation/create` onto the
+same [§10 `Request`/`Answer`](/api/python/types/request/) contract every other suspension uses, so
+one `wait_for` handles a `question` builtin, an MCP elicitation, and anything else that suspends,
+identically. `elicitation_to_request` does the forward mapping; `answer_to_elicit_result` maps the
+resolved `Answer` back to what the MCP SDK expects.
+
+## When to use it
+
+- You are calling these directly to unit-test a `wait_for` implementation against elicitation
+  shapes, without standing up a real MCP server.
+- You are building an alternative MCP transport or a custom session wrapper and need the same
+  mapping [`load_mcp`](/api/python/mcp/load/) uses internally.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="load_mcp wires this for you">
+Pass `wait_for` to [`load_mcp`](/api/python/mcp/load/) and this mapping happens automatically —
+the elicitation callback registered on each session calls `elicitation_to_request`, awaits your
+`wait_for`, and calls `answer_to_elicit_result` on what comes back. Reach for these two functions
+directly only when you are not going through `load_mcp` at all.
+</Aside>
+
+## Examples
+
+### 1. Form-mode elicitation becomes a kind:"input" Request
+
+A form elicitation carries a JSON Schema for what it wants back. That schema lands in
+`Request.data["schema"]` — the prompt shown to the user is `params.message`.
+
+```python test
+from types import SimpleNamespace
+from toolnexus import elicitation_to_request
+
+# Stand-in for the MCP SDK's ElicitRequestParams (form mode: no `url`).
+params = SimpleNamespace(
+    mode=None,
+    message="What is your shipping postal code?",
+    requestedSchema={"type": "object", "properties": {"postal_code": {"type": "string"}}},
+    url=None,
+)
+
+req = elicitation_to_request(params)
+
+assert req.kind == "input"
+assert req.prompt == "What is your shipping postal code?"
+assert req.data == {"schema": {"type": "object", "properties": {"postal_code": {"type": "string"}}}}
+assert req.url is None
+# Every mapped request gets a fresh id, prefixed for the elicitation bridge.
+assert req.id.startswith("elc-")
+
+print("ok:", req.kind, "->", req.data["schema"]["properties"])
+```
+
+### 2. URL-mode elicitation becomes a kind:"authorization" Request
+
+`mode="url"` skips the schema entirely and carries a `url` instead — the shape a `wait_for` uses to
+show the user a link to go authorize somewhere.
+
+```python test
+from types import SimpleNamespace
+from toolnexus import elicitation_to_request
+
+params = SimpleNamespace(
+    mode="url",
+    message="Please authorize access to your calendar.",
+    url="https://example.com/oauth/authorize?state=abc123",
+    requestedSchema=None,
+)
+
+req = elicitation_to_request(params)
+
+assert req.kind == "authorization"
+assert req.url == "https://example.com/oauth/authorize?state=abc123"
+assert req.prompt == "Please authorize access to your calendar."
+# URL mode never carries a schema.
+assert req.data is None
+
+print("ok:", req.kind, "->", req.url)
+```
+
+### 3. Round-trip an Answer back to an ElicitResult
+
+`ok=True` becomes `accept` (with `data`, or `{}` if none was given); `ok=False` becomes `decline`
+only when `reason == "declined"`, and `cancel` for everything else — a dismissal, an expiry, or no
+reason at all.
+
+```python test
+from toolnexus import Answer, answer_to_elicit_result
+
+accepted = answer_to_elicit_result(Answer(id="elc-1", ok=True, data={"postal_code": "12345"}))
+assert accepted.action == "accept"
+assert accepted.content == {"postal_code": "12345"}
+
+accepted_no_data = answer_to_elicit_result(Answer(id="elc-2", ok=True))
+assert accepted_no_data.action == "accept"
+assert accepted_no_data.content == {}
+
+declined = answer_to_elicit_result(Answer(id="elc-3", ok=False, reason="declined"))
+assert declined.action == "decline"
+
+cancelled = answer_to_elicit_result(Answer(id="elc-4", ok=False, reason="expired"))
+assert cancelled.action == "cancel"
+
+no_reason = answer_to_elicit_result(Answer(id="elc-5", ok=False))
+assert no_reason.action == "cancel"
+
+print("ok:", accepted.action, declined.action, cancelled.action, no_reason.action)
+```
+
+## `elicitation_to_request` mapping
+
+| `params` field | Condition | `Request` field |
+|---|---|---|
+| — | always | `id` — generated, prefixed `elc-` |
+| `mode == "url"` | true | `kind = "authorization"` |
+| `mode == "url"` | false | `kind = "input"` |
+| `message` | — | `prompt` (empty string if absent) |
+| `url` | `mode == "url"` and present | `url` |
+| `requestedSchema` | `mode != "url"` and present | `data = {"schema": requestedSchema}` |
+
+## `answer_to_elicit_result` mapping
+
+| `Answer` | `ElicitResult.action` |
+|---|---|
+| `ok=True` | `"accept"` (`content = data or {}`) |
+| `ok=False, reason="declined"` | `"decline"` |
+| `ok=False`, any other reason (or none) | `"cancel"` |
+
+## See also
+
+- [`load_mcp`](/api/python/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+- [`load_mcp_with_context`](/api/python/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+- [`list_mcp_tools`](/api/python/mcp/list-tools/) — List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+- [`parse_mcp_config`](/api/python/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.

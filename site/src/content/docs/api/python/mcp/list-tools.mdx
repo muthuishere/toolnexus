@@ -1,0 +1,158 @@
+---
+title: "list_mcp_tools"
+description: "List what each configured server would expose, plus per-server status, without wiring it into a toolkit. — Python."
+sidebar:
+  label: "list_mcp_tools"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/mcp_source.py">python/src/toolnexus/mcp_source.py</a>
+</p>
+
+```python
+async def list_mcp_tools(
+    input: str | dict[str, Any],
+    *,
+    cancel: asyncio.Event | None = None,
+) -> McpInventory
+```
+
+Connects to every enabled server, lists its tool definitions, and **disconnects before
+returning** — no `Tool.execute`, no toolkit, nothing left running. The returned tool defs use each
+server's **original, unprefixed** names, and are the **unfiltered** set (ignoring any per-server
+`tools` allowlist in config) — this is the call that exists to author and validate those
+allowlists, so it needs to show you everything a server has, not the narrowed view.
+
+## When to use it
+
+- Building a config UI or a `mcp.json` validator: show what a server *would* expose, without
+  committing to running it.
+- Deciding a per-server `tools` allowlist — you need the full, unfiltered tool list to write it
+  against.
+- A one-shot inventory (a CLI `--list-tools` flag, a CI check) where holding connections open past
+  the listing would be pure waste.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use load_mcp when you intend to actually call the tools">
+[`load_mcp`](/api/python/mcp/load/) keeps every connection open and returns tools with a working
+`execute` — that is what a toolkit or client loop needs. `list_mcp_tools` intentionally throws the
+connections away; the `ToolInfo` it returns has no `execute`, only `name` / `description` /
+`input_schema`.
+</Aside>
+
+## Examples
+
+<Aside type="note" title="Hermetic on purpose">
+No example dials a real MCP server — same constraint as `load_mcp`. These prove the two things
+specific to this call: disabled bookkeeping, and that a failed server is isolated and simply
+absent from `tools`, not present as an empty entry.
+</Aside>
+
+### 1. Disabled servers report status, and nothing else
+
+```python test
+import asyncio
+from toolnexus import list_mcp_tools, parse_mcp_config
+
+config = parse_mcp_config("examples/mcp.json")
+for cfg in config.values():
+    cfg["enabled"] = False
+
+
+async def main():
+    inventory = await list_mcp_tools(config)
+
+    assert inventory.tools == {}
+    assert inventory.status == {"everything": "disabled", "example-remote": "disabled"}
+
+    print("ok:", inventory.status)
+
+
+asyncio.run(main())
+```
+
+### 2. A failed server has no entry in `tools`
+
+`inventory.tools` only gets a key for a server that actually listed successfully — a failed
+connect shows up in `status`, not as an empty list.
+
+```python test
+import asyncio
+from toolnexus import list_mcp_tools
+
+config = {
+    "broken": {
+        "type": "local",
+        "command": ["/no/such/binary-toolnexus-docs-example"],
+    },
+}
+
+
+async def main():
+    inventory = await list_mcp_tools(config)
+
+    assert inventory.status["broken"] == "failed"
+    # No key at all for a server that never listed anything — not `[]`.
+    assert "broken" not in inventory.tools
+
+    print("ok:", inventory.status, "| tools:", inventory.tools)
+
+
+asyncio.run(main())
+```
+
+### 3. Parse first, decide what to inventory, run it, confirm nothing lingers
+
+The realistic shape: use [`parse_mcp_config`](/api/python/mcp/parse-config/) to see what a config
+declares, then call `list_mcp_tools` on the part you actually want inventoried. Here every server
+is disabled, so the call has nothing to connect to — proving the "disconnect before returning"
+contract trivially, since there is nothing left to disconnect.
+
+```python test
+import asyncio
+from toolnexus import list_mcp_tools, parse_mcp_config
+
+config = parse_mcp_config("examples/mcp.json")
+assert sorted(config.keys()) == ["everything", "example-remote"]
+for cfg in config.values():
+    cfg["enabled"] = False
+
+
+async def main():
+    inventory = await list_mcp_tools(config, cancel=asyncio.Event())
+
+    assert inventory.tools == {}
+    assert set(inventory.status) == {"everything", "example-remote"}
+    assert all(v == "disabled" for v in inventory.status.values())
+
+    print("ok:", sorted(inventory.status))
+
+
+asyncio.run(main())
+```
+
+## Options
+
+| Parameter | Type | What it does |
+|---|---|---|
+| `input` | `str \| dict` | Same accepted shapes as `load_mcp` — see [`parse_mcp_config`](/api/python/mcp/parse-config/). |
+| `cancel` | `asyncio.Event \| None` | Same whole-call abort semantics as [`load_mcp_with_context`](/api/python/mcp/load-with-context/). |
+
+## Returns — `McpInventory`
+
+| Member | Type | What it is |
+|---|---|---|
+| `tools` | `dict[str, list[ToolInfo]]` | Server name → its listed, **unfiltered** tool defs (original names). Only present for a server that listed successfully. |
+| `status` | `dict[str, McpStatus]` | Per-server `"connected"`, `"disabled"`, or `"failed"` — same vocabulary as `load_mcp`. |
+
+`ToolInfo` carries `name`, `description`, `input_schema` — no `execute`.
+
+## See also
+
+- [`load_mcp`](/api/python/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+- [`load_mcp_with_context`](/api/python/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+- [`parse_mcp_config`](/api/python/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
+- [`elicitation_to_request`](/api/python/mcp/elicitation/) — Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.

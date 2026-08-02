@@ -1,0 +1,137 @@
+---
+title: "BuiltinTools.create"
+description: "Construct every built-in tool directly, outside a toolkit. — Java."
+sidebar:
+  label: "BuiltinTools.create"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/BuiltinTools.java">BuiltinTools.java</a>
+</p>
+
+```java
+public static List<Tool> create()
+```
+
+Builds all ten built-in tools — `bash`, `read`, `write`, `edit`, `grep`, `glob`, `webfetch`,
+`question`, `apply_patch`, `todowrite`, in that fixed order — with no filtering and no config.
+Each is source `"builtin"`, with the same name and `inputSchema` as opencode's built-ins, and
+each obeys the uniform contract: a failure is `ToolResult{isError:true}`, never a thrown
+exception across the tool boundary.
+
+## When to use it
+
+When you want the raw, complete built-in set — every tool, unconditionally — to inspect, filter
+yourself with custom logic, or register directly without going through a `Toolkit` or a config
+object at all.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="create is unconditional, select respects a config">
+[`BuiltinTools.select(cfg)`](/api/java/builtins/select/) is `create()` plus the on/off and
+per-name filtering a `Toolkit.Options.builtins` config expresses. Reach for `create()` directly
+when there is no config to honor — you always want all ten — or when you are writing your own
+filtering logic on top and don't want `select`'s particular rules getting in the way.
+</Aside>
+
+`Toolkit.create` with no `builtins` option set is effectively `create()` merged with every other
+source — the ten built-ins ship on by default.
+
+## Examples
+
+### 1. All ten, in the documented fixed order
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+
+public class Example {
+    public static void main(String[] args) {
+        List<Tool> tools = BuiltinTools.create();
+
+        List<String> expected = List.of(
+            "bash", "read", "write", "edit", "grep", "glob",
+            "webfetch", "question", "apply_patch", "todowrite"
+        );
+        List<String> names = tools.stream().map(Tool::name).toList();
+        if (!names.equals(expected)) throw new AssertionError(names);
+
+        for (Tool t : tools) {
+            if (!t.source().equals("builtin")) throw new AssertionError(t.name() + " source");
+        }
+
+        System.out.println("ok: " + names);
+    }
+}
+```
+
+### 2. Calling `read` directly — a failure is a `ToolResult`, not a thrown exception
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    static Tool find(List<Tool> tools, String name) {
+        for (Tool t : tools) if (t.name().equals(name)) return t;
+        throw new IllegalStateException("no such builtin: " + name);
+    }
+
+    public static void main(String[] args) throws Exception {
+        Path tmp = Files.createTempFile("toolnexus-docs", ".txt");
+        Files.writeString(tmp, "line one\nline two\nline three\n");
+
+        Tool read = find(BuiltinTools.create(), "read");
+
+        ToolResult ok = read.execute(Map.of("path", tmp.toString()), new ToolContext());
+        if (ok.isError() || !ok.output().contains("line two")) throw new AssertionError(ok.output());
+
+        // A missing file is a tool ERROR, not an exception.
+        ToolResult missing = read.execute(Map.of("path", tmp.toString() + ".does-not-exist"), new ToolContext());
+        if (!missing.isError()) throw new AssertionError("expected isError");
+
+        System.out.println("ok: read " + ok.output().lines().count() + " lines, missing-file handled");
+    }
+}
+```
+
+### 3. Registering the raw set into a `Toolkit`, without going through `builtins(cfg)`
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+
+public class Example {
+    public static void main(String[] args) {
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+            // builtins(...) was never set on Options — but create() gives the same ten tools
+            // directly, useful when you want to register a hand-picked subset instead.
+            for (Tool t : BuiltinTools.create()) {
+                if (tk.get(t.name()) == null) tk.register(t);
+            }
+
+            if (tk.get("bash") == null) throw new AssertionError("bash missing");
+            if (!tk.get("bash").source().equals("builtin")) throw new AssertionError("source");
+
+            System.out.println("ok: " + tk.toOpenAI().size() + " tools registered");
+        }
+    }
+}
+```
+
+## Fields
+
+| Member | Type | What it is |
+|---|---|---|
+| `create()` | `List<Tool>` | All ten built-ins, fixed order, `source() == "builtin"` on each. |
+| Failure contract | — | Every built-in returns `ToolResult{isError:true}` on failure — never throws across `execute`. |
+| Paths | — | Resolve relative to the process working directory unless absolute. |
+
+## See also
+
+- [`BuiltinTools.select`](/api/java/builtins/select/) — the config-aware filter built on top of `create()`.
+- [`Toolkit.create`](/api/java/toolkit/create/) — assembles built-ins alongside MCP, skills, native and A2A tools.

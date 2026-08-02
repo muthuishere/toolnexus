@@ -1,0 +1,230 @@
+---
+title: "NativeToolReflect"
+description: "Derive the schema from the function signature or annotation instead of writing it by hand. — Go."
+sidebar:
+  label: "NativeToolReflect"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/native.go">golang/native.go</a>
+</p>
+
+```go
+func NativeToolReflect[T any](
+	name, description string,
+	fn func(ctx context.Context, in T) (string, error),
+) Tool
+```
+
+The generic sibling of [`NativeTool`](/api/go/native/define-tool/): instead of writing a JSON-Schema
+object by hand, you give it a Go struct type `T`, and it derives the schema from `T`'s fields via
+reflection over their `json` tags — then decodes the model's arguments into a `T` before your
+function ever runs. No `map[string]any` type assertions inside `fn`.
+
+<Aside type="note" title="Type mapping and required-ness">
+`string`→`string`, `int`/`float*`→`number`, `bool`→`boolean`, slice/array→`array`, struct/map→
+`object`. A field is **required** unless its `json` tag carries `,omitempty`; `json:"-"` drops the
+field from the schema entirely. Pointer fields are dereferenced for the purpose of type mapping.
+</Aside>
+
+## When to use it
+
+Reach for `NativeToolReflect` whenever your tool's input has a **fixed shape** you'd otherwise write
+out as a struct anyway — most native tools. The schema and the decode step both come from one
+source of truth: the struct definition.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Stay with NativeTool for dynamic or schema-construct-heavy inputs">
+[`NativeTool`](/api/go/native/define-tool/) is still the right call when the args are genuinely
+dynamic, when you need a schema construct reflection cannot express (`enum`, `minimum`, `oneOf`), or
+when the tool takes no input at all. Reach for `NativeToolReflect` instead the moment the args are a
+plain struct — it removes the schema/decode duplication.
+</Aside>
+
+## Examples
+
+### 1. A struct in, a schema and a decoded value out
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+type ShoutInput struct {
+	Text string `json:"text"`
+}
+
+func main() {
+	shout := toolnexus.NativeToolReflect[ShoutInput](
+		"shout",
+		"Uppercase the given text",
+		func(ctx context.Context, in ShoutInput) (string, error) {
+			return in.Text + "!", nil
+		},
+	)
+
+	if shout.Name != "shout" || shout.Source != toolnexus.SourceNative {
+		log.Fatalf("unexpected tool: %+v", shout)
+	}
+	if shout.InputSchema["type"] != "object" {
+		log.Fatalf("unexpected schema: %v", shout.InputSchema)
+	}
+	props := shout.InputSchema["properties"].(map[string]any)
+	if _, ok := props["text"]; !ok {
+		log.Fatalf("expected a 'text' property, got %v", props)
+	}
+
+	res, err := shout.Execute(map[string]any{"text": "hello"}, nil)
+	if err != nil || res.IsError || res.Output != "hello!" {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+
+	fmt.Println("ok:", res.Output)
+}
+```
+
+### 2. `omitempty` controls what's required, `json:"-"` drops a field
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+type SearchInput struct {
+	Query   string `json:"query"`
+	Limit   int    `json:"limit,omitempty"` // optional
+	Secret  string `json:"-"`               // never in the schema
+}
+
+func main() {
+	search := toolnexus.NativeToolReflect[SearchInput](
+		"search",
+		"Search the docs",
+		func(ctx context.Context, in SearchInput) (string, error) {
+			return fmt.Sprintf("query=%s limit=%d", in.Query, in.Limit), nil
+		},
+	)
+
+	schema := search.InputSchema
+	props := schema["properties"].(map[string]any)
+	if _, ok := props["secret"]; ok {
+		log.Fatal("expected json:\"-\" to drop the field from the schema")
+	}
+
+	required, _ := schema["required"].([]string)
+	if len(required) != 1 || required[0] != "query" {
+		log.Fatalf("expected only 'query' required, got %v", required)
+	}
+
+	// limit is omitted entirely — the decoder still zero-values it.
+	res, err := search.Execute(map[string]any{"query": "adapters"}, nil)
+	if err != nil || res.IsError {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+
+	fmt.Println("ok:", res.Output)
+}
+```
+
+### 3. Numbers, nested structs, and registering on a toolkit
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+type Address struct {
+	City string `json:"city"`
+}
+
+type OrderInput struct {
+	Quantity float64 `json:"quantity"`
+	Ship     Address `json:"ship"`
+}
+
+func main() {
+	order := toolnexus.NativeToolReflect[OrderInput](
+		"place_order",
+		"Place an order for delivery",
+		func(ctx context.Context, in OrderInput) (string, error) {
+			return fmt.Sprintf("%v units to %s", in.Quantity, in.Ship.City), nil
+		},
+	)
+
+	props := order.InputSchema["properties"].(map[string]any)
+	qty := props["quantity"].(map[string]any)
+	if qty["type"] != "number" {
+		log.Fatalf("expected quantity to map to number, got %v", qty)
+	}
+	ship := props["ship"].(map[string]any)
+	if ship["type"] != "object" {
+		log.Fatalf("expected a nested object schema for ship, got %v", ship)
+	}
+
+	res, err := order.Execute(map[string]any{
+		"quantity": 3,
+		"ship":     map[string]any{"city": "Chennai"},
+	}, nil)
+	if err != nil || res.IsError || res.Output != "3 units to Chennai" {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{
+		ExtraTools: []toolnexus.Tool{order},
+		Builtins:   false,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+	if _, ok := tk.Get("place_order"); !ok {
+		log.Fatal("expected the tool on the toolkit")
+	}
+
+	fmt.Println("ok:", res.Output)
+}
+```
+
+## Type parameters and arguments
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `T` | any struct type | The shape of the tool's input; drives both the emitted schema and the decode. |
+| `name` | `string` | The name the model calls. |
+| `description` | `string` | What the model reads to decide whether to call it. |
+| `fn` | `func(context.Context, T) (string, error)` | Your code — receives an already-decoded `T`, not `map[string]any`. |
+
+## Struct-to-schema mapping
+
+| Go kind | JSON-Schema `type` |
+|---|---|
+| `string` | `string` |
+| `bool` | `boolean` |
+| `int*`, `uint*`, `float*` | `number` |
+| slice / array | `array`, with `items` from the element type |
+| `map`, nested `struct` | `object` (structs recurse into their own field schema) |
+
+## See also
+
+- [`NativeTool`](/api/go/native/define-tool/) — wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.

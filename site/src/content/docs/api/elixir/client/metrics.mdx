@@ -1,0 +1,193 @@
+---
+title: "Toolnexus.Client.MetricsRegistry"
+description: "Emit one metric event per model call and per tool call: tokens, latency, outcome. — Elixir."
+sidebar:
+  label: "Toolnexus.Client.MetricsRegistry"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/client.ex">elixir/lib/toolnexus/client.ex</a>
+</p>
+
+```elixir
+# Client.create/1 options:
+#   on_metric: (event_map() -> any())   # forward anywhere — statsd, logs, OTel
+#   registry:  pid() | nil              # share ONE registry across many clients
+
+@spec metrics(Toolnexus.Client.t()) :: String.t()
+def metrics(client)   # Prometheus text exposition — byte-identical across all six ports
+```
+
+Two outputs from one internal instrumentation, both opt-in and zero-cost when unused.
+`:on_metric` receives a readable event map at every LLM call, tool call, and run — forward it
+anywhere. `Client.metrics/1` accumulates those same events into a tiny in-memory registry and
+renders them as **Prometheus text exposition format** — no third-party dependency, and its
+*text* is byte-identical across every toolnexus port.
+
+## When to use it
+
+- **You already scrape Prometheus** — mount `Client.metrics(client)` at `GET /metrics` and you're
+  done; no exporter library, no cardinality surprises (labels are bounded — no per-request `id`).
+- **You want events, not counters** — `:on_metric` gets a semantic record (`event: "llm"` /
+  `"tool"` / `"run"`) per significant point; pipe it into statsd, structured logs, or your own
+  OTel span.
+- **Several clients should share one scrape endpoint** — pass a `MetricsRegistry` pid you created
+  yourself as `:registry` and every client using it accumulates into the same counters.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for hooks when you need to change behavior, not just observe it">
+`:on_metric` and `Client.metrics/1` are strictly observational — nothing you do with an event can
+change what the client does next. [`hooks`](/api/elixir/client/hooks/) is the seam for that
+(deny a tool, rewrite a request, redact a result). Use metrics for "what happened", hooks for
+"what should happen".
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — `metrics/1` before any activity
+
+Valid Prometheus text renders even with zero traffic: just the `# HELP`/`# TYPE` header lines,
+in a fixed order, ending with a trailing newline.
+
+```elixir test
+alias Toolnexus.Client
+
+client = Client.create(base_url: "http://localhost", style: "openai", model: "gpt-x", api_key: "k")
+
+text = Client.metrics(client)
+
+true = String.starts_with?(text, "# HELP toolnexus_llm_requests_total Total LLM requests.\n")
+true = String.contains?(text, "# TYPE toolnexus_tool_calls_total counter")
+true = String.ends_with?(text, "\n")
+# No series lines yet — only the metric headers.
+false = String.contains?(text, "toolnexus_llm_requests_total{")
+
+IO.puts("ok: #{text |> String.split("\n") |> length()} header lines before any traffic")
+```
+
+### 2. A realistic case — scrape after a run with a tool call
+
+```elixir test
+alias Toolnexus.{Client, Context, Tool, ToolResult}
+
+add_tool = %Tool{
+  name: "add",
+  description: "Add two numbers",
+  input_schema: %{"type" => "object", "properties" => %{}},
+  source: "native",
+  execute: fn args, %Context{} -> ToolResult.ok(to_string(trunc(args["a"] + args["b"]))) end
+}
+
+{:ok, calls} = Agent.start_link(fn -> 0 end)
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  n = Agent.get_and_update(calls, fn c -> {c + 1, c + 1} end)
+
+  resp =
+    if n == 1 do
+      %{
+        "choices" => [
+          %{
+            "message" => %{
+              "role" => "assistant",
+              "content" => nil,
+              "tool_calls" => [%{"id" => "c1", "type" => "function", "function" => %{"name" => "add", "arguments" => ~s({"a":2,"b":3})}}]
+            }
+          }
+        ],
+        "usage" => %{"prompt_tokens" => 6, "completion_tokens" => 4, "total_tokens" => 10}
+      }
+    else
+      %{"choices" => [%{"message" => %{"role" => "assistant", "content" => "5"}}], "usage" => %{"prompt_tokens" => 4, "completion_tokens" => 1, "total_tokens" => 5}}
+    end
+
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client =
+  Client.create(base_url: "http://localhost", style: "openai", model: "gpt-x", api_key: "test-key", http_options: [plug: plug])
+
+_result = Client.run(client, "add 2 and 3", [add_tool])
+
+text = Client.metrics(client)
+
+true = String.contains?(text, ~s(toolnexus_llm_requests_total{model="gpt-x",status="ok"} 2))
+true = String.contains?(text, ~s(toolnexus_tool_calls_total{tool="add",source="native",is_error="false",pending="false"} 1))
+true = String.contains?(text, "toolnexus_llm_tokens_total{type=\"prompt\"}")
+
+IO.puts("ok: scraped after 2 LLM calls + 1 tool call")
+```
+
+### 3. The full surface — `:on_metric` forwarding, and a shared `:registry`
+
+`:registry` lets several clients accumulate into one `MetricsRegistry` — pass it explicitly and
+`Client.metrics/1` on either client renders the combined totals.
+
+```elixir test
+alias Toolnexus.Client
+alias Toolnexus.Client.MetricsRegistry
+
+{:ok, forwarded} = Agent.start_link(fn -> [] end)
+shared_registry = MetricsRegistry.new()
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  resp = %{"choices" => [%{"message" => %{"role" => "assistant", "content" => "hi"}}], "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}}
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+on_metric = fn ev -> Agent.update(forwarded, fn f -> f ++ [ev.event] end) end
+
+client_a =
+  Client.create(base_url: "http://localhost", style: "openai", model: "a", api_key: "k", http_options: [plug: plug], on_metric: on_metric, registry: shared_registry)
+
+client_b =
+  Client.create(base_url: "http://localhost", style: "openai", model: "b", api_key: "k", http_options: [plug: plug], on_metric: on_metric, registry: shared_registry)
+
+_ = Client.run(client_a, "hi", [])
+_ = Client.run(client_b, "hi", [])
+
+# Both clients' calls landed in the SAME registry.
+combined = Client.metrics(client_a)
+true = combined == Client.metrics(client_b)
+true = String.contains?(combined, ~s(toolnexus_llm_requests_total{model="a",status="ok"} 1))
+true = String.contains?(combined, ~s(toolnexus_llm_requests_total{model="b",status="ok"} 1))
+
+# on_metric saw every "llm" and "run" event from both clients, in order.
+true = Agent.get(forwarded, & &1) == ["llm", "run", "llm", "run"]
+
+IO.puts("ok: 2 clients, 1 registry, #{length(Agent.get(forwarded, & &1))} forwarded events")
+```
+
+## `on_metric` event shapes
+
+| `event` | Fields | Fires |
+|---|---|---|
+| `"llm"` | `model`, `status` (`"ok"`/`"error"`), `ms`, `prompt_tokens`, `completion_tokens` | Once per LLM call. |
+| `"tool"` | `tool`, `source`, `is_error`, `ms`, `pending?` | Once per tool call (including a suspended one, `pending: true`). |
+| `"run"` | `model`, `turns`, `tool_calls`, `total_tokens`, `ms`, `error?` | Once per `run`/`ask`/`stream`. |
+
+## Prometheus series (`Client.metrics/1`)
+
+| Metric | Labels | Type |
+|---|---|---|
+| `toolnexus_llm_requests_total` | `model`, `status` | counter |
+| `toolnexus_llm_tokens_total` | `type` (`prompt`/`completion`) | counter |
+| `toolnexus_llm_request_duration_seconds` | `model` | histogram |
+| `toolnexus_tool_calls_total` | `tool`, `source`, `is_error`, `pending` | counter |
+| `toolnexus_tool_duration_seconds` | `tool` | histogram |
+| `toolnexus_run_errors_total` | `model` | counter |
+
+Histogram buckets (seconds): `[0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, +Inf]`. Series within
+a metric are sorted lexicographically by rendered label string — this ordering, the bucket set,
+and label escaping are all part of the byte-identical contract.
+
+## See also
+
+- [`Toolnexus.Client.create`](/api/elixir/client/create/) — `:on_metric` and `:registry` are options here.
+- [`Toolnexus.Client.create`](/api/elixir/client/hooks/) — the seam for changing behavior, not just observing it.
+- [`Toolnexus.Client.run`](/api/elixir/client/run/) · [`Toolnexus.Client.stream`](/api/elixir/client/stream/) — both emit the same events.

@@ -1,0 +1,268 @@
+---
+title: "httpTool"
+description: "Turn an HTTP endpoint into a tool: URL, method, headers with ${ENV} expansion, and a schema. — JavaScript."
+sidebar:
+  label: "httpTool"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/http.ts">js/src/http.ts</a>
+</p>
+
+```ts
+function httpTool(opts: {
+  name: string
+  description: string
+  method: string
+  url: string                       // may contain {placeholders} filled from args
+  headers?: Record<string, string>  // values expand ${ENV_VAR} at call time
+  query?: string[]                  // arg names sent as querystring
+  body?: "json" | "form" | "raw"
+  inputSchema?: JSONSchema
+  timeout?: number                  // ms, default 30000
+  resultMode?: "text" | "json" | "status+text"
+}): Tool
+```
+
+Declares a REST endpoint as a [`Tool`](/api/javascript/types/tool/), with no client code at all.
+The declaration decides where each argument goes — into the path, the querystring, or the body —
+and the returned tool does the `fetch`, the timeout, the cancellation and the error mapping.
+
+## When to use it
+
+- An internal service already has the capability and you just want the model to reach it.
+- A third-party REST API you would otherwise have to wrap in an MCP server.
+- Anywhere the auth is a header and the header value belongs in the environment, not in code.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use defineTool instead when the call needs logic">
+[`defineTool`](/api/javascript/native/define-tool/) wraps *your* function, so you can paginate,
+retry, sign a request, reshape a response, or call three endpoints and merge them. `httpTool` is
+declarative and covers one request with no branching. The moment you find yourself wanting an `if`
+around the call, switch to `defineTool` and use `fetch` directly.
+</Aside>
+
+For a *whole* remote toolset rather than one endpoint, a remote MCP server
+([`loadMcp`](/api/javascript/mcp/load/)) or an A2A agent is the better fit — those advertise their
+own tools instead of you declaring each one.
+
+## Examples
+
+All three examples run against a throwaway `node:http` server on an ephemeral port, so they are
+fully hermetic — no public URL is ever contacted.
+
+### 1. A GET endpoint as a tool
+
+With `method: "GET"`, **every** remaining argument becomes a querystring parameter — you do not
+need `query` at all.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { httpTool } from "toolnexus"
+
+// --- a local stand-in for the real API ---
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "application/json" })
+  res.end(JSON.stringify({ path: req.url, method: req.method }))
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()))
+const port = (server.address() as { port: number }).port
+
+const search = httpTool({
+  name: "search_docs",
+  description: "Search the documentation",
+  method: "GET",
+  url: `http://127.0.0.1:${port}/search`,
+  inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] },
+})
+
+// It is an ordinary Tool, tagged with the http source.
+assert.equal(search.name, "search_docs")
+assert.equal(search.source, "http")
+
+const res = await search.execute({ q: "adapters" })
+assert.equal(res.isError, false)
+assert.equal(JSON.parse(res.output).path, "/search?q=adapters")
+// The HTTP status always comes back as metadata.
+assert.equal(res.metadata?.status, 200)
+
+server.close()
+console.log("ok:", JSON.parse(res.output).path)
+```
+
+### 2. Path placeholders, a JSON body, and an `${ENV}` auth header
+
+A `{name}` in the URL is filled from the matching argument and **consumed** — it is not repeated in
+the query or the body. On a non-GET request, whatever arguments are left become the body.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { httpTool } from "toolnexus"
+
+const seen: { url?: string; body: string; auth?: string; ct?: string }[] = []
+const server = http.createServer((req, res) => {
+  let body = ""
+  req.on("data", (c) => (body += c))
+  req.on("end", () => {
+    seen.push({
+      url: req.url,
+      body,
+      auth: req.headers.authorization,
+      ct: req.headers["content-type"],
+    })
+    res.writeHead(201, { "Content-Type": "application/json" })
+    res.end(JSON.stringify({ created: true }))
+  })
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()))
+const port = (server.address() as { port: number }).port
+
+// Secrets are read from the environment at CALL time and never logged.
+process.env.DOCS_API_TOKEN = "YOUR_KEY_HERE"
+
+const comment = httpTool({
+  name: "add_comment",
+  description: "Comment on an issue",
+  method: "POST",
+  url: `http://127.0.0.1:${port}/issues/{issue}/comments`,
+  headers: { Authorization: "Bearer ${DOCS_API_TOKEN}" },
+  // Explicitly routed to the querystring instead of the body.
+  query: ["notify"],
+  inputSchema: {
+    type: "object",
+    properties: {
+      issue: { type: "string" },
+      notify: { type: "boolean" },
+      text: { type: "string" },
+    },
+    required: ["issue", "text"],
+  },
+})
+
+const res = await comment.execute({ issue: "42", notify: true, text: "looks good" })
+assert.equal(res.isError, false)
+assert.equal(res.metadata?.status, 201)
+
+const call = seen[0]
+// `issue` went into the PATH, `notify` into the QUERY, `text` into the BODY.
+assert.equal(call.url, "/issues/42/comments?notify=true")
+assert.deepEqual(JSON.parse(call.body), { text: "looks good" })
+assert.equal(call.ct, "application/json")
+// ${DOCS_API_TOKEN} expanded from process.env.
+assert.equal(call.auth, "Bearer YOUR_KEY_HERE")
+
+server.close()
+console.log("ok:", call.url)
+```
+
+<Aside type="caution">
+Never write a real key into the `headers` map. Use `${ENV_VAR}`: the value is read from
+`process.env` at call time and is never logged. An unset variable expands to the empty string —
+it does not throw — so check your environment if auth suddenly fails.
+</Aside>
+
+### 3. The full surface — result modes, HTTP errors, timeouts and cancellation
+
+A non-2xx response is a **tool error**, not a thrown exception: the model reads the status and body
+and can react. Timeouts and `ctx.signal` both abort the request and are reported the same way.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { httpTool } from "toolnexus"
+
+const server = http.createServer((req, res) => {
+  if (req.url === "/boom") {
+    res.writeHead(422, { "Content-Type": "text/plain" })
+    res.end("invalid payload")
+    return
+  }
+  if (req.url === "/slow") {
+    setTimeout(() => {
+      res.writeHead(200)
+      res.end("late")
+    }, 2000).unref()
+    return
+  }
+  res.writeHead(200, { "Content-Type": "application/json" })
+  res.end('{"ok":true}')
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()))
+const port = (server.address() as { port: number }).port
+const base = `http://127.0.0.1:${port}`
+
+// resultMode: "status+text" prefixes the body with the status code.
+const status = httpTool({
+  name: "with_status",
+  description: "Fetch and report the status",
+  method: "GET",
+  url: `${base}/ok`,
+  resultMode: "status+text",
+})
+assert.equal((await status.execute({})).output, '200\n{"ok":true}')
+
+// A non-2xx is isError: true, with the status preserved in metadata.
+const boom = httpTool({ name: "boom", description: "Always fails", method: "GET", url: `${base}/boom` })
+const failed = await boom.execute({})
+assert.equal(failed.isError, true)
+assert.equal(failed.output, "HTTP 422: invalid payload")
+assert.equal(failed.metadata?.status, 422)
+
+// timeout (ms) bounds the request; ctx.timeout overrides the declared one.
+const slow = httpTool({
+  name: "slow",
+  description: "Never answers in time",
+  method: "GET",
+  url: `${base}/slow`,
+  timeout: 60_000,
+})
+const timedOut = await slow.execute({}, { timeout: 100 })
+assert.equal(timedOut.isError, true)
+assert.ok(timedOut.output.length > 0) // the abort reason, e.g. "This operation was aborted"
+
+// The loop's cancellation signal aborts an in-flight request too.
+const ac = new AbortController()
+const inflight = slow.execute({}, { signal: ac.signal })
+ac.abort()
+const cancelled = await inflight
+assert.equal(cancelled.isError, true)
+
+server.close()
+console.log("ok:", failed.output, "| timeout + cancel both reported as tool errors")
+```
+
+## Options
+
+| Option | Type | Default | What it does |
+|---|---|---|---|
+| `name` | `string` | — | The tool name the model calls. |
+| `description` | `string` | — | What the model reads to decide whether to call it. |
+| `method` | `string` | — | Any HTTP verb; upper-cased for you. |
+| `url` | `string` | — | Target. `{arg}` placeholders are URL-encoded from args and consumed. |
+| `headers` | `Record<string, string>` | `{}` | Values expand `${ENV_VAR}` from `process.env` at call time. Unset ⇒ empty string. |
+| `query` | `string[]` | `[]` | Arg names forced into the querystring. Ignored for `GET`, where *all* leftover args go there anyway. |
+| `body` | `"json" \| "form" \| "raw"` | `"json"` | Encoding for leftover args on a non-GET/HEAD request. `raw` sends the `body` arg as a plain string. |
+| `inputSchema` | `JSONSchema` | empty object schema | What the model sees. Not enforced at runtime. |
+| `timeout` | `number` | `30000` | Milliseconds. `ctx.timeout` wins when the loop supplies one. |
+| `resultMode` | `"text" \| "json" \| "status+text"` | `"text"` | `text` = raw body; `json` = parse then re-stringify (invalid JSON falls back to the text); `status+text` = `` `${status}\n${body}` ``. |
+
+Where an argument goes, in order:
+
+1. It matches a `{placeholder}` in `url` → substituted there and removed.
+2. It is listed in `query`, **or** the method is `GET` → querystring.
+3. Otherwise → the request body, encoded per `body`.
+
+Every outcome carries `metadata.status` except a transport failure (timeout, abort, connection
+refused), which has no status to report.
+
+## See also
+
+- [`defineTool`](/api/javascript/native/define-tool/) — when the call needs real logic
+- [`Tool`](/api/javascript/types/tool/) — what this builds
+- [`loadMcp`](/api/javascript/mcp/load/) — a whole remote toolset instead of one endpoint
+- [`createToolkit`](/api/javascript/toolkit/create/) — pass these in via `extraTools`

@@ -1,0 +1,344 @@
+---
+title: "translate"
+description: "Declare a toolkit to a provider and translate one request/response without executing anything or keeping state. — Python."
+sidebar:
+  label: "translate"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/client.py">python/src/toolnexus/client.py</a>
+</p>
+
+```python
+async def translate(
+    self,
+    messages: list[Any],
+    *,
+    tools: list[Any] | None = None,
+    toolkit: Toolkit | None = None,
+    tool_choice: Any = None,
+    system: str | None = None,
+    max_tokens: int = 0,
+    cancel: asyncio.Event | None = None,
+) -> TranslateResult
+```
+
+A method on [`Client`](/api/python/client/create/) (from `create_client`): exactly **one**
+provider call, `messages` in and out in OpenAI shape, always — no agent loop, no tool
+execution, no conversation state. This is the inbound half of the §5 adapters
+(`to_openai`/`to_anthropic`/`to_gemini` send tool declarations *out*; `translate` reads the
+provider's tool calls back *in*, normalized to OpenAI shape regardless of which provider you
+configured the client for). Because every call is self-contained, `translate` may be run
+statelessly and concurrently — nothing here persists between calls.
+
+## When to use it
+
+- **You** own the conversation and execute tools yourself — the standard OpenAI
+  function-calling posture — and want toolnexus purely as the wire-format translator so the
+  same code path works against OpenAI, Anthropic, or Gemini upstreams.
+- You're building a proxy/gateway that takes OpenAI-shaped requests, forwards to whichever
+  provider is actually configured, and hands back an OpenAI-shaped response — one call in,
+  one call out, no state to manage between requests.
+- You want to declare a `toolkit`'s tools to the provider (so the model can call them) without
+  toolnexus ever calling them — `toolkit` here is **declared only, never executed**.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for Client.run when toolnexus should own the loop">
+`translate` is one turn, stateless, no execution. If you want toolnexus to actually *call*
+your tools and keep looping until the model is done, use [`Client.run`](/api/python/client/run/)
+(or `ask`/`stream`) instead — those own the conversation and execute the toolkit's tools for
+you. Reach for `translate` specifically when the caller — not toolnexus — owns tool execution
+and/or the conversation, which `run`'s loop assumes it does not.
+</Aside>
+
+## Examples
+
+<Aside type="note" title="Hermetic on purpose">
+Every example points `create_client` at a local `http.server` stub instead of a real LLM
+endpoint — no network, no API key.
+</Aside>
+
+### 1. The smallest useful call — no tools, one provider call
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def reply(body):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": "sunny in Chennai"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+    }
+
+
+async def main():
+    with StubServer(reply) as srv:
+        client = create_client(base_url=srv.base_url, style="openai", model="test-model", api_key="test-key")
+        result = await client.translate([{"role": "user", "content": "weather in Chennai?"}])
+
+    assert result.text == "sunny in Chennai"
+    assert result.finish_reason == "stop"
+    assert result.tool_calls == []
+    assert result.usage["total_tokens"] == 8
+
+    print("ok:", result.text)
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — a declared `toolkit`, the provider's tool call read back
+
+`toolkit` is declared to the provider exactly like `Client.run` would declare it — but
+`translate` never calls `toolkit.execute`. The caller decides what to do with `tool_calls`.
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit, define_tool
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def add(a: float, b: float) -> str:
+    """Add two numbers and return the sum."""
+    return str(a + b)
+
+
+def scripted(body):
+    assert any(t["function"]["name"] == "add" for t in body["tools"])  # the toolkit WAS declared
+    return {
+        "choices": [{
+            "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": "call_1", "type": "function",
+                                 "function": {"name": "add", "arguments": '{"a": 21, "b": 21}'}}],
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+
+
+async def main():
+    tk = await create_toolkit()
+    tk.register(
+        define_tool(
+            add, name="add", description="Add two numbers.",
+            input_schema={
+                "type": "object",
+                "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+                "required": ["a", "b"],
+            },
+        )
+    )
+    try:
+        with StubServer(scripted) as srv:
+            client = create_client(base_url=srv.base_url, style="openai", model="test-model", api_key="test-key")
+            result = await client.translate([{"role": "user", "content": "add 21 and 21"}], toolkit=tk)
+
+        assert result.finish_reason == "tool_calls"
+        assert len(result.tool_calls) == 1
+        call = result.tool_calls[0]
+        assert call.name == "add"
+        assert call.arguments == '{"a": 21, "b": 21}'  # raw JSON string, echoable byte-for-byte
+        # tool was never actually run — translate declares, it does not execute.
+        assert result.tool_calls_json() == [
+            {"id": "call_1", "type": "function", "function": {"name": "add", "arguments": '{"a": 21, "b": 21}'}}
+        ]
+
+        print("ok:", call.name, call.arguments)
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — per-call `system`/`max_tokens`, and no memory between calls
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+async def main():
+    seen: list[dict] = []
+
+    def echo(body):
+        seen.append(body)
+        return {
+            "choices": [{"message": {"role": "assistant", "content": "noted"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    with StubServer(echo) as srv:
+        client = create_client(
+            base_url=srv.base_url, style="openai", model="test-model", api_key="test-key",
+            system_prompt="You are terse.",  # the client-wide default
+        )
+        r1 = await client.translate([{"role": "user", "content": "hello"}], max_tokens=50)
+        r2 = await client.translate([{"role": "user", "content": "hello again"}], system="Override prompt.")
+
+    assert len(seen) == 2
+    assert seen[0]["messages"][0] == {"role": "system", "content": "You are terse."}
+    assert seen[0]["max_tokens"] == 50
+    assert seen[1]["messages"][0] == {"role": "system", "content": "Override prompt."}  # per-call system wins
+    # Each call is self-contained: the second request carries NO memory of the first turn.
+    assert seen[1]["messages"] == [
+        {"role": "system", "content": "Override prompt."},
+        {"role": "user", "content": "hello again"},
+    ]
+
+    print("ok:", r1.text, "|", r2.text)
+
+
+asyncio.run(main())
+```
+
+## `TranslateResult` fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `text` | `str` | Assistant text (`""` when the model only called tools). |
+| `tool_calls` | `list[TranslatedToolCall]` | `{id, name, arguments}` in provider order — `arguments` is the raw OpenAI JSON string. |
+| `finish_reason` | `str` | The OpenAI finish reason. Any tool call ⇒ always `"tool_calls"`. |
+| `usage` | `dict[str, int]` | This single call's `prompt_tokens`/`completion_tokens`/`total_tokens`. |
+| `model` | `str` | The model that answered. |
+| `raw` | `dict \| None` | The provider's decoded response, for fields this type doesn't model. |
+| `tool_calls_json()` | `list[dict]` | Renders `tool_calls` as an OpenAI `tool_calls` array, ready for an assistant message. |
+
+## See also
+
+- [`openai_messages_to_anthropic`](/api/python/translate/inbound/) — Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong.
+- [`Client.run`](/api/python/client/run/) — The alternative when toolnexus should own the loop and execute the toolkit itself.

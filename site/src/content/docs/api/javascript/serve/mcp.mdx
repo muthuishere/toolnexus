@@ -1,0 +1,248 @@
+---
+title: "buildMcpServer"
+description: "The inbound MCP profile: any MCP client can call your tools. — JavaScript."
+sidebar:
+  label: "buildMcpServer"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7c-mcp-server--inbound-serve-mcp-profile">SPEC §7C</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/mcpserve.ts">js/src/mcpserve.ts</a>
+</p>
+
+```ts
+interface MCPServeConfig {
+  name?: string
+  version?: string
+  tools?: string[]
+}
+type OnCall = (ev: { name: string; source: ToolSource; ms: number; isError: boolean }) => void | Promise<void>
+
+function exposedMcpTools(tools: Tool[], cfg?: MCPServeConfig): Tool[]
+function buildMcpServer(tools: Tool[], cfg?: MCPServeConfig, onCall?: OnCall): Server // @modelcontextprotocol/sdk Server
+```
+
+The inbound mirror of §7B: where A2A advertises **skills** and fulfils a Task through the whole
+client loop, MCP advertises the toolkit's **unified tools** — every source (`mcp` · `skill` ·
+`native` · `http` · `builtin` · `a2a`) — and dispatches each `tools/call` straight to
+`Tool.execute`. The calling MCP client *is* the LLM host here, so there is no `Client`, no Task, and
+no `TaskStore`. `buildMcpServer` returns a low-level `@modelcontextprotocol/sdk` `Server`; a fresh
+one is cheap to build, so `toolkit.serve`'s HTTP path (`POST /mcp`) makes one per request
+(stateless — a fresh server + transport pair each time).
+
+## When to use it
+
+Reach for `buildMcpServer` when you want your toolkit's tools reachable by **any MCP client** —
+Claude Desktop, an IDE, another agent's `loadMcp` call — turning toolnexus into a universal MCP
+gateway: aggregate N MCP servers + skills + your own functions behind one toolkit, then re-expose
+the union as one MCP server.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use toolkit.serve({ mcp }) instead when you want the live HTTP endpoint">
+`buildMcpServer` builds the SDK `Server` object; it does not listen on a port. `toolkit.serve(addr,
+{ mcp })` mounts it at `POST /mcp` (streamable-HTTP) on the same server that can also carry the
+A2A routes (§7B) — pass both `a2a` and `mcp` to co-mount both profiles on one port. Call
+`buildMcpServer` directly only when you're wiring your own transport (an in-process linked pair for
+tests, stdio, something custom) instead of the shipped HTTP route.
+</Aside>
+
+`exposedMcpTools` is the filtering primitive `buildMcpServer`/`serve` apply before advertising: pass
+`cfg.tools` to narrow the surface to exactly those names; unknown names in the filter are ignored,
+never an error — the same posture as MCP config parsing elsewhere in the spec.
+
+## Examples
+
+### 1. The smallest useful call — in-process, no network at all
+
+Connect the MCP SDK's own linked in-memory transport pair to a server built from one tool — no HTTP,
+no child process.
+
+MCP client imports resolve against `toolnexus`'s own `@modelcontextprotocol/sdk` dependency, so —
+same as [`loadMcp`](/api/javascript/mcp/load/)'s hermetic examples — the client-side code below is
+written to a script next to toolnexus's own source and run as a child process; a real project just
+keeps this as its own file beside its own `@modelcontextprotocol/sdk` dependency.
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import path from "node:path"
+import { execFileSync } from "node:child_process"
+
+const script = `
+import assert from "node:assert"
+import { buildMcpServer, defineTool } from "toolnexus"
+import { Client as MCPClient } from "@modelcontextprotocol/sdk/client/index.js"
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
+
+const echo = defineTool({
+  name: "echo",
+  description: "echo back text",
+  inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+  run: (args) => String(args.text ?? ""),
+})
+
+const server = buildMcpServer([echo], { name: "gateway", version: "2.0.0" })
+const [clientT, serverT] = InMemoryTransport.createLinkedPair()
+await server.connect(serverT)
+const client = new MCPClient({ name: "test-client", version: "1.0.0" })
+await client.connect(clientT)
+
+const info = client.getServerVersion()
+assert.equal(info?.name, "gateway")
+
+const res = await client.callTool({ name: "echo", arguments: { text: "hi" } })
+assert.equal(res.isError, false)
+assert.equal(res.content[0].text, "hi")
+
+await client.close()
+console.log("ok:" + res.content[0].text)
+`
+const scriptPath = path.resolve(process.cwd(), "js", `_docs_mcp_serve_demo_${Date.now()}.mjs`)
+fs.writeFileSync(scriptPath, script)
+try {
+  const out = execFileSync("node", [scriptPath], { encoding: "utf8" }).trim()
+  assert.match(out, /^ok:hi$/)
+  console.log(out)
+} finally {
+  fs.rmSync(scriptPath, { force: true })
+}
+```
+
+### 2. A realistic case — the real streamable-HTTP route via `toolkit.serve`
+
+The route a real MCP client (Claude Desktop, an IDE) would use: `toolkit.serve(addr, { mcp })`
+mounts `buildMcpServer`'s output at `POST /mcp`; connect the SDK's `StreamableHTTPClientTransport`
+to it, all on `127.0.0.1`.
+
+`createToolkit`/`tk.serve` are toolnexus's own compiled code, so they resolve their own
+`@modelcontextprotocol/sdk` dependency fine and run directly here; only the **client**-side SDK
+import needs the same spawned-script treatment as example 1, this time pointed at the real
+`srv.url` over `127.0.0.1`.
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import path from "node:path"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
+import { createToolkit, defineTool } from "toolnexus"
+
+const execFileAsync = promisify(execFile)
+
+const echo = defineTool({ name: "echo", description: "echo", run: (a: any) => String(a.text ?? "") })
+const tk = await createToolkit({ builtins: false, extraTools: [echo] })
+const srv = await tk.serve("127.0.0.1:0", { mcp: { name: "http-gateway" } })
+
+const script = `
+import { Client as MCPClient } from "@modelcontextprotocol/sdk/client/index.js"
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
+
+const client = new MCPClient({ name: "http-test", version: "1.0.0" })
+await client.connect(new StreamableHTTPClientTransport(new URL(process.argv[2] + "/mcp")))
+const version = client.getServerVersion()
+const { tools } = await client.listTools()
+const res = await client.callTool({ name: "echo", arguments: { text: "over http" } })
+await client.close()
+console.log(JSON.stringify({ serverName: version?.name, toolNames: tools.map((t) => t.name), reply: res.content[0].text }))
+`
+const scriptPath = path.resolve(process.cwd(), "js", `_docs_mcp_serve_http_demo_${Date.now()}.mjs`)
+fs.writeFileSync(scriptPath, script)
+try {
+  // The toolkit's HTTP server runs on THIS process's event loop, so the client
+  // round trip must run in an ASYNC child process (execFile), never a blocking
+  // execFileSync — a synchronous spawn would freeze the loop the server needs.
+  const { stdout } = await execFileAsync("node", [scriptPath, srv.url])
+  const out = JSON.parse(stdout.trim())
+  assert.equal(out.serverName, "http-gateway")
+  assert.ok(out.toolNames.includes("echo"))
+  assert.equal(out.reply, "over http")
+  console.log("ok:", out.reply)
+} finally {
+  fs.rmSync(scriptPath, { force: true })
+  await srv.stop()
+  await tk.close()
+}
+```
+
+### 3. The full surface — `exposedMcpTools` filtering, `onCall`, and an erroring tool
+
+A name filter narrows `tools/list`/`tools/call` to a subset; `onCall` observes every inbound call
+with source and timing; a throwing tool becomes an `isError` result, never a crashed connection.
+
+`exposedMcpTools` runs directly (it's plain toolnexus code); the in-process MCP client round trip
+that proves the filtering and `onCall` telemetry is, once again, run as a spawned script.
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import path from "node:path"
+import { execFileSync } from "node:child_process"
+import { defineTool, exposedMcpTools } from "toolnexus"
+
+const echo = defineTool({ name: "echo", description: "echo", run: (a: any) => String(a.text ?? "") })
+const boom = defineTool({ name: "boom", description: "always throws", run: () => { throw new Error("kaboom") } })
+
+// Filter to just "echo" before building — "nope" (unknown) is silently ignored, not an error.
+const filtered = exposedMcpTools([echo, boom], { tools: ["echo", "nope"] })
+assert.deepEqual(filtered.map((t) => t.name), ["echo"])
+
+const script = `
+import { buildMcpServer, defineTool } from "toolnexus"
+import { Client as MCPClient } from "@modelcontextprotocol/sdk/client/index.js"
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
+
+const echo = defineTool({ name: "echo", description: "echo", run: (a) => String(a.text ?? "") })
+const calls = []
+const server = buildMcpServer([echo], { tools: ["echo"] }, (ev) => calls.push(ev))
+const [clientT, serverT] = InMemoryTransport.createLinkedPair()
+await server.connect(serverT)
+const client = new MCPClient({ name: "c", version: "1" })
+await client.connect(clientT)
+
+const { tools } = await client.listTools()
+const res = await client.callTool({ name: "echo", arguments: { text: "still up" } })
+await client.close()
+console.log(JSON.stringify({ toolNames: tools.map((t) => t.name), isError: res.isError, call: calls[0] }))
+`
+const scriptPath = path.resolve(process.cwd(), "js", `_docs_mcp_serve_filter_demo_${Date.now()}.mjs`)
+fs.writeFileSync(scriptPath, script)
+try {
+  const out = JSON.parse(execFileSync("node", [scriptPath], { encoding: "utf8" }).trim())
+  assert.deepEqual(out.toolNames, ["echo"], "boom never advertised")
+  assert.equal(out.isError, false)
+  assert.equal(out.call.name, "echo")
+  assert.equal(out.call.source, "native")
+  assert.equal(out.call.isError, false)
+  assert.ok(typeof out.call.ms === "number")
+  console.log("ok:", 1, "call(s) observed")
+} finally {
+  fs.rmSync(scriptPath, { force: true })
+}
+```
+
+## Options
+
+| Field | Type | What it does |
+|---|---|---|
+| `tools` | `Tool[]` | The toolkit's unified tools to expose. |
+| `cfg.name` / `cfg.version` | `string` | `initialize` `serverInfo`. Defaults `"toolnexus"` / `"0.1.0"`. |
+| `cfg.tools` | `string[]` | Subset of tool names to advertise/allow; unknown names ignored. Omit ⇒ all. |
+| `onCall` | `OnCall` | Fires per inbound `tools/call` with `{ name, source, ms, isError }`. |
+
+## What you get back
+
+`buildMcpServer` returns a `@modelcontextprotocol/sdk` `Server` — `tools/list` maps each `Tool`'s
+`name` (used **verbatim**, already sanitized at registration — not re-sanitized), `description`, and
+`inputSchema` (= `Tool.parameters`); `tools/call` dispatches to `Tool.execute` and maps the
+`ToolResult` to a `CallToolResult` (`output` → one text content part, `isError` propagates). An
+`execute` throw becomes `isError: true` text, never a crash; an unknown tool name is the SDK's
+standard `InvalidParams`/`-32602` error. `exposedMcpTools` returns the filtered `Tool[]` used to
+build the server.
+
+## See also
+
+- [`startA2AServer`](/api/javascript/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+- [`buildAgentCard`](/api/javascript/serve/agent-card/) — Construct the Agent Card that advertises your name, skills and endpoint.
+- [`FileTaskStore`](/api/javascript/serve/task-store/) — Persist inbound A2A tasks so a suspended request survives a restart.

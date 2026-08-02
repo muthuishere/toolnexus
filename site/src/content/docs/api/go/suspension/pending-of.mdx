@@ -1,0 +1,183 @@
+---
+title: "PendingOf"
+description: "Detect that a RunResult is parked rather than finished, and get the Request that parked it. — Go."
+sidebar:
+  label: "PendingOf"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/types.go">golang/types.go</a>
+</p>
+
+```go
+func PendingOf(result ToolResult) *Request
+```
+
+`PendingOf` reads the suspension back off a `ToolResult`: it returns `&Request` when
+`result.Metadata["pending"]` holds one (checking both the `Request` and `*Request` shapes),
+and `nil` for an ordinary result. It's the read side of [`Pending`](/api/go/suspension/pending/)
+— the thing you call from test code, from a `WaitFor` implementation inspecting what a tool
+asked for, or from any code that needs to tell "this call suspended" apart from "this call
+failed."
+
+## When to use it
+
+Reach for `PendingOf` wherever you have a `ToolResult` and need to know whether it's a
+suspension: writing tests for your own suspending tools, building a `WaitFor` that branches on
+`req.Kind`, or inspecting `RunResult.ToolCalls[i]`-shaped data after a run. It's also the
+correct way to distinguish "the tool suspended" from "the tool errored" — both set
+`IsError: true`, and `PendingOf` is the only reliable discriminator.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="IsError alone is not enough">
+A suspension deliberately sets `IsError: true` — a parked call has not produced an answer. That
+means checking `result.IsError` to detect "the tool broke" will misfire on every suspension.
+Check `PendingOf(result) != nil` first; only treat a non-nil-error, non-suspended result as a
+genuine tool failure. This is also why the suspension's own observability event carries
+`isError:false` + `pending:true` — the failure-rate signal is `PendingOf`-aware everywhere in
+the loop, and your own code should be too.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — suspension vs plain result
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	suspended := toolnexus.Pending(toolnexus.Request{Kind: "input", Prompt: "which env?"})
+	plain := toolnexus.ToolResult{Output: "done"}
+
+	if toolnexus.PendingOf(suspended) == nil {
+		log.Fatal("expected a suspension")
+	}
+	if toolnexus.PendingOf(plain) != nil {
+		log.Fatal("expected no suspension on a plain result")
+	}
+
+	fmt.Println("ok: suspension detected, plain result is not")
+}
+```
+
+### 2. The realistic case — telling a real error apart from a suspension
+
+Both set `IsError: true`; only `PendingOf` tells them apart.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func classify(res toolnexus.ToolResult) string {
+	if req := toolnexus.PendingOf(res); req != nil {
+		return "suspended: " + req.Kind
+	}
+	if res.IsError {
+		return "failed: " + res.Output
+	}
+	return "ok: " + res.Output
+}
+
+func main() {
+	suspended := toolnexus.AuthRequired("https://example.com/login", "")
+	failed := toolnexus.ToolResult{Output: "connection refused", IsError: true}
+	ok := toolnexus.ToolResult{Output: "42"}
+
+	got := []string{classify(suspended), classify(failed), classify(ok)}
+	want := []string{"suspended: authorization", "failed: connection refused", "ok: 42"}
+	for i := range want {
+		if got[i] != want[i] {
+			log.Fatalf("case %d: got %q want %q", i, got[i], want[i])
+		}
+	}
+
+	fmt.Println("ok:", got)
+}
+```
+
+### 3. The full surface — reading `RunResult.Pending` after a durable halt
+
+`PendingOf` works the same on a `ToolResult` you built by hand or one that flowed all the way
+through a real `Client.Run` — this reads the request back off the halted `RunResult` and off
+the underlying `ToolResult` that produced it.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"pick_env","arguments":"{}"}}]}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`))
+	}))
+	defer srv.Close()
+
+	var lastResult toolnexus.ToolResult
+	pickEnv := toolnexus.Tool{
+		Name: "pick_env", Description: "asks which environment", InputSchema: toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+		Source: toolnexus.SourceCustom,
+		Execute: func(_ map[string]any, _ *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			lastResult = toolnexus.Pending(toolnexus.Request{Kind: "input", Prompt: "which env?"})
+			return lastResult, nil
+		},
+	}
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: []toolnexus.Tool{pickEnv}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "gpt-4o-mini", APIKey: "test-key"})
+	res, err := client.Run(context.Background(), "deploy", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if res.Status != "pending" {
+		log.Fatalf("expected a durable halt, got %q", res.Status)
+	}
+
+	// PendingOf on the tool's own ToolResult, and RunResult.Pending, describe the same suspension.
+	fromTool := toolnexus.PendingOf(lastResult)
+	if fromTool == nil || res.Pending == nil {
+		log.Fatal("expected both views to see the suspension")
+	}
+	if fromTool.ID != res.Pending.ID || fromTool.Prompt != res.Pending.Prompt {
+		log.Fatalf("expected matching requests: tool=%+v run=%+v", fromTool, res.Pending)
+	}
+
+	fmt.Println("ok:", fromTool.Kind, "-", fromTool.Prompt, "id matches:", fromTool.ID == res.Pending.ID)
+}
+```
+
+## See also
+
+- [`Pending`](/api/go/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`AuthRequired`](/api/go/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`WaitFor`](/api/go/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`Client.Resume`](/api/go/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.

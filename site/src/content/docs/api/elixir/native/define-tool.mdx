@@ -1,0 +1,228 @@
+---
+title: Toolnexus.Native.define_tool
+description: Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call. Elixir.
+sidebar:
+  label: Native.define_tool
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/native.ex">elixir/lib/toolnexus/native.ex</a>
+</p>
+
+```elixir
+@spec define_tool(keyword() | map()) :: Toolnexus.Tool.t()
+def define_tool(opts)
+```
+
+Wraps a plain Elixir function as a uniform [`Toolnexus.Tool`](/api/elixir/types/tool/). You supply
+`:name`, `:description` and `:execute`; the returned struct is indistinguishable from a tool that
+came off an MCP server, a skill directory or an HTTP endpoint.
+
+## When to use it
+
+- **Your own business logic as a tool** — a database lookup, a pricing calculation, an internal
+  API wrapper. Anything already written in Elixir.
+- **Stubs and fakes in tests** — a deterministic tool to drive the client loop without a network.
+- **Adapting a third-party library** — one closure over the library call is the whole integration.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Build the struct by hand when you are generating many tools">
+`define_tool/1` gives you return-value coercion and rescue-to-`is_error` for free, which is what you
+want for a handful of hand-written tools. When you are producing tools **from data** — a table of
+endpoints, a database of jobs — construct [`%Toolnexus.Tool{}`](/api/elixir/types/tool/) directly
+instead: you already control the return shape and the extra layer buys nothing.
+</Aside>
+
+For a remote HTTP endpoint, [`Toolnexus.Http.tool/1`](/api/elixir/http/tool/) is the better fit —
+it handles URL placeholders, querystrings, body encoding and `${ENV_VAR}` headers, so you do not
+hand-roll a request inside `execute`.
+
+<Aside type="note" title="No reflection in this port">
+Some ports derive the schema from the function signature or an annotation
+([`Native.reflect`](/api/elixir/native/reflect/)). Elixir has no such helper — write the JSON Schema
+map yourself, or omit `:input_schema` for a no-argument tool.
+</Aside>
+
+## Examples
+
+### 1. The smallest possible definition
+
+Only `:name`, `:description` and `:execute` are required. Omit `:input_schema` and you get the empty
+object schema — the right shape for a tool that takes no arguments.
+
+```elixir test
+alias Toolnexus.{Context, Native}
+
+now =
+  Native.define_tool(%{
+    name: "server_time",
+    description: "The current server time as an ISO-8601 string",
+    execute: fn _args -> "2026-01-01T00:00:00Z" end
+  })
+
+true = now.name == "server_time"
+# Source defaults to "native".
+true = now.source == "native"
+# Default schema: an object with no properties, closed.
+true = now.input_schema == %{"type" => "object", "properties" => %{}, "additionalProperties" => false}
+
+res = now.execute.(%{}, %Context{})
+false = res.is_error
+true = res.output == "2026-01-01T00:00:00Z"
+
+IO.puts("ok: #{now.name} -> #{res.output}")
+```
+
+Note the **arity-1** `:execute`. `define_tool/1` inspects the function's arity and calls
+`run.(args)` or `run.(args, ctx)` accordingly, so you only take a context when you want one.
+
+### 2. Arguments, a schema, and returning something other than a binary
+
+A binary return becomes the output verbatim; anything else is JSON-encoded (`Jason.encode!/1`), which
+matches `JSON.stringify` in the JS port.
+
+```elixir test
+alias Toolnexus.{Context, Native}
+
+inventory = %{"widget" => 12, "sprocket" => 0}
+
+stock =
+  Native.define_tool(%{
+    name: "check_stock",
+    description: "How many units of a SKU are on hand",
+    input_schema: %{
+      "type" => "object",
+      "properties" => %{"sku" => %{"type" => "string", "description" => "The SKU to look up"}},
+      "required" => ["sku"],
+      "additionalProperties" => false
+    },
+    execute: fn args ->
+      sku = args["sku"]
+      # A map return is JSON-encoded for you.
+      %{sku: sku, on_hand: Map.get(inventory, sku, 0), in_stock: Map.get(inventory, sku, 0) > 0}
+    end
+  })
+
+res = stock.execute.(%{"sku" => "widget"}, %Context{})
+false = res.is_error
+true = Jason.decode!(res.output) == %{"sku" => "widget", "on_hand" => 12, "in_stock" => true}
+
+# A binary return is passed through untouched — no quoting, no encoding.
+plain =
+  Native.define_tool(%{
+    name: "shout",
+    description: "Uppercase the input",
+    execute: fn args -> String.upcase(args["text"] || "") end
+  })
+
+true = plain.execute.(%{"text" => "hello"}, %Context{}).output == "HELLO"
+
+IO.puts("ok: #{res.output}")
+```
+
+<Aside type="caution">
+`args` arrives with **string keys** — that is what came off the wire from the model. Pattern-matching
+`%{sku: sku}` will not match; use `args["sku"]`.
+</Aside>
+
+### 3. The full surface — context, custom source, explicit results, and raising
+
+`:source` overrides the `"native"` default. Returning a `%ToolResult{}` gives you full control
+(including `metadata`), and a raise inside `execute` is rescued into an error result rather than
+crashing the loop.
+
+```elixir test
+alias Toolnexus.{Context, Native, ToolResult}
+
+transfer =
+  Native.define_tool(%{
+    name: "transfer_funds",
+    description: "Move money between two accounts",
+    input_schema: %{
+      "type" => "object",
+      "properties" => %{
+        "from" => %{"type" => "string"},
+        "to" => %{"type" => "string"},
+        "amount" => %{"type" => "number"}
+      },
+      "required" => ["from", "to", "amount"],
+      "additionalProperties" => false
+    },
+    source: "custom",
+    # Arity-2: the loop always passes a %Context{}, so no nil-guard is needed.
+    execute: fn args, ctx ->
+      amount = args["amount"]
+
+      cond do
+        amount <= 0 ->
+          raise ArgumentError, "amount must be positive"
+
+        amount > 1000 ->
+          # Explicit failure, no exception — the model reads this and can retry smaller.
+          ToolResult.error("Amount #{amount} exceeds the per-call limit of 1000")
+
+        true ->
+          %ToolResult{
+            output: "moved #{amount} from #{args["from"]} to #{args["to"]}",
+            is_error: false,
+            metadata: %{session_id: ctx.session_id, amount: amount}
+          }
+      end
+    end
+  })
+
+true = transfer.source == "custom"
+
+ctx = %Context{session_id: "sess-1"}
+
+ok = transfer.execute.(%{"from" => "a", "to" => "b", "amount" => 250}, ctx)
+false = ok.is_error
+true = ok.output == "moved 250 from a to b"
+true = ok.metadata.session_id == "sess-1"
+
+over = transfer.execute.(%{"from" => "a", "to" => "b", "amount" => 5000}, ctx)
+true = over.is_error
+true = String.contains?(over.output, "exceeds the per-call limit")
+
+# A raise is rescued: is_error with the exception message as the output.
+raised = transfer.execute.(%{"from" => "a", "to" => "b", "amount" => 0}, ctx)
+true = raised.is_error
+true = raised.output == "amount must be positive"
+
+# A keyword list works exactly like a map.
+kw = Native.define_tool(name: "ping", description: "Health check", execute: fn _ -> "pong" end)
+true = kw.execute.(%{}, %Context{}).output == "pong"
+
+IO.puts("ok: #{ok.output} | limit: #{over.is_error} | raised: #{raised.is_error}")
+```
+
+## Options
+
+Accepts a **map or a keyword list**.
+
+| Option | Required | Default | What it does |
+|---|---|---|---|
+| `:name` | yes | — | The name the model calls. Must match `[a-zA-Z0-9_-]`; `Toolnexus.Tool.sanitize/1` will fix one up. |
+| `:description` | yes | — | What the model reads to decide whether to call it. |
+| `:execute` | yes | — | `fn args -> ... end` **or** `fn args, ctx -> ... end`. Arity is detected at build time. |
+| `:input_schema` | no | `%{"type" => "object", "properties" => %{}, "additionalProperties" => false}` | JSON-Schema object, string-keyed. |
+| `:source` | no | `"native"` | The `source` tag on the resulting tool. |
+
+### Return-value handling
+
+| `execute` returns | Becomes |
+|---|---|
+| `%Toolnexus.ToolResult{}` | Passed through unchanged — the only way to set `metadata`. |
+| a binary | `%ToolResult{output: it, is_error: false}` |
+| anything else | `%ToolResult{output: Jason.encode!(it), is_error: false}` |
+| a raise | `%ToolResult{output: Exception.message(e), is_error: true}` |
+
+## See also
+
+- [`Toolnexus.Tool`](/api/elixir/types/tool/) — the struct this produces
+- [`Toolnexus.ToolResult`](/api/elixir/types/tool-result/) — the richer return value
+- [`Toolnexus.Http.tool`](/api/elixir/http/tool/) — the same idea for a remote endpoint
+- [`Toolnexus.create_toolkit`](/api/elixir/toolkit/create/) — pass these in as `:tools`

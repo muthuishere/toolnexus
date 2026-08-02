@@ -1,0 +1,173 @@
+---
+title: "Conversation"
+description: "Keep a transcript across turns so the model remembers what it already did. — JavaScript."
+sidebar:
+  label: "Conversation"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#8-unified-llm-client-the-host-loop">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/client.ts">js/src/client.ts</a>
+</p>
+
+```ts
+client.conversation(ctx: { toolkit: Toolkit; signal?: AbortSignal }): Conversation
+
+class Conversation {
+  messages: any[]
+  send(prompt: string): Promise<RunResult>
+  reset(): void
+}
+```
+
+An explicit handle for a multi-turn exchange. `conversation()` returns a `Conversation` holding a
+running transcript (`messages`); each `send()` runs one turn via `run` with that transcript as
+history, then updates `messages` with the result — so the next `send()` continues where the last
+one left off, in-process, with no `id` or store involved.
+
+## When to use it
+
+Use `Conversation` when the caller already owns the object across turns — a chat session object, a
+REPL loop, a single request that does several back-and-forth exchanges with the model in one
+process lifetime. You hold the `Conversation`; it holds the transcript.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use ask(prompt, { id }) instead when memory needs to survive this process">
+`Conversation.messages` lives in the object, in memory, for as long as you keep the `Conversation`
+around. [`client.ask(prompt, { id })`](/api/javascript/client/create/) goes through the
+[`ConversationStore`](/api/javascript/client/store/) instead — keyed by `id`, so a second process,
+a restart, or a durable store makes memory outlive this call. Reach for `ask`/`id` the moment more
+than one call site needs to resume the same thread, or the thread must survive a crash.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — two turns, one Conversation
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit } from "toolnexus"
+
+// Replies with the number of messages it received — proves history accumulates.
+const server = http.createServer((req, res) => {
+  let raw = ""
+  req.on("data", (c) => (raw += c))
+  req.on("end", () => {
+    const body = JSON.parse(raw)
+    res.writeHead(200, { "content-type": "application/json" })
+    res.end(JSON.stringify({
+      choices: [{ message: { content: String(body.messages.length) }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }))
+  })
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const tk = await createToolkit({})
+const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key" })
+
+const convo = client.conversation({ toolkit: tk })
+const first = await convo.send("My name is Muthu.")
+assert.equal(first.text, "1", "first turn is just the one user message")
+const second = await convo.send("What's my name?")
+assert.equal(second.text, "3", "second turn carries the prior user+assistant turns plus this one")
+
+await tk.close()
+server.close()
+console.log("ok:", first.text, second.text)
+```
+
+### 2. A realistic case — a REPL-style loop over several prompts
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit } from "toolnexus"
+
+let n = 0
+const server = http.createServer((req, res) => {
+  n++
+  res.writeHead(200, { "content-type": "application/json" })
+  res.end(JSON.stringify({ choices: [{ message: { content: `reply ${n}` }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const tk = await createToolkit({})
+const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key" })
+const convo = client.conversation({ toolkit: tk })
+
+const prompts = ["step 1", "step 2", "step 3"]
+const answers: string[] = []
+for (const p of prompts) {
+  const res = await convo.send(p)
+  answers.push(res.text)
+}
+assert.deepEqual(answers, ["reply 1", "reply 2", "reply 3"])
+// the transcript grew by one user + one assistant turn per send()
+assert.equal(convo.messages.length, prompts.length * 2)
+
+await tk.close()
+server.close()
+console.log("ok:", answers.join(","))
+```
+
+### 3. The full surface — inspect messages directly, then reset
+
+`Conversation.messages` is public — read it for debugging/logging — and `reset()` drops it back to
+an empty transcript so the same handle can start a fresh thread without a new `client.conversation()` call.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit } from "toolnexus"
+
+const server = http.createServer((req, res) => {
+  let raw = ""
+  req.on("data", (c) => (raw += c))
+  req.on("end", () => {
+    const body = JSON.parse(raw)
+    res.writeHead(200, { "content-type": "application/json" })
+    res.end(JSON.stringify({ choices: [{ message: { content: String(body.messages.length) }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+  })
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const tk = await createToolkit({})
+const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key", systemPrompt: "Be terse." })
+const convo = client.conversation({ toolkit: tk, signal: AbortSignal.timeout(5_000) })
+
+await convo.send("first")
+assert.ok(convo.messages.some((m) => m.role === "system"), "system prompt not present in the transcript")
+assert.ok(convo.messages.length > 0)
+
+convo.reset()
+assert.deepEqual(convo.messages, [], "reset() did not clear the transcript")
+
+const afterReset = await convo.send("fresh start")
+assert.equal(afterReset.text, "2", "post-reset turn should look like a first turn again (system + user, no leftover history)")
+
+await tk.close()
+server.close()
+console.log("ok:", afterReset.text)
+```
+
+## Fields
+
+| Member | Type | What it does |
+|---|---|---|
+| `messages` | `any[]` | The running transcript — system + user + assistant + tool messages. Read directly. |
+| `send(prompt)` | `(prompt: string) => Promise<RunResult>` | Run the next turn; prior history is retained automatically. |
+| `reset()` | `() => void` | Drop the transcript back to empty — the next `send()` starts fresh. |
+
+## See also
+
+- [`createClient`](/api/javascript/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.run`](/api/javascript/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Client.stream`](/api/javascript/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Hooks`](/api/javascript/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

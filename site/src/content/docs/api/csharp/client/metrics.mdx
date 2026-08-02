@@ -1,0 +1,359 @@
+---
+title: "MetricEvent"
+description: "Emit one metric event per model call and per tool call: tokens, latency, outcome. — C#."
+sidebar:
+  label: "MetricEvent"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Metrics.cs">Metrics.cs</a>
+</p>
+
+```csharp
+public sealed record MetricEvent
+{
+    public required string Event { get; init; } // "llm" | "tool" | "run"
+    public string? Model { get; init; }
+    public string? Status { get; init; }         // "ok" | "error" (llm)
+    public long PromptTokens { get; init; }
+    public long CompletionTokens { get; init; }
+    public string? Tool { get; init; }
+    public string? Source { get; init; }
+    public bool IsError { get; init; }
+    public bool Pending { get; init; }            // §10: a suspension, never IsError
+    public int Turns { get; init; }
+    public int ToolCalls { get; init; }
+    public long TotalTokens { get; init; }
+    public string? Error { get; init; }
+    public long Ms { get; init; }
+}
+```
+
+<Aside type="caution" title="MetricEvent, not MetricEvent">
+The C# public API names this type `MetricEvent` — a top-level record in the `Toolnexus`
+namespace, defined in `Metrics.cs`. There is no wrapping `Metrics` class; every other port also
+ships a bare `MetricEvent` (or, for Java, a nested `LlmClient.MetricEvent`). Set
+`LlmClient.Options.OnMetric` to an `Action<MetricEvent>` to receive one of these per model call and
+per tool call.
+</Aside>
+
+A discriminated event — `Event` is `"llm"`, `"tool"`, or `"run"`, and only the fields for that
+kind are populated. Every `RunAsync`/`StreamAsync`/`TranslateAsync` call feeds the same events to
+two places at once: your `OnMetric` sink (if set) and the client's own cumulative Prometheus
+registry, rendered as text by `client.Metrics()`. `MetricEvent`'s C# fields are PascalCase (idiomatic
+for this port) — only the *rendered Prometheus text* from `Metrics()` is byte-identical across
+ports; the semantic event shape is per-language idiomatic.
+
+## When to use it
+
+Forwarding call-level observability to wherever your app already sends it — statsd, structured
+logs, OpenTelemetry — without scraping `/metrics`. It's also how you'd build a live "tokens spent
+this session" counter or alert on a rising `tool` error rate, since each event lands the instant
+the call it describes finishes.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for client.Metrics() when a scrape endpoint is enough">
+`OnMetric` gives you a *push* — one event per call, in real time, shaped however you want to
+route it. [`client.Metrics()`](/api/csharp/client/create/) gives you a *pull* — the same
+underlying counters/histograms as Prometheus text exposition, ready to serve from a `/metrics`
+route. Use `OnMetric` when something needs to react per-call; use `Metrics()` when a scraper is
+already polling.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful sink — count `llm` events
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+using var stub = new Stub(ctx =>
+{
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}
+    """);
+});
+
+var events = new List<MetricEvent>();
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+    OnMetric = ev => events.Add(ev),
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+await client.RunAsync("hi", tk);
+
+// One "llm" event and one "run" event for a single tool-free turn.
+if (!events.Any(e => e.Event == "llm" && e.Status == "ok")) throw new Exception("missing llm ok event");
+if (!events.Any(e => e.Event == "run")) throw new Exception("missing run event");
+
+Console.WriteLine($"ok: {events.Count} event(s): {string.Join(",", events.Select(e => e.Event))}");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+### 2. A `tool` event, and telling a suspension apart from a real error
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+var calls = 0;
+using var stub = new Stub(ctx =>
+{
+    calls++;
+    if (calls == 1)
+    {
+        Stub.Json(ctx, 200, """
+        {"id":"c1","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"add","arguments":"{\"a\":1,\"b\":1}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":8,"completion_tokens":4,"total_tokens":12}}
+        """);
+    }
+    else
+    {
+        Stub.Json(ctx, 200, """
+        {"id":"c2","choices":[{"message":{"role":"assistant","content":"1+1=2"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}
+        """);
+    }
+});
+
+var add = NativeTool.Of("add", "Add two integers", null,
+    (IDictionary<string, object?> a) => (Convert.ToInt32(a["a"]) + Convert.ToInt32(a["b"])).ToString());
+
+var toolEvents = new List<MetricEvent>();
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+    OnMetric = ev => { if (ev.Event == "tool") toolEvents.Add(ev); },
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = new List<ITool> { add } });
+await client.RunAsync("stop after adding 1+1", tk);
+
+if (toolEvents.Count != 1) throw new Exception($"expected 1 tool event, got {toolEvents.Count}");
+var ev0 = toolEvents[0];
+if (ev0.Tool != "add" || ev0.Source != "native") throw new Exception($"{ev0.Tool}/{ev0.Source}");
+// A real success: not an error, not pending.
+if (ev0.IsError || ev0.Pending) throw new Exception("expected a clean success, not error/pending");
+
+Console.WriteLine($"ok: tool={ev0.Tool} source={ev0.Source} ms>={ev0.Ms >= 0}");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+### 3. Full surface — the same events feed `client.Metrics()`'s Prometheus text
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+using var stub = new Stub(ctx =>
+{
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":6,"completion_tokens":3,"total_tokens":9}}
+    """);
+});
+
+var events = new List<MetricEvent>();
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl,
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = "test-key",
+    OnMetric = ev => events.Add(ev),
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+
+// Before any activity, Metrics() is still valid — just the HELP/TYPE header lines.
+var before = client.Metrics();
+if (!before.Contains("# HELP toolnexus_llm_requests_total")) throw new Exception("missing header before any calls");
+
+var result = await client.RunAsync("say ok", tk);
+
+var runEvent = events.Single(e => e.Event == "run");
+if (runEvent.Model != "gpt-4o-mini") throw new Exception(runEvent.Model);
+if (runEvent.TotalTokens != result.Usage.TotalTokens) throw new Exception($"{runEvent.TotalTokens} vs {result.Usage.TotalTokens}");
+if (runEvent.Error != null) throw new Exception("expected a clean run, no Error");
+
+// The exact same events also accumulated into the built-in Prometheus registry.
+var after = client.Metrics();
+if (!after.Contains("toolnexus_llm_requests_total{model=\"gpt-4o-mini\",status=\"ok\"} 1"))
+    throw new Exception(after);
+if (!after.Contains("toolnexus_run_errors_total")) throw new Exception("missing run_errors header");
+
+Console.WriteLine($"ok: {events.Count} events, run tokens={runEvent.TotalTokens}, Metrics() has {after.Split('\n').Length} lines");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+<Aside type="caution">
+`Pending` is `true` only for a §10 suspension — a tool call still awaiting out-of-band resolution.
+It is deliberately kept out of `IsError`: a suspended tool call is not a failure, so counting it as
+one would poison error-rate alerts. Filter on `Pending` separately if you need to track it.
+</Aside>
+
+## Fields
+
+| Field | Applies to | What it is |
+|---|---|---|
+| `Event` | all | Discriminator: `"llm"`, `"tool"`, or `"run"`. |
+| `Model` | llm, run | Model name. |
+| `Status` | llm | `"ok"` or `"error"`. |
+| `PromptTokens` / `CompletionTokens` | llm | Per-call token counts. |
+| `Tool` / `Source` | tool | Tool name and its `ITool.Source` (`"native"`, `"mcp"`, …). |
+| `IsError` | tool | Whether the tool call failed. Never `true` for a suspension — see `Pending`. |
+| `Pending` | tool | §10: `true` iff this call suspended awaiting out-of-band resolution. |
+| `Turns` / `ToolCalls` / `TotalTokens` | run | Totals for the whole run. |
+| `Error` | run | Set once, if the run threw. |
+| `Ms` | llm, tool, run | Duration in milliseconds. |
+
+## See also
+
+- [`LlmClient.Create`](/api/csharp/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`LlmClient.RunAsync`](/api/csharp/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`LlmClient.StreamAsync`](/api/csharp/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`LlmClient.Hooks`](/api/csharp/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

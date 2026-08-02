@@ -1,0 +1,122 @@
+---
+title: "BuiltinTools.select"
+description: "Pick which built-in file/shell/web tools are in play, by name or by source toggle. — Java."
+sidebar:
+  label: "BuiltinTools.select"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/BuiltinTools.java">BuiltinTools.java</a>
+</p>
+
+```java
+public static List<Tool> select(Object cfg)
+public static boolean enabled(Object cfg)
+```
+
+Resolves the active subset of the ten built-in tools (`bash`, `read`, `write`, `edit`, `grep`,
+`glob`, `webfetch`, `question`, `apply_patch`, `todowrite`) from one `cfg` value. Whole-source-off
+wins and returns an empty list; otherwise all ten start on, and an optional `tools: {name: bool}`
+map inside `cfg` drops any tool explicitly mapped to `false` (all-on baseline — `true` or an
+absent name stays on; unknown names are ignored).
+
+## When to use it
+
+When you want the built-in tools filtered by the same config shape `Toolkit.Options.builtins`
+accepts, without building a full `Toolkit` — inspecting what a config would enable, or wiring
+built-ins into your own tool list by hand.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="select filters, create builds everything unconditionally">
+[`BuiltinTools.create()`](/api/java/builtins/create/) always returns all ten, unfiltered — it is
+what `select` calls internally before applying `cfg`. Use `create()` when you want every
+built-in with no toggle logic; use `select(cfg)` when a config value (from JSON, from a caller)
+should determine which ones survive.
+</Aside>
+
+`cfg` accepts the same three shapes as `Toolkit.Options.builtins`: `null` (all on),
+a `Boolean` (`true`/`false` for the whole source), or a `Map` with `disabled`/`enabled`/`tools`
+keys — `select` and `enabled` both read exactly this shape, so a config parsed once from JSON
+works for both.
+
+## Examples
+
+### 1. Default — `null` means every built-in is on
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+
+public class Example {
+    public static void main(String[] args) {
+        List<Tool> tools = BuiltinTools.select(null);
+        if (tools.size() != 10) throw new AssertionError("expected 10, got " + tools.size());
+        for (Tool t : tools) {
+            if (!t.source().equals("builtin")) throw new AssertionError(t.name() + " source");
+        }
+        System.out.println("ok: " + tools.size() + " builtins");
+    }
+}
+```
+
+### 2. Whole-source off — `false` or `{disabled:true}` wins
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        if (!BuiltinTools.select(false).isEmpty()) throw new AssertionError("expected empty");
+        if (!BuiltinTools.select(Map.of("disabled", true)).isEmpty()) throw new AssertionError("expected empty");
+        if (!BuiltinTools.select(Map.of("enabled", false)).isEmpty()) throw new AssertionError("expected empty");
+
+        // disabled:true wins even if enabled:true is also present.
+        List<Tool> stillOff = BuiltinTools.select(Map.of("enabled", true, "disabled", true));
+        if (!stillOff.isEmpty()) throw new AssertionError("disabled should win, got " + stillOff.size());
+
+        System.out.println("ok: all three off-shapes produce an empty list");
+    }
+}
+```
+
+### 3. A `tools` map drops specific names; unknown names are ignored
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Map<String, Object> cfg = Map.of("tools", Map.of("bash", false, "write", false, "nope", false));
+        List<Tool> selected = BuiltinTools.select(cfg);
+
+        List<String> names = selected.stream().map(Tool::name).sorted().toList();
+        if (names.contains("bash") || names.contains("write")) throw new AssertionError(names);
+        if (names.size() != 8) throw new AssertionError("expected 8, got " + names.size()); // 10 - bash - write
+        if (!names.contains("read")) throw new AssertionError("read should still be on");
+
+        System.out.println("ok: " + names);
+    }
+}
+```
+
+## Fields
+
+| Member | Type | What it is |
+|---|---|---|
+| `select(cfg)` | `List<Tool>` | Filtered list of built-in `Tool`s per `cfg`; empty when the whole source is off. |
+| `enabled(cfg)` | `boolean` | The whole-source toggle only — `select` calls this first and short-circuits to `List.of()`. |
+| `cfg == null` | | All ten on. |
+| `cfg instanceof Boolean` | | `true`/`false` for the whole source. |
+| `cfg` is a `Map` | | `disabled:true` (wins) or `enabled:false` turns everything off; `tools:{name:false}` drops individual names off the all-on baseline. |
+
+## See also
+
+- [`BuiltinTools.create`](/api/java/builtins/create/) — construct every built-in tool directly, unfiltered.
+- [`Toolkit.create`](/api/java/toolkit/create/) — `builtins(cfg)` calls `select` internally.

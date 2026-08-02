@@ -1,0 +1,373 @@
+---
+title: "WaitFor"
+description: "The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract. — Python."
+sidebar:
+  label: "WaitFor"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/client.py">python/src/toolnexus/client.py</a>
+</p>
+
+```python
+WaitFor = Callable[[Request], Answer | Awaitable[Answer]]
+
+client = create_client(..., wait_for: WaitFor | None = None)
+```
+
+The one host-supplied slot in the whole §10 suspension contract. When a tool call comes back
+`Pending`, the loop calls `answer = wait_for(request)` — sync or async, your choice — and
+branches purely on `answer.ok`: `True` re-executes the *same* tool once with `ctx.answer` set;
+`False` feeds back an error result and the loop continues. Its interior is entirely
+unconstrained: open a browser and poll, message a Slack channel and poll, write a file and
+watch it, forward the request over A2A to another agent. `Request`/`Answer` are the only
+contract; `wait_for` is where you decide how a human (or another system) actually answers.
+
+## When to use it
+
+- You want suspensions resolved **in-process** — the run blocks inside `client.run`/`ask`
+  until an answer shows up, and you're fine with that (a CLI prompt, a synchronous approval
+  gate, a test harness that scripts the answer).
+- You're bridging to an external channel synchronously from inside the call — poll a webhook
+  inbox, poll a file a human edits, poll another agent's task status — anything that
+  eventually returns, without the caller needing to know a suspension happened at all.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Omit wait_for for the durable path">
+Configuring `wait_for` is Rule 1 of §10 (in-process): the run never returns to your code
+until it's resolved. **Leaving `wait_for` unset is Rule 2** (durable): the run returns
+immediately with `RunResult(status="pending", pending=request)` instead of hanging, so a
+different process — even after a restart — can persist the request, deliver it however it
+likes, and resume later. Neither is "more correct"; pick durable when the answer might take
+longer than you want a call to block, or when a different process will supply it.
+</Aside>
+
+`wait_for` never blocks the loop forever on a re-suspension: if the tool's post-answer retry
+suspends *again*, the loop gives up and feeds back `"unresolved: <prompt>"` rather than
+looping — a tool contract, not a `wait_for` concern.
+
+## Examples
+
+### 1. The smallest useful call — an async `wait_for` that approves
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import Answer, ToolResult, create_client, create_toolkit, define_tool, pending
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+async def send_refund(args=None, ctx=None):
+    if ctx is not None and ctx.answer is not None and ctx.answer.ok:
+        return ToolResult(output="refund issued", is_error=False)
+    return pending(kind="approval", prompt="OK to refund $40?")
+
+
+def scripted(body):
+    if not any(m.get("role") == "tool" for m in body["messages"]):
+        return {
+            "choices": [{
+                "message": {
+                    "role": "assistant", "content": None,
+                    "tool_calls": [{"id": "c1", "type": "function",
+                                     "function": {"name": "refund", "arguments": "{}"}}],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {"prompt_tokens": 6, "completion_tokens": 2, "total_tokens": 8},
+        }
+    return {
+        "choices": [{"message": {"role": "assistant", "content": "done"}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+    }
+
+
+async def main():
+    tk = await create_toolkit()
+    tk.register(define_tool(send_refund, name="refund", description="Issue a refund."))
+    try:
+
+        async def wait_for(request):  # WaitFor may be a coroutine function
+            return Answer(id=request.id, ok=True)
+
+        with StubServer(scripted) as srv:
+            client = create_client(
+                base_url=srv.base_url, style="openai", model="test-model", api_key="test-key",
+                wait_for=wait_for,
+            )
+            result = await client.run("refund the last order", tk)
+
+        assert result.status == "done"
+        assert result.tool_calls[0]["output"] == "refund issued"
+
+        print("ok:", result.text, "|", result.tool_calls[0]["output"])
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — a sync `wait_for` that declines
+
+`WaitFor` doesn't have to be async — a plain function works too. A `False` answer never
+re-executes the tool; it feeds back a loud error and lets the model decide what to say.
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import Answer, ToolResult, create_client, create_toolkit, define_tool, pending
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+async def send_refund(args=None, ctx=None):
+    if ctx is not None and ctx.answer is not None and ctx.answer.ok:
+        return ToolResult(output="refund issued", is_error=False)
+    return pending(kind="approval", prompt="OK to refund $40?")
+
+
+def scripted(body):
+    messages = body["messages"]
+    tool_msgs = [m for m in messages if m.get("role") == "tool"]
+    if not tool_msgs:
+        return {
+            "choices": [{
+                "message": {
+                    "role": "assistant", "content": None,
+                    "tool_calls": [{"id": "c1", "type": "function",
+                                     "function": {"name": "refund", "arguments": "{}"}}],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {"prompt_tokens": 6, "completion_tokens": 2, "total_tokens": 8},
+        }
+    # The model sees the declined tool result and reports it back in words.
+    assert "declined" in tool_msgs[-1]["content"]
+    return {
+        "choices": [{"message": {"role": "assistant", "content": "Refund was declined."}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+    }
+
+
+async def main():
+    tk = await create_toolkit()
+    tk.register(define_tool(send_refund, name="refund", description="Issue a refund."))
+    try:
+
+        def wait_for(request):  # a plain sync function is a valid WaitFor too
+            return Answer(id=request.id, ok=False, reason="declined")
+
+        with StubServer(scripted) as srv:
+            client = create_client(
+                base_url=srv.base_url, style="openai", model="test-model", api_key="test-key",
+                wait_for=wait_for,
+            )
+            result = await client.run("refund the last order", tk)
+
+        assert result.status == "done"  # the run still completes — a decline is not a crash
+        assert result.text == "Refund was declined."
+        assert result.tool_calls[0]["is_error"] is True
+
+        print("ok:", result.text)
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — no `wait_for` configured is the durable counterpart
+
+Omit `wait_for` entirely and the run never blocks on a human: it halts immediately with
+`status="pending"`, carrying the `Request` for a durable host to deliver and resolve out of
+band, exactly as [`suspension/resume`](/api/python/suspension/resume/) picks back up.
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit, define_tool, pending
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+async def send_refund(args=None, ctx=None):
+    return pending(kind="approval", prompt="OK to refund $40?")
+
+
+def scripted(body):
+    return {
+        "choices": [{
+            "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": "c1", "type": "function",
+                                 "function": {"name": "refund", "arguments": "{}"}}],
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 6, "completion_tokens": 2, "total_tokens": 8},
+    }
+
+
+async def main():
+    tk = await create_toolkit()
+    tk.register(define_tool(send_refund, name="refund", description="Issue a refund."))
+    try:
+        with StubServer(scripted) as srv:
+            client = create_client(
+                base_url=srv.base_url, style="openai", model="test-model", api_key="test-key",
+                # no wait_for — the durable path
+            )
+            result = await client.run("refund the last order", tk)
+
+        assert result.status == "pending"
+        assert result.pending is not None
+        assert result.pending.kind == "approval"
+        assert result.limit is None  # "pending" is a suspension, not a hit limit
+
+        print("ok:", result.status, "|", result.pending.prompt)
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+## The one behavioral pin
+
+| `wait_for` | Behavior |
+|---|---|
+| Configured, `answer.ok == True` | Same tool re-executed once with `ctx.answer` set; result feeds back to the model. |
+| Configured, `answer.ok == False` | An error result feeds back (`"declined/expired: <prompt>"`); the loop continues. |
+| Not configured | The run halts with `RunResult(status="pending", pending=request)` — no hang. |
+
+## See also
+
+- [`pending`](/api/python/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`auth_required`](/api/python/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`pending_of`](/api/python/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`AgentRuntime.resume`](/api/python/suspension/resume/) — The answer-carrying entry point: resume a parked agent run after a durable suspension.

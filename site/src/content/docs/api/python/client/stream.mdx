@@ -1,0 +1,342 @@
+---
+title: "Client.stream"
+description: "The streaming loop: text deltas, tool-call events, and suspension events as they happen. — Python."
+sidebar:
+  label: "Client.stream"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/client.py">python/src/toolnexus/client.py</a>
+</p>
+
+```python
+async def stream(
+    self,
+    prompt: str,
+    toolkit: Toolkit,
+    *,
+    id: str | None = None,
+    cancel: asyncio.Event | None = None,
+) -> AsyncGenerator[dict[str, Any], None]
+```
+
+The same agent loop as [`Client.run`](/api/python/client/run/), yielded as live event dicts
+instead of returned as one object: `text` deltas as they arrive, `tool_call`/`tool_result`
+pairs, `pending` when a tool suspends (§10), a running `usage` snapshot, and a terminal `done`
+carrying the full `RunResult`. Pass `id` to make it stateful, exactly like `ask(..., id=...)`.
+
+## When to use it
+
+- You're building a UI or CLI and want to render the model's answer as it's generated, not
+  after the whole turn completes.
+- You want to react to tool calls as they happen — show "calling `search`…" — instead of only
+  seeing the final transcript.
+- You need `id`-based memory (load history in, save the updated transcript out) while still
+  streaming — that's exactly what `stream(..., id=...)` does under the hood for `ask`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for run() when you don't need to render anything mid-turn">
+[`Client.run`](/api/python/client/run/) is this same loop collapsed into one awaited
+`RunResult`. If nothing in your program needs to react before the model finishes, `run` is
+less code. `stream` is strictly more information — every `run` result can be derived from a
+`stream`'s `done` event.
+</Aside>
+
+## Examples
+
+<Aside type="note" title="Hermetic on purpose">
+Every example points `create_client` at a local `http.server` stub that emits real
+Server-Sent Events in the exact shape `client.py`'s `_sse_lines`/`_stream_openai` parse
+(`data: {...}\n\n` lines, terminated by `data: [DONE]`) — no network, no API key.
+</Aside>
+
+### 1. The smallest useful call — text deltas only
+
+```python test
+import asyncio
+import json
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit
+
+
+class SseStubServer:
+    """A local OpenAI-shaped streaming chat-completions endpoint."""
+
+    def __init__(self, chunks):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):  # silence
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for c in outer._chunks:
+                    self.wfile.write(f"data: {c}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                    time.sleep(0.005)
+
+        self._chunks = chunks
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+async def main():
+    tk = await create_toolkit()
+    try:
+        chunks = [
+            json.dumps({"choices": [{"delta": {"content": "Hel"}}]}),
+            json.dumps({"choices": [{"delta": {"content": "lo"}}]}),
+            json.dumps({"choices": [{"delta": {}}], "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}}),
+            "[DONE]",
+        ]
+        with SseStubServer(chunks) as srv:
+            client = create_client(base_url=srv.base_url, style="openai", model="test-model", api_key="test-key")
+
+            deltas = []
+            done = None
+            async for ev in client.stream("say hello", tk):
+                if ev["type"] == "text":
+                    deltas.append(ev["delta"])
+                elif ev["type"] == "done":
+                    done = ev["result"]
+
+        assert "".join(deltas) == "Hello"
+        assert done is not None
+        assert done.text == "Hello"
+        assert done.usage["total_tokens"] == 3
+
+        print("ok:", "".join(deltas))
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — tool_call / tool_result events mid-stream
+
+The stub's first response streams a tool call (delta-accumulated, the same way a real
+provider streams function-call arguments token by token); the second response streams the
+final text.
+
+```python test
+import asyncio
+import json
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit, define_tool
+
+
+class ScriptedSseServer:
+    """Streams a different scripted SSE response depending on request count."""
+
+    def __init__(self, scripts):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                idx = outer._n
+                outer._n += 1
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for c in outer._scripts[idx]:
+                    self.wfile.write(f"data: {c}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                    time.sleep(0.005)
+
+        self._scripts = scripts
+        self._n = 0
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+async def main():
+    tk = await create_toolkit()
+    tk.register(define_tool(lambda a, b: str(a + b), name="add", description="Add two numbers.", input_schema={
+        "type": "object",
+        "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+        "required": ["a", "b"],
+    }))
+    try:
+        turn1 = [
+            json.dumps({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "add", "arguments": ""}}]}}]}),
+            json.dumps({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"a": 21, "b": 21}'}}]}}]}),
+            "[DONE]",
+        ]
+        turn2 = [
+            json.dumps({"choices": [{"delta": {"content": "42"}}]}),
+            "[DONE]",
+        ]
+        with ScriptedSseServer([turn1, turn2]) as srv:
+            client = create_client(base_url=srv.base_url, style="openai", model="test-model", api_key="test-key")
+
+            tool_calls, tool_results, done = [], [], None
+            async for ev in client.stream("add 21 and 21", tk):
+                if ev["type"] == "tool_call":
+                    tool_calls.append(ev)
+                elif ev["type"] == "tool_result":
+                    tool_results.append(ev)
+                elif ev["type"] == "done":
+                    done = ev["result"]
+
+        assert tool_calls and tool_calls[0]["name"] == "add"
+        assert tool_calls[0]["args"] == {"a": 21, "b": 21}
+        assert tool_results and tool_results[0]["output"] == "42"
+        assert done is not None and done.text == "42"
+
+        print("ok:", tool_calls[0]["name"], "->", tool_results[0]["output"])
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — `id`-based memory across two streamed turns
+
+With `id`, `stream` loads the transcript for that id before the loop starts and saves it
+back through the client's [`ConversationStore`](/api/python/client/store/) on the terminal
+`done` event — the same store `ask(..., id=...)` uses.
+
+```python test
+import asyncio
+import json
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit
+
+
+class SseStubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for c in outer._handler(body):
+                    self.wfile.write(f"data: {c}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                    time.sleep(0.005)
+
+        self._handler = handler
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+async def main():
+    tk = await create_toolkit()
+    try:
+        seen_messages = []
+
+        def handler(body):
+            seen_messages.append([m.get("content") for m in body["messages"]])
+            return [json.dumps({"choices": [{"delta": {"content": "noted"}}]}), "[DONE]"]
+
+        with SseStubServer(handler) as srv:
+            client = create_client(base_url=srv.base_url, style="openai", model="test-model", api_key="test-key")
+
+            async for ev in client.stream("my name is Muthu", tk, id="thread-1"):
+                pass
+            async for ev in client.stream("what's my name?", tk, id="thread-1"):
+                pass
+
+            # The store now holds the full two-turn transcript, addressable by id.
+            saved = await client.conversation_store.get("thread-1")
+
+        assert "my name is Muthu" in seen_messages[1]  # second call included the first turn
+        assert saved is not None
+        user_contents = [m.get("content") for m in saved if m.get("role") == "user"]
+        assert "my name is Muthu" in user_contents and "what's my name?" in user_contents
+
+        print("ok: transcript for 'thread-1' has", len(saved), "messages")
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+## Streaming event shapes
+
+| `type` | Fields | When |
+|---|---|---|
+| `"text"` | `delta` | An assistant text token/chunk arrived. |
+| `"tool_call"` | `id`, `name`, `args` | A tool call was fully parsed and is about to run. |
+| `"tool_result"` | `id`, `name`, `output`, `is_error` | A tool finished. |
+| `"pending"` | `request` | A tool suspended (§10) — yielded *before* `wait_for` runs, so a channel can push a link/prompt immediately. |
+| `"usage"` | `usage` | A non-streaming-shaped usage snapshot alongside the final text (no-tool-call turns). |
+| `"done"` | `result` | Terminal event — carries the full `RunResult`, same shape `run()` returns. |
+
+## See also
+
+- [`create_client`](/api/python/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.run`](/api/python/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Hooks`](/api/python/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+- [`Conversation`](/api/python/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.

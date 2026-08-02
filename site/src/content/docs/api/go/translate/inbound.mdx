@@ -1,0 +1,38 @@
+---
+title: "Inbound translation — transcripts across providers"
+description: "Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong. — Go."
+sidebar:
+  label: "translate / inbound"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a>
+</p>
+
+<Aside type="caution" title="Not available in Go">
+Go keeps openAIMessagesToAnthropic unexported (golang/translate.go:283) — inbound translation is reachable only through Translate.
+</Aside>
+
+Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong.
+
+## What to use instead
+
+Go's `openAIMessagesToAnthropic` (`golang/translate.go:283`) does exactly what the exported
+symbol does in the other five ports — it's not missing, it's just not part of the public API.
+The Go port deliberately keeps the raw inbound converter and its siblings
+(`openAIToolsToAnthropic`, `openAIToolChoiceToAnthropic`) unexported, because the port's stance
+is that a caller should never need to hand-assemble a provider-native payload: point
+[`Translate`](/api/go/translate/translate/) at `StyleAnthropic` and it runs the same conversion
+internally, on your behalf, with retries, request-param merging and the `llm` observability
+event all wired in — see `translate/translate` example 3 for the system-hoisting and
+`tool_use`/`tool_result` conversion in action against a live (stubbed) Anthropic-style
+endpoint. If you need the *converted messages themselves* rather than a completed response —
+say, to hand them to a different Anthropic SDK client — there is no exported escape hatch in Go
+today; that would be a new, deliberate addition to the public API, not a gap in feature
+parity.
+
+## See also
+
+- [`Translate`](/api/go/translate/translate/) — Declare a toolkit to a provider and translate one request/response without executing anything or keeping state.

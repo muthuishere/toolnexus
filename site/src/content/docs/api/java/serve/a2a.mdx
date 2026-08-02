@@ -1,0 +1,242 @@
+---
+title: "A2AServer.start"
+description: "Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent. — Java."
+sidebar:
+  label: "A2AServer.start"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/A2AServer.java">A2AServer.java</a>
+</p>
+
+```java
+// the ergonomic entry — Toolkit.ServeOptions.a2a(...) opts in:
+public A2AServer.ServeHandle serve(String addr, Toolkit.ServeOptions opts)
+
+// the lower-level static entry Toolkit.serve delegates to:
+public static A2AServer.ServeHandle start(String addr, A2AServer.A2AConfig a2a,
+    List<SkillSource.SkillInfo> skills, A2AServer.RunTask runTask, A2AServer.OnTask onTask) throws IOException
+```
+
+Stands up a minimal HTTP server that, when an `a2a` profile is configured, mounts
+`GET /.well-known/agent-card.json` (built from the toolkit's **skills**, never raw tools) and
+`POST /` (JSON-RPC 2.0: `SendMessage` submits a Task and fulfils it asynchronously through the
+client loop; `GetTask` polls it). Your toolkit becomes a real A2A peer any
+[`A2A.agent`](/api/java/agents/agent/) caller — yours or someone else's — can call.
+
+## When to use it
+
+Whenever you want to expose a toolkit's skills to other agents over the network, rather than
+only to the LLM you drive locally. `toolkit.serve(addr, opts.a2a(...))` is the entry point in
+practice — it wires the toolkit's own skills and calls `A2AServer.start` for you; reach for
+`A2AServer.start` directly only when you are assembling the pieces (skills, `RunTask`, store)
+yourself, outside a `Toolkit`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="A2A serves skills; MCP serve exposes raw tools">
+The `a2a` profile advertises the toolkit's **skills** (the `SKILL.md` catalog) and fulfils a Task
+through the whole `LlmClient` loop — a peer sends natural language, your model decides what to
+call. If the caller already knows exactly which tool it wants and needs no model in the loop,
+expose the toolkit over [`McpServe`](/api/java/serve/mcp/) instead — `tools/call` dispatches
+straight to `Tool.execute`, no LLM involved. Both profiles can be mounted on the same `serve(...)`
+call, independently.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — `a2a` absent means no routes
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false))) {
+            A2AServer.ServeHandle handle = tk.serve("127.0.0.1:0", new Toolkit.ServeOptions());
+            try {
+                HttpClient http = HttpClient.newHttpClient();
+                HttpResponse<String> res = http.send(
+                        HttpRequest.newBuilder(URI.create(handle.url() + "/.well-known/agent-card.json")).GET().build(),
+                        HttpResponse.BodyHandlers.ofString());
+                if (res.statusCode() != 404) throw new AssertionError("no a2a profile ⇒ 404, got " + res.statusCode());
+                System.out.println("ok: " + res.statusCode());
+            } finally {
+                handle.stop();
+            }
+        }
+    }
+}
+```
+
+### 2. The realistic case — a real local round trip, another toolkit calling in
+
+A hermetic mock LLM stands in for the real model on the serving side; the calling side is
+plain [`A2A.agentTools`](/api/java/agents/agent-tools/) — the same code that would call a
+real remote peer.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        // A hermetic OpenAI-shaped stub standing in for the real model.
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                ex.getRequestBody().readAllBytes();
+                String body = "{\"choices\":[{\"message\":{\"content\":\"Chennai is warm today.\"}}]}";
+                byte[] b = body.getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+        int llmPort = llm.getAddress().getPort();
+        LlmClient client = LlmClient.create(new LlmClient.Options()
+                .baseUrl("http://127.0.0.1:" + llmPort).style("openai").model("test-model").apiKey("test-key"));
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options()
+                .builtins(false).skillsDir("examples/skills"))) {
+            A2AServer.A2AConfig a2a = new A2AServer.A2AConfig().name("weather-desk").skills(List.of("hello-world"));
+            A2AServer.ServeHandle handle = tk.serve("127.0.0.1:0",
+                    new Toolkit.ServeOptions().client(client).a2a(a2a));
+            try {
+                // Another toolkit calling IN, exactly like a real remote peer would.
+                List<Tool> tools = A2A.agentTools(
+                        A2A.agent(handle.url() + "/.well-known/agent-card.json", null, null, 20L));
+                Tool hello = tools.stream().filter(t -> t.name().equals("weather-desk_hello-world")).findFirst().orElseThrow();
+
+                ToolResult r = hello.execute(Map.of("task", "what's the weather?"), null);
+                if (r.isError() || !r.output().equals("Chennai is warm today.")) throw new AssertionError(r.output());
+
+                System.out.println("ok: " + r.output());
+            } finally {
+                handle.stop();
+            }
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
+```
+
+### 3. The full surface — `onTask` telemetry and a custom `TaskStore`
+
+`onTask` fires once per Task's terminal state with the underlying `RunResult` telemetry; the
+task store can be swapped for any `A2AServer.TaskStore` implementation (see
+[`A2AServer.FileTaskStore`](/api/java/serve/task-store/) for the durable option).
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                ex.getRequestBody().readAllBytes();
+                String body = "{\"choices\":[{\"message\":{\"content\":\"done thinking\"}}],"
+                        + "\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}";
+                byte[] b = body.getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+        LlmClient client = LlmClient.create(new LlmClient.Options()
+                .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                .style("openai").model("test-model").apiKey("test-key"));
+
+        Map<String, Map<String, Object>> backing = new ConcurrentHashMap<>();
+        A2AServer.TaskStore custom = new A2AServer.TaskStore() {
+            @Override public Map<String, Object> get(String id) { return backing.get(id); }
+            @Override public void save(Map<String, Object> task) { backing.put(String.valueOf(task.get("id")), task); }
+        };
+        List<A2AServer.OnTaskEvent> events = new ArrayList<>();
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).skillsDir("examples/skills"))) {
+            A2AServer.A2AConfig a2a = new A2AServer.A2AConfig().name("audit-desk").store(custom);
+            A2AServer.ServeHandle handle = tk.serve("127.0.0.1:0",
+                    new Toolkit.ServeOptions().client(client).a2a(a2a)
+                            .onTask(ev -> { synchronized (events) { events.add(ev); } }));
+            try {
+                HttpClient http = HttpClient.newHttpClient();
+                String req = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"SendMessage\",\"params\":"
+                        + "{\"message\":{\"role\":\"user\",\"parts\":[{\"kind\":\"text\",\"text\":\"go\"}]}}}";
+                HttpResponse<String> sent = http.send(
+                        HttpRequest.newBuilder(URI.create(handle.url() + "/"))
+                                .header("Content-Type", "application/json")
+                                .POST(HttpRequest.BodyPublishers.ofString(req))
+                                .build(),
+                        HttpResponse.BodyHandlers.ofString());
+                Map<String, Object> submitted = (Map<String, Object>) Json.toMap(sent.body()).get("result");
+                String id = String.valueOf(submitted.get("id"));
+
+                long deadline = System.currentTimeMillis() + 5000;
+                while (backing.get(id) == null
+                        || !"completed".equals(((Map<?, ?>) backing.get(id).get("status")).get("state"))) {
+                    if (System.currentTimeMillis() > deadline) throw new AssertionError("timed out waiting for completion");
+                    Thread.sleep(20);
+                }
+
+                synchronized (events) {
+                    if (events.isEmpty()) throw new AssertionError("onTask should have fired");
+                    if (!"completed".equals(events.get(events.size() - 1).state())) throw new AssertionError(events);
+                    if (events.get(events.size() - 1).result().usage.totalTokens != 5) throw new AssertionError("telemetry carried");
+                }
+                if (backing.get(id) == null) throw new AssertionError("custom store received the task");
+
+                System.out.println("ok: task " + id + " completed via a custom TaskStore");
+            } finally {
+                handle.stop();
+            }
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
+```
+
+## Fields and overloads
+
+| Member | Type | What it is |
+|---|---|---|
+| `Toolkit.serve(addr, opts)` | `ServeHandle` | The ergonomic entry: mounts A2A when `opts.a2a` (or the toolkit's config `a2a` block) is set, MCP when `opts.mcp` is set. |
+| `A2AServer.A2AConfig` | class | `name`, `description`, `version`, `provider`, `skills` (allowlist), `store`. |
+| `A2AServer.OnTask` | functional interface | `accept(OnTaskEvent{id, skill, task, result, state})` — fires on every terminal state. |
+| `ServeHandle.url()` / `.stop()` / `.close()` | — | Base URL; `close()` aliases `stop()`. |
+| `a2a` absent | — | No A2A routes mount; every request 404s (unless `mcp` is also configured). |
+
+## See also
+
+- [`A2AServer.buildAgentCard`](/api/java/serve/agent-card/) — the card-building logic behind `GET /.well-known/agent-card.json`.
+- [`A2AServer.FileTaskStore`](/api/java/serve/task-store/) — persist Tasks so a suspended request survives a restart.
+- [`McpServe.build`](/api/java/serve/mcp/) — the sibling inbound profile: raw tools over MCP, no LLM in the loop.
+- [`A2A.agent`](/api/java/agents/agent/) — the outbound counterpart: call a peer's served toolkit.

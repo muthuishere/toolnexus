@@ -1,0 +1,257 @@
+---
+title: "ToGemini"
+description: "Render any tool list as Gemini function-declaration schema. Go."
+sidebar:
+  label: "ToGemini"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/adapters.go">golang/adapters.go</a>
+</p>
+
+```go
+func ToGemini(tools []Tool) []any
+```
+
+Turns a `[]Tool` into the `tools` array a Gemini `generateContent` request expects. Gemini is the odd
+one out: **every** tool goes inside a *single* element, under `functionDeclarations`. The returned
+slice therefore has length 1 no matter how many tools you pass.
+
+## When to use it
+
+When you call the Gemini API yourself — `generativelanguage.googleapis.com`, Vertex AI, or a Gemini
+SDK — and need the `tools` block for the request body.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use CreateClient instead if you want the loop too">
+[`CreateClient`](/api/go/client/create/) selects the adapter from its style option and runs the
+tool-calling loop for you — including unwrapping Gemini's `functionCall` parts and posting
+`functionResponse` back. Prefer it *instead* of this unless you already have your own loop and want
+toolnexus only for tool aggregation.
+</Aside>
+
+`tk.ToGemini()` on a [`Toolkit`](/api/go/toolkit/create/) is this function applied to that toolkit's
+tools — the method when you hold a toolkit, the free function when you hold a slice.
+
+## Examples
+
+### 1. One tool, and the wrapper that surprises everyone
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	weather := toolnexus.NativeTool(
+		"get_weather",
+		"Current weather for a city",
+		toolnexus.JSONSchema{
+			"type":       "object",
+			"properties": map[string]any{"city": map[string]any{"type": "string"}},
+			"required":   []string{"city"},
+		},
+		func(ctx context.Context, args map[string]any) (string, error) {
+			return fmt.Sprintf("sunny in %v", args["city"]), nil
+		},
+	)
+
+	schema := toolnexus.ToGemini([]toolnexus.Tool{weather})
+	// ALWAYS exactly one element — the wrapper, not the tool.
+	if len(schema) != 1 {
+		log.Fatalf("expected 1 wrapper element, got %d", len(schema))
+	}
+
+	b, _ := json.Marshal(schema[0])
+	var got map[string]any
+	_ = json.Unmarshal(b, &got)
+
+	decls := got["functionDeclarations"].([]any)
+	if len(decls) != 1 {
+		log.Fatalf("expected 1 declaration, got %d", len(decls))
+	}
+	d := decls[0].(map[string]any)
+	if d["name"] != "get_weather" || d["description"] != "Current weather for a city" {
+		log.Fatalf("unexpected declaration: %v", d)
+	}
+	if _, ok := d["parameters"].(map[string]any); !ok {
+		log.Fatalf("expected a parameters object, got %v", d["parameters"])
+	}
+
+	fmt.Println("ok:", d["name"])
+}
+```
+
+<Aside type="caution">
+`len(ToGemini(tools))` is **not** the number of tools — it is always 1. Count
+`functionDeclarations` instead. Even with no tools at all you get one element holding an empty
+declaration list.
+</Aside>
+
+### 2. Feeding it straight into a generateContent body
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	mk := func(name, desc string) toolnexus.Tool {
+		return toolnexus.NativeTool(name, desc,
+			toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+			func(ctx context.Context, args map[string]any) (string, error) { return name, nil },
+		)
+	}
+
+	tools := []toolnexus.Tool{mk("search", "Search the docs"), mk("ping", "Health check")}
+
+	body := map[string]any{
+		"contents": []any{map[string]any{
+			"role":  "user",
+			"parts": []any{map[string]any{"text": "search for adapters"}},
+		}},
+		"tools": toolnexus.ToGemini(tools),
+	}
+
+	b, err := json.Marshal(body)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var got map[string]any
+	_ = json.Unmarshal(b, &got)
+	wrappers := got["tools"].([]any)
+	if len(wrappers) != 1 {
+		log.Fatalf("expected 1 wrapper, got %d", len(wrappers))
+	}
+
+	decls := wrappers[0].(map[string]any)["functionDeclarations"].([]any)
+	var names []string
+	for _, d := range decls {
+		names = append(names, d.(map[string]any)["name"].(string))
+	}
+	// Two tools, one wrapper, order preserved.
+	if len(names) != 2 || names[0] != "search" || names[1] != "ping" {
+		log.Fatalf("unexpected declarations: %v", names)
+	}
+
+	fmt.Println("ok:", names)
+}
+```
+
+### 3. Round-tripping a `functionCall` part back to the tool
+
+Gemini returns a `functionCall` part whose `args` is an object, and expects a `functionResponse`
+part back — keyed by tool **name**, not by a call id.
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	weather := toolnexus.NativeTool(
+		"get_weather",
+		"Current weather for a city",
+		toolnexus.JSONSchema{
+			"type":       "object",
+			"properties": map[string]any{"city": map[string]any{"type": "string"}},
+			"required":   []string{"city"},
+		},
+		func(ctx context.Context, args map[string]any) (string, error) {
+			return fmt.Sprintf("sunny in %v", args["city"]), nil
+		},
+	)
+	tools := []toolnexus.Tool{weather}
+
+	raw := `{"functionCall":{"name":"get_weather","args":{"city":"Chennai"}}}`
+	var part struct {
+		FunctionCall struct {
+			Name string         `json:"name"`
+			Args map[string]any `json:"args"`
+		} `json:"functionCall"`
+	}
+	if err := json.Unmarshal([]byte(raw), &part); err != nil {
+		log.Fatal(err)
+	}
+
+	var called *toolnexus.Tool
+	for i := range tools {
+		if tools[i].Name == part.FunctionCall.Name {
+			called = &tools[i]
+			break
+		}
+	}
+	if called == nil {
+		log.Fatal("the advertised name should resolve back to the tool")
+	}
+
+	res, err := called.Execute(part.FunctionCall.Args, nil)
+	if err != nil || res.Output != "sunny in Chennai" || res.IsError {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+
+	response := map[string]any{"functionResponse": map[string]any{
+		"name":     called.Name,
+		"response": map[string]any{"result": res.Output},
+	}}
+	if _, ok := response["functionResponse"]; !ok {
+		log.Fatal("expected a functionResponse part")
+	}
+
+	// No tools at all still yields the wrapper — with an empty declaration list.
+	empty := toolnexus.ToGemini(nil)
+	if len(empty) != 1 {
+		log.Fatalf("expected the wrapper even for no tools, got %d", len(empty))
+	}
+	eb, _ := json.Marshal(empty[0])
+	var emptyGot map[string]any
+	_ = json.Unmarshal(eb, &emptyGot)
+	if n := len(emptyGot["functionDeclarations"].([]any)); n != 0 {
+		log.Fatalf("expected 0 declarations, got %d", n)
+	}
+
+	fmt.Println("ok:", called.Name, "->", res.Output)
+}
+```
+
+## Shape
+
+| Path | From | Notes |
+|---|---|---|
+| `[0]` | — | The single wrapper element (`GeminiTool`). Always exactly one. |
+| `[0].functionDeclarations` | `tools` | One entry per tool, in input order. |
+| `[0].functionDeclarations[].name` | `Tool.Name` | What the `functionCall` part names. |
+| `[0].functionDeclarations[].description` | `Tool.Description` | |
+| `[0].functionDeclarations[].parameters` | `Tool.InputSchema` | Renamed — `inputSchema` → `parameters`. |
+
+## See also
+
+- [`ToOpenAI`](/api/go/adapters/openai/) · [`ToAnthropic`](/api/go/adapters/anthropic/)
+- [`CreateToolkit`](/api/go/toolkit/create/) — `tk.ToGemini()` is this, applied to the toolkit
+- [`CreateClient`](/api/go/client/create/) — calls the adapter for you
+- [`Tool`](/api/go/types/tool/) — the input type

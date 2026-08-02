@@ -1,0 +1,41 @@
+---
+title: "pendingOf — read a suspension off a result"
+description: "Detect that a RunResult is parked rather than finished, and get the Request that parked it. — Elixir."
+sidebar:
+  label: "suspension / pending-of"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+<Aside type="caution" title="Not available in Elixir">
+Elixir has no pending_of/1; match on result.metadata or use ToolResult.pending?/1.
+</Aside>
+
+Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+
+## What to use instead
+
+Two calls cover it. `Toolnexus.ToolResult.pending?/1` tells you a **result** is a suspension;
+matching `metadata.pending` directly gets you the `Request`:
+
+```elixir
+alias Toolnexus.{ToolResult, Request}
+
+case result do
+  %ToolResult{metadata: %{pending: %Request{} = req}} -> req
+  _ -> nil
+end
+```
+
+At the `RunResult` level, `Toolnexus.Client.run/4` already surfaces this without a helper:
+`result.status == "pending"` and `result.pending` is the `Request` directly (no reader call
+needed — see [`Client.run`](/api/elixir/client/run/#runresult-shape)).
+
+## See also
+
+- [`Toolnexus.Client.create`](/api/elixir/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`Toolnexus.Agents.Runtime.resume`](/api/elixir/suspension/resume/) — The answer-carrying entry point: resume a parked run in a different process.

@@ -1,0 +1,122 @@
+---
+title: "BuiltinTools.Create"
+description: "Construct every built-in tool directly, outside a toolkit. — C#."
+sidebar:
+  label: "BuiltinTools.Create"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/BuiltinTools.cs">BuiltinTools.cs</a>
+</p>
+
+```csharp
+public static List<ITool> Create()
+```
+
+Builds all ten built-in tools — opencode's set, ported with identical names and input schemas across
+every language — with **no config and no filtering**. Fixed order for parity:
+
+`bash`, `read`, `write`, `edit`, `grep`, `glob`, `webfetch`, `question`, `apply_patch`, `todowrite`.
+
+Every one obeys the uniform [`ITool`](/api/csharp/types/tool/)/[`ToolResult`](/api/csharp/types/tool-result/)
+contract — a failure is a `ToolResult` with `IsError: true`, never a thrown exception across the
+tool boundary — and each reports `Source == "builtin"`. Paths resolve relative to the process
+working directory unless absolute.
+
+## When to use it
+
+You want the full built-in set, unconditionally — no config value to honor, nothing to turn off.
+Useful for inspecting the whole set (schemas, names, count), or for building your own filtering on
+top of it instead of the `tools`-map shape `Select` understands.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Select(cfg) when a config value exists">
+`Create` always returns all ten. The moment you have a `builtins` config value — from `mcp.json`,
+from an agent definition, from anywhere — reach for
+[`BuiltinTools.Select`](/api/csharp/builtins/select/) instead; it calls `Create` internally and
+applies that config's on/off/allowlist semantics.
+</Aside>
+
+## Examples
+
+### 1. All ten, in the fixed order
+
+```csharp test
+using Toolnexus;
+
+var tools = BuiltinTools.Create();
+
+var names = tools.Select(t => t.Name).ToList();
+var expected = new[] { "bash", "read", "write", "edit", "grep", "glob", "webfetch", "question", "apply_patch", "todowrite" };
+if (!names.SequenceEqual(expected)) throw new Exception(string.Join(",", names));
+if (tools.Any(t => t.Source != "builtin")) throw new Exception("expected every tool to be builtin");
+
+Console.WriteLine($"ok: {tools.Count} built-ins in fixed order");
+```
+
+### 2. Calling one directly — read/write round-trip
+
+```csharp test
+using Toolnexus;
+
+var tools = BuiltinTools.Create();
+var write = tools.Single(t => t.Name == "write");
+var read = tools.Single(t => t.Name == "read");
+
+var path = Path.Combine(Path.GetTempPath(), $"toolnexus-docs-{Guid.NewGuid():N}.txt");
+try
+{
+    var wr = await write.ExecuteAsync(new Dictionary<string, object?> { ["path"] = path, ["content"] = "hello builtins" });
+    if (wr.IsError) throw new Exception(wr.Output);
+
+    var rr = await read.ExecuteAsync(new Dictionary<string, object?> { ["path"] = path });
+    if (rr.IsError || rr.Output != "hello builtins") throw new Exception(rr.Output);
+
+    // A missing required argument is a ToolResult error, never a thrown exception.
+    var missing = await read.ExecuteAsync(new Dictionary<string, object?>());
+    if (!missing.IsError) throw new Exception("expected an error result for a missing path");
+
+    Console.WriteLine($"ok: wrote and read back \"{rr.Output}\"");
+}
+finally
+{
+    File.Delete(path);
+}
+```
+
+### 3. Feeding the full set into an adapter, outside any toolkit
+
+```csharp test
+using Toolnexus;
+
+var tools = BuiltinTools.Create();
+var schema = Adapters.ToOpenAI(tools);
+
+if (schema.Count != 10) throw new Exception($"expected 10, got {schema.Count}");
+var fnNames = schema.Select(e => (string)((IDictionary<string, object?>)e["function"]!)["name"]!).ToList();
+if (fnNames[0] != "bash" || fnNames[^1] != "todowrite") throw new Exception(string.Join(",", fnNames));
+
+Console.WriteLine($"ok: {schema.Count} built-ins as OpenAI schema, first={fnNames[0]}, last={fnNames[^1]}");
+```
+
+## The ten built-ins
+
+| Name | What it does |
+|---|---|
+| `bash` | Run a shell command; returns combined stdout+stderr. |
+| `read` | Read a UTF-8 text file, optionally windowed by offset/limit. |
+| `write` | Write (create/overwrite) a file, creating parent directories. |
+| `edit` | Exact-string replace, single-occurrence by default. |
+| `grep` | Regex search over file contents under a directory. |
+| `glob` | List files matching a glob under a directory. |
+| `webfetch` | HTTP GET a URL as text, markdown, or html. |
+| `question` | Ask the host a question; suspends via §10 (`kind:"question"`). |
+| `apply_patch` | Apply a Begin/End Patch grammar patch; atomic. |
+| `todowrite` | Replace the session todo list; returns the rendered list. |
+
+## See also
+
+- [`BuiltinTools.Select`](/api/csharp/builtins/select/) — Pick which built-in file/shell/web tools are in play, by name or by source toggle.

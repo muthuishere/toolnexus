@@ -1,0 +1,197 @@
+---
+title: ToolContext
+description: The optional per-call context handed to execute — cancellation, a timeout override, and the answer that resolves a suspension. JavaScript.
+sidebar:
+  label: ToolContext
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/types.ts">js/src/types.ts</a>
+</p>
+
+```ts
+interface ToolContext {
+  signal?: AbortSignal
+  timeout?: number
+  /** Present ONLY on a post-waitFor retry (§10): the resolution of a prior suspension. */
+  answer?: Answer
+}
+```
+
+The second, optional argument to `execute`. Every field is optional and the whole object may be
+absent, so a tool that ignores it still works — but the three things it carries are how a tool
+participates in cancellation, honours a deadline, and receives the answer to a question it asked.
+
+## When to use it
+
+Read `ctx` when your tool does anything **slow or interactive**:
+
+- **`signal`** — long work that should stop when the run is cancelled or times out.
+- **`timeout`** — the caller's deadline for this specific call, in milliseconds.
+- **`answer`** — you returned a suspension on a previous attempt and the host has now resolved it.
+
+A pure, fast, local computation can ignore `ctx` entirely.
+
+## Why it is optional, and what that costs you
+
+<Aside type="caution" title="Always guard it">
+`ctx` is `ToolContext | undefined`, and every field inside is optional too. `ctx.signal.aborted`
+will throw on a direct `execute()` call that passed no context. Write `ctx?.signal?.aborted`.
+</Aside>
+
+The reason it is optional is that `Tool.execute` is called from many places — the client loop, a
+direct `tk.execute()`, your own test — and not all of them have a signal or a deadline to give.
+Making it required would force every caller to invent one.
+
+## Examples
+
+### 1. Respecting cancellation
+
+Check `signal` before starting work and between steps. A cancelled tool should return promptly
+rather than throwing.
+
+```ts test
+import assert from "node:assert"
+import type { Tool } from "toolnexus"
+
+const crunch: Tool = {
+  name: "crunch",
+  description: "Do some work in steps, stopping if cancelled",
+  inputSchema: { type: "object", properties: { steps: { type: "number" } } },
+  source: "custom",
+  async execute(args, ctx) {
+    let done = 0
+    for (let i = 0; i < Number(args.steps ?? 3); i++) {
+      if (ctx?.signal?.aborted) {
+        return { output: `cancelled after ${done} step(s)`, isError: true }
+      }
+      done++
+    }
+    return { output: `completed ${done} step(s)`, isError: false }
+  },
+}
+
+// No context at all — the tool still runs.
+const plain = await crunch.execute({ steps: 3 })
+assert.equal(plain.output, "completed 3 step(s)")
+
+// Cancelled before it starts.
+const ac = new AbortController()
+ac.abort()
+const stopped = await crunch.execute({ steps: 3 }, { signal: ac.signal })
+assert.equal(stopped.isError, true)
+assert.equal(stopped.output, "cancelled after 0 step(s)")
+
+console.log("ok:", plain.output, "|", stopped.output)
+```
+
+### 2. Honouring the caller's timeout
+
+`timeout` is **milliseconds** in JavaScript. It is the caller's budget for this call — treat it as
+a ceiling, not a suggestion.
+
+```ts test
+import assert from "node:assert"
+import type { Tool } from "toolnexus"
+
+const fetchish: Tool = {
+  name: "fetchish",
+  description: "Pretend to fetch, bounded by the caller's timeout",
+  inputSchema: { type: "object", properties: { url: { type: "string" } } },
+  source: "custom",
+  async execute(args, ctx) {
+    // Fall back to your own default when the caller gave no budget.
+    const budgetMs = ctx?.timeout ?? 30_000
+    if (budgetMs < 100) {
+      return { output: `budget ${budgetMs}ms is too small to try`, isError: true }
+    }
+    return { output: `fetched ${args.url} within ${budgetMs}ms`, isError: false }
+  },
+}
+
+const generous = await fetchish.execute({ url: "/a" }, { timeout: 5000 })
+assert.equal(generous.output, "fetched /a within 5000ms")
+
+const stingy = await fetchish.execute({ url: "/a" }, { timeout: 10 })
+assert.equal(stingy.isError, true)
+
+const defaulted = await fetchish.execute({ url: "/a" })
+assert.ok(defaulted.output.includes("30000ms"))
+
+console.log("ok:", generous.output, "|", stingy.output)
+```
+
+### 3. `answer` — the second half of a suspension
+
+This is the field that makes the human-in-the-loop contract work. On the first call the tool
+returns a `pending`. The host resolves it, then calls the **same tool again** with
+`ctx.answer` set. The tool branches on whether the answer is there.
+
+```ts test
+import assert from "node:assert"
+import { pending, pendingOf } from "toolnexus"
+import type { Tool } from "toolnexus"
+
+const deploy: Tool = {
+  name: "deploy",
+  description: "Deploy, asking which environment first",
+  inputSchema: { type: "object", properties: {} },
+  source: "custom",
+  async execute(_args, ctx) {
+    // Second pass: the host resolved the question and handed the answer back.
+    if (ctx?.answer) {
+      if (!ctx.answer.ok) {
+        return { output: `declined: ${ctx.answer.reason ?? "no reason"}`, isError: true }
+      }
+      const env = String(ctx.answer.data?.env ?? "unknown")
+      return { output: `deployed to ${env}`, isError: false }
+    }
+    // First pass: park the run and ask.
+    return pending({ kind: "input", prompt: "Which environment?" })
+  },
+}
+
+// First pass — a suspension, not an answer.
+const first = await deploy.execute({})
+const req = pendingOf(first)
+assert.ok(req)
+assert.equal(req?.kind, "input")
+
+// Second pass — the host supplies the resolution, echoing the request id.
+const second = await deploy.execute({}, {
+  answer: { id: req!.id, ok: true, data: { env: "staging" } },
+})
+assert.equal(second.isError, false)
+assert.equal(second.output, "deployed to staging")
+
+// A refusal is a normal outcome, not a crash.
+const refused = await deploy.execute({}, {
+  answer: { id: req!.id, ok: false, reason: "declined" },
+})
+assert.equal(refused.isError, true)
+
+console.log("ok:", second.output, "|", refused.output)
+```
+
+<Aside type="note" title="Read answer.data only when the answer IS the payload">
+For `kind: "input"` the value you asked for lives in `answer.data`. For `kind: "authorization"` the
+world changed out-of-band — the session is simply valid now — so you re-run the real work and
+ignore `data`.
+</Aside>
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `signal` | `AbortSignal` | Cancellation. Check `ctx?.signal?.aborted` before and between steps. |
+| `timeout` | `number` | This call's budget, in **milliseconds**. |
+| `answer` | `Answer` | Present **only** on a post-`waitFor` retry — the resolution of a prior suspension. |
+
+## See also
+
+- [`Tool`](/api/javascript/types/tool/) — what receives this
+- [`ToolResult`](/api/javascript/types/tool-result/) — what `execute` returns
+- [`pending`](/api/javascript/suspension/pending/) — ask a question mid-call
+- [`waitFor`](/api/javascript/suspension/wait-for/) — the host slot that produces `answer`

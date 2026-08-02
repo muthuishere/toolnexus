@@ -1,0 +1,168 @@
+---
+title: Adapters.ToOpenAI
+description: Render any tool list as OpenAI function-calling schema. C#.
+sidebar:
+  label: Adapters.ToOpenAI
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Adapters.cs">Adapters.cs</a>
+</p>
+
+```csharp
+public static List<Dictionary<string, object?>> ToOpenAI(IEnumerable<ITool> tools)
+```
+
+Turns tools into the `tools` array an OpenAI-shaped chat completion expects. This is the bridge
+between "toolnexus knows about these tools" and "the model can call them".
+
+It takes an `IEnumerable<ITool>`, so a LINQ query or a filtered `tk.Tools()` passes straight in
+without materialising a list first.
+
+## When to use it
+
+When you are driving the LLM call yourself and need schema to put in the request body. Every
+OpenAI-compatible endpoint takes this shape — OpenAI, OpenRouter, Groq, Together, a local Ollama,
+or your own gateway.
+
+## Why this and not the client
+
+<Aside type="tip" title="Skip this entirely if you use LlmClient.Create">
+[`LlmClient.Create`](/api/csharp/client/create/) calls the right adapter for you based on its style
+option and runs the whole tool-calling loop. Reach for `ToOpenAI` when you already have your own
+loop or framework and only want toolnexus for tool *aggregation*.
+</Aside>
+
+## Examples
+
+### 1. One tool to OpenAI schema
+
+```csharp test
+using Toolnexus;
+
+var weather = NativeTool.Of(
+    "get_weather",
+    "Current weather for a city",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["city"] = new Dictionary<string, object?> { ["type"] = "string" } },
+        ["required"] = new[] { "city" },
+    },
+    (IDictionary<string, object?> a) => $"sunny in {a["city"]}");
+
+var schema = Adapters.ToOpenAI(new ITool[] { weather });
+
+if (schema.Count != 1) throw new Exception("expected 1 entry");
+if (schema[0]["type"] as string != "function") throw new Exception("type");
+
+var fn = (IDictionary<string, object?>)schema[0]["function"]!;
+if (fn["name"] as string != "get_weather") throw new Exception("name");
+if (fn["description"] as string != "Current weather for a city") throw new Exception("description");
+
+Console.WriteLine($"ok: {fn["name"]}");
+```
+
+Note the nesting: OpenAI wraps each tool in `{"type":"function","function":{...}}`. The
+`InputSchema` on an `ITool` becomes `function.parameters` — the key is renamed.
+
+### 2. Feeding it straight into a request body
+
+The output is plain dictionaries, so `System.Text.Json` serializes it with no converter.
+
+```csharp test
+using System.Text.Json;
+using Toolnexus;
+
+ITool Mk(string name, string desc) => NativeTool.Of(
+    name, desc,
+    new Dictionary<string, object?> { ["type"] = "object", ["properties"] = new Dictionary<string, object?>() },
+    (IDictionary<string, object?> a) => name);
+
+var tools = new[] { Mk("search", "Search the docs"), Mk("ping", "Health check") };
+
+var body = new Dictionary<string, object?>
+{
+    ["model"] = "gpt-4o-mini",
+    ["messages"] = new[] { new Dictionary<string, object?> { ["role"] = "user", ["content"] = "search for adapters" } },
+    ["tools"] = Adapters.ToOpenAI(tools),
+};
+
+var entries = (List<Dictionary<string, object?>>)body["tools"]!;
+if (entries.Count != 2) throw new Exception("expected 2 tools");
+
+// Order is preserved.
+var names = entries
+    .Select(e => (string)((IDictionary<string, object?>)e["function"]!)["name"]!)
+    .ToList();
+if (names[0] != "search" || names[1] != "ping") throw new Exception($"order: {string.Join(",", names)}");
+
+// Plain JSON — no custom converter needed.
+if (JsonSerializer.Serialize(body).Length == 0) throw new Exception("serialize");
+
+Console.WriteLine($"ok: {string.Join(", ", names)}");
+```
+
+### 3. Round-tripping a call back to the tool
+
+Schema out, tool call in. The `Name` the model returns is the same `Name` you look up.
+
+```csharp test
+using System.Text.Json;
+using Toolnexus;
+
+var weather = NativeTool.Of(
+    "get_weather",
+    "Current weather for a city",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["city"] = new Dictionary<string, object?> { ["type"] = "string" } },
+        ["required"] = new[] { "city" },
+    },
+    (IDictionary<string, object?> a) => $"sunny in {a["city"]}");
+
+var tools = new ITool[] { weather };
+
+// What a model would send back. OpenAI encodes arguments as a JSON STRING.
+const string rawArgs = """{"city":"Chennai"}""";
+const string calledName = "get_weather";
+
+var parsed = JsonSerializer.Deserialize<Dictionary<string, object?>>(rawArgs)!;
+// NB: `args` is already the implicit parameter of a top-level program — pick another name.
+var callArgs = parsed.ToDictionary(kv => kv.Key, kv => (object?)kv.Value?.ToString());
+
+var called = tools.FirstOrDefault(t => t.Name == calledName)
+    ?? throw new Exception("the advertised name should resolve back to the tool");
+
+var res = await called.ExecuteAsync(callArgs);
+if (res.IsError || res.Output != "sunny in Chennai") throw new Exception(res.Output);
+
+// An empty tool list is valid — it just means "no tools this turn".
+if (Adapters.ToOpenAI(Array.Empty<ITool>()).Count != 0) throw new Exception("expected empty");
+
+Console.WriteLine($"ok: {calledName} -> {res.Output}");
+```
+
+<Aside type="caution">
+OpenAI sends `arguments` as a **JSON string**, not an object. Deserialize it before handing it to
+`ExecuteAsync`, and note that `System.Text.Json` gives you `JsonElement` values — convert them to
+the shapes your tool expects.
+</Aside>
+
+## Shape
+
+| Path | From | Notes |
+|---|---|---|
+| `[]["type"]` | — | Always the literal `"function"`. |
+| `[]["function"]["name"]` | `ITool.Name` | What the model calls back with. |
+| `[]["function"]["description"]` | `ITool.Description` | |
+| `[]["function"]["parameters"]` | `ITool.InputSchema` | Renamed — `InputSchema` → `parameters`. |
+
+## See also
+
+- [`Adapters.ToAnthropic`](/api/csharp/adapters/anthropic/) · [`Adapters.ToGemini`](/api/csharp/adapters/gemini/)
+- [`Toolkit.CreateAsync`](/api/csharp/toolkit/create/) — `tk.ToOpenAI()` is this, applied to the toolkit
+- [`LlmClient.Create`](/api/csharp/client/create/) — calls the adapter for you

@@ -1,0 +1,190 @@
+---
+title: "agents.Budget"
+description: "Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight. — JavaScript."
+sidebar:
+  label: "agents.Budget"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7d-sub-agents--agent-runtime-source-agent">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/agents/runtime.ts">js/src/agents/runtime.ts</a>
+</p>
+
+```ts
+interface agents.Budget {
+  maxTurns?: number        // LLM round trips for this handle; lifetime cap across resumes. Default 6.
+  maxTokens?: number       // token pool, shared downward with descendants
+  maxToolCalls?: number    // tool-call pool, shared downward with descendants
+  maxWallMs?: number       // wall-clock deadline in ms from spawn; min'd with the parent's
+  maxChildren?: number     // direct-children cap, checked at spawn
+  maxConcurrent?: number   // concurrently RUNNING children cap. Default 8.
+  maxDepth?: number        // tree-depth cap, checked at spawn. Default 3.
+}
+```
+
+Hierarchical, **live-enforced** limits. Carved at `spawn()` — `effective = min(own, parent
+remaining)` — and re-checked by walking the **live ancestor chain** before every turn and every
+spawn, because carving alone misses sibling spend (two children can each be under their own carved
+cap while jointly exhausting the parent's pool). Money is deliberately excluded (vendor-specific;
+convert token/call counts to cost in a host `onBudget`).
+
+## When to use it
+
+Attach a `Budget` the moment a sub-agent — or a whole team — needs a hard ceiling: a runaway loop
+that can't spend more than N turns, a delegation tree that can't fan out past N children, a
+worker that must yield its wall-clock slot after a deadline regardless of how the model is doing.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use maxTurns on createClient instead for a single, non-hierarchical client">
+A bare [`createClient({ maxTurns })`](/api/javascript/client/create/) caps one client's loop —
+there is no tree, no roll-up, no carving. `agents.Budget` exists specifically because a sub-agent
+tree has *shared* pools: children draw down from the same token/call budget their parent was given,
+and the runtime's job is enforcing that jointly, not per-handle in isolation.
+</Aside>
+
+**Any limit stop is loud** — `status: "incomplete"` with the limit named in the text, never a
+silent `"done"` and never a crash. Partial work and the transcript are preserved either way.
+
+## Examples
+
+### 1. The smallest useful call — `maxTurns` stops a loop, loudly
+
+The mock model never gives a final answer without a tool round trip first; with `maxTurns: 1` the
+handle can't complete even one full cycle — the stop is loud, and a second `wake()` is refused
+outright rather than silently re-running.
+
+```ts test
+import assert from "node:assert"
+import { agents, defineTool } from "toolnexus"
+
+const lookup = defineTool({ name: "lookup", description: "look something up", run: () => "data" })
+const mockFetch: typeof fetch = async () =>
+  new Response(JSON.stringify({
+    choices: [{ message: { content: null, tool_calls: [{ id: "c", type: "function", function: { name: "lookup", arguments: "{}" } }] } }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  }), { status: 200, headers: { "content-type": "application/json" } })
+
+const runtime = new agents.AgentRuntime({
+  fetch: mockFetch,
+  registry: { looper: { name: "looper", does: "never finishes", model: "m", tools: [lookup], budget: { maxTurns: 1 } } },
+})
+
+const h = runtime.spawn(runtime.root, "looper") as agents.Handle
+runtime.wake(h, "go")
+const r = await runtime.wait(h)
+
+assert.equal(r.status, "incomplete")
+assert.match(r.text, /maxTurns/)
+assert.equal(h.turnsTotal, 1, "the cap, never exceeded")
+
+// The budget is exhausted — a second wake is refused synchronously, not silently re-run.
+const woke = runtime.wake(h, "try again")
+assert.equal(woke.ok, false)
+assert.match(woke.ok === false ? woke.error : "", /maxTurns/)
+
+await runtime.close(runtime.root)
+console.log("ok:", r.status, r.text)
+```
+
+### 2. A realistic case — `maxChildren` and `maxDepth`, checked at `spawn()`
+
+Both caps are checked on the **parent's** effective budget, at the moment a child is spawned — a
+refusal never partially mutates the tree.
+
+```ts test
+import assert from "node:assert"
+import { agents } from "toolnexus"
+
+const canned: typeof fetch = async () =>
+  new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } })
+
+const runtime = new agents.AgentRuntime({
+  fetch: canned,
+  registry: {
+    coordinator: { name: "coordinator", does: "delegates", model: "m", budget: { maxChildren: 1 } },
+    shallow: { name: "shallow", does: "may not have children of its own", model: "m", budget: { maxDepth: 0 } },
+    worker: { name: "worker", does: "does the work", model: "m" },
+  },
+})
+
+// maxChildren: caps how many DIRECT children this handle may have.
+const coord = runtime.spawn(runtime.root, "coordinator") as agents.Handle
+const w1 = runtime.spawn(coord, "worker")
+assert.ok(!agents.isVerbError(w1), "first child: within maxChildren")
+
+const w2 = runtime.spawn(coord, "worker")
+assert.ok(agents.isVerbError(w2))
+assert.match((w2 as { error: string }).error, /maxChildren 1 exceeded/)
+
+// maxDepth: caps how much DEEPER this handle's own descendants may go —
+// shallow declares maxDepth:0, so even a direct child (one level deeper) is refused.
+const shallow = runtime.spawn(runtime.root, "shallow") as agents.Handle
+const tooDeep = runtime.spawn(shallow, "worker")
+assert.ok(agents.isVerbError(tooDeep))
+assert.match((tooDeep as { error: string }).error, /maxDepth 0 exceeded/)
+
+await runtime.close(runtime.root)
+console.log("ok: both caps enforced at spawn()")
+```
+
+### 3. The full surface — `maxConcurrent` queues wakes FIFO, slot transfer on completion
+
+Only one child of this parent may **run** at a time; the other two `wake()` calls queue instead of
+being refused, and each completing sibling transfers its slot to the next queued wake — the "loud
+backpressure, never a silent drop" gate described in SPEC §7D.
+
+```ts test
+import assert from "node:assert"
+import { agents } from "toolnexus"
+
+const canned: typeof fetch = async () =>
+  new Response(JSON.stringify({ choices: [{ message: { content: "done" } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } })
+
+const runtime = new agents.AgentRuntime({
+  fetch: canned,
+  registry: {
+    coordinator: { name: "coordinator", does: "delegates", model: "m", budget: { maxConcurrent: 1 } },
+    worker: { name: "worker", does: "worker", model: "m" },
+  },
+})
+
+const coord = runtime.spawn(runtime.root, "coordinator") as agents.Handle
+const kids = [runtime.spawn(coord, "worker"), runtime.spawn(coord, "worker"), runtime.spawn(coord, "worker")] as agents.Handle[]
+
+for (const k of kids) runtime.wake(k, "go") // all three requested at once
+const results = await Promise.all(kids.map((k) => runtime.wait(k)))
+
+assert.ok(results.every((r) => r.status === "done"))
+assert.equal(runtime.trace.filter((l) => l.includes("wake QUEUED")).length, 2, "2 of 3 had to wait for a slot")
+assert.equal(runtime.trace.filter((l) => l.includes("DEQUEUED wake")).length, 2, "each queued wake later got its slot")
+
+await runtime.close(runtime.root)
+console.log("ok: maxConcurrent gate held, no work lost")
+```
+
+## Options
+
+| Field | Type | What it does |
+|---|---|---|
+| `maxTurns` | `number` | LLM round trips this handle may run — a **lifetime** cap, never reset by a resume. Default `6`. |
+| `maxTokens` | `number` | Token pool, carved `min(own, parent remaining)`, shared downward and drained by every descendant's usage. |
+| `maxToolCalls` | `number` | Same carving, for tool-call count. |
+| `maxWallMs` | `number` | Wall-clock deadline from spawn, min'd with the parent's — a child can never outlive its parent's deadline. |
+| `maxChildren` | `number` | Direct-children cap on this handle, checked at `spawn()`. |
+| `maxConcurrent` | `number` | Concurrently **running** children of this handle. Default `8`. Queued wakes fire FIFO. |
+| `maxDepth` | `number` | Tree-depth cap relative to this handle, checked at `spawn()`. Default `3`. |
+
+## What you get back
+
+Nothing to call — a `Budget` is data, attached via `AgentSpec.budget` / `AgentDef.budget`, or
+passed to `spawn(parent, name, budget)` to override per-call. Enforcement surfaces as: a refused
+`spawn()`/`wake()` (`VerbError`, synchronous), or a `TaskResult.status: "incomplete"` with the
+exhausted limit named in the text when a turn itself hits the cap mid-flight.
+
+## See also
+
+- [`agents.Agent`](/api/javascript/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`agents.AgentRuntime`](/api/javascript/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`agents.Handle`](/api/javascript/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.

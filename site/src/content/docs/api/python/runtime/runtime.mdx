@@ -1,0 +1,291 @@
+---
+title: "AgentRuntime"
+description: "The six host verbs that drive sub-agents, plus the read-only list and inspect views. — Python."
+sidebar:
+  label: "AgentRuntime"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/agents/runtime.py">python/src/toolnexus/agents/runtime.py</a>
+</p>
+
+```python
+class AgentRuntime:
+    def __init__(self, *, registry: dict[str, AgentDef],
+                 transport: HttpTransport | None = None,
+                 inbox_cap: int = 8, max_concurrent_turns: int = 8,
+                 shutdown_ms: float = 200,
+                 llm: dict | None = None,
+                 store: ConversationStore | None = None,
+                 clock: Clock | None = None,
+                 hooks: Any | None = None,
+                 on_metric: Callable | None = None) -> None: ...
+
+    # the six host verbs
+    def spawn(self, parent: Handle, def_name: str, budget: Budget | None = None) -> Handle | SpawnError: ...
+    def post(self, h: Handle, item: InboxItem) -> PostResult: ...
+    def wake(self, h: Handle, prompt: str | None = None) -> PostResult: ...
+    async def wait(self, h: Handle, timeout_ms: float | None = None) -> TaskResult: ...
+    def interrupt(self, h: Handle) -> None: ...
+    async def close(self, h: Handle, *, force: bool = False, reason: str | None = None) -> None: ...
+
+    # read-only views
+    def list(self, h: Handle | None = None) -> list[HandleView]: ...
+    def inspect(self, h: Handle) -> HandleView: ...
+
+    root: Handle  # the synthetic root every spawn hangs off
+```
+
+The §7D host substrate: a table of live agents as `Handle` state machines, driven by
+exactly six verbs — `spawn / post / wake / wait / interrupt / close` — plus read-only
+`list`/`inspect`. Everything rides shipped machinery (the §8 client loop, the §10
+`wait_for` contract); the runtime adds no second suspension mechanism, just
+hierarchical budgets, backpressure gates, and durable resume.
+
+## When to use it
+
+- You need the six verbs individually — fan out several children and `wait` on them
+  concurrently, `post` an update into a running agent's inbox, `interrupt` one child
+  without touching its siblings.
+- You are building your own delegation surface (not the model-facing `task` tool) —
+  a supervisor loop, a fan-out/fan-in pipeline, a long-lived persona's heartbeat.
+- You want the transition trace / budget ledger / handle tree directly for tests,
+  observability, or a custom `list`/`inspect` view.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Agent.run()/.as_tool() build one of these for you">
+[`Agent.run(prompt)`](/api/python/runtime/agent/) is `spawn → wake → wait → close`
+fused into one call on a fresh, disposable `AgentRuntime`. Reach for `AgentRuntime`
+directly when one fused call isn't enough — you need the handle in between, or
+several handles at once.
+</Aside>
+
+A turn is the only execution unit; every verb either starts, feeds, reads, or stops
+one. `wake` and `wait` are decoupled on purpose: `wake` returns synchronously the
+instant admission is decided (running, queued, or rejected), `wait` is the separate
+async call that resolves with the eventual `TaskResult` — so a caller can wake several
+children back-to-back and only then await them.
+
+## Examples
+
+<Aside type="note" title="Hermetic on purpose">
+Every example scripts the LLM with a plain in-process `HttpTransport` stand-in —
+canned OpenAI-shaped replies keyed by model. No network; `AgentRuntime` accepts any
+object with a `.post()` method as its `transport`.
+</Aside>
+
+### 1. The smallest useful call — spawn, wake, wait, close
+
+```python test
+import asyncio
+
+from toolnexus.agents import AgentDef, AgentRuntime, Handle
+
+
+class ScriptedTransport:
+    def __init__(self, scripts):
+        self._scripts = {k: list(v) for k, v in scripts.items()}
+
+    def post(self, url, headers, payload, timeout):
+        return self._scripts[payload.get("model")].pop(0)
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError
+
+
+def final_reply(text):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+    }
+
+
+async def main():
+    registry = {
+        "greeter": AgentDef(name="greeter", description="says hello", system_prompt="", model="inherit"),
+    }
+    rt = AgentRuntime(
+        registry=registry,
+        transport=ScriptedTransport({"stub-model": [final_reply("hello!")]}),
+        llm={"base_url": "http://mock.local", "style": "openai", "model": "stub-model", "api_key": "unused"},
+    )
+
+    h = rt.spawn(rt.root, "greeter")
+    assert isinstance(h, Handle)
+    assert h.id == "root/greeter.1"  # deterministic, parent-scoped id
+    assert h.state == "idle"
+
+    rt.wake(h, "say hi")
+    r = await rt.wait(h)
+
+    assert r.status == "done"
+    assert r.text == "hello!"
+    assert h.state == "idle"  # a completed turn returns the handle to idle
+
+    await rt.close(h)
+    assert h.state == "closed"
+
+    print("ok:", h.id, "->", r.text)
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — fan-out, `list()`, usage roll-up
+
+```python test
+import asyncio
+
+from toolnexus.agents import AgentDef, AgentRuntime, Handle
+
+
+class ScriptedTransport:
+    def __init__(self, scripts):
+        self._scripts = {k: list(v) for k, v in scripts.items()}
+
+    def post(self, url, headers, payload, timeout):
+        return self._scripts[payload.get("model")].pop(0)
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError
+
+
+def final_reply(text, tokens=10):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": tokens - 4, "completion_tokens": 4, "total_tokens": tokens},
+    }
+
+
+async def main():
+    registry = {
+        "lookup": AgentDef(name="lookup", description="looks things up", system_prompt="", model="inherit"),
+    }
+    rt = AgentRuntime(
+        registry=registry,
+        transport=ScriptedTransport({
+            "stub-model": [final_reply("found: A-1 shipped", 10), final_reply("found: A-2 delayed", 12)]
+        }),
+        llm={"base_url": "http://mock.local", "style": "openai", "model": "stub-model", "api_key": "unused"},
+    )
+
+    a = rt.spawn(rt.root, "lookup")
+    b = rt.spawn(rt.root, "lookup")
+    assert a.id == "root/lookup.1"
+    assert b.id == "root/lookup.2"  # sibling ids never collide
+
+    rt.wake(a, "status of A-1")
+    rt.wake(b, "status of A-2")  # both admitted — default maxConcurrent is 8
+    ra, rb = await asyncio.gather(rt.wait(a), rt.wait(b))
+
+    assert {ra.text, rb.text} == {"found: A-1 shipped", "found: A-2 delayed"}
+    assert rt.root.usage_total == 10 + 12  # usage rolls up to every ancestor
+
+    views = rt.list()
+    assert {v.id for v in views} == {"root/lookup.1", "root/lookup.2"}
+    assert all(v.state == "idle" for v in views)
+
+    await rt.close(rt.root)  # stop-all: closes the whole tree, leaf-first
+
+    print("ok:", sorted(v.id for v in views), "| total tokens:", rt.root.usage_total)
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — `post` into a running turn, `interrupt`, budget exhaustion
+
+```python test
+import asyncio
+
+from toolnexus.agents import AgentDef, AgentRuntime, Budget, Handle, InboxItem
+
+
+class ScriptedTransport:
+    def __init__(self, scripts):
+        self._scripts = {k: list(v) for k, v in scripts.items()}
+
+    def post(self, url, headers, payload, timeout):
+        return self._scripts[payload.get("model")].pop(0)
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError
+
+
+def final_reply(text):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+    }
+
+
+async def main():
+    registry = {
+        "worker": AgentDef(name="worker", description="does work", system_prompt="", model="inherit"),
+    }
+
+    # -- interrupt: idle + restored inbox, never a kill --------------------------
+    rt = AgentRuntime(registry=registry, transport=ScriptedTransport({"stub-model": []}),
+                       llm={"base_url": "http://mock.local", "style": "openai", "model": "stub-model", "api_key": "unused"})
+    h = rt.spawn(rt.root, "worker")
+    rt.post(h, InboxItem(from_="external", channel="external", text="queued while idle"))
+    assert len(h.inbox) == 1
+    rt.interrupt(h)  # a no-op on an idle handle — nothing was running
+    assert h.state == "idle"
+    assert len(h.inbox) == 1  # the queued item is untouched
+    await rt.close(rt.root)
+
+    # -- budget exhaustion: a loud "incomplete", never a silent stop -------------
+    limited = AgentRuntime(
+        registry=registry,
+        transport=ScriptedTransport({"stub-model": [final_reply("done")]}),
+        llm={"base_url": "http://mock.local", "style": "openai", "model": "stub-model", "api_key": "unused"},
+    )
+    tight = limited.spawn(limited.root, "worker", budget=Budget(max_tool_calls=0, max_tokens=0))
+    limited.wake(tight, "go")
+    r = await limited.wait(tight)
+
+    assert r.status == "incomplete"
+    assert "tokens" in r.text or "toolCalls" in r.text  # the exhausted dimension is named
+    assert r.is_error is True
+    await limited.close(limited.root)
+
+    print("ok:", "interrupt-on-idle preserved the inbox; budget exhaustion was loud:", r.text)
+
+
+asyncio.run(main())
+```
+
+## Constructor options
+
+| Parameter | Type | What it does |
+|---|---|---|
+| `registry` | `dict[str, AgentDef]` | Every spawnable agent definition, keyed by name. |
+| `transport` | `HttpTransport \| None` | Injected LLM HTTP transport — fixtures script it; default `UrllibTransport()`. |
+| `inbox_cap` | `int` | Per-handle bounded inbox; `post` past the cap is a synchronous reject. Default `8`. |
+| `max_concurrent_turns` | `int` | The global turn gate — wraps only the LLM HTTP call, never a whole Run. Default `8`. |
+| `shutdown_ms` | `float` | Grace period `close()` gives a running turn before escalating to `interrupt`. Default `200`. |
+| `llm` | `dict \| None` | `{base_url, style, model, api_key}` every handle's loop talks to. |
+| `store` | `ConversationStore \| None` | The ONE runtime-wide store — conversation id = handle id. Default in-memory. |
+| `clock` | `Clock \| None` | Injectable clock for every timer/timeout/deadline. Default the real asyncio clock. |
+| `hooks` / `on_metric` | `Any \| None` | The §8 seams, applied to every agent unless a def replaces them. |
+
+## The six verbs, in one line each
+
+| Verb | Contract |
+|---|---|
+| `spawn(parent, def_name, budget?)` | New child; deterministic id; budget carve; caps checked; handle returned to the spawner alone. |
+| `post(h, item)` | Append to the inbox — no state transition; bounded, loud reject at cap. |
+| `wake(h, prompt?)` | `idle → running`; admission is atomic with the call; over `maxConcurrent` ⇒ FIFO queue. |
+| `wait(h, timeout_ms?)` | Resolves with the next-or-last result; a settled handle answers immediately. |
+| `interrupt(h)` | Abort the in-flight turn → `idle` with the inbox restored. Never a kill. |
+| `close(h, force?)` | Graceful, leaf-first cascade; `close(rt.root)` is stop-all. |
+
+## See also
+
+- [`Agent`](/api/python/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`Handle`](/api/python/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`Budget`](/api/python/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

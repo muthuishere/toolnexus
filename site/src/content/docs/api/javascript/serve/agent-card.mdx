@@ -1,0 +1,153 @@
+---
+title: "buildAgentCard"
+description: "Construct the Agent Card that advertises your name, skills and endpoint. — JavaScript."
+sidebar:
+  label: "buildAgentCard"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7b-a2a-agents--inbound-serve">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/serve.ts">js/src/serve.ts</a>
+</p>
+
+```ts
+interface A2AConfig {
+  name?: string
+  description?: string
+  version?: string
+  provider?: { organization: string; url: string }
+  skills?: string[]
+  store?: TaskStore | "memory" | string
+}
+
+function buildAgentCard(cfg: A2AConfig, skills: SkillInfo[], url: string): AgentCard
+```
+
+The pure function behind `GET /.well-known/agent-card.json`: take the `a2a` profile config, the
+toolkit's `SkillInfo[]`, and the base URL, and produce the JSON document a peer's `agent()` call
+fetches. **Skills, never raw tools** — a served toolkit's `bash`/`read`/MCP tool names never leak
+into the card, only its `SKILL.md` catalog.
+
+## When to use it
+
+Call `buildAgentCard` directly when you want to inspect, test, or hand-roll the card without
+starting a server — checking what a given `a2a` config would advertise, or building your own HTTP
+layer around the same card shape [`startA2AServer`](/api/javascript/serve/a2a/) mounts for you.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use startA2AServer / toolkit.serve instead when you want the live route">
+`startA2AServer` calls `buildAgentCard` on every `GET /.well-known/agent-card.json` request, using
+the toolkit's live skill list and the server's own bound `url`. Reach for `buildAgentCard` directly
+only when you need the JSON without an HTTP server around it.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — defaults, no skills
+
+Every field has a sensible default; an empty skill list produces an empty `skills` array, not an
+error.
+
+```ts test
+import assert from "node:assert"
+import { buildAgentCard } from "toolnexus"
+
+const card = buildAgentCard({}, [], "http://127.0.0.1:4000/")
+
+assert.equal(card.name, "toolnexus-agent")
+assert.equal(card.description, "")
+assert.equal(card.version, "0.1.0")
+assert.equal(card.protocolVersion, "0.3.0")
+assert.deepEqual(card.capabilities, { streaming: false, pushNotifications: false })
+assert.deepEqual(card.skills, [])
+assert.equal(card.url, "http://127.0.0.1:4000/")
+
+console.log("ok:", card.name)
+```
+
+### 2. A realistic case — named agent, real skills, a subset filter
+
+`cfg.skills` narrows what's advertised to a named subset — useful when a toolkit has internal
+skills it shouldn't hand out to every peer.
+
+```ts test
+import assert from "node:assert"
+import { buildAgentCard, type SkillInfo } from "toolnexus"
+
+const skills: SkillInfo[] = [
+  { name: "hello-world", description: "Say hello", location: "/skills/hello-world/SKILL.md", content: "" },
+  { name: "internal-audit", description: "Not for peers", location: "/skills/internal-audit/SKILL.md", content: "" },
+]
+
+const publicCard = buildAgentCard(
+  { name: "video-desk", description: "Handles video pipeline requests", skills: ["hello-world"] },
+  skills,
+  "http://127.0.0.1:4000/",
+)
+
+assert.equal(publicCard.name, "video-desk")
+assert.deepEqual(publicCard.skills!.map((s) => s.id), ["hello-world"], "internal-audit filtered out")
+assert.equal(publicCard.skills![0].description, "Say hello")
+
+console.log("ok:", publicCard.skills!.map((s) => s.id))
+```
+
+### 3. The full surface — provider metadata and every advertised field
+
+```ts test
+import assert from "node:assert"
+import { buildAgentCard, type SkillInfo } from "toolnexus"
+
+const skills: SkillInfo[] = [
+  { name: "search", description: "Search the catalog", location: "-", content: "" },
+]
+
+const card = buildAgentCard(
+  {
+    name: "catalog-desk",
+    description: "Product catalog search agent",
+    version: "2.3.0",
+    provider: { organization: "acme-corp", url: "https://acme.example" },
+    store: "memory", // not reflected on the card — controls Task persistence
+  },
+  skills,
+  "http://catalog.internal:8080/",
+)
+
+assert.equal(card.version, "2.3.0")
+assert.deepEqual(card.provider, { organization: "acme-corp", url: "https://acme.example" })
+assert.deepEqual(card.defaultInputModes, ["text"])
+assert.deepEqual(card.defaultOutputModes, ["text"])
+assert.equal(card.capabilities!.streaming, false, "core has no streaming/push support")
+assert.equal(card.skills!.length, 1)
+assert.equal(card.skills![0].name, "search")
+
+console.log("ok:", JSON.stringify(card.provider))
+```
+
+## Options
+
+| Field | Type | What it does |
+|---|---|---|
+| `cfg.name` | `string` | Advertised agent name — also the outbound tool-name prefix a caller sees. Default `"toolnexus-agent"`. |
+| `cfg.description` | `string` | Default `""`. |
+| `cfg.version` | `string` | Default `"0.1.0"`. |
+| `cfg.provider` | `{ organization, url }` | Included on the card only when set. |
+| `cfg.skills` | `string[]` | Subset of skill names/ids to advertise. Omit ⇒ all. |
+| `cfg.store` | `TaskStore \| "memory" \| string` | Not reflected on the card; controls `startA2AServer`'s Task persistence — see [`FileTaskStore`](/api/javascript/serve/task-store/). |
+| `skills` | `SkillInfo[]` | The toolkit's `SkillSource` entries; each becomes `{ id: name, name, description }`. |
+| `url` | `string` | The JSON-RPC POST endpoint — set to `card.url`. |
+
+## What you get back
+
+An `AgentCard`: `{ name, description, version, protocolVersion: "0.3.0", capabilities: { streaming:
+false, pushNotifications: false }, defaultInputModes: ["text"], defaultOutputModes: ["text"],
+skills, url, provider? }` — exactly the JSON `GET /.well-known/agent-card.json` returns.
+
+## See also
+
+- [`startA2AServer`](/api/javascript/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+- [`FileTaskStore`](/api/javascript/serve/task-store/) — Persist inbound A2A tasks so a suspended request survives a restart.
+- [`buildMcpServer`](/api/javascript/serve/mcp/) — The inbound MCP profile: any MCP client can call your tools.

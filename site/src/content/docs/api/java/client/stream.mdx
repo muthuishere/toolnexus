@@ -1,0 +1,250 @@
+---
+title: "LlmClient.stream"
+description: "The streaming loop: text deltas, tool-call events, and suspension events as they happen. — Java."
+sidebar:
+  label: "LlmClient.stream"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/LlmClient.java">LlmClient.java</a>
+</p>
+
+```java
+public RunResult stream(String prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent)
+public RunResult stream(String prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent, String id)
+public Stream<StreamEvent> stream(String prompt, Toolkit toolkit)
+```
+
+Drives the SAME agent loop as [`run`](/api/java/client/run/) — hooks, tools, telemetry — but
+delivers incremental `StreamEvent`s to `onEvent` as they happen: text deltas, tool calls, tool
+results, usage, and a terminal `DONE` event carrying the final `RunResult`. `stream` always
+returns that same `RunResult` too, for convenience.
+
+## When to use it
+
+Whenever a human or a UI is watching the turn happen live — a chat bubble filling in token by
+token, a "calling `get_weather`…" indicator, a link surfaced the instant a tool suspends. Anywhere
+you'd otherwise poll or guess at progress, stream the events instead.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use run() when you only want the final answer">
+If nothing needs to see progress — a backend job, a batch script — [`LlmClient.run`](/api/java/client/run/)
+is the simpler call for the identical loop and the identical `RunResult`. Reach for `stream` only
+when something is consuming the events *as they happen*; don't reach for it just to get the final
+text back.
+</Aside>
+
+The 3-arg overload adds conversation memory by `id`, exactly like `ask(prompt, id)` — the
+transcript is loaded from the client's [`ConversationStore`](/api/java/client/store/) before
+streaming and saved back once the terminal `DONE` event fires. The zero-callback
+`Stream<StreamEvent>` overload is a blocking convenience: it collects every event first and hands
+back a `java.util.stream.Stream` — the `Consumer` form above is the truly incremental API.
+
+## Examples
+
+### 1. The smallest useful call — text deltas only
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        // OpenAI-shaped SSE: "data: {json}\n\n" lines, terminated by "data: [DONE]".
+        String sse = "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n"
+                + "data: {\"choices\":[{\"delta\":{\"content\":\"lo!\"}}]}\n\n"
+                + "data: [DONE]\n\n";
+
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            ex.getResponseHeaders().add("Content-Type", "text/event-stream");
+            ex.sendResponseHeaders(200, 0); // 0 => chunked, unknown length
+            try (OutputStream os = ex.getResponseBody()) { os.write(sse.getBytes(StandardCharsets.UTF_8)); }
+        });
+        server.start();
+        int port = server.getAddress().getPort();
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + port)
+                    .style("openai")
+                    .model("test-model")
+                    .apiKey("test-key"));
+
+            List<String> deltas = new ArrayList<>();
+            LlmClient.RunResult res = client.stream("Say hello", tk, ev -> {
+                if (ev.type() == LlmClient.StreamEvent.Kind.TEXT) deltas.add(ev.delta());
+            });
+
+            if (!String.join("", deltas).equals("Hello!")) throw new AssertionError(deltas);
+            if (!res.text.equals("Hello!")) throw new AssertionError(res.text);
+
+            System.out.println("ok: " + deltas.size() + " delta(s) -> " + res.text);
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 2. The realistic case — a streamed tool call
+
+Tool-call arguments are assembled from `delta.tool_calls` fragments (here sent whole, in one
+chunk — the client accumulates by index either way), then the tool runs and a second streamed
+turn produces the final text.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        AtomicInteger hits = new AtomicInteger(0);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            int n = hits.incrementAndGet();
+            String sse = n == 1
+                    ? "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\","
+                      + "\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Chennai\\\"}\"}}]}}]}\n\n"
+                      + "data: [DONE]\n\n"
+                    : "data: {\"choices\":[{\"delta\":{\"content\":\"It is sunny in Chennai.\"}}]}\n\n"
+                      + "data: [DONE]\n\n";
+            ex.getResponseHeaders().add("Content-Type", "text/event-stream");
+            ex.sendResponseHeaders(200, 0);
+            try (OutputStream os = ex.getResponseBody()) { os.write(sse.getBytes(StandardCharsets.UTF_8)); }
+        });
+        server.start();
+        int port = server.getAddress().getPort();
+
+        Tool weather = NativeTool.of(
+                "get_weather", "Current weather for a city",
+                Map.of("type", "object", "properties", Map.of("city", Map.of("type", "string"))),
+                (Map<String, Object> a) -> "sunny in " + a.get("city"));
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().extraTools(weather))) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + port)
+                    .style("openai")
+                    .model("test-model")
+                    .apiKey("test-key"));
+
+            List<LlmClient.StreamEvent> events = new ArrayList<>();
+            LlmClient.RunResult res = client.stream("weather in Chennai?", tk, events::add);
+
+            boolean sawToolCall = events.stream().anyMatch(e -> e.type() == LlmClient.StreamEvent.Kind.TOOL_CALL
+                    && "get_weather".equals(e.name()));
+            boolean sawToolResult = events.stream().anyMatch(e -> e.type() == LlmClient.StreamEvent.Kind.TOOL_RESULT
+                    && "sunny in Chennai".equals(e.output()));
+            if (!sawToolCall) throw new AssertionError("expected a tool_call event");
+            if (!sawToolResult) throw new AssertionError("expected a tool_result event");
+            if (!res.text.equals("It is sunny in Chennai.")) throw new AssertionError(res.text);
+
+            System.out.println("ok: " + res.text);
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 3. The full surface — conversation memory by `id`, and the `USAGE`/`DONE` events
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        AtomicInteger hits = new AtomicInteger(0);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            int n = hits.incrementAndGet();
+            String text = n == 1 ? "Hi there." : "Still here.";
+            String sse = "data: {\"choices\":[{\"delta\":{\"content\":\"" + text + "\"}}]}\n\n"
+                    + "data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n"
+                    + "data: [DONE]\n\n";
+            ex.getResponseHeaders().add("Content-Type", "text/event-stream");
+            ex.sendResponseHeaders(200, 0);
+            try (OutputStream os = ex.getResponseBody()) { os.write(sse.getBytes(StandardCharsets.UTF_8)); }
+        });
+        server.start();
+        int port = server.getAddress().getPort();
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + port)
+                    .style("openai")
+                    .model("test-model")
+                    .apiKey("test-key"));
+
+            // Stateful streaming: the same `id` continues the SAME transcript across calls,
+            // loaded from and saved back to the client's own ConversationStore.
+            List<LlmClient.StreamEvent> firstEvents = new ArrayList<>();
+            LlmClient.RunResult first = client.stream("Hello", tk, firstEvents::add, "session-1");
+
+            List<LlmClient.StreamEvent> secondEvents = new ArrayList<>();
+            LlmClient.RunResult second = client.stream("Still there?", tk, secondEvents::add, "session-1");
+
+            boolean sawUsage = firstEvents.stream().anyMatch(e -> e.type() == LlmClient.StreamEvent.Kind.USAGE
+                    && e.usage().totalTokens == 5);
+            if (!sawUsage) throw new AssertionError("expected a usage event");
+
+            boolean sawDone = secondEvents.stream().anyMatch(e -> e.type() == LlmClient.StreamEvent.Kind.DONE
+                    && e.result().text.equals("Still here."));
+            if (!sawDone) throw new AssertionError("expected a done event carrying the final result");
+
+            if (second.messages.size() <= first.messages.size()) throw new AssertionError("history should grow");
+            if (!client.conversationStore().get("session-1").equals(second.messages)) {
+                throw new AssertionError("the store should hold the latest transcript for \"session-1\"");
+            }
+
+            System.out.println("ok: " + first.text + " | " + second.text);
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+## Fields and overloads
+
+| Member | Type | What it is |
+|---|---|---|
+| `stream(prompt, toolkit, onEvent)` | `RunResult` | Stateless: streams events, returns the final `RunResult`. |
+| `stream(prompt, toolkit, onEvent, id)` | `RunResult` | Stateful — loads/saves the transcript for `id` via the client's `ConversationStore`, like `ask(prompt, id)`. |
+| `stream(prompt, toolkit)` | `Stream<StreamEvent>` | Blocking convenience: collects every event, then returns them as a `java.util.stream.Stream`. |
+| `StreamEvent.type()` | `Kind` | `TEXT` \| `TOOL_CALL` \| `TOOL_RESULT` \| `USAGE` \| `PENDING` \| `DONE`. |
+| `StreamEvent.delta()` | `String` | Set on `TEXT` — one assistant text token delta. |
+| `StreamEvent.id()` / `name()` / `args()` | — | Set on `TOOL_CALL` — the call about to run. |
+| `StreamEvent.output()` / `isError()` | — | Set on `TOOL_RESULT` — after the tool ran. |
+| `StreamEvent.usage()` | `Usage` | Set on `USAGE` — token usage accumulated so far. |
+| `StreamEvent.request()` | `Request` | Set on `PENDING` — a §10 suspension, emitted BEFORE `waitFor` runs. |
+| `StreamEvent.result()` | `RunResult` | Set on `DONE` — the same terminal value `stream` returns. |
+
+## See also
+
+- [`LlmClient.create`](/api/java/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`LlmClient.run`](/api/java/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`LlmClient.Hooks`](/api/java/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+- [`LlmClient.Conversation`](/api/java/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.

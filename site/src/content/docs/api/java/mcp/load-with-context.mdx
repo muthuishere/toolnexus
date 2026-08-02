@@ -1,0 +1,150 @@
+---
+title: "McpSource.loadWith"
+description: "The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process. — Java."
+sidebar:
+  label: "McpSource.loadWith"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/McpSource.java">McpSource.java</a>
+</p>
+
+```java
+public static McpSource load(Object input, Function<Request, Answer> waitFor, CancelSignal cancel)
+
+@FunctionalInterface
+public interface CancelSignal {
+    boolean cancelled();
+}
+```
+
+Java has no `Context` type the way Go does, so `load`'s third overload is the port's idiom for
+"a caller-owned cancel/deadline": each per-server connect-and-list is already bounded by that
+server's own `timeout` (which marks only *that* server `"failed"`, within budget, and lets the
+rest of the load continue) — `cancel` adds a second, cooperative axis on top: a
+`CancelSignal` the caller polls that aborts the **whole** load promptly, interrupting every
+still-running worker thread and closing any client that had already connected.
+
+## When to use it
+
+When the caller itself has a deadline or a "stop now" button — a request timeout, a shutdown
+signal, a user cancelling a long-running setup — and an MCP server hanging (bad network, a stuck
+child process) must not hang the caller with it. Pass a `CancelSignal` whose `cancelled()`
+flips from `false` to `true` when that happens.
+
+Skip it (use the two-argument [`McpSource.load`](/api/java/mcp/load/) instead) when per-server
+`timeout` values already bound everything you care about — most callers never need this.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Per-server timeout vs. whole-load cancellation — different failure shapes">
+A per-server `timeout` in the config handles *one bad server*: it fails, the rest still load.
+`CancelSignal` handles *the caller itself* changing its mind mid-load — a parent request
+timing out, a user hitting cancel — and aborts everything in flight, not just one server. Use
+both together: `timeout` for steady-state resilience, `cancel` for external abort.
+</Aside>
+
+A `null` `cancel` is exactly today's behavior (join every worker thread to completion) — this
+overload is additive, not a different mode you opt into by default.
+
+## Examples
+
+### 1. A `CancelSignal` that never fires — degrades to plain `load`
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Map<String, Object> config = Map.of(
+            "mcpServers", Map.of("off", Map.of("command", java.util.List.of("x"), "enabled", false))
+        );
+
+        // A CancelSignal that is always false is a no-op — identical to the two-arg load.
+        McpSource.CancelSignal neverCancel = () -> false;
+
+        try (McpSource src = McpSource.load(config, null, neverCancel)) {
+            if (!"disabled".equals(src.status().get("off"))) throw new AssertionError(src.status());
+            System.out.println("ok: " + src.status());
+        }
+    }
+}
+```
+
+### 2. Cancelling before the load starts aborts it promptly
+
+A signal that is already `true` when `load` begins throws `CancellationException` immediately —
+no server connection is attempted, and any client that *had* connected (none here) is released
+first.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Map;
+import java.util.concurrent.CancellationException;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Map<String, Object> config = Map.of(
+            "mcpServers", Map.of("never-runs", Map.of("command", java.util.List.of("x")))
+        );
+
+        McpSource.CancelSignal alreadyCancelled = () -> true;
+
+        boolean threw = false;
+        try {
+            McpSource.load(config, null, alreadyCancelled);
+        } catch (CancellationException e) {
+            threw = true;
+        }
+        if (!threw) throw new AssertionError("expected CancellationException");
+
+        System.out.println("ok: load aborted via CancelSignal");
+    }
+}
+```
+
+### 3. `waitFor` and `cancel` together — the full three-argument shape
+
+Both optional arguments compose: `waitFor` bridges MCP elicitation, `cancel` bounds the whole
+call. Neither fires here (no server actually elicits, and the signal stays false), which is the
+point — wiring both costs nothing when they are not needed.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Map;
+import java.util.function.Function;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Map<String, Object> config = Map.of(
+            "mcpServers", Map.of("off", Map.of("command", java.util.List.of("x"), "enabled", false))
+        );
+
+        Function<Request, Answer> waitFor = req -> new Answer(req.id(), true, Map.of());
+        McpSource.CancelSignal cancel = () -> false;
+
+        try (McpSource src = McpSource.load(config, waitFor, cancel)) {
+            if (!"disabled".equals(src.status().get("off"))) throw new AssertionError(src.status());
+            System.out.println("ok: " + src.status());
+        }
+    }
+}
+```
+
+## Members
+
+| Member | Type | What it is |
+|---|---|---|
+| `CancelSignal` | `@FunctionalInterface` | One method, `cancelled()`, polled cooperatively while workers run. |
+| `load(input, waitFor, cancel)` | `McpSource` | `waitFor`/`cancel` may each independently be `null`. |
+| Abort behavior | — | Interrupts every in-flight server thread, closes already-connected clients, throws `CancellationException`. |
+| Per-server `timeout` | — | Still applies underneath — bounds one server's connect+list even when `cancel` is `null`. |
+
+## See also
+
+- [`McpSource.load`](/api/java/mcp/load/) — the two-argument form, for when you don't need cancellation.
+- [`McpSource.listMcpTools`](/api/java/mcp/list-tools/) — list what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+- [`McpSource.elicitationToRequest`](/api/java/mcp/elicitation/) — what `waitFor` receives when a server elicits input.

@@ -1,0 +1,244 @@
+---
+title: "Conversation"
+description: "Keep a transcript across turns so the model remembers what it already did. — Go."
+sidebar:
+  label: "Conversation"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/client.go">golang/client.go</a>
+</p>
+
+```go
+func (c *Client) Conversation(tk *Toolkit) *Conversation
+
+type Conversation struct {
+	Messages []any // the full running transcript
+}
+
+func (conv *Conversation) Send(ctx context.Context, prompt string) (RunResult, error)
+func (conv *Conversation) Reset()
+```
+
+`Conversation` is a stateful handle bound to one `Client` and `Toolkit`: each `Send` continues the
+same transcript automatically — the system prompt isn't re-added, and every prior user/assistant/tool
+message is replayed as history — so the model remembers what it already said and did.
+
+<Aside type="note" title="Not safe for concurrent Send calls">
+A `Conversation` owns one mutable `Messages` slice, updated after every `Send`. Call `Send`
+sequentially from one goroutine; for concurrent per-user conversations, give each user its own
+`Conversation` (or use `Client.Ask` with a distinct id per user, backed by a
+[`ConversationStore`](/api/go/client/store/)).
+</Aside>
+
+## When to use it
+
+Reach for `Conversation` for in-process, multi-turn interactions — a CLI chat loop, a test harness
+driving several turns, an in-memory agent session — where you hold the handle for the process's
+lifetime and don't need the transcript to survive a restart.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Need it to survive a restart, or keyed by request?">
+`Conversation` keeps its transcript as a Go value in your process — restart the process and it's
+gone. Need the transcript to survive that, or to be looked up by an id that arrives with each
+request (a web handler, an A2A peer)? Use `Client.Ask(ctx, prompt, tk, id)` instead — same
+"continue the transcript" behavior, but backed by a [`ConversationStore`](/api/go/client/store/) you
+can point at a file or a database. Don't need memory at all? [`Client.Run`](/api/go/client/run/) is
+stateless and simpler.
+</Aside>
+
+## Examples
+
+Each example points `CreateClient` at a local `httptest.Server` — no real network call, no real API
+key.
+
+### 1. The smallest useful call — two turns, transcript grows
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ack"}}]}`))
+	}))
+	defer srv.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "test-key"})
+	conv := client.Conversation(tk)
+
+	if _, err := conv.Send(context.Background(), "one"); err != nil {
+		log.Fatal(err)
+	}
+	afterFirst := len(conv.Messages)
+
+	if _, err := conv.Send(context.Background(), "two"); err != nil {
+		log.Fatal(err)
+	}
+	if len(conv.Messages) <= afterFirst {
+		log.Fatalf("transcript did not grow: %d then %d", afterFirst, len(conv.Messages))
+	}
+
+	fmt.Println("ok: transcript grew from", afterFirst, "to", len(conv.Messages))
+}
+```
+
+### 2. The realistic case — the system prompt is sent once, not per turn
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	var lastRoles []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []map[string]any `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		lastRoles = nil
+		for _, m := range body.Messages {
+			lastRoles = append(lastRoles, fmt.Sprint(m["role"]))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "test-key", SystemPrompt: "You are terse.",
+	})
+	conv := client.Conversation(tk)
+
+	if _, err := conv.Send(context.Background(), "first"); err != nil {
+		log.Fatal(err)
+	}
+	// turn 1: [system, user]
+	if len(lastRoles) != 2 || lastRoles[0] != "system" {
+		log.Fatalf("turn1 roles = %v, want [system user]", lastRoles)
+	}
+
+	if _, err := conv.Send(context.Background(), "second"); err != nil {
+		log.Fatal(err)
+	}
+	// turn 2: [system, user, assistant, user] — the system message is NOT repeated.
+	systemCount := 0
+	for _, r := range lastRoles {
+		if r == "system" {
+			systemCount++
+		}
+	}
+	if systemCount != 1 || len(lastRoles) != 4 {
+		log.Fatalf("turn2 roles = %v, want exactly one system message and 4 total", lastRoles)
+	}
+
+	fmt.Println("ok: system sent once, transcript on turn 2 =", lastRoles)
+}
+```
+
+### 3. The full surface — `Reset` clears memory, then continues fresh
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ack"}}]}`))
+	}))
+	defer srv.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "test-key"})
+	conv := client.Conversation(tk)
+
+	if _, err := conv.Send(context.Background(), "hello"); err != nil {
+		log.Fatal(err)
+	}
+	if len(conv.Messages) == 0 {
+		log.Fatal("expected a non-empty transcript after Send")
+	}
+
+	conv.Reset()
+	if len(conv.Messages) != 0 {
+		log.Fatalf("after Reset, Messages = %d, want 0", len(conv.Messages))
+	}
+
+	// A fresh Send after Reset starts a new transcript from scratch.
+	res, err := conv.Send(context.Background(), "hello again")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if res.Turns != 1 || len(conv.Messages) != 2 { // [user, assistant]
+		log.Fatalf("post-reset turn unexpected: turns=%d messages=%d", res.Turns, len(conv.Messages))
+	}
+
+	fmt.Println("ok: reset then", len(conv.Messages), "messages after one fresh turn")
+}
+```
+
+## Conversation surface
+
+| Member | What it does |
+|---|---|
+| `Client.Conversation(tk *Toolkit) *Conversation` | Builds a `Conversation` bound to this client and toolkit. |
+| `Messages []any` | The full running transcript — read it directly to inspect or persist it yourself. |
+| `Send(ctx, prompt) (RunResult, error)` | Sends the next user turn with prior history retained; updates `Messages` to the returned `RunResult.Messages`. |
+| `Reset()` | Clears `Messages` — the next `Send` starts a brand-new transcript. |
+
+## See also
+
+- [`CreateClient`](/api/go/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.Run`](/api/go/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Client.Stream`](/api/go/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`NewInMemoryConversationStore`](/api/go/client/store/) — The `Client.Ask`-based alternative when memory must survive a restart or be keyed by a request id.

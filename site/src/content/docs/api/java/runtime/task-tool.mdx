@@ -1,0 +1,57 @@
+---
+title: "The task tool — model-facing delegation"
+description: "The opt-in tool that lets the model itself spawn a teammate. Default OFF. — Java."
+sidebar:
+  label: "runtime / task-tool"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/agents/AgentRuntime.java">agents/AgentRuntime.java</a>
+</p>
+
+<Aside type="caution" title="Not available in Java">
+Only JS exposes a constructible task tool symbol; elsewhere it is the `task` builtin, toggled on
+the runtime.
+</Aside>
+
+The opt-in tool that lets the model itself spawn a teammate. Default OFF.
+
+## What to use instead
+
+There is no standalone, constructible `taskTool(...)` symbol in this port — you cannot build one
+and drop it into an arbitrary `extraTools` list the way JS's `agents.taskTool` allows. In Java,
+`AgentRuntime` builds the `task` tool **itself**, privately, and registers it on a handle's own
+tool list automatically — the opt-in switch is declaring a `team`, not constructing a tool object:
+
+```java
+// AgentSpec.team(...) IS the opt-in — spec.team = empty ⇒ no `task` tool at all.
+Agents.Agent coordinator = Agents.agent("coordinator", new Agents.AgentSpec()
+        .does("splits work and delegates")
+        .model("gpt-4o-mini")
+        .team(worker, researcher)); // <- declaring a team is the switch
+
+// Equivalently at the AgentDef level (agents.AgentRuntime.java):
+AgentDef def = new AgentDef("coordinator", "splits work and delegates", "", "gpt-4o-mini")
+        .team(List.of("worker", "researcher"));
+```
+
+Internally, `AgentRuntime.executeTurn` checks `h.def.team != null && !h.def.team.isEmpty()` and
+only then adds the private `task` tool to that turn's toolkit — recursion and delegation are
+opt-in per agent, never default, and a child gets no `task` reach unless its **own** def declares
+a team. The tool's description is composed for the model from each team member's `does` field,
+name-sorted; calling `task {agent, prompt}` fuses `spawn→wake→wait→close` into one tool call, and
+a re-invoked call with the same `{agent, prompt}` pair **reattaches** to the existing child rather
+than spawning a duplicate (the durable-resume idempotency rule).
+
+If you want the same fused behavior **without** a model choosing the target — scripted,
+deterministic delegation — call [`Agents.Agent.run`](/api/java/runtime/agent/) directly instead
+of going through a model-facing tool at all.
+
+## See also
+
+- [`agents.Agent`](/api/java/runtime/agent/) — `AgentSpec.team(...)` is the opt-in switch that registers `task`.
+- [`agents.Runtime`](/api/java/runtime/runtime/) — the six host verbs `task` fuses into one call.
+- [`agents.Handle`](/api/java/runtime/handle/) — the child handle a `task` call spawns, waits on, and closes.
+- [`agents.Budget`](/api/java/runtime/budgets/) — bounds what a delegated `task` call may spend.

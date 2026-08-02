@@ -1,0 +1,300 @@
+---
+title: "AgentRuntime.resume"
+description: "Route an Answer to the deepest suspended sub-agent handle and resume it in place. — Java."
+sidebar:
+  label: "AgentRuntime.resume"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/agents/AgentRuntime.java">agents/AgentRuntime.java</a>
+</p>
+
+<Aside type="caution" title="Symbol correction: no LlmClient.resume in this port">
+An earlier draft of this page marked resume "not available in Java" — that was wrong. It was
+checking for the SPEC §10 golang-only preview (`runWithAnswer`/`askWithAnswer` on the bare
+client, `STATUS: golang only — a preview, NOT part of the §0 conformance contract`), which
+genuinely doesn't exist here. But Java DOES ship the §7D mechanism this manifest entry actually
+documents: `AgentRuntime.resume(answer)` — the answer-carrying re-entry point for a suspended
+sub-agent `Handle`, real and shipped in all six ports. This page documents that.
+</Aside>
+
+```java
+public void resume(Answer answer)
+```
+
+Routes an [`Answer`](/api/java/types/tool-result/) to the **deepest suspended** handle in the
+runtime's tree, resumes it from its checkpoint (a retry-with-answer of the halted tool — turns and
+token usage keep accumulating, never reset), then cascades upward: each suspended ancestor
+replays too, and its re-invoked `task` delegation call **reattaches** to the already-resumed child
+by task key rather than spawning a duplicate. `resume` itself returns nothing — call
+[`rt.waitOn(handle)`](/api/java/runtime/runtime/) afterward for the finished `TaskResult`.
+
+## When to use it
+
+Reach for `rt.resume(answer)` any time a spawned agent's handle transitions to
+`Handle.State.SUSPENDED` (`handle.pendingReq` set) and you have — or have just obtained — the
+`Answer` to that suspension: a human approved a payment, a login completed, a form was filled in.
+There is no separate resume path per handle; one call resolves whichever handle is currently the
+deepest suspended one in the tree.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Set AgentDef.waitFor instead when resolution fits inside the call">
+`AgentDef`'s `waitFor` interpreter resolves a suspension **inline** — the same posture as the bare
+client's `waitFor` — so the handle never settles into `SUSPENDED` at all. Reach for `resume` when
+resolution genuinely can't happen inside the original turn: the process handling the answer is a
+webhook handler, a queue consumer, or simply a later turn of the same long-running process, not the
+code that spawned the handle.
+</Aside>
+
+<Aside type="note" title="This crosses TIME, not necessarily a process boundary">
+The suspended `Handle` tree lives in the `AgentRuntime` instance's memory. So `resume` genuinely
+lets an answer arrive arbitrarily late within the **same running process** (a different callback,
+an hour later, driven by a webhook) — it does not, by itself, survive a process restart. That
+cross-restart case is precisely the gap the golang-only `RunWithAnswer`/`AskWithAnswer` preview
+covers (see [`suspension/relay`](/api/java/suspension/relay/)).
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — suspend, resume, get the final answer
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import io.github.muthuishere.toolnexus.agents.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                Map<String, Object> req = Json.toMap(body);
+                List<Object> msgs = (List<Object>) req.get("messages");
+                boolean answered = msgs.stream().anyMatch(m -> "tool".equals(((Map<?, ?>) m).get("role")));
+                String message = answered
+                        ? "{\"content\":\"Done — charged.\"}"
+                        : "{\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\","
+                          + "\"function\":{\"name\":\"charge_card\",\"arguments\":\"{}\"}}]}";
+                byte[] b = ("{\"choices\":[{\"message\":" + message + "}]}").getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+
+        Tool chargeCard = new Tool() {
+            @Override public String name() { return "charge_card"; }
+            @Override public String description() { return "charge the card"; }
+            @Override public Map<String, Object> inputSchema() { return Map.of("type", "object", "properties", Map.of()); }
+            @Override public String source() { return "custom"; }
+            @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
+                if (ctx != null && ctx.answer() != null) return ToolResult.ok("charged (ok=" + ctx.answer().ok() + ")");
+                return ToolResult.pending(new Request(null, "approval", "Approve $500 charge?"));
+            }
+        };
+
+        try {
+            AgentDef def = new AgentDef("approve", "approves a payment", "", "test-model").tools(List.of(chargeCard));
+            RuntimeOptions rtOpts = new RuntimeOptions()
+                    .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                    .apiKey("test-key")
+                    .registry(Map.of("approve", def));
+            AgentRuntime rt = new AgentRuntime(rtOpts);
+            Handle h = rt.spawn(rt.root, "approve").handle();
+
+            var fut = rt.futureResult(h);
+            rt.wake(h, "Charge the card.");
+            TaskResult r1 = fut.join();
+
+            if (!"pending".equals(r1.status())) throw new AssertionError(r1.status());
+            if (h.state != Handle.State.SUSPENDED) throw new AssertionError(h.state);
+
+            rt.resume(new Answer(r1.pending().id(), true));
+
+            if (h.state != Handle.State.IDLE) throw new AssertionError("resumed back to idle: " + h.state);
+            if (h.lastResult == null || !h.lastResult.text().equals("Done — charged.")) {
+                throw new AssertionError(h.lastResult);
+            }
+
+            System.out.println("ok: suspended -> resumed -> " + h.lastResult.text());
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
+```
+
+### 2. A declined answer — the run finishes, it just doesn't do the thing
+
+`resume`'s loop rule branches only on `Answer.ok()` — a decline is data, not a thrown error.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import io.github.muthuishere.toolnexus.agents.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                Map<String, Object> req = Json.toMap(body);
+                List<Object> msgs = (List<Object>) req.get("messages");
+                boolean answered = msgs.stream().anyMatch(m -> "tool".equals(((Map<?, ?>) m).get("role")));
+                String message = answered
+                        ? "{\"content\":\"Understood — the charge was cancelled.\"}"
+                        : "{\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\","
+                          + "\"function\":{\"name\":\"charge_card\",\"arguments\":\"{}\"}}]}";
+                byte[] b = ("{\"choices\":[{\"message\":" + message + "}]}").getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+
+        Tool chargeCard = new Tool() {
+            @Override public String name() { return "charge_card"; }
+            @Override public String description() { return "charge the card"; }
+            @Override public Map<String, Object> inputSchema() { return Map.of("type", "object", "properties", Map.of()); }
+            @Override public String source() { return "custom"; }
+            @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
+                if (ctx != null && ctx.answer() != null) return ToolResult.ok("charge outcome ok=" + ctx.answer().ok());
+                return ToolResult.pending(new Request(null, "approval", "Approve $500 charge?"));
+            }
+        };
+
+        try {
+            AgentDef def = new AgentDef("approve", "approves a payment", "", "test-model").tools(List.of(chargeCard));
+            RuntimeOptions rtOpts = new RuntimeOptions()
+                    .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                    .apiKey("test-key")
+                    .registry(Map.of("approve", def));
+            AgentRuntime rt = new AgentRuntime(rtOpts);
+            Handle h = rt.spawn(rt.root, "approve").handle();
+
+            var fut = rt.futureResult(h);
+            rt.wake(h, "Charge the card.");
+            TaskResult r1 = fut.join();
+            if (h.state != Handle.State.SUSPENDED) throw new AssertionError(h.state);
+
+            rt.resume(new Answer(r1.pending().id(), false, null, "declined"));
+
+            // The RUN still completes — it just knows the charge was declined.
+            if (h.lastResult == null || !h.lastResult.text().contains("cancelled")) {
+                throw new AssertionError(h.lastResult);
+            }
+
+            System.out.println("ok: " + h.lastResult.text());
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
+```
+
+### 3. Inspecting the parked handle before resuming — `list()`
+
+A host that stores the answer separately from the runtime (a queue, a database row) still needs a
+live handle to resume — `list()` gives a read-only view of what's parked, including the pending
+request's kind, without walking `handle.children` by hand.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import io.github.muthuishere.toolnexus.agents.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer llm = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        llm.createContext("/", ex -> {
+            try {
+                String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                Map<String, Object> req = Json.toMap(body);
+                List<Object> msgs = (List<Object>) req.get("messages");
+                boolean answered = msgs.stream().anyMatch(m -> "tool".equals(((Map<?, ?>) m).get("role")));
+                String message = answered
+                        ? "{\"content\":\"Charged.\"}"
+                        : "{\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\","
+                          + "\"function\":{\"name\":\"charge_card\",\"arguments\":\"{}\"}}]}";
+                byte[] b = ("{\"choices\":[{\"message\":" + message + "}]}").getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+            } catch (Exception ignored) { }
+        });
+        llm.start();
+
+        Tool chargeCard = new Tool() {
+            @Override public String name() { return "charge_card"; }
+            @Override public String description() { return "charge the card"; }
+            @Override public Map<String, Object> inputSchema() { return Map.of("type", "object", "properties", Map.of()); }
+            @Override public String source() { return "custom"; }
+            @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
+                if (ctx != null && ctx.answer() != null) return ToolResult.ok("charged");
+                return ToolResult.pending(new Request(null, "approval", "Approve $500 charge?"));
+            }
+        };
+
+        try {
+            AgentDef def = new AgentDef("approve", "approves a payment", "", "test-model").tools(List.of(chargeCard));
+            RuntimeOptions rtOpts = new RuntimeOptions()
+                    .baseUrl("http://127.0.0.1:" + llm.getAddress().getPort())
+                    .apiKey("test-key")
+                    .registry(Map.of("approve", def));
+            AgentRuntime rt = new AgentRuntime(rtOpts);
+            Handle h = rt.spawn(rt.root, "approve").handle();
+
+            var fut = rt.futureResult(h);
+            rt.wake(h, "Charge the card.");
+            TaskResult r1 = fut.join();
+
+            // The read-only view: same handle state, reachable from list() alone.
+            var view = rt.list().stream().filter(v -> v.id().equals(h.id)).findFirst().orElseThrow();
+            if (view.state() != Handle.State.SUSPENDED) throw new AssertionError(view.state());
+
+            rt.resume(new Answer(r1.pending().id(), true));
+            if (h.lastResult == null || !"done".equals(h.lastResult.status())) throw new AssertionError(h.lastResult);
+
+            System.out.println("ok: " + view.state() + " -> " + h.lastResult.status());
+        } finally {
+            llm.stop(0);
+        }
+    }
+}
+```
+
+## Signature
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `answer` | `Answer` | Must echo the `id` of the pending `Request` — routed to the deepest suspended handle. |
+| returns | `void` | Call `rt.waitOn(handle)` or `rt.futureResult(handle)` afterward for the finished `TaskResult`. |
+
+## See also
+
+- [`agents.Handle`](/api/java/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`agents.Runtime`](/api/java/runtime/runtime/) — The six verbs that create and transition handles.
+- [`ToolResult.pending`](/api/java/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`suspension/relay`](/api/java/suspension/relay/) — The golang-only §10 preview that typically resumes via `RunWithAnswer`/`AskWithAnswer`.

@@ -1,0 +1,182 @@
+---
+title: "Toolnexus.Agents budget"
+description: "Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight. — Elixir."
+sidebar:
+  label: "Toolnexus.Agents budget"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/agents/handle.ex">elixir/lib/toolnexus/agents/handle.ex</a>
+</p>
+
+```elixir
+# A budget is a PLAIN MAP — no dedicated struct in this port — passed as
+# :budget in an agent/2 spec, or as the 4th arg to spawn_agent/4:
+
+%{
+  max_turns: 6,          # LLM calls per Handle turn (client-loop cap; default 6)
+  max_tokens: nil,        # carved at spawn: effective = min(own request, parent remaining)
+  max_tool_calls: nil,    # cumulative across every wake this handle has done
+  max_wall_ms: nil,       # wall-clock since spawn
+  max_children: :infinity,
+  max_concurrent: 8,      # running children per parent, admitted atomically
+  max_depth: 3            # checked at spawn, on the PARENT
+}
+
+@spec spawn_agent(pid(), pid(), String.t(), map() | nil) :: {:ok, pid()} | {:error, String.t()}
+def spawn_agent(rt, parent, def_name, budget \\ nil)
+# budget here OVERRIDES/merges onto the definition's own :budget for this one spawn
+```
+
+Budgets are **hierarchical and live-enforced**, not just carved once at spawn: `pool_tokens` carves
+`min(own request, parent's remaining)` when a handle is created, and every ancestor's remaining pool
+is walked again **before each turn and each spawn** — carving alone would miss sibling spend. Any
+limit stop is **loud**: the handle settles with `status: "incomplete"` and the limit named in
+`limit` (`"maxTokens"`, `"maxToolCalls"`, `"maxWallMs"`, `"maxChildren"`, `"maxDepth"`) — never a
+silent `"done"`, never a crash. Partial work and the transcript are preserved.
+
+## When to use it
+
+- **Bounding a delegated sub-agent's spend** — `budget: %{max_tokens: 20_000}` on `agent/2`, or a
+  one-off override on a specific `spawn_agent/4` call.
+- **Capping fan-out** — `max_children` and `max_depth` stop a runaway delegation tree at spawn time,
+  before any tokens are spent on it.
+- **A slow tool or a stuck loop** — `max_tool_calls` and `max_wall_ms` bound a handle even when the
+  model keeps asking for more turns.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="This is a plain map here, a named type in most other ports">
+Elixir represents a budget as an ordinary map, not a dedicated struct — it composes the same way
+every other keyword-ish option in this port does (`agent/2`'s `spec`, `Client.create`'s `opts`).
+Reach for the `:budget` key on `agent/2` when the cap belongs to the definition; pass a budget map
+as `spawn_agent/4`'s 4th argument when you want a one-off override for a single spawn (e.g. a
+tighter cap for one particular delegation) without touching the shared definition.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — a budget map on `agent/2`
+
+```elixir test
+alias Toolnexus.Agents
+
+coder = Agents.agent("coder", does: "implements changes", budget: %{max_turns: 4, max_tokens: 20_000, max_tool_calls: 10})
+
+reg = Agents.registry(coder)
+true = reg["coder"][:budget] == %{max_turns: 4, max_tokens: 20_000, max_tool_calls: 10}
+
+IO.puts("ok: #{inspect(reg["coder"][:budget])}")
+```
+
+### 2. The realistic case — carve at spawn, and `max_children` refused at spawn
+
+```elixir test
+alias Toolnexus.{Agents, Agents.Runtime}
+
+transport = fn _req ->
+  {:ok, %{status: 200, headers: %{}, body: %{"choices" => [%{"message" => %{"role" => "assistant", "content" => "ok"}}], "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}}}}
+end
+
+explore = Agents.agent("explore", does: "read-only research", model: "m-explore")
+coordinator = Agents.agent("coordinator", does: "delegates", team: [explore], model: "m-coordinator")
+
+rt = Runtime.new(%{transport: transport, registry: Agents.registry(coordinator)})
+
+# coordinator carves 100 tokens off the (unlimited) root; its child ASKS for 500, but the
+# effective pool is min(own request, parent remaining) = 100.
+{:ok, c} = Runtime.spawn_agent(rt, Runtime.root(rt), "coordinator", %{max_tokens: 100, max_children: 2})
+{:ok, kid} = Runtime.spawn_agent(rt, c, "explore", %{max_tokens: 500})
+true = Runtime.snapshot(kid).pool_tokens == 100
+
+{:ok, _kid2} = Runtime.spawn_agent(rt, c, "explore")
+kid3 = Runtime.spawn_agent(rt, c, "explore")
+
+# maxChildren is checked at spawn time, on the PARENT — never mid-run
+true = match?({:error, _}, kid3)
+{:error, msg} = kid3
+true = msg =~ "maxChildren"
+
+carved = Runtime.snapshot(kid).pool_tokens
+Runtime.shutdown(rt)
+IO.puts("ok: carved #{carved} token(s); 3rd child refused: #{msg}")
+```
+
+### 3. The full surface — `max_tool_calls` exhausted: loud `incomplete`, never a crash
+
+The ancestor-chain walk runs **before every turn**, so a second `wake` is refused synchronously —
+the handle never even starts a Run it cannot afford.
+
+```elixir test
+alias Toolnexus.{Agents, Agents.Runtime}
+
+usage = %{"prompt_tokens" => 5, "completion_tokens" => 3, "total_tokens" => 8}
+
+transport = fn %{body: body} ->
+  tool_msgs = Enum.filter(body["messages"] || [], &(&1["role"] == "tool"))
+
+  resp =
+    if tool_msgs == [] do
+      %{"choices" => [%{"message" => %{"role" => "assistant", "content" => nil, "tool_calls" => [
+        %{"id" => "l1", "type" => "function", "function" => %{"name" => "lookup", "arguments" => ~s({"q":"x"})}}
+      ]}}], "usage" => usage}
+    else
+      %{"choices" => [%{"message" => %{"role" => "assistant", "content" => "looked it up"}}], "usage" => usage}
+    end
+
+  {:ok, %{status: 200, headers: %{}, body: resp}}
+end
+
+lookup = Toolnexus.define_tool(%{
+  name: "lookup",
+  description: "look something up",
+  input_schema: %{"type" => "object", "properties" => %{"q" => %{"type" => "string"}}},
+  execute: fn args -> "data(#{args["q"]})" end
+})
+
+worker = Agents.agent("worker", does: "answers, one tool call at a time", uses: %{tools: [lookup]}, model: "m-worker", budget: %{max_tool_calls: 1})
+
+rt = Runtime.new(%{transport: transport, registry: Agents.registry(worker)})
+{:ok, h} = Runtime.spawn_agent(rt, Runtime.root(rt), "worker")
+
+Runtime.wake(rt, h, "look something up")
+r1 = Runtime.wait(rt, h)
+true = r1.status == "done"
+true = Runtime.snapshot(h).tool_calls_total == 1
+
+# a SECOND wake is refused synchronously — cumulative tool_calls_total (1) >= max_tool_calls (1)
+refusal = Runtime.wake(rt, h, "look up something else")
+true = refusal == %{ok: false, is_error: "budget exhausted (maxToolCalls 1); partial work preserved"}
+
+r2 = Runtime.wait(rt, h)
+true = r2.status == "incomplete"
+true = r2.limit == "maxToolCalls"
+true = r2.is_error
+
+Runtime.shutdown(rt)
+IO.puts("ok: 1st wake done, 2nd wake refused loudly — limit=#{r2.limit}")
+```
+
+## Budget map fields
+
+| Field | Default | Enforced |
+|---|---|---|
+| `max_turns` | `6` | The client loop's own cap (§8) — per Handle turn, not cumulative. |
+| `max_tokens` | `:infinity` | Carved at spawn (`min(own, parent remaining)`); walked live before each turn/spawn. |
+| `max_tool_calls` | `:infinity` | Cumulative across every wake this handle has done. |
+| `max_wall_ms` | `:infinity` | Wall-clock since spawn (via the runtime's injectable clock). |
+| `max_children` | `:infinity` | Checked at spawn, on the parent. |
+| `max_concurrent` | `8` | Running children per parent — an atomic admission gate, not a hard reject (excess wakes queue FIFO). |
+| `max_depth` | `3` | Checked at spawn, on the parent. |
+
+A limit stop is always `status: "incomplete"` with `limit` naming which one tripped — money is
+excluded from the budget dimensions (vendor-specific; hosts convert their own cost tracking in an
+optional `onBudget` callback).
+
+## See also
+
+- [`Toolnexus.Agents.agent`](/api/elixir/runtime/agent/) — define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`Toolnexus.Agents.Runtime`](/api/elixir/runtime/runtime/) — the six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`Toolnexus.Agents.Handle`](/api/elixir/runtime/handle/) — the state machine for one spawned agent: pending, running, suspended, done.

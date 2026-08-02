@@ -1,0 +1,180 @@
+---
+title: McpSource.ParseConfig
+description: Parse and validate an mcp.json without connecting to anything — the fast fail for a malformed or misspelled server block. C#.
+sidebar:
+  label: McpSource.ParseConfig
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/McpSource.cs">McpSource.cs</a>
+</p>
+
+```csharp
+public static Dictionary<string, object?> ParseConfig(object input)
+```
+
+Reads MCP server configuration and normalises it into a flat dictionary of server name → config. It
+**connects to nothing** — no child processes, no HTTP. That is the whole point: it is the cheap
+check you can run before paying for [`LoadAsync`](/api/csharp/mcp/load/).
+
+<Aside type="caution" title="It is ParseConfig, not ParseMcpConfig">
+C# drops the `Mcp` from the method name because it already lives on `McpSource`. The other ports
+spell it `parseMcpConfig` / `parse_mcp_config` / `ParseMcpConfig`. Java does not expose a public
+parser at all — see [the Java page](/api/java/mcp/parse-config/).
+</Aside>
+
+## When to use it
+
+- **Validate at startup or in a test**, so a typo in `mcp.json` fails immediately rather than
+  halfway through connecting to five servers.
+- **Inspect or modify config before loading** — filter servers by environment, inject a header,
+  disable one in CI.
+- **Accept config from somewhere other than a file** — a database, an env var, an API response.
+
+## Why this and not just calling LoadAsync
+
+<Aside type="tip" title="LoadAsync already parses — use this when you need the config itself">
+[`McpSource.LoadAsync`](/api/csharp/mcp/load/) parses internally, so you do not need to call this
+first in the ordinary path. Reach for it when you want the *config as data*: to check it, change
+it, or report on it without launching anything.
+</Aside>
+
+It is **synchronous** — unlike almost everything else on `McpSource`, there is no `Async` suffix,
+because there is no I/O beyond an optional file read.
+
+## Examples
+
+### 1. Parse the shared fixture from disk
+
+This is `examples/mcp.json`, the fixture every port is tested against.
+
+```csharp test
+using Toolnexus;
+
+// TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+var repo = Environment.GetEnvironmentVariable("TOOLNEXUS_REPO") ?? ".";
+var fixture = Path.Combine(repo, "examples", "mcp.json");
+
+var config = McpSource.ParseConfig(fixture);
+
+// The `mcpServers` wrapper is unwrapped — you get the servers directly.
+var names = config.Keys.OrderBy(k => k).ToList();
+if (names.Count != 2 || names[0] != "everything" || names[1] != "example-remote")
+    throw new Exception($"unexpected servers: {string.Join(",", names)}");
+
+// Disabled servers are still returned — parsing does not filter.
+Console.WriteLine($"ok: {string.Join(", ", names)}");
+```
+
+<Aside type="caution">
+Parsing does **not** drop disabled servers. `enabled: false` is preserved in the returned config
+and is honoured later, by `LoadAsync`. If you are counting servers, count the enabled ones yourself.
+</Aside>
+
+### 2. Wrapper spellings and a raw JSON string
+
+`mcpServers`, `servers` and `mcp` all mean the same thing, and a raw JSON string is accepted too.
+
+```csharp test
+using Toolnexus;
+
+foreach (var raw in new[]
+{
+    """{"mcpServers":{"a":{"type":"local","command":["echo","hi"]}}}""",
+    """{"servers":{"a":{"type":"local","command":["echo","hi"]}}}""",
+    """{"mcp":{"a":{"type":"local","command":["echo","hi"]}}}""",
+})
+{
+    var config = McpSource.ParseConfig(raw);
+    if (config.Count != 1) throw new Exception($"expected one server, got {config.Count}");
+    if (!config.ContainsKey("a")) throw new Exception("expected server 'a'");
+}
+
+Console.WriteLine("ok: 3 spellings -> a");
+```
+
+### 3. Validate before loading, and fail loudly
+
+The pattern this method exists for — check the config, then decide whether to connect.
+
+```csharp test
+using Toolnexus;
+
+(List<string> Enabled, List<string> Problems) Validate(string raw)
+{
+    var config = McpSource.ParseConfig(raw);
+    var enabled = new List<string>();
+    var problems = new List<string>();
+
+    foreach (var pair in config)
+    {
+        // Values come back as nested Dictionary<string, object?>, NOT JsonElement.
+        var cfg = (IDictionary<string, object?>)pair.Value!;
+
+        object? Get(string k) => cfg.TryGetValue(k, out var v) ? v : null;
+
+        // Disabled either way round: `enabled: false` or `disabled: true`.
+        if (Get("disabled") is bool db && db) continue;
+        if (Get("enabled") is bool en && !en) continue;
+        enabled.Add(pair.Key);
+
+        var type = Get("type") as string;
+        if (type == "remote")
+        {
+            if (Get("url") is not string u || string.IsNullOrEmpty(u))
+                problems.Add($"{pair.Key}: remote server without a url");
+        }
+        else
+        {
+            var command = Get("command") as System.Collections.IEnumerable;
+            var count = command?.Cast<object?>().Count() ?? 0;
+            if (count == 0) problems.Add($"{pair.Key}: local server without a command");
+        }
+    }
+
+    enabled.Sort();
+    problems.Sort();
+    return (enabled, problems);
+}
+
+var good = Validate("""
+{"mcpServers":{
+  "ok_local":{"type":"local","command":["npx","server"]},
+  "ok_remote":{"type":"remote","url":"https://example.com/mcp"},
+  "off":{"type":"local","command":["x"],"enabled":false}}}
+""");
+if (good.Enabled.Count != 2 || good.Problems.Count != 0)
+    throw new Exception($"unexpected: {string.Join(",", good.Enabled)} / {good.Problems.Count}");
+
+var bad = Validate("""
+{"mcpServers":{
+  "broken_remote":{"type":"remote"},
+  "broken_local":{"type":"local","command":[]}}}
+""");
+if (bad.Problems.Count != 2) throw new Exception($"expected 2 problems, got {bad.Problems.Count}");
+
+Console.WriteLine($"ok: {string.Join(",", good.Enabled)} | problems: {bad.Problems.Count}");
+```
+
+<Aside type="note">
+Values in the returned dictionary are **nested `Dictionary<string, object?>`**, not `JsonElement` —
+cast to `IDictionary<string, object?>` and index, rather than reaching for `TryGetProperty`.
+</Aside>
+
+## Accepted input
+
+| Input | Behaviour |
+|---|---|
+| `"./mcp.json"` | A path — read from disk and parsed. |
+| A raw JSON `string` | Parsed directly. |
+| A parsed dictionary | Normalised. |
+
+Wrapped under `mcpServers`, `servers` or `mcp` — all three are unwrapped.
+
+## See also
+
+- [`McpSource.LoadAsync`](/api/csharp/mcp/load/) — parse *and* connect
+- [`McpSource.ListMcpToolsAsync`](/api/csharp/mcp/list-tools/) — what each server would expose
+- [`Toolkit.CreateAsync`](/api/csharp/toolkit/create/) — takes config in exactly these forms

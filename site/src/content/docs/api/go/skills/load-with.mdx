@@ -1,0 +1,186 @@
+---
+title: "LoadSkillsWith"
+description: "Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist. — Go."
+sidebar:
+  label: "LoadSkillsWith"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/skill.go">golang/skill.go</a>
+</p>
+
+```go
+func LoadSkillsWith(opts LoadSkillsOptions) *SkillSource
+```
+
+The options-taking sibling of [`LoadSkills`](/api/go/skills/load/) (`LoadSkills(dirs...)` is just
+`LoadSkillsWith(LoadSkillsOptions{Dirs: dirs})`). Where `LoadSkills` only globs directories,
+`LoadSkillsWith` also accepts skills supplied directly **as data** (`Skills []SkillDef`, §3 S1 —
+no filesystem involved) and a per-agent **allowlist** (`Filter map[string]bool`, §3 S2) so two
+agents sharing one skill catalog can each see a different subset.
+
+<Aside type="note" title="A lazy provider is a Toolkit-level concept, not a LoadSkillsOptions field">
+`SkillProvider func(context.Context) ([]SkillDef, error)` lives on [`CreateToolkit`](/api/go/toolkit/create/)'s
+`Options`, not on `LoadSkillsOptions` — `CreateToolkit` resolves the provider once, merges the
+result into `Skills`, and *then* calls `LoadSkillsWith`. A provider failure there is isolated: the
+other skill sources still load. Call `LoadSkillsWith` directly when you already have the skill data
+in hand; go through `CreateToolkit` when the data needs to be fetched lazily (a database, an API).
+</Aside>
+
+## When to use it
+
+Reach for `LoadSkillsWith` whenever plain directory globbing (`LoadSkills`) is not enough: skills
+that live in a database or come back from an API rather than `SKILL.md` files on disk, or a fleet
+of agents where each one should see a *different* slice of one shared catalog.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="LoadSkills is the shorthand for the common case">
+[`LoadSkills`](/api/go/skills/load/) is `LoadSkillsWith` with only `Dirs` set — reach for it when
+every skill is a `SKILL.md` on disk and every agent should see all of them. Reach for
+[`ListSkills`](/api/go/skills/list/) instead of either when you want the discovery pass without a
+built `skill` tool — useful for validating a catalog and seeing what got skipped and why.
+</Aside>
+
+## Examples
+
+### 1. Skills supplied as data, no filesystem involved
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	src := toolnexus.LoadSkillsWith(toolnexus.LoadSkillsOptions{
+		Skills: []toolnexus.SkillDef{
+			{Name: "deploy", Description: "Ship a release", Content: "Run the release checklist."},
+		},
+	})
+
+	if len(src.Skills) != 1 {
+		log.Fatalf("expected 1 skill, got %d", len(src.Skills))
+	}
+	if _, ok := src.Skills["deploy"]; !ok {
+		log.Fatal("expected the 'deploy' skill to be present")
+	}
+
+	res, err := src.Tool.Execute(map[string]any{"name": "deploy"}, nil)
+	if err != nil || res.IsError {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+
+	fmt.Println("ok:", src.Skills["deploy"].Name)
+}
+```
+
+### 2. The shared fixture, filtered down for one agent
+
+Loaded from `examples/skills`, then narrowed to a subset via `Filter` — the allowlist is per-agent,
+not global, so a second `LoadSkillsWith` call over the same directory could see a different set.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	dir := filepath.Join(os.Getenv("TOOLNEXUS_REPO"), "examples", "skills")
+
+	all := toolnexus.LoadSkillsWith(toolnexus.LoadSkillsOptions{Dirs: []string{dir}})
+	if _, ok := all.Skills["hello-world"]; !ok {
+		log.Fatal("expected 'hello-world' in the shared fixture")
+	}
+
+	// An allowlist naming a skill that doesn't exist filters everything out —
+	// it does not fall back to "all".
+	narrowed := toolnexus.LoadSkillsWith(toolnexus.LoadSkillsOptions{
+		Dirs:   []string{dir},
+		Filter: map[string]bool{"some-other-skill": true},
+	})
+	if len(narrowed.Skills) != 0 {
+		log.Fatalf("expected the filter to exclude every skill, got %d", len(narrowed.Skills))
+	}
+
+	fmt.Println("ok: unfiltered=", len(all.Skills), "filtered=", len(narrowed.Skills))
+}
+```
+
+### 3. Directories and data merged, with a sample cap
+
+`Dirs` and `Skills` combine into one catalog; `SampleLimit` bounds how many sibling files the
+loader tool reports per skill (`0` ⇒ default 10, `-1` ⇒ omit the file list entirely).
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	dir := filepath.Join(os.Getenv("TOOLNEXUS_REPO"), "examples", "skills")
+
+	src := toolnexus.LoadSkillsWith(toolnexus.LoadSkillsOptions{
+		Dirs: []string{dir},
+		Skills: []toolnexus.SkillDef{
+			{Name: "from-data", Description: "Supplied directly, not from disk", Content: "Body."},
+		},
+		SampleLimit: -1, // omit <skill_files> entirely
+	})
+
+	if len(src.Skills) != 2 {
+		log.Fatalf("expected 2 skills (fs + data), got %d", len(src.Skills))
+	}
+
+	res, err := src.Tool.Execute(map[string]any{"name": "from-data"}, nil)
+	if err != nil || res.IsError {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+	if strings.Contains(res.Output, "<skill_files>") {
+		log.Fatal("expected SampleLimit:-1 to omit the skill_files block")
+	}
+
+	fmt.Println("ok:", len(src.Skills), "skills, no file sampling")
+}
+```
+
+## Options (`LoadSkillsOptions`)
+
+| Field | Type | What it does |
+|---|---|---|
+| `Dirs` | `[]string` | Skill roots to glob for `**/SKILL.md`. |
+| `Skills` | `[]SkillDef` | Skills supplied directly as data — no filesystem involved. |
+| `Filter` | `map[string]bool` | Per-agent allowlist. `nil`/empty ⇒ all; ≥1 `true` ⇒ allowlist; only-`false` ⇒ drop-list; unknown names are ignored (and logged). |
+| `SampleLimit` | `int` | `0` ⇒ default 10 sibling files sampled, `n>0` ⇒ that cap, `-1` ⇒ omit `<skill_files>` from the tool's output. |
+
+## Return value
+
+`*SkillSource` — same shape as [`LoadSkills`](/api/go/skills/load/) returns: `Skills
+map[string]SkillInfo` plus the built `Tool` named `skill`.
+
+## See also
+
+- [`LoadSkills`](/api/go/skills/load/) — glob a skills directory and expose one skill tool with progressive disclosure.
+- [`ListSkills`](/api/go/skills/list/) — enumerate discovered skills and, crucially, the ones that were skipped and why.
+- [`CreateToolkit`](/api/go/toolkit/create/) — the aggregator; its `SkillProvider` resolves lazily and then flows into this same options struct.

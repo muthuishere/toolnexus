@@ -1,0 +1,149 @@
+---
+title: "Toolnexus.Serve.build_agent_card"
+description: "Construct the Agent Card that advertises your name, skills and endpoint. — Elixir."
+sidebar:
+  label: "Toolnexus.Serve.build_agent_card"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/serve.ex">elixir/lib/toolnexus/serve.ex</a>
+</p>
+
+```elixir
+@spec build_agent_card(map(), [Toolnexus.Skill.Info.t()], String.t()) :: map()
+def build_agent_card(cfg, skills, url)
+
+# cfg = the a2a profile map: %{name?, description?, version?, provider?, skills?: [String.t()]}
+# skills = the toolkit's Skill.Info list (never raw Tools)
+# url = the JSON-RPC POST endpoint peers will call (base <> "/")
+```
+
+Builds the exact map `GET /.well-known/agent-card.json` serves. Card `skills[]` always come from
+the toolkit's **skills** (`SKILL.md` name + description), filtered to `cfg[:skills]` when given —
+**never raw tools**, so a peer only ever sees the capabilities you meant to advertise. Defaults
+apply when a field is omitted: `name: "toolnexus-agent"`, `description: ""`, `version: "0.1.0"`,
+`protocolVersion` is always `"0.3.0"`, `capabilities: {streaming: false, pushNotifications:
+false}`. `provider` is present only when `cfg[:provider]` was configured.
+
+## When to use it
+
+- **You want the card map without standing up a server** — snapshot-test it, log it, or hand it to
+  a discovery layer that doesn't hit the HTTP endpoint.
+- **Understanding exactly what a peer will see** before you `serve/3` — this is a pure function of
+  your skills + config, so you can print it locally first.
+- **Filtering which skills are advertised** — pass `cfg[:skills]` (a list of skill names) to expose
+  a subset of what the toolkit actually has, without changing the toolkit itself.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Serve.start/2 calls this for you on every GET">
+[`Toolnexus.Serve.start/2`](/api/elixir/serve/a2a/) (via `Toolkit.serve/3`) calls
+`build_agent_card/3` internally on every `GET /.well-known/agent-card.json` — you never need to
+call it yourself to run a server. Reach for it directly only when you want the card as data, not
+as an HTTP response.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — all defaults, no config
+
+```elixir test
+alias Toolnexus.Serve
+
+card = Serve.build_agent_card(%{}, [], "http://localhost:4000/")
+
+true = card["name"] == "toolnexus-agent"
+true = card["description"] == ""
+true = card["version"] == "0.1.0"
+true = card["protocolVersion"] == "0.3.0"
+true = card["capabilities"] == %{"streaming" => false, "pushNotifications" => false}
+true = card["defaultInputModes"] == ["text"]
+true = card["skills"] == []
+false = Map.has_key?(card, "provider")
+true = card["url"] == "http://localhost:4000/"
+
+IO.puts("ok: #{card["name"]} v#{card["version"]}")
+```
+
+### 2. The realistic case — every skill advertised, plus a provider block
+
+```elixir test
+alias Toolnexus.Serve
+
+skills = [
+  %Toolnexus.Skill.Info{name: "greeter", description: "Says hello nicely", location: "greeter/SKILL.md", content: "Wave."},
+  %Toolnexus.Skill.Info{name: "internal", description: "Not meant for peers", location: "internal/SKILL.md", content: "Hidden."}
+]
+
+cfg = %{
+  name: "docs-agent",
+  description: "an agent from the docs",
+  version: "2.0.0",
+  provider: %{organization: "deemwar", url: "https://deemwar.com"}
+}
+
+card = Serve.build_agent_card(cfg, skills, "http://127.0.0.1:9000/")
+
+true = card["name"] == "docs-agent"
+true = card["provider"] == %{"organization" => "deemwar", "url" => "https://deemwar.com"}
+true = Enum.map(card["skills"], & &1["id"]) == ["greeter", "internal"]
+true = hd(card["skills"]) == %{"id" => "greeter", "name" => "greeter", "description" => "Says hello nicely"}
+
+IO.puts("ok: #{length(card["skills"])} skill(s) advertised, provider #{card["provider"]["organization"]}")
+```
+
+### 3. The full surface — filtered to a subset, then round-tripped through a real server
+
+```elixir test
+alias Toolnexus.{Client, Serve, Toolkit}
+
+Application.ensure_all_started(:req)
+
+skills = [
+  %Toolnexus.Skill.Info{name: "greeter", description: "Says hello nicely", location: "greeter/SKILL.md", content: "Wave."},
+  %Toolnexus.Skill.Info{name: "internal", description: "Not meant for peers", location: "internal/SKILL.md", content: "Hidden."}
+]
+
+# built directly: only "greeter" survives the filter
+filtered = Serve.build_agent_card(%{skills: ["greeter"]}, skills, "http://x/")
+true = Enum.map(filtered["skills"], & &1["id"]) == ["greeter"]
+
+# the SAME filter, live over HTTP through Toolkit.serve/3
+llm_client = Client.create(base_url: "http://127.0.0.1:1", style: "openai", model: "m", api_key: "k")
+
+{:ok, tk} =
+  Toolnexus.create_toolkit(
+    skills: [
+      %{name: "greeter", description: "Says hello nicely", content: "Wave."},
+      %{name: "internal", description: "Not meant for peers", content: "Hidden."}
+    ],
+    builtins: false
+  )
+
+handle = Toolkit.serve(tk, "127.0.0.1:0", client: llm_client, a2a: %{skills: ["greeter"]})
+served = Req.get!(url: handle.url <> "/.well-known/agent-card.json", retry: false).body
+
+true = Enum.map(served["skills"], & &1["id"]) == ["greeter"]
+
+Serve.stop(handle)
+
+IO.puts("ok: filtered to #{length(served["skills"])} of 2 skills, matching build_agent_card/3 directly")
+```
+
+## `cfg` (a2a profile) fields
+
+| Field | Default | What it does |
+|---|---|---|
+| `:name` | `"toolnexus-agent"` | Card `name`. |
+| `:description` | `""` | Card `description`. |
+| `:version` | `"0.1.0"` | Card `version`. |
+| `:provider` | omitted | `%{organization, url}` — included only when set. |
+| `:skills` | all | A list of skill names to filter the card's `skills[]` to. |
+
+## See also
+
+- [`Toolnexus.Serve.start`](/api/elixir/serve/a2a/) — publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+- [`Toolnexus.Serve task_store`](/api/elixir/serve/task-store/) — persist inbound A2A tasks so a suspended request survives a restart.
+- [`Toolnexus.McpServe`](/api/elixir/serve/mcp/) — the inbound MCP profile: any MCP client can call your tools.

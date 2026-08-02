@@ -1,0 +1,275 @@
+---
+title: "Compactor"
+description: "Summarise older turns when the transcript grows, so a long-lived agent stays inside its context window. — Go."
+sidebar:
+  label: "Compactor"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang/agents</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7F</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/agents/compaction.go">golang/agents/compaction.go</a>
+</p>
+
+```go
+type CompactorOptions struct {
+	MaxTokens     int                          // compact only when the estimate exceeds this
+	KeepTail      int                          // tail tokens to retain; default MaxTokens/2
+	Summarize     func(older []any) (string, error) // required; MAY call an LLM
+	CountTokens   func(messages []any) int      // default EstimateTokens
+	FlushToMemory bool                          // inject a pre-compact memory reminder
+}
+
+func Compactor(opts CompactorOptions) func(context.Context, tn.BeforeLLMEvent) (*tn.LLMOverride, error)
+
+func EstimateTokens(messages []any) int // the default estimator: ceil(chars/4) per message
+```
+
+`Compactor` builds a `BeforeLLM` hook (§8) — a pure `messages → messages` transform, not a new
+loop feature. Below `MaxTokens` it returns `nil` (no-op, byte-identical to no compactor at
+all). Above it, it keeps a leading `system` message verbatim, summarizes everything between
+that and a tail that fits `KeepTail`, and returns
+`[system, summary-system-message, (flush reminder?), …tail]`. The tail always starts at a
+`user` turn — that's tool-pair safety, so a `tool` message is never orphaned from the
+`assistant` turn carrying its `tool_call_id`.
+
+## When to use it
+
+Reach for `Compactor` on any agent that runs long enough to threaten the model's context
+window — a persona with a heartbeat, a coordinator delegating many rounds, anything backed by
+a [`ConversationStore`](/api/go/client/store/). Wire the returned hook into
+`ClientOptions.Hooks.BeforeLLM` on a bare client, or into an
+[`agents.Spec`](/api/go/runtime/agent/)'s hooks for a §7D agent run — per agent, so two agents
+in one runtime can carry different budgets.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Trimming history yourself with a raw BeforeLLM hook?">
+You can always write your own `Hooks.BeforeLLM` that truncates or rewrites `ev.Messages`.
+`Compactor` exists because getting the boundary right is easy to get subtly wrong: split at the
+wrong point and you orphan a `tool` result from its `tool_use`/`tool_calls`, which every
+provider rejects. `Compactor` enforces the user-turn boundary and the leading-system-preserved
+rule for you, and is a no-op at rest — reach for a hand-written hook only when you need a
+transform `Compactor` doesn't model (e.g. compacting by wall-clock age instead of token count).
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — under budget is a byte-identical no-op
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func main() {
+	hook := agents.Compactor(agents.CompactorOptions{
+		MaxTokens: 100_000, // far above this tiny transcript
+		Summarize: func(older []any) (string, error) { return "summary", nil },
+	})
+
+	msgs := []any{
+		map[string]any{"role": "system", "content": "You are Ava."},
+		map[string]any{"role": "user", "content": "hi"},
+		map[string]any{"role": "assistant", "content": "hello"},
+	}
+	ov, err := hook(context.Background(), tn.BeforeLLMEvent{Messages: msgs})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if ov != nil {
+		log.Fatalf("expected a nil override under budget, got %+v", ov)
+	}
+
+	fmt.Println("ok: under budget, no compaction ran")
+}
+```
+
+### 2. The realistic case — compacts above budget, preserving system + tool pairing
+
+A synthetic transcript with many user/assistant/tool rounds, well over a small `MaxTokens`.
+The result keeps the leading system message, a summary, and a tail that starts cleanly at a
+`user` turn — no orphaned `tool` message.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func round(i int) []any {
+	id := fmt.Sprintf("c%d", i)
+	return []any{
+		map[string]any{"role": "user", "content": fmt.Sprintf("question %d with some padding text here", i)},
+		map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+			map[string]any{"id": id, "type": "function", "function": map[string]any{"name": "lookup", "arguments": "{}"}},
+		}},
+		map[string]any{"role": "tool", "tool_call_id": id, "content": fmt.Sprintf("result %d with more padding data", i)},
+		map[string]any{"role": "assistant", "content": fmt.Sprintf("answer %d", i)},
+	}
+}
+
+func main() {
+	msgs := []any{map[string]any{"role": "system", "content": "You are Ava. SOUL."}}
+	for i := 0; i < 30; i++ {
+		msgs = append(msgs, round(i)...)
+	}
+	before := agents.EstimateTokens(msgs)
+
+	hook := agents.Compactor(agents.CompactorOptions{
+		MaxTokens: 2000, KeepTail: 800,
+		Summarize: func(older []any) (string, error) { return fmt.Sprintf("summarized %d messages", len(older)), nil },
+	})
+
+	ov, err := hook(context.Background(), tn.BeforeLLMEvent{Messages: msgs})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if ov == nil {
+		log.Fatal("expected compaction to fire above budget")
+	}
+	after := agents.EstimateTokens(ov.Messages)
+	if after >= before {
+		log.Fatalf("expected the compacted transcript to shrink: before=%d after=%d", before, after)
+	}
+	if role(ov.Messages[0]) != "system" || ov.Messages[0].(map[string]any)["content"] != "You are Ava. SOUL." {
+		log.Fatal("expected the leading system message preserved verbatim")
+	}
+	if role(ov.Messages[1]) != "system" {
+		log.Fatal("expected a summary system message right after the preserved system prompt")
+	}
+	// The tail must start at a user turn — no orphaned tool_call_id.
+	tailStart := ov.Messages[2]
+	if role(tailStart) != "user" {
+		log.Fatalf("expected the tail to start at a user turn, got role=%q", role(tailStart))
+	}
+
+	fmt.Println("ok: compacted", before, "->", after, "estimated tokens, tail starts at a user turn")
+}
+
+func role(m any) string {
+	mm, _ := m.(map[string]any)
+	r, _ := mm["role"].(string)
+	return r
+}
+```
+
+### 3. The full surface — wired into a live `Client.Run`, plus `FlushToMemory`
+
+The hook is handed to `ClientOptions.Hooks.BeforeLLM`, so an ordinary `Run` call compacts
+transparently before it ever reaches the (stubbed) provider. `FlushToMemory` adds one more
+system reminder telling the model to persist durable facts via the `memory` tool before the
+head is summarized.
+
+```go test
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func round(i int) []any {
+	id := fmt.Sprintf("c%d", i)
+	return []any{
+		map[string]any{"role": "user", "content": fmt.Sprintf("question %d with padding text here", i)},
+		map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+			map[string]any{"id": id, "type": "function", "function": map[string]any{"name": "lookup", "arguments": "{}"}},
+		}},
+		map[string]any{"role": "tool", "tool_call_id": id, "content": fmt.Sprintf("result %d with padding data", i)},
+		map[string]any{"role": "assistant", "content": fmt.Sprintf("answer %d", i)},
+	}
+}
+
+func main() {
+	history := []any{map[string]any{"role": "system", "content": "You are Ava."}}
+	for i := 0; i < 25; i++ {
+		history = append(history, round(i)...)
+	}
+
+	var lastRequestBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastRequestBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"noted"}}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`))
+	}))
+	defer srv.Close()
+
+	hook := agents.Compactor(agents.CompactorOptions{
+		MaxTokens: 1500, KeepTail: 600, FlushToMemory: true,
+		Summarize: func(older []any) (string, error) { return fmt.Sprintf("summarized %d messages", len(older)), nil },
+	})
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "gpt-4o-mini", APIKey: "test-key",
+		Hooks: &toolnexus.Hooks{BeforeLLM: hook},
+	})
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	res, err := client.RunWithHistory(context.Background(), "one more question", tk, history)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if res.Status != "done" || res.Text != "noted" {
+		log.Fatalf("unexpected: %+v", res)
+	}
+
+	var sent map[string]any
+	if err := json.Unmarshal(lastRequestBody, &sent); err != nil {
+		log.Fatal(err)
+	}
+	sentMsgs, _ := sent["messages"].([]any)
+	raw, _ := json.Marshal(sentMsgs)
+	if !bytes.Contains(raw, []byte("summarized")) {
+		log.Fatalf("expected the provider to see a compacted, summarized transcript: %s", raw)
+	}
+	if !bytes.Contains(raw, []byte("save it with the memory tool now")) {
+		log.Fatal("expected the FlushToMemory reminder ahead of the tail")
+	}
+
+	fmt.Println("ok:", res.Text, "- the provider received a compacted, flush-reminded transcript")
+}
+```
+
+## CompactorOptions fields
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `MaxTokens` | `int` | — (required for compaction to ever fire) | Compact only when the estimate exceeds this; at or below ⇒ no-op, byte-identical to no compactor. |
+| `KeepTail` | `int` | `MaxTokens / 2` | Keep at least this many estimated tokens of the most recent tail. |
+| `Summarize` | `func(older []any) (string, error)` | — (required) | Produces the summary. MAY call an LLM — the library never calls a model on the host's behalf. |
+| `CountTokens` | `func(messages []any) int` | `EstimateTokens` | The token estimator (`ceil(chars/4)` per message, summed). An estimator, not a tokenizer. |
+| `FlushToMemory` | `bool` | `false` | Injects a pre-compact system reminder to persist durable facts via the §7E `memory` tool before the head is summarized. |
+
+## See also
+
+- [`Client.Run`](/api/go/client/run/) — The loop that applies `Hooks.BeforeLLM` on every turn.
+- [`agents.New`](/api/go/runtime/agent/) — Wire a compactor per agent via `Spec` hooks in a §7D run.
+- [`ComposeSoul`](/api/go/persona/compose-soul/) — Builds the leading system prompt a compactor preserves verbatim.

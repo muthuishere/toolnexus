@@ -1,0 +1,184 @@
+---
+title: "FileTaskStore"
+description: "Persist inbound A2A tasks so a suspended request survives a restart. — Python."
+sidebar:
+  label: "FileTaskStore"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/serve.py">python/src/toolnexus/serve.py</a>
+</p>
+
+```python
+class TaskStore(ABC):
+    async def get(self, id: str) -> dict | None: ...
+    async def save(self, task: dict) -> None: ...
+
+class InMemoryTaskStore(TaskStore): ...
+class FileTaskStore(TaskStore):
+    def __init__(self, dir: str) -> None: ...
+
+def resolve_store(store: TaskStore | str | None = None) -> TaskStore
+```
+
+The pluggable persistence layer behind `Toolkit.serve`'s A2A profile. Every Task read
+and write — `SendMessage`'s initial `submitted` save, the async `working`/`completed`/
+`failed` transitions, every `GetTask` poll — goes through a `TaskStore`. `InMemoryTaskStore`
+is the default; `FileTaskStore` writes one JSON file per Task id so a suspended or
+long-running Task survives a process restart.
+
+## When to use it
+
+- You are serving a toolkit (`toolkit.serve(addr, a2a=...)`) and want Tasks to survive
+  a restart — pass `a2a={"store": "file:<dir>"}` or `a2a={"store": FileTaskStore(dir)}`.
+- You are testing `Toolkit.serve` fulfilment logic directly and want to inspect Task
+  state (`submitted` → `working` → `completed`/`failed`) without going over HTTP.
+- You need a custom persistence backend (Postgres, NATS/JetStream, S3) — implement the
+  two-method `TaskStore` ABC and pass the instance as `a2a["store"]`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="InMemoryTaskStore is the default — no config needed">
+`resolve_store(None)` — what `Toolkit.serve` calls when `a2a["store"]` is absent —
+returns an `InMemoryTaskStore`. Reach for `FileTaskStore` (or your own `TaskStore`)
+specifically when a Task must outlive the process: a suspended `input-required` Task
+(§10 over A2A) that a human answers hours later, or a server that restarts under a
+process supervisor mid-poll.
+</Aside>
+
+`FileTaskStore` writes are atomic — a concurrent `get()` never observes a half-written
+file (temp file + `os.replace`), so a poller mid-`GetTask` never sees a spurious
+"Task not found". Reads and writes stay JSON-serializable Task dicts — the same shape
+`Toolkit.serve` builds internally — so a file written by one process reads back
+identically in another.
+
+## Examples
+
+### 1. The smallest useful call — save then get, round trip
+
+```python test
+import asyncio
+import tempfile
+
+from toolnexus.serve import FileTaskStore
+
+
+async def main():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = FileTaskStore(tmp)
+        task = {"id": "task-1", "status": {"state": "submitted"}}
+
+        await store.save(task)
+        got = await store.get("task-1")
+
+        assert got == task
+        assert await store.get("no-such-id") is None  # a miss is None, never an error
+
+        print("ok:", got["status"]["state"])
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — Task lifecycle transitions survive a "restart"
+
+Writes from one `FileTaskStore` instance are readable from a fresh instance pointed
+at the same directory — that is what "survives a restart" means in practice.
+
+```python test
+import asyncio
+import tempfile
+
+from toolnexus.serve import FileTaskStore
+
+
+async def main():
+    with tempfile.TemporaryDirectory() as tmp:
+        first = FileTaskStore(tmp)
+        await first.save({"id": "task-2", "status": {"state": "submitted"}})
+        await first.save({"id": "task-2", "status": {"state": "working"}})
+        await first.save({
+            "id": "task-2",
+            "status": {"state": "completed"},
+            "artifacts": [{"artifactId": "a1", "parts": [{"kind": "text", "text": "done"}]}],
+        })
+
+        # A fresh instance over the same directory sees the latest write.
+        reopened = FileTaskStore(tmp)
+        task = await reopened.get("task-2")
+
+        assert task["status"]["state"] == "completed"
+        assert task["artifacts"][0]["parts"][0]["text"] == "done"
+
+        print("ok:", task["status"]["state"])
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — `resolve_store` selectors and `InMemoryTaskStore`
+
+`resolve_store` is what `Toolkit.serve` calls internally on `a2a["store"]`: `None` or
+`"memory"` ⇒ in-memory, `"file:<dir>"` ⇒ `FileTaskStore(dir)`, an existing `TaskStore`
+instance ⇒ used as-is.
+
+```python test
+import asyncio
+import tempfile
+
+from toolnexus.serve import FileTaskStore, InMemoryTaskStore, TaskStore, resolve_store
+
+
+async def main():
+    assert isinstance(resolve_store(None), InMemoryTaskStore)
+    assert isinstance(resolve_store("memory"), InMemoryTaskStore)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        assert isinstance(resolve_store(f"file:{tmp}"), FileTaskStore)
+
+        # An already-built store instance passes through untouched.
+        mine = FileTaskStore(tmp)
+        assert resolve_store(mine) is mine
+
+    # InMemoryTaskStore satisfies the same TaskStore ABC — swap freely.
+    mem = InMemoryTaskStore()
+    assert isinstance(mem, TaskStore)
+    await mem.save({"id": "x", "status": {"state": "submitted"}})
+    assert (await mem.get("x"))["status"]["state"] == "submitted"
+
+    try:
+        resolve_store("nats://not-a-real-scheme")
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised  # an unknown selector string is a loud error, not a silent fallback
+
+    print("ok:", "memory + file + passthrough + unknown-selector all verified")
+
+
+asyncio.run(main())
+```
+
+## `TaskStore` members
+
+| Member | Type | What it does |
+|---|---|---|
+| `get(id)` | `async (str) -> dict \| None` | The current Task, or `None` on a miss. |
+| `save(task)` | `async (dict) -> None` | Upsert by `task["id"]`. |
+
+## `resolve_store` selectors
+
+| `store` | Resolves to |
+|---|---|
+| `None` / `"memory"` | `InMemoryTaskStore()` — default, process-lifetime only. |
+| `"file:<dir>"` | `FileTaskStore(dir)` — one `<sanitized-id>.json` per Task, atomic writes. |
+| A `TaskStore` instance | Used as-is (your own backend). |
+| Any other string | `ValueError` — unknown selector, never a silent fallback. |
+
+## See also
+
+- [`Toolkit.serve`](/api/python/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+- [`build_agent_card`](/api/python/serve/agent-card/) — Construct the Agent Card that advertises your name, skills and endpoint.
+- [`build_mcp_server`](/api/python/serve/mcp/) — The inbound MCP profile: any MCP client can call your tools.

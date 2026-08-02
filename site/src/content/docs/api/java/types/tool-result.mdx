@@ -1,0 +1,188 @@
+---
+title: ToolResult
+description: The result envelope every tool returns — output text, an error flag, and optional metadata that can carry a suspension. Java.
+sidebar:
+  label: ToolResult
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/ToolResult.java">ToolResult.java</a>
+</p>
+
+```java
+public final class ToolResult {
+    public ToolResult(String output, boolean isError, Map<String, Object> metadata);
+
+    public String output();
+    public boolean isError();
+    public Map<String, Object> metadata();
+}
+```
+
+What every `execute` returns. Three fields, and the whole tool-calling loop is built on them:
+`output` is the text handed back to the model, `isError` says whether the call failed, and
+`metadata` is free-form — except for one reserved key that turns a result into a suspension.
+
+## When to use it
+
+Every time you write a tool. It is the return type of [`Tool.execute`](/api/java/types/tool/), so
+you construct one on every code path.
+
+## Why the static factories rather than the constructor
+
+<Aside type="tip" title="Prefer ok / error over new ToolResult(…)">
+`ToolResult.ok(output)` and `ToolResult.error(output)` say what you mean and cannot get the boolean
+backwards. Each has a metadata overload. Use the three-arg constructor only when the error flag is
+itself computed.
+</Aside>
+
+A tool that fails does **not** throw — it returns `error(...)`. The loop feeds that text back to the
+model as the tool result, so the model can read "file not found", pick another path, and carry on.
+Throwing escapes the loop and ends the run.
+
+`output` is always a `String`, and the constructor normalises `null` to `""` — it is what the model
+reads, so serialize structured data yourself.
+
+## Examples
+
+### 1. Success and failure on the same tool
+
+```java test
+import io.github.muthuishere.toolnexus.ToolResult;
+import java.util.Map;
+
+public class Example {
+    static final Map<String, String> CONFIG = Map.of("region", "eu-west-1");
+
+    static ToolResult readConfig(String key) {
+        String v = CONFIG.get(key);
+        if (v == null) {
+            // Recoverable: the model can read this and try another key.
+            return ToolResult.error("No such config key: " + key);
+        }
+        return ToolResult.ok(v);
+    }
+
+    public static void main(String[] args) {
+        ToolResult found = readConfig("region");
+        if (!found.output().equals("eu-west-1") || found.isError()) {
+            throw new AssertionError("unexpected: " + found.output());
+        }
+
+        ToolResult missing = readConfig("nope");
+        if (!missing.isError()) throw new AssertionError("expected isError");
+
+        System.out.println("ok: " + found.output() + " | " + missing.output());
+    }
+}
+```
+
+### 2. Structured output and metadata
+
+`output` must be a string, so serialize deliberately. `metadata` rides alongside for *your* code —
+the model never sees it, which makes it the right place for bookkeeping.
+
+```java test
+import io.github.muthuishere.toolnexus.ToolResult;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+public class Example {
+    record Hit(int id, String title) {}
+
+    static ToolResult search(String q) {
+        List<Hit> hits = List.of(new Hit(1, "Getting started"), new Hit(2, "Advanced usage"));
+
+        return ToolResult.ok(
+            // The model reads this. Make it legible, not just valid.
+            hits.stream().map(h -> "#" + h.id() + " " + h.title()).collect(Collectors.joining("\n")),
+            // Your code reads this. The model never sees it.
+            Map.of("title", "search: " + q,
+                   "count", hits.size(),
+                   "ids", hits.stream().map(Hit::id).toList())
+        );
+    }
+
+    public static void main(String[] args) {
+        ToolResult res = search("usage");
+        if (!res.metadata().get("count").equals(2)) throw new AssertionError("count");
+        if (!res.metadata().get("ids").equals(List.of(1, 2))) throw new AssertionError("ids");
+        if (!res.output().contains("Advanced usage")) throw new AssertionError("output");
+
+        System.out.println("ok: " + res.metadata().get("title"));
+    }
+}
+```
+
+### 3. The reserved key — `metadata.pending` is a suspension
+
+`metadata` is free-form with one exception. A `pending` key holding a `Request` means "this tool
+cannot finish until something out-of-band happens" — the loop parks the run instead of returning.
+The producer and reader helpers are **static methods on `ToolResult`**.
+
+```java test
+import io.github.muthuishere.toolnexus.Request;
+import io.github.muthuishere.toolnexus.ToolResult;
+
+public class Example {
+    public static void main(String[] args) {
+        // pending() returns a ToolResult carrying metadata.pending = Request.
+        // An empty id is filled in for you — it is the correlation key.
+        ToolResult res = ToolResult.pending(new Request("", "input", "Which environment?"));
+
+        if (!res.isError()) throw new AssertionError("a parked call is not a success");
+
+        Request req = ToolResult.pendingOf(res);
+        if (req == null) throw new AssertionError("pendingOf should read the suspension back");
+        if (!req.kind().equals("input")) throw new AssertionError("kind: " + req.kind());
+        if (!req.prompt().equals("Which environment?")) throw new AssertionError("prompt");
+        if (req.id() == null || req.id().isEmpty()) throw new AssertionError("an id is generated");
+
+        // authRequired is sugar for the login case.
+        ToolResult auth = ToolResult.authRequired("https://example.com/login");
+        Request authReq = ToolResult.pendingOf(auth);
+        if (!authReq.kind().equals("authorization")) throw new AssertionError("auth kind");
+        if (!authReq.url().equals("https://example.com/login")) throw new AssertionError("auth url");
+
+        // An ordinary result has no suspension.
+        if (ToolResult.pendingOf(ToolResult.ok("done")) != null) {
+            throw new AssertionError("expected no suspension on a plain result");
+        }
+
+        System.out.println("ok: " + req.kind() + " | " + authReq.kind());
+    }
+}
+```
+
+<Aside type="caution">
+A suspension sets `isError` to true. That is deliberate — a parked call has not produced an answer.
+Do not treat `isError()` alone as "the tool broke"; check `ToolResult.pendingOf(result)` when
+suspension is in play.
+</Aside>
+
+## Members
+
+| Member | Returns | What it is |
+|---|---|---|
+| `output()` | `String` | The text handed to the model. Never null — `null` becomes `""`. |
+| `isError()` | `boolean` | Whether the call failed. Fed back to the model, not thrown. |
+| `metadata()` | `Map<String, Object>` | Free-form, may be null. **Reserved:** `pending` holds a §10 `Request`. |
+
+## Static factories
+
+| Method | What it does |
+|---|---|
+| `ok(output)` / `ok(output, metadata)` | A success result. |
+| `error(output)` / `error(output, metadata)` | A failure result the model can recover from. |
+| `pending(request)` | A §10 suspension. Generates an `id` when the request has none. |
+| `authRequired(url)` / `authRequired(url, prompt)` | Sugar for `kind:"authorization"` at a login URL. |
+| `pendingOf(result)` | Reads the `Request` back off a result, or `null`. |
+
+## See also
+
+- [`Tool`](/api/java/types/tool/) — what returns this
+- [`ToolContext`](/api/java/types/context/) — what `execute` receives
+- [`Request.pending`](/api/java/suspension/pending/) — the suspension entry point

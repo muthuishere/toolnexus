@@ -1,0 +1,233 @@
+---
+title: "Toolnexus.Serve.start"
+description: "Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent. — Elixir."
+sidebar:
+  label: "Toolnexus.Serve.start"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/serve.ex">elixir/lib/toolnexus/serve.ex</a>
+</p>
+
+```elixir
+@spec start(String.t(), keyword()) :: Toolnexus.Serve.Handle.t()
+def start(addr, opts)
+
+# addr = "host:port" ("127.0.0.1:0" for an ephemeral port); opts[:a2a] mounts the A2A routes,
+# opts[:mcp] co-mounts /mcp (SPEC §7C). Neither present ⇒ every request 404s.
+
+# The everyday entry point wraps this for you:
+@spec serve(Toolnexus.Toolkit.t(), String.t(), keyword()) :: Toolnexus.Serve.Handle.t()
+def Toolnexus.Toolkit.serve(toolkit, addr, opts \\ [])
+# opts: :client (the Client that fulfils tasks), :a2a (profile, or from
+# toolkit's mcp_config "a2a" block), :mcp (profile, §7C), :on_task, :on_call
+```
+
+Stands up a Bandit HTTP server. With the `a2a` profile present it mounts `GET
+/.well-known/agent-card.json` (built from the toolkit's **skills**, never raw tools — see
+[`build_agent_card/3`](/api/elixir/serve/agent-card/)) and `POST /` for JSON-RPC 2.0:
+`SendMessage` creates a Task, persists it via the configured
+[`TaskStore`](/api/elixir/serve/task-store/), returns it immediately in `"submitted"` state, and
+fulfils it **asynchronously** through `client.run(task_text, toolkit)`; `GetTask` polls it. A §10
+suspension surfaces as the protocol's `input-required` state carrying the request prompt — never a
+false `completed`. A fulfilment error becomes a `"failed"` Task; it never crashes the server.
+
+## When to use it
+
+- **Expose a toolkit's skills to real A2A peers** — any client speaking the SendMessage/GetTask
+  subset (verified against the `a2a-python` SDK) can call in.
+- **Bridge your own toolnexus toolkit to another toolnexus toolkit** — the hermetic examples below
+  are exactly this: one served toolkit is another port's remote peer.
+- **Co-mount MCP alongside A2A** on the same address — pass both `a2a:` and `mcp:`; they share one
+  Bandit listener, routed by path (`/.well-known/agent-card.json` + `POST /` vs `POST /mcp`).
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Call Toolkit.serve/3, not Serve.start/2, in application code">
+`Toolnexus.Toolkit.serve/3` is the entry point real code should use — it resolves the `a2a`/`mcp`
+profile from either an inline option or the toolkit's own `mcp_config` (`"a2a"`/`"mcpServer"` top-level
+blocks), wires `client.run/3` as the fulfilment function, and threads a message's `contextId`
+through `Client.ask/4` so a peer's turns are remembered across Tasks. `Serve.start/2` is the
+lower-level primitive `Toolkit.serve/3` delegates to — reach for it directly only if you are not
+starting from a `Toolnexus.Toolkit.t()`.
+</Aside>
+
+For the inbound **MCP** profile instead of (or alongside) A2A, see
+[`Toolnexus.McpServe`](/api/elixir/serve/mcp/) — same `serve/3` call, a different `opts` key.
+
+## Examples
+
+### 1. The smallest useful call — no profile at all, everything 404s
+
+```elixir test
+alias Toolnexus.{Serve, Toolkit}
+
+Application.ensure_all_started(:req)
+
+{:ok, tk} = Toolnexus.create_toolkit(builtins: false)
+handle = Toolkit.serve(tk, "127.0.0.1:0")
+
+true = handle.port > 0
+true = handle.url == "http://127.0.0.1:#{handle.port}"
+
+resp = Req.get!(url: handle.url <> "/.well-known/agent-card.json", retry: false, decode_body: false)
+true = resp.status == 404
+
+Serve.stop(handle)
+
+IO.puts("ok: no profile -> 404 (server was still listening on #{handle.url})")
+```
+
+### 2. The realistic case — SendMessage runs a tool, GetTask observes it complete
+
+The LLM call is stubbed via `Client.create`'s `http_options: [plug: ...]` (in-process, no
+network); the A2A wire itself is real loopback HTTP.
+
+```elixir test
+alias Toolnexus.{Client, Native, Serve, Toolkit}
+
+Application.ensure_all_started(:req)
+{:ok, calls} = Agent.start_link(fn -> 0 end)
+
+llm_plug = fn conn ->
+  {:ok, raw, conn} = Plug.Conn.read_body(conn)
+  body = Jason.decode!(raw)
+  n = Agent.get_and_update(calls, fn c -> {c + 1, c + 1} end)
+
+  resp =
+    if n == 1 do
+      %{
+        "choices" => [
+          %{
+            "message" => %{
+              "role" => "assistant",
+              "content" => nil,
+              "tool_calls" => [
+                %{"id" => "c1", "type" => "function", "function" => %{"name" => "echo", "arguments" => ~s({"text":"hi"})}}
+              ]
+            }
+          }
+        ],
+        "usage" => %{"prompt_tokens" => 3, "completion_tokens" => 2, "total_tokens" => 5}
+      }
+    else
+      %{
+        "choices" => [%{"message" => %{"role" => "assistant", "content" => "echoed: hi"}}],
+        "usage" => %{"prompt_tokens" => 2, "completion_tokens" => 1, "total_tokens" => 3}
+      }
+    end
+
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+llm_client =
+  Client.create(base_url: "http://localhost", style: "openai", model: "gpt-x", api_key: "test-key", http_options: [plug: llm_plug])
+
+{:ok, tk} =
+  Toolnexus.create_toolkit(
+    skills: [%{name: "echoer", description: "Echoes text", content: "Call echo."}],
+    extra_tools: [Native.define_tool(name: "echo", description: "Echo text back", execute: fn args -> "echoed: #{args["text"]}" end)],
+    builtins: false
+  )
+
+handle = Toolkit.serve(tk, "127.0.0.1:0", client: llm_client, a2a: %{name: "Echo Agent"})
+
+send_body = %{
+  "jsonrpc" => "2.0",
+  "id" => "1",
+  "method" => "SendMessage",
+  "params" => %{"message" => %{"role" => "user", "messageId" => "m1", "parts" => [%{"kind" => "text", "text" => "please echo hi"}]}}
+}
+
+submit_resp = Req.post!(url: handle.url <> "/", json: send_body, retry: false, decode_body: false)
+%{"result" => %{"id" => task_id, "status" => %{"state" => "submitted"}}} = Jason.decode!(submit_resp.body)
+
+final =
+  Stream.repeatedly(fn ->
+    get_body = %{"jsonrpc" => "2.0", "id" => "2", "method" => "GetTask", "params" => %{"id" => task_id}}
+    resp = Req.post!(url: handle.url <> "/", json: get_body, retry: false, decode_body: false)
+    %{"result" => task} = Jason.decode!(resp.body)
+    if task["status"]["state"] in ["submitted", "working"], do: (Process.sleep(10) && nil), else: task
+  end)
+  |> Enum.find(&(&1 != nil))
+
+true = final["status"]["state"] == "completed"
+[%{"parts" => [%{"text" => text}]}] = final["artifacts"]
+true = text == "echoed: hi"
+
+Serve.stop(handle)
+
+IO.puts("ok: Task #{task_id} completed with \"#{text}\"")
+```
+
+### 3. The full surface — co-mounted A2A + MCP, and a top-level config block
+
+```elixir test
+alias Toolnexus.{Client, Serve, Toolkit}
+
+Application.ensure_all_started(:req)
+
+llm_plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+
+  resp = %{
+    "choices" => [%{"message" => %{"role" => "assistant", "content" => "ok"}}],
+    "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+  }
+
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+llm_client =
+  Client.create(base_url: "http://localhost", style: "openai", model: "gpt-x", api_key: "test-key", http_options: [plug: llm_plug])
+
+# A top-level `a2a` config block (a reserved key, like `mcpServers`) mounts the profile
+# without an inline `a2a:` option — Toolkit.serve/3 resolves it from the toolkit itself.
+tk =
+  Toolnexus.create_toolkit!(
+    mcp_config: %{"mcpServers" => %{}, "a2a" => %{"name" => "cfg-served"}},
+    skills: [%{name: "s1", description: "a skill", content: "c"}],
+    builtins: false
+  )
+
+handle = Toolkit.serve(tk, "127.0.0.1:0", client: llm_client, mcp: %{name: "gw"})
+
+card = Req.get!(url: handle.url <> "/.well-known/agent-card.json", retry: false).body
+true = card["name"] == "cfg-served"
+true = Enum.map(card["skills"], & &1["id"]) == ["s1"]
+
+# MCP is co-mounted at /mcp alongside the A2A routes on the SAME listener.
+init_body = %{"jsonrpc" => "2.0", "id" => 1, "method" => "initialize", "params" => %{}}
+
+mcp_resp =
+  Req.post!(
+    url: handle.url <> "/mcp",
+    json: init_body,
+    headers: [{"accept", "application/json, text/event-stream"}],
+    retry: false,
+    decode_body: false
+  )
+
+%{"result" => %{"serverInfo" => %{"name" => "gw"}}} = Jason.decode!(mcp_resp.body)
+
+Serve.stop(handle)
+
+IO.puts("ok: one listener, two profiles — A2A card \"#{card["name"]}\" + MCP serverInfo \"gw\"")
+```
+
+## `ServeHandle` shape
+
+| Field | Type | What it is |
+|---|---|---|
+| `url` | `String.t()` | Base URL, e.g. `"http://127.0.0.1:52341"` — the actual bound port when `addr` used `:0`. |
+| `port` | `:inet.port_number()` | The bound port. |
+| `pid` | `pid()` | The Bandit listener process — `Serve.stop/1` (alias `close/1`) shuts it down. |
+
+## See also
+
+- [`Toolnexus.Serve.build_agent_card`](/api/elixir/serve/agent-card/) — construct the Agent Card that advertises your name, skills and endpoint.
+- [`Toolnexus.Serve task_store`](/api/elixir/serve/task-store/) — persist inbound A2A tasks so a suspended request survives a restart.
+- [`Toolnexus.McpServe`](/api/elixir/serve/mcp/) — the inbound MCP profile: any MCP client can call your tools.
+- [`Toolnexus.A2a.agent`](/api/elixir/agents/agent/) — the outbound mirror: call a served toolkit from the other side.

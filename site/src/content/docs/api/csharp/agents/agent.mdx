@@ -1,0 +1,332 @@
+---
+title: "A2A.Agent"
+description: "Point at a remote agent's card and use it exactly like a local tool. — C#."
+sidebar:
+  label: "A2A.Agent"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/A2A.cs">A2A.cs</a>
+</p>
+
+```csharp
+public sealed class Agent
+{
+    public string Card { get; set; } = "";
+    public IDictionary<string, string>? Headers { get; set; }
+    public long? Timeout { get; set; }     // ms, default 300000
+    public long? PollEvery { get; set; }   // ms, default 1000
+}
+```
+
+A descriptor pointing at a remote peer's Agent Card URL — not a factory function. Build one with
+an object initializer (`new Agent { Card = url }`) and hand it to
+[`A2A.AgentTools`](/api/csharp/agents/agent-tools/) directly, or drop it into
+`Toolkit.Options.Agents`/`Toolkit.AddAgentAsync` to have the toolkit resolve, isolate, and register
+its skills for you.
+
+## When to use it
+
+You have (or are given) the URL of another A2A agent's card — your own, a teammate's toolkit, or
+any third-party A2A peer — and want its skills to show up in your model's tool list exactly like a
+native or MCP tool. `Card` is the only required field; `Headers`, `Timeout`, and `PollEvery` tune
+auth and the submit→poll budget per peer.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Prefer Toolkit.Options.Agents / AddAgentAsync in an app">
+`Agent` on its own is inert — nothing is fetched until you pass it to
+[`A2A.AgentTools`](/api/csharp/agents/agent-tools/) or a `Toolkit`. Reach for the `Toolkit` path
+(`Options.Agents` at startup, `AddAgentAsync` at runtime) when you want a **failing peer isolated**
+(logged, zero tools, never fatal) alongside your MCP servers and skills. Call `A2A.AgentTools`
+directly only when you want the resolution to **throw** on a bad card, e.g. to fail startup loudly
+for one agent you know must be reachable.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — register a descriptor on a toolkit
+
+```csharp test
+using Toolnexus;
+
+// --- the peer: a toolkit exposing one skill, served as an A2A agent ---
+using var peerLlm = new Stub(ctx => Stub.Json(ctx, 200, """
+{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}
+"""));
+
+await using var peer = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Builtins = false,
+    Skills = new List<SkillSource.SkillDef> { new("greet", "says hello", "Say a friendly hello.") },
+});
+var peerClient = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = peerLlm.BaseUrl, Style = "openai", Model = "mock", ApiKey = "k",
+});
+var handle = await peer.ServeAsync("127.0.0.1:0", new Toolkit.ServeOptions
+{
+    Client = peerClient,
+    A2A = new A2AConfig { Name = "desk" },
+});
+
+// --- the caller: a plain descriptor, registered on ITS OWN toolkit ---
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Builtins = false,
+    Agents = new List<Agent> { new() { Card = handle.Url + "/.well-known/agent-card.json" } },
+});
+
+var names = tk.Tools().Select(t => t.Name).ToList();
+if (names.Count != 1 || names[0] != "desk_greet") throw new Exception(string.Join(",", names));
+
+await handle.StopAsync();
+Console.WriteLine($"ok: {string.Join(",", names)}");
+
+sealed class Stub : IDisposable
+{
+    readonly System.Net.HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<System.Net.HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                System.Net.HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(System.Net.HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+### 2. The realistic case — call the tool, round-trip through the real peer
+
+```csharp test
+using Toolnexus;
+
+using var peerLlm = new Stub(ctx => Stub.Json(ctx, 200, """
+{"choices":[{"message":{"content":"hello, friend"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}
+"""));
+
+await using var peer = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Builtins = false,
+    Skills = new List<SkillSource.SkillDef> { new("greet", "says hello", "Say a friendly hello.") },
+});
+var peerClient = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = peerLlm.BaseUrl, Style = "openai", Model = "mock", ApiKey = "k",
+});
+var handle = await peer.ServeAsync("127.0.0.1:0", new Toolkit.ServeOptions
+{
+    Client = peerClient,
+    A2A = new A2AConfig { Name = "desk" },
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Builtins = false,
+    Agents = new List<Agent>
+    {
+        new() { Card = handle.Url + "/.well-known/agent-card.json", PollEvery = 25 },
+    },
+});
+
+var tool = tk.Get("desk_greet") ?? throw new Exception("tool not registered");
+var result = await tool.ExecuteAsync(new Dictionary<string, object?> { ["task"] = "say hi" });
+if (result.IsError) throw new Exception(result.Output);
+if (result.Output != "hello, friend") throw new Exception(result.Output);
+
+await handle.StopAsync();
+Console.WriteLine($"ok: {result.Output}");
+
+sealed class Stub : IDisposable
+{
+    readonly System.Net.HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<System.Net.HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                System.Net.HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(System.Net.HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+### 3. Full surface — Timeout/PollEvery tuning, and a bad peer is isolated, not fatal
+
+```csharp test
+using Toolnexus;
+
+using var peerLlm = new Stub(ctx => Stub.Json(ctx, 200, """
+{"choices":[{"message":{"content":"pong"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}
+"""));
+
+await using var peer = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Builtins = false,
+    Skills = new List<SkillSource.SkillDef> { new("ping", "says pong", "Reply pong.") },
+});
+var peerClient = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = peerLlm.BaseUrl, Style = "openai", Model = "mock", ApiKey = "k",
+});
+var handle = await peer.ServeAsync("127.0.0.1:0", new Toolkit.ServeOptions
+{
+    Client = peerClient,
+    A2A = new A2AConfig { Name = "reachable" },
+});
+
+// A reachable peer with a tuned poll budget, alongside one whose card can never be fetched —
+// registered together the way a real app would declare its `agents` config.
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Builtins = false,
+    Agents = new List<Agent>
+    {
+        new() { Card = handle.Url + "/.well-known/agent-card.json", Timeout = 5_000, PollEvery = 25 },
+        new() { Card = "http://127.0.0.1:1/.well-known/agent-card.json" }, // nothing listens on :1
+    },
+});
+
+// The bad agent is isolated: no exception, its skills just never appear.
+var names = tk.Tools().Select(t => t.Name).ToList();
+if (names.Count != 1 || names[0] != "reachable_ping") throw new Exception(string.Join(",", names));
+
+var result = await tk.ExecuteAsync("reachable_ping", new Dictionary<string, object?> { ["task"] = "ping" });
+if (result.IsError || result.Output != "pong") throw new Exception(result.Output);
+
+await handle.StopAsync();
+Console.WriteLine($"ok: {string.Join(",", names)} -> {result.Output}");
+
+sealed class Stub : IDisposable
+{
+    readonly System.Net.HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<System.Net.HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                System.Net.HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(System.Net.HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+<Aside type="caution">
+`Card` must be the Agent Card URL itself (`.../.well-known/agent-card.json`), not the base origin —
+`A2A.AgentTools` does a plain `GET` on `Card`. The JSON-RPC endpoint peers `POST` to comes from the
+fetched card's own `url` field, which may differ from `Card`'s origin.
+</Aside>
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `Card` | `string` | The Agent Card URL (`GET`). Required. |
+| `Headers` | `IDictionary<string, string>?` | Sent on both the card `GET` and every JSON-RPC `POST`. `${ENV_VAR}` values are expanded at call time and never logged. |
+| `Timeout` | `long?` | Overall poll budget in ms. Default `300000`. |
+| `PollEvery` | `long?` | Interval between `GetTask` polls in ms. Default `1000`. |
+
+## See also
+
+- [`A2A.AgentTools`](/api/csharp/agents/agent-tools/) — Expand a remote agent card into one tool per advertised skill.
+- [`A2A.ParseAgentsConfig`](/api/csharp/agents/parse-config/) — Declare remote peers in config the way MCP servers are declared, with precedence rules.
+- [`A2AServer.Start`](/api/csharp/serve/a2a/) — The inbound counterpart: serve your own toolkit as the peer being called here.

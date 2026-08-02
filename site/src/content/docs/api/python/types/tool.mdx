@@ -1,0 +1,198 @@
+---
+title: Tool
+description: The uniform shape every tool source collapses to — name, description, JSON-Schema parameters, execute. Python.
+sidebar:
+  label: Tool
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/types.py">python/src/toolnexus/types.py</a>
+</p>
+
+```python
+@dataclass
+class Tool:
+    name: str
+    description: str
+    input_schema: JSONSchema
+    source: ToolSource
+    execute: ExecuteFn          # async def execute(args: dict, ctx: ToolContext | None = None) -> ToolResult
+```
+
+The one type. An MCP server tool, an agent skill, a built-in shell tool, a remote A2A agent, an
+HTTP endpoint and a plain function of your own are all *the same thing* to an LLM — a named,
+described, schema'd callable. `Tool` is that thing, and every source in toolnexus produces it.
+
+## When to use it
+
+You mostly **receive** `Tool`s rather than construct them: `tk.tools()` hands you a `list[Tool]`,
+and that is what you iterate, filter, and pass to an adapter.
+
+Construct one directly when you are writing a **new tool source** — something producing tools from
+a shape toolnexus doesn't already cover (a table of prompts, an internal RPC registry, a plugin
+system). For a single ordinary function, don't hand-build this.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use define_tool instead for your own functions">
+[`define_tool`](/api/python/native/define-tool/) builds a `Tool` for you and sets
+`source="native"`, inferring the schema from your type hints. Hand-writing the dataclass to wrap
+one function is more code and one more thing to keep in sync. Reach for the raw type only when you
+are generating tools programmatically.
+</Aside>
+
+`execute` is a **coroutine function** — `async def`. The loop awaits it, so a synchronous callable
+will not work; wrap blocking work in `asyncio.to_thread` if you need to.
+
+## Examples
+
+### 1. The smallest possible tool
+
+`Tool` is a dataclass. Nothing is subclassed and nothing is registered — build it and it works.
+
+```python test
+import asyncio
+from toolnexus import Tool, ToolResult
+
+
+async def _echo(args, ctx=None):
+    return ToolResult(output=str(args["text"]), is_error=False)
+
+
+echo = Tool(
+    name="echo",
+    description="Return whatever it is given",
+    input_schema={"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+    source="custom",
+    execute=_echo,
+)
+
+
+async def main():
+    res = await echo.execute({"text": "hello"})
+    assert res.output == "hello"
+    assert res.is_error is False
+    print("ok:", res.output)
+
+
+asyncio.run(main())
+```
+
+<Aside type="caution">
+`source` is not free-form. It is one of `"mcp"`, `"skill"`, `"native"`, `"http"`, `"builtin"`,
+`"a2a"`, `"custom"`. Use `"custom"` for tools you construct yourself — the other values mean "this
+came from that subsystem" and are what filtering over `tk.tools()` relies on.
+</Aside>
+
+### 2. Reporting failure, and carrying metadata
+
+A tool that fails does **not** raise — it returns `is_error=True`. The loop feeds that text back to
+the model as the tool result, so the model can react. Raising escapes the loop instead.
+
+```python test
+import asyncio
+from toolnexus import Tool, ToolResult
+
+
+async def _divide(args, ctx=None):
+    a, b = float(args["a"]), float(args["b"])
+    if b == 0:
+        # The model sees this text and can correct itself on the next turn.
+        return ToolResult(output="Cannot divide by zero", is_error=True)
+    return ToolResult(
+        output=str(a / b),
+        is_error=False,
+        metadata={"title": "divide", "operands": [a, b]},
+    )
+
+
+divide = Tool(
+    name="divide",
+    description="Divide two numbers",
+    input_schema={
+        "type": "object",
+        "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+        "required": ["a", "b"],
+    },
+    source="custom",
+    execute=_divide,
+)
+
+
+async def main():
+    ok = await divide.execute({"a": 10, "b": 4})
+    assert ok.output == "2.5"
+    assert ok.metadata["operands"] == [10.0, 4.0]
+
+    bad = await divide.execute({"a": 1, "b": 0})
+    assert bad.is_error is True
+
+    print("ok:", ok.output, "| error path:", bad.output)
+
+
+asyncio.run(main())
+```
+
+### 3. A generated tool source — the real reason this type is public
+
+Producing many tools from data is where you build `Tool` directly. Here one row of config becomes
+one tool, and `sanitize` makes each name schema-safe.
+
+```python test
+import asyncio
+from toolnexus import Tool, ToolResult, sanitize
+
+endpoints = [
+    {"key": "get user", "path": "/users/:id"},
+    {"key": "list orders", "path": "/orders"},
+]
+
+
+def make_tool(endpoint):
+    async def _execute(args, ctx=None):
+        # ctx is optional — always guard it.
+        if ctx is not None and getattr(ctx, "signal", None) is not None:
+            pass
+        return ToolResult(output=f"{endpoint['path']} <- {args}", is_error=False)
+
+    return Tool(
+        # Names must match [a-zA-Z0-9_-]; sanitize does exactly that.
+        name=sanitize(endpoint["key"]),
+        description=f"Call {endpoint['path']}",
+        input_schema={"type": "object", "properties": {"id": {"type": "string"}}},
+        source="custom",
+        execute=_execute,
+    )
+
+
+tools = [make_tool(e) for e in endpoints]
+
+
+async def main():
+    assert [t.name for t in tools] == ["get_user", "list_orders"]
+    res = await tools[0].execute({"id": "42"})
+    assert res.output == "/users/:id <- {'id': '42'}"
+    print("ok:", ", ".join(t.name for t in tools))
+
+
+asyncio.run(main())
+```
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `name` | `str` | The name the model calls. Must match `[a-zA-Z0-9_-]` — run it through `sanitize`. |
+| `description` | `str` | What the model reads to decide whether to call it. |
+| `input_schema` | `JSONSchema` | A JSON-Schema **object** — a plain `dict`. |
+| `source` | `ToolSource` | One of `mcp`, `skill`, `native`, `http`, `builtin`, `a2a`, `custom`. |
+| `execute` | `ExecuteFn` | `async def execute(args, ctx=None) -> ToolResult`. Must be a coroutine function. |
+
+## See also
+
+- [`ToolResult`](/api/python/types/tool-result/) — what `execute` returns
+- [`ToolContext`](/api/python/types/context/) — what `execute` receives
+- [`define_tool`](/api/python/native/define-tool/) — build a `Tool` from a function
+- [`create_toolkit`](/api/python/toolkit/create/) — aggregate tools from every source

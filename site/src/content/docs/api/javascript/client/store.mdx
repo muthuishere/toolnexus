@@ -1,0 +1,194 @@
+---
+title: "InMemoryConversationStore"
+description: "Swap in-memory history for your own store so a conversation survives a process restart. — JavaScript."
+sidebar:
+  label: "InMemoryConversationStore"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#8-unified-llm-client-the-host-loop">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/client.ts">js/src/client.ts</a>
+</p>
+
+```ts
+interface ConversationStore {
+  get(id: string): Promise<any[] | undefined>
+  save(id: string, messages: any[]): Promise<void>
+}
+
+class InMemoryConversationStore implements ConversationStore { /* default, process-lifetime */ }
+```
+
+Where `ask(prompt, { id })` and `stream(prompt, { id })` remember. `ConversationStore` is a
+two-method interface — `get(id)` / `save(id, messages)` — and `InMemoryConversationStore` is the
+default implementation `createClient` uses when you don't pass `store`: an in-process `Map`,
+alive for as long as the process is.
+
+## When to use it
+
+You don't call either directly in the common case — `createClient` wires the default in for you,
+and `ask`/`stream` read and write it automatically by `id`. Reach for the interface when a
+conversation needs to survive something the process's memory doesn't: a restart, a second
+instance, a different request handler picking up the same thread later.
+
+`client.conversationStore()` hands you the exact instance in use — the one you passed in `opts.store`,
+or the default — so you can read/write it directly without a shadow copy.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use Conversation instead when the transcript never needs to leave this process">
+[`Conversation`](/api/javascript/client/conversation/) keeps the transcript as a plain object field
+— no `id`, no store, nothing serialized. That is strictly less machinery, and the right choice when
+one process holds the whole exchange start to finish. Reach for a `ConversationStore` — in-memory
+or your own — the moment a *second* call site (a different request, a cron tick, another process)
+needs to resume the same `id`.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — the default store, used implicitly
+
+No `store` option passed: `createClient` builds an `InMemoryConversationStore` and `ask(prompt, { id })`
+reads/writes it for you.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, InMemoryConversationStore } from "toolnexus"
+
+const server = http.createServer((req, res) => {
+  let raw = ""
+  req.on("data", (c) => (raw += c))
+  req.on("end", () => {
+    const body = JSON.parse(raw)
+    res.writeHead(200, { "content-type": "application/json" })
+    res.end(JSON.stringify({ choices: [{ message: { content: String(body.messages.length) }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+  })
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const tk = await createToolkit({})
+const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key" })
+
+assert.ok(client.conversationStore() instanceof InMemoryConversationStore, "default store should be in-memory")
+
+await client.ask("first", { toolkit: tk, id: "thread-1" })
+const second = await client.ask("second", { toolkit: tk, id: "thread-1" })
+assert.equal(second.text, "3", "second ask() carried the first turn's history")
+
+await tk.close()
+server.close()
+console.log("ok:", second.text)
+```
+
+### 2. A realistic case — read the store directly to inspect a thread
+
+`client.conversationStore()` returns the live instance; `get(id)` reads exactly what `ask`/`stream`
+would load next.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit } from "toolnexus"
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "content-type": "application/json" })
+  res.end(JSON.stringify({ choices: [{ message: { content: "ack" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const tk = await createToolkit({})
+const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key" })
+
+await client.ask("remember this", { toolkit: tk, id: "support-42" })
+
+const store = client.conversationStore()
+const transcript = await store.get("support-42")
+assert.ok(transcript, "nothing stored under support-42")
+assert.ok(transcript!.some((m: any) => m.role === "user" && m.content === "remember this"))
+
+const missing = await store.get("no-such-thread")
+assert.equal(missing, undefined, "get() on an unknown id should return undefined, not throw")
+
+await tk.close()
+server.close()
+console.log("ok:", transcript!.length)
+```
+
+### 3. The full surface — a custom durable ConversationStore
+
+A minimal file/db-shaped implementation of the two-method interface, passed as `opts.store`. This
+one keeps a plain object as its "backing store" so the example stays hermetic — a real one would
+write to a file, Redis, or Postgres in `save()`.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit } from "toolnexus"
+import type { ConversationStore } from "toolnexus"
+
+/** A stand-in "durable" store — same shape a file/db-backed one would have. */
+class RecordingStore implements ConversationStore {
+  backing: Record<string, any[]> = {}
+  saves = 0
+  async get(id: string) {
+    return this.backing[id] ? [...this.backing[id]] : undefined
+  }
+  async save(id: string, messages: any[]) {
+    this.saves++
+    this.backing[id] = [...messages]
+  }
+}
+
+const server = http.createServer((req, res) => {
+  let raw = ""
+  req.on("data", (c) => (raw += c))
+  req.on("end", () => {
+    const body = JSON.parse(raw)
+    res.writeHead(200, { "content-type": "application/json" })
+    res.end(JSON.stringify({ choices: [{ message: { content: String(body.messages.length) }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+  })
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const tk = await createToolkit({})
+const store = new RecordingStore()
+const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key", store })
+
+assert.equal(client.conversationStore(), store, "conversationStore() must return the EXACT instance passed in")
+
+await client.ask("hello", { toolkit: tk, id: "durable-1" })
+await client.ask("again", { toolkit: tk, id: "durable-1" })
+assert.equal(store.saves, 2, "save() should fire once per ask()")
+assert.ok(store.backing["durable-1"].length > 0, "custom store never received the transcript")
+
+// A brand-new client, same store instance — the thread resumes as if the process restarted.
+const resumed = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key", store })
+const res = await resumed.ask("still here?", { toolkit: tk, id: "durable-1" })
+assert.equal(res.text, "5", "a fresh client sharing the store did not resume the thread")
+
+await tk.close()
+server.close()
+console.log("ok:", store.saves)
+```
+
+## Fields
+
+| Member | Type | What it does |
+|---|---|---|
+| `get(id)` | `(id: string) => Promise<any[] \| undefined>` | Return the stored transcript for `id`, or `undefined` if none. |
+| `save(id, messages)` | `(id: string, messages: any[]) => Promise<void>` | Persist the (updated) transcript for `id`. |
+
+Pass a `ConversationStore` implementation as `createClient({ store })`; retrieve whichever one is
+active with `client.conversationStore()`.
+
+## See also
+
+- [`createClient`](/api/javascript/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.run`](/api/javascript/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Client.stream`](/api/javascript/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Hooks`](/api/javascript/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

@@ -1,0 +1,137 @@
+---
+title: "Toolnexus.Agents.Home.compose_soul"
+description: "Build a persona's system prompt from its home directory: identity, memory, skills. — Elixir."
+sidebar:
+  label: "Toolnexus.Agents.Home.compose_soul"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/agents/home.ex">elixir/lib/toolnexus/agents/home.ex</a>
+</p>
+
+```elixir
+@spec compose_soul(String.t()) :: {String.t(), [String.t()]}
+def compose_soul(dir)
+
+# bootstrap order: AGENTS.md, SOUL.md, IDENTITY.md, USER.md, TOOLS.md, HEARTBEAT.md, MEMORY.md
+# (Toolnexus.Agents.Home.bootstrap_order/0)
+```
+
+Composes whichever bootstrap files exist under `dir`, in the canonical order, into one soul
+string — the persona's system prompt. Each present file becomes a `## <file>` section; absent
+files are silently skipped; a file over 2 MB is truncated with a notice (the file on disk is
+untouched). Returns `{soul, found}`, where `found` lists the discovered filenames in the order
+they were composed.
+
+## When to use it
+
+- **The directory IS the agent** — a persona's identity lives in files (`SOUL.md`,
+  `IDENTITY.md`, ...) that a human or another process edits directly, and you want that
+  editable state to become a system prompt without hand-rolling the file walk and ordering.
+- **You need the composition step in isolation** — to preview a soul before running the agent,
+  to snapshot it for a log, or to build something other than an `AgentDef` from the same files.
+- **You're auditing what a persona will see** — `found` tells you exactly which files were
+  present at composition time.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for from_dir/2 for the everyday path">
+`compose_soul/1` is the composition primitive — a pure function from directory to string.
+[`Toolnexus.Agents.Home.from_dir/2`](/api/elixir/persona/from-dir/) is what you actually call
+in application code: it runs `compose_soul/1` for you, wires the `memory` tool over the same
+directory, and hands back a runnable `AgentDef`. Reach for `compose_soul/1` directly only when
+you want the soul string itself, decoupled from building an agent.
+</Aside>
+
+Composition happens **once**, at session start — a frozen snapshot. A later `memory` tool write
+changes the files on disk, but not the live prompt already in context; the next session's
+`compose_soul/1` call is what picks it up. This is deliberate (cache-stable prompts), not a bug.
+
+## Examples
+
+### 1. The smallest useful call — one bootstrap file
+
+```elixir test
+alias Toolnexus.Agents.Home
+
+dir = Path.join(System.tmp_dir!(), "toolnexus_doc_compose_soul_1_#{System.unique_integer([:positive])}")
+File.rm_rf!(dir)
+File.mkdir_p!(dir)
+File.write!(Path.join(dir, "SOUL.md"), "You are Kestrel, a calm and precise research agent.")
+
+{soul, found} = Home.compose_soul(dir)
+
+true = found == ["SOUL.md"]
+true = soul == "## SOUL.md\n\nYou are Kestrel, a calm and precise research agent."
+
+IO.puts("ok: composed #{byte_size(soul)} bytes from #{Enum.join(found, ", ")}")
+```
+
+### 2. The realistic case — several files, canonical order, missing files skipped
+
+Files are composed in the **bootstrap order**, not directory-listing order, and a file that
+isn't present is simply absent from `found` — no error, no placeholder section.
+
+```elixir test
+alias Toolnexus.Agents.Home
+
+dir = Path.join(System.tmp_dir!(), "toolnexus_doc_compose_soul_2_#{System.unique_integer([:positive])}")
+File.rm_rf!(dir)
+File.mkdir_p!(dir)
+
+# Written out of canonical order on purpose — composition order must not depend on write order.
+File.write!(Path.join(dir, "MEMORY.md"), "- prefers concise answers")
+File.write!(Path.join(dir, "AGENTS.md"), "Follow the repo's CLAUDE.md conventions.")
+File.write!(Path.join(dir, "IDENTITY.md"), "Name: Kestrel. Role: research agent.")
+# TOOLS.md, USER.md, HEARTBEAT.md, SOUL.md are all absent.
+
+{soul, found} = Home.compose_soul(dir)
+
+true = found == ["AGENTS.md", "IDENTITY.md", "MEMORY.md"]
+true = String.starts_with?(soul, "## AGENTS.md")
+true = String.contains?(soul, "## IDENTITY.md\n\nName: Kestrel. Role: research agent.")
+true = String.ends_with?(soul, "## MEMORY.md\n\n- prefers concise answers")
+
+IO.puts("ok: #{length(found)} bootstrap file(s) composed in canonical order")
+```
+
+### 3. The full surface — the 2 MB truncation cap
+
+A file that exceeds the byte cap is truncated in the composed soul, with a notice appended;
+the file on disk is left exactly as written.
+
+```elixir test
+alias Toolnexus.Agents.Home
+
+dir = Path.join(System.tmp_dir!(), "toolnexus_doc_compose_soul_3_#{System.unique_integer([:positive])}")
+File.rm_rf!(dir)
+File.mkdir_p!(dir)
+
+huge = String.duplicate("x", 2 * 1024 * 1024 + 100)
+File.write!(Path.join(dir, "MEMORY.md"), huge)
+
+{soul, found} = Home.compose_soul(dir)
+
+true = found == ["MEMORY.md"]
+true = String.contains?(soul, "[truncated: exceeds 2 MB bootstrap cap]")
+# the composed section is capped, but the on-disk file is untouched
+true = byte_size(File.read!(Path.join(dir, "MEMORY.md"))) == byte_size(huge)
+true = byte_size(soul) < byte_size(huge)
+
+IO.puts("ok: oversized MEMORY.md truncated to #{byte_size(soul)} bytes (disk file untouched)")
+```
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `dir` (arg) | `String.t()` | The persona's home directory. |
+| `soul` (return) | `String.t()` | The composed system prompt — `## <file>` sections, joined with blank lines. |
+| `found` (return) | `[String.t()]` | Discovered bootstrap filenames, in canonical order. |
+
+## See also
+
+- [`Toolnexus.Agents.Home.from_dir`](/api/elixir/persona/from-dir/) — Point at an agent home directory and get a configured agent back.
+- [`Toolnexus.Agents.Home.memory_tool`](/api/elixir/persona/memory-tool/) — The opt-in built-in that lets a persona write durable notes to its own home.

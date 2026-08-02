@@ -1,0 +1,269 @@
+---
+title: "LlmClient.Hooks"
+description: "Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite. — Java."
+sidebar:
+  label: "LlmClient.Hooks"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/LlmClient.java">LlmClient.java</a>
+</p>
+
+```java
+public static final class Hooks {
+    public Function<BeforeLLMEvent, LLMOverride> beforeLLM;   // may return null
+    public Consumer<AfterLLMEvent> afterLLM;                  // observe only
+    public Function<BeforeToolEvent, ToolOverride> beforeTool; // may return null
+    public Function<AfterToolEvent, ToolOverride> afterTool;   // may return null
+}
+```
+
+Four optional callbacks wired around the agent loop, set via `LlmClient.Options.hooks(...)`: fire
+before/after every LLM call and before/after every tool call. Each is skipped when left unset.
+`beforeTool`/`afterTool` may return a non-null `ToolOverride` to rewrite arguments, short-circuit
+a call entirely (deny/cache), or replace/redact a result.
+
+## When to use it
+
+Whenever behavior needs to live OUTSIDE any individual tool or model call: audit logging every
+tool invocation, redacting sensitive output before it reaches the model, vetoing a dangerous call
+by name/argument pattern, or inspecting the raw provider response for cost tracking. One `Hooks`
+object applies to every tool and every LLM call in the run — you don't touch each `Tool`'s own
+code.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Wrap a tool by hand only when the logic is tool-specific">
+If a rule belongs to exactly one tool — "this tool always logs its own calls" — put it in that
+tool's implementation directly (see [`NativeTool.of`](/api/java/native/define-tool/)). Reach for
+`Hooks` when the rule is cross-cutting: it applies to many/all tools, or it needs to see the
+LLM-level request/response (`messages`, declared `tools`, raw usage) that no single `Tool` ever
+sees.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — `afterTool` as a pure audit log
+
+Returning `null` from `afterTool` means "observe only" — the original result flows through
+unchanged.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        AtomicInteger hits = new AtomicInteger(0);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            int n = hits.incrementAndGet();
+            String body = n == 1
+                    ? "{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\","
+                      + "\"function\":{\"name\":\"ping\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}"
+                    : "{\"choices\":[{\"message\":{\"content\":\"done\"}}]}";
+            byte[] b = body.getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        int port = server.getAddress().getPort();
+
+        AtomicInteger audited = new AtomicInteger(0);
+        LlmClient.Hooks hooks = new LlmClient.Hooks()
+                .afterTool(ev -> { audited.incrementAndGet(); return null; });
+
+        Tool ping = NativeTool.of("ping", "Health check",
+                Map.of("type", "object", "properties", Map.of()),
+                (Map<String, Object> a) -> "pong");
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().extraTools(ping))) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + port)
+                    .style("openai")
+                    .model("test-model")
+                    .apiKey("test-key")
+                    .hooks(hooks));
+
+            LlmClient.RunResult res = client.run("ping the service", tk);
+
+            if (audited.get() != 1) throw new AssertionError("expected afterTool to fire once, got " + audited.get());
+            if (!res.text.equals("done")) throw new AssertionError(res.text);
+
+            System.out.println("ok: audited " + audited.get() + " tool call(s)");
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 2. The realistic case — `beforeTool` vetoes a dangerous call
+
+`ToolOverride.withResult(...)` short-circuits: the real tool never runs.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            String body = "{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\","
+                    + "\"function\":{\"name\":\"delete_file\",\"arguments\":\"{\\\"path\\\":\\\"/etc/passwd\\\"}\"}}]},"
+                    + "\"finish_reason\":\"tool_calls\"}]}";
+            byte[] b = body.getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        int port = server.getAddress().getPort();
+
+        AtomicInteger actuallyDeleted = new AtomicInteger(0);
+        Tool deleteFile = NativeTool.of("delete_file", "Delete a file",
+                Map.of("type", "object", "properties", Map.of("path", Map.of("type", "string"))),
+                (Map<String, Object> a) -> { actuallyDeleted.incrementAndGet(); return "deleted"; });
+
+        LlmClient.Hooks hooks = new LlmClient.Hooks().beforeTool(ev -> {
+            String path = String.valueOf(ev.args().get("path"));
+            if (path.startsWith("/etc/")) {
+                return LlmClient.ToolOverride.withResult(ToolResult.error("blocked: refusing to touch " + path));
+            }
+            return null; // allow every other call through unchanged
+        });
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().extraTools(deleteFile))) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + port)
+                    .style("openai")
+                    .model("test-model")
+                    .apiKey("test-key")
+                    .hooks(hooks)
+                    .maxTurns(1)); // the stub always asks for the same call; one turn is enough
+
+            LlmClient.RunResult res = client.run("delete /etc/passwd", tk);
+
+            if (actuallyDeleted.get() != 0) throw new AssertionError("the real tool must never run");
+            if (res.toolCalls.isEmpty()) throw new AssertionError("expected the vetoed call recorded");
+            LlmClient.ToolCall call = res.toolCalls.get(0);
+            if (!call.isError) throw new AssertionError("expected the veto to be an error result");
+            if (!call.output.contains("blocked")) throw new AssertionError(call.output);
+
+            System.out.println("ok: " + call.output);
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 3. The full surface — all four hooks together
+
+`beforeLLM`/`afterLLM` observe every round trip; `beforeTool` rewrites arguments (normalizes
+casing); `afterTool` redacts a result that leaked something sensitive.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        AtomicInteger hits = new AtomicInteger(0);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            int n = hits.incrementAndGet();
+            String body = n == 1
+                    ? "{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\","
+                      + "\"function\":{\"name\":\"search\",\"arguments\":\"{\\\"query\\\":\\\"SECRET project X\\\"}\"}}]},"
+                      + "\"finish_reason\":\"tool_calls\"}]}"
+                    : "{\"choices\":[{\"message\":{\"content\":\"search complete\"}}]}";
+            byte[] b = body.getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        int port = server.getAddress().getPort();
+
+        Tool search = NativeTool.of("search", "Search the index",
+                Map.of("type", "object", "properties", Map.of("query", Map.of("type", "string"))),
+                (Map<String, Object> a) -> "results for " + a.get("query"));
+
+        AtomicInteger beforeLlmCalls = new AtomicInteger(0);
+        AtomicInteger afterLlmCalls = new AtomicInteger(0);
+        LlmClient.Hooks hooks = new LlmClient.Hooks()
+                .beforeLLM(ev -> { beforeLlmCalls.incrementAndGet(); return null; })
+                .afterLLM(ev -> afterLlmCalls.incrementAndGet())
+                .beforeTool(ev -> {
+                    String q = String.valueOf(ev.args().get("query"));
+                    return LlmClient.ToolOverride.withArgs(Map.of("query", q.toLowerCase()));
+                })
+                .afterTool(ev -> {
+                    if (ev.result().output().toLowerCase().contains("secret")) {
+                        return LlmClient.ToolOverride.withResult(ToolResult.ok("[redacted]"));
+                    }
+                    return null;
+                });
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().extraTools(search))) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + port)
+                    .style("openai")
+                    .model("test-model")
+                    .apiKey("test-key")
+                    .hooks(hooks));
+
+            LlmClient.RunResult res = client.run("search for SECRET project X", tk);
+
+            if (beforeLlmCalls.get() != 2 || afterLlmCalls.get() != 2) {
+                throw new AssertionError("expected 2 LLM round trips, got before=" + beforeLlmCalls.get()
+                        + " after=" + afterLlmCalls.get());
+            }
+            LlmClient.ToolCall call = res.toolCalls.get(0);
+            if (!call.args.equals(Map.of("query", "secret project x"))) throw new AssertionError(call.args);
+            if (!call.output.equals("[redacted]")) throw new AssertionError(call.output);
+            if (!res.text.equals("search complete")) throw new AssertionError(res.text);
+
+            System.out.println("ok: args rewritten to " + call.args + ", output " + call.output);
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+## Fields
+
+| Member | Type | What it is |
+|---|---|---|
+| `beforeLLM` | `Function<BeforeLLMEvent, LLMOverride>` | Fires before every LLM call. Return non-null `messages`/`tools` to replace the request; `null` ⇒ unchanged. |
+| `afterLLM` | `Consumer<AfterLLMEvent>` | Fires after every LLM call, with the raw provider response (carries usage). Observe-only. |
+| `beforeTool` | `Function<BeforeToolEvent, ToolOverride>` | Fires before a tool runs. `ToolOverride.withResult(...)` short-circuits (the real tool never runs); `.withArgs(...)` rewrites the call's arguments; `null` ⇒ unchanged. |
+| `afterTool` | `Function<AfterToolEvent, ToolOverride>` | Fires after a tool ran (skipped for a §10 suspension). `ToolOverride.withResult(...)` replaces the result; `null` ⇒ unchanged. |
+
+## See also
+
+- [`LlmClient.create`](/api/java/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`LlmClient.run`](/api/java/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`LlmClient.stream`](/api/java/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`LlmClient.Conversation`](/api/java/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.

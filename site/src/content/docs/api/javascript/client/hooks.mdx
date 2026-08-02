@@ -1,0 +1,222 @@
+---
+title: "Hooks"
+description: "Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite. — JavaScript."
+sidebar:
+  label: "Hooks"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#8-unified-llm-client-the-host-loop">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/client.ts">js/src/client.ts</a>
+</p>
+
+```ts
+interface Hooks {
+  beforeLLM?(ev: { messages: any[]; tools: any[]; model: string; turn: number }):
+    void | { messages?: any[]; tools?: any[] } | Promise<void | { messages?: any[]; tools?: any[] }>
+  afterLLM?(ev: { response: any; model: string; turn: number }): void | Promise<void>
+  beforeTool?(ev: { name: string; args: Record<string, unknown>; id?: string; turn: number }):
+    void | { args?: Record<string, unknown>; result?: ToolResult } | Promise<void | { args?: Record<string, unknown>; result?: ToolResult }>
+  afterTool?(ev: { name: string; args: Record<string, unknown>; result: ToolResult; id?: string; turn: number }):
+    void | { result?: ToolResult } | Promise<void | { result?: ToolResult }>
+}
+```
+
+Four lifecycle interception points around the loop `createClient` runs: before/after each model
+call, before/after each tool call. Each may just observe (return nothing), or mutate/short-circuit
+by returning an override — `beforeLLM`/`beforeTool` can rewrite what's about to happen,
+`beforeTool` can also deny it outright by returning a `result`, and `afterTool` can replace what
+came back. All four may be async.
+
+## When to use it
+
+Reach for `Hooks` — passed as `createClient({ hooks })` — whenever the loop itself needs to be
+observed or governed, not just the final answer: an audit log of every tool call, a policy veto
+("never let this agent run `bash` in prod"), redacting a secret out of a tool result before it
+reaches the transcript, or rewriting arguments a model got slightly wrong before they execute.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Filter at the toolkit instead when the rule doesn't depend on runtime state">
+If the rule is static — "this agent never sees `github_delete_repo`" — [`createToolkit`](/api/javascript/toolkit/create/)'s
+`disableTools`/`skillsFilter` is the right layer: the tool is never even offered to the model.
+Reach for `Hooks` when the decision needs runtime context (the actual args, the turn number, an
+external policy check) or when you need to observe/log rather than just filter.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — observe, change nothing
+
+`afterLLM` and `afterTool` returning nothing (`void`) just watch. This is the audit-log case: log
+every model round trip and every tool call without touching either.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, defineTool } from "toolnexus"
+
+// First reply asks for a tool, second reply answers — same pattern as client/run.
+let calls = 0
+const combined = http.createServer((req, res) => {
+  calls++
+  res.writeHead(200, { "content-type": "application/json" })
+  if (calls === 1) {
+    res.end(JSON.stringify({
+      choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "ping", arguments: "{}" } }] }, finish_reason: "tool_calls" }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }))
+  } else {
+    res.end(JSON.stringify({ choices: [{ message: { content: "done" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+  }
+})
+await new Promise<void>((r) => combined.listen(0, "127.0.0.1", r))
+const port = (combined.address() as any).port
+
+const tk = await createToolkit({ builtins: false, extraTools: [defineTool({ name: "ping", description: "", run: () => "pong" })] })
+const llmCalls: number[] = []
+const toolCalls: string[] = []
+const client = createClient({
+  baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key",
+  hooks: {
+    afterLLM: async ({ turn }) => { llmCalls.push(turn) },
+    afterTool: async ({ name }) => { toolCalls.push(name) },
+  },
+})
+
+const res = await client.run("ping once", { toolkit: tk })
+assert.equal(res.text, "done")
+assert.deepEqual(llmCalls, [0, 1], "afterLLM did not fire once per model round trip")
+assert.deepEqual(toolCalls, ["ping"], "afterTool did not observe the tool call")
+
+await tk.close()
+combined.close()
+console.log("ok:", llmCalls.length, toolCalls)
+```
+
+### 2. A realistic case — veto a dangerous tool
+
+`beforeTool` returns `{ result }` to short-circuit: the real tool never runs, and the returned
+result goes straight into the transcript as if it had.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, defineTool } from "toolnexus"
+
+let ran = false
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "content-type": "application/json" })
+  res.end(JSON.stringify({
+    choices: [{
+      message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "bash", arguments: '{"cmd":"rm -rf /"}' } }] },
+      finish_reason: "tool_calls",
+    }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  }))
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const tk = await createToolkit({
+  builtins: false,
+  extraTools: [defineTool({ name: "bash", description: "run a shell command", run: () => { ran = true; return "executed" } })],
+})
+const client = createClient({
+  baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key", maxTurns: 1,
+  hooks: {
+    beforeTool: async ({ name }) => {
+      if (name === "bash") return { result: { output: "vetoed: shell disabled in prod", isError: true } }
+    },
+  },
+})
+
+const res = await client.run("clean up", { toolkit: tk })
+assert.equal(ran, false, "the veto did not stop the real tool from running")
+assert.equal(res.toolCalls[0].output, "vetoed: shell disabled in prod")
+assert.equal(res.toolCalls[0].isError, true)
+
+await tk.close()
+server.close()
+console.log("ok:", res.toolCalls[0].output)
+```
+
+### 3. The full surface — rewrite args, redact a result, watch the model call
+
+`beforeTool` rewrites the arguments the model sent; `afterTool` replaces the result (redaction);
+`beforeLLM`/`afterLLM` observe the raw messages/tools and the raw response each turn.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, defineTool } from "toolnexus"
+
+let calls = 0
+const server = http.createServer((req, res) => {
+  calls++
+  res.writeHead(200, { "content-type": "application/json" })
+  if (calls === 1) {
+    res.end(JSON.stringify({
+      choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "lookup", arguments: '{"city":"chennai"}' } }] }, finish_reason: "tool_calls" }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }))
+  } else {
+    res.end(JSON.stringify({ choices: [{ message: { content: "done" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+  }
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const seenArgs: Record<string, unknown>[] = []
+const seenModels: string[] = []
+const tk = await createToolkit({
+  builtins: false,
+  extraTools: [defineTool({ name: "lookup", description: "", run: (args) => `secret-api-key-abc123 for ${args.city}` })],
+})
+const client = createClient({
+  baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key",
+  hooks: {
+    beforeLLM: async ({ model }) => { seenModels.push(model) },
+    afterLLM: async ({ response }) => { assert.ok(response.choices, "afterLLM did not see the raw response") },
+    beforeTool: async ({ name, args }) => {
+      // the model sent lowercase — normalize before the tool runs
+      if (name === "lookup" && args.city === "chennai") { seenArgs.push(args); return { args: { city: "Chennai" } } }
+    },
+    afterTool: async ({ result }) => {
+      // redact anything that looks like a secret before it reaches the transcript
+      if (result.output.includes("secret-api-key")) return { result: { ...result, output: "[redacted]" } }
+    },
+  },
+})
+
+const res = await client.run("weather?", { toolkit: tk })
+assert.equal(res.text, "done")
+assert.deepEqual(seenModels, ["stub", "stub"], "beforeLLM should fire once per turn")
+assert.equal(seenArgs.length, 1)
+assert.equal(res.toolCalls[0].output, "[redacted]", "afterTool did not redact the result")
+
+await tk.close()
+server.close()
+console.log("ok:", res.toolCalls[0].output)
+```
+
+## Fields
+
+| Hook | When | Return to observe | Return to change behavior |
+|---|---|---|---|
+| `beforeLLM` | Before each model call | `undefined` | `{ messages?, tools? }` — replace what's sent |
+| `afterLLM` | After each model call | `undefined` | — (observe only) |
+| `beforeTool` | Before a tool runs | `undefined` | `{ args? }` rewrite, or `{ result }` to **veto/short-circuit** |
+| `afterTool` | After a tool runs | `undefined` | `{ result }` — replace the result (e.g. redact) |
+
+A §10 suspension (a tool returning `Pending`) is never treated as a tool failure in `afterTool` —
+`beforeTool`'s own short-circuit path is exempt too, since a guard-raised suspension can originate
+there.
+
+## See also
+
+- [`createClient`](/api/javascript/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.run`](/api/javascript/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Client.stream`](/api/javascript/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Conversation`](/api/javascript/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.

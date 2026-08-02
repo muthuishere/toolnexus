@@ -1,0 +1,208 @@
+---
+title: "Compaction.Compactor"
+description: "Summarise older turns when the transcript grows, so a long-lived agent stays inside its context window. — C#."
+sidebar:
+  label: "Compaction.Compactor"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7F</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Agents/Compaction.cs">Agents/Compaction.cs</a>
+</p>
+
+```csharp
+namespace Toolnexus.Agents;
+
+public static class Compaction
+{
+    public static Func<LlmClient.BeforeLLMEvent, LlmClient.LLMOverride?> Compactor(Options opts);
+
+    public delegate string SummarizeFn(IReadOnlyList<object?> older);
+    public delegate int CountTokensFn(IReadOnlyList<object?> messages);
+
+    public sealed class Options
+    {
+        public required int MaxTokens { get; init; }
+        public int? KeepTail { get; init; }          // default MaxTokens / 2
+        public required SummarizeFn Summarize { get; init; }
+        public CountTokensFn? CountTokens { get; init; } // default ceil(chars/4) per message
+        public bool FlushToMemory { get; init; }
+    }
+}
+```
+
+`Compactor` builds a `BeforeLLM` hook (§8): every turn, it estimates the transcript's token count,
+and — only when that estimate exceeds `MaxTokens` — replaces the working transcript with
+`[system, summary, tail]`, where `tail` is the most recent turns kept in full. Below the budget it
+is a **byte-identical no-op**: no compactor behaves exactly like this compactor under budget.
+
+## When to use it
+
+A persona or agent that runs for a long time (many turns, a `heartbeat`, a chat that never really
+ends) will eventually overflow the model's context window. Hand `Compactor`'s result to
+`LlmClient.Options.Hooks.BeforeLLM` (a bare client) or an agent's `AgentSpec.Hooks.BeforeLLM`
+(§7D) and the loop keeps itself under budget automatically — no change to how you call `RunAsync`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for a bigger context window before reaching for this">
+Compaction is lossy — the older transcript becomes a summary, not a replay. If the model you're
+using simply has room, raising `MaxTurns` or switching models is cheaper than compacting. Reach
+for `Compactor` when the run is genuinely long-lived (a heartbeat persona, a support desk that
+runs for days) and unbounded growth is the actual constraint, not a one-off long conversation.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — under budget is a no-op
+
+```csharp test
+using Toolnexus;
+using Toolnexus.Agents;
+
+var compact = Compaction.Compactor(new Compaction.Options
+{
+    MaxTokens = 1000,
+    Summarize = older => $"summary of {older.Count} messages",
+});
+
+var messages = new List<object?>
+{
+    new Dictionary<string, object?> { ["role"] = "system", ["content"] = "You are terse." },
+    new Dictionary<string, object?> { ["role"] = "user", ["content"] = "hello" },
+    new Dictionary<string, object?> { ["role"] = "assistant", ["content"] = "hi" },
+};
+var ev = new LlmClient.BeforeLLMEvent(messages, new List<Dictionary<string, object?>>(), "gpt-4o-mini", 1);
+
+var over = compact(ev);
+
+if (over != null) throw new Exception("under budget must be a byte-identical no-op");
+
+Console.WriteLine("ok: no-op under budget");
+```
+
+### 2. Over budget — tool-pair safety at the retained tail's boundary
+
+```csharp test
+using Toolnexus;
+using Toolnexus.Agents;
+
+object? Msg(string role, string content) => new Dictionary<string, object?> { ["role"] = role, ["content"] = content };
+object? ToolCallMsg(string id, string name) => new Dictionary<string, object?>
+{
+    ["role"] = "assistant", ["content"] = null,
+    ["tool_calls"] = new List<object?> { new Dictionary<string, object?> { ["id"] = id, ["type"] = "function", ["function"] = new Dictionary<string, object?> { ["name"] = name, ["arguments"] = "{}" } } },
+};
+object? ToolResultMsg(string id, string output) => new Dictionary<string, object?> { ["role"] = "tool", ["tool_call_id"] = id, ["content"] = output };
+
+var messages = new List<object?>
+{
+    Msg("system", "You are terse."),
+    Msg("user", "turn one"),
+    Msg("assistant", "turn one answer"),
+    Msg("user", "turn two — check the weather"),
+    ToolCallMsg("c1", "weather"),
+    ToolResultMsg("c1", "31C, humid"),
+    Msg("assistant", "It's 31C and humid."),
+};
+
+var summarized = "";
+var compact = Compaction.Compactor(new Compaction.Options
+{
+    MaxTokens = 6,
+    KeepTail = 3,
+    CountTokens = msgs => msgs.Count, // one "token" per message — deterministic for the test
+    Summarize = older => { summarized = $"{older.Count} older turns folded"; return summarized; },
+});
+
+var ev = new LlmClient.BeforeLLMEvent(messages, new List<Dictionary<string, object?>>(), "gpt-4o-mini", 5);
+var over = compact(ev);
+
+if (over?.Messages == null) throw new Exception("expected compaction (7 messages > MaxTokens=6)");
+var result = over.Messages;
+
+// Leading system prompt preserved verbatim.
+var head = (IDictionary<string, object?>)result[0]!;
+if (head["role"] as string != "system" || head["content"] as string != "You are terse.")
+    throw new Exception("system prompt must be preserved verbatim");
+
+// A summary message follows, carrying Summarize()'s output.
+var summaryMsg = (IDictionary<string, object?>)result[1]!;
+if (!((summaryMsg["content"] as string) ?? "").Contains(summarized)) throw new Exception("summary missing");
+
+// The retained tail begins at a `user` turn — the `tool` result for "c1" is never orphaned from
+// the assistant turn carrying its tool_calls.
+var tailStart = (IDictionary<string, object?>)result[2]!;
+if (tailStart["role"] as string != "user") throw new Exception($"tail must start at user, got {tailStart["role"]}");
+
+Console.WriteLine($"ok: {result.Count} messages, tail starts at '{tailStart["role"]}'");
+```
+
+### 3. Full surface — `FlushToMemory`'s pre-compact reminder
+
+```csharp test
+using Toolnexus;
+using Toolnexus.Agents;
+
+object? Msg(string role, string content) => new Dictionary<string, object?> { ["role"] = role, ["content"] = content };
+
+var messages = new List<object?>
+{
+    Msg("system", "identity"),
+    Msg("user", "one"),
+    Msg("assistant", "ack one"),
+    Msg("user", "two"),
+    Msg("assistant", "ack two"),
+    Msg("user", "three"),
+};
+
+var compact = Compaction.Compactor(new Compaction.Options
+{
+    MaxTokens = 3,
+    KeepTail = 1,
+    FlushToMemory = true,
+    CountTokens = msgs => msgs.Count,
+    Summarize = older => $"folded {older.Count} messages",
+});
+
+var ev = new LlmClient.BeforeLLMEvent(messages, new List<Dictionary<string, object?>>(), "gpt-4o-mini", 3);
+var over = compact(ev);
+
+if (over?.Messages == null) throw new Exception("expected compaction (6 messages > MaxTokens=3)");
+var result = over.Messages;
+
+// [system, summary, flush-reminder, ...tail] — the reminder tells the model to save durable facts
+// via the memory tool BEFORE the head is summarized away.
+var reminder = (IDictionary<string, object?>)result[2]!;
+if (reminder["role"] as string != "system" || !((reminder["content"] as string) ?? "").Contains("memory tool"))
+    throw new Exception("expected the pre-compact flush-to-memory reminder");
+
+var tail = (IDictionary<string, object?>)result[3]!;
+if (tail["content"] as string != "three") throw new Exception("expected the most recent user turn as tail");
+
+Console.WriteLine($"ok: {result.Count} messages, reminder='{reminder["content"]}'");
+```
+
+<Aside type="caution">
+`FlushToMemory` only injects the reminder message — it does not call the `memory` tool itself, and
+it has no effect unless the agent actually has a `memory` tool wired (e.g. via
+[`Home.FromDir`](/api/csharp/persona/from-dir/)). Without one, the model has nowhere to put what
+the reminder asks it to save.
+</Aside>
+
+## Fields (`Options`)
+
+| Field | Type | What it is |
+|---|---|---|
+| `MaxTokens` | `int` (required) | Compact only when the estimate exceeds this; at/below ⇒ no-op. |
+| `KeepTail` | `int?` | Minimum tokens of the most recent tail to keep. Default `MaxTokens / 2`. |
+| `Summarize` | `SummarizeFn` (required) | Produces the summary of the older messages. MAY call an LLM — the library never calls one on your behalf. |
+| `CountTokens` | `CountTokensFn?` | Token estimator. Default: `ceil(len(JSON) / 4)` summed per message — an estimator, not a tokenizer. |
+| `FlushToMemory` | `bool` | Inject a pre-compact system reminder to persist durable facts via the §7E `memory` tool. Default `false`. |
+
+## See also
+
+- [`Home.MemoryTool`](/api/csharp/persona/memory-tool/) — What `FlushToMemory`'s reminder points the model at.
+- [`LlmClient.Hooks`](/api/csharp/client/hooks/) — The `BeforeLLM` seam `Compactor`'s result plugs into.
+- [`Agent`](/api/csharp/runtime/agent/) — `AgentSpec.Hooks` is where a §7D agent wires its own compactor, independent of the runtime-wide one.

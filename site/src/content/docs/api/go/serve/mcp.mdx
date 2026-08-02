@@ -1,0 +1,256 @@
+---
+title: "ExposedMcpTools — expose your toolkit over MCP"
+description: "The inbound MCP profile: any MCP client can call your tools. — Go."
+sidebar:
+  label: "serve / mcp"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7C</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/mcpserve.go">golang/mcpserve.go</a>
+</p>
+
+```go
+type MCPServeConfig struct {
+	Name    string   // advertised server name, default "toolnexus"
+	Version string   // advertised server version, default "0.1.0"
+	Tools   []string // filter; nil ⇒ all, unknown names ignored
+}
+
+func ExposedMcpTools(tools []Tool, cfg *MCPServeConfig) []Tool
+
+// mount it: independent of A2A, co-located on the same Serve() server
+tk.Serve(addr, toolnexus.ServeOptions{MCP: &toolnexus.MCPServeConfig{...}})
+```
+
+Where [`Toolkit.Serve`](/api/go/serve/a2a/)'s A2A profile advertises **skills** and fulfils a whole
+Task through the client loop, the MCP profile advertises the toolkit's **unified tools** — every
+source (mcp · skill · native · http · builtin · a2a) — and dispatches each inbound `tools/call`
+straight to `Tool.Execute`. `ExposedMcpTools` is the filtering step: it decides which of the
+toolkit's tools actually reach `tools/list`.
+
+## When to use it
+
+Reach for the MCP profile when the caller is itself an MCP client (Claude Desktop, an IDE, another
+agent's MCP-speaking host) rather than an A2A peer — `Toolkit.Serve` turns your aggregated toolkit
+(N MCP servers + skills + your own tools) into **one universal MCP gateway**. Call
+`ExposedMcpTools` directly when you want the filtered list itself, decoupled from a running server.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="MCP and A2A are independent profiles on the same Serve">
+Set `ServeOptions.MCP` alone to skip the A2A card/JSON-RPC surface and expose raw tools instead of
+skills; set both to serve the same toolkit two ways at once, on different endpoints (`/mcp` vs
+`/` + the card path). Neither set ⇒ `Serve` mounts nothing.
+</Aside>
+
+## Examples
+
+### 1. The filter itself — omit, narrow, unknown names ignored
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func mkTool(name string) toolnexus.Tool {
+	return toolnexus.NativeTool(name, "does "+name,
+		toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+		func(_ context.Context, _ map[string]any) (string, error) { return name, nil },
+	)
+}
+
+func main() {
+	tools := []toolnexus.Tool{mkTool("echo"), mkTool("boom")}
+
+	all := toolnexus.ExposedMcpTools(tools, nil)
+	if len(all) != 2 {
+		log.Fatalf("nil cfg should expose everything, got %d", len(all))
+	}
+
+	narrowed := toolnexus.ExposedMcpTools(tools, &toolnexus.MCPServeConfig{Tools: []string{"echo"}})
+	if len(narrowed) != 1 || narrowed[0].Name != "echo" {
+		log.Fatalf("expected only echo, got %+v", narrowed)
+	}
+
+	// An unknown name in the filter is ignored, never an error.
+	stillOne := toolnexus.ExposedMcpTools(tools, &toolnexus.MCPServeConfig{Tools: []string{"echo", "nope"}})
+	if len(stillOne) != 1 {
+		log.Fatalf("unknown filter names should be silently dropped, got %d", len(stillOne))
+	}
+
+	fmt.Println("ok:", len(all), "->", len(narrowed), "tools after filtering")
+}
+```
+
+### 2. The realistic case — a real MCP client, over real streamable-HTTP
+
+Two independent processes in spirit: a served toolkit, and a real `mark3labs/mcp-go` MCP client
+connecting to it over `POST /mcp` on a local ephemeral port — no external network.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	mcpclient "github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/mcp"
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	echo := toolnexus.NativeTool("echo", "echo back the text",
+		toolnexus.JSONSchema{"type": "object", "properties": map[string]any{"text": map[string]any{"type": "string"}}, "required": []string{"text"}},
+		func(_ context.Context, args map[string]any) (string, error) {
+			return fmt.Sprintf("%v", args["text"]), nil
+		},
+	)
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false, ExtraTools: []toolnexus.Tool{echo}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	handle, err := tk.Serve("127.0.0.1:0", toolnexus.ServeOptions{MCP: &toolnexus.MCPServeConfig{Name: "gateway"}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer handle.Stop()
+
+	c, err := mcpclient.NewStreamableHttpClient(handle.URL + "/mcp")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.Start(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+	initRes, err := c.Initialize(context.Background(), mcp.InitializeRequest{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if initRes.ServerInfo.Name != "gateway" {
+		log.Fatalf("expected serverInfo.name = gateway, got %q", initRes.ServerInfo.Name)
+	}
+
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "echo"
+	req.Params.Arguments = map[string]any{"text": "over mcp"}
+	res, err := c.CallTool(context.Background(), req)
+	if err != nil {
+		log.Fatal(err)
+	}
+	text := res.Content[0].(mcp.TextContent).Text
+	if text != "over mcp" {
+		log.Fatalf("unexpected: %q", text)
+	}
+
+	fmt.Println("ok:", text)
+}
+```
+
+### 3. The full surface — `tools/list` narrowed, and an `Execute` error becomes `isError`, never a crash
+
+```go test
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+
+	mcpclient "github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/mcp"
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	safe := toolnexus.NativeTool("safe", "always works",
+		toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+		func(_ context.Context, _ map[string]any) (string, error) { return "ok", nil },
+	)
+	boom := toolnexus.Tool{
+		Name: "boom", Description: "always explodes", Source: toolnexus.SourceNative,
+		InputSchema: toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+		Execute: func(_ map[string]any, _ *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			return toolnexus.ToolResult{}, errors.New("kaboom")
+		},
+	}
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{
+		Builtins: false, ExtraTools: []toolnexus.Tool{safe, boom},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	calls := 0
+	handle, err := tk.Serve("127.0.0.1:0", toolnexus.ServeOptions{
+		MCP:    &toolnexus.MCPServeConfig{Name: "narrow-gw", Tools: []string{"safe", "boom"}},
+		OnCall: func(ev toolnexus.OnCallEvent) { calls++ },
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer handle.Stop()
+
+	c, err := mcpclient.NewStreamableHttpClient(handle.URL + "/mcp")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.Start(context.Background())
+	_, _ = c.Initialize(context.Background(), mcp.InitializeRequest{})
+
+	list, err := c.ListTools(context.Background(), mcp.ListToolsRequest{})
+	if err != nil || len(list.Tools) != 2 {
+		log.Fatalf("expected exactly 2 tools listed, got %+v %v", list.Tools, err)
+	}
+
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "boom"
+	res, err := c.CallTool(context.Background(), req)
+	if err != nil {
+		log.Fatal(err) // a tool ERROR must not be a protocol/transport error
+	}
+	if !res.IsError {
+		log.Fatal("expected isError=true for a tool that returned an error")
+	}
+	if calls != 1 {
+		log.Fatalf("expected OnCall to fire once, got %d", calls)
+	}
+
+	fmt.Println("ok:", len(list.Tools), "tools listed; boom isError =", res.IsError)
+}
+```
+
+## MCPServeConfig fields
+
+| Field | Type | Default |
+|---|---|---|
+| `Name` | `string` | `"toolnexus"` |
+| `Version` | `string` | `"0.1.0"` |
+| `Tools` | `[]string` | `nil` ⇒ every toolkit tool; set ⇒ exactly that subset, unknown names ignored |
+
+`tools/call` maps `ToolResult.Output` to one `{type:"text", text}` content part and
+`IsError` propagates verbatim; an `Execute` error becomes `isError:true` with the error text —
+never a server crash. `OnCallEvent{Name, Source, Ms, IsError}` fires per call.
+
+## See also
+
+- [`Toolkit.Serve`](/api/go/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+- [`BuildAgentCard`](/api/go/serve/agent-card/) — Construct the Agent Card that advertises your name, skills and endpoint.
+- [`NewFileTaskStore`](/api/go/serve/task-store/) — Persist inbound A2A tasks so a suspended request survives a restart.

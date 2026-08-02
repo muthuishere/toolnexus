@@ -1,0 +1,234 @@
+---
+title: ToOpenAI
+description: Render any tool list as OpenAI function-calling schema. Go.
+sidebar:
+  label: ToOpenAI
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/adapters.go">golang/adapters.go</a>
+</p>
+
+```go
+func ToOpenAI(tools []Tool) []any
+```
+
+Turns a `[]Tool` into the `tools` array an OpenAI-shaped chat completion expects. This is the
+bridge between "toolnexus knows about these tools" and "the model can call them".
+
+## When to use it
+
+When you are driving the LLM call yourself and need schema to put in the request body. Every
+OpenAI-compatible endpoint takes this shape — OpenAI, OpenRouter, Groq, Together, a local Ollama,
+or your own gateway.
+
+## Why this and not the client
+
+<Aside type="tip" title="Skip this entirely if you use CreateClient">
+[`CreateClient`](/api/go/client/create/) calls the right adapter for you based on its style option
+and runs the whole tool-calling loop. Reach for `ToOpenAI` when you already have your own loop and
+only want toolnexus for tool *aggregation*.
+</Aside>
+
+`tk.ToOpenAI()` on a [`Toolkit`](/api/go/toolkit/create/) is the same function applied to that
+toolkit's tools — use it when you have a toolkit, and the free function when you have a bare slice.
+
+## Examples
+
+### 1. One tool to OpenAI schema
+
+The return type is `[]any` so it marshals directly; assert against the marshalled JSON rather than
+type-asserting the interior.
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	weather := toolnexus.NativeTool(
+		"get_weather",
+		"Current weather for a city",
+		toolnexus.JSONSchema{
+			"type":       "object",
+			"properties": map[string]any{"city": map[string]any{"type": "string"}},
+			"required":   []string{"city"},
+		},
+		func(ctx context.Context, args map[string]any) (string, error) {
+			return fmt.Sprintf("sunny in %v", args["city"]), nil
+		},
+	)
+
+	schema := toolnexus.ToOpenAI([]toolnexus.Tool{weather})
+	if len(schema) != 1 {
+		log.Fatalf("expected 1 entry, got %d", len(schema))
+	}
+
+	b, _ := json.Marshal(schema[0])
+	var got map[string]any
+	_ = json.Unmarshal(b, &got)
+
+	if got["type"] != "function" {
+		log.Fatalf("expected type=function, got %v", got["type"])
+	}
+	fn := got["function"].(map[string]any)
+	if fn["name"] != "get_weather" || fn["description"] != "Current weather for a city" {
+		log.Fatalf("unexpected function block: %v", fn)
+	}
+
+	fmt.Println("ok:", fn["name"])
+}
+```
+
+Note the nesting: OpenAI wraps each tool in `{"type":"function","function":{...}}`. The
+`InputSchema` on a `Tool` becomes `function.parameters` — the key is renamed.
+
+### 2. Feeding it straight into a request body
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	mk := func(name, desc string) toolnexus.Tool {
+		return toolnexus.NativeTool(name, desc,
+			toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+			func(ctx context.Context, args map[string]any) (string, error) { return name, nil },
+		)
+	}
+
+	tools := []toolnexus.Tool{mk("search", "Search the docs"), mk("ping", "Health check")}
+
+	body := map[string]any{
+		"model":    "gpt-4o-mini",
+		"messages": []any{map[string]any{"role": "user", "content": "search for adapters"}},
+		"tools":    toolnexus.ToOpenAI(tools),
+	}
+
+	// The whole body marshals with encoding/json — no custom marshaller needed.
+	b, err := json.Marshal(body)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var got map[string]any
+	_ = json.Unmarshal(b, &got)
+	entries := got["tools"].([]any)
+	if len(entries) != 2 {
+		log.Fatalf("expected 2 tools, got %d", len(entries))
+	}
+
+	// Order is preserved.
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.(map[string]any)["function"].(map[string]any)["name"].(string))
+	}
+	if names[0] != "search" || names[1] != "ping" {
+		log.Fatalf("order not preserved: %v", names)
+	}
+
+	fmt.Println("ok:", names)
+}
+```
+
+### 3. Round-tripping a call back to the tool
+
+Schema out, tool call in. The `Name` the model returns is the same `Name` you look up.
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	weather := toolnexus.NativeTool(
+		"get_weather",
+		"Current weather for a city",
+		toolnexus.JSONSchema{
+			"type":       "object",
+			"properties": map[string]any{"city": map[string]any{"type": "string"}},
+			"required":   []string{"city"},
+		},
+		func(ctx context.Context, args map[string]any) (string, error) {
+			return fmt.Sprintf("sunny in %v", args["city"]), nil
+		},
+	)
+	tools := []toolnexus.Tool{weather}
+
+	// What a model would send back. OpenAI encodes arguments as a JSON STRING.
+	rawArgs := `{"city":"Chennai"}`
+	calledName := "get_weather"
+
+	var args map[string]any
+	if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
+		log.Fatal(err)
+	}
+
+	var called *toolnexus.Tool
+	for i := range tools {
+		if tools[i].Name == calledName {
+			called = &tools[i]
+			break
+		}
+	}
+	if called == nil {
+		log.Fatal("the advertised name should resolve back to the tool")
+	}
+
+	res, err := called.Execute(args, nil)
+	if err != nil || res.Output != "sunny in Chennai" || res.IsError {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+
+	// An empty tool list is valid — it just means "no tools this turn".
+	if len(toolnexus.ToOpenAI(nil)) != 0 {
+		log.Fatal("expected an empty slice for no tools")
+	}
+
+	fmt.Println("ok:", calledName, "->", res.Output)
+}
+```
+
+<Aside type="caution">
+OpenAI sends `arguments` as a **JSON string**, not an object. `json.Unmarshal` it into a
+`map[string]any` before handing it to `Execute`.
+</Aside>
+
+## Shape
+
+| Path | From | Notes |
+|---|---|---|
+| `[].type` | — | Always the literal `"function"`. |
+| `[].function.name` | `Tool.Name` | What the model calls back with. |
+| `[].function.description` | `Tool.Description` | |
+| `[].function.parameters` | `Tool.InputSchema` | Renamed — `inputSchema` → `parameters`. |
+
+## See also
+
+- [`ToAnthropic`](/api/go/adapters/anthropic/) · [`ToGemini`](/api/go/adapters/gemini/)
+- [`CreateToolkit`](/api/go/toolkit/create/) — `tk.ToOpenAI()` is this, applied to the toolkit
+- [`CreateClient`](/api/go/client/create/) — calls the adapter for you

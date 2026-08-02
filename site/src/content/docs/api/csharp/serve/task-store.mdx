@@ -1,0 +1,201 @@
+---
+title: "A2AServer.FileTaskStore"
+description: "Persist inbound A2A tasks so a suspended request survives a restart. — C#."
+sidebar:
+  label: "A2AServer.FileTaskStore"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/A2AServer.cs">A2AServer.cs</a>
+</p>
+
+```csharp
+public sealed class FileTaskStore : ITaskStore
+{
+    public FileTaskStore(string dir);
+    public Task<A2ATask?> GetAsync(string id);
+    public Task SaveAsync(A2ATask task);
+}
+```
+
+One JSON file per Task id, written atomically (temp file + move) so a concurrent `GetAsync` never
+reads a half-written file mid-poll. This is the pluggable alternative to the default
+`InMemoryTaskStore`: when `A2AConfig.Store` is `"file:<dir>"`, `A2AServer.StartAsync` resolves to a
+`FileTaskStore` rooted at `<dir>` — a served toolkit's Tasks then survive a process restart.
+
+<Aside type="caution" title="Not nested under A2AServer">
+Despite the page title (kept for cross-port symbol parity), the real C# type is the top-level class
+`Toolnexus.FileTaskStore`, declared alongside — not inside — the `A2AServer` static class in
+`A2AServer.cs`. Construct it as `new FileTaskStore(dir)`, not `A2AServer.FileTaskStore(dir)`.
+</Aside>
+
+## When to use it
+
+The default in-memory `ITaskStore` loses every submitted/working/completed Task when the process
+restarts — fine for a short-lived demo, not for a long-poll caller that might catch you mid-restart.
+Point `A2AConfig.Store` at `"file:<dir>"` (or construct `FileTaskStore` yourself for a custom
+`ITaskStore`) to make Task state durable across restarts.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for a custom ITaskStore for anything bigger than a directory">
+`FileTaskStore` is the built-in, dependency-free option — one small JSON file per Task, atomic
+writes, no database. For a multi-instance deployment or a real workload, implement `ITaskStore`
+yourself (Postgres, Redis, NATS/JetStream — the interface is just `GetAsync`/`SaveAsync`) and pass
+the instance directly as `A2AConfig.Store`, which accepts an `ITaskStore` object as-is.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — save, then get it back
+
+```csharp test
+using Toolnexus;
+
+var dir = Path.Combine(Path.GetTempPath(), "toolnexus-docs-" + Guid.NewGuid().ToString("n"));
+var store = new FileTaskStore(dir);
+
+var task = new A2ATask { Id = "t1", Status = new A2ATaskStatus { State = "completed" } };
+await store.SaveAsync(task);
+
+var loaded = await store.GetAsync("t1");
+if (loaded == null) throw new Exception("expected the task back");
+if (loaded.Status?.State != "completed") throw new Exception(loaded.Status?.State);
+
+// An unknown id is a plain null, never a throw.
+if (await store.GetAsync("nope") != null) throw new Exception("expected null for an unknown id");
+
+Directory.Delete(dir, recursive: true);
+Console.WriteLine($"ok: {loaded.Id} -> {loaded.Status?.State}");
+```
+
+### 2. The realistic case — wired in via `A2AConfig.Store = "file:<dir>"`
+
+```csharp test
+using Toolnexus;
+
+var dir = Path.Combine(Path.GetTempPath(), "toolnexus-docs-" + Guid.NewGuid().ToString("n"));
+
+// A2AServer.ResolveStore is what StartAsync calls internally to turn the "file:" prefix into a
+// FileTaskStore rooted at the given directory.
+var resolved = A2AServer.ResolveStore("file:" + dir);
+if (resolved is not FileTaskStore) throw new Exception($"expected FileTaskStore, got {resolved.GetType().Name}");
+
+await resolved.SaveAsync(new A2ATask { Id = "t2", Status = new A2ATaskStatus { State = "working" } });
+var back = await resolved.GetAsync("t2");
+if (back?.Status?.State != "working") throw new Exception(back?.Status?.State);
+
+Directory.Delete(dir, recursive: true);
+Console.WriteLine($"ok: resolved to {resolved.GetType().Name}");
+```
+
+### 3. Full surface — a real served round trip, task state survives a fresh store instance
+
+```csharp test
+using Toolnexus;
+
+var dir = Path.Combine(Path.GetTempPath(), "toolnexus-docs-" + Guid.NewGuid().ToString("n"));
+
+using var peerLlm = new Stub(ctx => Stub.Json(ctx, 200, """
+{"choices":[{"message":{"content":"archived"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}
+"""));
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Builtins = false,
+    Skills = new List<SkillSource.SkillDef> { new("archive", "archives a request", "Archive it.") },
+});
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = peerLlm.BaseUrl, Style = "openai", Model = "mock", ApiKey = "k",
+});
+
+var handle = await tk.ServeAsync("127.0.0.1:0", new Toolkit.ServeOptions
+{
+    Client = client,
+    A2A = new A2AConfig { Name = "archivist", Store = "file:" + dir },
+});
+
+var tools = await A2A.AgentTools(new Agent { Card = handle.Url + "/.well-known/agent-card.json", PollEvery = 25 });
+var result = await tools.Single(t => t.Name == "archivist_archive")
+    .ExecuteAsync(new Dictionary<string, object?> { ["task"] = "archive this" });
+if (result.IsError || result.Output != "archived") throw new Exception(result.Output);
+var taskId = result.Metadata?["taskId"] as string ?? throw new Exception("no taskId in metadata");
+
+await handle.StopAsync(); // simulate a restart: the server (and its in-memory bits) are gone
+
+// A brand-new FileTaskStore, same directory, no server running — the completed Task is still there.
+var reopened = new FileTaskStore(dir);
+var survived = await reopened.GetAsync(taskId);
+if (survived?.Status?.State != "completed") throw new Exception(survived?.Status?.State);
+
+Directory.Delete(dir, recursive: true);
+Console.WriteLine($"ok: task {taskId} survived past the server's shutdown");
+
+sealed class Stub : IDisposable
+{
+    readonly System.Net.HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<System.Net.HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                System.Net.HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(System.Net.HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+<Aside type="caution">
+The file name is `Tools.Sanitize(id) + ".json"` — a Task id is already a GUID from `SendMessage`, so
+this only matters if you construct/save Tasks with your own ids directly against the store.
+</Aside>
+
+## Members
+
+| Member | What it is |
+|---|---|
+| `FileTaskStore(string dir)` | Creates `dir` if missing; every Task under this store lives at `<dir>/<id>.json`. |
+| `GetAsync(string id)` | Reads and deserializes; unknown id or unreadable file ⇒ `null`, never a throw. |
+| `SaveAsync(A2ATask task)` | Atomic write — a temp file, then an overwrite move — so readers never see a partial file. |
+| `A2AServer.ResolveStore(object? store)` | What `StartAsync` calls: `null`/`"memory"` ⇒ `InMemoryTaskStore`; `"file:<dir>"` ⇒ `FileTaskStore`; an `ITaskStore` ⇒ used as-is. |
+
+## See also
+
+- [`A2AServer.Start`](/api/csharp/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+- [`A2AServer.BuildAgentCard`](/api/csharp/serve/agent-card/) — Construct the Agent Card that advertises your name, skills and endpoint.
+- [`McpServe.Build`](/api/csharp/serve/mcp/) — The inbound MCP profile: any MCP client can call your tools.

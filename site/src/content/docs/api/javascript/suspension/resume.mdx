@@ -1,0 +1,220 @@
+---
+title: "AgentRuntime.resume"
+description: "The answer-carrying entry point: resume a parked run in a different process. — JavaScript."
+sidebar:
+  label: "AgentRuntime.resume"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#10-suspension--pending--waitfor">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/agents/runtime.ts">js/src/agents/runtime.ts</a>
+</p>
+
+<Aside type="caution" title="Symbol correction: no Client.resume in this port">
+`js/src/client.ts`'s bare `Client` has no `resume` method, and no `runWithAnswer`/`askWithAnswer`
+either — SPEC §10 marks that pair **golang-only, a preview, not part of the §0 conformance
+contract** (`golang/relay.go` is the only port that ships it, and even there the real names are
+`Client.RunWithAnswer` / `Client.AskWithAnswer`, not `Resume`). What JavaScript ships **today**,
+shipped and unconditional (§7D, not a preview), is `agents.AgentRuntime.resume(answer)` — the
+answer-carrying re-entry point for a suspended [`agents.Agent`](/api/javascript/runtime/agent/)
+run, the same mechanism every other port ships under an `AgentRuntime.resume`-shaped name. This
+page documents that real, tested mechanism.
+</Aside>
+
+```ts
+class AgentRuntime {
+  async resume(answer: Answer): Promise<void>
+}
+```
+
+Routes an [`Answer`](/api/javascript/types/tool-result/) to the **deepest suspended** handle in
+the runtime's tree, resumes it from its checkpoint (a retry-with-answer of the halted tool —
+turns and token usage keep accumulating, never reset), then cascades upward: each suspended
+ancestor replays too, and its re-invoked `task` delegation call **reattaches** to the already-
+resumed child by task key rather than spawning a duplicate. `resume` itself returns nothing — call
+[`runtime.wait(handle)`](/api/javascript/runtime/runtime/) afterward to get the finished
+`TaskResult`.
+
+## When to use it
+
+Reach for `runtime.resume(answer)` any time an [`agents.Agent.run()`](/api/javascript/runtime/agent/)
+call comes back with `status: "pending"` and you have (or have just obtained) the
+[`Answer`](/api/javascript/types/tool-result/) to that suspension — a human approved a payment, a
+login completed, a form was filled in. `AgentRunResult.runtime` is handed back to you specifically
+for this: `result.runtime.resume(answer)` is the documented way back in, whether the answer arrives
+a second later or after the runtime has sat idle for an hour waiting on a Slack reply.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Set waitFor on the agent spec instead when resolution fits in the call">
+`AgentSpec.waitFor` (or `AgentRunOptions.waitFor`) resolves a suspension **inline**, the same as
+the bare client's `waitFor` — the run never returns `"pending"` at all. Reach for `resume` when
+resolution genuinely can't happen inside the original call: the process handling the answer is a
+webhook handler, a queue consumer, or simply a later turn of the same long-running process, not
+the code that started the run.
+</Aside>
+
+<Aside type="note" title="This crosses TIME, not necessarily a process boundary">
+The suspended `Handle` tree lives in the `AgentRuntime` instance's memory — only the transcript
+(via `ConversationStore`) is written through a pluggable store. So `resume` genuinely lets an
+answer arrive arbitrarily late within the **same running process** (a different async callback,
+an hour later, driven by a webhook). It does not, by itself, survive a process **restart** — that
+is precisely the gap SPEC §10 leaves to the golang-only `RunWithAnswer`/`AskWithAnswer` preview
+above. Plan around this: keep the runtime alive (or route external answers back into the process
+that holds it) until you also want the golang-shaped durable-resume story on this port.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — suspend, resume, get the final answer
+
+```ts test
+import assert from "node:assert"
+import { agents, pending } from "toolnexus"
+
+const approve = agents.agent("approve", {
+  does: "Approves a payment",
+  uses: {
+    tools: [{
+      name: "charge_card",
+      description: "Charge the card",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      source: "custom",
+      execute: async (_args, ctx: any) =>
+        ctx?.answer ? { output: `charged (ok=${ctx.answer.ok})`, isError: false } : pending({ kind: "approval", prompt: "Approve $500 charge?" }),
+    }],
+  },
+})
+
+let turn = 0
+const canned: typeof fetch = async () => {
+  turn++
+  const body = turn === 1
+    ? { choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "charge_card", arguments: "{}" } }] } }] }
+    : { choices: [{ message: { content: "Done — charged." } }] }
+  return new Response(JSON.stringify({ ...body, usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } })
+}
+
+const r1 = await approve.run("Charge the card.", { fetch: canned })
+assert.equal(r1.status, "pending")
+assert.equal(r1.pending?.kind, "approval")
+
+// The handle this run spawned — resume needs it to `wait` afterward.
+const handle = r1.runtime.root.children[0]
+
+await r1.runtime.resume({ id: r1.pending!.id, ok: true })
+const r2 = await r1.runtime.wait(handle)
+
+assert.equal(r2.status, "done")
+assert.match(r2.text, /Done — charged/)
+
+console.log("ok:", r1.status, "->", r2.status, "|", r2.text)
+```
+
+### 2. A declined answer — the run finishes, it just doesn't do the thing
+
+```ts test
+import assert from "node:assert"
+import { agents, pending } from "toolnexus"
+
+const approve = agents.agent("approve", {
+  does: "Approves a payment",
+  uses: {
+    tools: [{
+      name: "charge_card",
+      description: "Charge the card",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      source: "custom",
+      execute: async (_args, ctx: any) =>
+        ctx?.answer ? { output: `charge outcome ok=${ctx.answer.ok}`, isError: false } : pending({ kind: "approval", prompt: "Approve $500 charge?" }),
+    }],
+  },
+})
+
+let turn = 0
+const canned: typeof fetch = async () => {
+  turn++
+  const body = turn === 1
+    ? { choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "charge_card", arguments: "{}" } }] } }] }
+    : { choices: [{ message: { content: "Understood — the charge was cancelled." } }] }
+  return new Response(JSON.stringify({ ...body, usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } })
+}
+
+const r1 = await approve.run("Charge the card.", { fetch: canned })
+assert.equal(r1.status, "pending")
+
+const handle = r1.runtime.root.children[0]
+// §10's loop rule branches only on `ok` — a decline is data, not a thrown error.
+await r1.runtime.resume({ id: r1.pending!.id, ok: false, reason: "declined" })
+const r2 = await r1.runtime.wait(handle)
+
+assert.equal(r2.status, "done") // the RUN still completes — it just knows the charge was declined
+assert.match(r2.text, /cancelled/)
+
+console.log("ok:", r2.text)
+```
+
+### 3. Inspecting the parked tree before resuming — `runtime.inspect(handle)`
+
+A host that stores the answer separately from the runtime (a queue, a database row) still needs a
+live handle to resume — `list()`/`inspect()` give a read-only view of what's parked, including the
+`pending` request itself, without guessing at `root.children` indices.
+
+```ts test
+import assert from "node:assert"
+import { agents, pending } from "toolnexus"
+
+const approve = agents.agent("approve", {
+  does: "Approves a payment",
+  uses: {
+    tools: [{
+      name: "charge_card",
+      description: "Charge the card",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      source: "custom",
+      execute: async (_args, ctx: any) =>
+        ctx?.answer ? { output: "charged", isError: false } : pending({ kind: "approval", prompt: "Approve $500 charge?" }),
+    }],
+  },
+})
+
+let turn = 0
+const canned: typeof fetch = async () => {
+  turn++
+  const body = turn === 1
+    ? { choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "charge_card", arguments: "{}" } }] } }] }
+    : { choices: [{ message: { content: "Charged." } }] }
+  return new Response(JSON.stringify({ ...body, usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } })
+}
+
+const r1 = await approve.run("Charge the card.", { fetch: canned })
+const handle = r1.runtime.root.children[0]
+
+// The read-only view: same Request the AgentRunResult carried, reachable from the runtime alone.
+const view = r1.runtime.inspect(handle)
+assert.equal(view.state, "suspended")
+assert.equal(view.pending?.kind, "approval")
+assert.equal(view.pending?.id, r1.pending?.id)
+
+await r1.runtime.resume({ id: view.pending!.id, ok: true })
+const r2 = await r1.runtime.wait(handle)
+assert.equal(r2.status, "done")
+
+console.log("ok:", view.state, "->", r2.status)
+```
+
+## Signature
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `answer` | `Answer` | Must echo the `id` of the pending `Request` — routed to the deepest suspended handle. |
+| returns | `Promise<void>` | Call `runtime.wait(handle)` afterward for the finished `TaskResult`. |
+
+## See also
+
+- [`pending`](/api/javascript/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`authRequired`](/api/javascript/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`waitFor`](/api/javascript/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`pendingOf`](/api/javascript/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`agents.Agent`](/api/javascript/runtime/agent/) — `.run()` returns the `runtime` this page's `resume` is called on.

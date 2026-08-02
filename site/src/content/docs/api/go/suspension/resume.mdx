@@ -1,0 +1,591 @@
+---
+title: "Runtime.Resume"
+description: "Route an Answer to the deepest suspended sub-agent handle and resume it in place. — Go."
+sidebar:
+  label: "Runtime.Resume"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang/agents</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/agents/runtime.go">golang/agents/runtime.go</a>
+</p>
+
+<Aside type="note" title="Not the §10 golang-preview resume — see the bottom of this page">
+An earlier draft of this page led with `Client.RunWithAnswer`/`Client.AskWithAnswer` (SPEC §10's
+golang-only durable-resume **preview**, `STATUS: golang only — a preview, NOT part of the §0
+conformance contract`). That content is real and still documented below, but it answers a
+different question than this manifest entry: this page's PRIMARY symbol is `Runtime.Resume` — the
+§7D sub-agent resume mechanism shipped, unconditionally, in all six ports.
+</Aside>
+
+```go
+func (rt *Runtime) Resume(answer tn.Answer) error
+```
+
+Routes an `Answer` to the **deepest suspended** handle in the runtime's tree, resumes it from its
+checkpoint (a retry-with-answer of the halted tool — turns and token usage keep accumulating,
+never reset), then cascades upward: each suspended ancestor replays too, and its re-invoked `task`
+delegation call **reattaches** to the already-resumed child by task key rather than spawning a
+duplicate. Call [`rt.Wait(handle, 0)`](/api/go/runtime/runtime/) afterward for the finished
+`TaskResult`.
+
+## When to use it
+
+Reach for `rt.Resume(answer)` any time a spawned agent's handle transitions to `StateSuspended`
+(`rt.Inspect(h).PendingKind` non-empty) and you have — or have just obtained — the `Answer` to
+that suspension: a human approved a payment, a login completed, a form was filled in. There is no
+separate resume path per handle; one call resolves whichever handle is currently the deepest
+suspended one in the tree.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Set a WaitFor on the agent def instead when resolution fits inside the call">
+A `Def`'s `WaitFor` interpreter resolves a suspension **inline** — the same posture as the bare
+client's `WaitFor` — so the handle never settles into `StateSuspended` at all. Reach for `Resume`
+when resolution genuinely can't happen inside the original turn: the process handling the answer
+is a webhook handler, a queue consumer, or simply a later turn of the same long-running process,
+not the code that spawned the handle.
+</Aside>
+
+<Aside type="note" title="This crosses TIME, not necessarily a process boundary">
+The suspended `Handle` tree lives in the `Runtime` instance's memory. So `Resume` genuinely lets an
+answer arrive arbitrarily late within the **same running process** (a different goroutine, an hour
+later, driven by a webhook) — it does not, by itself, survive a process restart. That cross-restart
+case is precisely what the golang-only `RunWithAnswer`/`AskWithAnswer` preview below covers.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — `suspended`, `PendingKind`, and durable `Resume`
+
+No `WaitFor` anywhere in the chain ⇒ the suspension goes durable: the handle parks in
+`StateSuspended` and `Runtime.Resume` is the ONLY way back to `running`.
+
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+// checkSecret needs human approval the first time; once ctx.Answer carries a
+// satisfied Answer, it succeeds.
+var checkSecret = tn.Tool{
+	Name: "check_secret", Description: "needs approval", Source: tn.SourceCustom,
+	InputSchema: tn.JSONSchema{"type": "object", "properties": map[string]any{}},
+	Execute: func(_ map[string]any, tctx *tn.ToolContext) (tn.ToolResult, error) {
+		if tctx != nil && tctx.Answer != nil && tctx.Answer.Ok {
+			return tn.ToolResult{Output: "secret-token"}, nil
+		}
+		return tn.Pending(tn.Request{Kind: "approval", Prompt: "approve secret access?"}), nil
+	},
+}
+
+type approvalLLM struct{}
+
+func (approvalLLM) RoundTrip(req *http.Request) (*http.Response, error) {
+	b, _ := io.ReadAll(req.Body)
+	var parsed struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	_ = json.Unmarshal(b, &parsed)
+	sawToolResult := false
+	for _, m := range parsed.Messages {
+		if m["role"] == "tool" {
+			sawToolResult = true
+		}
+	}
+	var resp map[string]any
+	if !sawToolResult {
+		args, _ := json.Marshal(map[string]any{})
+		resp = map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+			map[string]any{"id": "c1", "type": "function", "function": map[string]any{"name": "check_secret", "arguments": string(args)}},
+		}}
+	} else {
+		resp = map[string]any{"role": "assistant", "content": "approved and done"}
+	}
+	body, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": resp}},
+		"usage":   map[string]any{"prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6},
+	})
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+}
+
+func main() {
+	reg := map[string]agents.Def{
+		// No WaitFor on this def, and none higher in the chain: the suspension
+		// goes durable instead of being answered inline.
+		"asker": {Name: "asker", Does: "needs approvals", Model: "m-asker", Tools: []tn.Tool{checkSecret}},
+	}
+	rt := agents.NewRuntime(agents.Options{Transport: approvalLLM{}, Registry: reg})
+
+	h, err := rt.Spawn(rt.Root, "asker", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	rt.Wake(h, "get the secret")
+	r := rt.Wait(h, 0)
+	if r.Status != "pending" || rt.StateOf(h) != agents.StateSuspended {
+		log.Fatalf("expected a durable pending, got status=%q state=%s", r.Status, rt.StateOf(h))
+	}
+	v := rt.Inspect(h)
+	if v.PendingKind != "approval" {
+		log.Fatalf("expected PendingKind=approval, got %q", v.PendingKind)
+	}
+
+	// The out-of-band Answer resumes the DEEPEST suspended handle.
+	if err := rt.Resume(tn.Answer{ID: r.Pending.ID, Ok: true}); err != nil {
+		log.Fatal(err)
+	}
+	if rt.StateOf(h) != agents.StateIdle {
+		log.Fatalf("expected idle after resume, got %s", rt.StateOf(h))
+	}
+
+	fmt.Println("ok: suspended (", v.PendingKind, ") -> resumed ->", rt.StateOf(h))
+}
+```
+
+### 2. A declined answer — the run finishes, it just doesn't do the thing
+
+`Resume`'s loop rule branches only on `Answer.Ok` — a decline is data, not a returned error.
+
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+var checkSecret = tn.Tool{
+	Name: "check_secret", Description: "needs approval", Source: tn.SourceCustom,
+	InputSchema: tn.JSONSchema{"type": "object", "properties": map[string]any{}},
+	Execute: func(_ map[string]any, tctx *tn.ToolContext) (tn.ToolResult, error) {
+		if tctx != nil && tctx.Answer != nil {
+			return tn.ToolResult{Output: fmt.Sprintf("outcome ok=%v", tctx.Answer.Ok)}, nil
+		}
+		return tn.Pending(tn.Request{Kind: "approval", Prompt: "approve secret access?"}), nil
+	},
+}
+
+type approvalLLM struct{}
+
+func (approvalLLM) RoundTrip(req *http.Request) (*http.Response, error) {
+	b, _ := io.ReadAll(req.Body)
+	var parsed struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	_ = json.Unmarshal(b, &parsed)
+	sawToolResult := false
+	for _, m := range parsed.Messages {
+		if m["role"] == "tool" {
+			sawToolResult = true
+		}
+	}
+	var resp map[string]any
+	if !sawToolResult {
+		args, _ := json.Marshal(map[string]any{})
+		resp = map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+			map[string]any{"id": "c1", "type": "function", "function": map[string]any{"name": "check_secret", "arguments": string(args)}},
+		}}
+	} else {
+		resp = map[string]any{"role": "assistant", "content": "understood — access was declined"}
+	}
+	body, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": resp}},
+		"usage":   map[string]any{"prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6},
+	})
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+}
+
+func main() {
+	reg := map[string]agents.Def{
+		"asker": {Name: "asker", Does: "needs approvals", Model: "m-asker", Tools: []tn.Tool{checkSecret}},
+	}
+	rt := agents.NewRuntime(agents.Options{Transport: approvalLLM{}, Registry: reg})
+
+	h, err := rt.Spawn(rt.Root, "asker", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	rt.Wake(h, "get the secret")
+	r := rt.Wait(h, 0)
+	if r.Status != "pending" {
+		log.Fatalf("expected pending, got %q", r.Status)
+	}
+
+	if err := rt.Resume(tn.Answer{ID: r.Pending.ID, Ok: false, Reason: "declined"}); err != nil {
+		log.Fatal(err)
+	}
+
+	// The RUN still completes — it just knows the request was declined.
+	final := rt.Wait(h, 0)
+	if final.Status != "done" || !strings.Contains(final.Text, "declined") {
+		log.Fatalf("unexpected: %+v", final)
+	}
+
+	fmt.Println("ok:", final.Text)
+}
+```
+
+### 3. Inspecting the parked handle before resuming — `List`/`Inspect`
+
+A host that stores the answer separately from the runtime (a queue, a database row) still needs a
+live handle to resume — `List()`/`Inspect()` give a read-only `HandleView` of what's parked,
+including the pending request's kind, without walking the tree by hand.
+
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+var checkSecret = tn.Tool{
+	Name: "check_secret", Description: "needs approval", Source: tn.SourceCustom,
+	InputSchema: tn.JSONSchema{"type": "object", "properties": map[string]any{}},
+	Execute: func(_ map[string]any, tctx *tn.ToolContext) (tn.ToolResult, error) {
+		if tctx != nil && tctx.Answer != nil && tctx.Answer.Ok {
+			return tn.ToolResult{Output: "secret-token"}, nil
+		}
+		return tn.Pending(tn.Request{Kind: "approval", Prompt: "approve secret access?"}), nil
+	},
+}
+
+type approvalLLM struct{}
+
+func (approvalLLM) RoundTrip(req *http.Request) (*http.Response, error) {
+	b, _ := io.ReadAll(req.Body)
+	var parsed struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	_ = json.Unmarshal(b, &parsed)
+	sawToolResult := false
+	for _, m := range parsed.Messages {
+		if m["role"] == "tool" {
+			sawToolResult = true
+		}
+	}
+	var resp map[string]any
+	if !sawToolResult {
+		args, _ := json.Marshal(map[string]any{})
+		resp = map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+			map[string]any{"id": "c1", "type": "function", "function": map[string]any{"name": "check_secret", "arguments": string(args)}},
+		}}
+	} else {
+		resp = map[string]any{"role": "assistant", "content": "approved and done"}
+	}
+	body, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": resp}},
+		"usage":   map[string]any{"prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6},
+	})
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+}
+
+func main() {
+	reg := map[string]agents.Def{
+		"asker": {Name: "asker", Does: "needs approvals", Model: "m-asker", Tools: []tn.Tool{checkSecret}},
+	}
+	rt := agents.NewRuntime(agents.Options{Transport: approvalLLM{}, Registry: reg})
+
+	h, err := rt.Spawn(rt.Root, "asker", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	rt.Wake(h, "get the secret")
+	_ = rt.Wait(h, 0)
+
+	// The read-only view: same handle state, reachable from Inspect() alone.
+	view := rt.Inspect(h)
+	if view.State != agents.StateSuspended || view.PendingKind != "approval" {
+		log.Fatalf("unexpected view: %+v", view)
+	}
+
+	last := rt.Wait(h, 0) // fast-path: returns the cached pending TaskResult, does not block
+	if err := rt.Resume(tn.Answer{ID: last.Pending.ID, Ok: true}); err != nil {
+		log.Fatal(err)
+	}
+	settled := rt.Wait(h, 0)
+	if settled.Status != "done" {
+		log.Fatalf("unexpected: %+v", settled)
+	}
+
+	fmt.Println("ok:", view.State, "->", settled.Status)
+}
+```
+
+## Signature
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `answer` | `tn.Answer` | Must echo the `ID` of the pending `Request` — routed to the deepest suspended handle. |
+| returns | `error` | Non-nil when `answer.ID` doesn't match any suspended handle's pending request. |
+
+## Go also has a durable, cross-restart resume (preview)
+
+<Aside type="note" title="STATUS: golang only — a preview, not part of the §0 conformance contract">
+Separately from `Runtime.Resume` above, Go ships `Client.RunWithAnswer`/`Client.AskWithAnswer` —
+SPEC §10's "Durable resume — the answer-carrying entry point," which resumes a **bare-client** run
+(no agent runtime involved) across a **process restart**, not just across time within one running
+process. The other five ports do not implement this yet
+(tracked in `openspec/changes/add-tool-relay-mode/tasks.md`). See
+[`suspension/relay`](/api/go/suspension/relay/), which typically resumes via this same pair.
+</Aside>
+
+```go
+func (c *Client) RunWithAnswer(ctx context.Context, tk *Toolkit, history []any, pending Request, answer Answer) (RunResult, error)
+
+func (c *Client) AskWithAnswer(ctx context.Context, tk *Toolkit, id string, pending Request, answer Answer) (RunResult, error)
+```
+
+`RunWithAnswer` takes the transcript you persisted yourself; `AskWithAnswer` is the stateful
+counterpart — it loads the transcript for `id` from the [`ConversationStore`](/api/go/client/store/),
+resumes, and saves the result back. Both fill **every** `tool_result` slot left outstanding on the
+halted assistant turn — not just the halted call's — replacing the halt's placeholder rather than
+appending alongside it, so the transcript sent to the provider is balanced (one `tool_result` per
+`tool_use`/`tool_call`) and replayable. The resume continues from the transcript and appends **no
+new user turn**.
+
+### 1. The smallest useful call — halt, then resume with `RunWithAnswer`
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`))
+			return
+		}
+		// Turn 2: after resume, the provider sees a balanced transcript and answers.
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"resumed"}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`))
+	}))
+	defer srv.Close()
+
+	lookup := toolnexus.RelayTool("lookup", "look something up", nil)
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false, ExtraTools: []toolnexus.Tool{lookup}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "stub", APIKey: "k"})
+
+	halted, err := client.Run(context.Background(), "go", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if halted.Status != "pending" {
+		log.Fatalf("expected a durable halt, got %q", halted.Status)
+	}
+
+	resumed, err := client.RunWithAnswer(context.Background(), tk, halted.Messages, *halted.Pending,
+		toolnexus.Answer{ID: halted.Pending.ID, Ok: true, Data: map[string]any{toolnexus.RelayOutputKey: "sunny"}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if resumed.Status != "done" || resumed.Text != "resumed" {
+		log.Fatalf("unexpected: %+v", resumed)
+	}
+
+	fmt.Println("ok: resumed to", resumed.Status)
+}
+```
+
+### 2. The realistic case — resume across a fresh `*Client`, and a mismatched answer errors loudly
+
+`RunResult.Messages` and `RunResult.Pending` round-trip through `encoding/json` exactly as a
+durable host would persist them; a completely new `*Client` resumes the run. A mismatched
+`Answer.ID` is rejected — never a silent continue.
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"resumed elsewhere"}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`))
+	}))
+	defer srv.Close()
+
+	lookup := toolnexus.RelayTool("lookup", "look something up", nil)
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false, ExtraTools: []toolnexus.Tool{lookup}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	first := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "stub", APIKey: "k"})
+	halted, err := first.Run(context.Background(), "go", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Round-trip through JSON, as a durable host persisting to disk/DB would.
+	blob, err := json.Marshal(map[string]any{"messages": halted.Messages, "pending": halted.Pending})
+	if err != nil {
+		log.Fatal(err)
+	}
+	var restored struct {
+		Messages []any            `json:"messages"`
+		Pending  toolnexus.Request `json:"pending"`
+	}
+	if err := json.Unmarshal(blob, &restored); err != nil {
+		log.Fatal(err)
+	}
+
+	second := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "stub", APIKey: "k"})
+
+	// A stale/misrouted answer id is rejected, not silently accepted.
+	_, err = second.RunWithAnswer(context.Background(), tk, restored.Messages, restored.Pending,
+		toolnexus.Answer{ID: "not-the-right-id", Ok: true, Data: map[string]any{toolnexus.RelayOutputKey: "x"}})
+	if err == nil || !strings.Contains(err.Error(), "does not echo") {
+		log.Fatalf("expected a mismatched-id error, got %v", err)
+	}
+
+	// The correct id resumes cleanly on the brand-new client.
+	resumed, err := second.RunWithAnswer(context.Background(), tk, restored.Messages, restored.Pending,
+		toolnexus.Answer{ID: restored.Pending.ID, Ok: true, Data: map[string]any{toolnexus.RelayOutputKey: "cross-process"}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if resumed.Status != "done" {
+		log.Fatalf("unexpected: %+v", resumed)
+	}
+
+	fmt.Println("ok: resumed on a fresh client after a rejected mismatched answer")
+}
+```
+
+### 3. The full surface — `AskWithAnswer` round-trips through the conversation store
+
+`AskWithAnswer` is `RunWithAnswer` plus store load/save: no explicit transcript handling on your
+part — just the conversation id.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"stored answer"}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`))
+	}))
+	defer srv.Close()
+
+	lookup := toolnexus.RelayTool("lookup", "look something up", nil)
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false, ExtraTools: []toolnexus.Tool{lookup}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "stub", APIKey: "k"})
+
+	halted, err := client.Ask(context.Background(), "go", tk, "conv-1")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if halted.Status != "pending" {
+		log.Fatalf("expected pending, got %q", halted.Status)
+	}
+
+	resumed, err := client.AskWithAnswer(context.Background(), tk, "conv-1", *halted.Pending,
+		toolnexus.Answer{ID: halted.Pending.ID, Ok: true, Data: map[string]any{toolnexus.RelayOutputKey: "stored answer"}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if resumed.Status != "done" {
+		log.Fatalf("unexpected: %+v", resumed)
+	}
+
+	// The store now holds the resumed, balanced transcript under the same id.
+	saved, err := client.ConversationStore().Get("conv-1")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(saved) != len(resumed.Messages) {
+		log.Fatalf("expected the store to hold the resumed transcript: saved=%d resumed=%d", len(saved), len(resumed.Messages))
+	}
+
+	fmt.Println("ok: AskWithAnswer resumed and saved conv-1,", len(saved), "messages")
+}
+```
+
+## See also
+
+- [`agents.Handle`](/api/go/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`NewRuntime`](/api/go/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`Pending`](/api/go/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`RelayTool`](/api/go/suspension/relay/) — The declaration-only tool the durable resume path was built to cover.

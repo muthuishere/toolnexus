@@ -1,0 +1,199 @@
+---
+title: Toolnexus.Skill.load
+description: Glob a skills directory and expose one skill tool with progressive disclosure. Elixir.
+sidebar:
+  label: Skill.load
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/skill.ex">elixir/lib/toolnexus/skill.ex</a>
+</p>
+
+```elixir
+@spec load(String.t() | [String.t()] | keyword() | map()) :: Toolnexus.Skill.Source.t()
+def load(input)
+
+# %Toolnexus.Skill.Source{skills: [%Skill.Info{}], tool: %Toolnexus.Tool{}, prompt: String.t()}
+```
+
+Walks a skills root for every `**/SKILL.md`, parses each file's YAML frontmatter, and returns three
+things: the discovered `skills`, a **single** `tool` named `skill`, and a `prompt` catalog you paste
+into your system prompt.
+
+That single-tool design is the whole point. The model sees a short list of skill *names and
+descriptions* in the system prompt and one `skill` tool; the full instruction body and the file
+listing are only loaded when it actually calls `skill(name: "…")`. That is progressive disclosure —
+twenty skills cost you twenty lines of context, not twenty tool schemas.
+
+## When to use it
+
+- **You keep prompt-shaped expertise on disk** — a `skills/` folder of Markdown playbooks, each with
+  scripts and reference files beside it — and want the model to pull one in on demand.
+- **You want to add capability without redeploying** — drop a new `SKILL.md` in the folder and call
+  `load/1` again.
+- **You are following the open SKILL.md convention** used by Claude's agent skills, so the same
+  folder works with other tooling.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use create_toolkit when you also have MCP servers or native tools">
+[`Toolnexus.create_toolkit`](/api/elixir/toolkit/create/) takes a `:skills_dir` and does this
+internally, merging the `skill` tool into one list with MCP, HTTP and native tools — and it hands the
+catalog to the client loop for you. Call `Skill.load/1` directly **instead** when skills are your
+only tool source, or when you want the `skills` list and `prompt` as data (to inspect, to render, to
+inject into a prompt you build yourself).
+</Aside>
+
+If you only need to *inspect* what is on disk — including the files that were rejected and why —
+use [`Toolnexus.Skill.list/1`](/api/elixir/skills/list/); it does no tool wiring.
+
+## Examples
+
+### 1. Load the shared fixture and read the catalog
+
+This is `examples/skills`, the fixture every port is tested against.
+
+```elixir test
+alias Toolnexus.Skill
+
+# TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+repo = System.get_env("TOOLNEXUS_REPO") || "."
+dir = Path.join([repo, "examples", "skills"])
+
+source = Skill.load(dir)
+
+# One skill discovered, parsed from its YAML frontmatter.
+[info] = source.skills
+true = info.name == "hello-world"
+true = String.starts_with?(info.description, "A tiny example skill.")
+true = String.ends_with?(info.location, "hello-world/SKILL.md")
+true = info.origin == :fs
+
+# Exactly ONE tool, whatever the skill count.
+true = source.tool.name == "skill"
+true = source.tool.source == "skill"
+true = source.tool.input_schema["required"] == ["name"]
+
+# The catalog goes in your system prompt — names + descriptions only.
+true = String.contains?(source.prompt, "## Available Skills")
+true = String.contains?(source.prompt, "- **hello-world**:")
+# The instruction body is NOT in the prompt. That is the disclosure boundary.
+false = String.contains?(source.prompt, "Hello World Skill")
+
+IO.puts("ok: #{info.name} | 1 tool: #{source.tool.name}")
+```
+
+<Aside type="caution">
+A skill with no `description` in its frontmatter is still loadable, but it is **omitted from the
+prompt catalog** — so the model never learns it exists. Always write a description.
+</Aside>
+
+### 2. Calling the `skill` tool — what the model actually gets back
+
+This is the second half of progressive disclosure: the body, a base directory, and a sampled file
+listing so the model can go read the resources next to the skill.
+
+```elixir test
+alias Toolnexus.{Context, Skill}
+
+repo = System.get_env("TOOLNEXUS_REPO") || "."
+source = Skill.load(Path.join([repo, "examples", "skills"]))
+
+res = source.tool.execute.(%{"name" => "hello-world"}, %Context{})
+false = res.is_error
+
+out = res.output
+true = String.starts_with?(out, ~s(<skill_content name="hello-world">))
+true = String.ends_with?(out, "</skill_content>")
+
+# The instruction body, verbatim from below the frontmatter.
+true = String.contains?(out, "# Skill: hello-world")
+true = String.contains?(out, "1. Read `scripts/greet.sh` in this skill's base directory.")
+
+# An absolute file:// base so relative paths in the skill resolve.
+true = String.contains?(out, "Base directory for this skill: file:///")
+
+# A SAMPLED listing of sibling files — SKILL.md itself is excluded.
+true = String.contains?(out, "<skill_files>")
+true = String.contains?(out, "greet.sh</file>")
+false = String.contains?(out, "SKILL.md</file>")
+
+# Metadata carries the on-disk directory for hosts that need a real path.
+true = res.metadata.name == "hello-world"
+true = String.ends_with?(res.metadata.dir, "skills/hello-world")
+
+IO.puts("ok: #{byte_size(out)} bytes of skill_content")
+```
+
+### 3. The full surface — several roots, the sample cap, and the miss path
+
+`:dirs` accepts a list; missing roots warn on stderr rather than raising, so one bad path never takes
+down the others. `:sample_limit` controls the `skill_files` listing.
+
+```elixir test
+alias Toolnexus.{Context, Skill}
+
+repo = System.get_env("TOOLNEXUS_REPO") || "."
+dir = Path.join([repo, "examples", "skills"])
+
+# Several roots at once; a nonexistent one warns and contributes nothing.
+merged = Skill.load(dirs: [dir, Path.join([repo, "does", "not", "exist"])])
+true = Enum.map(merged.skills, & &1.name) == ["hello-world"]
+
+# A bare binary and a bare list are shorthand for `dirs:`.
+true = Enum.map(Skill.load(dir).skills, & &1.name) == ["hello-world"]
+true = Enum.map(Skill.load([dir]).skills, & &1.name) == ["hello-world"]
+
+# sample_limit: -1 omits the <skill_files> block entirely (smallest context).
+lean = Skill.load(dirs: dir, sample_limit: -1)
+lean_out = lean.tool.execute.(%{"name" => "hello-world"}, %Context{}).output
+false = String.contains?(lean_out, "<skill_files>")
+true = String.contains?(lean_out, "Base directory for this skill:")
+
+# sample_limit: n > 0 caps the listing; 0 (the default) means 10.
+capped = Skill.load(dirs: dir, sample_limit: 1)
+capped_out = capped.tool.execute.(%{"name" => "hello-world"}, %Context{}).output
+true = capped_out |> String.split("<file>") |> length() == 2
+
+# An unknown name is a tool ERROR, not a raise — the model sees what is available.
+miss = merged.tool.execute.(%{"name" => "nope"}, %Context{})
+true = miss.is_error
+true = miss.output == ~s(Skill "nope" not found. Available skills: hello-world)
+
+# With no skills at all the catalog says so, and the tool still exists.
+empty = Skill.load(dirs: [])
+[] = empty.skills
+true = empty.prompt == "No skills are currently available."
+true = empty.tool.name == "skill"
+
+IO.puts("ok: #{length(merged.skills)} skill(s), miss handled, sample_limit honoured")
+```
+
+## Options
+
+Accepts a **binary** (one root), a **list of binaries** (several roots), or a **map / keyword list**:
+
+| Option | Default | What it does |
+|---|---|---|
+| `:dirs` | `[]` | A root, or list of roots, walked for `**/SKILL.md`. `node_modules` and `.git` are skipped; symlinks are followed with cycle protection. |
+| `:skills` | `[]` | Skills supplied as data maps instead of files — see [`load` with data](/api/elixir/skills/load-with/). |
+| `:provider` | `nil` | A 0-arity function returning skill-data maps, resolved once. A failure is isolated with a warning. |
+| `:filter` | `nil` | `name => boolean` allowlist / droplist. `nil` or `%{}` means all. |
+| `:sample_limit` | `0` | Sibling-file cap in `skill_files`: `0` ⇒ 10, `n > 0` ⇒ `n`, `-1` ⇒ omit the block. |
+
+### What you get back
+
+| Field | Type | What it is |
+|---|---|---|
+| `skills` | `[%Skill.Info{}]` | `name`, `description`, `location`, `content`, `origin`, `resources`, `base`. |
+| `tool` | `%Toolnexus.Tool{}` | The single `skill` tool, `source: "skill"`, one required `name` argument. |
+| `prompt` | `String.t()` | The catalog to paste into your system prompt — described skills only, sorted by name. |
+
+## See also
+
+- [`Toolnexus.Skill.load` with data and filters](/api/elixir/skills/load-with/) — `:skills`, `:provider`, `:filter`
+- [`Toolnexus.Skill.list`](/api/elixir/skills/list/) — discovery without wiring, plus skip reasons
+- [`Toolnexus.create_toolkit`](/api/elixir/toolkit/create/) — takes `:skills_dir` and merges this in
+- [`Toolnexus.Tool`](/api/elixir/types/tool/) — what `source.tool` is

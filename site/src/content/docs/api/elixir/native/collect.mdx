@@ -1,0 +1,57 @@
+---
+title: "collectTools — gather decorated functions"
+description: "Sweep a module or class and collect every function marked as a tool. — Elixir."
+sidebar:
+  label: "native / collect"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
+</p>
+
+<Aside type="caution" title="Not available in Elixir">
+JS/Java/C# expose an explicit collector; Python, Go and Elixir have no equivalent public symbol.
+</Aside>
+
+Sweep a module or class and collect every function marked as a tool.
+
+## What to use instead
+
+There is no module-sweeping collector in this port — nothing scans a module for functions marked
+with an attribute or convention and turns them into tools automatically. Every native tool in
+Elixir is built one at a time with
+[`Toolnexus.Native.define_tool/1`](/api/elixir/native/define-tool/); "collecting" a set of them is
+just building a plain Elixir list:
+
+```elixir
+alias Toolnexus.Native
+
+defmodule MyTools do
+  def weather, do: Native.define_tool(%{
+    name: "get_weather",
+    description: "Current weather for a city",
+    input_schema: %{"type" => "object", "properties" => %{"city" => %{"type" => "string"}}},
+    execute: fn args, _ctx -> "sunny in #{args["city"]}" end
+  })
+
+  def ping, do: Native.define_tool(%{
+    name: "ping",
+    description: "Health check",
+    execute: fn _args, _ctx -> "pong" end
+  })
+
+  # The "collector" is just a list of the tools you defined above.
+  def tools, do: [weather(), ping()]
+end
+```
+
+If you are generating many tools **from data** rather than from hand-written functions — a table
+of endpoints, a set of database-backed jobs — build `%Toolnexus.Tool{}` structs directly in an
+`Enum.map/2` instead; see the third example on the
+[`Toolnexus.Tool`](/api/elixir/types/tool/) reference page for that pattern.
+
+## See also
+
+- [`Toolnexus.Native.define_tool`](/api/elixir/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.

@@ -1,0 +1,216 @@
+---
+title: "Client.run"
+description: "Send a prompt, let the loop call tools until the model stops, get a RunResult. — JavaScript."
+sidebar:
+  label: "Client.run"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#8-unified-llm-client-the-host-loop">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/client.ts">js/src/client.ts</a>
+</p>
+
+```ts
+run(prompt: string, ctx: { toolkit: Toolkit; signal?: AbortSignal; history?: any[] }): Promise<RunResult>
+```
+
+One turn of the host loop, non-streaming. Send a prompt, and the client calls the model,
+executes whatever tools it asks for — in parallel where requested, chained where the model needs
+a result before asking for more — feeds results back, and repeats until the model stops asking or
+`maxTurns` is hit. You get one `RunResult` back at the end.
+
+## When to use it
+
+Use `run` for a single, self-contained turn: a batch job, a webhook handler, a CLI command — any
+place where you have one prompt and want one answer, and don't need the caller to see partial
+output as it arrives.
+
+`run` is also what `ask` and `conversation().send()` call underneath — `ctx.history` is the same
+mechanism `ask(prompt, { id })` uses to carry a prior transcript in.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use stream instead when the caller is a person watching output arrive">
+[`Client.stream`](/api/javascript/client/stream/) yields the same work as an `AsyncGenerator` —
+text deltas, tool-call/result events — so a UI or terminal can render progress live. `run` gives
+you nothing until the whole turn is done. Same loop underneath; the difference is only how you
+observe it.
+</Aside>
+
+Prefer `run` when:
+
+- You want the simplest possible call: `await client.run(prompt, { toolkit })` and inspect the
+  result.
+- You are calling this from a place that has no notion of "streaming to a client" — a queue
+  worker, a scheduled job, a test.
+- You want `status: "pending"` to come back as a plain return value (no suspension resolver
+  configured) rather than an event in a stream.
+
+## Examples
+
+### 1. The smallest useful call — no tools, one round trip
+
+A stub server shaped like the OpenAI `/chat/completions` response. No network, no real key —
+`baseUrl` points at `127.0.0.1`.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit } from "toolnexus"
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "content-type": "application/json" })
+  res.end(JSON.stringify({
+    choices: [{ message: { content: "Hello, Muthu!" }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+  }))
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const tk = await createToolkit({})
+const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key" })
+
+const res = await client.run("Say hello to Muthu.", { toolkit: tk })
+assert.equal(res.text, "Hello, Muthu!")
+assert.equal(res.status, "done")
+assert.equal(res.turns, 1)
+
+await tk.close()
+server.close()
+console.log("ok:", res.text)
+```
+
+### 2. A realistic case — the model calls a tool, then answers
+
+The stub server replies differently on each request: first with a `tool_calls` turn, then with
+plain text once it sees the tool's result in the transcript. This is the parallel/chained
+tool-calling cycle `run` exists for.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, defineTool } from "toolnexus"
+
+let calls = 0
+const server = http.createServer((req, res) => {
+  let raw = ""
+  req.on("data", (c) => (raw += c))
+  req.on("end", () => {
+    calls++
+    res.writeHead(200, { "content-type": "application/json" })
+    if (calls === 1) {
+      res.end(JSON.stringify({
+        choices: [{
+          message: {
+            content: null,
+            tool_calls: [{ id: "call_1", type: "function", function: { name: "get_weather", arguments: '{"city":"Chennai"}' } }],
+          },
+          finish_reason: "tool_calls",
+        }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      }))
+    } else {
+      res.end(JSON.stringify({
+        choices: [{ message: { content: "It is 31C in Chennai." }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
+      }))
+    }
+  })
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const tk = await createToolkit({
+  builtins: false,
+  extraTools: [
+    defineTool({
+      name: "get_weather",
+      description: "Weather for a city",
+      inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+      run: ({ city }) => `31C in ${city}`,
+    }),
+  ],
+})
+const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key" })
+
+const res = await client.run("What's the weather in Chennai?", { toolkit: tk })
+assert.equal(res.text, "It is 31C in Chennai.")
+assert.equal(res.toolCallCount, 1)
+assert.equal(res.toolCalls[0].name, "get_weather")
+assert.equal(res.turns, 2)
+assert.ok(res.usage.totalTokens > 0)
+
+await tk.close()
+server.close()
+console.log("ok:", res.text)
+```
+
+### 3. The full surface — history, abort signal, and an incomplete run
+
+`ctx.history` seeds the transcript (what `ask`/`Conversation` pass under the hood), `ctx.signal`
+bounds the call, and hitting `maxTurns` with no final text comes back as `status: "incomplete"` —
+loud, never silently `"done"`.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, defineTool } from "toolnexus"
+
+// Always asks for the same tool again — never produces a final answer, to exercise maxTurns.
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "content-type": "application/json" })
+  res.end(JSON.stringify({
+    choices: [{
+      message: { content: null, tool_calls: [{ id: "c", type: "function", function: { name: "ping", arguments: "{}" } }] },
+      finish_reason: "tool_calls",
+    }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  }))
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const tk = await createToolkit({
+  builtins: false,
+  extraTools: [defineTool({ name: "ping", description: "", run: () => "pong" })],
+})
+const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key", maxTurns: 2 })
+
+// Seed history — this is exactly what ask(prompt, { id }) passes as ctx.history. No trailing
+// text turn here on purpose: "incomplete" means no FINAL text anywhere in the transcript.
+const priorHistory = [{ role: "system", content: "Be terse." }]
+
+const res = await client.run("keep pinging", { toolkit: tk, history: priorHistory, signal: AbortSignal.timeout(5_000) })
+assert.equal(res.status, "incomplete", "maxTurns exhausted with no final text is loud, never silent done")
+assert.equal(res.limit, "maxTurns")
+assert.equal(res.turns, 2)
+assert.ok(res.messages.length > priorHistory.length, "seeded history carried through")
+
+await tk.close()
+server.close()
+console.log("ok:", res.status, res.limit)
+```
+
+## Options
+
+| Field | Type | What it does |
+|---|---|---|
+| `prompt` | `string` | The user turn to send. **Required.** |
+| `ctx.toolkit` | `Toolkit` | Tools available to the model this turn. **Required.** |
+| `ctx.signal` | `AbortSignal` | Aborts the run (and any in-flight request), combined with `timeoutMs`. |
+| `ctx.history` | `any[]` | Prior transcript to continue from — the mechanism `ask`/`Conversation` use. |
+
+## What you get back
+
+`Promise<RunResult>` — see the fields on [`createClient`](/api/javascript/client/create/#what-you-get-back):
+`text`, `messages`, `toolCalls`, `toolCallCount`, `turns`, `usage`, `model`, `status`
+(`"done" | "pending" | "incomplete"`), `pending`, `limit`.
+
+## See also
+
+- [`createClient`](/api/javascript/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.stream`](/api/javascript/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Hooks`](/api/javascript/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+- [`Conversation`](/api/javascript/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.

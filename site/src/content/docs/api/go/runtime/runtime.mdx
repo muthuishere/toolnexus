@@ -1,0 +1,273 @@
+---
+title: "NewRuntime — spawn, wait, interrupt"
+description: "The six host verbs that drive sub-agents, plus the read-only list and inspect views. — Go."
+sidebar:
+  label: "runtime / runtime"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang/agents</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/agents/runtime.go">golang/agents/runtime.go</a>
+</p>
+
+```go
+func NewRuntime(opts Options) *Runtime
+
+func (rt *Runtime) Spawn(parent *Handle, defName string, budget *Budget) (*Handle, error)
+func (rt *Runtime) Post(h *Handle, item InboxItem) PostResult
+func (rt *Runtime) Wake(h *Handle, prompt string) PostResult
+func (rt *Runtime) Wait(h *Handle, timeout time.Duration) TaskResult
+func (rt *Runtime) Interrupt(h *Handle)
+func (rt *Runtime) Close(h *Handle, opts *CloseOptions)
+
+func (rt *Runtime) List() []HandleView
+func (rt *Runtime) Inspect(h *Handle) HandleView
+func (rt *Runtime) Trace() []string
+```
+
+`NewRuntime` builds the substrate `agents.New` runs on: a handle table rooted at `Root`, the three
+backpressure gates (bounded inbox, per-parent concurrency, a global turn gate around the LLM HTTP
+call), hierarchical budgets, and one runtime-wide `ConversationStore`. The six verbs are the
+**entire** host surface — everything else (`Agent.Run`, `AsTool`, the `task` tool) compiles down to
+these.
+
+## When to use it
+
+Reach for `NewRuntime` directly — over the `Agent.Run` one-shot — when you need more than one
+handle alive at a time: fan work out to several children concurrently, keep a long-lived agent
+between calls, post unsolicited events into a running agent's inbox, or drive
+interrupt/close yourself instead of letting `Run` do it implicitly.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Just running one agent to completion? Agent.Run already does this">
+`agents.New(...).Run(opts, prompt)` builds a `Runtime` from the agent's `Registry()`, spawns it at
+`Root`, wakes it, waits, and closes — exactly `NewRuntime` + `Spawn` + `Wake` + `Wait` + `Close`
+under the hood. Reach for `NewRuntime` when that one-shot lifecycle doesn't fit.
+</Aside>
+
+## Examples
+
+All three run against a scripted `http.RoundTripper` (`Options.Transport`) — the runtime's
+documented hermetic seam, zero network, zero real API key.
+
+### 1. The smallest useful call — spawn, wake, wait
+
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+type textLLM struct{ reply string }
+
+func (t textLLM) RoundTrip(req *http.Request) (*http.Response, error) {
+	body, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": t.reply}}},
+		"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+	})
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+}
+
+func main() {
+	reg := map[string]agents.Def{
+		"peer": {Name: "peer", Does: "a worker", Model: "m-peer"},
+	}
+	rt := agents.NewRuntime(agents.Options{Transport: textLLM{reply: "done work"}, Registry: reg})
+
+	h, err := rt.Spawn(rt.Root, "peer", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	rt.Wake(h, "go")
+	r := rt.Wait(h, 0)
+	if r.Status != "done" || r.Text != "done work" {
+		log.Fatalf("unexpected: %+v", r)
+	}
+	rt.Close(rt.Root, nil)
+
+	fmt.Println("ok:", r.Text)
+}
+```
+
+### 2. The realistic case — fan two children out concurrently
+
+Ids are deterministic and parent-scoped (`root/worker.1`, `root/worker.2`) — never random.
+
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"time"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+type textLLM struct{ reply string }
+
+func (t textLLM) RoundTrip(req *http.Request) (*http.Response, error) {
+	time.Sleep(2 * time.Millisecond) // makes concurrency observable
+	body, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": t.reply}}},
+		"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+	})
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+}
+
+func main() {
+	reg := map[string]agents.Def{"worker": {Name: "worker", Does: "does a slice of the job", Model: "m-worker"}}
+	rt := agents.NewRuntime(agents.Options{Transport: textLLM{reply: "ok"}, Registry: reg})
+
+	h1, err := rt.Spawn(rt.Root, "worker", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	h2, err := rt.Spawn(rt.Root, "worker", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if h1.ID == h2.ID {
+		log.Fatal("expected distinct deterministic ids")
+	}
+
+	rt.Wake(h1, "task A")
+	rt.Wake(h2, "task B")
+	r1 := rt.Wait(h1, 0)
+	r2 := rt.Wait(h2, 0)
+	if r1.Status != "done" || r2.Status != "done" {
+		log.Fatalf("unexpected: %+v %+v", r1, r2)
+	}
+
+	rows := rt.List()
+	if len(rows) != 2 {
+		log.Fatalf("expected 2 handles listed, got %d", len(rows))
+	}
+	rt.Close(rt.Root, nil)
+
+	fmt.Println("ok:", h1.ID, h2.ID)
+}
+```
+
+### 3. The full surface — post to the inbox, interrupt mid-flight, trace, close
+
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+// gatedLLM never answers until released, or the turn's context is cancelled —
+// the seam Interrupt uses to prove it aborts the TURN, not the agent.
+type gatedLLM struct{ gate chan struct{} }
+
+func (g gatedLLM) RoundTrip(req *http.Request) (*http.Response, error) {
+	select {
+	case <-g.gate:
+		body, _ := json.Marshal(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "finished"}}},
+			"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+	case <-req.Context().Done():
+		return nil, req.Context().Err()
+	}
+}
+
+func main() {
+	reg := map[string]agents.Def{"slow": {Name: "slow", Does: "takes a while", Model: "m-slow"}}
+	gate := make(chan struct{})
+	rt := agents.NewRuntime(agents.Options{Transport: gatedLLM{gate: gate}, Registry: reg})
+
+	h, err := rt.Spawn(rt.Root, "slow", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// An unsolicited post lands in the inbox — no state transition on its own.
+	pr := rt.Post(h, agents.InboxItem{From: "external", Channel: "peer", Text: "heads up"})
+	if !pr.Ok {
+		log.Fatalf("post should succeed: %s", pr.Err)
+	}
+
+	rt.Wake(h, "start the slow task")
+	for i := 0; i < 200 && rt.StateOf(h) != agents.StateRunning; i++ {
+		time.Sleep(time.Millisecond)
+	}
+
+	rt.Interrupt(h) // aborts the TURN — the agent returns to idle, inbox intact
+	r := rt.Wait(h, 0)
+	if r.Status != "interrupted" {
+		log.Fatalf("expected interrupted, got %q", r.Status)
+	}
+	if rt.StateOf(h) != agents.StateIdle {
+		log.Fatalf("expected idle after interrupt, got %s", rt.StateOf(h))
+	}
+	if rt.InboxLen(h) != 1 {
+		log.Fatalf("the posted item should survive the aborted turn, got inbox len %d", rt.InboxLen(h))
+	}
+
+	close(gate) // let any straggler goroutine finish; unused by this point
+	rt.Close(rt.Root, nil)
+
+	if rt.StateOf(h) != agents.StateClosed {
+		log.Fatalf("expected closed, got %s", rt.StateOf(h))
+	}
+	trace := rt.Trace()
+	found := false
+	for _, line := range trace {
+		if strings.Contains(line, "interrupt") {
+			found = true
+		}
+	}
+	if !found {
+		log.Fatal("expected the trace to record the interrupt transition")
+	}
+
+	fmt.Println("ok: interrupted then closed,", len(trace), "trace lines recorded")
+}
+```
+
+## Options fields
+
+| Field | Type | Default |
+|---|---|---|
+| `Transport` | `http.RoundTripper` | `http.DefaultTransport` — a scripted RoundTripper makes fixtures hermetic |
+| `Registry` | `map[string]Def` | required — prefer `Agent.Registry()` over hand-building it |
+| `InboxCap` | `int` | 8 |
+| `MaxConcurrentTurns` | `int` | 8 — the global turn gate, wraps only the LLM HTTP call |
+| `Shutdown` | `time.Duration` | 200ms — how long a graceful `Close` waits before escalating to interrupt |
+| `LLM` | `*LLMOptions` | `nil` ⇒ mock placeholders (pair with `Transport`) |
+| `Store` | `tn.ConversationStore` | `nil` ⇒ in-memory |
+| `Clock` | `Clock` | `nil` ⇒ the real clock; inject a virtual one for deterministic fixtures |
+| `Hooks` / `OnMetric` | — | the §8 seams, applied to every agent unless a `Def` overrides them |
+
+## See also
+
+- [`agents.New`](/api/go/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`agents.Handle`](/api/go/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`agents.Budget`](/api/go/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

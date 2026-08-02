@@ -1,0 +1,205 @@
+---
+title: "agents.taskTool"
+description: "The opt-in tool that lets the model itself spawn a teammate. Default OFF. — JavaScript."
+sidebar:
+  label: "agents.taskTool"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7d-sub-agents--agent-runtime-source-agent">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/agents/runtime.ts">js/src/agents/runtime.ts</a>
+</p>
+
+```ts
+// Not a standalone constructor — a BEHAVIOR: declaring `team` on an AgentDef/AgentSpec
+// is what puts this tool in that agent's toolkit. No team ⇒ no task tool, ever.
+interface AgentDef {
+  team?: string[]   // (AgentSpec: agents.Agent[]) — the ONLY way `task` gets added
+  // ...
+}
+
+// The tool the model sees when `team` is non-empty:
+// task({ agent: string, prompt: string }) -> ToolResult
+```
+
+The one model-visible delegation tool: `task { agent, prompt }` = `spawn → wake → wait → close`
+fused into a single tool call. The child runs on a **fresh transcript** and the parent gains
+**exactly one** tool message per call — the child's intermediate tool calls and reasoning never
+leak into the parent's context. There is no importable `taskTool()` constructor to call yourself:
+declaring `team` on an `AgentDef`/`AgentSpec` is the only way it gets attached, which is the whole
+point — **delegation is opt-in, like recursion, never default.**
+
+## When to use it
+
+You don't call this directly — you enable it by giving an agent a `team`, and then it's the *model*
+that decides when to use it, based on the tool's own description (composed from each teammate's
+`does`). Read this page to understand exactly what gets advertised, how out-of-team requests are
+refused, and how a repeated call reattaches instead of spawning a duplicate.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Call agent.run() / runtime.spawn() yourself instead when the HOST should decide">
+`task` is the **model-facing** delegation surface — the LLM itself chooses when and who to delegate
+to. When *your code* decides which sub-agent to run and when, skip the tool entirely and call
+[`agents.Agent.run()`](/api/javascript/runtime/agent/) or
+`runtime.spawn/wake/wait` directly — no model round trip needed to make that decision.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — `team` present, one delegation, one tool message
+
+```ts test
+import assert from "node:assert"
+import { agents } from "toolnexus"
+
+const mockFetch: typeof fetch = async (_url, init) => {
+  const body = JSON.parse(String(init?.body))
+  const hasToolResult = body.messages.some((m: any) => m.role === "tool")
+  const payload = body.model === "m-explorer"
+    ? { choices: [{ message: { content: "found it" } }] }
+    : hasToolResult
+      ? { choices: [{ message: { content: `synthesis: ${body.messages.at(-1).content}` } }] }
+      : { choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "task", arguments: JSON.stringify({ agent: "explorer", prompt: "find X" }) } }] } }] }
+  return new Response(JSON.stringify({ ...payload, usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } })
+}
+
+const runtime = new agents.AgentRuntime({
+  fetch: mockFetch,
+  registry: {
+    coordinator: { name: "coordinator", does: "splits and delegates", model: "m-coordinator", team: ["explorer"] },
+    explorer: { name: "explorer", does: "read-only research", model: "m-explorer" },
+  },
+})
+
+const h = runtime.spawn(runtime.root, "coordinator") as agents.Handle
+runtime.wake(h, "investigate X")
+const r = await runtime.wait(h)
+
+assert.equal(r.status, "done")
+assert.equal(r.text, "synthesis: found it")
+assert.equal(r.turns, 2, "one delegating turn, one synthesis turn — the child's own turns are invisible here")
+
+await runtime.close(runtime.root)
+console.log("ok:", r.text)
+```
+
+### 2. A realistic case — default OFF: no `team`, no `task` tool, ever
+
+An agent with no `team` never gets a `task` tool — a model that (incorrectly) tries to call one
+anyway gets a normal unknown-tool error, not a crash, because the tool genuinely isn't registered.
+
+```ts test
+import assert from "node:assert"
+import { agents } from "toolnexus"
+
+const mockFetch: typeof fetch = async (_url, init) => {
+  const body = JSON.parse(String(init?.body))
+  const toolMsgs = body.messages.filter((m: any) => m.role === "tool")
+  const payload = toolMsgs.length > 0
+    ? { choices: [{ message: { content: `tool said: ${toolMsgs[0].content}` } }] }
+    : { choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "task", arguments: JSON.stringify({ agent: "anyone", prompt: "help" }) } }] } }] }
+  return new Response(JSON.stringify({ ...payload, usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } })
+}
+
+const runtime = new agents.AgentRuntime({
+  fetch: mockFetch,
+  registry: { solo: { name: "solo", does: "works alone", model: "m" } }, // no `team` field at all
+})
+
+const h = runtime.spawn(runtime.root, "solo") as agents.Handle
+runtime.wake(h, "do something")
+const r = await runtime.wait(h)
+
+// The client's own toolkit for this agent has no "task" entry — calling it
+// surfaces as a normal isError TOOL result (via the shipped "Unknown tool" path),
+// never a runtime crash and never a phantom delegation. The run itself still finishes.
+assert.equal(r.status, "done")
+assert.match(r.text, /Unknown tool: task/, "the tool error rode back through the transcript, never crashed the run")
+
+await runtime.close(runtime.root)
+console.log("ok:", r.text)
+```
+
+### 3. The full surface — team advertised sorted, out-of-team refusal, reattach not duplicate
+
+The tool's description lists ONLY the caller's team, sorted by name; asking for an agent outside it
+is refused with the team listed (never a silent no-op); calling `task` twice with the same
+`{ agent, prompt }` reattaches to the already-spawned child instead of spawning a second one.
+
+```ts test
+import assert from "node:assert"
+import { agents } from "toolnexus"
+
+let explorerRuns = 0
+const mockFetch: typeof fetch = async (_url, init) => {
+  const body = JSON.parse(String(init?.body))
+  const hasToolResult = body.messages.some((m: any) => m.role === "tool")
+  if (body.model === "m-explorer") {
+    explorerRuns++
+    return new Response(JSON.stringify({ choices: [{ message: { content: "explorer says hi" } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } })
+  }
+  // coordinator: first call the SAME task twice (proving reattachment), then try an
+  // out-of-team agent, then echo back whatever the last tool result said.
+  const calls = body.messages.filter((m: any) => m.role === "tool").length
+  let toolCall: any
+  if (calls === 0) toolCall = { name: "task", arguments: JSON.stringify({ agent: "explorer", prompt: "look around" }) }
+  else if (calls === 1) toolCall = { name: "task", arguments: JSON.stringify({ agent: "explorer", prompt: "look around" }) } // identical — reattach
+  else if (calls === 2) toolCall = { name: "task", arguments: JSON.stringify({ agent: "stranger", prompt: "x" }) } // not on the team
+  const payload = toolCall
+    ? { choices: [{ message: { content: null, tool_calls: [{ id: `c${calls}`, type: "function", function: toolCall }] } }] }
+    : { choices: [{ message: { content: `refusal was: ${body.messages.at(-1).content}` } }] }
+  return new Response(JSON.stringify({ ...payload, usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } })
+}
+
+const runtime = new agents.AgentRuntime({
+  fetch: mockFetch,
+  registry: {
+    coordinator: { name: "coordinator", does: "delegates work", model: "m-coordinator", team: ["explorer", "planner"] },
+    explorer: { name: "explorer", does: "read-only research", model: "m-explorer" },
+    planner: { name: "planner", does: "breaks work into steps", model: "m-planner" },
+  },
+})
+
+const h = runtime.spawn(runtime.root, "coordinator") as agents.Handle
+runtime.wake(h, "start")
+const r = await runtime.wait(h)
+
+assert.equal(explorerRuns, 1, "the SECOND identical task call reattached — the child never re-ran")
+assert.ok(runtime.trace.some((l) => l.includes("REATTACH")), "the trace names the reattachment")
+assert.equal(r.status, "done", "the coordinator's own run finishes normally — the refusal is just a tool error")
+assert.match(r.text, /not in this agent's team/)
+assert.match(r.text, /explorer/)
+assert.match(r.text, /planner/, "the refusal lists the team, sorted, so the model can self-correct")
+
+await runtime.close(runtime.root)
+console.log("ok:", r.text)
+```
+
+## Options
+
+`task` itself takes no configuration — it appears automatically, shaped by the agent's own
+declaration:
+
+| Where it's set | Field | What it does |
+|---|---|---|
+| `AgentSpec` (via `agents.agent`) | `team: agents.Agent[]` | Reachable delegation targets. Empty/absent ⇒ **no `task` tool at all** for this agent. |
+| `AgentDef` (raw runtime registry) | `team: string[]` | Same, by registry name. |
+
+The tool's own schema is fixed: `{ agent: string, prompt: string }`, both required. Its
+`description` is generated — team members sorted by name, each rendered as `"<name>: <does>"`.
+
+## What you get back
+
+Calling `task` returns a `ToolResult` whose `output` is the child's final text (prefixed
+`[<status>]` for anything other than `"done"`) and whose `metadata` carries `{ agent, turns,
+totalTokens }` — or, if the child itself suspends, the child's `Request.prompt` as `output` with
+`isError: true` and `metadata.pending` set (§10 escalation, unchanged shape).
+
+## See also
+
+- [`agents.Agent`](/api/javascript/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`agents.AgentRuntime`](/api/javascript/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`agents.Handle`](/api/javascript/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`agents.Budget`](/api/javascript/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

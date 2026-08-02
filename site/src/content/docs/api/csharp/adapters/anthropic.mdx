@@ -1,0 +1,183 @@
+---
+title: Adapters.ToAnthropic
+description: Render any tool list as Anthropic tool-use schema. C#.
+sidebar:
+  label: Adapters.ToAnthropic
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Adapters.cs">Adapters.cs</a>
+</p>
+
+```csharp
+public static List<Dictionary<string, object?>> ToAnthropic(IEnumerable<ITool> tools)
+```
+
+Turns tools into the `tools` array an Anthropic Messages request expects. Same tools, same
+execution — only the schema envelope differs from OpenAI.
+
+The Anthropic shape is the **flattest** of the three: one entry per tool, carrying `name`,
+`description` and `input_schema`, with no `type: "function"` wrapper around it.
+
+## When to use it
+
+When you are calling `POST /v1/messages` yourself — through the official SDK, a raw `HttpClient`,
+or a gateway that speaks the Anthropic wire format (Bedrock, Vertex) — and need schema to put in
+the request body.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Skip this entirely if you use LlmClient.Create">
+[`LlmClient.Create`](/api/csharp/client/create/) picks the adapter from its style option and runs
+the whole tool-calling loop for you. Reach for `ToAnthropic` when you already own the loop and want
+toolnexus only for tool *aggregation*. And if you are talking to an OpenAI-compatible endpoint,
+use [`Adapters.ToOpenAI`](/api/csharp/adapters/openai/) instead — the two envelopes are not
+interchangeable.
+</Aside>
+
+## Examples
+
+### 1. One tool to Anthropic schema
+
+```csharp test
+using Toolnexus;
+
+var weather = NativeTool.Of(
+    "get_weather",
+    "Current weather for a city",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["city"] = new Dictionary<string, object?> { ["type"] = "string" } },
+        ["required"] = new[] { "city" },
+    },
+    (IDictionary<string, object?> a) => $"sunny in {a["city"]}");
+
+var schema = Adapters.ToAnthropic(new ITool[] { weather });
+
+if (schema.Count != 1) throw new Exception("expected 1 entry");
+if (schema[0]["name"] as string != "get_weather") throw new Exception("name");
+if (schema[0]["description"] as string != "Current weather for a city") throw new Exception("description");
+
+// Flat: no "type"/"function" wrapper, and the schema key is input_schema.
+if (schema[0].ContainsKey("function")) throw new Exception("there is no function wrapper here");
+if (!schema[0].ContainsKey("input_schema")) throw new Exception("input_schema");
+
+Console.WriteLine($"ok: {schema[0]["name"]}");
+```
+
+`ITool.InputSchema` becomes `input_schema` — snake_case, because that is what the Anthropic wire
+format uses. Compare with OpenAI, where the same dictionary is nested under
+`function.parameters`.
+
+### 2. Feeding it straight into a Messages request body
+
+The output is plain dictionaries, so `System.Text.Json` serializes it with no converter.
+
+```csharp test
+using System.Text.Json;
+using Toolnexus;
+
+ITool Mk(string name, string desc) => NativeTool.Of(
+    name, desc,
+    new Dictionary<string, object?> { ["type"] = "object", ["properties"] = new Dictionary<string, object?>() },
+    (IDictionary<string, object?> a) => name);
+
+var tools = new[] { Mk("search", "Search the docs"), Mk("ping", "Health check") };
+
+var body = new Dictionary<string, object?>
+{
+    ["model"] = "claude-sonnet-4-5",
+    ["max_tokens"] = 1024,
+    ["messages"] = new[] { new Dictionary<string, object?> { ["role"] = "user", ["content"] = "search for adapters" } },
+    ["tools"] = Adapters.ToAnthropic(tools),
+};
+
+var entries = (List<Dictionary<string, object?>>)body["tools"]!;
+if (entries.Count != 2) throw new Exception("expected 2 tools");
+
+// Order is preserved.
+var names = entries.Select(e => (string)e["name"]!).ToList();
+if (names[0] != "search" || names[1] != "ping") throw new Exception($"order: {string.Join(",", names)}");
+
+var json = JsonSerializer.Serialize(body);
+if (!json.Contains("\"input_schema\"")) throw new Exception("expected input_schema on the wire");
+
+Console.WriteLine($"ok: {string.Join(", ", names)}");
+```
+
+<Aside type="note" title="The key never goes in the body">
+The API key belongs in the `x-api-key` header and is read from the environment —
+`Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY")`. Never write a real one into code, a
+test, or a docs example.
+</Aside>
+
+### 3. Round-tripping a `tool_use` block back to the tool
+
+Schema out, tool call in. The `name` you advertised is the `name` the model returns.
+
+```csharp test
+using System.Text.Json;
+using Toolnexus;
+
+var weather = NativeTool.Of(
+    "get_weather",
+    "Current weather for a city",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["city"] = new Dictionary<string, object?> { ["type"] = "string" } },
+        ["required"] = new[] { "city" },
+    },
+    (IDictionary<string, object?> a) => $"sunny in {a["city"]}");
+
+var tools = new ITool[] { weather };
+if (Adapters.ToAnthropic(tools)[0]["name"] as string != "get_weather") throw new Exception("advertised name");
+
+// What a model would send back: a content block whose `input` is a real JSON OBJECT.
+const string block = """
+{"type":"tool_use","id":"toolu_01","name":"get_weather","input":{"city":"Chennai"}}
+""";
+
+var parsed = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(block)!;
+var calledName = parsed["name"].GetString()!;
+// NB: `args` is already the implicit parameter of a top-level program — pick another name.
+var callArgs = parsed["input"].EnumerateObject()
+    .ToDictionary(p => p.Name, p => (object?)p.Value.ToString());
+
+var called = tools.FirstOrDefault(t => t.Name == calledName)
+    ?? throw new Exception("the advertised name should resolve back to the tool");
+
+var res = await called.ExecuteAsync(callArgs);
+if (res.IsError || res.Output != "sunny in Chennai") throw new Exception(res.Output);
+
+// An empty tool list is valid — it just means "no tools this turn".
+if (Adapters.ToAnthropic(Array.Empty<ITool>()).Count != 0) throw new Exception("expected empty");
+
+Console.WriteLine($"ok: {calledName} -> {res.Output}");
+```
+
+<Aside type="caution">
+Unlike OpenAI, Anthropic sends `input` as a **JSON object**, not a JSON string — do not deserialize
+it a second time. You send the answer back as a `tool_result` content block carrying the matching
+`tool_use_id`; `ToolResult.IsError` maps to that block's `is_error`.
+</Aside>
+
+## Shape
+
+| Path | From | Notes |
+|---|---|---|
+| `[]["name"]` | `ITool.Name` | What the model calls back with. |
+| `[]["description"]` | `ITool.Description` | |
+| `[]["input_schema"]` | `ITool.InputSchema` | Renamed — `InputSchema` → `input_schema`. |
+
+There is no wrapper key and no wrapper entry: an empty tool list produces an empty list.
+
+## See also
+
+- [`Adapters.ToOpenAI`](/api/csharp/adapters/openai/) · [`Adapters.ToGemini`](/api/csharp/adapters/gemini/)
+- [`Toolkit.CreateAsync`](/api/csharp/toolkit/create/) — the toolkit exposes this applied to its own tools
+- [`LlmClient.Create`](/api/csharp/client/create/) — calls the adapter for you
+- [`ITool`](/api/csharp/types/tool/) — the four members the adapter reads

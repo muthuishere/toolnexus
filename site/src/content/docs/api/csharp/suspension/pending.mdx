@@ -1,0 +1,290 @@
+---
+title: "ToolResult.Pending"
+description: "Return a Pending from a tool to park the run until someone answers. — C#."
+sidebar:
+  label: "ToolResult.Pending"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/ToolResult.cs">ToolResult.cs</a>
+</p>
+
+```csharp
+public sealed record ToolResult(string Output, bool IsError, IDictionary<string, object?>? Metadata = null)
+{
+    public static ToolResult Pending(Request request);
+}
+```
+
+<Aside type="note" title="Not `Suspension.Pending`">
+This port puts the §10 producer helpers directly on **`ToolResult`** — there is no separate
+`Suspension` class in C#. Java does the same; JavaScript, Python and Go expose free functions
+named `pending`/`Pending` instead. See [`ToolResult`](/api/csharp/types/tool-result/) for the full
+type.
+</Aside>
+
+A tool that cannot finish in one shot returns `ToolResult.Pending(request)` instead of an answer.
+It builds a `ToolResult` with `IsError = true` and `Metadata["pending"] = request` — a
+correlation id is generated for you when `request.Id` is empty. The client loop reads that
+metadata key, calls the configured [`WaitFor`](/api/csharp/suspension/wait-for/), and on an `Ok`
+answer **re-executes the same tool once** with the resolution attached to `ToolContext.Answer`.
+
+## When to use it
+
+Any tool whose real answer depends on something outside the current process — a human's approval,
+a login flow, a file that hasn't arrived yet. Return `Pending` on the first call; check
+`ctx?.Answer` to detect you're on the resumed retry and finish the job using the resolution.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for ToolResult.AuthRequired for the login-shaped case">
+`Pending` takes a full `Request` — any `Kind`, any `Prompt`, any `Data`. When the suspension is
+specifically "the user needs to log in at a URL",
+[`ToolResult.AuthRequired`](/api/csharp/suspension/auth-required/) is the same mechanism with the
+`kind:"authorization"` shape and a default prompt already filled in — less to type for the most
+common case.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — build and read a suspension
+
+```csharp test
+using Toolnexus;
+
+var res = ToolResult.Pending(new Request { Kind = "approval", Prompt = "Approve refund of $40?" });
+
+if (!res.IsError) throw new Exception("a parked call is not a success");
+var req = ToolResult.PendingOf(res)!;
+if (req.Kind != "approval") throw new Exception(req.Kind);
+if (req.Prompt != "Approve refund of $40?") throw new Exception(req.Prompt);
+if (string.IsNullOrEmpty(req.Id)) throw new Exception("an id is generated when none is supplied");
+
+Console.WriteLine($"ok: {req.Kind} #{req.Id}");
+```
+
+### 2. The realistic case — a full suspend/resolve loop against a stub LLM
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+var httpCalls = 0;
+using var stub = new Stub(ctx =>
+{
+    httpCalls++;
+    if (httpCalls == 1)
+    {
+        Stub.Json(ctx, 200, """
+        {"id":"c1","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"approve_purchase","arguments":"{\"item\":\"gpu\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}
+        """);
+    }
+    else
+    {
+        Stub.Json(ctx, 200, """
+        {"id":"c2","choices":[{"message":{"role":"assistant","content":"Purchase approved."},"finish_reason":"stop"}],"usage":{"prompt_tokens":15,"completion_tokens":4,"total_tokens":19}}
+        """);
+    }
+});
+
+var approve = NativeTool.Of("approve_purchase", "Requests spend approval before proceeding",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["item"] = new Dictionary<string, object?> { ["type"] = "string" } },
+    },
+    (IDictionary<string, object?> a, ToolContext? ctx) =>
+    {
+        // On the RESUMED retry, ctx.Answer carries the resolution — this is how the tool tells
+        // "first call" (suspend) from "post-WaitFor retry" (finish) apart.
+        if (ctx?.Answer != null)
+            return (object)(ctx.Answer.Ok ? $"approved: {a["item"]}" : ToolResult.Error("declined"));
+        return (object)ToolResult.Pending(new Request { Kind = "approval", Prompt = $"Approve purchase of {a["item"]}?" });
+    });
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "openai", Model = "gpt-4o-mini", ApiKey = "test-key",
+    WaitFor = async request =>
+    {
+        // Stand in for a human clicking "approve" — any out-of-band resolution works the same way.
+        await Task.Delay(1);
+        return new Answer { Id = request.Id, Ok = true };
+    },
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = new List<ITool> { approve } });
+var result = await client.RunAsync("buy a gpu", tk);
+
+if (result.Status != "done") throw new Exception($"status: {result.Status}");
+if (result.Text != "Purchase approved.") throw new Exception(result.Text);
+if (result.ToolCalls[0].Output != "approved: gpu") throw new Exception(result.ToolCalls[0].Output);
+
+Console.WriteLine($"ok: {result.Text} (resolved via {httpCalls} LLM calls, tool retried once)");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+### 3. Full surface — a declined answer feeds back an error, the loop keeps going
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+var httpCalls = 0;
+using var stub = new Stub(ctx =>
+{
+    httpCalls++;
+    if (httpCalls == 1)
+    {
+        Stub.Json(ctx, 200, """
+        {"id":"c1","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"approve_purchase","arguments":"{\"item\":\"gpu\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}
+        """);
+    }
+    else
+    {
+        Stub.Json(ctx, 200, """
+        {"id":"c2","choices":[{"message":{"role":"assistant","content":"The purchase was declined."},"finish_reason":"stop"}],"usage":{"prompt_tokens":15,"completion_tokens":4,"total_tokens":19}}
+        """);
+    }
+});
+
+var approve = NativeTool.Of("approve_purchase", "Requests spend approval before proceeding",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["item"] = new Dictionary<string, object?> { ["type"] = "string" } },
+    },
+    (IDictionary<string, object?> a, ToolContext? ctx) => ctx?.Answer != null
+        ? (object)ToolResult.Error("declined")
+        : (object)ToolResult.Pending(new Request { Kind = "approval", Prompt = $"Approve purchase of {a["item"]}?" }));
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "openai", Model = "gpt-4o-mini", ApiKey = "test-key",
+    // A human said no — WaitFor reports it, the loop never re-executes the tool for a real answer.
+    WaitFor = request => Task.FromResult(new Answer { Id = request.Id, Ok = false, Reason = "declined" }),
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = new List<ITool> { approve } });
+var result = await client.RunAsync("buy a gpu", tk);
+
+if (result.Status != "done") throw new Exception($"status: {result.Status}"); // NOT "pending" — WaitFor resolved it
+if (result.Text != "The purchase was declined.") throw new Exception(result.Text);
+if (!result.ToolCalls[0].IsError) throw new Exception("the fed-back tool result must carry the decline");
+if (!result.ToolCalls[0].Output.Contains("declined/expired")) throw new Exception(result.ToolCalls[0].Output);
+
+Console.WriteLine($"ok: {result.Text} (tool result: {result.ToolCalls[0].Output})");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+<Aside type="caution">
+A suspension is never a tool error for observability purposes: the `tool` metric event carries
+`IsError = false` and a `pending: true` marker, and `Hooks.AfterTool`'s failure path does not run
+on it. Don't treat `IsError == true` alone as "the tool broke" — check
+[`ToolResult.PendingOf`](/api/csharp/suspension/pending-of/) first.
+</Aside>
+
+## Parameters
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `request` | `Request` | What is being asked. `Id` is filled in for you when empty — the correlation key `WaitFor`/`Answer` echo back. |
+
+## See also
+
+- [`ToolResult.AuthRequired`](/api/csharp/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`LlmClient.WaitFor`](/api/csharp/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`ToolResult.PendingOf`](/api/csharp/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`ToolResult`](/api/csharp/types/tool-result/) — The result envelope this rides on.

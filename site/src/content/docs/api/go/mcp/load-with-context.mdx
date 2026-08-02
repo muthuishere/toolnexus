@@ -1,0 +1,179 @@
+---
+title: "LoadMcpWithContext"
+description: "The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process. — Go."
+sidebar:
+  label: "LoadMcpWithContext"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/mcp.go">golang/mcp.go</a>
+</p>
+
+```go
+func LoadMcpWithContext(ctx context.Context, input any, waitFor ...func(Request) (Answer, error)) (*McpSource, error)
+```
+
+The context-aware entry point. `ctx` propagates through every connect, initialize, and list call
+(and bounds the streamable-HTTP → SSE fallback). A **per-server** timeout within budget marks only
+that server `failed` and the build continues — the same isolation as [`LoadMcp`](/api/go/mcp/load/).
+A **parent** cancellation or deadline is different: it aborts the whole load, closes every client
+that did connect, and `LoadMcpWithContext` returns `ctx.Err()`. `LoadMcp` keeps its simpler
+signature and delegates here with `context.Background()`.
+
+## When to use it
+
+Reach for `LoadMcpWithContext` whenever the load itself needs a budget or an external
+cancellation trigger — a request-scoped context in a server handler, a CLI command with a
+`--timeout` flag, or a shutdown signal that should stop connecting to MCP servers immediately
+rather than waiting for every one to time out on its own.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use LoadMcp when the process owns the whole lifetime">
+[`LoadMcp`](/api/go/mcp/load/) is `LoadMcpWithContext` with `context.Background()` — reach for it
+when nothing outside the load needs to cancel it. Reach for [`CreateToolkit`](/api/go/toolkit/create/)
+instead of either when MCP is one of several tool sources; its own `ctx` argument bounds the whole
+toolkit build the same way.
+</Aside>
+
+## Examples
+
+### 1. A generous budget for the shared fixture
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"time"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	fixture := filepath.Join(os.Getenv("TOOLNEXUS_REPO"), "examples", "mcp.json")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	src, err := toolnexus.LoadMcpWithContext(ctx, fixture)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer src.Close()
+
+	if src.Status["example-remote"] != toolnexus.StatusDisabled {
+		log.Fatalf("expected example-remote disabled, got %v", src.Status["example-remote"])
+	}
+
+	fmt.Println("ok: loaded under a bounded context")
+}
+```
+
+### 2. A cancelled parent context aborts the whole load
+
+Cancel `ctx` before the call even starts — no server gets a chance to connect, and the returned
+error is `ctx.Err()` itself, not a per-server failure.
+
+```go test
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	config := toolnexus.McpConfig{
+		"everything": toolnexus.ServerConfig{
+			Type:    "local",
+			Command: []string{"npx", "-y", "@modelcontextprotocol/server-everything"},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled before LoadMcpWithContext even runs
+
+	src, err := toolnexus.LoadMcpWithContext(ctx, config)
+	if err == nil {
+		log.Fatal("expected a context error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		log.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if src != nil {
+		log.Fatal("expected a nil McpSource on abort")
+	}
+
+	fmt.Println("ok: aborted the whole load with", err)
+}
+```
+
+### 3. A disabled server is reported without ever needing the budget
+
+Disabled servers are skipped before any connection attempt — a small, live deadline is plenty,
+because nothing actually races against it.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"time"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	disabled := true
+	config := toolnexus.McpConfig{
+		"off": toolnexus.ServerConfig{
+			Type:     "local",
+			Command:  []string{"unused"},
+			Disabled: &disabled,
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	src, err := toolnexus.LoadMcpWithContext(ctx, config)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer src.Close()
+
+	if src.Status["off"] != toolnexus.StatusDisabled {
+		log.Fatalf("expected 'off' disabled, got %v", src.Status["off"])
+	}
+
+	fmt.Println("ok: disabled server reported as", src.Status["off"])
+}
+```
+
+## Parameters
+
+| Parameter | Type | What it does |
+|---|---|---|
+| `ctx` | `context.Context` | Bounds connect + initialize + list for every server; cancellation aborts the whole build. |
+| `input` | `any` | Anything [`ParseMcpConfig`](/api/go/mcp/parse-config/) accepts. |
+| `waitFor` | `...func(Request) (Answer, error)` | Optional (variadic) host resolver for MCP elicitation (§10). |
+
+## See also
+
+- [`LoadMcp`](/api/go/mcp/load/) — the `context.Background()`-bound entry point this delegates to.
+- [`ListMcpTools`](/api/go/mcp/list-tools/) — list what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+- [`ParseMcpConfig`](/api/go/mcp/parse-config/) — parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
+- [`ElicitationToRequest`](/api/go/mcp/elicitation/) — map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.

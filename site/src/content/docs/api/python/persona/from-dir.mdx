@@ -1,0 +1,232 @@
+---
+title: "agent_from_dir"
+description: "Point at an agent home directory and get a configured agent back. — Python."
+sidebar:
+  label: "agent_from_dir"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/agents/surface.py">python/src/toolnexus/agents/surface.py</a>
+</p>
+
+```python
+def agent_from_dir(
+    dir: str,
+    *,
+    name: str | None = None,
+    does: str | None = None,
+    memory: bool = True,
+    tools: list[Tool] | None = None,
+    **opts: Any,          # forwarded to Agent(...): team, budget, model, wait_for, ...
+) -> Agent
+```
+
+Level 2 of the §7D/§7E surface: the directory *is* the agent. Discovers the
+`BOOTSTRAP_ORDER` files via [`compose_soul`](/api/python/persona/compose-soul/) and uses the
+result as the returned `Agent`'s `soul`; unless `memory=False`, wires a
+[`memory_tool`](/api/python/persona/memory-tool/) over the same directory so the persona can
+edit its own `MEMORY.md`/`USER.md`. Everything else — `team`, `budget`, `wait_for`,
+`uses={"tools": [...]}` — passes straight through to `Agent(...)`.
+
+## When to use it
+
+- You keep a persona's identity in files (`SOUL.md`, `AGENTS.md`, `MEMORY.md`, ...) under
+  version control or a data volume, and want one call that turns that folder into a
+  runnable `Agent` — no manual `compose_soul` + `memory_tool` wiring.
+- You want the persona to be able to persist durable notes about itself or the user across
+  sessions (the default `memory=True` path) — a support bot that remembers a customer's
+  preferences, a coding agent that keeps its own running notes.
+- You're building a long-lived, heartbeat-driven persona with `start_agent` (§7E) — it takes
+  exactly this kind of `Agent`, adds a timer that wakes it on an interval.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for agent(...) directly for an inline soul">
+`agent_from_dir` is sugar over `Agent(name, soul=..., uses={"tools": [...]})` for the specific
+case where identity lives on disk. If your soul is a short inline string, or you don't want
+the file-backed `memory` tool at all, call [`agent`](/api/python/runtime/agent/) directly —
+it's the same `Agent` class either way, and `agent_from_dir`'s `**opts` forward to the exact
+same constructor (`team`, `budget`, `model`, `wait_for`, ...).
+</Aside>
+
+`memory=True` (the default) is what makes a persona *durable* rather than merely
+file-configured: the `memory` tool writes to disk immediately, but per SPEC §7E those writes
+are intentionally invisible to the *current* session's prompt — they load at the start of
+the *next* `compose_soul` (frozen-snapshot rule). Pass `memory=False` for a read-only
+persona that should never mutate its own home directory.
+
+## Examples
+
+### 1. The smallest useful call — a directory becomes an `Agent`
+
+```python test
+import os
+import tempfile
+
+from toolnexus.agents import agent_from_dir
+
+with tempfile.TemporaryDirectory() as home:
+    with open(os.path.join(home, "SOUL.md"), "w", encoding="utf-8") as f:
+        f.write("You are Aster.")
+
+    a = agent_from_dir(home)
+
+    assert a.name == os.path.basename(home.rstrip("/"))       # defaults to the dir's basename
+    assert a.does == f"persona agent from {home}"              # a generic default routing description
+    assert a.soul == "## SOUL.md\n\nYou are Aster."
+    tool_names = [t.name for t in a.uses["tools"]]
+    assert tool_names == ["memory"]                            # memory=True by default
+
+    print("ok:", a.name, "|", tool_names)
+```
+
+### 2. The realistic case — a named persona, run to completion
+
+```python test
+import asyncio
+import os
+import tempfile
+
+from toolnexus.agents import agent_from_dir
+
+
+class ScriptedTransport:
+    """Canned OpenAI-shaped replies, popped per model — no network, no real LLM."""
+
+    def __init__(self, scripts):
+        self._scripts = {k: list(v) for k, v in scripts.items()}
+
+    def post(self, url, headers, payload, timeout):
+        return self._scripts[payload.get("model")].pop(0)
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError
+
+
+def reply(text):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+    }
+
+
+async def main():
+    with tempfile.TemporaryDirectory() as home:
+        with open(os.path.join(home, "SOUL.md"), "w", encoding="utf-8") as f:
+            f.write("You are Aster, a calm support agent.")
+        with open(os.path.join(home, "AGENTS.md"), "w", encoding="utf-8") as f:
+            f.write("Always be concise.")
+
+        support = agent_from_dir(home, name="support", does="answers support questions")
+
+        r = await support.run(
+            "hello there",
+            transport=ScriptedTransport({"stub-model": [reply("Hi — how can I help?")]}),
+            llm={"base_url": "http://mock.local", "style": "openai", "model": "stub-model", "api_key": "unused"},
+        )
+
+        assert r.status == "done"
+        assert r.text == "Hi — how can I help?"
+        assert r.is_error is False
+
+        print("ok:", support.name, "|", r.text)
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — the wired `memory` tool persists to disk, `memory=False` opts out
+
+```python test
+import asyncio
+import json
+import os
+import tempfile
+
+from toolnexus.agents import agent_from_dir
+
+
+class ScriptedTransport:
+    def __init__(self, scripts):
+        self._scripts = {k: list(v) for k, v in scripts.items()}
+
+    def post(self, url, headers, payload, timeout):
+        return self._scripts[payload.get("model")].pop(0)
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError
+
+
+def tool_call_reply(name, args):
+    return {
+        "choices": [{
+            "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": "c1", "type": "function",
+                                 "function": {"name": name, "arguments": json.dumps(args)}}],
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+
+
+def final_reply(text):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+    }
+
+
+async def main():
+    with tempfile.TemporaryDirectory() as home:
+        with open(os.path.join(home, "SOUL.md"), "w", encoding="utf-8") as f:
+            f.write("You are Aster.")
+
+        persona = agent_from_dir(home, name="aster", does="remembers user preferences")
+        scripts = {"stub-model": [
+            tool_call_reply("memory", {"action": "add", "text": "user prefers dark mode"}),
+            final_reply("Noted."),
+        ]}
+        r = await persona.run(
+            "remember that I prefer dark mode",
+            transport=ScriptedTransport(scripts),
+            llm={"base_url": "http://mock.local", "style": "openai", "model": "stub-model", "api_key": "unused"},
+        )
+
+        assert r.status == "done"
+        assert r.text == "Noted."
+
+        memory_path = os.path.join(home, "MEMORY.md")
+        assert os.path.exists(memory_path)  # the tool call above wrote real bytes to disk
+        with open(memory_path, encoding="utf-8") as f:
+            saved = f.read()
+        assert "user prefers dark mode" in saved
+
+        # memory=False -> no memory tool, and the persona cannot write to its own home.
+        readonly = agent_from_dir(home, name="readonly", memory=False)
+        assert readonly.uses["tools"] == []
+
+        print("ok:", r.text, "| memory.md:", saved.strip())
+
+
+asyncio.run(main())
+```
+
+## `agent_from_dir(dir, **opts)` fields
+
+| Field | Type | What it does |
+|---|---|---|
+| `dir` | `str` | The persona's home directory — scanned for `BOOTSTRAP_ORDER` files. |
+| `name` | `str \| None` | Defaults to `os.path.basename(dir)`. |
+| `does` | `str \| None` | Defaults to `f"persona agent from {dir}"`. |
+| `memory` | `bool` | Default `True` — wires [`memory_tool(dir)`](/api/python/persona/memory-tool/) into `uses["tools"]`. |
+| `tools` | `list[Tool] \| None` | Extra tools appended alongside the memory tool (and any `uses["tools"]` in `**opts`). |
+| `**opts` | — | Forwarded verbatim to `Agent(...)`: `team`, `budget`, `model`, `wait_for`, `on_spawn`, `on_close`, `hooks`, `on_metric`. |
+
+## See also
+
+- [`compose_soul`](/api/python/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.
+- [`memory_tool`](/api/python/persona/memory-tool/) — The opt-in built-in that lets a persona write durable notes to its own home.

@@ -1,0 +1,286 @@
+---
+title: "Agent"
+description: "Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent. — C#."
+sidebar:
+  label: "Agent"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Agents/Agent.cs">Agents/Agent.cs</a>
+</p>
+
+```csharp
+namespace Toolnexus.Agents;
+
+public sealed class Agent
+{
+    public Agent(string name, AgentSpec spec);
+    public Task<AgentResult> RunAsync(RuntimeOptions rtOpts, string prompt);
+    public ITool AsTool(RuntimeOptions rtOpts);
+}
+
+public sealed class AgentSpec
+{
+    public string Does { get; set; } = "";           // routing description, required
+    public List<ITool>? Uses { get; set; }            // the toolkit VIEW for this agent
+    public string? Soul { get; set; }                 // identity / system prompt
+    public string? SoulFile { get; set; }              // path form, read when the registry is built
+    public List<Agent>? Team { get; set; }             // task-tool targets; null = no task tool
+    public Budget? Budget { get; set; }
+    public string? Model { get; set; }                 // null/"inherit" = the runtime default
+    public Func<Request, Task<Answer>>? WaitFor { get; set; }
+    public Func<Handle, Task>? OnSpawn { get; set; }
+    public Func<Handle, string, Task>? OnClose { get; set; }
+    public LlmClient.Hooks? Hooks { get; set; }
+    public Action<MetricEvent>? OnMetric { get; set; }
+}
+```
+
+The SPEC §7D axiom made concrete: an `Agent` is (a system prompt × a filtered toolkit view × the
+§8 client loop). `RunAsync` runs it one-shot to completion, building and tearing down its own
+[`AgentRuntime`](/api/csharp/runtime/runtime/). `AsTool` is the axiom's *other* direction — it
+bridges the agent into a plain `ITool`, so a classic `LlmClient`/`Toolkit` caller can drop it into
+`ExtraTools` and delegate to it exactly like any native tool.
+
+## When to use it
+
+You want a named, reusable unit — its own `does` description, its own scoped tools (`Uses`), its
+own identity (`Soul`/`SoulFile`), its own budget — that either runs standalone (`RunAsync`) or
+plugs into a bigger toolkit as one more callable (`AsTool`). `Team` is the subagent wiring itself:
+listing other `Agent`s there is what makes the parent's model able to delegate to them via the
+[`task`](/api/csharp/runtime/task-tool/) tool.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for AgentRuntime directly for anything longer-lived">
+`Agent.RunAsync` is deliberately one-shot: spawn, wake, wait, close, done — no host verbs exposed.
+Reach for [`AgentRuntime`](/api/csharp/runtime/runtime/) directly when you need to `Post` to an
+agent's inbox mid-run, `Interrupt` it, keep several handles alive across many turns, or inspect the
+tree with `List`/`Inspect`. `Agent` is the ergonomic front door; `AgentRuntime` is the full host
+surface underneath it.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — one-shot, no tools
+
+```csharp test
+using Toolnexus.Agents;
+
+var llm = new MockLlm(_ => Task.FromResult(MockLlm.Text("hello from the sub-agent")));
+
+var greeter = new Agent("greeter", new AgentSpec { Does = "says hello" });
+var rtOpts = new RuntimeOptions { ApiKey = "test-key", Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock" };
+
+var result = await greeter.RunAsync(rtOpts, "say hi");
+
+if (result.Status != "done") throw new Exception(result.Status);
+if (result.Text != "hello from the sub-agent") throw new Exception(result.Text);
+
+Console.WriteLine($"ok: {result.Text} (turns={result.Turns})");
+
+sealed class MockLlm : System.Net.Http.HttpMessageHandler
+{
+    readonly Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> _respond;
+    public MockLlm(Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> respond) => _respond = respond;
+    protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+        System.Net.Http.HttpRequestMessage request, CancellationToken ct) => _respond(request);
+
+    public static System.Net.Http.HttpResponseMessage Text(string content) => Json(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        choices = new[] { new { message = new { role = "assistant", content } } },
+        usage = new { prompt_tokens = 5, completion_tokens = 3, total_tokens = 8 },
+    }));
+
+    public static System.Net.Http.HttpResponseMessage ToolCall(string id, string name, object args) => Json(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        choices = new[]
+        {
+            new { message = new { role = "assistant", content = (string?)null,
+                tool_calls = new[] { new { id, type = "function", function = new { name, arguments = System.Text.Json.JsonSerializer.Serialize(args) } } } } },
+        },
+        usage = new { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+    }));
+
+    static System.Net.Http.HttpResponseMessage Json(string body) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json"),
+    };
+}
+```
+
+### 2. The realistic case — a tool call, then a final answer
+
+```csharp test
+using Toolnexus;
+using Toolnexus.Agents;
+
+var calls = 0;
+var llm = new MockLlm(_ =>
+{
+    calls++;
+    return Task.FromResult(calls == 1
+        ? MockLlm.ToolCall("c1", "add", new { a = 2, b = 3 })
+        : MockLlm.Text("2 + 3 = 5"));
+});
+
+var add = NativeTool.Of("add", "add two integers",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?>
+        {
+            ["a"] = new Dictionary<string, object?> { ["type"] = "integer" },
+            ["b"] = new Dictionary<string, object?> { ["type"] = "integer" },
+        },
+    },
+    (IDictionary<string, object?> a) => (Convert.ToInt32(a["a"]) + Convert.ToInt32(a["b"])).ToString());
+
+var mathTutor = new Toolnexus.Agents.Agent("math-tutor", new AgentSpec
+{
+    Does = "answers arithmetic questions",
+    Soul = "You are a terse math tutor.",
+    Uses = new List<ITool> { add },
+});
+var rtOpts = new RuntimeOptions { ApiKey = "test-key", Handler = llm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock" };
+
+var result = await mathTutor.RunAsync(rtOpts, "what is 2 + 3?");
+
+if (result.Status != "done") throw new Exception(result.Status);
+if (result.Text != "2 + 3 = 5") throw new Exception(result.Text);
+if (result.Turns != 2) throw new Exception($"expected 2 turns, got {result.Turns}");
+
+Console.WriteLine($"ok: {result.Text} (turns={result.Turns}, tokens={result.TotalTokens})");
+
+sealed class MockLlm : System.Net.Http.HttpMessageHandler
+{
+    readonly Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> _respond;
+    public MockLlm(Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> respond) => _respond = respond;
+    protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+        System.Net.Http.HttpRequestMessage request, CancellationToken ct) => _respond(request);
+
+    public static System.Net.Http.HttpResponseMessage Text(string content) => Json(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        choices = new[] { new { message = new { role = "assistant", content } } },
+        usage = new { prompt_tokens = 5, completion_tokens = 3, total_tokens = 8 },
+    }));
+
+    public static System.Net.Http.HttpResponseMessage ToolCall(string id, string name, object args) => Json(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        choices = new[]
+        {
+            new { message = new { role = "assistant", content = (string?)null,
+                tool_calls = new[] { new { id, type = "function", function = new { name, arguments = System.Text.Json.JsonSerializer.Serialize(args) } } } } },
+        },
+        usage = new { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+    }));
+
+    static System.Net.Http.HttpResponseMessage Json(string body) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json"),
+    };
+}
+```
+
+### 3. Full surface — the axiom's other direction: `AsTool` bridges into a plain client loop
+
+```csharp test
+using Toolnexus;
+using Agent = Toolnexus.Agents.Agent;
+using Toolnexus.Agents;
+
+var subCalls = 0;
+var subLlm = new MockLlm(_ =>
+{
+    subCalls++;
+    return Task.FromResult(MockLlm.Text("Chennai: 31C, humid"));
+});
+var subRtOpts = new RuntimeOptions { ApiKey = "test-key", Handler = subLlm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock" };
+
+var weatherAgent = new Agent("weather", new AgentSpec { Does = "reports the weather for a city" });
+var weatherTool = weatherAgent.AsTool(subRtOpts); // an Agent, dropped into ExtraTools like any ITool
+
+// A completely ordinary top-level client + toolkit — it doesn't know "weather" is a whole sub-agent.
+var parentCalls = 0;
+var parentLlm = new MockLlm(_ =>
+{
+    parentCalls++;
+    return Task.FromResult(parentCalls == 1
+        ? MockLlm.ToolCall("p1", "weather", new { prompt = "how's Chennai?" })
+        : MockLlm.Text("It's 31C and humid in Chennai."));
+});
+var client = LlmClient.Create(new LlmClient.Options
+{
+    HttpHandler = parentLlm, BaseUrl = "http://runtime.invalid", Style = "openai", Model = "mock", ApiKey = "k",
+});
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false, ExtraTools = new List<ITool> { weatherTool } });
+
+var result = await client.RunAsync("what's the weather in Chennai?", tk);
+
+if (result.Status != "done") throw new Exception(result.Status);
+if (result.Text != "It's 31C and humid in Chennai.") throw new Exception(result.Text);
+// the parent's transcript gains exactly ONE tool message for the whole sub-agent run
+if (result.ToolCallCount != 1) throw new Exception($"expected 1 tool call, got {result.ToolCallCount}");
+if (result.ToolCalls[0].Output != "Chennai: 31C, humid") throw new Exception(result.ToolCalls[0].Output);
+
+Console.WriteLine($"ok: {result.Text} (sub-agent ran {subCalls} turn(s) inside 1 parent tool call)");
+
+sealed class MockLlm : System.Net.Http.HttpMessageHandler
+{
+    readonly Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> _respond;
+    public MockLlm(Func<System.Net.Http.HttpRequestMessage, Task<System.Net.Http.HttpResponseMessage>> respond) => _respond = respond;
+    protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+        System.Net.Http.HttpRequestMessage request, CancellationToken ct) => _respond(request);
+
+    public static System.Net.Http.HttpResponseMessage Text(string content) => Json(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        choices = new[] { new { message = new { role = "assistant", content } } },
+        usage = new { prompt_tokens = 5, completion_tokens = 3, total_tokens = 8 },
+    }));
+
+    public static System.Net.Http.HttpResponseMessage ToolCall(string id, string name, object args) => Json(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        choices = new[]
+        {
+            new { message = new { role = "assistant", content = (string?)null,
+                tool_calls = new[] { new { id, type = "function", function = new { name, arguments = System.Text.Json.JsonSerializer.Serialize(args) } } } } },
+        },
+        usage = new { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+    }));
+
+    static System.Net.Http.HttpResponseMessage Json(string body) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json"),
+    };
+}
+```
+
+<Aside type="caution">
+`AgentSpec.Team` (a `List<Agent>`) is what wires the `task` tool — see
+[the task tool](/api/csharp/runtime/task-tool/). Two different `Agent` types exist in this
+namespace and `Toolnexus.A2A`'s outbound descriptor of the same name — bring both `using
+Toolnexus;` and `using Toolnexus.Agents;` into scope and the bare name is ambiguous; alias one
+(`using Agent = Toolnexus.Agents.Agent;`) as example 3 does.
+</Aside>
+
+## Fields (`AgentSpec`)
+
+| Field | Type | What it is |
+|---|---|---|
+| `Does` | `string` | Required — the routing description a delegating model (or `task` tool listing) sees. |
+| `Uses` | `List<ITool>?` | The scoped toolkit view — this agent gets exactly these tools, nothing more. |
+| `Soul` / `SoulFile` | `string?` | Identity → this agent's system prompt, inline or read from a file when the registry builds. |
+| `Team` | `List<Agent>?` | `task`-tool targets. `null` ⇒ no `task` tool (recursion is opt-in). |
+| `Budget` | `Budget?` | See [Budgets](/api/csharp/runtime/budgets/). |
+| `Model` | `string?` | `null`/`"inherit"` ⇒ the runtime's default model. |
+| `WaitFor` | `Func<Request, Task<Answer>>?` | This agent's §10 interpreter authority. |
+| `Hooks` / `OnMetric` | — | Per-agent §8 seams — replace the runtime-wide ones for this agent only. |
+
+## See also
+
+- [`AgentRuntime`](/api/csharp/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`Handle`](/api/csharp/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`AgentTypes.Budget`](/api/csharp/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+- [The task tool](/api/csharp/runtime/task-tool/) — What `Team` wires up: the model-facing delegation tool.

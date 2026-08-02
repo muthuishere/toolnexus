@@ -341,6 +341,167 @@ defmodule Toolnexus.Client do
   end
 
   @doc """
+  Single-turn translation (§11): exactly ONE provider call, returned in OpenAI shape. No
+  agent loop, no tool execution, no conversation state — every call is self-contained, so
+  this may be run statelessly and concurrently.
+
+  The inbound half of the adapters: `to_anthropic/1`/`to_gemini/1` send declarations out,
+  this reads the provider's tool calls back in. A `:toolkit` in `opts` is DECLARED and
+  never executed.
+
+  `messages` is the OpenAI `messages` list, taken verbatim. Options:
+
+    * `:tools` — the OpenAI `tools` array, verbatim (declaration-only)
+    * `:toolkit` — an ordinary toolkit, declared but never executed; composes with `:tools`
+    * `:tool_choice` — the OpenAI `tool_choice`, verbatim
+    * `:system` — overrides the system prompt
+    * `:max_tokens` — overrides the per-provider default
+
+  Retries/backoff, request-param merging and the `llm` metric are shared with the loop;
+  `before_llm`/`after_llm` fire once and tool hooks never fire.
+
+  Returns a `Toolnexus.Translate.Result`.
+  """
+  @spec translate(t(), [map()], keyword()) :: Toolnexus.Translate.Result.t()
+  def translate(%__MODULE__{} = client, messages, opts \\ []) do
+    client = arm_deadline(client)
+
+    case client.style do
+      "anthropic" -> translate_anthropic(client, messages, opts)
+      _ -> translate_openai(client, messages, opts)
+    end
+  end
+
+  # OpenAI-style upstream: near-passthrough.
+  defp translate_openai(client, messages, opts) do
+    alias Toolnexus.Translate
+
+    key = resolve_key(client)
+    messages = Enum.filter(messages || [], &is_map/1)
+
+    sys = opts[:system] || client.system_prompt || ""
+
+    messages =
+      if sys != "" and not Translate.has_system_message?(messages),
+        do: [%{"role" => "system", "content" => sys} | messages],
+        else: messages
+
+    declared =
+      case opts[:toolkit] do
+        nil -> []
+        tk -> Enum.map(tools_of(tk), &to_openai_schema/1)
+      end ++ (opts[:tools] || [])
+
+    {messages, declared} = before_llm(client, messages, declared, 0)
+
+    body = %{"model" => client.model, "messages" => messages}
+    body = if declared != [], do: Map.put(body, "tools", declared), else: body
+
+    body =
+      case opts[:tool_choice] do
+        nil -> body
+        tc -> Map.put(body, "tool_choice", tc)
+      end
+
+    body =
+      case opts[:max_tokens] do
+        n when is_integer(n) and n > 0 -> Map.put(body, "max_tokens", n)
+        _ -> body
+      end
+
+    data = llm_call_json(client, openai_url(client), headers_for(client, key), finalize_body(client, body))
+    after_llm(client, data, 0)
+
+    usage = add_usage(zero_usage(), data["usage"], "openai")
+    choice = data |> Map.get("choices", []) |> List.first() || %{}
+    message = Map.get(choice, "message") || %{}
+    calls = Translate.tool_calls_of(message)
+
+    finish =
+      case Map.get(choice, "finish_reason") do
+        fr when is_binary(fr) and fr != "" -> fr
+        _ -> Translate.finish_reason_for(calls != [], nil)
+      end
+
+    %Translate.Result{
+      text: Map.get(message, "content") || "",
+      tool_calls: calls,
+      finish_reason: finish,
+      usage: usage,
+      model: client.model,
+      raw: data
+    }
+  end
+
+  # Anthropic-style upstream: the real translation.
+  defp translate_anthropic(client, messages, opts) do
+    alias Toolnexus.Translate
+
+    key = resolve_key(client)
+    {converted, extracted_system} = Translate.openai_messages_to_anthropic(messages)
+
+    sys =
+      opts[:system] ||
+        if(client.system_prompt not in [nil, ""], do: client.system_prompt, else: extracted_system)
+
+    declared =
+      case opts[:toolkit] do
+        nil -> []
+        tk -> Enum.map(tools_of(tk), &to_anthropic_schema/1)
+      end ++ Translate.openai_tools_to_anthropic(opts[:tools])
+
+    {converted, declared} = before_llm(client, converted, declared, 0)
+
+    max_tokens =
+      case opts[:max_tokens] do
+        n when is_integer(n) and n > 0 -> n
+        _ -> 4096
+      end
+
+    body = %{"model" => client.model, "max_tokens" => max_tokens, "messages" => converted}
+    body = if sys not in [nil, ""], do: Map.put(body, "system", sys), else: body
+    body = if declared != [], do: Map.put(body, "tools", declared), else: body
+
+    body =
+      case Translate.openai_tool_choice_to_anthropic(opts[:tool_choice]) do
+        nil -> body
+        tc -> Map.put(body, "tool_choice", tc)
+      end
+
+    data = llm_call_json(client, anthropic_url(client), headers_for(client, key), finalize_body(client, body))
+    after_llm(client, data, 0)
+
+    usage = add_usage(zero_usage(), data["usage"], "anthropic")
+    content = data["content"] || []
+
+    text =
+      content
+      |> Enum.filter(&(is_map(&1) and &1["type"] == "text"))
+      |> Enum.map(&(&1["text"] || ""))
+      |> Enum.join()
+
+    calls =
+      content
+      |> Enum.filter(&(is_map(&1) and &1["type"] == "tool_use"))
+      |> Enum.map(fn b ->
+        %Translate.ToolCall{
+          id: to_string(b["id"] || ""),
+          name: to_string(b["name"] || ""),
+          arguments: Jason.encode!(b["input"] || %{})
+        }
+      end)
+
+    %Translate.Result{
+      text: text,
+      tool_calls: calls,
+      finish_reason: Translate.finish_reason_for(calls != [], data["stop_reason"]),
+      usage: usage,
+      model: client.model,
+      raw: data
+    }
+  end
+
+  @doc """
   Stateful ask. With an `:id` (or a bare conversation-id string as the 4th argument), the
   client's store remembers the conversation: load transcript → run → save. Without an id,
   a stateless one-shot identical to `run/4`. With `:on_text`, streams and forwards text

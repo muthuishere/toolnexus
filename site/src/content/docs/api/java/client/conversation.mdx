@@ -1,0 +1,222 @@
+---
+title: "LlmClient.Conversation"
+description: "Keep a transcript across turns so the model remembers what it already did. — Java."
+sidebar:
+  label: "LlmClient.Conversation"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/LlmClient.java">LlmClient.java</a>
+</p>
+
+```java
+public Conversation conversation(Toolkit toolkit)
+
+public final class Conversation {
+    public RunResult send(String prompt);
+    public List<Object> messages();
+    public void reset();
+}
+```
+
+A stateful multi-turn conversation object. Each `send(prompt)` continues the SAME running
+transcript — the system prompt is added once, on the first turn, and every later turn appends to
+what came before, so the model remembers earlier turns without you re-assembling `history` by
+hand.
+
+## When to use it
+
+Multi-turn chat that lives and dies inside one Java object — a REPL, a single request/response
+session, a test — where you don't need the transcript to survive past this process. Call
+`client.conversation(toolkit)` once, then keep calling `send(...)` on the same object.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for ConversationStore when memory must survive a restart">
+`Conversation` keeps its transcript in a plain Java field — in memory, for exactly as long as the
+object lives. If the same conversation must resume after a process restart (a chat backed by a
+file/db/redis), use [`LlmClient.ask(prompt, toolkit, id)`](/api/java/client/run/) with a custom
+[`ConversationStore`](/api/java/client/store/) instead — same idea, durable by id.
+</Aside>
+
+`run(prompt, toolkit, history)` is the primitive both build on: `Conversation` is a thin,
+convenient wrapper that tracks `history` for you between calls.
+
+## Examples
+
+### 1. The smallest useful call — two turns, one object
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        AtomicInteger hits = new AtomicInteger(0);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            int n = hits.incrementAndGet();
+            String text = n == 1 ? "My name is Aria." : "You told me your name is Aria.";
+            byte[] b = ("{\"choices\":[{\"message\":{\"content\":\"" + text + "\"}}]}").getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        int port = server.getAddress().getPort();
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + port)
+                    .style("openai")
+                    .model("test-model")
+                    .apiKey("test-key"));
+
+            LlmClient.Conversation conv = client.conversation(tk);
+            LlmClient.RunResult first = conv.send("What's your name?");
+            LlmClient.RunResult second = conv.send("What did you just tell me?");
+
+            if (!first.text.equals("My name is Aria.")) throw new AssertionError(first.text);
+            if (!second.text.equals("You told me your name is Aria.")) throw new AssertionError(second.text);
+            if (conv.messages().size() != second.messages.size()) {
+                throw new AssertionError("conv.messages() should mirror the latest transcript");
+            }
+
+            System.out.println("ok: " + first.text + " | " + second.text);
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 2. The realistic case — `reset()` starts a fresh transcript
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            byte[] b = "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}".getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        int port = server.getAddress().getPort();
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + port)
+                    .style("openai")
+                    .model("test-model")
+                    .apiKey("test-key"));
+
+            LlmClient.Conversation conv = client.conversation(tk);
+            conv.send("first turn");
+            conv.send("second turn");
+            int beforeReset = conv.messages().size();
+            if (beforeReset < 2) throw new AssertionError("expected an accumulated transcript");
+
+            conv.reset();
+            if (!conv.messages().isEmpty()) throw new AssertionError("reset should clear the transcript");
+
+            conv.send("fresh start");
+            if (conv.messages().size() >= beforeReset) {
+                throw new AssertionError("post-reset transcript should not carry the old turns");
+            }
+
+            System.out.println("ok: reset from " + beforeReset + " down to " + conv.messages().size());
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 3. The full surface — a tool call inside the conversation
+
+`conv.messages()` after `send()` is the exact transcript that turn produced — system, user,
+assistant (with the tool call), tool result, and the final assistant answer.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        AtomicInteger hits = new AtomicInteger(0);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            int n = hits.incrementAndGet();
+            String body = n == 1
+                    ? "{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\","
+                      + "\"function\":{\"name\":\"epoch_zero\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}"
+                    : "{\"choices\":[{\"message\":{\"content\":\"The epoch is 1970-01-01T00:00:00Z.\"}}]}";
+            byte[] b = body.getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        int port = server.getAddress().getPort();
+
+        Tool epochZero = NativeTool.of("epoch_zero", "Return the Unix epoch",
+                Map.of("type", "object", "properties", Map.of()),
+                (Map<String, Object> a) -> "1970-01-01T00:00:00Z");
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().extraTools(epochZero))) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + port)
+                    .style("openai")
+                    .model("test-model")
+                    .apiKey("test-key"));
+
+            LlmClient.Conversation conv = client.conversation(tk);
+            LlmClient.RunResult result = conv.send("What is the Unix epoch?");
+
+            if (!result.text.equals("The epoch is 1970-01-01T00:00:00Z.")) throw new AssertionError(result.text);
+            if (result.toolCallCount != 1) throw new AssertionError(result.toolCallCount);
+            if (!conv.messages().equals(result.messages)) throw new AssertionError("conv should mirror RunResult.messages");
+            if (conv.messages().size() < 4) throw new AssertionError("expected system/user/assistant/tool messages");
+
+            System.out.println("ok: " + result.toolCallCount + " tool call(s), " + conv.messages().size() + " messages");
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+## Fields
+
+| Member | Type | What it is |
+|---|---|---|
+| `client.conversation(toolkit)` | `Conversation` | Builds a fresh conversation, empty transcript, bound to this `toolkit`. |
+| `conv.send(prompt)` | `RunResult` | Runs the next turn, appending to the running transcript automatically. |
+| `conv.messages()` | `List<Object>` | The full running transcript — same value as the last `RunResult.messages`. |
+| `conv.reset()` | `void` | Clears the transcript; the next `send()` starts a brand-new conversation. |
+
+## See also
+
+- [`LlmClient.create`](/api/java/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`LlmClient.run`](/api/java/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`LlmClient.stream`](/api/java/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`LlmClient.Hooks`](/api/java/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

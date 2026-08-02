@@ -1,0 +1,271 @@
+---
+title: "build_mcp_server"
+description: "The inbound MCP profile: any MCP client can call your tools. — Python."
+sidebar:
+  label: "build_mcp_server"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7C</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/mcp_serve.py">python/src/toolnexus/mcp_serve.py</a>
+</p>
+
+```python
+def exposed_mcp_tools(
+    tools: list[Tool],
+    cfg: dict[str, Any] | None = None,
+) -> list[Tool]
+
+def build_mcp_server(
+    tools: list[Tool],
+    cfg: dict[str, Any] | None = None,
+    on_call: Callable[[dict], Any] | None = None,
+) -> mcp.server.lowlevel.Server
+```
+
+Builds a low-level MCP `Server` exposing `tools` as MCP tools — the inbound mirror of
+§7B: where A2A advertises **skills** and runs the whole client loop, MCP advertises
+the toolkit's **unified tools** (every source) and dispatches each `tools/call`
+straight to `Tool.execute`. There is no client, no Task, no TaskStore — the calling
+MCP client *is* the LLM host.
+
+## When to use it
+
+- You want any MCP client (Claude Desktop, an IDE, another agent) to call your
+  toolkit's tools directly, with no A2A envelope in between.
+- You are turning toolnexus into a **universal MCP gateway** — aggregate N MCP
+  servers + skills + your own tools behind one toolkit, then re-expose the union as
+  one MCP server.
+- You want the tool list narrowed for a given audience — `exposed_mcp_tools` filters
+  by name before you ever build the server.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Toolkit.serve co-mounts this at POST /mcp for you">
+`toolkit.serve(addr, mcp={...})` builds this same server per request and serves it
+over streamable-HTTP at `/mcp`, alongside any `a2a` profile. Reach for
+`build_mcp_server` directly when you want the MCP `Server` object itself — an
+in-process test, a non-HTTP transport, or a custom mount point.
+</Aside>
+
+Unlike the client-side `load_mcp` (which *connects to* other MCP servers),
+`build_mcp_server` makes *this* toolkit *into* one. `tools/list` uses each `Tool`'s
+name **verbatim** — already sanitized at registration — never re-sanitized the way
+§7A/§7B skill ids are.
+
+## Examples
+
+<Aside type="note" title="Hermetic on purpose">
+Every example connects the port's own MCP **client** to the built server over an
+in-memory linked transport (`mcp.shared.memory.create_client_server_memory_streams`)
+— no HTTP, no external process, no network.
+</Aside>
+
+### 1. The smallest useful call — `tools/list` over an in-memory client
+
+```python test
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import timedelta
+
+import anyio
+from mcp import ClientSession
+from mcp.shared.memory import create_client_server_memory_streams
+
+from toolnexus import build_mcp_server, define_tool
+
+
+@asynccontextmanager
+async def connected(server):
+    async with create_client_server_memory_streams() as (client_streams, server_streams):
+        client_read, client_write = client_streams
+        server_read, server_write = server_streams
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                lambda: server.run(server_read, server_write, server.create_initialization_options())
+            )
+            async with ClientSession(read_stream=client_read, write_stream=client_write,
+                                      read_timeout_seconds=timedelta(seconds=5)) as session:
+                init = await session.initialize()
+                try:
+                    yield session, init
+                finally:
+                    tg.cancel_scope.cancel()
+
+
+def get_weather(city: str) -> str:
+    """Current weather for a city."""
+    return f"sunny in {city}"
+
+
+async def main():
+    weather = define_tool(get_weather, name="get_weather", description="Current weather for a city")
+    server = build_mcp_server([weather])
+
+    async with connected(server) as (session, init):
+        assert init.serverInfo.name == "toolnexus"  # default name
+        assert init.serverInfo.version == "0.1.0"  # default version
+
+        listed = await session.list_tools()
+        assert [t.name for t in listed.tools] == ["get_weather"]
+
+        print("ok:", listed.tools[0].name)
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — `tools/call`, an error tool, unknown-tool handling
+
+```python test
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import timedelta
+
+import anyio
+from mcp import ClientSession
+from mcp.shared.memory import create_client_server_memory_streams
+
+from toolnexus import build_mcp_server, define_tool
+
+
+@asynccontextmanager
+async def connected(server):
+    async with create_client_server_memory_streams() as (client_streams, server_streams):
+        client_read, client_write = client_streams
+        server_read, server_write = server_streams
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                lambda: server.run(server_read, server_write, server.create_initialization_options())
+            )
+            async with ClientSession(read_stream=client_read, write_stream=client_write,
+                                      read_timeout_seconds=timedelta(seconds=5)) as session:
+                await session.initialize()
+                try:
+                    yield session
+                finally:
+                    tg.cancel_scope.cancel()
+
+
+def add(a: float, b: float) -> str:
+    """Add two numbers."""
+    return str(a + b)
+
+
+def boom() -> str:
+    raise RuntimeError("kaboom")
+
+
+async def main():
+    add_tool = define_tool(add, name="add", description="Add two numbers")
+    boom_tool = define_tool(boom, name="boom", description="always throws")
+    server = build_mcp_server([add_tool, boom_tool])
+
+    async with connected(server) as session:
+        ok = await session.call_tool("add", {"a": 21, "b": 21})
+        assert ok.isError is False
+        assert ok.content[0].text == "42"
+
+        # An execute() throw becomes an isError result — never a crashed server.
+        failed = await session.call_tool("boom", {})
+        assert failed.isError is True
+        assert "kaboom" in failed.content[0].text
+
+        # An unknown tool name maps to the SDK's standard InvalidParams error, which
+        # the client SDK surfaces as an isError result rather than raising.
+        unknown = await session.call_tool("no-such-tool", {})
+        assert unknown.isError is True
+        assert "Unknown tool" in unknown.content[0].text
+
+        print("ok:", ok.content[0].text, "|", failed.isError, "|", unknown.content[0].text)
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — `exposed_mcp_tools` filtering, `cfg`, `on_call`
+
+```python test
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import timedelta
+
+import anyio
+from mcp import ClientSession
+from mcp.shared.memory import create_client_server_memory_streams
+
+from toolnexus import build_mcp_server, define_tool
+from toolnexus.mcp_serve import exposed_mcp_tools
+
+
+@asynccontextmanager
+async def connected(server):
+    async with create_client_server_memory_streams() as (client_streams, server_streams):
+        client_read, client_write = client_streams
+        server_read, server_write = server_streams
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                lambda: server.run(server_read, server_write, server.create_initialization_options())
+            )
+            async with ClientSession(read_stream=client_read, write_stream=client_write,
+                                      read_timeout_seconds=timedelta(seconds=5)) as session:
+                await session.initialize()
+                try:
+                    yield session
+                finally:
+                    tg.cancel_scope.cancel()
+
+
+async def main():
+    echo = define_tool(lambda text="": str(text), name="echo", description="echo text")
+    internal = define_tool(lambda: "secret", name="internal-only", description="not for MCP peers")
+
+    all_tools = [echo, internal]
+    # Filter down to a named subset — unknown names in the filter are ignored, never
+    # an error, matching the §2/§3 filter convention.
+    exposed = exposed_mcp_tools(all_tools, {"tools": ["echo", "does-not-exist"]})
+    assert [t.name for t in exposed] == ["echo"]
+
+    calls: list[dict] = []
+    server = build_mcp_server(
+        exposed,
+        {"name": "gateway", "version": "2.0.0"},
+        on_call=lambda ev: calls.append(ev),
+    )
+
+    async with connected(server) as session:
+        init_name = server.name
+        assert init_name == "gateway"
+
+        listed = await session.list_tools()
+        assert [t.name for t in listed.tools] == ["echo"]  # "internal-only" never crossed the boundary
+
+        r = await session.call_tool("echo", {"text": "hi"})
+        assert r.content[0].text == "hi"
+
+        # on_call fires per inbound tools/call — telemetry only, never on the MCP wire.
+        assert calls[0]["name"] == "echo"
+        assert calls[0]["source"] == "native"
+        assert calls[0]["is_error"] is False
+        assert calls[0]["ms"] >= 0
+
+        print("ok:", listed.tools[0].name, "|", calls[0])
+
+
+asyncio.run(main())
+```
+
+## Options
+
+| Parameter | Type | What it does |
+|---|---|---|
+| `tools` | `list[Tool]` | Every tool this server exposes — typically `exposed_mcp_tools(toolkit_tools, cfg)`. |
+| `cfg` | `dict \| None` | `{name?, version?, tools?: list[str]}`. `name` default `"toolnexus"`, `version` default `"0.1.0"`. `tools` filters by name (unknown names ignored); omit ⇒ all. |
+| `on_call` | `Callable \| None` | Fires per `tools/call`: `{name, source, ms, is_error}` (snake_case). Telemetry only — never on the MCP wire. |
+
+## See also
+
+- [`Toolkit.serve`](/api/python/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+- [`build_agent_card`](/api/python/serve/agent-card/) — Construct the Agent Card that advertises your name, skills and endpoint.
+- [`FileTaskStore`](/api/python/serve/task-store/) — Persist inbound A2A tasks so a suspended request survives a restart.

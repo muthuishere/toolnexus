@@ -1,0 +1,281 @@
+---
+title: "LlmClient.ErrorInfo"
+description: "Classify an LLM error into retry / fail, bound a run with a deadline, and cancel cleanly. — Java."
+sidebar:
+  label: "LlmClient.ErrorInfo"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/LlmClient.java">LlmClient.java</a>
+</p>
+
+```java
+public enum Tier { RETRY, FAIL }
+public record ErrorInfo(Throwable error, int status, int attempt, boolean retryable) {}
+
+// LlmClient.Options
+public Options onError(Function<ErrorInfo, Tier> v)   // default: retryable ? RETRY : FAIL
+public Options retries(int v)                          // default 2
+public Options retryBaseMs(int v)                       // default 500 (exponential + jitter)
+public Options timeoutMs(long v)                        // whole-run deadline; null = unbounded
+
+// LlmClient
+public static final class CancelToken {
+    public void cancel();
+    public boolean isCancelled();
+}
+public static final class TimeoutException extends RuntimeException {}
+public static final class CancelledException extends RuntimeException {}
+```
+
+The client's three resilience knobs. `ErrorInfo` is what `onError` sees for every failed LLM
+attempt (429/5xx/network are `retryable=true` by default) and returns a `Tier` — `RETRY` (bounded
+by `retries`) or `FAIL` (surface immediately). `timeoutMs` bounds the WHOLE run — including
+retries and backoff — with a monotonic deadline. `CancelToken` lets an external caller abort a
+run cooperatively from another thread.
+
+## When to use it
+
+`onError` when the default "retry 429/5xx/network, fail everything else" isn't right for your
+host — e.g. a budget-conscious caller that never wants to retry a rate limit, or one that wants to
+retry a normally-terminal status because the upstream is flaky in a nonstandard way. `timeoutMs`
+whenever a run must not hang past a caller-facing SLA. `CancelToken` whenever something OTHER than
+the run itself decides to abort it — a user closing a tab, a supervisor killing a stuck job.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Leave onError unset for the byte-identical default">
+Every port ships the same default classifier: `retryable ? RETRY : FAIL`, where `retryable` is
+429/5xx/network. Most callers never need `onError` at all — set `retries`/`retryBaseMs` to tune
+the budget/backoff and stop there. Reach for `onError` only when a status needs to be
+reclassified against that default, and reach for `CancelToken` instead of `timeoutMs` when the
+abort decision comes from OUTSIDE the run (a click, a signal) rather than from elapsed time.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — the default classifier retries transient failures
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        AtomicInteger hits = new AtomicInteger(0);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            int n = hits.incrementAndGet();
+            if (n < 3) {
+                byte[] b = "busy".getBytes(StandardCharsets.UTF_8);
+                ex.sendResponseHeaders(503, b.length);
+                try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+                return;
+            }
+            byte[] b = "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}".getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        int port = server.getAddress().getPort();
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+            // No onError set — the default classifier treats 429/5xx/network as RETRY, everything
+            // else as FAIL. Two 503s are absorbed silently.
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + port)
+                    .style("openai")
+                    .model("test-model")
+                    .apiKey("test-key")
+                    .retries(3)
+                    .retryBaseMs(5));
+
+            LlmClient.RunResult res = client.run("hi", tk);
+
+            if (!"ok".equals(res.text)) throw new AssertionError(res.text);
+            if (hits.get() != 3) throw new AssertionError("expected 2 retries then a success, got " + hits.get());
+
+            System.out.println("ok: recovered after " + (hits.get() - 1) + " retries");
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 2. The realistic case — a custom `onError` overrides the default
+
+A budget-conscious host that never retries a 429, inspecting the `ErrorInfo` it was classified on.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        AtomicInteger hits = new AtomicInteger(0);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            hits.incrementAndGet();
+            byte[] b = "rate limited".getBytes(StandardCharsets.UTF_8);
+            ex.sendResponseHeaders(429, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        int port = server.getAddress().getPort();
+
+        List<LlmClient.ErrorInfo> seen = new ArrayList<>();
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + port)
+                    .style("openai")
+                    .model("test-model")
+                    .apiKey("test-key")
+                    .retries(3)
+                    .retryBaseMs(5)
+                    .onError(info -> { seen.add(info); return LlmClient.Tier.FAIL; }));
+
+            RuntimeException thrown = null;
+            try {
+                client.run("hi", tk);
+            } catch (RuntimeException e) {
+                thrown = e;
+            }
+
+            if (thrown == null || !thrown.getMessage().contains("429")) {
+                throw new AssertionError("expected a surfaced 429, got " + thrown);
+            }
+            if (hits.get() != 1) throw new AssertionError("FAIL classifier must skip every retry, got " + hits.get());
+            LlmClient.ErrorInfo info = seen.get(0);
+            if (info.status() != 429) throw new AssertionError(info.status());
+            if (!info.retryable()) throw new AssertionError("429 is retryable by default — the host chose FAIL anyway");
+            if (info.attempt() != 0) throw new AssertionError(info.attempt());
+
+            System.out.println("ok: classifier saw status=" + info.status() + ", one request only");
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 3. The full surface — `timeoutMs` and an external `CancelToken`
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        // --- timeoutMs: a whole-run deadline aborts a slow server. ---
+        HttpServer slow = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        slow.createContext("/", ex -> {
+            try {
+                Thread.sleep(500); // far longer than the run deadline below
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            byte[] b = "{\"choices\":[{\"message\":{\"content\":\"too late\"}}]}".getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        slow.start();
+        int slowPort = slow.getAddress().getPort();
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+            LlmClient timedClient = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + slowPort)
+                    .style("openai")
+                    .model("test-model")
+                    .apiKey("test-key")
+                    .retries(0)
+                    .timeoutMs(60));
+
+            try {
+                timedClient.run("hi", tk);
+                throw new AssertionError("expected a timeout");
+            } catch (LlmClient.TimeoutException expected) {
+                // the whole-run deadline won, not the server
+            }
+        } finally {
+            slow.stop(0);
+        }
+
+        // --- CancelToken: an external caller aborts the run cooperatively. ---
+        HttpServer never = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        never.createContext("/", ex -> {
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            ex.sendResponseHeaders(200, -1); // never actually reached in this example
+        });
+        never.start();
+        int neverPort = never.getAddress().getPort();
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+            LlmClient cancelClient = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + neverPort)
+                    .style("openai")
+                    .model("test-model")
+                    .apiKey("test-key")
+                    .retries(0));
+
+            LlmClient.CancelToken cancel = new LlmClient.CancelToken();
+            Thread canceller = new Thread(() -> {
+                try { Thread.sleep(50); } catch (InterruptedException ignored) { }
+                cancel.cancel();
+            });
+            canceller.start();
+
+            try {
+                cancelClient.run("hi", tk, null, cancel);
+                throw new AssertionError("expected a cancellation");
+            } catch (LlmClient.CancelledException expected) {
+                // cancel.cancel() interrupted the in-flight request
+            }
+            canceller.join();
+        } finally {
+            never.stop(0);
+        }
+
+        System.out.println("ok: timeout and cancellation both abort cleanly");
+    }
+}
+```
+
+## Fields
+
+| Member | Type | What it is |
+|---|---|---|
+| `ErrorInfo.error/status/attempt/retryable` | — | The thrown transport error (or `null` on a non-ok HTTP response), the HTTP status (or `0` on a throw), the zero-based attempt index, and whether the default classifier would call this retryable. |
+| `Tier.RETRY` / `Tier.FAIL` | `enum` | What `onError` returns — `RETRY` is still bounded by `retries`; `FAIL` surfaces immediately, skipping remaining retries. |
+| `Options.onError(v)` | — | `null` ⇒ default classifier (`retryable ? RETRY : FAIL`), byte-identical to no classifier at all. |
+| `Options.retries(v)` / `retryBaseMs(v)` | `int` | Retry budget and exponential-backoff-with-jitter base, in ms. |
+| `Options.timeoutMs(v)` | `long` | Whole-run monotonic deadline; aborts the run (and its in-flight request) once exceeded — throws `TimeoutException`. Never retried. |
+| `CancelToken.cancel()` / `isCancelled()` | — | Cooperative external cancellation; aborts the run — throws `CancelledException`. Never retried, bypasses `onError`. |
+
+## See also
+
+- [`LlmClient.create`](/api/java/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`LlmClient.run`](/api/java/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`LlmClient.stream`](/api/java/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`LlmClient.Hooks`](/api/java/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

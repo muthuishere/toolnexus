@@ -1,0 +1,30 @@
+---
+title: "parseMcpConfig — validate an mcp.json"
+description: "Parse and validate config without connecting — the fast fail for a malformed or misspelled server block. — Java."
+sidebar:
+  label: "mcp / parse-config"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+</p>
+
+<Aside type="caution" title="Not available in Java">
+Java keeps parseConfig package-private (McpSource.java:141) — there is no public config parser. C# exposes it as McpSource.ParseConfig, not ParseMcpConfig.
+</Aside>
+
+Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
+
+## What to use instead
+
+{/* TODO:why */}
+_TODO: the closest thing this port does offer, and how to get the same outcome._
+
+## See also
+
+- [`McpSource.load`](/api/java/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+- [`McpSource.loadWith`](/api/java/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+- [`McpSource.listMcpTools`](/api/java/mcp/list-tools/) — List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+- [`McpSource.elicitationToRequest`](/api/java/mcp/elicitation/) — Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.

@@ -1,0 +1,170 @@
+---
+title: toOpenAI
+description: Render any tool list as OpenAI function-calling schema. JavaScript.
+sidebar:
+  label: toOpenAI
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/adapters.ts">js/src/adapters.ts</a>
+</p>
+
+```ts
+function toOpenAI(tools: Tool[]): {
+  type: "function"
+  function: { name: string; description: string; parameters: JSONSchema }
+}[]
+```
+
+Turns a `Tool[]` into the `tools` array an OpenAI-shaped chat completion expects. This is the
+bridge between "toolnexus knows about these tools" and "the model can call them".
+
+## When to use it
+
+When you are driving the LLM call yourself and need schema to put in the request body. Every
+OpenAI-compatible endpoint takes this shape — OpenAI, OpenRouter, Groq, Together, a local
+Ollama, or your own gateway.
+
+## Why this and not the client
+
+<Aside type="tip" title="Skip this entirely if you use createClient">
+[`createClient`](/api/javascript/client/create/) calls the right adapter for you based on its
+`style` option and runs the whole tool-calling loop. Reach for `toOpenAI` when you already have
+your own loop or framework and only want toolnexus for tool *aggregation*.
+</Aside>
+
+`tk.toOpenAI()` on a [`Toolkit`](/api/javascript/toolkit/create/) is the same function applied to
+that toolkit's tools — use it when you have a toolkit, and the free function when you have a bare
+array.
+
+## Examples
+
+### 1. One tool to OpenAI schema
+
+```ts test
+import assert from "node:assert"
+import { toOpenAI, defineTool } from "toolnexus"
+
+const weather = defineTool({
+  name: "get_weather",
+  description: "Current weather for a city",
+  inputSchema: {
+    type: "object",
+    properties: { city: { type: "string" } },
+    required: ["city"],
+  },
+  run: async ({ city }) => `sunny in ${city}`,
+})
+
+const schema = toOpenAI([weather])
+
+assert.equal(schema.length, 1)
+assert.equal(schema[0].type, "function")
+assert.equal(schema[0].function.name, "get_weather")
+assert.equal(schema[0].function.description, "Current weather for a city")
+assert.deepEqual(schema[0].function.parameters.required, ["city"])
+
+console.log("ok:", JSON.stringify(schema[0].function.name))
+```
+
+Note the nesting: OpenAI wraps each tool in `{ type: "function", function: {...} }`. The
+`inputSchema` on a `Tool` becomes `function.parameters` — the key is renamed.
+
+### 2. Feeding it straight into a request body
+
+The output is designed to be dropped into `tools` verbatim. Nothing else needs transforming.
+
+```ts test
+import assert from "node:assert"
+import { toOpenAI, defineTool } from "toolnexus"
+
+const tools = [
+  defineTool({
+    name: "search",
+    description: "Search the docs",
+    inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] },
+    run: async ({ q }) => `results for ${q}`,
+  }),
+  defineTool({
+    name: "ping",
+    description: "Health check",
+    inputSchema: { type: "object", properties: {} },
+    run: async () => "pong",
+  }),
+]
+
+const body = {
+  model: "gpt-4o-mini",
+  messages: [{ role: "user", content: "search for adapters" }],
+  tools: toOpenAI(tools),
+}
+
+// Order is preserved, one entry per tool.
+assert.equal(body.tools.length, 2)
+assert.deepEqual(body.tools.map((t) => t.function.name), ["search", "ping"])
+// The body is plain JSON — no classes, no cycles.
+assert.ok(JSON.stringify(body).length > 0)
+
+console.log("ok:", body.tools.map((t) => t.function.name).join(", "))
+```
+
+### 3. Round-tripping a call back to the tool
+
+Schema out, tool call in. The `name` the model returns is the same `name` you look up.
+
+```ts test
+import assert from "node:assert"
+import { toOpenAI, defineTool } from "toolnexus"
+
+const weather = defineTool({
+  name: "get_weather",
+  description: "Current weather for a city",
+  inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+  run: async ({ city }) => `sunny in ${city}`,
+})
+
+const tools = [weather]
+const schema = toOpenAI(tools)
+
+// What a model would send back for that schema.
+const toolCall = {
+  id: "call_1",
+  type: "function",
+  function: { name: "get_weather", arguments: '{"city":"Chennai"}' },
+}
+
+// Look the tool up by the name you advertised, then execute it.
+const called = tools.find((t) => t.name === toolCall.function.name)
+assert.ok(called, "the advertised name resolves back to the tool")
+
+const res = await called.execute(JSON.parse(toolCall.function.arguments))
+assert.equal(res.output, "sunny in Chennai")
+assert.equal(res.isError, false)
+
+// An empty tool list is valid — it just means "no tools this turn".
+assert.deepEqual(toOpenAI([]), [])
+
+console.log("ok:", schema[0].function.name, "->", res.output)
+```
+
+<Aside type="caution">
+OpenAI sends `arguments` as a **JSON string**, not an object. Parse it before handing it to
+`execute`, which expects a real object.
+</Aside>
+
+## Shape
+
+| Path | From | Notes |
+|---|---|---|
+| `[].type` | — | Always the literal `"function"`. |
+| `[].function.name` | `Tool.name` | What the model calls back with. |
+| `[].function.description` | `Tool.description` | |
+| `[].function.parameters` | `Tool.inputSchema` | Renamed — `inputSchema` → `parameters`. |
+
+## See also
+
+- [`toAnthropic`](/api/javascript/adapters/anthropic/) · [`toGemini`](/api/javascript/adapters/gemini/)
+- [`createToolkit`](/api/javascript/toolkit/create/) — `tk.toOpenAI()` is this, applied to the toolkit
+- [`createClient`](/api/javascript/client/create/) — calls the adapter for you

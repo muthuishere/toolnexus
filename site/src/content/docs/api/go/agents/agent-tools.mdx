@@ -1,0 +1,241 @@
+---
+title: "AgentTools"
+description: "Expand a remote agent card into one tool per advertised skill. — Go."
+sidebar:
+  label: "AgentTools"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/a2a.go">golang/a2a.go</a>
+</p>
+
+```go
+func AgentTools(ctx context.Context, ag Agent) ([]Tool, error)
+```
+
+`AgentTools` does the resolve step by itself: `GET` the peer's Agent Card, and turn every advertised
+skill into one `Tool` (`source:"a2a"`) named `sanitize(card.name) + "_" + sanitize(skill.id)`. This
+is exactly what [`CreateToolkit`](/api/go/toolkit/create/) calls internally for each entry in
+`Options.Agents` — `AgentTools` is that step, exposed directly.
+
+## When to use it
+
+Reach for `AgentTools` when you want the raw `[]Tool` slice instead of a whole toolkit — to inspect
+what a peer offers before committing to it, to register only some of its skills, or to call
+`tool.Execute` directly without building a `Toolkit` at all.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Building a toolkit? Skip straight to Options.Agents">
+[`Agent`](/api/go/agents/agent/) wired through `CreateToolkit`'s `Options.Agents` calls
+`AgentTools` for you and merges the result with your other tool sources (MCP, skills,
+`ExtraTools`) under one uniform registry. Reach for `AgentTools` directly only when you need the
+tools themselves, before or instead of a toolkit.
+</Aside>
+
+## Examples
+
+All three examples resolve tools from a local fake A2A peer (`httptest.Server`) — no external
+network, no real agent.
+
+### 1. Resolve one card into its tools
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func startPeer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name": "librarian",
+			"url":  "http://unused/", // this example never calls SendMessage/GetTask
+			"skills": []any{
+				map[string]any{"id": "search", "name": "Search", "description": "Search the catalog"},
+			},
+		})
+	}))
+}
+
+func main() {
+	peer := startPeer()
+	defer peer.Close()
+
+	tools, err := toolnexus.AgentTools(context.Background(), toolnexus.Agent{
+		Card: peer.URL,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(tools) != 1 {
+		log.Fatalf("expected 1 tool, got %d", len(tools))
+	}
+	if tools[0].Name != "librarian_search" || tools[0].Source != toolnexus.SourceA2A {
+		log.Fatalf("unexpected tool: %+v", tools[0])
+	}
+
+	fmt.Println("ok:", tools[0].Name, tools[0].Source)
+}
+```
+
+### 2. Register only some of a peer's tools
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func startPeer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name": "ops",
+			"url":  "http://unused/",
+			"skills": []any{
+				map[string]any{"id": "read", "name": "Read", "description": "Read-only, safe"},
+				map[string]any{"id": "delete", "name": "Delete", "description": "Destructive"},
+			},
+		})
+	}))
+}
+
+func main() {
+	peer := startPeer()
+	defer peer.Close()
+
+	tools, err := toolnexus.AgentTools(context.Background(), toolnexus.Agent{Card: peer.URL})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Hand-pick a safe subset into your own toolkit — never blanket-import a
+	// peer's whole surface when you don't trust all of it equally.
+	var safe []toolnexus.Tool
+	for _, t := range tools {
+		if t.Name == "ops_read" {
+			safe = append(safe, t)
+		}
+	}
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+	tk.Register(safe...)
+
+	if _, ok := tk.Get("ops_read"); !ok {
+		log.Fatal("expected ops_read registered")
+	}
+	if _, ok := tk.Get("ops_delete"); ok {
+		log.Fatal("ops_delete should have been left out")
+	}
+
+	fmt.Println("ok: registered", len(safe), "of", len(tools), "peer tools")
+}
+```
+
+### 3. The full surface — a bad card fails the resolve, calling a tool needs no toolkit
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func startPeer() *httptest.Server {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/.well-known/agent-card.json" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name": "calc", "url": srv.URL + "/",
+				"skills": []any{map[string]any{"id": "double", "name": "Double", "description": "Doubles a number"}},
+			})
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var rpc struct {
+			ID     any    `json:"id"`
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(body, &rpc)
+		if rpc.Method == "SendMessage" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": rpc.ID,
+				"result": map[string]any{"id": "t1", "status": map[string]any{"state": "submitted"}}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": rpc.ID,
+			"result": map[string]any{"id": "t1", "status": map[string]any{"state": "completed"},
+				"artifacts": []any{map[string]any{"parts": []any{map[string]any{"kind": "text", "text": "42"}}}}}})
+	}))
+	return srv
+}
+
+func main() {
+	// A bad card URL fails the resolve up front — never a partial tool list.
+	if _, err := toolnexus.AgentTools(context.Background(), toolnexus.Agent{Card: "http://127.0.0.1:0/nope"}); err == nil {
+		log.Fatal("expected an error for an unreachable card")
+	}
+
+	peer := startPeer()
+	defer peer.Close()
+	tools, err := toolnexus.AgentTools(context.Background(), toolnexus.Agent{
+		Card: peer.URL + "/.well-known/agent-card.json", PollEvery: 5,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// A resolved Tool is a complete, self-contained callable — Execute it
+	// directly, no CreateToolkit required.
+	res, err := tools[0].Execute(map[string]any{"task": "double 21"}, &toolnexus.ToolContext{Ctx: context.Background()})
+	if err != nil || res.IsError || res.Output != "42" {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+
+	fmt.Println("ok:", tools[0].Name, "->", res.Output)
+}
+```
+
+## Parameters and return value
+
+| | Type | What it holds |
+|---|---|---|
+| `ctx` | `context.Context` | Bounds the card fetch. |
+| `ag` | `Agent` | The peer descriptor — `Card`, `Headers`, `Timeout`, `PollEvery`. |
+| returns | `([]Tool, error)` | One `Tool` per advertised skill, or an error if the card could not be fetched/parsed. |
+
+## See also
+
+- [`agents.New`](/api/go/agents/agent/) — Point at a remote agent's card and use it exactly like a local tool.
+- [`ParseAgentsConfig`](/api/go/agents/parse-config/) — Declare remote peers in config the way MCP servers are declared, with precedence rules.

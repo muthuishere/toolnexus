@@ -1,0 +1,41 @@
+---
+title: "Relay tools — declaration-only"
+description: "Declare a tool the host executes, not the library: the call rides out on the suspension. — Java."
+sidebar:
+  label: "suspension / relay"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+<Aside type="caution" title="Not available in Java">
+Go-only today (golang/relay.go). SPEC §10 addendum landed as a Go preview; the other five ports do not ship a relay tool yet.
+</Aside>
+
+Declare a tool the host executes, not the library: the call rides out on the suspension.
+
+## What to use instead
+
+A relay tool declares a schema with no host-side behavior: the model calls it, the call rides out
+as a §10 suspension carrying `data.calls`, the *host* executes it, and the host's output is fed
+back as the tool result — nothing runs inside toolnexus. That lets a Go service act as a pure
+OpenAI-function-calling proxy. Java has no equivalent constructor, but the same outcome — declare
+tools to a provider without toolnexus ever executing them — is available today through
+[`Translate.translate`](/api/java/translate/translate/) (SPEC §11): hand it a `Toolkit` (or a raw
+OpenAI `tools` array) and it declares everything to the provider and hands back the tool calls the
+model asked for, verbatim, executing **nothing**. The difference is posture, not capability for the
+common case: relay keeps toolnexus owning the conversation loop and surfaces calls as a suspension
+mid-loop; `translate` is a single stateless call where the *caller* already owns the conversation
+and will execute the tools itself. ADR-0011 (linked from `SPEC.md`) is the fuller argument for why
+translation, not relay, is the right mechanism for a pure pass-through posture outside Go.
+
+## See also
+
+- [`ToolResult.pending`](/api/java/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`ToolResult.authRequired`](/api/java/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`LlmClient.waitFor`](/api/java/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`ToolResult.pendingOf`](/api/java/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`Translate.translate`](/api/java/translate/translate/) — The pure declare-and-translate mechanism Java offers instead, for the pass-through posture.

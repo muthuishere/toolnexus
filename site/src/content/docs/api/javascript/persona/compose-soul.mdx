@@ -1,0 +1,137 @@
+---
+title: "composeSoul"
+description: "Build a persona's system prompt from its home directory: identity, memory, skills. — JavaScript."
+sidebar:
+  label: "composeSoul"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7e-agent-home--personas-source-agent-persona-surface">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/agents/home.ts">js/src/agents/home.ts</a>
+</p>
+
+```ts
+function composeSoul(dir: string): { soul: string; found: string[] }
+```
+
+Read a persona's home directory and assemble its system prompt. Seven well-known filenames —
+`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `MEMORY.md` — are
+each read (when present) and joined as a `## <filename>` section, always in that fixed order
+regardless of directory-listing order. Absent files are silently skipped.
+
+## When to use it
+
+Reach for `composeSoul` when you want the **file layout** — the identity/memory/heartbeat
+directory shape §7E defines — without the rest of the persona machinery. It is a pure
+`dir -> string` read: no tool wiring, no agent registration, no side effects. That makes it useful
+on its own for previewing a soul before spawning anything, or for feeding the same composed text
+into something that isn't an `agents.Agent` at all (a bare `createClient` call's `systemPrompt`,
+for instance).
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use fromDir instead when you want a runnable agent">
+`composeSoul` only builds the string. [`fromDir`](/api/javascript/persona/from-dir/) calls it
+internally and also wires the `memory` tool and returns a ready-to-run
+[`agents.Agent`](/api/javascript/runtime/agent/). Reach for `fromDir` unless you specifically need
+the soul text in isolation — most callers do.
+</Aside>
+
+Two behaviors are worth pinning explicitly, because they are easy to get wrong by hand:
+
+- **Order is fixed, not filesystem order.** `AGENTS.md` always precedes `MEMORY.md` in the output
+  even if the OS lists them the other way — identity comes first, durable memory comes last.
+- **The 2 MB cap is measured in bytes, not characters.** A file over `2097152` bytes is truncated
+  at the byte boundary (which can split a multibyte UTF-8 character) with a trailing notice
+  appended to the in-memory string — the file on disk is never touched.
+
+## Examples
+
+### 1. One file present — the rest are silently skipped
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { agents } from "toolnexus"
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "persona-"))
+fs.writeFileSync(path.join(dir, "SOUL.md"), "You are Ava, a calm and precise ops assistant.")
+
+const { soul, found } = agents.composeSoul(dir)
+
+assert.deepEqual(found, ["SOUL.md"])
+assert.equal(soul, "## SOUL.md\n\nYou are Ava, a calm and precise ops assistant.")
+
+console.log("ok:", found.join(","))
+```
+
+### 2. Several files — always assembled in bootstrap order
+
+Files are written here in reverse order on purpose — `MEMORY.md` before `AGENTS.md` — to show
+that the output order does not depend on write order or directory listing order.
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { agents } from "toolnexus"
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "persona-"))
+fs.writeFileSync(path.join(dir, "MEMORY.md"), "The team prefers metric units.")
+fs.writeFileSync(path.join(dir, "AGENTS.md"), "Be concise. Never guess a balance.")
+fs.writeFileSync(path.join(dir, "USER.md"), "Reports to the ops lead.")
+
+const { soul, found } = agents.composeSoul(dir)
+
+// IDENTITY.md/TOOLS.md/HEARTBEAT.md were absent — skipped, not blank sections.
+assert.deepEqual(found, ["AGENTS.md", "USER.md", "MEMORY.md"])
+assert.ok(soul.indexOf("## AGENTS.md") < soul.indexOf("## USER.md"))
+assert.ok(soul.indexOf("## USER.md") < soul.indexOf("## MEMORY.md"))
+
+console.log("ok:", found.join(" -> "))
+```
+
+### 3. Oversized file — truncated in memory, byte-capped, disk untouched
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { agents } from "toolnexus"
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "persona-"))
+const oversized = "x".repeat(2 * 1024 * 1024 + 10) // 10 bytes over the 2 MB cap
+fs.writeFileSync(path.join(dir, "MEMORY.md"), oversized)
+
+const { soul, found } = agents.composeSoul(dir)
+
+assert.deepEqual(found, ["MEMORY.md"])
+assert.match(soul, /\[truncated: exceeds 2 MB bootstrap cap\]$/)
+// The cap is on the composed IN-MEMORY string — the file on disk is never rewritten.
+assert.equal(fs.statSync(path.join(dir, "MEMORY.md")).size, oversized.length)
+
+console.log("ok: soul truncated, disk file still", fs.statSync(path.join(dir, "MEMORY.md")).size, "bytes")
+```
+
+## Options
+
+| Field | Type | What it is |
+|---|---|---|
+| `dir` | `string` | The persona's home directory. |
+
+## What you get back
+
+| Field | Type | What it is |
+|---|---|---|
+| `soul` | `string` | The joined `## <filename>` sections, in bootstrap order — empty string if no files were found. |
+| `found` | `string[]` | Which of the seven bootstrap filenames were present, in bootstrap order. |
+
+## See also
+
+- [`fromDir`](/api/javascript/persona/from-dir/) — Point at an agent home directory and get a configured agent back.
+- [`memoryTool`](/api/javascript/persona/memory-tool/) — The opt-in built-in that lets a persona write durable notes to its own home.

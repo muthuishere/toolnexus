@@ -1,0 +1,299 @@
+---
+title: "LlmClient.Options.waitFor"
+description: "The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract. — Java."
+sidebar:
+  label: "LlmClient.waitFor"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/LlmClient.java">LlmClient.java</a>
+</p>
+
+```java
+public Function<Request, Answer> waitFor; // LlmClient.Options field
+public Options waitFor(Function<Request, Answer> v)  // fluent setter
+```
+
+The one host slot for resolving a §10 suspension. When a tool returns `Pending`
+(`metadata.pending`), the client calls `waitFor.apply(request)` synchronously on the calling
+thread to obtain an `Answer`, then re-executes the **same tool once** with `Context.answer` set,
+and feeds that result back to the model. If the retry still suspends, the loop feeds back an error
+`ToolResult` rather than looping forever on the same request. `waitFor`'s interior is entirely the
+host's business — open a browser and poll, message a channel and wait, forward to another agent —
+the client only cares that it eventually returns an `Answer`. Leave it `null` (the default) and a
+suspended run does not hang: `run` returns `status:"pending"` with the `Request` instead, so a
+durable host can resolve it out-of-band and resume by calling `run` again later.
+
+## When to use it
+
+Set `waitFor` whenever you want suspensions resolved **in-process**, transparently, without the
+caller ever seeing `status:"pending"` — a CLI that can pop a login link and block on the terminal,
+a service with its own approval queue it can poll synchronously. Leave it unset when you want the
+**durable** posture instead: the run halts, you persist the `Request`, and a different process (or
+a much later call) resolves it — see [`ToolResult.pendingOf`](/api/java/suspension/pending-of/) for
+reading that halted state back off a `RunResult`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="waitFor for in-process resolution, the pending RunResult for durable">
+Both postures share one mechanism — there's no separate "durable mode" to opt into. Provide
+`waitFor` when blocking the current call until the suspension resolves is acceptable; omit it when
+the resolution might take minutes, hours, or cross a process boundary, and drive resumption from
+`RunResult.status`/`RunResult.pending` instead. A run's tool calls don't know or care which posture
+is active.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — waitFor resolves an approval inline
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    @SuppressWarnings("unchecked")
+    public static void main(String[] args) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            Map<String, Object> req = Json.toMap(body);
+            List<Object> messages = (List<Object>) req.get("messages");
+            boolean sawToolResult = messages.stream()
+                    .anyMatch(m -> m instanceof Map && "tool".equals(((Map<String, Object>) m).get("role")));
+            String message = sawToolResult
+                    ? "{\"content\":\"Approved and sent.\"}"
+                    : "{\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\","
+                      + "\"function\":{\"name\":\"send_payment\",\"arguments\":\"{}\"}}]}";
+            byte[] b = ("{\"choices\":[{\"message\":" + message + "}]}").getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, b.length);
+            try (OutputStream os = exchange.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+
+        Tool sendPayment = new Tool() {
+            @Override public String name() { return "send_payment"; }
+            @Override public String description() { return "Send a payment; needs approval first."; }
+            @Override public Map<String, Object> inputSchema() {
+                return Map.of("type", "object", "properties", Map.of());
+            }
+            @Override public String source() { return "custom"; }
+            @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
+                if (ctx == null || ctx.answer() == null) {
+                    return ToolResult.pending(new Request("", "approval", "Approve this payment?"));
+                }
+                return ToolResult.ok("sent");
+            }
+        };
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(sendPayment))) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort())
+                    .style("openai").model("test-model").apiKey("test-key")
+                    // The host's own logic decides how an approval gets resolved — here, always yes.
+                    .waitFor(request -> new Answer(request.id(), true)));
+
+            LlmClient.RunResult res = client.run("pay the invoice", tk);
+
+            if (!"done".equals(res.status)) throw new AssertionError(res.status);
+            if (!res.text.equals("Approved and sent.")) throw new AssertionError(res.text);
+
+            System.out.println("ok: " + res.text);
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 2. The realistic case — waitFor sees the URL and flips out-of-band state
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+
+public class Example {
+    @SuppressWarnings("unchecked")
+    public static void main(String[] args) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            Map<String, Object> req = Json.toMap(body);
+            List<Object> messages = (List<Object>) req.get("messages");
+            boolean sawToolResult = messages.stream()
+                    .anyMatch(m -> m instanceof Map && "tool".equals(((Map<String, Object>) m).get("role")));
+            String message = sawToolResult
+                    ? "{\"content\":\"Done — your balance is 67417.\"}"
+                    : "{\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\","
+                      + "\"function\":{\"name\":\"get_balance\",\"arguments\":\"{}\"}}]}";
+            byte[] b = ("{\"choices\":[{\"message\":" + message + "}]}").getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, b.length);
+            try (OutputStream os = exchange.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+
+        AtomicBoolean authed = new AtomicBoolean(false);
+        Tool getBalance = new Tool() {
+            @Override public String name() { return "get_balance"; }
+            @Override public String description() { return "Return the account balance. Requires login first."; }
+            @Override public Map<String, Object> inputSchema() {
+                return Map.of("type", "object", "properties", Map.of());
+            }
+            @Override public String source() { return "custom"; }
+            @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
+                if (!authed.get()) {
+                    return ToolResult.authRequired("https://example.com/login?token=abc", "Log in to view your balance");
+                }
+                String answerId = ctx != null && ctx.answer() != null ? ctx.answer().id() : "none";
+                return ToolResult.ok("balance: 67417 (resolved via answer " + answerId + ")");
+            }
+        };
+
+        AtomicReference<String> linkSeen = new AtomicReference<>();
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(getBalance))) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort())
+                    .style("openai").model("test-model").apiKey("test-key")
+                    // waitFor is the ONLY behavior the host supplies — here it simulates a human
+                    // completing login. In real life: open a browser, text the link, forward over A2A.
+                    .waitFor(request -> {
+                        linkSeen.set(request.url());
+                        authed.set(true); // the world changed out-of-band
+                        return new Answer(request.id(), true);
+                    }));
+
+            LlmClient.RunResult res = client.run("what is my balance?", tk);
+
+            if (!"done".equals(res.status)) throw new AssertionError(res.status);
+            if (res.pending != null) throw new AssertionError("no pending request once resolved");
+            if (!res.text.contains("67417")) throw new AssertionError(res.text);
+            if (linkSeen.get() == null || !linkSeen.get().contains("example.com/login")) {
+                throw new AssertionError("the login link must reach the host: " + linkSeen.get());
+            }
+
+            System.out.println("ok: " + res.text);
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 3. The full surface — both postures side by side: with and without waitFor
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+public class Example {
+    @SuppressWarnings("unchecked")
+    private static HttpServer stubLLM() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            Map<String, Object> req = Json.toMap(body);
+            List<Object> messages = (List<Object>) req.get("messages");
+            boolean sawToolResult = messages.stream()
+                    .anyMatch(m -> m instanceof Map && "tool".equals(((Map<String, Object>) m).get("role")));
+            String message = sawToolResult
+                    ? "{\"content\":\"resolved\"}"
+                    : "{\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\","
+                      + "\"function\":{\"name\":\"needs_approval\",\"arguments\":\"{}\"}}]}";
+            byte[] b = ("{\"choices\":[{\"message\":" + message + "}]}").getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, b.length);
+            try (OutputStream os = exchange.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        return server;
+    }
+
+    private static Toolkit approvalToolkit(AtomicBoolean approved) {
+        Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false));
+        tk.register(new Tool() {
+            @Override public String name() { return "needs_approval"; }
+            @Override public String description() { return "Something gated behind approval."; }
+            @Override public Map<String, Object> inputSchema() {
+                return Map.of("type", "object", "properties", Map.of());
+            }
+            @Override public String source() { return "custom"; }
+            @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
+                if (!approved.get()) return ToolResult.pending(new Request("", "approval", "Approve?"));
+                return ToolResult.ok("done");
+            }
+        });
+        return tk;
+    }
+
+    public static void main(String[] args) throws Exception {
+        // (A) waitFor provided → the engine resolves + retries transparently.
+        HttpServer serverA = stubLLM();
+        AtomicBoolean approvedA = new AtomicBoolean(false);
+        try (Toolkit tk = approvalToolkit(approvedA)) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + serverA.getAddress().getPort())
+                    .style("openai").model("test-model").apiKey("test-key")
+                    .waitFor(request -> { approvedA.set(true); return new Answer(request.id(), true); }));
+            LlmClient.RunResult a = client.run("do the gated thing", tk);
+            if (!"done".equals(a.status)) throw new AssertionError("A: " + a.status);
+        } finally {
+            serverA.stop(0);
+        }
+
+        // (B) no waitFor → run() halts with status:"pending", never hangs.
+        HttpServer serverB = stubLLM();
+        AtomicBoolean approvedB = new AtomicBoolean(false);
+        try (Toolkit tk = approvalToolkit(approvedB)) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + serverB.getAddress().getPort())
+                    .style("openai").model("test-model").apiKey("test-key")); // no waitFor
+            LlmClient.RunResult b = client.run("do the gated thing", tk);
+            if (!"pending".equals(b.status)) throw new AssertionError("B: " + b.status);
+            if (b.pending == null || !b.pending.kind().equals("approval")) throw new AssertionError(b.pending);
+        } finally {
+            serverB.stop(0);
+        }
+
+        System.out.println("ok: both postures verified");
+    }
+}
+```
+
+## Fields
+
+| Member | Type | What it is |
+|---|---|---|
+| `Options.waitFor` | `Function<Request, Answer>` | Resolver, called synchronously on the calling thread. `null` (default) ⇒ durable/halt posture. |
+| `Options.waitFor(v)` | `Options` | Fluent setter. |
+| `RunResult.status` | `String` | `"pending"` iff a tool suspended with no `waitFor` set. |
+| `RunResult.pending` | `Request` | The unresolved suspension, non-null iff `status == "pending"`. |
+| `Context.answer()` | `Answer` | Set on the retry after `waitFor` resolves; a tool reads `answer.data()` for `kind:"input"`, ignores it for `kind:"authorization"`. |
+
+## See also
+
+- [`ToolResult.pending`](/api/java/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`ToolResult.authRequired`](/api/java/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`ToolResult.pendingOf`](/api/java/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`LlmClient.run`](/api/java/client/run/) — The loop `waitFor` plugs into.

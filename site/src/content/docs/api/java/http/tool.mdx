@@ -1,0 +1,267 @@
+---
+title: "HttpTool.of"
+description: "Turn an HTTP endpoint into a tool: URL, method, headers with ${ENV} expansion, and a schema. — Java."
+sidebar:
+  label: "HttpTool.of"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/HttpTool.java">HttpTool.java</a>
+</p>
+
+```java
+public static HttpTool of(HttpTool.Options opts)
+```
+
+Declares a REST endpoint as a `Tool` with `source()` = `"http"`. The model supplies arguments; the
+tool spends them on `{placeholder}` segments in the URL, the querystring, and the request body, in
+that order, then returns the response text.
+
+## When to use it
+
+When the capability you want to expose is already an HTTP endpoint — your own service, an internal
+API, a third-party REST API — and standing up an MCP server for it would be pure ceremony. One
+`Options` bag replaces the client code you would otherwise write and wrap.
+
+It is also how you keep credentials out of your source: `headers` values expand `${ENV_VAR}` from
+the process environment **at call time**, and are never logged.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Prefer NativeTool.of when you already have a client">
+If the call needs pagination, retries, a signed request, an SDK, or any response munging,
+[`NativeTool.of`](/api/java/native/define-tool/) around your existing client is clearer **instead** —
+`HttpTool` deliberately does one request and hands back the raw body. Use `HttpTool.of` for the
+plain case: one endpoint, args in, text out.
+</Aside>
+
+Against pointing an MCP server at the same API: MCP earns its keep when a *server* owns many tools
+and their lifecycle. For a handful of endpoints you control, `HttpTool` skips the process, the
+handshake and the transport entirely.
+
+## Examples
+
+### 1. A GET endpoint with a URL placeholder
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        // A throwaway local server so this page never touches the network.
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            byte[] body = ("user " + ex.getRequestURI().getPath()).getBytes(StandardCharsets.UTF_8);
+            ex.sendResponseHeaders(200, body.length);
+            ex.getResponseBody().write(body);
+            ex.close();
+        });
+        server.start();
+        String base = "http://127.0.0.1:" + server.getAddress().getPort();
+
+        HttpTool.Options opts = new HttpTool.Options();
+        opts.name = "get_user";
+        opts.description = "Fetch a user by id";
+        opts.method = "GET";
+        opts.url = base + "/users/{id}";
+        opts.inputSchema = Map.of(
+            "type", "object",
+            "properties", Map.of("id", Map.of("type", "string")),
+            "required", List.of("id"));
+
+        Tool tool = HttpTool.of(opts);
+        if (!tool.source().equals("http")) throw new AssertionError(tool.source());
+
+        ToolResult res = tool.execute(Map.of("id", "42"), new ToolContext());
+        server.stop(0);
+
+        if (res.isError()) throw new AssertionError(res.output());
+        // `id` was CONSUMED by the placeholder, so it never became a query param.
+        if (!res.output().equals("user /users/42")) throw new AssertionError(res.output());
+        if (!res.metadata().get("status").equals(200)) throw new AssertionError(res.metadata());
+
+        System.out.println("ok: " + res.output());
+    }
+}
+```
+
+`Options` is a plain field bag — set the fields, no builder. `name`, `method` and `url` are
+required; a null `method` throws on construction.
+
+### 2. A POST with a JSON body and a credential from the environment
+
+Arguments left over after placeholders and the querystring become the request body. Header values
+expand `${ENV_VAR}` at call time, so the secret lives in the environment, never in the code.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            String sent = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            String auth = String.valueOf(ex.getRequestHeaders().getFirst("Authorization"));
+            String ctype = String.valueOf(ex.getRequestHeaders().getFirst("Content-Type"));
+            byte[] body = (ex.getRequestMethod() + "|" + ctype + "|" + auth + "|" + sent)
+                .getBytes(StandardCharsets.UTF_8);
+            ex.sendResponseHeaders(201, body.length);
+            ex.getResponseBody().write(body);
+            ex.close();
+        });
+        server.start();
+        String base = "http://127.0.0.1:" + server.getAddress().getPort();
+
+        HttpTool.Options opts = new HttpTool.Options();
+        opts.name = "create_ticket";
+        opts.description = "Open a support ticket";
+        opts.method = "POST";
+        opts.url = base + "/tickets";
+        opts.body = "json";
+        // Never a literal key — ${VAR} is read from the environment when the tool runs.
+        opts.headers = Map.of("Authorization", "Bearer ${TOOLNEXUS_DEMO_TOKEN}");
+        opts.inputSchema = Map.of(
+            "type", "object",
+            "properties", Map.of("title", Map.of("type", "string")),
+            "required", List.of("title"));
+
+        ToolResult res = HttpTool.of(opts).execute(Map.of("title", "Printer on fire"), new ToolContext());
+        server.stop(0);
+
+        if (res.isError()) throw new AssertionError(res.output());
+        List<String> parts = List.of(res.output().split("\\|", 4));
+        if (!parts.get(0).equals("POST")) throw new AssertionError(parts.get(0));
+        // body = "json" sets Content-Type for you.
+        if (!parts.get(1).equals("application/json")) throw new AssertionError(parts.get(1));
+        // The placeholder was expanded — an UNSET variable becomes empty, never the literal ${...}.
+        // (HTTP trims the trailing space, so what arrives is just "Bearer".)
+        if (parts.get(2).contains("${")) throw new AssertionError("not expanded: " + parts.get(2));
+        if (!parts.get(2).strip().equals("Bearer")) throw new AssertionError(parts.get(2));
+        if (!parts.get(3).contains("\"title\"")) throw new AssertionError(parts.get(3));
+        // 201 is a success — only non-2xx is an error.
+        if (!res.metadata().get("status").equals(201)) throw new AssertionError(res.metadata());
+
+        System.out.println("ok: " + parts.get(0) + " " + parts.get(1) + " status=" + res.metadata().get("status"));
+    }
+}
+```
+
+<Aside type="caution">
+An unset `${VAR}` expands to the **empty string**, not an error — a missing token shows up as a 401
+from the server, not as a configuration failure. Check the variable at startup if that matters.
+</Aside>
+
+### 3. Splitting args between query and body, result modes, and failure
+
+`query` names the arguments that belong in the querystring; everything left goes to the body. On a
+GET every remaining argument goes to the query, so `query` is redundant there.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/search", ex -> {
+            String sent = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            byte[] body = (ex.getRequestURI().getQuery() + "|" + sent).getBytes(StandardCharsets.UTF_8);
+            ex.sendResponseHeaders(200, body.length);
+            ex.getResponseBody().write(body);
+            ex.close();
+        });
+        server.createContext("/missing", ex -> {
+            byte[] body = "no such thing".getBytes(StandardCharsets.UTF_8);
+            ex.sendResponseHeaders(404, body.length);
+            ex.getResponseBody().write(body);
+            ex.close();
+        });
+        server.start();
+        String base = "http://127.0.0.1:" + server.getAddress().getPort();
+
+        HttpTool.Options opts = new HttpTool.Options();
+        opts.name = "search";
+        opts.description = "Search the index";
+        opts.method = "POST";
+        opts.url = base + "/search";
+        opts.query = List.of("q");          // q -> querystring
+        opts.body = "json";                 // everything else -> JSON body
+        opts.resultMode = "status+text";    // prefix the output with the status line
+        opts.timeout = 5_000L;              // per-call ceiling, ms
+        opts.inputSchema = Map.of(
+            "type", "object",
+            "properties", Map.of("q", Map.of("type", "string"), "limit", Map.of("type", "integer")),
+            "required", List.of("q"));
+
+        ToolResult res = HttpTool.of(opts).execute(Map.of("q", "adapters", "limit", 5), new ToolContext());
+
+        if (res.isError()) throw new AssertionError(res.output());
+        // status+text puts the code on its own first line.
+        String[] lines = res.output().split("\n", 2);
+        if (!lines[0].equals("200")) throw new AssertionError(lines[0]);
+        List<String> parts = List.of(lines[1].split("\\|", 2));
+        if (!parts.get(0).equals("q=adapters")) throw new AssertionError("query: " + parts.get(0));
+        if (!parts.get(1).contains("\"limit\"")) throw new AssertionError("body: " + parts.get(1));
+        if (parts.get(1).contains("\"q\"")) throw new AssertionError("q should not be in the body");
+
+        // Non-2xx: an error RESULT, never an exception. Status survives in metadata.
+        HttpTool.Options bad = new HttpTool.Options();
+        bad.name = "missing";
+        bad.description = "Always 404s";
+        bad.method = "GET";
+        bad.url = base + "/missing";
+        ToolResult err = HttpTool.of(bad).execute(Map.of(), new ToolContext());
+        server.stop(0);
+
+        if (!err.isError()) throw new AssertionError("expected isError");
+        if (!err.output().equals("HTTP 404: no such thing")) throw new AssertionError(err.output());
+        if (!err.metadata().get("status").equals(404)) throw new AssertionError(err.metadata());
+
+        System.out.println("ok: " + lines[0] + " " + parts.get(0) + " | " + err.output());
+    }
+}
+```
+
+## `HttpTool.Options`
+
+Public mutable fields — assign them directly.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` | `String` | Tool name. Required. |
+| `description` | `String` | What the model reads. Required in practice. |
+| `method` | `String` | `GET`, `POST`, … Required — upper-cased internally, so `"post"` is fine. |
+| `url` | `String` | Endpoint. `{placeholder}` segments are filled from args and URL-encoded; the arg is consumed. |
+| `headers` | `Map<String, String>` | Sent as-is after `${ENV_VAR}` expansion. Never logged. |
+| `query` | `List<String>` | Arg names routed to the querystring. On `GET`, *all* remaining args go there anyway. |
+| `body` | `String` | `json` (default), `form`, or `raw`. `raw` sends the `body` argument verbatim. |
+| `inputSchema` | `Map<String, Object>` | JSON-Schema object. Null ⇒ empty-object schema. |
+| `timeout` | `Long` | Milliseconds. Default 30000. `ToolContext.timeoutMs()` overrides it when present. |
+| `resultMode` | `String` | `text` (default), `json` (re-serialize the parsed body), or `status+text` (`"<status>\n<body>"`). |
+
+Result contract: 2xx ⇒ `ToolResult.ok(body)` with `metadata.status`; non-2xx ⇒ an error result whose
+output is `HTTP <status>: <body>`, also with `metadata.status`. A transport failure (connection
+refused, timeout) is an error result carrying the exception message — nothing throws.
+
+## See also
+
+- [`NativeTool.of`](/api/java/native/define-tool/) — wrap your own client when one request is not enough
+- [`Toolkit.create`](/api/java/toolkit/create/) — pass HTTP tools via `extraTools(...)`
+- [`Tool`](/api/java/types/tool/) — the interface this implements
+- [`ToolContext`](/api/java/types/context/) — where the per-call timeout override comes from

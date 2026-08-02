@@ -1,0 +1,240 @@
+---
+title: Tool
+description: The uniform shape every tool source collapses to — name, description, JSON-Schema parameters, execute. Go.
+sidebar:
+  label: Tool
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · module <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/types.go">golang/types.go</a>
+</p>
+
+```go
+type Tool struct {
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	InputSchema JSONSchema `json:"inputSchema"`
+	Source      ToolSource `json:"source"`
+	// Execute runs the tool. ctx may be nil.
+	Execute func(args map[string]any, ctx *ToolContext) (ToolResult, error) `json:"-"`
+}
+```
+
+The one type. An MCP server tool, an agent skill, a built-in shell tool, a remote A2A agent, an
+HTTP endpoint and a plain function of your own are all *the same thing* to an LLM — a named,
+described, schema'd callable. `Tool` is that thing, and every source in toolnexus produces it.
+
+## When to use it
+
+You mostly **receive** `Tool`s rather than construct them: `tk.Tools()` hands you a `[]Tool`, and
+that is what you range over, filter, and pass to an adapter.
+
+Construct one directly when you are writing a **new tool source** — something producing tools from
+a shape toolnexus doesn't already cover (a table of prompts, an internal RPC registry, a plugin
+system). For a single ordinary function, don't hand-build this.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use NativeTool instead for your own functions">
+[`NativeTool`](/api/go/native/define-tool/) builds a `Tool` for you and sets `Source: "native"`.
+Hand-writing the struct to wrap one function is more code and one more thing to keep in sync. Reach
+for the raw type only when you are generating tools programmatically.
+</Aside>
+
+<Aside type="caution" title="Go returns two values — and both matter">
+`Execute` returns `(ToolResult, error)`, unlike JavaScript's single `Promise<ToolResult>`. These
+are **not** interchangeable. Return a `ToolResult` with `IsError: true` for an outcome the model
+should see and can recover from; return a non-nil `error` only for a genuine failure of your code.
+An `error` does not become tool output.
+</Aside>
+
+## Examples
+
+### 1. The smallest possible tool
+
+A `Tool` is a plain struct. Nothing is embedded and nothing is registered — build it and it works.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	echo := toolnexus.Tool{
+		Name:        "echo",
+		Description: "Return whatever it is given",
+		InputSchema: toolnexus.JSONSchema{
+			"type":       "object",
+			"properties": map[string]any{"text": map[string]any{"type": "string"}},
+			"required":   []string{"text"},
+		},
+		Source: "custom",
+		Execute: func(args map[string]any, ctx *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			return toolnexus.ToolResult{Output: fmt.Sprint(args["text"]), IsError: false}, nil
+		},
+	}
+
+	res, err := echo.Execute(map[string]any{"text": "hello"}, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if res.Output != "hello" || res.IsError {
+		log.Fatalf("unexpected: %+v", res)
+	}
+	fmt.Println("ok:", res.Output)
+}
+```
+
+`Source` is not free-form — it is one of `mcp`, `skill`, `builtin`, `native`, `http`, `a2a`,
+`custom`. Use `custom` for tools you construct yourself.
+
+### 2. Error result vs returned error — the distinction that matters
+
+This is the field pairing people get wrong. `IsError` is an *outcome the model reads*; a returned
+`error` is *your code failing*.
+
+```go test
+package main
+
+import (
+	"errors"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	divide := toolnexus.Tool{
+		Name:        "divide",
+		Description: "Divide two numbers",
+		InputSchema: toolnexus.JSONSchema{
+			"type": "object",
+			"properties": map[string]any{
+				"a": map[string]any{"type": "number"},
+				"b": map[string]any{"type": "number"},
+			},
+			"required": []string{"a", "b"},
+		},
+		Source: "custom",
+		Execute: func(args map[string]any, ctx *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			a, aok := args["a"].(float64)
+			b, bok := args["b"].(float64)
+			if !aok || !bok {
+				// Your code cannot proceed — a real error, not model-facing output.
+				return toolnexus.ToolResult{}, errors.New("a and b must be numbers")
+			}
+			if b == 0 {
+				// The model sees this text and can correct itself on the next turn.
+				return toolnexus.ToolResult{Output: "Cannot divide by zero", IsError: true}, nil
+			}
+			return toolnexus.ToolResult{
+				Output:   fmt.Sprintf("%g", a/b),
+				IsError:  false,
+				Metadata: map[string]any{"title": "divide", "operands": []float64{a, b}},
+			}, nil
+		},
+	}
+
+	ok, err := divide.Execute(map[string]any{"a": 10.0, "b": 4.0}, nil)
+	if err != nil || ok.Output != "2.5" {
+		log.Fatalf("unexpected: %+v %v", ok, err)
+	}
+
+	// Recoverable outcome: no error, IsError set.
+	bad, err := divide.Execute(map[string]any{"a": 1.0, "b": 0.0}, nil)
+	if err != nil || !bad.IsError {
+		log.Fatalf("expected an error RESULT, got %+v %v", bad, err)
+	}
+
+	// Genuine failure: a returned error, empty result.
+	_, err = divide.Execute(map[string]any{"a": "x", "b": 1.0}, nil)
+	if err == nil {
+		log.Fatal("expected a returned error for bad input types")
+	}
+
+	fmt.Println("ok:", ok.Output, "| error path:", bad.Output, "| returned err:", err)
+}
+```
+
+### 3. A generated tool source — the real reason this type is public
+
+Producing many tools from data is where you build `Tool` directly. `Sanitize` makes each name
+schema-safe.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	endpoints := []struct{ Key, Path string }{
+		{"get user", "/users/:id"},
+		{"list orders", "/orders"},
+	}
+
+	var tools []toolnexus.Tool
+	for _, e := range endpoints {
+		e := e // capture per iteration
+		tools = append(tools, toolnexus.Tool{
+			// Names must match [a-zA-Z0-9_-]; Sanitize does exactly that.
+			Name:        toolnexus.Sanitize(e.Key),
+			Description: "Call " + e.Path,
+			InputSchema: toolnexus.JSONSchema{
+				"type":       "object",
+				"properties": map[string]any{"id": map[string]any{"type": "string"}},
+			},
+			Source: "custom",
+			Execute: func(args map[string]any, ctx *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+				// ctx may be nil — always guard it.
+				if ctx != nil && ctx.Ctx != nil && ctx.Ctx.Err() != nil {
+					return toolnexus.ToolResult{Output: "cancelled", IsError: true}, nil
+				}
+				return toolnexus.ToolResult{
+					Output:  fmt.Sprintf("%s <- %v", e.Path, args["id"]),
+					IsError: false,
+				}, nil
+			},
+		})
+	}
+
+	if tools[0].Name != "get_user" || tools[1].Name != "list_orders" {
+		log.Fatalf("unexpected names: %s %s", tools[0].Name, tools[1].Name)
+	}
+
+	res, err := tools[0].Execute(map[string]any{"id": "42"}, nil)
+	if err != nil || res.Output != "/users/:id <- 42" {
+		log.Fatalf("unexpected: %+v %v", res, err)
+	}
+	fmt.Printf("ok: %s, %s\n", tools[0].Name, tools[1].Name)
+}
+```
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `Name` | `string` | The name the model calls. Must match `[a-zA-Z0-9_-]` — run it through `Sanitize`. |
+| `Description` | `string` | What the model reads to decide whether to call it. |
+| `InputSchema` | `JSONSchema` | A JSON-Schema **object** — a `map[string]any`. |
+| `Source` | `ToolSource` | One of `mcp`, `skill`, `builtin`, `native`, `http`, `a2a`, `custom`. |
+| `Execute` | `func(map[string]any, *ToolContext) (ToolResult, error)` | Runs the tool. `ctx` may be **nil** — guard it. |
+
+## See also
+
+- [`ToolResult`](/api/go/types/tool-result/) — what `Execute` returns
+- [`ToolContext`](/api/go/types/context/) — what `Execute` receives
+- [`NativeTool`](/api/go/native/define-tool/) — build a `Tool` from a function
+- [`CreateToolkit`](/api/go/toolkit/create/) — aggregate tools from every source

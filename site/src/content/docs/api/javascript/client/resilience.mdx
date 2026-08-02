@@ -1,0 +1,203 @@
+---
+title: "ErrorInfo"
+description: "Classify an LLM error into retry / fail, bound a run with a deadline, and cancel cleanly. — JavaScript."
+sidebar:
+  label: "ErrorInfo"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#8-unified-llm-client-the-host-loop">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/client.ts">js/src/client.ts</a>
+</p>
+
+```ts
+interface ErrorInfo {
+  error?: unknown    // the thrown network/transport error, when it wasn't an HTTP response
+  status?: number     // the HTTP status, when it was a non-ok response
+  attempt: number     // zero-based attempt index (0 = first try)
+  retryable: boolean  // whether status/error is in the default retryable set (429/5xx/network)
+}
+type ErrorTier = "retry" | "fail"
+
+createClient({ retries?, retryBaseMs?, timeoutMs?, onError?: (info: ErrorInfo) => ErrorTier, … })
+```
+
+The resilience layer around every LLM call: retries with exponential backoff + jitter (honoring
+`Retry-After`), a whole-run deadline that aborts the in-flight request, and — via `onError` — the
+classifier that decides retry-or-fail for each failed attempt. Omit `onError` and you get the
+default classifier: the normally-retryable set (429/5xx/network) retries within budget, everything
+else fails immediately. That default is byte-identical to what the client did before `onError`
+existed.
+
+## When to use it
+
+The built-in retry/timeout behavior (`retries`, `retryBaseMs`, `timeoutMs`) covers the common case
+with no code. Reach for `onError` specifically when the default retry set is wrong for your
+provider or your budget — e.g. treat a `400` from a flaky gateway as retryable, or stop retrying a
+`429` immediately because you're already over cost budget for this run.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="waitFor (§10) is a different kind of pause — not an error path">
+`onError` classifies **failures** of the LLM call itself (bad status, network error) into
+`"retry"` or `"fail"` — there is no `"suspend"` tier. A tool asking a human for input mid-run is
+[`waitFor`](/api/javascript/client/create/) instead: a deliberate pause on a *successful* call
+that returned a `Pending` result, not an error being recovered from. Don't reach for `onError` to
+handle a 402-then-topup-then-resume flow — that's `waitFor`.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — default retries recover a transient 503
+
+No `onError` set: two `503`s, then the third attempt succeeds — the default classifier's behavior,
+unchanged.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit } from "toolnexus"
+
+let hits = 0
+const server = http.createServer((req, res) => {
+  hits++
+  if (hits < 3) { res.writeHead(503); res.end("busy"); return }
+  res.writeHead(200, { "content-type": "application/json" })
+  res.end(JSON.stringify({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const tk = await createToolkit({})
+const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key", retries: 3, retryBaseMs: 5 })
+
+const res = await client.run("hi", { toolkit: tk })
+assert.equal(res.text, "ok")
+assert.equal(hits, 3, "two 503s retried, third succeeded")
+
+await tk.close()
+server.close()
+console.log("ok:", res.text, hits)
+```
+
+### 2. A realistic case — a custom classifier overrides the default in both directions
+
+`onError` treats a normally-terminal `400` as retryable (within budget), and a normally-retryable
+`429` as an immediate fail — the inverse of the built-in policy, entirely by the host's own rule.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit } from "toolnexus"
+import type { ErrorInfo, ErrorTier } from "toolnexus"
+
+// Server A: always 400 — normally terminal, this classifier retries it up to budget.
+let hitsA = 0
+const serverA = http.createServer((req, res) => { hitsA++; res.writeHead(400); res.end("bad") })
+await new Promise<void>((r) => serverA.listen(0, "127.0.0.1", r))
+const portA = (serverA.address() as any).port
+
+const tk = await createToolkit({})
+const retryOn400 = (info: ErrorInfo): ErrorTier => (info.status === 400 ? "retry" : (info.retryable ? "retry" : "fail"))
+const clientA = createClient({ baseUrl: `http://127.0.0.1:${portA}`, style: "openai", model: "stub", apiKey: "test-key", retries: 2, retryBaseMs: 5, onError: retryOn400 })
+await assert.rejects(() => clientA.run("hi", { toolkit: tk }), /LLM 400/)
+assert.equal(hitsA, 3, "1 initial attempt + 2 retries, all on a normally-terminal 400")
+serverA.close()
+
+// Server B: always 429 — normally retryable, this classifier fails immediately (budget-conscious).
+let hitsB = 0
+const serverB = http.createServer((req, res) => { hitsB++; res.writeHead(429); res.end("slow down") })
+await new Promise<void>((r) => serverB.listen(0, "127.0.0.1", r))
+const portB = (serverB.address() as any).port
+const failFast: (info: ErrorInfo) => ErrorTier = () => "fail"
+const clientB = createClient({ baseUrl: `http://127.0.0.1:${portB}`, style: "openai", model: "stub", apiKey: "test-key", retries: 5, retryBaseMs: 5, onError: failFast })
+await assert.rejects(() => clientB.run("hi", { toolkit: tk }), /LLM 429/)
+assert.equal(hitsB, 1, "onError:fail skipped every retry, even for a normally-retryable status")
+serverB.close()
+
+await tk.close()
+console.log("ok:", hitsA, hitsB)
+```
+
+### 3. The full surface — `attempt`/`retryable` inspected, plus a deadline that cancels cleanly
+
+`onError` sees the zero-based `attempt` and the default `retryable` verdict on every failure —
+useful for logging or attempt-dependent policy. `timeoutMs` bounds the whole run and aborts the
+in-flight request; a hung server past that deadline never gets a chance to retry its way out.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit } from "toolnexus"
+import type { ErrorInfo } from "toolnexus"
+
+// Server: 429 twice, then succeeds — inspect what onError sees on each attempt.
+let hits = 0
+const server = http.createServer((req, res) => {
+  hits++
+  if (hits <= 2) { res.writeHead(429); res.end("slow"); return }
+  res.writeHead(200, { "content-type": "application/json" })
+  res.end(JSON.stringify({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const port = (server.address() as any).port
+
+const seen: ErrorInfo[] = []
+const tk = await createToolkit({})
+const client = createClient({
+  baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "stub", apiKey: "test-key",
+  retries: 3, retryBaseMs: 5,
+  onError: (info) => { seen.push(info); return info.retryable ? "retry" : "fail" },
+})
+const res = await client.run("hi", { toolkit: tk })
+assert.equal(res.text, "ok")
+assert.deepEqual(seen.map((i) => i.attempt), [0, 1])
+assert.ok(seen.every((i) => i.status === 429 && i.retryable === true))
+await tk.close()
+server.close()
+
+// A server that never answers — timeoutMs aborts the run instead of hanging forever.
+const hungServer = http.createServer(() => { /* never respond */ })
+await new Promise<void>((r) => hungServer.listen(0, "127.0.0.1", r))
+const hungPort = (hungServer.address() as any).port
+const tk2 = await createToolkit({})
+const bounded = createClient({ baseUrl: `http://127.0.0.1:${hungPort}`, style: "openai", model: "stub", apiKey: "test-key", timeoutMs: 150, retries: 5, retryBaseMs: 500 })
+const t0 = Date.now()
+await assert.rejects(() => bounded.run("hi", { toolkit: tk2 }))
+const elapsed = Date.now() - t0
+assert.ok(elapsed < 2000, `timeoutMs did not bound the run (took ${elapsed}ms)`)
+await tk2.close()
+hungServer.close()
+
+console.log("ok:", seen.length, elapsed)
+```
+
+## Fields
+
+| Field | Type | What it means |
+|---|---|---|
+| `error` | `unknown` | The thrown network/transport error, when the failure was not an HTTP response. |
+| `status` | `number` | The HTTP status, when the failure was a non-ok response. |
+| `attempt` | `number` | Zero-based attempt index (`0` = first try). |
+| `retryable` | `boolean` | Whether `status`/`error` is in the default retryable set (429/5xx/network). |
+
+`onError(info: ErrorInfo) => "retry" | "fail"` — a `"retry"` is always bounded by `retries`, so a
+classifier cannot make the client loop unbounded. There is no `"suspend"` tier; use
+[`waitFor`](/api/javascript/client/create/) for a user-action pause instead.
+
+## Options (on `createClient`)
+
+| Option | Type | What it does |
+|---|---|---|
+| `retries` | `number` | Transient-error retries. Default `2`. |
+| `retryBaseMs` | `number` | Base backoff, exponential + jitter, honoring `Retry-After`. Default `500`. |
+| `timeoutMs` | `number` | Whole-run deadline; aborts the in-flight request when exceeded. |
+| `onError` | `(info: ErrorInfo) => ErrorTier` | Classify each failed attempt. Omit ⇒ the default classifier. |
+
+## See also
+
+- [`createClient`](/api/javascript/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.run`](/api/javascript/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Client.stream`](/api/javascript/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Hooks`](/api/javascript/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
