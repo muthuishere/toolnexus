@@ -11,4 +11,4 @@
 ;; pins. No HTTP client, no JSON library, no process library.
 {:paths ["src"]
  :deps  {org.clojure/clojure           {:mvn/version "1.12.5"}
-         net.clojars.muthuishere/koine {:mvn/version "0.10.0"}}}
+         net.clojars.muthuishere/koine {:mvn/version "0.11.0"}}}

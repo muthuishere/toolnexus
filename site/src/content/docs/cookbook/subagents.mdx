@@ -1,6 +1,6 @@
 ---
 title: Sub-agents & teams
-description: Give your agent a team — delegate subtasks to scoped, isolated sub-agents with one task call, and get back one clean result with tokens rolled up. In all six languages.
+description: Give your agent a team — delegate subtasks to scoped, isolated sub-agents with one task call, and get back one clean result with tokens rolled up. In all seven languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -169,6 +169,35 @@ r =
 IO.puts("#{r.status} #{r.text} #{r.total_tokens}")
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '
+         '[toolnexus.agents.runtime :as rt])
+
+;; An AgentDef is a plain map; `:team` names the agents `task` can reach.
+(def explore
+  {:name  "explore"
+   :does  "read-only research"
+   :tools [lookup]})                        ; least privilege: only these tools
+
+(def coder
+  {:name   "coder"
+   :does   "implements changes"
+   :soul-file "AGENTS.md"
+   :team   ["explore"]                      ; team = who `task` can reach
+   :budget {:max-tokens 10000}})
+
+(def runtime
+  (rt/create-runtime
+   {:registry {"explore" explore "coder" coder}
+    :llm      {:base-url "https://openrouter.ai/api/v1"
+               :style    "openai"
+               :model    "openai/gpt-4o-mini"}}))
+
+(def r (rt/run-agent runtime "coder" "fix the failing test"))
+(println (:status r) (:text r) (:total-tokens r))
+```
+</TabItem>
 </Tabs>
 
 That's the whole wiring: **listing an agent in `team` is what makes it delegable.** The parent
@@ -176,7 +205,8 @@ gains one built-in `task { agent, prompt }` tool whose description advertises on
 agent without a team gets no `task` tool at all (delegation — and recursion — are opt-in).
 
 <Aside type="tip" title="An Agent IS a Tool">
-`asTool()` / `as_tool()` / `AsTool()` turns any agent into a plain tool for the classic API's
+`asTool()` / `as_tool()` / `AsTool()` — and `(rt/agent-tool runtime "explore")` in Clojure —
+turns any agent into a plain tool for the classic API's
 `extraTools` — so an existing `createClient` + `createToolkit` app can delegate without adopting
 any new loop. Note the namespace: this lives under `agents` in every port, separate from the
 remote **A2A** `Agent`.

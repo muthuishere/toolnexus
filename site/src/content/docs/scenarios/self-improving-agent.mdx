@@ -177,6 +177,23 @@ reviewer =
   )
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '
+         '[toolnexus.agents.home :as home])
+
+(def dir "./personas/ava")
+
+(def reviewer
+  {:name   "reviewer"
+   :does   "reads a finished run and records durable lessons"
+   ;; no `:soul-file` in this port — a soul is a string, so read the file yourself
+   :soul-file "personas/reviewer/SOUL.md"
+   :tools  [(home/memory-tool dir)]            ; the ONLY tool it can touch
+   :model  "openai/gpt-4o-mini"                ; cheap: it reads a digest, not a codebase
+   :budget {:max-tokens 4000 :max-turns 3}})   ; a review that runs long is a broken review
+```
+</TabItem>
 </Tabs>
 
 <Aside type="tip" title="Budget the reviewer tightly — it is a tax on every run">
@@ -294,6 +311,26 @@ def digest(r, prompt) do
   #{if calls == "", do: "(none)", else: calls}
   """
 end
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[clojure.string :as str]
+         '[koine.json :as json])
+
+(defn digest [r prompt]
+  (let [calls (str/join "\n"
+                        (map (fn [c]
+                               (let [out (str (:output c))]
+                                 (str "- " (:name c) "(" (json/write-str (:args c)) ") → "
+                                      (when (:isError c) "ERROR: ")
+                                      (subs out 0 (min 200 (count out))))))
+                             (:tool-calls r)))]
+    (str/join "\n\n"
+              [(str "TASK: " prompt)
+               (str "OUTCOME (" (:turns r) " turns, "
+                    (get-in r [:usage :total-tokens]) " tokens): " (:text r))
+               (str "TOOL CALLS:\n" (if (seq calls) calls "(none)"))])))
 ```
 </TabItem>
 </Tabs>
@@ -425,6 +462,27 @@ def handle(ava, tk, reviewer, rt_opts, prompt) do
 end
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[koine.process :as proc]
+         '[toolnexus.agents.runtime :as rt]
+         '[toolnexus.client :as client])
+
+(def llm {:base-url "https://openrouter.ai/api/v1" :style "openai" :model "openai/gpt-4o-mini"})
+(def review-runtime (rt/create-runtime {:registry {"reviewer" reviewer} :llm llm}))
+
+(defn handle [prompt]
+  (let [r (client/run ava prompt {:toolkit tk :conversation-id "ava"})]
+    ;; Fire-and-forget: the user already has their answer. `run-async!`, never
+    ;; `future` — a library may not hold its consumer's process open.
+    (proc/run-async!
+     (fn []
+       (try (rt/run-agent review-runtime "reviewer" (digest r prompt))
+            ;; a failed review must never fail the run
+            (catch Throwable e (println "review failed:" (ex-message e))))))
+    (:text r)))
+```
+</TabItem>
 </Tabs>
 
 The reviewer's `memory add` lands in `MEMORY.md` on disk immediately. It becomes part of Ava's
@@ -521,6 +579,17 @@ ava = Home.from_dir("./personas/ava")          # memory tool wired automatically
 nightly = Home.start_agent(ava, rt_opts,
   every_ms: 24 * 60 * 60_000,                                    # once a day
   on_beat: fn summary -> Logger.info("memory consolidated: #{summary}") end)
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(def ava (home/from-dir "./personas/ava"))   ; memory tool wired automatically
+
+(def nightly
+  (home/start-agent ava {:llm llm}
+                    {:every-ms (* 24 60 60000)                    ; once a day
+                     ;; quiet nights surface nothing — HEARTBEAT_OK never reaches :on-beat
+                     :on-beat  (fn [summary] (println "memory consolidated:" summary))}))
 ```
 </TabItem>
 </Tabs>

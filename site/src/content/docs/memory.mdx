@@ -1,6 +1,6 @@
 ---
 title: Memory & conversations
-description: The client loop remembers a thread for you. ask(prompt, id) loads a conversation's transcript, runs, and saves it back — with a pluggable store you can point at a file, database, or Redis. The same shape across all six languages.
+description: The client loop remembers a thread for you. ask(prompt, id) loads a conversation's transcript, runs, and saves it back — with a pluggable store you can point at a file, database, or Redis. The same shape across all seven languages.
 ---
 
 import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
@@ -67,6 +67,28 @@ var agent = LlmClient.Create(new LlmClient.Options {
 await agent.AskAsync("Book me a flight to Berlin.", tk, "user-42");
 await agent.AskAsync("Actually, make it Munich.",   tk, "user-42");   // same thread — remembered
 await agent.AskAsync("What is 21 + 21?",            tk);              // no id → one-shot
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+agent = Toolnexus.Client.create(base_url: base, style: "openai", model: model)  # in-memory store by default
+
+Toolnexus.Client.ask(agent, "Book me a flight to Berlin.", tk, "user-42")
+Toolnexus.Client.ask(agent, "Actually, make it Munich.",   tk, "user-42")   # same thread — remembered
+Toolnexus.Client.run(agent, "What is 21 + 21?",            tk)              # run/3 → one-shot
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.client :as client])
+
+;; the client carries a per-client store (in-memory by default); the thread id
+;; is an option on run rather than a separate entry point
+(def agent (client/create-client {:base-url base-url :style "openai" :model model}))
+
+(client/run agent "Book me a flight to Berlin." {:toolkit tk :conversation-id "user-42"})
+(client/run agent "Actually, make it Munich."   {:toolkit tk :conversation-id "user-42"}) ; remembered
+(client/run agent "What is 21 + 21?"            {:toolkit tk})   ; no :conversation-id → one-shot
 ```
 </TabItem>
 </Tabs>
@@ -147,6 +169,41 @@ var agent = LlmClient.Create(new LlmClient.Options
 });
 ```
 </TabItem>
+<TabItem label="Elixir">
+```elixir
+defmodule RedisStore do
+  @behaviour Toolnexus.Client.ConversationStore
+  defstruct []
+
+  @impl true
+  def get(%__MODULE__{}, id) do
+    case Redis.get("conv:#{id}") do
+      nil -> nil
+      raw -> Jason.decode!(raw)
+    end
+  end
+
+  @impl true
+  def save(%__MODULE__{}, id, messages), do: Redis.set("conv:#{id}", Jason.encode!(messages))
+end
+
+agent = Toolnexus.Client.create(base_url: base, style: "openai", model: model,
+                                store: %RedisStore{})
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[koine.json :as json])
+
+;; A store is exactly two functions — any map with these keys is a store.
+(defn redis-store []
+  {:get  (fn [id] (some-> (redis-get (str "conv:" id)) json/read-str))
+   :save (fn [id messages] (redis-set! (str "conv:" id) (json/write-str messages)) nil)})
+
+(def agent (client/create-client {:base-url base-url :style "openai" :model model
+                                  :store    (redis-store)}))
+```
+</TabItem>
 </Tabs>
 
 ## Streaming remembers too
@@ -154,7 +211,8 @@ var agent = LlmClient.Create(new LlmClient.Options
 The same `id` works on the streaming paths. Pass `on_text` to `ask` to stream assistant deltas while
 `ask` still returns the final result, or use `stream(prompt, { toolkit, id })` to iterate events
 (`text` / `tool_call` / `tool_result` / `usage` / `done`). With an `id`, the thread is loaded before
-streaming and saved on the terminal `done` event.
+streaming and saved on the terminal `done` event. (The Clojure port has no streaming loop — see
+[Streaming](/toolnexus/streaming/); memory there is the `:conversation-id` option on `run`.)
 
 <Aside type="note" title="Served A2A agents remember by contextId">
 When you [serve your toolkit as an A2A agent](/toolnexus/a2a/), each inbound `SendMessage` is

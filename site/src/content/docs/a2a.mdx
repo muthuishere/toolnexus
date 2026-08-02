@@ -1,6 +1,6 @@
 ---
 title: A2A — call remote agents, or be one
-description: Point the toolkit at a remote agent-to-agent (A2A) agent and each of its skills becomes a tool; the same toolkit can serve itself as an A2A agent others call. A minimal, verified subset of A2A — outbound and inbound — in all six languages.
+description: Point the toolkit at a remote agent-to-agent (A2A) agent and each of its skills becomes a tool; the same toolkit can serve itself as an A2A agent others call. A minimal, verified subset of A2A — outbound and inbound — in all seven languages.
 ---
 
 import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
@@ -73,6 +73,19 @@ await tk.AddAgentAsync("https://other.example.com/.well-known/agent-card.json");
 # each advertised skill is now a tool named <agent>_<skill>, source "a2a"
 
 Toolnexus.Toolkit.add_agent(tk, "https://other.example.com/.well-known/agent-card.json")  # runtime
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.a2a :as a2a] '[toolnexus.core :as tn] '[toolnexus.tool :as tool])
+
+(def tk (tn/build {:agents [{:card "https://peer.example.com/.well-known/agent-card.json"}]}))
+;; each advertised skill is now a tool named <agent>_<skill>, source "a2a"
+
+;; a toolkit is a plain value here, so "add one at runtime" is adding its tools to it
+(def tk2
+  (tool/add-tools tk (a2a/agent-tools
+                       {:card "https://other.example.com/.well-known/agent-card.json"})))
 ```
 </TabItem>
 </Tabs>
@@ -153,6 +166,23 @@ handle = Toolnexus.Toolkit.serve(tk, "127.0.0.1:0",
 # handle.url now speaks A2A; Toolnexus.Serve.stop(handle)
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.client :as client] '[toolnexus.serve :as serve])
+
+(def llm (client/create-client {:base-url base-url :style "openai" :model model}))
+
+(def handle
+  (serve/serve tk {:port   0                 ; 0 ⇒ an OS-assigned port
+                   :host   "127.0.0.1"
+                   :client llm
+                   :a2a    {:name "my-agent"}
+                   :skills (:skills tk)      ; what the Agent Card advertises
+                   :store  "memory"}))       ; "memory" | "file:<dir>" | your own TaskStore
+
+;; (:url handle) now speaks A2A; stop with (serve/stop! handle)
+```
+</TabItem>
 </Tabs>
 
 ## Tasks persist through a pluggable store
@@ -168,7 +198,7 @@ it to the A2A `input-required` state (the question in the task's status message)
 resumes it by answering. The human-in-the-loop primitive reaches across the agent boundary.
 </Aside>
 
-Both directions exist in all six ports. The same `serve(...)` can co-mount an
+Both directions exist in all seven ports. The same `serve(...)` can co-mount an
 [MCP server](/toolnexus/mcp/) endpoint, so what you assemble is consumable as an agent *and* as an
 MCP server at once.
 

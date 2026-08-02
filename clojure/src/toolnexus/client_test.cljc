@@ -1112,3 +1112,24 @@
         (is (= [[:before 0] [:after 0] [:before 1] [:after 1]] @seen))
         (is (= ["<LOUD>"] (outputs-of rr)))
         (is (seq (:tools (first @requests))))))))
+
+
+(deftest ask-remembers-by-id-and-forgets-without-one
+  ;; §conversation-store — `ask` is `run` with :conversation-id filled in. The
+  ;; second ask with the SAME id must carry the first exchange on the wire; a
+  ;; second ask with NO id must not. Asserted on the REQUEST BODIES the provider
+  ;; received, not on the results — memory that is not on the wire is not memory.
+  (with-llm "openai" [{:text "first answer"} {:text "second answer"} {:text "third answer"}]
+    (fn [{:keys [base requests]}]
+      (let [c (client-for "openai" base {})]
+        (client/ask c "first question" {:toolkit toolkit :id "muthu"})
+        (client/ask c "second question" {:toolkit toolkit :id "muthu"})
+        (client/ask c "unrelated" {:toolkit toolkit})
+        (let [[_ second-body third-body] @requests
+              roles+content (fn [b] (mapv (juxt :role :content) (:messages b)))]
+          (is (some #(= ["user" "first question"] %) (roles+content second-body))
+              "the SECOND ask with the same id replays the first question")
+          (is (some #(= ["assistant" "first answer"] %) (roles+content second-body))
+              "…and the first answer")
+          (is (not-any? #(= ["user" "first question"] %) (roles+content third-body))
+              "an ask WITHOUT an id is a stateless one-shot — no leakage from the store"))))))

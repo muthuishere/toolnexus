@@ -49,6 +49,7 @@
   No `future` (a library may not hold its consumer's process open), no java.*,
   no reader conditionals."
   (:require [clojure.string :as str]
+            [koine.fs :as fs]
             [koine.http :as khttp]
             [koine.process :as proc]
             [koine.time :as ktime]
@@ -580,12 +581,24 @@
   ([rt parent-id def-name budget]
    (let [reg (:registry rt)
          now ((:now (:clock rt)))
+         ;; §7E: an AgentDef may carry :soul-file instead of :soul — the other
+         ;; six ports spell it soulFile/soul_file, and its absence here was the
+         ;; single most repeated divergence when the docs were written. Resolved
+         ;; ONCE, at spawn, matching js/src/agents/agent.ts (registry-build
+         ;; time): the frozen-snapshot rule — an edit to the file lands on the
+         ;; NEXT spawn, never mid-run. Read OUTSIDE the transaction below, whose
+         ;; body may retry under contention; :soul-file wins over :soul, as in
+         ;; every other port.
+         souled (when-let [d (get reg def-name)]
+                  (if-let [f (:soul-file d)]
+                    (assoc d :soul (fs/read-file (str f)))
+                    d))
          outcome
          (transact!
           rt
           (fn [st]
             (let [p   (h-of st parent-id)
-                  d   (get reg def-name)
+                  d   souled
                   err (cond
                         (nil? d) (str "unknown agent \"" def-name "\" (known: "
                                       (str/join ", " (sort (keys reg))) ")")

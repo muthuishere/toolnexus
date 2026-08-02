@@ -1,6 +1,6 @@
 ---
 title: Build an openclaw-style personal assistant
-description: A complete build — a long-lived assistant whose identity is a git-able folder, whose memory it edits itself, which wakes on its own clock and reaches you on your channels. fromDir + memory + heartbeat + compaction, in all six languages.
+description: A complete build — a long-lived assistant whose identity is a git-able folder, whose memory it edits itself, which wakes on its own clock and reaches you on your channels. fromDir + memory + heartbeat + compaction, in all seven languages.
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -198,6 +198,25 @@ r = Toolnexus.Agents.run(ava,
 IO.puts("#{r.status} #{r.text}")
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.agents.home :as home]
+         '[toolnexus.agents.runtime :as rt])
+
+(def ava (home/from-dir "./personas/ava"))
+
+;; `from-dir` returns a plain AgentDef MAP — a runtime is what runs it, and both
+;; directions of the axiom work on it unchanged (`run-agent` = run, `agent-tool` = asTool).
+(def runtime
+  (rt/create-runtime
+   {:registry {(:name ava) ava}
+    :llm      {:base-url "https://openrouter.ai/api/v1" :style "openai"
+               :model "openai/gpt-4o-mini"}}))
+
+(def r (rt/run-agent runtime (:name ava) "What's on my plate today?"))
+(println (:status r) (:text r))
+```
+</TabItem>
 </Tabs>
 
 Options worth knowing on `fromDir`: `name` (defaults to the directory basename), `does` (the
@@ -340,6 +359,18 @@ started = Home.start_agent(ava, rt_opts,
 Home.stop(started)
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(def llm {:base-url "https://openrouter.ai/api/v1" :style "openai" :model "openai/gpt-4o-mini"})
+
+(def started
+  (home/start-agent ava {:llm llm}
+                    {:every-ms (* 5 60000)                          ; check in every 5 minutes
+                     :on-beat  (fn [text] (send-to-telegram text))}))  ; ONLY non-silent beats
+;; ... on shutdown:
+((:stop started))
+```
+</TabItem>
 </Tabs>
 
 <Aside type="caution" title="Pick the interval against your HEARTBEAT.md, not against your nerves">
@@ -455,6 +486,21 @@ def on_inbound_message(rt, handle, from, channel, text) do
       :ok   # busy: the inbox keeps it for the next wake
   end
 end
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+;; start-agent hands back the live runtime and the persona's handle id.
+(def runtime (:runtime started))
+(def handle  (:handle started))
+
+;; Your webhook / socket handler — Telegram, WhatsApp, Slack, SMS, email: your transport.
+(defn on-inbound-message [from channel text]
+  (rt/post runtime handle {:from from :channel channel :text text})  ; the unsolicited rail
+  (if (:ok (rt/wake runtime handle "You have a new message — read it and respond."))
+    (let [r (rt/wait runtime handle)]
+      (when-not (:isError r) (send-to-channel channel from (:text r))))
+    nil))                       ; busy: the inbox keeps it, the next wake drains it
 ```
 </TabItem>
 </Tabs>
@@ -685,6 +731,39 @@ def on_inbound_message(ava, tk, from, text) do
   r = Toolnexus.Client.ask(ava, text, tk, "ava:#{from}")
   send_to_telegram(from, r.text)
 end
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.agents.compaction :as compaction]
+         '[toolnexus.agents.home :as home]
+         '[toolnexus.client :as client]
+         '[toolnexus.core :as tn]
+         '[toolnexus.tool :as tool])
+
+(def dir "./personas/ava")
+
+;; 1. Identity — a frozen snapshot of the bootstrap files, composed once per session.
+(def soul (:soul (home/compose-soul dir)))
+
+;; 2. Tools — the built-ins, her memory, and whatever else she needs (MCP, your own).
+(def tk (tool/add-tools (tn/build {:mcp "./mcp.json"}) [(home/memory-tool dir)]))
+
+;; 3. The loop — soul as system prompt, compaction with a memory flush on :before-llm.
+(def ava
+  (client/create-client
+   {:base-url "https://openrouter.ai/api/v1" :style "openai" :model "openai/gpt-4o-mini"
+    :system-prompt soul
+    :hooks {:before-llm (compaction/compactor
+                         {:max-tokens      120000
+                          :keep-tail       40000
+                          :flush-to-memory true      ; persist durable facts BEFORE summarizing
+                          :summarize       (fn [older] (summarise-with-cheap-model older))})}}))
+
+;; 4. Inbound — one stable conversation id = one continuous assistant.
+(defn on-inbound-message [from text]
+  (let [r (client/run ava text {:toolkit tk :conversation-id (str "ava:" from)})]
+    (send-to-telegram from (:text r))))
 ```
 </TabItem>
 </Tabs>

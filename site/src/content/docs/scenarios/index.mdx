@@ -7,13 +7,14 @@ import { Aside, LinkButton } from '@astrojs/starlight/components';
 
 The rest of the docs are organised by **primitive** — MCP, skills, suspension, sub-agents. This
 section is organised by **what you're trying to build**. Each scenario page takes one real,
-production-shaped agent and wires it end to end in the six published languages, including the parts
-that are *not* included and why. **Clojure** is held to the same `full` tier and covers the primitives it ships — MCP, skills, native/HTTP/built-in tools, conversation memory, the
-suspending refund gate, and A2A `serve` — so the
-[support agent](/toolnexus/scenarios/support-agent/) carries Clojure tabs; scenarios that lean on the
-sub-agent/`team`/`Budget` or heartbeat layers show none, because those subsystems (§7D–§7F) are
-Clojure parity debt the option gate structurally cannot see (see the
-[Clojure API page](/api/clojure/)).
+production-shaped agent and wires it end to end in the seven published languages, including the parts
+that are *not* included and why. **Every scenario on this page carries all seven** — JavaScript,
+Python, Go, Java, C#, Elixir and **Clojure**. Clojure ships the agent layer too: the §7D runtime
+(sub-agents, the `task` tool, hierarchical budgets), §7E personas (`from-dir`, the `memory` tool,
+the heartbeat) and §7F compaction, alongside MCP, skills, native/HTTP/built-in tools, conversation
+memory, suspension and A2A `serve` (see the [Clojure API page](/api/clojure/)). Its shapes are
+native — an AgentDef is a plain map, and you run one with `rt/run-agent` or expose it with
+`rt/agent-tool` — but the behavior is the same contract as the other six.
 
 <Aside type="tip" title="New here? Start with the quickstart">
 If you have not run toolnexus yet, do [**zero to agent in 3 steps**](/toolnexus/quickstart/) first
@@ -61,13 +62,13 @@ Each one follows the same spine, so you can skim to the part you need:
 
 1. **The scenario** and a *when to reach for this* table — including when **not** to.
 2. **The wiring at a glance** — layer → primitive → SPEC section.
-3. **Step-by-step build**, with the full example in JavaScript, Python, Go, Java, C# and Elixir.
+3. **Step-by-step build**, with the full example in JavaScript, Python, Go, Java, C#, Elixir and Clojure.
 4. **Honest limits** — what the library deliberately leaves to you (auth, UI, storage, policy).
 
-<Aside type="note" title="Six ports, one behavior">
-Every scenario is expressible in all six languages because parity is the product: the same
+<Aside type="note" title="Seven ports, one behavior">
+Every scenario is expressible in all seven languages because parity is the product: the same
 `mcp.json` and the same `SKILL.md` folder produce the same tools and the same byte-exact `skill`
-output in JavaScript, Python, Go, Java, C# and Elixir. Pick the language your
+output in JavaScript, Python, Go, Java, C#, Elixir and Clojure. Pick the language your
 service is already written in.
 </Aside>
 

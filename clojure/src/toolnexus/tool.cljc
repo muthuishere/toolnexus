@@ -5,7 +5,8 @@
 ;; any Clojure without a protocol, a record or a deftype — none of which behave
 ;; identically across hosts.
 (ns toolnexus.tool
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [koine.text :as text]))
 
 (defn sanitize
   "SPEC §0.2 — replace [^a-zA-Z0-9_-] with _."
@@ -60,58 +61,25 @@
 (defn add-tools [tk tools]
   (update tk :tools #(reduce (fn [acc t] (assoc acc (:name t) t)) % tools)))
 
-(defn code-points
-  "`s` as a vector of Unicode CODE POINTS, on either host.
+(def code-points
+  "`s` as a vector of Unicode code points — `koine.text/code-points`.
 
-  `seq` over a string is NOT portable: the JVM yields UTF-16 code units, so
-  \"\uD83D\uDE00\" arrives as two, while cljgo yields one rune. Folding a
-  surrogate pair back into its code point makes both hosts produce the same
-  vector, and cljgo — which never presents surrogates — passes straight through."
-  [s]
-  (loop [cs (seq (str s)) out []]
-    (if-let [c (first cs)]
-      (let [v  (int c)
-            lo (when (second cs) (int (second cs)))]
-        (if (and (<= 0xD800 v 0xDBFF) lo (<= 0xDC00 lo 0xDFFF))
-          (recur (nnext cs)
-                 (conj out (+ 0x10000 (bit-shift-left (- v 0xD800) 10) (- lo 0xDC00))))
-          (recur (next cs) (conj out v))))
-      out)))
+  Lived here first: this port found the divergence (nine sites sorting
+  differently on the two hosts) and carried the fix locally until koine 0.11.0
+  lifted it into the seam, where a clojure.core divergence belongs. The vars
+  stay so call sites and tests read `tool/…`, but there is ONE implementation."
+  text/code-points)
 
-(defn compare-strings
-  "Compare two strings by CODE POINT, lexicographically, identically on both hosts.
-
-  `sort` alone is host-dependent above the BMP: the JVM orders by UTF-16 code
-  unit (a surrogate `D83D` sorts below `E000`) and cljgo orders by UTF-8 byte
-  (`F0` sorts above `EE`), so `(sort [\"\uD83D\uDE00\" \"\uE000\"])` returns
-  opposite answers. That fed §0.6's byte-exact `<skill_files>` block, the §3
-  not-found list, adapter order and `glob` — so \"byte-identical on both hosts\"
-  held only while every name stayed inside the BMP.
-
-  Comparing `code-points` vectors with `compare` would not do: Clojure orders
-  vectors by LENGTH first, so a 1-element vector sorts below any 2-element one
-  regardless of content. This walks them element-wise, then by length — the
-  lexicographic order Go, Python and Elixir already produce.
-
-  CROSS-PORT NOTE: js and java sort by UTF-16 code unit, which differs from this
-  above the BMP. The seven ports therefore do not all agree for non-BMP names.
-  Recorded rather than silently matched: this port is at least self-consistent
-  across its own two hosts, which it was not before."
-  [a b]
-  (let [xs (code-points a) ys (code-points b)]
-    (loop [i 0]
-      (cond
-        (and (= i (count xs)) (= i (count ys))) 0
-        (= i (count xs)) -1
-        (= i (count ys)) 1
-        :else (let [x (nth xs i) y (nth ys i)]
-                (if (= x y) (recur (inc i)) (if (< x y) -1 1)))))))
+(def compare-strings
+  "Code-point string comparison, identical on both hosts — `koine.text/compare-strings`.
+  See `code-points` for why this delegates."
+  text/compare-strings)
 
 (defn sort-strings
-  "`coll` sorted by `compare-strings` — the portable order for every surface the
-  spec calls byte-exact."
+  "`coll` sorted by `compare-strings` — `koine.text/sort-strings`, returned as a
+  vector because every caller here treats tool lists as vectors."
   [coll]
-  (vec (sort compare-strings coll)))
+  (vec (text/sort-strings coll)))
 
 (defn tool-names
   "Sorted, always. Two runtimes must not disagree on order — which is why this

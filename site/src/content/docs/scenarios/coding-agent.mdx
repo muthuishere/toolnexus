@@ -1,6 +1,6 @@
 ---
 title: Build a Claude-Code-style coding agent
-description: A complete build — an AGENTS.md soul, the built-in shell/file pack, a read-only explore sub-agent, hierarchical budgets, compaction, and a human approval gate on dangerous bash — assembled in all six languages.
+description: A complete build — an AGENTS.md soul, the built-in shell/file pack, a read-only explore sub-agent, hierarchical budgets, compaction, and a human approval gate on dangerous bash — assembled in all seven languages.
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -242,6 +242,27 @@ explore =
   )
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.core :as tn]
+         '[toolnexus.tool :as tool])
+
+;; A READ-ONLY view: drop everything that mutates or executes.
+(def read-only
+  (tn/build {:builtins {:tools {"bash" false "write" false
+                                "edit" false "apply_patch" false}}}))
+
+;; An AgentDef is a plain MAP here — there is no Agent object to construct.
+(def explore
+  {:name   "explore"
+   :does   (str "Answers a specific question about this codebase. Give it ONE question, not a task. "
+                "Read-only: it cannot edit files or run commands.")
+   :tools  (tool/all-tools read-only)   ; read, grep, glob, webfetch, question, todowrite
+   :soul   (str "Answer the question and nothing else. Cite file:line for every claim. "
+                "If the answer is not in the code, say so — never guess.")
+   :budget {:max-turns 20 :max-tokens 60000}})
+```
+</TabItem>
 </Tabs>
 
 <Aside type="tip" title="`does` is not documentation — it is the router">
@@ -270,7 +291,7 @@ turn and *every* spawn — so a sibling's spend counts against you.
 
 When a limit stops a run, the result is **`status: "incomplete"`** — never a silent `"done"`,
 never a crash. Partial work and the transcript are preserved, so you can inspect what it got
-through before the ceiling. The status vocabulary is closed and byte-identical in all six ports:
+through before the ceiling. The status vocabulary is closed and byte-identical in all seven ports:
 
 ```
 "done" | "pending" | "incomplete" | "interrupted" | "closed" | "timeout" | "error"
@@ -307,7 +328,7 @@ Because compaction rides the **client** loop's hook and the agent runtime owns i
 wire it on the client when you run a coding session through `client.ask(...)` directly. The full
 assembly below shows the agent path; see
 [persona agents → compaction](/toolnexus/persona-agents/#staying-under-the-context-window--compaction)
-for the client-loop wiring in all six languages.
+for the client-loop wiring in all seven languages.
 
 ## 6. The brake — human approval on dangerous `bash`
 
@@ -539,6 +560,50 @@ end
 coder_tools = Enum.map(Toolnexus.Toolkit.tools(full), fn t ->
   if t.name == "bash", do: gated_bash(t), else: t
 end)
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.client :as client]
+         '[toolnexus.core :as tn]
+         '[toolnexus.native :as native]
+         '[toolnexus.tool :as tool])
+
+(def dangerous
+  #"(?i)\b(rm\s+-rf|git\s+push|--force|drop\s+table|terraform\s+apply|kubectl\s+delete)\b")
+
+;; Same name + schema as the built-in — the model cannot tell it apart.
+(defn gated-bash [raw]
+  (native/native-tool
+   {:name         (:name raw)
+    :description  (:description raw)
+    :input-schema (:input-schema raw)
+    :ctx?         true                      ; this port asks for the §1 Context explicitly
+    :run
+    (fn [args ctx]
+      (let [command (str (:command args))]
+        (cond
+          (not (re-find dangerous command))
+          ((:execute raw) args ctx)                             ; safe: straight through
+
+          (nil? (:answer ctx))
+          ;; First pass: halt. `:data` is plain serializable payload for your UI.
+          (client/suspend
+           (client/make-request
+            "question"
+            (str "Approve destructive command?\n\n  " command
+                 "\n\n(" (or (:description args) "no reason given") ")")
+            {:data {:command command :workdir (:workdir args)}}))
+
+          (not (:ok (:answer ctx)))
+          (tool/failure (str "Operator declined: " command))
+
+          :else ((:execute raw) args ctx))))}))                 ; approved: run it
+
+(def full (tn/build {}))
+(def coder-tools
+  (mapv (fn [t] (if (= "bash" (:name t)) (gated-bash t) t))
+        (tool/all-tools full)))
 ```
 </TabItem>
 </Tabs>
@@ -820,13 +885,61 @@ IO.puts("#{r.status} #{r.total_tokens}")   # whole-tree tokens
 if r.status == "incomplete", do: IO.warn("stopped by a budget: #{r.text}")
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '
+         '[toolnexus.agents.runtime :as rt]
+         '[toolnexus.client :as client]
+         '[toolnexus.core :as tn]
+         '[toolnexus.tool :as tool])
+
+(def llm {:base-url "https://openrouter.ai/api/v1" :style "openai"
+          :model "anthropic/claude-sonnet-4"})
+
+;; --- tools -----------------------------------------------------------------
+(def read-only
+  (tn/build {:builtins {:tools {"bash" false "write" false
+                                "edit" false "apply_patch" false}}}))
+(def full (tn/build {}))
+(def coder-tools
+  (mapv (fn [t] (if (= "bash" (:name t)) (gated-bash t) t)) (tool/all-tools full)))
+
+;; --- the team --------------------------------------------------------------
+(def explore
+  {:name   "explore"
+   :does   "Answers ONE specific question about this codebase. Read-only: cannot edit or run commands."
+   :tools  (tool/all-tools read-only)
+   :soul   "Answer the question and nothing else. Cite file:line. Never guess."
+   :budget {:max-turns 20 :max-tokens 60000}})
+
+(def coder
+  {:name     "coder"
+   :does     "Implements a change in this repository"
+   :soul-file "AGENTS.md"   ; resolved at spawn — same as soulFile in the other ports
+   :tools    coder-tools
+   :team     ["explore"]                ; a team is a list of NAMES in the registry
+   :budget   {:max-turns 60 :max-tokens 400000 :max-children 8 :max-depth 2}
+   :wait-for (fn [req] (client/make-answer (:id req) (confirm-on-terminal? (:prompt req))))})
+
+;; --- run -------------------------------------------------------------------
+(def runtime (rt/create-runtime {:registry {"explore" explore "coder" coder} :llm llm}))
+
+(def r (rt/run-agent runtime "coder"
+                     "The MCP stdio client leaks a child process on reconnect. Find it and fix it."))
+
+(println (:status r))         ; "done" | "incomplete" | "pending" | "error"
+(println (:text r))           ; the final report
+(println (:total-tokens r))   ; WHOLE-TREE tokens: coder + every explore call
+(when (= "incomplete" (:status r)) (println "stopped by a budget:" (:text r)))
+```
+</TabItem>
 </Tabs>
 
 ## What this is — and what it is not
 
 **It is the engine.** The loop, the tool pack, delegation with real context isolation,
 hierarchical budgets, durable suspension, compaction, and a scoped security model — the parts
-that are genuinely hard to build correctly and that behave identically in six languages.
+that are genuinely hard to build correctly and that behave identically in seven languages.
 
 **It is not the product around the engine.** You bring:
 

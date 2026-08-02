@@ -139,6 +139,41 @@ var res = await agent.RunAsync("Use my tools to answer this.", tk);
 Console.WriteLine(res.Text);
 ```
 </TabItem>
+<TabItem label="Elixir">
+```elixir
+{:ok, tk} =
+  Toolnexus.create_toolkit(
+    mcp_config: "./mcp.json",                    # every MCP server's tools
+    skills_dir: "./skills"                       # every SKILL.md, loaded on demand
+  )
+
+agent =
+  Toolnexus.Client.create(
+    base_url: "https://openrouter.ai/api/v1",    # any OpenAI- or Anthropic-style endpoint
+    style: "openai",
+    model: "openai/gpt-4o-mini"
+  )
+
+res = Toolnexus.Client.run(agent, "Use my tools to answer this.", tk)
+IO.puts(res.text)
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.core :as tn] '[toolnexus.client :as client])
+
+(def tk (tn/build {:mcp    "./mcp.json"      ; every MCP server's tools
+                   :skills "./skills"}))     ; every SKILL.md, loaded on demand
+
+(def agent
+  (client/create-client
+    {:base-url "https://openrouter.ai/api/v1" ; any OpenAI- or Anthropic-style endpoint
+     :style    "openai"
+     :model    "openai/gpt-4o-mini"}))
+
+(println (:text (client/run agent "Use my tools to answer this." {:toolkit tk})))
+```
+</TabItem>
 </Tabs>
 
 ## One interface for every tool
@@ -174,7 +209,7 @@ Console.WriteLine(res.Text);
 
 The whole point is **parity**: the same `examples/` fixtures produce the same behavior in every
 language. Six are published; [Clojure](/toolnexus/api/clojure/) — one `.cljc` tree that runs on the
-JVM and on cljgo — is wired into the same conformance checker at the same **full** tier, and is
-held back from Clojars until §7D–§7F land.
+JVM and on cljgo — is wired into the same conformance checker at the same **full** tier, is
+feature-complete including the agent layer, and awaits only its first Clojars release.
 Install for yours on the [install page](/toolnexus/install/), or walk the
 [one-demo-five-sources](/toolnexus/demo/) tour.
