@@ -469,7 +469,7 @@
         "java": "LlmClient.Hooks",
         "csharp": "LlmClient.Hooks",
         "elixir": "Toolnexus.Client.create",
-        "clojure": null
+        "clojure": "toolnexus.client/create-client"
       },
       "sources": [
         "js/examples/hooks.ts",
@@ -477,7 +477,7 @@
         "golang/examples/hooks",
         "examples/agent-hooks"
       ],
-      "parityNote": "Elixir has no separate Hooks type \u2014 pass a :hooks map (:before_llm, :after_llm, :before_tool, :after_tool) to Toolnexus.Client.create/1. Clojure has no hooks: before/after model and tool interception is recorded parity debt in clojure/README.md. :body-transform on toolnexus.client/create-client is the one request-shaping seam that exists."
+      "parityNote": "Elixir has no separate Hooks type \u2014 pass a :hooks map (:before_llm, :after_llm, :before_tool, :after_tool) to Toolnexus.Client.create/1."
     },
     {
       "id": "client/conversation",
