@@ -3,6 +3,7 @@
 (ns toolnexus.http-test
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [koine.env :as env]
             [koine.json :as json]
             [koine.server :as server]
             [toolnexus.http :as http]))
@@ -42,6 +43,11 @@
                 :body            (str (:body req))
                 :authPresent     (contains? h "authorization")
                 :authUnexpanded  (str/includes? (str (get h "authorization" "")) "${")
+                ;; The LENGTH, never the value: it is the one thing that tells
+                ;; "expanded the variable" apart from "deleted the ${...}",
+                ;; which are byte-identical for an UNSET variable and were the
+                ;; only case this suite used to cover.
+                :authValueLen    (count (str (get h "authorization" "")))
                 :contentType     (str (get h "content-type" ""))})})))
 
 (use-fixtures :once
@@ -102,14 +108,44 @@
     (is (= "/echo/42" (:path (body-of r))))
     (is (= "get" (:method (body-of r))))))
 
+(def ^:private set-var
+  "A variable that IS set in this process, with its value — used to prove the
+  expansion reads the environment rather than merely deleting `${...}`. Nothing
+  can set an env var portably from inside a running program on both hosts, so
+  the test finds one that the process already has instead of exporting a fake.
+  Never a credential: only the NAME is chosen here and only its LENGTH is ever
+  asserted or sent."
+  (some (fn [n] (when-let [v (env/get-env n)] [n v]))
+        ["HOME" "PATH" "USER" "TMPDIR"]))
+
 (deftest env-expansion-in-headers
-  (testing "§0.9 — ${ENV} expands; the value never appears anywhere here"
+  (testing "§0.9 — an UNSET variable expands to empty and leaves no ${...}"
     (let [t (http/http-tool {:name "auth" :url (str @base "/echo")
-                             :headers {"authorization" "Bearer ${TN_TEST_TOKEN_UNSET}"}})
+                             ;; the trailing "!" keeps the value from ending in
+                             ;; whitespace, which an HTTP client may trim
+                             :headers {"authorization" "Bearer ${TN_TEST_TOKEN_UNSET}!"}})
           b (body-of ((:execute t) {}))]
       (is (true? (:authPresent b)) "the header was sent")
       (is (false? (:authUnexpanded b))
-          "no ${...} survived — expansion ran (an unset var expands to empty)"))))
+          "no ${...} survived — expansion ran (an unset var expands to empty)")
+      (is (= (count "Bearer !") (:authValueLen b))
+          "an unset variable contributes nothing")))
+  (testing "§0.9 — a SET variable's VALUE actually reaches the wire"
+    ;; The case the old test could not see: `authPresent`/`authUnexpanded` agree
+    ;; between a correct expansion and an implementation that just strips
+    ;; `${...}`, so an authorization header could go out as a bare "Bearer " and
+    ;; nothing failed. The length discriminates them; the value is never sent
+    ;; back, logged or asserted.
+    (is (some? set-var) "no environment variable at all — cannot prove expansion")
+    (let [[vname vval] set-var
+          t (http/http-tool {:name "auth2" :url (str @base "/echo")
+                             :headers {"authorization" (str "Bearer ${" vname "}!")}})
+          b (body-of ((:execute t) {}))]
+      (is (true? (:authPresent b)))
+      (is (false? (:authUnexpanded b)))
+      (is (pos? (count vval)) "the probe variable must be non-empty to discriminate")
+      (is (= (+ (count "Bearer ") (count vval) 1) (:authValueLen b))
+          "the expanded value is on the wire; deleting ${...} would send 8 chars"))))
 
 (deftest non-2xx-is-an-error-result
   (testing "§0.9 — non-2xx ⇒ `HTTP <status>: <body>` isError"
@@ -163,12 +199,27 @@
           b (body-of ((:execute t) {:a 1}))]
       (is (= "" (:body b))))))
 
+(deftest query-string-is-built-not-merely-consumed
+  ;; koine.server hands the handler a :path with the query STRIPPED on the JVM
+  ;; (`URI.getPath`) while cljgo's `:uri` may keep it, so no portable end-to-end
+  ;; assertion can see the querystring at all. Asserting only "the args are
+  ;; absent from the body" is satisfied just as well by an implementation that
+  ;; consumes them and throws them away — `(defn query-string [_ _] nil)` used to
+  ;; pass the whole suite. So the builder is asserted directly.
+  (testing "one name, taken from the args and percent-encoded"
+    (is (= "page=3" (http/query-string {:page 3} [:page])))
+    (is (= "q=a%20b" (http/query-string {:q "a b"} [:q]))))
+  (testing "several names keep DECLARATION order, whatever the args map's order"
+    (is (= "a=1&b=2&c=3" (http/query-string {:c 3 :b 2 :a 1} [:a :b :c]))))
+  (testing "string names work like keyword ones"
+    (is (= "page=3" (http/query-string {:page 3} ["page"]))))
+  (testing "an arg with no value contributes no pair; no names at all is nil"
+    (is (= "b=2" (http/query-string {:b 2} [:a :b])))
+    (is (nil? (http/query-string {:a nil} [:a])))
+    (is (nil? (http/query-string {:a 1} [])))))
+
 (deftest query-parameters
   (testing "named args go to the querystring and NOT the body"
-    ;; koine.server hands the handler a :path with the query stripped on the JVM
-    ;; (`URI.getPath`), so the query cannot be observed server-side portably.
-    ;; What is asserted here is that the request still succeeds and the query
-    ;; args are consumed — the encoding itself is covered by percent-encoding.
     (let [t (http/http-tool {:name "q" :method :post :query [:v]
                              :url (str @base "/echo")})
           b (body-of ((:execute t) {:v "a b" :keep "yes"}))]

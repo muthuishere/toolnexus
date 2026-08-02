@@ -47,14 +47,21 @@
 ;; ---------------------------------------------------------------------------
 
 (defn utf8-count
-  "UTF-8 byte length of `s`, computed from code units — `String.getBytes` is
-  java.*, and koine.codec only exposes base64. A surrogate pair counts 6 rather
-  than 4 (same on both hosts)."
+  "UTF-8 byte length of `s` — what `write` reports, and what js reports through
+  `Buffer.byteLength(content,\"utf8\")` (`js/src/builtin.ts`). `String.getBytes`
+  is java.*, and koine.codec only exposes base64, so it is computed here.
+
+  IT COUNTS CODE POINTS, NOT CODE UNITS, and that is the whole point. Folding
+  over `(str s)` gave three answers for one string: the JVM yields a surrogate
+  PAIR for U+1F600 and charged 3 bytes each (6), cljgo yields one rune and fell
+  into the same `:else 3` branch (3), and the real UTF-8 length is 4 — so the
+  two hosts disagreed with each other AND both disagreed with js, on a §4A
+  output string. `tool/code-points` is the portable fold; the fourth branch is
+  the one a code-unit walk can never reach."
   [s]
-  (reduce (fn [n c]
-            (let [v (int c)]
-              (+ n (cond (< v 128) 1 (< v 2048) 2 :else 3))))
-          0 (str s)))
+  (reduce (fn [n v]
+            (+ n (cond (< v 0x80) 1 (< v 0x800) 2 (< v 0x10000) 3 :else 4)))
+          0 (tool/code-points s)))
 
 (defn- index-all
   "Every index at which `sub` occurs in `s`, left to right."
@@ -318,8 +325,13 @@
         rels  (->> (files-under root)
                    (map (fn [f] (rel-path root f)))
                    (filter (fn [r] (glob-match? (str (:pattern args)) r)))
-                   sort
-                   vec)]
+                   ;; tool/sort-strings, not `sort`. `files-under` already
+                   ;; ordered these portably, but by ABSOLUTE path — mapping to
+                   ;; relative changes the keys, so this re-sort is what the
+                   ;; output order actually is, and a bare `sort` handed it back
+                   ;; to the host: the JVM orders by UTF-16 code unit, cljgo by
+                   ;; UTF-8 byte, and above the BMP those are opposite answers.
+                   tool/sort-strings)]
     (tool/success (str/join "\n" (take limit rels)))))
 
 (defn- strip-tags [s]

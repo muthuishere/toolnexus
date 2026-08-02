@@ -106,7 +106,26 @@
   (testing "non-zero exit ⇒ isError, combined stdout+stderr, exit code appended"
     (let [r (run "bash" {:command "echo oops 1>&2; exit 7"})]
       (is (true? (:isError r)))
-      (is (= "oops\nexit code 7" (:output r))))))
+      (is (= "oops\nexit code 7" (:output r)))))
+  ;; §4A: "Output = combined stdout+stderr". Every other bash case in this file
+  ;; leaves ONE of the two streams empty, so the ORDER of the join was unpinned:
+  ;; `(str (:err r) (:out r))` produced identical output for all of them. Order
+  ;; is a cross-port byte question — `bash` output is a ToolResult a model reads
+  ;; — so it is asserted here with both streams non-empty, in both exit states.
+  ;;
+  ;; CROSS-PORT NOTE, recorded not silently matched: js appends stdout and
+  ;; stderr to one buffer as the DATA EVENTS ARRIVE (js/src/builtin.ts:166-167),
+  ;; so js interleaves by timing and cannot promise an order at all. §4A's own
+  ;; wording ("stdout+stderr") is the only deterministic reading, and it is the
+  ;; one this port implements. `printf` without a newline keeps the two writes
+  ;; adjacent so nothing but the order can explain the result.
+  (testing "both streams non-empty ⇒ stdout FIRST, then stderr (§4A)"
+    (let [r (run "bash" {:command "printf out; printf err 1>&2"})]
+      (is (false? (:isError r)))
+      (is (= "outerr" (:output r))))
+    (let [r (run "bash" {:command "printf out; printf err 1>&2; exit 3"})]
+      (is (true? (:isError r)))
+      (is (= "outerrexit code 3" (:output r))))))
 
 (deftest bash-timeout-kills-the-child
   (testing "§4A — 'Timeout kills the child ⇒ isError:true'. s22 could not do
@@ -142,6 +161,24 @@
       (let [r (run "read" {:path (p "work" "nope.txt")})]
         (is (true? (:isError r)))
         (is (str/includes? (:output r) "file not found"))))
+    ;; `Wrote N bytes` is a §4A output string, and js computes N with
+    ;; `Buffer.byteLength(content,"utf8")` (js/src/builtin.ts:236) — UTF-8
+    ;; BYTES. The old fold over code UNITS agreed with that only for ASCII,
+    ;; which is all "alpha\nbeta\ngamma\n" above is, so a `(count s)` byte
+    ;; count was indistinguishable from a correct one. These four cover every
+    ;; branch of the UTF-8 length table, including the 4-byte one no code-unit
+    ;; walk can reach. Non-ASCII is written DIRECTLY, never as a \u escape: an
+    ;; escaped lone surrogate is not portable source.
+    (testing "the byte count is UTF-8 BYTES, not characters (§4A, = Buffer.byteLength)"
+      (doseq [[label content bytes] [["ascii"  "hello"  5]   ; 1-byte
+                                     ["latin1" "héllo"  6]   ; +1 two-byte  (U+00E9)
+                                     ["cjk"    "日本"    6]   ; two three-byte (U+65E5 U+672C)
+                                     ["astral" "a😀b"   6]]] ; +1 FOUR-byte  (U+1F600)
+        (let [g (p "bytes" (str label ".txt"))
+              r (run "write" {:path g :content content})]
+          (is (= (str "Wrote " bytes " bytes to " g) (:output r))
+              (str "byte count for " (pr-str content)))
+          (is (= content (:output (run "read" {:path g})))))))
     (testing "a deep write also creates its parents"
       (run "write" {:path (p "work" "sub" "deep.txt")
                     :content "TODO: alpha\nplain line\nTODO: omega\n"})
@@ -188,7 +225,20 @@
         (is (false? (:isError r)))
         (is (= "" (:output r)))))
     (testing "limit caps the output"
-      (is (= "notes.txt" (:output (run "glob" {:pattern "**/*.txt" :path d :limit 1})))))))
+      (is (= "notes.txt" (:output (run "glob" {:pattern "**/*.txt" :path d :limit 1})))))
+    ;; §4A glob output is a listing a model reads, so its ORDER must not depend
+    ;; on which host produced it — and above the BMP a bare `sort` is precisely
+    ;; where the two disagree: the JVM compares UTF-16 code units (a surrogate
+    ;; D83D below E000), cljgo compares UTF-8 bytes (F0 above EE). Every ASCII
+    ;; fixture above orders identically either way, which is why the bare sort
+    ;; survived. U+E000 is an escape (a normal BMP char); U+1F600 is written
+    ;; DIRECTLY, because an escaped surrogate is not portable source.
+    (testing "order is by CODE POINT, identically on both hosts"
+      (let [nb (p "globs-nonbmp")]
+        (doseq [n ["a.txt" "\uE000.txt" "😀.txt" "z.txt"]]
+          (run "write" {:path (str nb "/" n) :content "x\n"}))
+        (is (= "a.txt\nz.txt\n\uE000.txt\n😀.txt"
+               (:output (run "glob" {:pattern "*.txt" :path nb}))))))))
 
 (deftest grep-tool
   (let [d (p "greps")]
@@ -197,10 +247,17 @@
     (testing "file:line:text, filtered by an include glob"
       (let [r (run "grep" {:pattern "TODO:\\s*\\w+" :path d :include "**/*.txt"})]
         (is (false? (:isError r)))
+        ;; The FULL line, not `ends-with?`. Asserting only the tail left the
+        ;; `file:` half of "file:line:text" unproven — emitting an empty
+        ;; filename passed just as well. js pushes the walked path verbatim
+        ;; (`matches.push(\`${file}:${i+1}:${lines[i]}\`)`, js/src/builtin.ts:329)
+        ;; where `glob` pushes `path.relative(root,file)` (:360), so grep being
+        ;; ABSOLUTE while glob is RELATIVE is faithful parity, not a slip.
+        ;; §4A pins neither; reported upward rather than quietly normalised.
         (let [lines (str/split-lines (:output r))]
           (is (= 2 (count lines)))
-          (is (str/ends-with? (nth lines 0) ":1:TODO: alpha"))
-          (is (str/ends-with? (nth lines 1) ":3:TODO: omega")))))
+          (is (= (str (p "greps") "/a.txt:1:TODO: alpha") (nth lines 0)))
+          (is (= (str (p "greps") "/a.txt:3:TODO: omega") (nth lines 1))))))
     (testing "an include that matches nothing ⇒ empty"
       (is (= "" (:output (run "grep" {:pattern "TODO" :path d
                                       :include "**/nomatch/*.txt"})))))

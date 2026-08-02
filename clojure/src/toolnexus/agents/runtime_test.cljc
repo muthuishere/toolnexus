@@ -422,6 +422,53 @@
     (is (= 15 (:tokens (rt/inspect rt boss)))
         "the roll-up IS the ledger — a child's spend is visible on every ancestor")))
 
+(deftest a-wall-clock-deadline-is-carved-at-spawn-and-enforced-by-the-live-walk
+  (testing "maxWallMs runs from SPAWN on the INJECTED clock, not from the wake and not off wall time"
+    ;; The clock does NOT start at zero, which is what makes "deadline = spawn
+    ;; time + maxWallMs" observable: with a zero epoch a runtime that stored the
+    ;; raw duration as an absolute deadline would pass this test unchanged.
+    (let [clock (rt/virtual-clock 5000)
+          {:keys [rt]} (runtime-with {"w" (adef "w" "wm" :budget {:max-wall-ms 1000})}
+                                     {"wm" [{:text "in time"} {:text "never seen"}]}
+                                     {:clock clock})
+          h (rt/spawn rt rt/root "w")]                 ; deadline = 5000 + 1000
+      ((:advance! clock) 600)
+      (is (= {:ok true} (rt/wake rt h "inside the window"))
+          "600ms in, the deadline has not passed")
+      (is (= "done" (:status (rt/wait rt h))))
+      ((:advance! clock) 401)                          ; now 1001 — past the deadline
+      (let [r (rt/wake rt h "outside it")]
+        (is (= false (:ok r)) "the second wake is past the wall-clock deadline")
+        (is (= "budget exhausted (maxWallMs); partial work preserved" (:error r))
+            "the limit is NAMED — `maxWallMs`, not a generic budget error"))
+      (let [r (rt/wait rt h)]
+        (is (= "incomplete" (:status r)))
+        (is (= 1 (:turns r)) "partial work preserved: the in-window turn still counts"))
+      (is (= "idle" (state-of rt h)) "a deadline is a limit stop, not a kill"))))
+
+(deftest the-max-tool-calls-pool-is-drained-by-the-rollup-and-then-exceeded
+  (testing "the pool has to be EXCEEDED — a tool-call budget that is never spent proves nothing"
+    (let [noop (tool/tool {:name "noop" :description "does nothing"
+                           :execute (fn ([_a] (tool/success "ok"))
+                                      ([_a _c] (tool/success "ok")))})
+          {:keys [rt]} (runtime-with
+                        {"w" (adef "w" "wm" :budget {:max-tool-calls 3} :tools [noop])}
+                        {"wm" [{:calls [{:id "c1" :name "noop"} {:id "c2" :name "noop"}]}
+                               {:text "spent two"}
+                               {:calls [{:id "c3" :name "noop"}]}
+                               {:text "spent the third"}
+                               {:text "never seen"}]})
+          h (rt/spawn rt rt/root "w")]
+      (rt/wake rt h "use two")
+      (is (= "done" (:status (rt/wait rt h))))
+      (is (= {:ok true} (rt/wake rt h "use the third"))
+          "two of three spent — the pool is drained PER CALL, so one is left and the wake stands")
+      (is (= "done" (:status (rt/wait rt h))))
+      (let [r (rt/wake rt h "one too many")]
+        (is (= false (:ok r)) "the third call exhausted the pool; this turn EXCEEDS it")
+        (is (= "budget exhausted (maxToolCalls); partial work preserved" (:error r))))
+      (is (= "incomplete" (:status (rt/wait rt h)))))))
+
 ;; ===========================================================================
 ;; Gate 2 — maxConcurrent per parent, FIFO queue, slot transfer
 ;; ===========================================================================
@@ -557,6 +604,261 @@
     (is (traced? rt "root/w.1: onSpawn error: boom"))
     (rt/wake rt h "go")
     (is (= "done" (:status (rt/wait rt h))) "and it still runs")))
+
+(deftest close-force-aborts-the-in-flight-turn-instead-of-letting-it-finish
+  (testing "{:force true} skips the grace period — the same run, two endings"
+    (let [run (fn [opts]
+                (let [{:keys [rt]} (runtime-with {"w" (adef "w" "wm")} {"wm" [{:text "finished"}]}
+                                                 {:shutdown-ms 60000
+                                                  :on-call (fn [_b _n] (ktime/sleep! 150))})
+                      h (rt/spawn rt rt/root "w")]
+                  (rt/wake rt h "go")
+                  (rt/close rt h opts)
+                  rt))]
+      (let [rt (run {:force true})]
+        (is (= "closed" (state-of rt "root/w.1")))
+        (is (traced? rt "root/w.1: running→idle (interrupted; inbox intact)")
+            "force ABORTS the running turn — it does not wait 60s for it to finish")
+        (is (traced? rt "root/w.1: idle→closed (interrupted)")
+            "…and the close reason is `interrupted`, not `closed`")
+        (is (not (traced? rt "running→idle (done"))
+            "the turn never produced its answer"))
+      (let [rt (run {})]
+        (is (= "closed" (state-of rt "root/w.1")))
+        (is (traced? rt "root/w.1: running→idle (done, turns=1, tokens=15)")
+            "without :force the turn finishes inside the grace period")
+        (is (traced? rt "root/w.1: idle→closed (closed)"))))))
+
+(deftest wake-on-a-closed-handle-is-refused
+  (testing "close means stop accepting — a wake after it is an error, never a resurrection"
+    (let [{:keys [rt]} (runtime-with {"w" (adef "w" "wm")} {"wm" [{:text "never"}]})
+          h (rt/spawn rt rt/root "w")]
+      (rt/close rt h)
+      (let [r (rt/wake rt h "go")]
+        (is (= false (:ok r)))
+        (is (= "closed: root/w.1" (:error r))))
+      (is (= "closed" (state-of rt h)) "the state did not move")
+      (is (not (traced? rt "root/w.1: idle→running (wake)")) "and no turn was ever started"))))
+
+(deftest the-inherit-model-falls-back-to-the-runtimes-llm-model
+  (testing "\"inherit\" (and an absent model) resolve to :llm's; an explicit model wins"
+    (let [{:keys [rt requests]} (runtime-with
+                                 {"i" (adef "i" "inherit")
+                                  "n" (adef "n" nil)
+                                  "o" (adef "o" "own")}
+                                 {"default" [{:text "a"} {:text "b"}] "own" [{:text "c"}]})]
+      (doseq [nm ["i" "n" "o"]]
+        (let [h (rt/spawn rt rt/root nm)]
+          (rt/wake rt h "go")
+          (rt/wait rt h)))
+      (is (= ["default" "default" "own"] (mapv :model @requests))
+          "the model on the WIRE — `inherit` must never reach a provider as a model id"))))
+
+(deftest on-metric-set-on-the-def-replaces-the-runtimes
+  (testing "the §8 seams resolve def-over-runtime for :on-metric too, not only :hooks"
+    (let [seen (atom [])
+          {:keys [rt]} (runtime-with
+                        {"plain" (adef "plain" "pm")
+                         "own"   (adef "own" "om" :on-metric (fn [_ev] (swap! seen conj :def-metric)))}
+                        {"pm" [{:text "a"}] "om" [{:text "b"}]}
+                        {:on-metric (fn [_ev] (swap! seen conj :runtime-metric))})
+          a (rt/spawn rt rt/root "plain")
+          b (rt/spawn rt rt/root "own")]
+      (rt/wake rt a "x") (rt/wait rt a)
+      (is (seq @seen) "an agent with no :on-metric inherits the runtime's")
+      (is (= #{:runtime-metric} (set @seen)))
+      (reset! seen [])
+      (rt/wake rt b "y") (rt/wait rt b)
+      (is (seq @seen) "the def's sink fired")
+      (is (= #{:def-metric} (set @seen))
+          "a def that sets :on-metric REPLACES the runtime's — replace, never merge"))))
+
+(deftest gate-stats-in-flight-is-a-live-gauge
+  (testing ":max-observed is a high-water mark; :in-flight is what is happening NOW"
+    (let [gate (promise) entered (promise)
+          {:keys [rt]} (runtime-with {"w" (adef "w" "wm")} {"wm" [{:text "ok"}]}
+                                     {:on-call (fn [_b _n] (deliver entered true) @gate)})
+          h (rt/spawn rt rt/root "w")]
+      (is (= 0 (:in-flight (rt/gate-stats rt))) "nothing in flight before the first turn")
+      (rt/wake rt h "go")
+      (is (until! #(realized? entered)))
+      (is (= 1 (:in-flight (rt/gate-stats rt)))
+          "counted while the LLM call is ACTUALLY in flight, not merely while a turn exists")
+      (deliver gate true)
+      (rt/wait rt h)
+      (is (until! #(= 0 (:in-flight (rt/gate-stats rt))))
+          "…and released when it returns — a gauge, not a total")
+      (is (= 1 (:max-observed (rt/gate-stats rt)))
+          "the high-water mark is NOT reset by the release"))))
+
+;; ===========================================================================
+;; onBudget — the optional host budget callback (§7D)
+;; ===========================================================================
+;;
+;; The vocabulary is three strings. Every test below EXCEEDS the budget it names
+;; — a budget callback that is never consulted would pass a test that merely set
+;; one up.
+
+(defn- budget-rt
+  "A runtime whose agent runs out of turns on its SECOND wake, with `on-budget`
+  wired. `decide` is the host callback."
+  [decide & [extra]]
+  (runtime-with {"w" (adef "w" "wm" :budget {:max-turns 1})}
+                {"wm" [{:text "first"} {:text "second"} {:text "third"}]}
+                (merge {:on-budget decide} extra)))
+
+(deftest without-on-budget-a-limit-stop-is-unchanged
+  (testing "unset ⇒ byte-identical: no hook, no decision, nothing added to the trace"
+    (let [run (fn [opts]
+                (let [{:keys [rt]} (runtime-with {"w" (adef "w" "wm" :budget {:max-turns 1})}
+                                                 {"wm" [{:text "first"} {:text "second"}]}
+                                                 opts)
+                      h (rt/spawn rt rt/root "w")]
+                  (rt/wake rt h "one") (rt/wait rt h)
+                  [(rt/wake rt h "two") (:status (rt/wait rt h)) (rt/trace rt)]))
+          [refusal status trace] (run {})
+          [refusal' status' trace'] (run {:on-budget (fn [_info] "stop")})]
+      (is (= ["root/w.1: spawned (depth 1, tokens Infinity)"
+              "root/w.1: idle→running (wake)"
+              "root/w.1: running→idle (done, turns=1, tokens=15)"]
+             trace)
+          "a runtime with no :on-budget traces exactly what it traced before the hook existed")
+      (is (= refusal refusal') "…and \"stop\" reaches the same refusal…")
+      (is (= status status') "…the same incomplete status…")
+      (is (= (conj trace "root/w.1: budget maxTurns → stop") trace')
+          "…differing ONLY by the line recording that a host was asked"))))
+
+(deftest on-budget-is-asked-with-the-limit-and-the-ledger
+  (let [seen (atom nil)
+        {:keys [rt]} (budget-rt (fn [info] (reset! seen info) "stop"))
+        h (rt/spawn rt rt/root "w")]
+    (rt/wake rt h "one") (rt/wait rt h)
+    (is (nil? @seen) "the hook is NOT consulted while the run is inside its budget")
+    (rt/wake rt h "two")
+    (is (= "root/w.1" (:handle @seen)))
+    (is (= "maxTurns" (:limit @seen)) "the limit that would stop the turn, by name")
+    (is (= "two" (:prompt @seen)) "the prompt the refused wake carried")
+    (is (= 1 (:turns @seen)))
+    (is (= 15 (:tokens @seen)) "the ledger, so a host can convert tokens to money itself")
+    (is (nil? (:cost @seen)) "money is deliberately NOT in the library — that is the host's job")))
+
+(deftest on-budget-stop-settles-the-same-loud-incomplete
+  (let [{:keys [rt]} (budget-rt (fn [_info] "stop"))
+        h (rt/spawn rt rt/root "w")]
+    (rt/wake rt h "one") (rt/wait rt h)
+    (let [r (rt/wake rt h "two")]
+      (is (= false (:ok r)))
+      (is (= "budget exhausted (maxTurns); partial work preserved" (:error r))))
+    (is (= "incomplete" (:status (rt/wait rt h))))
+    (is (traced? rt "root/w.1: budget maxTurns → stop"))
+    (is (= "idle" (state-of rt h)))))
+
+(deftest an-unrecognised-or-throwing-decision-is-read-as-stop
+  (testing "an unrecognised decision must NEVER be a silent grant"
+    (doseq [[label decide] [["nil"     (fn [_i] nil)]
+                            ["typo"    (fn [_i] "extned")]
+                            ["throws"  (fn [_i] (throw (ex-info "boom" {})))]]]
+      (let [{:keys [rt]} (budget-rt decide)
+            h (rt/spawn rt rt/root "w")]
+        (rt/wake rt h "one") (rt/wait rt h)
+        (is (= false (:ok (rt/wake rt h "two"))) (str label ": the turn is still refused"))
+        (is (= "incomplete" (:status (rt/wait rt h))) label)
+        (is (= 1 (:turns (rt/wait rt h))) (str label ": and no extra turn was bought"))))
+    (let [{:keys [rt]} (budget-rt (fn [_i] (throw (ex-info "boom" {}))))
+          h (rt/spawn rt rt/root "w")]
+      (rt/wake rt h "one") (rt/wait rt h) (rt/wake rt h "two")
+      (is (traced? rt "root/w.1: onBudget error: boom")
+          "a throwing host callback is traced, never fatal"))))
+
+(deftest on-budget-extend-buys-exactly-one-more-turn
+  (testing "the pool is NOT rewritten — the host is asked again, so the host owns the loop bound"
+    (let [asked (atom 0)
+          {:keys [rt]} (budget-rt (fn [_info] (swap! asked inc) "extend"))
+          h (rt/spawn rt rt/root "w")]
+      (rt/wake rt h "one")
+      (is (= "first" (:text (rt/wait rt h))))
+      (is (= {:ok true} (rt/wake rt h "two")) "the extended wake is ADMITTED, not refused")
+      (let [r (rt/wait rt h)]
+        (is (= "done" (:status r)) "the granted turn actually ran")
+        (is (= "second" (:text r))))
+      (is (= 1 @asked))
+      (is (traced? rt "root/w.1: budget maxTurns → extend (one granted turn)"))
+      (is (traced? rt "root/w.1: running→idle (done, turns=1, tokens=15)"))
+      (rt/wake rt h "three")
+      (rt/wait rt h)
+      (is (= 2 @asked)
+          "the grant was ONE-SHOT: the third turn had to ask again")
+      (is (= 3 (:turns (rt/inspect rt h))) "…and all three turns ran"))))
+
+(deftest on-budget-suspend-routes-the-limit-through-section-10
+  (testing "402 → top-up → resume: the limit becomes an approval Request, answered by the host"
+    (let [{:keys [rt]} (budget-rt (fn [_info] "suspend"))
+          h (rt/spawn rt rt/root "w")]
+      (rt/wake rt h "one") (rt/wait rt h)
+      (is (= {:ok true} (rt/wake rt h "two")) "the wake parks rather than failing")
+      (is (= "suspended" (state-of rt h)))
+      (let [r (rt/wait rt h)]
+        (is (= "pending" (:status r)) "the host sees a §10 pending, not an incomplete")
+        (is (= false (:isError r)) "a pending is a pause, not a failure")
+        (is (= "approval" (:kind (:pending r))) "…routed as an APPROVAL, which §7D names")
+        (is (str/includes? (:prompt (:pending r)) "budget exhausted (maxTurns)"))
+        (is (= ["root" "w.1"] (get-in r [:pending :data :path]))
+            "the §10 agent addendum's handle path rides inside `data`"))
+      (is (traced? rt "root/w.1: idle→suspended (budget maxTurns → §10 approval)"))
+      ;; --- the host tops up -------------------------------------------------
+      (rt/resume rt (client/make-answer (:id (:pending (rt/wait rt h))) true))
+      (is (= "done" (:status (rt/wait rt h))) "an approved top-up runs the turn it bought")
+      (is (= "second" (:text (rt/wait rt h))))
+      (is (= 2 (:turns (rt/inspect rt h))) "turns GROW across the suspension, they never reset"))))
+
+(deftest a-declined-budget-approval-settles-the-same-incomplete-as-stop
+  (testing "the Answer is still the only exit from suspended — ok=false means the limit stands"
+    (let [{:keys [rt]} (budget-rt (fn [_info] "suspend"))
+          h (rt/spawn rt rt/root "w")]
+      (rt/wake rt h "one") (rt/wait rt h)
+      (rt/wake rt h "two")
+      (let [req (:pending (rt/wait rt h))]
+        (rt/resume rt (client/make-answer (:id req) false)))
+      (let [r (rt/wait rt h)]
+        (is (= "incomplete" (:status r)) "a declined top-up is indistinguishable from a `stop`")
+        (is (= "budget exhausted (maxTurns); partial work preserved" (:text r)))
+        (is (= 1 (:turns r)) "no turn was bought"))
+      (is (= "idle" (state-of rt h)))
+      (is (traced? rt "root/w.1: suspended→idle (Answer ok=false, budget maxTurns refused)")))))
+
+(deftest interrupting-a-budget-suspension-releases-it
+  (let [{:keys [rt]} (budget-rt (fn [_info] "suspend"))
+        h (rt/spawn rt rt/root "w")]
+    (rt/wake rt h "one") (rt/wait rt h)
+    (rt/wake rt h "two")
+    (is (= "suspended" (state-of rt h)))
+    (rt/interrupt rt h)
+    (is (= "idle" (state-of rt h)))
+    (is (nil? (:pending (rt/inspect rt h)))
+        "the operator escape hatch works on a budget suspension like any other")))
+
+(deftest a-queued-wake-whose-budget-expired-still-reaches-the-hook
+  (testing "the dequeue path consults on-budget too — a queued wake is deferred, not exempt"
+    (let [gate (promise)
+          asked (atom [])
+          {:keys [rt]} (runtime-with
+                        {"boss" (adef "boss" "bm" :budget {:max-concurrent 1 :max-tokens 20 :max-depth 5})
+                         "w"    (adef "w" "wm")}
+                        {"wm" [{:calls [{:id "c1" :name "nope" :args {}}]} {:text "burnt"}]}
+                        {:on-call (fn [_b _n] @gate)
+                         :on-budget (fn [info] (swap! asked conj (:limit info)) "stop")})
+          boss (rt/spawn rt rt/root "boss")
+          a (rt/spawn rt boss "w") b (rt/spawn rt boss "w")]
+      (rt/wake rt a "burn it")                    ; two round trips = 30 > the 20 shared
+      (rt/wake rt b "my turn")                    ; queued behind a, cap 1
+      (is (until! #(traced? rt "root/boss.1/w.2: wake QUEUED")))
+      (deliver gate true)
+      (is (= "done" (:status (rt/wait rt a))))
+      (is (until! #(seq @asked))
+          "b's slot arrived after a had drained the shared pool — the hook was asked")
+      (is (= ["maxTokens"] @asked))
+      (is (= "incomplete" (:status (rt/wait rt b))))
+      (is (traced? rt "root/boss.1/w.2: budget maxTokens → stop")))))
 
 ;; ===========================================================================
 ;; wait timeouts, on the injectable clock

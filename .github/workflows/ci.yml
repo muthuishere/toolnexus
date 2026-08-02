@@ -172,6 +172,10 @@ jobs:
       - run: ./consumer-exit-check.sh
         env:
           TN_EXAMPLES: ${{ github.workspace }}/examples
+      # The API-key env fallback chain, proven from OUTSIDE with fake keys — the
+      # suite cannot set an env var in-process on either host, so a runner that
+      # controls its child's environment is the only place this is testable.
+      - run: ./env-chain-check.sh
       # The shipped examples, on BOTH hosts. A README example that no longer runs
       # is a broken promise to the first person who tries the library.
       - run: ./examples/clj/run.sh

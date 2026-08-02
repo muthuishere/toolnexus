@@ -287,7 +287,7 @@
   (let [h    (h-of st id)
         text (str "budget exhausted (" limit "); partial work preserved")
         r    (result "incomplete" text true (:turns-total h) (:usage-total h))]
-    [(update-in st [:handles id] assoc :last-result r :waiters [])
+    [(update-in st [:handles id] assoc :last-result r :waiters [] :state "idle")
      text
      (:waiters h)]))
 
@@ -329,6 +329,12 @@
      :tool-calls-total 0
      :turns-total      0
      :pending-request  nil
+     ;; `:on-budget` bookkeeping (§7D). `:budget-grant` is a ONE-SHOT permit — an
+     ;; `"extend"` decision sets it, the next admission consumes it. `:budget-pending`
+     ;; names the limit a `"suspend"` decision parked on, so the Answer knows whether
+     ;; it is granting the turn or refusing it.
+     :budget-grant     false
+     :budget-pending   nil
      :last-result      nil
      :checkpoint       nil
      :drained          []
@@ -361,6 +367,10 @@
                           that agent's def sets its own. Forwarded verbatim
     :on-metric            §8 observability sink, same resolution, resolved
                           INDEPENDENTLY of `:hooks`
+    :on-budget            the optional §7D host budget callback,
+                          `(fn [info] \"stop\"|\"extend\"|\"suspend\")`. Consulted
+                          ONLY when a limit would stop a turn; absent ⇒ the limit
+                          always stops it, byte-identically. See `budget-decision!`
 
   An AgentDef is a map:
 
@@ -662,7 +672,11 @@
   (let [h (h-of st id)]
     (cond-> st
       (:parent h) (update-in [:handles (:parent h) :running-children] inc)
-      true        (update-in [:handles id] assoc :state "running" :cancel (atom nil))
+      ;; `:budget-grant` is consumed HERE, by the admission it paid for: an
+      ;; `"extend"` decision buys exactly one turn, so the host is asked again
+      ;; before the next one and owns the loop bound.
+      true        (update-in [:handles id] assoc :state "running" :cancel (atom nil)
+                             :budget-grant false)
       trace?      (trace-in (str id ": idle→running (wake)")))))
 
 (defn- queued?
@@ -854,6 +868,124 @@
   nil)
 
 ;; ---------------------------------------------------------------------------
+;; `onBudget` — the optional host budget callback (§7D)
+;; ---------------------------------------------------------------------------
+
+(declare wake)
+
+(defn- on-budget-fn [rt] (:on-budget (:opts rt)))
+
+(defn- budget-limit-of
+  "The limit that would stop this handle's next turn, or nil. A one-shot
+  `:budget-grant` from an `\"extend\"` decision suppresses the check for exactly
+  one admission — otherwise `\"extend\"` would ask the host again forever without
+  ever running the turn it granted."
+  [st now id]
+  (let [h (h-of st id)]
+    (when-not (:budget-grant h)
+      (or (pool-limit st now id) (turn-cap st id)))))
+
+(defn- budget-info
+  "What the host is told. Deliberately NOT money: §7D excludes monetary budgets
+  from the library because price tables are vendor data — a host converts tokens
+  to money here, which is the whole reason this callback exists."
+  [st id limit prompt]
+  (let [h (h-of st id)]
+    {:handle     id
+     :limit      limit
+     :prompt     prompt
+     :turns      (:turns-total h)
+     :tokens     (:usage-total h)
+     :tool-calls (:tool-calls-total h)
+     :pool       (:pool h)}))
+
+(defn- budget-stop!
+  "The default: settle `incomplete` naming the limit. Identical to what a runtime
+  with NO `:on-budget` does, plus one trace line recording that the host was
+  asked — with no hook there is no decision to record, so the trace of a
+  hook-less runtime is unchanged."
+  [rt id limit]
+  (let [outcome
+        (transact! rt (fn [st]
+                        (let [[st* text waiters] (settle-refused st id limit)]
+                          [(trace-in st* (str id ": budget " limit " → stop"))
+                           {:error text :deliver waiters
+                            :result (:last-result (h-of st* id))}])))]
+    (deliver-all! (:deliver outcome) (:result outcome))
+    {:ok false :error (:error outcome)}))
+
+(defn- budget-suspend!
+  "Route the limit through §10 as an APPROVAL (`suspend`). The handle parks with
+  a pending Request and only the Answer may move it: `ok` ⇒ the granted turn
+  runs from the checkpoint (the 402 → top-up → resume story), not-ok ⇒ exactly
+  the `incomplete` that `\"stop\"` would have settled.
+
+  The transition recorded is `idle→suspended`. §7D's state graph writes
+  `suspended` as reachable from `running`, because every suspension it
+  contemplates comes OUT of a halted turn; a budget suspension happens BEFORE the
+  turn, and tracing a `running` the handle never entered would be a lie in the one
+  artifact conformance is measured on. `suspended → running only via the Answer`
+  — the invariant that graph exists to state — is untouched."
+  [rt id limit prompt]
+  (let [req (client/make-request
+             "approval"
+             (str "budget exhausted (" limit "); approve to continue?")
+             {:id (str id "#budget:" limit)
+              :data {:limit limit :handle id}})
+        outcome
+        (transact!
+         rt
+         (fn [st]
+           (let [[st text] (drain-in st id)]
+             [(-> st
+                  (update-in [:handles id] assoc
+                             :state "suspended"
+                             :pending-request (stamp-path req id)
+                             :budget-pending limit
+                             :checkpoint {:input (str (or prompt "") text)}
+                             :drained [])
+                  (trace-in (str id ": idle→suspended (budget " limit " → §10 approval)")))
+              nil])))]
+    outcome
+    {:ok true}))
+
+(defn- budget-decision!
+  "Ask the host's `:on-budget` what to do about a limit that would stop this
+  turn, and apply the answer. §7D pins the vocabulary — three strings:
+
+    \"stop\"     settle `incomplete` naming the limit. What a runtime with no
+                 hook always does
+    \"extend\"   grant EXACTLY ONE more turn past the limit, then re-run the wake
+                 verb so gate 2 and the queue are honoured unchanged. The pool
+                 itself is not rewritten, so the host is asked again before the
+                 next turn: the HOST owns the loop bound, never the runtime
+    \"suspend\"  park on a §10 `approval` Request (see `budget-suspend!`)
+
+  Anything else — nil, a typo, a thrown callback — is read as \"stop\". An
+  unrecognised decision must never become a silent grant, which is the one way a
+  budget hook could turn a bounded run into an unbounded one."
+  [rt id limit prompt]
+  (let [f (on-budget-fn rt)
+        decision (try (str (f (budget-info @(:state rt) id limit prompt)))
+                      (catch Throwable e
+                        (transact! rt (fn [st]
+                                        [(trace-in st (str id ": onBudget error: "
+                                                           (or (ex-message e) (str e))))
+                                         nil]))
+                        "stop"))]
+    (cond
+      (= "extend" decision)
+      (do (transact! rt (fn [st]
+                          [(-> st
+                               (assoc-in [:handles id :budget-grant] true)
+                               (trace-in (str id ": budget " limit " → extend (one granted turn)")))
+                           nil]))
+          (wake rt id prompt))
+
+      (= "suspend" decision) (budget-suspend! rt id limit prompt)
+      :else                  (budget-stop! rt id limit))))
+
+;; ---------------------------------------------------------------------------
 ;; verb: wake  (gate 2 — atomic admission, FIFO queue, slot transfer)
 ;; ---------------------------------------------------------------------------
 
@@ -893,16 +1025,23 @@
                          (trace-in (str id ": wake QUEUED (parent concurrency "
                                         (get-in p [:eff :max-concurrent]) ")")))
                      {:ok true}]
-                    (if-let [limit (or (pool-limit st now id) (turn-cap st id))]
-                      (let [[st* text waiters] (settle-refused st id limit)]
-                        [st* {:ok false :error text :deliver waiters
-                              :result (:last-result (h-of st* id))}])
+                    (if-let [limit (budget-limit-of st now id)]
+                      ;; With an `:on-budget` hook the refusal is NOT committed
+                      ;; here: the host has to be asked first, and a host callback
+                      ;; may not run inside a transaction that can be retried.
+                      (if (on-budget-fn rt)
+                        [st {:ok false :budget-limit limit}]
+                        (let [[st* text waiters] (settle-refused st id limit)]
+                          [st* {:ok false :error text :deliver waiters
+                                :result (:last-result (h-of st* id))}]))
                       (let [[st* text] (drain-in st id)]
                         [(admit-in st* id true)
                          {:ok true :start (str (or prompt "") text)}]))))))))]
      (when (:deliver outcome) (deliver-all! (:deliver outcome) (:result outcome)))
      (when (contains? outcome :start) (start-turn! rt id (:start outcome) nil))
-     (select-keys outcome [:ok :error]))))
+     (if-let [limit (:budget-limit outcome)]
+       (budget-decision! rt id limit prompt)
+       (select-keys outcome [:ok :error])))))
 
 (defn release-child-slot!
   "Gate 2's other half: free this Run's slot and TRANSFER it to queued sibling
@@ -917,31 +1056,40 @@
            (let [h (h-of st id)
                  pid (:parent h)]
              (if-not pid
-               [st {:starts [] :deliver []}]
+               [st {:starts [] :deliver [] :decisions []}]
                (loop [st (update-in st [:handles pid :running-children] dec)
-                      starts [] deliver []]
+                      starts [] deliver [] decisions []]
                  (let [p (h-of st pid)
                        q (:wake-queue p)]
                    (if (or (empty? q) (>= (:running-children p) (get-in p [:eff :max-concurrent])))
-                     [st {:starts starts :deliver deliver}]
+                     [st {:starts starts :deliver deliver :decisions decisions}]
                      (let [nx (first q)
                            st (assoc-in st [:handles pid :wake-queue] (vec (rest q)))
                            nh (h-of st (:h nx))]
                        (cond
-                         (not= "idle" (:state nh)) (recur st starts deliver)
+                         (not= "idle" (:state nh)) (recur st starts deliver decisions)
                          :else
-                         (if-let [limit (or (pool-limit st now (:h nx)) (turn-cap st (:h nx)))]
-                           (let [[st* _ waiters] (settle-refused st (:h nx) limit)]
-                             (recur st* starts
-                                    (conj deliver [waiters (:last-result (h-of st* (:h nx)))])))
+                         (if-let [limit (budget-limit-of st now (:h nx))]
+                           ;; Same rule as `wake`: with a host hook the refusal is
+                           ;; deferred out of the transaction, so a queued wake whose
+                           ;; budget expired while it waited gets the same decision a
+                           ;; direct wake would have.
+                           (if (on-budget-fn rt)
+                             (recur st starts deliver
+                                    (conj decisions [(:h nx) limit (:prompt nx)]))
+                             (let [[st* _ waiters] (settle-refused st (:h nx) limit)]
+                               (recur st* starts
+                                      (conj deliver [waiters (:last-result (h-of st* (:h nx)))])
+                                      decisions)))
                            (let [[st* text] (drain-in st (:h nx))
                                  st* (-> st*
                                          (trace-in (str (:h nx) ": DEQUEUED wake (slot transferred)"))
                                          (admit-in (:h nx) true))]
                              (recur st* (conj starts [(:h nx) (str (or (:prompt nx) "") text)])
-                                    deliver))))))))))))]
+                                    deliver decisions))))))))))))]
     (doseq [[waiters r] (:deliver outcome)] (deliver-all! waiters r))
     (doseq [[cid input] (:starts outcome)] (start-turn! rt cid input nil))
+    (doseq [[cid limit prompt] (:decisions outcome)] (budget-decision! rt cid limit prompt))
     nil))
 
 ;; ---------------------------------------------------------------------------
@@ -1028,7 +1176,7 @@
                (= "suspended" (:state h))
                [(-> st
                     (update-in [:handles id] assoc :state "idle"
-                               :pending-request nil :checkpoint nil)
+                               :pending-request nil :checkpoint nil :budget-pending nil)
                     (trace-in (str id ": suspended→idle (interrupt cancelled pending \""
                                    (:kind (:pending-request h)) "\")")))
                 nil]
@@ -1107,6 +1255,8 @@
     (or (some #(deepest-suspended st %) (:children h))
         (when (= "suspended" (:state h)) id))))
 
+(declare resume-turn!)
+
 (defn- resume-suspended!
   "Resume a suspended handle by REPLAYING its halted turn from the checkpoint.
   The stored transcript was rewound when the Run halted, so the whole turn
@@ -1122,13 +1272,37 @@
     durable  `suspended→idle` (Answer accepted, checkpoint restored) then
              `idle→running` (the replay wake)"
   [rt id answer inline?]
+  (if (and (:budget-pending (h-of @(:state rt) id)) answer (not (:ok answer)))
+    ;; An `:on-budget` "suspend" that the host then DECLINED. The Answer is still
+    ;; the only exit from `suspended`, and the outcome is exactly the `incomplete`
+    ;; a "stop" decision would have settled — a declined top-up must not look
+    ;; different from a refused one.
+    (let [outcome
+          (transact!
+           rt
+           (fn [st]
+             (let [limit (:budget-pending (h-of st id))
+                   st (update-in st [:handles id] assoc
+                                 :pending-request nil :checkpoint nil :budget-pending nil)
+                   [st* _ waiters] (settle-refused st id limit)]
+               [(trace-in st* (str id ": suspended→idle (Answer ok=false, budget "
+                                   limit " refused)"))
+                {:deliver waiters :result (:last-result (h-of st* id))}])))]
+      (deliver-all! (:deliver outcome) (:result outcome))
+      (:result outcome))
+    (resume-turn! rt id answer inline?)))
+
+(defn- resume-turn!
+  "The ordinary resume: restore the checkpoint and replay the halted turn."
+  [rt id answer inline?]
   (let [outcome
         (transact!
          rt
          (fn [st]
            (let [h  (h-of st id)
                  cp (:checkpoint h)
-                 st (update-in st [:handles id] assoc :pending-request nil :checkpoint nil)
+                 st (update-in st [:handles id] assoc :pending-request nil :checkpoint nil
+                               :budget-pending nil)
                  st (if inline?
                       (-> st
                           (update-in [:handles id] assoc :state "running" :cancel (atom nil))

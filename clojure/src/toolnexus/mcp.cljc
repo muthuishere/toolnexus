@@ -148,6 +148,8 @@
   length — a length leaks a secret's size."
   [raw expanded]
   (let [raw (reduce (fn [acc e] (assoc acc (key-str (key e)) (str (val e)))) {} raw)]
+    ;; Bare `sort` is fine: these are HTTP header field names, which RFC 7230
+    ;; restricts to ASCII tokens, so the two hosts cannot order them differently.
     {:keys     (vec (sort (keys expanded)))
      :expanded (boolean (some (fn [e] (not= (val e) (get raw (key e)))) expanded))}))
 
@@ -189,7 +191,14 @@
                     (apply dissoc cfg reserved-keys))]
     (->> servers
          (map (fn [entry] (one-server (key entry) (val entry))))
-         (sort-by :name)
+         ;; tool/compare-strings, not bare `sort-by`. These are the RAW server
+         ;; names out of the user's mcp.json — the one name in the MCP path that
+         ;; `mcp-tool-name` has not yet run through `tool/sanitize` — and this
+         ;; order is load-bearing twice over: it is the connection order, and
+         ;; `from-config`'s first-wins collision rule inherits it. Bare sort put
+         ;; a non-BMP server name in a different place on each host, so which
+         ;; server won a name clash could depend on the runtime.
+         (sort-by :name tool/compare-strings)
          vec)))
 
 ;; ---------------------------------------------------------------------------
@@ -823,6 +832,13 @@
                      :status      "connected"
                      :transport   transport
                      :server-info (get-in init [:ok :result :serverInfo])
+                     ;; Bare `sort-by` is CORRECT here, unlike `parse-config`'s
+                     ;; above: every name in this list came out of
+                     ;; `mcp-tool-name`, i.e. `tool/sanitize` twice, so it is
+                     ;; `[a-zA-Z0-9_-]+` by construction. Code-unit and
+                     ;; code-point order coincide over ASCII, so there is no
+                     ;; host divergence to fix and no mutation that could prove
+                     ;; one — which is why this is a comment and not a change.
                      :tools       (->> (:ok listed)
                                        (map (fn [t] (uniform-tool (:name server) transport timeout-ms t)))
                                        (sort-by :name)
@@ -866,6 +882,8 @@
   ([config] (from-config config nil))
   ([config conn-opts]
   (let [conns (mapv (fn [srv] (connect srv conn-opts)) (parse-config config))]
+    ;; Bare `sort-by` again, and again deliberately: `mcp-tool-name` sanitized
+    ;; every one of these to `[a-zA-Z0-9_-]+`. See `connect`.
     {:tools       (->> conns (mapcat :tools) (sort-by :name) vec)
      :statuses    (reduce (fn [acc c] (assoc acc (:name c) (:status c))) {} conns)
      :errors      (reduce (fn [acc c] (if (:message c) (assoc acc (:name c) (:message c)) acc))

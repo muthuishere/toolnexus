@@ -186,17 +186,27 @@
         "longer content estimates larger")))
 
 (deftest keep-tail-defaults-to-half-of-max-tokens
-  (testing "the default is documented; measure it rather than trust the docstring"
+  (testing "the §7F default is `max-tokens / 2` — asserted as the EXACT transcript"
+    ;; A length BAND cannot see this default move: with :max-tokens 8 every
+    ;; divisor from 2 to 8 lands inside `3 <= n < 8`, so `(quot max-tokens 8)`
+    ;; used to pass. The split is arithmetic, so the whole output vector is
+    ;; pinned instead.
+    ;;
+    ;; 21 messages at one token each, keep-tail = 8/2 = 4: scanning back from the
+    ;; end, index 17 ("u8") is the LARGEST user-boundary tail still within 4
+    ;; messages, so the tail is indexes 17..20 and the summarizer sees the 16
+    ;; messages between the preserved system head and it.
     (let [msgs (transcript 10)                      ; 21 messages
           out  (:messages ((compaction/compactor {:max-tokens 8
                                                   :count-tokens per-message
                                                   :summarize summarize-marker})
                            {:messages msgs}))]
-      (is (some? out))
-      ;; keep-tail defaults to 4, so the retained tail is ~4 messages: system +
-      ;; summary + tail should be well under the original 21.
-      (is (< (count out) 8))
-      (is (>= (count out) 3)))))
+      (is (= (into [(msg "system" "soul")
+                    (msg "system" "[Summary of earlier conversation]\nSUMMARIZED 16")]
+                   (subvec msgs 17))
+             out))
+      (is (= 4 (count (drop 2 out)))
+          "four messages of tail — keep-tail 1 (max-tokens/8) would keep two"))))
 
 (deftest the-hook-shape-matches-the-section-8-seam
   (testing "it is a plain :before-llm hook — event in, {:messages} or nil out"
