@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.13.0 — 2026-08-02
+
 ### Added — Clojure, the 7th language (tier `full`, not yet published)
 
 One `.cljc` source tree on **two runtimes**: Clojure on the JVM and
