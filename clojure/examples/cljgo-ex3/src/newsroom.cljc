@@ -1,12 +1,13 @@
-;; toolnexus sub-agents in Clojure — an agent IS a tool.
+;; toolnexus sub-agents in Clojure — ask a question; the agent delegates to a
+;; budgeted SUB-AGENT that has its own tools, and uses a SKILL for the style.
 ;;
 ;;   OPENROUTER_API_KEY=... clojure -M -m newsroom
 ;;
-;; A "researcher" sub-agent lives in a §7D runtime with its OWN soul, its own
-;; tool view (release-facts — the writer cannot call it directly) and its own
-;; budget that stops it loudly if it runs away. `rt/agent-tool` drops that whole
-;; agent into the writer's toolkit as one ordinary tool, next to the announcer
-;; SKILL.md. The writer delegates; it cannot tell a sub-agent from a function.
+;; The "researcher" lives in a §7D runtime with its OWN soul, its own tool view
+;; (release-facts — the main agent cannot call it directly) and a hard budget.
+;; `rt/agent-tool` drops that whole agent into the toolkit as one ordinary
+;; tool. Watch the trace: the main agent calls `researcher` like any tool; a
+;; whole second agent loop runs behind that one call.
 (ns newsroom
   (:require [koine.env :as env]
             [koine.json :as json]
@@ -35,6 +36,30 @@
    :model    (or (env/get-env "TN_MODEL") "openai/gpt-4o-mini")
    :api-key  (env/get-env "OPENROUTER_API_KEY")})
 
+(defn print-scan [tk]
+  (println "== scan ==============================================")
+  (doseq [n (tn/tool-names tk)]
+    (let [t (get-in tk [:tools n])
+          d (str (:description t))]
+      (println (str "  tool:  " n " -- "
+                    (if (> (count d) 90) (str (subs d 0 90) "...") d)))))
+  (doseq [s (get-in tk [:skills :skills])]
+    (println (str "  skill: " (:name s) " — " (:description s))))
+  (println "======================================================"))
+
+(defn trace [ev]
+  (case (:type ev)
+    "tool_call"   (println (str ">> tool call   " (:name ev) " "
+                                (json/write-str (or (:args ev) {}))))
+    "tool_result" (let [o (str (:output ev))]
+                    (println (str "<< tool result " (:name ev)
+                                  (when (:isError ev) " [ERROR]") " — "
+                                  (if (> (count o) 160) (str (subs o 0 160) "…") o))))
+    nil))
+
+(def question
+  "How well is the Clojure port of toolnexus tested, and on which runtimes does it run? Ask your researcher — don't guess.")
+
 (defn -main [& _]
   (let [runtime (rt/create-runtime
                  {:llm llm
@@ -45,18 +70,18 @@
                     :soul   "You are a meticulous researcher. Answer strictly from your tools' output, tersely. If a fact is not in the output, say so."
                     :tools  [release-facts]
                     :budget {:max-turns 4 :max-tokens 20000}}}})
-        tk (tn/build {:skills   "skills"   ; the announcer house style, on demand
+        tk (tn/build {:skills   "skills"   ; the helper style, loaded on demand
                       :builtins false
                       :tools    [(rt/agent-tool runtime "researcher")]})
+        _  (print-scan tk)
+        _  (println "question:" question)
+        _  (println)
         c  (client/create-client llm)
-        r  (client/run c
-             (str "Announce the new Clojure support in toolnexus. Load your "
-                  "announcer skill for the house style, and delegate ALL "
-                  "fact-gathering to your researcher — never invent a number.")
-             {:toolkit tk})]
-    (println "----------------------------------------")
+        r  (client/run c question {:toolkit tk :on-event trace})]
+    (println)
+    (println "== answer ============================================")
     (println (:text r))
-    (println "----------------------------------------")
+    (println "======================================================")
     (println "turns:" (:turns r)
              "| tool calls:" (:tool-call-count r)
              "| tokens:" (:total-tokens (:usage r)))))

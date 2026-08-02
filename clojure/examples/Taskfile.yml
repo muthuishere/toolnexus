@@ -53,7 +53,7 @@ tasks:
   # ---- JVM runs --------------------------------------------------------------
 
   clj-ex1:
-    desc: 'ex1 on the JVM — agent skill (SKILL.md) + native tool announce a release'
+    desc: 'ex1 on the JVM — skill + http-tool: fetch and report Clojure community events'
     deps: [check-key]
     dir: clj-ex1
     cmds:
@@ -67,7 +67,7 @@ tasks:
       - clojure -M -m inspect
 
   clj-ex3:
-    desc: 'ex3 on the JVM — a budgeted sub-agent as a tool, next to a skill'
+    desc: 'ex3 on the JVM — a budgeted sub-agent answers via its own tools'
     deps: [check-key]
     dir: clj-ex3
     cmds:
@@ -80,10 +80,10 @@ tasks:
     deps: [check-key]
     dir: cljgo-ex1
     preconditions:
-      - sh: test -x ./announce
-        msg: 'cljgo-ex1/announce not built — run `task build-all` first.'
+      - sh: test -x ./events
+        msg: 'cljgo-ex1/events not built — run `task build-all` first.'
     cmds:
-      - ./announce
+      - ./events
 
   cljgo-ex2:
     desc: 'ex2 as a native binary (run `task build-all` once first)'
