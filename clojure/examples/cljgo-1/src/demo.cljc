@@ -36,7 +36,7 @@
         c  (client/create-client
             {:base-url "https://openrouter.ai/api/v1"
              :style    "openai"
-             :model    "openai/gpt-4o-mini"
+             :model    (or (env/get-env "TN_MODEL") "openai/gpt-4o-mini")
              ;; explicit, because the env fallback prefers OPENAI_API_KEY for
              ;; openai style — and that key is not valid at OpenRouter
              :api-key  (env/get-env "OPENROUTER_API_KEY")})

@@ -1,0 +1,56 @@
+# Runs the two Medium-article demos (clj-1 = JVM, cljgo-1 = native AOT binary)
+# against OpenRouter. Requires OPENROUTER_API_KEY in the environment — the value
+# is never echoed, only passed through by name.
+#
+#   task ex1                 # clj-1 on the JVM
+#   task ex2                 # cljgo-1 AOT-compiled to ./announce, then run
+#   task all                 # both
+#   task ex1 MODEL=...       # override the model for a run
+version: '3'
+
+vars:
+  # Small, cheap default. Override per-run: task ex1 MODEL=qwen/qwen-2.5-7b-instruct
+  MODEL: openai/gpt-4o-mini
+  # The published cljgo, not the local-checkout shim.
+  CLJGO: '{{.HOME}}/go/bin/cljgo'
+
+tasks:
+  default:
+    silent: true
+    cmds:
+      - task --list
+
+  check-key:
+    internal: true
+    silent: true
+    preconditions:
+      - sh: test -n "$OPENROUTER_API_KEY"
+        msg: 'OPENROUTER_API_KEY is not set. Export it first (the value is never printed).'
+
+  ex1:
+    desc: 'clj-1 on the JVM — skill + native tool against OpenRouter'
+    deps: [check-key]
+    dir: clj-1
+    env:
+      TN_MODEL: '{{.MODEL}}'
+    cmds:
+      - clojure -M -m demo
+
+  ex2:
+    desc: 'cljgo-1 — AOT-compile the same source to ./announce, then run it'
+    deps: [check-key]
+    dir: cljgo-1
+    env:
+      TN_MODEL: '{{.MODEL}}'
+    preconditions:
+      - sh: test -x {{.CLJGO}}
+        msg: 'cljgo not found at {{.CLJGO}} — install it: go install github.com/muthuishere/cljgo@latest'
+    cmds:
+      - '{{.CLJGO}} build'
+      - ./announce
+
+  all:
+    desc: 'Run both demos (JVM, then native)'
+    cmds:
+      - task: ex1
+      - task: ex2
