@@ -113,15 +113,14 @@ regardless of tier.
 The gap, measured after teaching the checker to tokenize kebab-case (it
 previously reported all 23 options missing, of which only 20 were real):
 
-**Client** — `hooks`, `retries`, `retry-base-ms`, `timeout-ms`, `store`
-(memory), `on-metric`, `request-params`, `body-transform`, `http-client`,
-`on-error`.
+**Client** — `hooks` only. Everything else landed: `retries`, `retry-base-ms`,
+`timeout-ms`, `store`, `on-metric`, `on-error`, `request-params`, `body-transform`,
+`http-client`.
 
-**Toolkit** — `skill-provider`, `skills-filter`, `skill-sample-limit`,
-`agents`, `wait-for` (present on the client, not the toolkit), `disable-tools`,
-`disable-skills`. Three more were aliases rather than absences and are now
-aliased in the manifest: `:mcp` (`mcpConfig`), `:skills` (`skillsDir`),
-`:tools` (`extraTools`).
+**Toolkit** — none. All twelve options are present, including `skill-provider`,
+`skills-filter`, `skill-sample-limit`, data skills, `agents` (the **A2A** option —
+remote agents behind an Agent Card, NOT the unshipped `subagents` capability),
+toolkit-level `wait-for`, and `disable-tools` / `disable-skills`.
 
 **Whole capabilities absent** — and the option-parity gate cannot see these,
 because it compares option NAMES in two files and a missing subsystem has no

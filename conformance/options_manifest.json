@@ -251,6 +251,6 @@
     "java": "full",
     "csharp": "full",
     "elixir": "full",
-    "clojure": "core"
+    "clojure": "full"
   }
 }
