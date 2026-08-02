@@ -144,10 +144,9 @@ from scratch:
 
 The language-independent behavior is pinned in **[SPEC.md](SPEC.md)** so all the shipped ports stay
 byte-compatible (especially the skill loader output). Clojure (one `.cljc` source tree on the JVM
-and [cljgo](https://github.com/muthuishere/cljgo)) is held to the same **`full`** tier as the rest.
-It is the one language not yet on a registry: the agent runtime, sub-agents, compaction and agent
-home (§7D–§7F) are still being written, and we are not publishing a partial port — see
-[`clojure/README.md`](clojure/README.md).
+and [cljgo](https://github.com/muthuishere/cljgo)) is held to the same **`full`** tier as the
+rest — agent runtime, sub-agents, personas and compaction included — and is on Clojars since
+v0.13.0; see [`clojure/README.md`](clojure/README.md).
 
 ## Six tool sources, one interface
 
