@@ -8,6 +8,56 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### Changed — performance benchmarks re-run in full, and Clojure joins the table
+
+The whole benchmark suite was re-measured in **one sitting on 2 August 2026** — 39 framework
+configurations across seven languages — so no cell on the results page is a splice of two
+different days or two different toolchains. `benchmarks/results.json`,
+`docs/performance-benchmarks.md` and the site's [Performance](https://muthuishere.github.io/toolnexus/performance/)
+page all carry the same run. Nothing was skipped; `results.json` now records a `skipped` list
+so that a framework that fails to stand up in a future run is named rather than quietly missing.
+
+- **A Clojure runner exists** (`benchmarks/run_toolnexus_clojure/`) and measures **both hosts**
+  from one `.cljc` file — `toolnexus-clojure-jvm` via `clojure -M`, `toolnexus-clojure-cljgo` via
+  a `cljgo build` AOT binary. The performance page had deliberately stayed six-language because
+  no seventh runner existed; it is seven-language now for exactly that reason and no other.
+- **What the Clojure numbers say, plainly: it is the slowest port on the page.** ~5.5 ms p50 over
+  MCP on both hosts, against 1.0 ms for Python and 0.49 ms for Go. The loop is not the problem —
+  with native tools the same port runs the scenario in 1.7 ms; the shared stdio MCP server adds
+  ~2 ms *per tool call*, where Go pays 0.07 ms for identical wire traffic. That points at the
+  port's stdio JSON-RPC path (blocking line-read round trip plus the pure-Clojure JSON codec) and
+  is the biggest single optimisation target the benchmark has surfaced. Published, not massaged.
+- **The two hosts agree to within 0.2 ms** from the same source, which is the port's whole claim
+  measured under load. Where they diverge is startup and memory, both favouring cljgo: process
+  cold start ~1.13 s (JVM) vs ~0.02 s (binary), peak RSS ~500 MB vs ~31 MB. The JVM figure is the
+  default heap on a 48 GB machine, not memory the port needs — said so on the page rather than
+  dropping the column.
+- **Clojure p95 is not measured the same way as the other ports**, and the page says so: koine's
+  portable monotonic clock is millisecond-resolution on both hosts, so a sample is a batch of 10
+  runs divided by 10. Mean is unaffected; p50/p95 are percentiles over batch means and are
+  therefore smoother than a per-run percentile.
+- **Go publishes a real MCP row again.** The 0.9.0 stdio-MCP bug that forced July's table to show
+  a native-tools-only Go number is fixed, so Go now discovers over a live stdio session: 0.49 ms
+  p50, the fastest cell on the page, in a 10 MB binary at 17 MB RSS.
+- Two competitor edges remain and stay published: **LangChain4j** is 0.04 ms ahead in Java (down
+  from 0.78 ms), and **Semantic Kernel**'s native path is 0.03 ms ahead in C# while toolnexus is
+  doing live MCP.
+- `run_all.py` now registers every runner that exists (JS, Elixir, the Go competitors, Clojure)
+  instead of a subset, accepts both runner output shapes, and can run a runner in its own working
+  directory. `benchmarks/README.md` documents the full set, plus two install traps found on the
+  way: LangGraph and Google ADK need `mcp<2` pinned (2.0.0 removed symbols their adapters
+  import), and CrewAI needs the `crewai-tools[mcp]` extra or its MCP adapter aborts on a prompt.
+
+### Fixed
+
+- `js/package-lock.json` had been left at 0.10.0 while `package.json` moved to 0.13.0; running
+  `npm install` re-syncs it. Nothing user-visible changed, but a lockfile that disagrees with its
+  manifest is the kind of drift a release should not carry.
+
+||||||| ddb2cbe
+
+## 0.13.0 — 2026-08-02
+
 ### Added — Clojure, the 7th language (tier `full`, not yet published)
 
 One `.cljc` source tree on **two runtimes**: Clojure on the JVM and
@@ -184,52 +234,6 @@ call, identical output) — the port's first live-LLM run.
   Clojure in the parity scene and Hex and Clojars in the closing registry line. It had been
   recorded when there were five, so the one place a first-time visitor hears the parity claim
   out loud was under-counting the ports by two.
-
-### Changed — performance benchmarks re-run in full, and Clojure joins the table
-
-The whole benchmark suite was re-measured in **one sitting on 2 August 2026** — 39 framework
-configurations across seven languages — so no cell on the results page is a splice of two
-different days or two different toolchains. `benchmarks/results.json`,
-`docs/performance-benchmarks.md` and the site's [Performance](https://muthuishere.github.io/toolnexus/performance/)
-page all carry the same run. Nothing was skipped; `results.json` now records a `skipped` list
-so that a framework that fails to stand up in a future run is named rather than quietly missing.
-
-- **A Clojure runner exists** (`benchmarks/run_toolnexus_clojure/`) and measures **both hosts**
-  from one `.cljc` file — `toolnexus-clojure-jvm` via `clojure -M`, `toolnexus-clojure-cljgo` via
-  a `cljgo build` AOT binary. The performance page had deliberately stayed six-language because
-  no seventh runner existed; it is seven-language now for exactly that reason and no other.
-- **What the Clojure numbers say, plainly: it is the slowest port on the page.** ~5.5 ms p50 over
-  MCP on both hosts, against 1.0 ms for Python and 0.49 ms for Go. The loop is not the problem —
-  with native tools the same port runs the scenario in 1.7 ms; the shared stdio MCP server adds
-  ~2 ms *per tool call*, where Go pays 0.07 ms for identical wire traffic. That points at the
-  port's stdio JSON-RPC path (blocking line-read round trip plus the pure-Clojure JSON codec) and
-  is the biggest single optimisation target the benchmark has surfaced. Published, not massaged.
-- **The two hosts agree to within 0.2 ms** from the same source, which is the port's whole claim
-  measured under load. Where they diverge is startup and memory, both favouring cljgo: process
-  cold start ~1.13 s (JVM) vs ~0.02 s (binary), peak RSS ~500 MB vs ~31 MB. The JVM figure is the
-  default heap on a 48 GB machine, not memory the port needs — said so on the page rather than
-  dropping the column.
-- **Clojure p95 is not measured the same way as the other ports**, and the page says so: koine's
-  portable monotonic clock is millisecond-resolution on both hosts, so a sample is a batch of 10
-  runs divided by 10. Mean is unaffected; p50/p95 are percentiles over batch means and are
-  therefore smoother than a per-run percentile.
-- **Go publishes a real MCP row again.** The 0.9.0 stdio-MCP bug that forced July's table to show
-  a native-tools-only Go number is fixed, so Go now discovers over a live stdio session: 0.49 ms
-  p50, the fastest cell on the page, in a 10 MB binary at 17 MB RSS.
-- Two competitor edges remain and stay published: **LangChain4j** is 0.04 ms ahead in Java (down
-  from 0.78 ms), and **Semantic Kernel**'s native path is 0.03 ms ahead in C# while toolnexus is
-  doing live MCP.
-- `run_all.py` now registers every runner that exists (JS, Elixir, the Go competitors, Clojure)
-  instead of a subset, accepts both runner output shapes, and can run a runner in its own working
-  directory. `benchmarks/README.md` documents the full set, plus two install traps found on the
-  way: LangGraph and Google ADK need `mcp<2` pinned (2.0.0 removed symbols their adapters
-  import), and CrewAI needs the `crewai-tools[mcp]` extra or its MCP adapter aborts on a prompt.
-
-### Fixed
-
-- `js/package-lock.json` had been left at 0.10.0 while `package.json` moved to 0.13.0; running
-  `npm install` re-syncs it. Nothing user-visible changed, but a lockfile that disagrees with its
-  manifest is the kind of drift a release should not carry.
 
 ### Known gaps
 
