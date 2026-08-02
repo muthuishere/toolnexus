@@ -23,9 +23,8 @@ export const LANGS = {
 	csharp: { slug: "csharp", label: "C#", pkg: "Toolnexus", registry: "NuGet", src: "csharp/src/Toolnexus", fence: "csharp" },
 	elixir: { slug: "elixir", label: "Elixir", pkg: "toolnexus", registry: "Hex", src: "elixir/lib", fence: "elixir" },
 	// One .cljc tree that runs on Clojure (JVM) and on cljgo. Tier `full` in the shared
-	// conformance manifest, same bar as the other six. Not yet published to Clojars —
-	// use it from a local checkout until the first release with ENABLE_CLOJARS lands.
-	clojure: { slug: "clojure", label: "Clojure", pkg: "net.clojars.muthuishere/toolnexus", registry: "Clojars (unreleased)", src: "clojure/src/toolnexus", fence: "clojure" },
+	// conformance manifest, same bar as the other six. On Clojars since v0.13.0.
+	clojure: { slug: "clojure", label: "Clojure", pkg: "net.clojars.muthuishere/toolnexus", registry: "Clojars", src: "clojure/src/toolnexus", fence: "clojure" },
 }
 
 export const GITHUB = "https://github.com/muthuishere/toolnexus"

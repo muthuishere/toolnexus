@@ -5,12 +5,10 @@ description: Install toolnexus in JavaScript, Python, Go, Java, C#, Elixir or Cl
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Six of the seven languages are published from the same release and carry the same version. Clojure
-is a single `.cljc` source tree (JVM + [cljgo](https://github.com/muthuishere/cljgo)) with
-[koine](https://github.com/muthuishere/koine) as its only dependency, and it is **not published
-yet** — the port is feature-complete (the agent runtime, sub-agents, personas and compaction all
-ship, at the same `full` conformance tier as the other six); it simply has not had its first
-Clojars release cut.
+All seven languages are published from the same release and carry the same version. Clojure is a
+single `.cljc` source tree (JVM + [cljgo](https://github.com/muthuishere/cljgo)) with
+[koine](https://github.com/muthuishere/koine) as its only dependency — on Clojars since v0.13.0,
+at the same `full` conformance tier as the other six.
 
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">
@@ -57,15 +55,15 @@ end
 Elixir ≥ 1.16 / OTP 26 · [Hex · toolnexus](https://hex.pm/packages/toolnexus) · MCP client: in-house (OTP-supervised, no SDK)
 </TabItem>
 <TabItem label="Clojure">
-**Not yet released to Clojars.** There is no `net.clojars.muthuishere/toolnexus` artifact to depend
-on — use the port from a checkout of the repo (its `clojure/` directory is a normal deps.edn
-project), or build and install it locally with `clojure -T:build install`:
-
 ```clojure
-;; deps.edn — point at a checkout; koine is the only third-party dependency
-{:deps {net.clojars.muthuishere/koine     {:mvn/version "0.11.0"}}
- :paths ["src" "../toolnexus/clojure/src"]}
+;; deps.edn — one artifact; koine (the portability seam) comes with it
+{:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.13.0"}}}
 ```
+
+Works as an ordinary Clojure library on the JVM, and as a
+[cljgo](https://github.com/muthuishere/cljgo) dependency (`build.cljgo`:
+`(dep b "net.clojars.muthuishere/toolnexus" {:mvn/version "0.13.0"})`) compiled
+to a native Go binary — the same artifact, verified on both.
 Clojure CLI (JVM) or [cljgo](https://github.com/muthuishere/cljgo) · MCP client: in-house over
 [koine](https://github.com/muthuishere/koine) (`koine.process` stdio / `koine.http` streamable-HTTP)
 · [API reference](/toolnexus/api/clojure/)
