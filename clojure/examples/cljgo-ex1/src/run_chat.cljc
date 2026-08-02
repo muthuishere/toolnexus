@@ -1,0 +1,2 @@
+(require 'chat)
+(chat/-main)
