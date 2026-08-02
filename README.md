@@ -380,7 +380,7 @@ cd golang && go build -o toolnexus ./cmd/toolnexus
 
 ## Per-language docs
 
-Full docs site (all six languages): **<https://muthuishere.github.io/toolnexus/>**.
+Full docs site (all seven languages): **<https://muthuishere.github.io/toolnexus/>**.
 Per port: [`js/`](js/) · [`python/`](python/) · [`golang/`](golang/) · [`java/`](java/) · [`csharp/`](csharp/) · [`elixir/`](elixir/) · [`clojure/`](clojure/) — quickstarts and API.
 Embedding in a Go app? See [`golang/GUIDE.md`](golang/GUIDE.md).
 [`examples/`](examples/) holds the shared `mcp.json` + sample skill used by every
