@@ -5,9 +5,11 @@ description: Install toolnexus in JavaScript, Python, Go, Java, C#, Elixir or Cl
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-The six shipped ports are published from the same release and carry the same version. The seventh —
-Clojure — is a single `.cljc` source tree (JVM + [cljgo](https://github.com/muthuishere/cljgo)) with
-[koine](https://github.com/muthuishere/koine) as its only dependency, and it is **not published yet**.
+Six of the seven languages are published from the same release and carry the same version. Clojure
+is a single `.cljc` source tree (JVM + [cljgo](https://github.com/muthuishere/cljgo)) with
+[koine](https://github.com/muthuishere/koine) as its only dependency, and it is **not published
+yet** — the agent runtime, sub-agents and compaction (§7D–§7F) are still being written, and a
+partial port is not going on Clojars.
 
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">

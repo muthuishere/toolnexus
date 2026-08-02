@@ -25,7 +25,8 @@
             [toolnexus.translate-test]
             [toolnexus.a2a-test]
             [toolnexus.serve-test]
-            [toolnexus.core-test]))
+            [toolnexus.core-test]
+            [toolnexus.agents.compaction-test]))
 
 (def suites
   '[toolnexus.tool-test
@@ -40,7 +41,8 @@
     toolnexus.translate-test
     toolnexus.a2a-test
     toolnexus.serve-test
-    toolnexus.core-test])
+    toolnexus.core-test
+    toolnexus.agents.compaction-test])
 
 ;; A floor, not an exact count — it must fail on an EMPTY collection without
 ;; needing an edit every time a test is added.

@@ -1,6 +1,6 @@
 # toolnexus — Clojure
 
-The seventh port. **One `.cljc` source tree, two runtimes**: Clojure on the JVM
+**One `.cljc` source tree, two runtimes**: Clojure on the JVM
 and [cljgo](https://github.com/muthuishere/cljgo) (Clojure hosted on Go, both
 AOT-compiled and interpreted). Not two implementations that agree — *one*
 implementation, byte-identical on both.

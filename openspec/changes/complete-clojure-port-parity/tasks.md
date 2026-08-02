@@ -46,7 +46,14 @@ with no Clojure implementation:
       adapters, which are outbound-only. Shipped in six ports.
 - [ ] 5b.2 `agent-runtime` (`js/src/agents/runtime.ts`)
 - [ ] 5b.3 `subagents` (`js/src/agents/agent.ts`) — §7D/§7E
-- [ ] 5b.4 `context-compaction` (`js/src/agents/compaction.ts`) — §7F
+- [x] 5b.4 `context-compaction` (`js/src/agents/compaction.ts`) — §7F.
+      `toolnexus.agents.compaction/compactor` + `estimate-tokens`; 11 tests /
+      ~40 assertions, green in all four runnable modes. Caught a cljgo core bug
+      on the way: a DESCENDING `range` is an inconsistent seq there (`count` and
+      `map` see every element, `seq`/`vec`/`doall`/`some` see only the first), so
+      the backwards scan for the most recent `user` turn silently found nothing
+      and the fallback never fired — JVM green, cljgo red. Worked around with an
+      explicit `loop`; reported upstream.
 - [ ] 5b.5 `agent-home` (`js/src/agents/home.ts`)
 
 NOTE FOR THE GATE ITSELF: that these were invisible is a defect in

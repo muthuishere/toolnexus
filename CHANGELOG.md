@@ -1,14 +1,14 @@
 # Changelog
 
 All ports are versioned and released together; entries here apply to every port unless a port
-is named. Six ports are at full parity (js / python / golang / java / csharp / elixir); the
-**Clojure port is at tier `core`** — see `conformance/options_manifest.json`, which is where a
+is named. All seven ports are at tier `full` (js / python / golang / java / csharp / elixir /
+clojure) — see `conformance/options_manifest.json`, which is where a
 port's tier is declared, never by the port about itself. Releases are cut as
 GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
-### Added — Clojure, a seventh port (tier `core`)
+### Added — Clojure, the 7th language (tier `full`, not yet published)
 
 One `.cljc` source tree on **two runtimes**: Clojure on the JVM and
 [cljgo](https://github.com/muthuishere/cljgo) (Clojure hosted on Go). Not two implementations

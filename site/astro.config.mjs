@@ -21,9 +21,9 @@ export default defineConfig({
 				starlightLlmsTxt({
 					projectName: 'toolnexus',
 					description:
-						'A small, vendor-neutral library that gives any LLM dynamic tool-calling: an MCP host, agent skills, native + HTTP + built-in tools, remote A2A agents, a human-in-the-loop suspension layer, and a unified client loop — byte-identical across JavaScript, Python, Go, Java, C# and Elixir, plus a seventh port in Clojure, not yet released.',
+						'A small, vendor-neutral library that gives any LLM dynamic tool-calling: an MCP host, agent skills, native + HTTP + built-in tools, remote A2A agents, a human-in-the-loop suspension layer, and a unified client loop — byte-identical across JavaScript, Python, Go, Java, C#, Elixir and Clojure. Six ports are published to their registries; the Clojure port is not yet on Clojars.',
 					details:
-						'toolnexus unifies every tool source (MCP servers, agent skills, your own functions via defineTool, HTTP/REST endpoints, built-in shell/file tools, and remote A2A agents) behind one Tool interface, emits schema in OpenAI/Anthropic/Gemini formats, and ships a client with a built-in tool-calling loop (skills injection, parallel + chained calls, hooks, streaming, retries, conversation memory, observability). The same examples/ fixtures produce identical behavior in all six published ports; the seventh, Clojure, runs on both the JVM and cljgo and is wired into the same conformance checker, but is not yet released.',
+						'toolnexus unifies every tool source (MCP servers, agent skills, your own functions via defineTool, HTTP/REST endpoints, built-in shell/file tools, and remote A2A agents) behind one Tool interface, emits schema in OpenAI/Anthropic/Gemini formats, and ships a client with a built-in tool-calling loop (skills injection, parallel + chained calls, hooks, streaming, retries, conversation memory, observability). The same examples/ fixtures produce identical behavior in all seven ports, each held to the full tier by a shared conformance gate. The Clojure port runs one .cljc source tree on both the JVM and cljgo; it is verified in CI but not yet published to Clojars.',
 				}),
 				// Splits the whole site into topics, each with its own dedicated sidebar (switchable
 				// via the topic picker at the top of the nav): the main "Docs" topic below, plus one

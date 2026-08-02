@@ -10,12 +10,13 @@
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Discord](https://img.shields.io/badge/AgentNexus-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/V9C2kvHC8D)
 
-### Your LLM, with MCP tools and agent skills built in — in 3 lines, in 6 languages.
+### Your LLM, with MCP tools and agent skills built in — in 3 lines, in 7 languages.
 
 Point toolnexus at an `mcp.json` and a `skills/` folder and you get a **working agent**: the
 tool-calling loop, skills injection, six unified tool sources, and conversation memory — all
-included. Vendor-neutral, byte-identical across **JavaScript · Python · Go · Java · C# · Elixir**,
-plus a seventh **Clojure** port (one `.cljc` tree on the JVM + cljgo, at the SPEC core tier).
+included. Vendor-neutral, byte-identical across **JavaScript · Python · Go · Java · C# · Elixir ·
+Clojure** — the Clojure port is one `.cljc` tree that runs on both the JVM and cljgo, and is held
+to the same `full` tier as the other six. It is the one port not yet on a registry.
 
 > **Right-sized.** Not a framework — no builders, advisors, runnables, or config to wade through.
 > Not a toy that falls over the moment you need streaming or a retry. Exactly what a real agent
@@ -116,9 +117,9 @@ The same three steps work in Python, Go, Java, C#, and Elixir.
 The individual pieces — MCP, agent skills (`SKILL.md`), native tools, HTTP tools — each landed in
 the big frameworks during 2026: **Spring AI**, **LangChain** (Deep Agents) and **Google ADK** now
 do most of them. What none of them combine is **every tool source behind one interface,
-byte-identical across six languages, vendor-neutral, in a small à-la-carte library:**
+byte-identical across seven languages, vendor-neutral, in a small à-la-carte library:**
 
-- **Six languages, one behavior** — JS · Python · Go · Java · C# · Elixir, pinned by a shared
+- **Seven languages, one behavior** — JS · Python · Go · Java · C# · Elixir · Clojure, pinned by a shared
   [SPEC.md](SPEC.md) so they stay byte-compatible (the skill-loader output is byte-for-byte).
   First-class **Go and C#** — where Spring AI (Java-only) and LangChain (no Go/C#) don't reach.
 - **Vendor-neutral** — a plain base URL + `openai`/`anthropic` style; not tied to one provider
@@ -142,9 +143,11 @@ from scratch:
 | Clojure| [`clojure/`](clojure/) | in-house MCP client over [koine](https://github.com/muthuishere/koine) (JVM + cljgo) |
 
 The language-independent behavior is pinned in **[SPEC.md](SPEC.md)** so all the shipped ports stay
-byte-compatible (especially the skill loader output). The Clojure port (one `.cljc` source tree on
-the JVM and [cljgo](https://github.com/muthuishere/cljgo)) is the seventh, at the SPEC §0 **core**
-tier — see [`clojure/README.md`](clojure/README.md) for its measured parity debt.
+byte-compatible (especially the skill loader output). Clojure (one `.cljc` source tree on the JVM
+and [cljgo](https://github.com/muthuishere/cljgo)) is held to the same **`full`** tier as the rest.
+It is the one language not yet on a registry: the agent runtime, sub-agents, compaction and agent
+home (§7D–§7F) are still being written, and we are not publishing a partial port — see
+[`clojure/README.md`](clojure/README.md).
 
 ## Six tool sources, one interface
 

@@ -85,7 +85,7 @@ builtin/builtin-names
 ;;     :required ["path"]}
 
 ((:execute read-tool) {:path "README.md" :offset 1 :limit 3})
-;; => {:output "# toolnexus — Clojure\n\nThe seventh port…" :isError false}
+;; => {:output "# toolnexus — Clojure\n\nOne `.cljc` source tree, two runtimes…" :isError false}
 
 ;; A missing file is a value the model can read, not an exception.
 ((:execute read-tool) {:path "nope.md"})
