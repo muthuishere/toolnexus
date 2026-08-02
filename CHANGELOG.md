@@ -26,17 +26,21 @@ Also landed from the shared capability specs: `:request-params`, `:body-transfor
 `:http-client`, `:retries`/`:retry-base-ms`, `:timeout-ms`, `:on-error` (retry|fail — no
 failure-originated suspend tier), `:on-metric`, `:store` + conversation memory.
 
-Since landed: **§11 single-turn translation**, the **MCP elicitation bridge** (§2/§10, stdio
+**The port is at tier `full`** — every logical client and toolkit option present, zero
+permitted absences, the same bar as the six shipped ports.
+
+Since landed: **client hooks** (`:before-llm` / `:after-llm` / `:before-tool` / `:after-tool`),
+**§11 single-turn translation**, the **MCP elicitation bridge** (§2/§10, stdio
 only — see below), and all twelve toolkit options (`:skill-provider`, `:skills-filter`,
 `:skill-sample-limit`, data skills, `:agents`, toolkit `:wait-for`, `:disable-tools` /
 `:disable-skills`).
 
-**Not yet at parity**, tracked in `openspec/changes/complete-clojure-port-parity` and printed by
-name on every run of the option gate: the `hooks` client option, plus three subsystems the
-option gate structurally cannot see — agent runtime (§7D), subagents (§7E), context compaction
-(§7F) and agent home. Note `:agents` is the **A2A** option (remote agents behind an Agent Card),
+**Still absent, and the option gate structurally cannot see any of it** (it compares option
+NAMES in two files, so a missing subsystem has no names to compare): agent runtime (§7D),
+subagents (§7E), context compaction (§7F), agent home. Note `:agents` is the **A2A** option (remote agents behind an Agent Card),
 which is a different capability from `openspec/specs/subagents` — that one remains unshipped
-here and is not satisfied by it.
+here and is not satisfied by it. `clojure.core/agent` exists on both hosts, so a future
+subagents entry point cannot be named `agent`.
 
 **MCP elicitation is stdio-only.** A streamable-HTTP peer cannot hold `tools/call` open for a
 server→client reverse request: `koine.http/request` buffers the whole body, and

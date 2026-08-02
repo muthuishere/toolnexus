@@ -25,14 +25,14 @@ output. Each must be green in all five execution modes before it is ticked.
 - [x] 3.3 `:store` — conversation memory (`conversation-store`)
 
 ## 4. Toolkit — skill sources (`skill-discovery`)
-- [ ] 4.1 `:skill-provider`
-- [ ] 4.2 `:skills-filter` (allowlist)
-- [ ] 4.3 `:skill-sample-limit`
+- [x] 4.1 `:skill-provider`
+- [x] 4.2 `:skills-filter` (allowlist)
+- [x] 4.3 `:skill-sample-limit`
 
 ## 5. Toolkit — composition and toggles
-- [ ] 5.1 `:agents` (`subagents`)
-- [ ] 5.2 toolkit-level `:wait-for`
-- [ ] 5.3 `:disable-tools` / `:disable-skills`
+- [x] 5.1 `:agents` (`subagents`)
+- [x] 5.2 toolkit-level `:wait-for`
+- [x] 5.3 `:disable-tools` / `:disable-skills`
 
 ## 5b. WHOLE CAPABILITIES ABSENT — found by merging main, not by the gate
 
@@ -41,7 +41,7 @@ capability that does not exist at all, so "17 options" understated the gap. A
 module-level diff against the JS port after merging main shows five subsystems
 with no Clojure implementation:
 
-- [ ] 5b.1 `§11 translate` (`tool-translation`) — `js/src/translate.ts`. One
+- [x] 5b.1 `§11 translate` (`tool-translation`) — `js/src/translate.ts`. One
       provider call, no loop, no tool execution; the INBOUND half of the
       adapters, which are outbound-only. Shipped in six ports.
 - [ ] 5b.2 `agent-runtime` (`js/src/agents/runtime.ts`)
@@ -56,7 +56,7 @@ mention the right names. A capability-level check belongs next to the
 option-level one.
 
 ## 6. Promotion
-- [ ] 6.1 Flip `clojure` to tier `full` in `conformance/options_manifest.json`
-- [ ] 6.2 `check_options_parity.py` exits 0 with zero debt rows
-- [ ] 6.3 All five execution modes green; README parity-debt section removed
-- [ ] 6.4 Update `clojure/README.md` — tier `full`, no permitted absences
+- [x] 6.1 Flip `clojure` to tier `full` in `conformance/options_manifest.json`
+- [x] 6.2 `check_options_parity.py` exits 0 with zero debt rows
+- [x] 6.3 All five execution modes green; README parity-debt section removed
+- [x] 6.4 Update `clojure/README.md` — tier `full`, no permitted absences

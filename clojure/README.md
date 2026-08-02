@@ -23,7 +23,7 @@ is the only third-party dependency.
 
 ## Status
 
-155 tests / 708 assertions, 0 failures, in **all five** execution modes:
+263 tests / 1018 assertions, 0 failures, in **all five** execution modes:
 
 | runtime | how |
 |---|---|
@@ -31,7 +31,7 @@ is the only third-party dependency.
 | cljgo, AOT binary | `cljgo build && ./toolnexus-test` |
 | cljgo, interpreted | `cljgo run src/run_tests.cljc` |
 
-Verified against koine 0.8.2 and the **published cljgo v0.8.8 release
+Verified against koine 0.9.1 and the **published cljgo v0.8.8 release
 archive** — no source checkout, no `CLJGO_SRC`. cljgo #177 is closed, so these
 numbers are re-runnable by anyone rather than only on the machine that produced
 them.
@@ -96,58 +96,38 @@ that side by running the AOT binary and both cljgo evaluators.
 | §0.12, §10 | suspension — `pending`, `wait-for`, resume |
 | §7A, §7B, §7C | A2A outbound, `serve` inbound (Agent Card + JSON-RPC), MCP server inbound |
 
-## Parity debt — measured, not estimated
+## Parity — tier `full`
 
-This port **is** wired into `conformance/check_options_parity.py`, at tier
-`core` — the SPEC §0 conformance contract — while the six shipped ports are at
-tier `full`. Every core option is present; the 17 full-tier options below are
-recorded as DEBT and printed by name on every run, pass or fail, because a
-permitted absence that stops being mentioned is indistinguishable from one that
-was implemented.
+This port is held to tier **`full`** in `conformance/check_options_parity.py`, the same as the
+six shipped ports: every logical client and toolkit option present, **zero permitted absences**.
 
-The tier is declared in the shared manifest, never by this port about itself: a
-self-graded exam is not a gate, and lowering the bar has to be a visible diff
-the other ports review. Missing a *core* option still fails, for every port,
-regardless of tier.
+```
+Option parity OK: 18 client + 12 toolkit options across 7 ports (7 at tier full, 0 at tier core)
+```
 
-The gap, measured after teaching the checker to tokenize kebab-case (it
-previously reported all 23 options missing, of which only 20 were real):
+The tier is declared in the shared manifest, never by this port about itself — a self-graded
+exam is not a gate, and lowering the bar has to be a visible diff the other ports review.
 
-**Client** — `hooks` only. Everything else landed: `retries`, `retry-base-ms`,
-`timeout-ms`, `store`, `on-metric`, `on-error`, `request-params`, `body-transform`,
-`http-client`.
-
-**Toolkit** — none. All twelve options are present, including `skill-provider`,
-`skills-filter`, `skill-sample-limit`, data skills, `agents` (the **A2A** option —
-remote agents behind an Agent Card, NOT the unshipped `subagents` capability),
-toolkit-level `wait-for`, and `disable-tools` / `disable-skills`.
-
-**Whole capabilities absent** — and the option-parity gate cannot see these,
-because it compares option NAMES in two files and a missing subsystem has no
-names to compare. Found by diffing modules against the JS port:
+**Still absent, and the option gate cannot see any of it** — it compares option NAMES in two
+files, so a missing subsystem has no names to compare:
 
 | capability | JS module |
 |---|---|
-| §11 `translate` — one provider call, no loop, the inbound half of the adapters | `translate.ts` |
 | agent runtime (§7D) | `agents/runtime.ts` |
 | subagents / persona (§7E) | `agents/agent.ts` |
 | context compaction (§7F) | `agents/compaction.ts` |
 | agent home | `agents/home.ts` |
 
-**MCP elicitation (§2/§10) is implemented — over stdio only.** A streamable-HTTP
-peer cannot hold `tools/call` open for a server→client reverse request, because
-`koine.http/request` returns a fully-buffered body; `koine.stream/sse-post` is
-incremental but exposes no response headers, and MCP's `Mcp-Session-Id` arrives
-in exactly those headers. So a consumer must choose streaming or the session id,
-and this port takes the session id. Requested upstream as an `:on-open` callback
-on `sse-post`; the five shipped ports get both halves from their MCP SDK, and
-this is the only port whose transport is written against a seam.
+Note `:agents` here is the **A2A** option — remote agents behind an Agent Card — which is a
+different capability from `openspec/specs/subagents` and does not satisfy it.
 
-Also absent: per-server tool allowlists, real SSE
-streaming (the loop buffers and emits no text deltas — faking them out of a
-buffered body would be a lie), and durable resume.
+**MCP elicitation (§2/§10) is implemented over stdio only.** A streamable-HTTP peer cannot hold
+`tools/call` open for a server→client reverse request: `koine.http/request` buffers the whole
+body, and `koine.stream/sse-post` is incremental but exposes no response headers — where MCP's
+`Mcp-Session-Id` lives. A consumer must choose streaming or the session id. Raised upstream.
 
-These are tracked as unchecked tasks in `openspec/changes/add-clojure-port/`.
+Also absent: per-server tool allowlists, real SSE streaming (the loop buffers and emits no text
+deltas — faking them out of a buffered body would be a lie), and durable resume.
 
 ## Three things this port learned the hard way
 
