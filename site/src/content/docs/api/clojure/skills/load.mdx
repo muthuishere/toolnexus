@@ -1,0 +1,172 @@
+---
+title: "toolnexus.skill/load-skills"
+description: "Glob a skills directory and expose one skill tool with progressive disclosure. — Clojure."
+sidebar:
+  label: "toolnexus.skill/load-skills"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/skill.cljc">clojure/src/toolnexus/skill.cljc</a>
+</p>
+
+```clojure
+(load-skills "examples/skills")                      ; one root
+(load-skills ["project/skills" "team/skills"])       ; several, earlier wins
+
+;; => {:skills  [{:name     "hello-world"
+;;                :description "A tiny example skill."
+;;                :location "examples/skills/hello-world/SKILL.md"
+;;                :content  "# Hello World Skill\n…"
+;;                :dir      "examples/skills/hello-world"
+;;                :base     "file://examples/skills/hello-world"
+;;                :origin   "fs"}]
+;;     :by-name          {"hello-world" {…}}
+;;     :skipped          [{:location "…/SKILL.md" :reason "duplicate-name"}]
+;;     :filter-unmatched []
+;;     :sample-limit     0}
+```
+
+`load-skills` walks every root for `**/SKILL.md`, parses the `---`-fenced frontmatter, and returns
+the whole discovery result as one map. It opens nothing, starts nothing, and never throws: a
+`SKILL.md` that cannot be read or cannot be parsed becomes a typed entry in `:skipped` rather than
+an exception that takes the rest of the tree down with it.
+
+The returned map is an input, not a finished product. Pass it to `toolnexus.skill/skill-tool` to
+build the single `skill` tool the model calls, and to `toolnexus.skill/skills-prompt` for the
+`## Available Skills` block that goes into the system prompt. `toolnexus.core/build` does both for
+you when you give it `:skills`.
+
+Name collisions resolve by discovery order, first wins. Roots are visited in the order given, and
+`koine.fs/find-files` sorts within a root — so the winner is the same on Clojure (JVM) and on
+cljgo. That ordering is load-bearing, not incidental: one `.cljc` tree has to produce identical
+bytes on both hosts, and a first-wins rule over an unsorted walk would not.
+
+The same function also takes an options map, which is where skills supplied as data, the per-agent
+allowlist and the file-sampling limit live — see
+[data skills, filters and sampling](/api/clojure/skills/load-with/). This page is the plain-roots
+half.
+
+## When to use it
+
+- **Wiring skills into a toolkit** — the normal path, usually through `toolnexus.core/build`'s
+  `:skills` option rather than by calling this directly.
+- **Layering skill trees** — a project root plus a shared team root, where the project's copy of a
+  skill must shadow the team's. Put the project root first.
+- **Reloading while authoring** — nothing caches, so calling again after you edit a `SKILL.md`
+  picks the change up.
+- **Before you trust the catalog** — read `:skipped`. A skill that failed to parse is simply not in
+  the model's list, and this map is the only place that says so.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use list-skills when you want a report, not a tool">
+[`toolnexus.skill/list-skills`](/api/clojure/skills/list/) runs exactly the same discovery and hands
+back only `:skills` and `:skipped` — no `:by-name`, so a report cannot be fed to `skill-tool` by
+mistake. Reach for `load-skills` when the next thing you do is call an LLM, and for `list-skills`
+when the next thing you do is fail a build.
+</Aside>
+
+Nothing here caches. Calling `load-skills` twice re-reads the tree, which is what you want while
+authoring skills and what you should avoid on a hot path — hold the returned map for the life of
+the agent.
+
+## Examples
+
+### Load one tree and build the `skill` tool
+
+```clojure
+(require '[toolnexus.skill :as skill]
+         '[toolnexus.tool :as tool])
+
+(def loaded (skill/load-skills "examples/skills"))
+
+(map :name (:skills loaded))          ;=> ("hello-world")
+(:skipped loaded)                     ;=> []
+
+;; The single tool the model sees, plus the catalog for the system prompt.
+(def tk (tool/toolkit [(skill/skill-tool loaded)]))
+
+(tool/tool-names tk)                  ;=> ["skill"]
+(:output (tool/execute tk "skill" {"name" "hello-world"}))
+;; => "<skill_content name=\"hello-world\">\n# Skill: hello-world\n…"
+
+(skill/skills-prompt loaded)
+;; => "Skills provide specialized instructions and workflows for specific tasks.\n…"
+```
+
+An unknown skill name is not a throw. `execute-skill` returns
+`(toolnexus.tool/failure "Skill \"x\" not found. Available skills: hello-world")`, so the model
+sees its own mistake and can retry. Progressive disclosure is the point of the output: the
+instructions are inlined, and the skill's sibling files are *listed* rather than read, so the model
+asks for what it actually needs.
+
+### Layer a project root over a shared team root
+
+```clojure
+(require '[toolnexus.skill :as skill])
+
+;; Earlier root wins. The project's "deploy" shadows the team's, and the
+;; shadowed one shows up as a skip rather than disappearing quietly.
+(def loaded (skill/load-skills ["project/skills" "team/skills"]))
+
+(map :name (:skills loaded))
+;; => ("deploy" "triage" "postmortem")
+
+(map (juxt :reason :location) (:skipped loaded))
+;; => (["duplicate-name" "team/skills/deploy/SKILL.md"])
+```
+
+A root that does not exist contributes nothing and is not an error, which makes an optional team
+root safe to list unconditionally. Paths under `node_modules` or `.git` are ignored.
+
+### Into a toolkit alongside every other source
+
+```clojure
+(require '[toolnexus.core :as toolnexus])
+
+;; :skills takes exactly what this function takes.
+(def tk (toolnexus/build {:mcp    "examples/mcp.json"
+                          :skills "examples/skills"}))
+
+(toolnexus/tool-names tk)
+;; => ["apply_patch" "bash" "edit" "glob" "grep" "question" "read"
+;;     "skill" "todowrite" "webfetch" "write"]
+
+(toolnexus/skills-prompt tk)     ; the loaded map is kept on the toolkit under :skills
+(:skipped (:skills tk))          ;=> []
+
+(toolnexus/shutdown! tk)         ; closes MCP connections; skills hold nothing open
+```
+
+| Return key | What it is |
+|---|---|
+| `:skills` | Parsed skills in discovery order, deduped by name. |
+| `:by-name` | The same skills keyed by name — what `execute-skill` looks up. |
+| `:skipped` | One `{:location :reason}` map per rejected candidate. Reasons: `"missing-name"`, `"malformed-frontmatter"`, `"duplicate-name"`, `"unreadable"`. |
+| `:filter-unmatched` | Allowlist names that matched no skill. Always `[]` from the plain-roots form. |
+| `:sample-limit` | The sibling-file limit, carried into `skill-tool`. `0` from the plain-roots form, which means the default of 10. |
+
+| Skill key | What it is |
+|---|---|
+| `:name` | From the frontmatter. Required — a blank one is a `"missing-name"` skip. |
+| `:description` | From the frontmatter. `nil` when absent, and only described skills appear in `skills-prompt`. |
+| `:location` | The `SKILL.md` path. |
+| `:content` | The instruction body below the frontmatter, already parsed. |
+| `:dir` | The skill's directory — what gets sampled for the `<skill_files>` block. |
+| `:base` | `file://` plus the directory. It is the `Base directory for this skill:` line in the tool output. |
+| `:origin` | `"fs"` for a skill discovered on disk. |
+
+<Aside type="caution" title="A narrower frontmatter parser than the other ports">
+`toolnexus.frontmatter` accepts a strict subset of YAML: plain scalars, no block scalars. A
+`SKILL.md` written as `description: >` loads in the six full-tier ports and is skipped here as
+`"malformed-frontmatter"`. The shared `examples/` fixture uses plain scalars only, so conformance
+bytes match — but a skill of your own written that way will not load. Check `:skipped` after every
+load.
+</Aside>
+
+## See also
+
+- [`toolnexus.skill/list-skills`](/api/clojure/skills/list/) — Enumerate discovered skills and, crucially, the ones that were skipped and why.
+- [Data skills, filters and sampling](/api/clojure/skills/load-with/) — the same function's option-map form: skills without a filesystem, a per-agent allowlist, and the sibling-file limit.

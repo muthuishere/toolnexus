@@ -1,0 +1,155 @@
+---
+title: "toolnexus.client/in-memory-store"
+description: "Swap in-memory history for your own store so a conversation survives a process restart. — Clojure."
+sidebar:
+  label: "toolnexus.client/in-memory-store"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+```clojure
+(in-memory-store) ; => the shipped default, per-client, process lifetime
+
+;; A store is exactly two operations. Any map with these keys is a store:
+;; {:get  (fn [id]      messages-or-nil)
+;;  :save (fn [id msgs] nil)}
+
+(create-client {:base-url "…" :model "…" :store my-store})
+```
+
+A store is two closures in a map, and that is the entire interface. `:get` is handed a
+conversation id and returns the messages it holds, or `nil` if it holds none. `:save` is handed an
+id and the finished transcript and returns nothing. There is no protocol, no record and no
+`deftype` — a plain map plus closures ports to any Clojure host without behaving differently on
+either, which is the same reason a `Tool` is a map in this port.
+
+`in-memory-store` is the shipped default. `create-client` attaches a **fresh** one per client, so
+two clients built in the same process never share a transcript by accident. It is an atom of
+`id -> messages` with process lifetime: perfect for a CLI or a test, gone on restart.
+
+Because the surface is this small, a file store, a Postgres store or a Redis store is a few lines
+and `toolnexus.client` learns nothing about any of them. Only `run` calls the store, and only when
+[`:conversation-id`](/api/clojure/client/conversation/) is supplied.
+
+## When to use it
+
+- **Call `in-memory-store` explicitly** when you want two clients to *share* one transcript store,
+  or when you want to reach into it yourself between runs.
+- **Supply your own** the moment conversations must outlive the process, be shared across
+  instances, or be subject to a retention policy.
+- **Neither** for one-shot runs — with no `:conversation-id`, the store is never touched.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Pass :history instead when your app already owns the messages">
+If the transcript already lives in your database and your code already loads it, a store is an
+extra indirection buying nothing. Pass `:history` to `run` and persist the returned `:messages`
+yourself — that path wins over the store and keeps one copy of the truth. Use a store when you want
+the client to do the remembering, not when you already do.
+</Aside>
+
+The two-operation shape is also what keeps this honest across hosts: anything richer (streaming
+appends, transactions, TTLs) would need host-specific machinery, and this port has none.
+
+## Examples
+
+### The default, made explicit and shared
+
+```clojure
+(require '[toolnexus.client :as client])
+
+(def shared (client/in-memory-store))
+
+(def fast  (client/create-client {:base-url "https://api.openai.com/v1"
+                                  :model "gpt-4.1-mini" :store shared}))
+(def smart (client/create-client {:base-url "https://api.openai.com/v1"
+                                  :model "gpt-4.1"      :store shared}))
+
+;; the cheap model takes the first turn …
+(client/run fast "Triage this stack trace" {:toolkit toolkit :conversation-id "t-9"})
+;; … and the strong one continues the SAME conversation
+(client/run smart "Now write the fix"      {:toolkit toolkit :conversation-id "t-9"})
+```
+
+Without the shared store each client would have kept its own, and the second run would have started
+from nothing.
+
+### A store on disk
+
+```clojure
+(require '[koine.fs :as fs]
+         '[koine.json :as json]
+         '[toolnexus.tool :as tool])
+
+(defn file-store
+  "One JSON file per conversation, under `dir`. Survives a restart."
+  [dir]
+  (fs/mkdirs! dir)
+  ;; toolnexus.tool/sanitize is exactly the [^a-zA-Z0-9_-] -> _ rule (SPEC §0.2)
+  (let [path (fn [id] (str dir "/" (tool/sanitize id) ".json"))]
+    {:get  (fn [id]
+             (let [p (path id)]
+               (when (fs/exists? p) (json/read-str (fs/read-file p)))))
+     :save (fn [id msgs]
+             (fs/write-file (path id) (json/write-str msgs))
+             nil)}))
+
+(def llm (client/create-client {:base-url "https://api.anthropic.com"
+                                :style    "anthropic"
+                                :model    "claude-sonnet-4-5"
+                                :store    (file-store "./conversations")}))
+```
+
+Sanitising the id into the filename matters: a conversation id is caller-supplied data, and it
+should never be able to choose a path.
+
+### A store with a cap, and reading it back
+
+Nothing stops a store from editing what it saves. Trimming there rather than in the loop keeps the
+policy in one place, and `:get` returns whatever `:save` wrote.
+
+```clojure
+(defn capped-store
+  "Keep only the most recent `n` messages of each conversation."
+  [n]
+  (let [a (atom {})]
+    {:get  (fn [id] (get @a id))
+     :save (fn [id msgs]
+             (swap! a assoc id (vec (take-last n msgs)))
+             nil)
+     ;; extra keys are ignored by the client — this one is for your own use
+     :dump (fn [] @a)}))
+
+(def store (capped-store 40))
+(def llm (client/create-client {:base-url "https://api.openai.com/v1"
+                                :model "gpt-4.1" :store store}))
+
+(client/run llm "Start the audit" {:toolkit toolkit :conversation-id "audit-1"})
+
+;; inspect what was kept
+(count ((:get store) "audit-1"))
+```
+
+Trimming a transcript is a real decision, not a detail: cutting mid-tool-call leaves a
+`tool_call_id` with no matching result, and some providers reject that. Trim at message boundaries
+you understand, or keep whole turns.
+
+### The contract
+
+| Key | Signature | Called when |
+|---|---|---|
+| `:get` | `(fn [id] messages-or-nil)` | Before a run, only if `:conversation-id` was supplied. |
+| `:save` | `(fn [id msgs] nil)` | After **every** run exit — including the `:max-turns` one. |
+
+`msgs` is the RunResult's `:messages`, in the provider's own message shape.
+
+## See also
+
+- [`toolnexus.client/create-client`](/api/clojure/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`toolnexus.client/run`](/api/clojure/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`toolnexus.client/run`](/api/clojure/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.
+- [`toolnexus.client/create-client`](/api/clojure/client/metrics/) — Emit one metric event per model call and per tool call: tokens, latency, outcome.

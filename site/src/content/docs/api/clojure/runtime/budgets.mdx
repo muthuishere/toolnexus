@@ -1,0 +1,83 @@
+---
+title: "Budgets — hierarchical, live-enforced"
+description: "Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight. — Clojure."
+sidebar:
+  label: "runtime / budgets"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+</p>
+
+<Aside type="caution" title="Not available in Clojure">
+There are no §7D budgets in this port — no per-agent or per-team caps on tool calls and wall-clock,
+because there is no sub-agent runtime to enforce them across. The caps that do exist are per-run and
+per-call: `:max-turns` on the client, and `:timeout` on the sources that reach the network.
+</Aside>
+
+Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+
+Hierarchical budgets are about a *team*: a parent hands a child a share of its remaining allowance,
+the child cannot exceed it, and the parent's own ceiling accounts for everything its children spent.
+That arithmetic needs a runtime that owns the children. What this port has instead is a set of
+independent, single-scope limits.
+
+## What to use instead
+
+`:max-turns` bounds the loop — each turn is one provider call plus whatever tools it asked for — and
+the run comes back with `:status "incomplete"` and `:limit? true` rather than an exception:
+
+```clojure
+(require '[toolnexus.client :as client])
+
+(def c (client/create-client {:base-url  "https://api.anthropic.com"
+                              :style     "anthropic"
+                              :model     "claude-sonnet-4-6"
+                              :max-turns 8}))          ; default is 10
+
+(def r (client/run c "audit the repo" {:toolkit tk}))
+
+(:turns r)           ;; how many were actually used
+(:tool-call-count r) ;; total tool calls across the run
+(:limit? r)          ;; true when the turn cap ended the run
+(:status r)          ;; "done" | "pending" | "incomplete"
+(:usage r)           ;; {:prompt-tokens ... :completion-tokens ... :total-tokens ...}
+```
+
+Wall-clock is bounded per network call, not per run: `:timeout` on
+[`remote-agent`](/api/clojure/agents/agent/) and on HTTP tools, and each MCP server's own timeout.
+There is no single knob that stops a run after N seconds.
+
+For anything tighter, `:on-event` is the live seam. It is called synchronously inside the loop, so a
+counter kept there sees every tool call as it happens:
+
+```clojure
+(require '[toolnexus.client :as client]
+         '[koine.time :as time])
+
+(def spent (atom {:calls 0 :started (time/mono-ms)}))
+
+(client/run c "audit the repo"
+  {:toolkit  tk
+   :on-event (fn [e]
+               (when (= "tool_call" (:type e))
+                 (swap! spent update :calls inc))
+               (let [{:keys [calls started]} @spent]
+                 (when (or (> calls 40) (> (time/elapsed-ms started) 120000))
+                   ;; your policy, your signal — the loop does not enforce this for you
+                   (deliver over-budget true))))})
+```
+
+Note the honest limit: `:on-event` can *observe* and can flip a flag your own tools check, but it
+cannot abort the loop mid-turn. The two enforcement points the port actually owns are `:max-turns`
+and the per-call timeouts. To cap a delegated child, give it its own client with its own
+`:max-turns` — the child's spend is then bounded, but it is not deducted from the parent's.
+
+## See also
+
+- [`toolnexus.client/create-client`](/api/clojure/client/create/) — where `:max-turns` is set
+- [`toolnexus.client/run`](/api/clojure/client/run/) — `:turns`, `:tool-call-count`, `:limit?`, `:usage`, `:on-event`
+- [`client / metrics`](/api/clojure/client/metrics/) — `:on-metric`, for spend you want to record rather than cap
+- [`runtime / runtime`](/api/clojure/runtime/runtime/) — the missing runtime these budgets would belong to

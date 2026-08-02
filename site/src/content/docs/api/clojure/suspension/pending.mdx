@@ -1,0 +1,187 @@
+---
+title: "toolnexus.client/suspend"
+description: "Return a Pending from a tool to park the run until someone answers. — Clojure."
+sidebar:
+  label: "toolnexus.client/suspend"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+```clojure
+(suspend request)          ; output defaults to the request's :prompt
+(suspend request output)
+;; => {:output "…" :isError true :metadata {:pending request}}
+
+(make-request kind prompt)
+(make-request kind prompt opts)   ; :url, :data, :expiresAt
+;; => {:id "sus-…" :kind "input" :prompt "Which city?"
+;;     :url "…" :data {…} :expiresAt "2026-01-01T00:00:00Z"}
+;;    absent optionals are OMITTED, never emitted as null
+
+(new-request-id)   ; => "sus-<epoch-ms>-<n>", unique per suspension
+```
+
+A suspension is not a new return type. It is an ordinary `ToolResult` whose `metadata.pending`
+holds a `Request` — that is the whole mechanism, and it is why `execute`'s signature never changed.
+Any tool can suspend at any time, and a toolkit, an adapter or a host that knows nothing about §10
+still sees a well-formed result.
+
+`make-request` builds the `Request`. Its keys are **pinned across every port** because they cross
+the wire: `id`, `kind`, `prompt`, and the optional `url`, `data` and `expiresAt`. That is why
+`expiresAt` is camelCase in a kebab-case language — `koine.json/write-str` emits a keyword's name
+verbatim, so the keyword *is* the wire key, and renaming it here would be exactly the cross-port
+drift the ports exist to prevent.
+
+`kind` is a free string and the loop never branches on it; hosts do. The four in use across the
+ports are `"authorization"` (see [`auth-required`](/api/clojure/suspension/auth-required/)),
+`"input"`, `"approval"` and `"question"` — the last being what the `question` builtin emits.
+
+What happens next depends entirely on the client. With
+[`:wait-for`](/api/clojure/suspension/wait-for/) configured the loop resolves the request and
+re-executes your tool once with the answer in Context. Without it the run returns cleanly with
+`:status "pending"` and the `Request` on `:pending`.
+
+## When to use it
+
+- **A tool needs something only a human has** — an approval, a value the model cannot know, a
+  choice between options.
+- **A credential expired mid-run** — reach for
+  [`auth-required`](/api/clojure/suspension/auth-required/), which is `suspend` with the
+  authorization shape pre-filled.
+- **Not for a failure** — if the tool simply could not do its job, return
+  `toolnexus.tool/failure`. The model sees that and adapts; a suspension asks a *person* for
+  something.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Return failure when nobody needs to be asked">
+`toolnexus.tool/failure` is for "this did not work" — bad arguments, a 404, a parse error. The
+model reads it and tries something else, and the run never leaves the loop. `suspend` is for "this
+cannot proceed until a human acts", and it either blocks the run in `:wait-for` or ends it with
+`:status "pending"`. Using a suspension where a failure would do turns a recoverable step into a
+stall.
+</Aside>
+
+A suspension's `:isError` is `true` on purpose: to a host that does not implement §10 — a plain
+adapter, an older port, a debug dump — the result still reads as "this call did not produce a
+value", which is the truthful degradation.
+
+## Examples
+
+### A tool that asks for a value
+
+The tool must be **multi-arity**. `toolnexus.tool/execute` calls `(f args)` when there is no
+Context and `(f args ctx)` when there is one, so the first execution and the post-answer retry land
+on different arities of the same function.
+
+```clojure
+(require '[toolnexus.tool :as tool]
+         '[toolnexus.client :as client]
+         '[koine.json :as json])
+
+(def book-flight
+  (tool/tool
+    {:name        "book_flight"
+     :description "Book a flight for the user"
+     :execute
+     (fn ([_args]
+          ;; first call: we do not know the destination, so ask
+          (client/suspend (client/make-request "input" "Which city?")
+                          "Input required: Which city?"))
+       ([args ctx]
+        ;; the retry: the answer is in Context
+        (let [city (get-in ctx [:answer :data :city])]
+          (tool/success (str "booked " (:flight args) " to " city)))))}))
+```
+
+The second argument to `suspend` is the text that goes into the transcript. Default it to the
+prompt unless the model benefits from something more explicit.
+
+### Carrying a schema so a generic host can render the prompt
+
+`:data` is yours. The convention across the ports is that `data.schema` holds a JSON Schema for the
+expected answer, which lets a web front end or a chat bot build a form without knowing what your
+tool does.
+
+```clojure
+(require '[koine.time :as ktime])
+
+(def city-schema
+  {:type "object"
+   :properties {:city {:type "string"}}
+   :required ["city"]})
+
+(client/suspend
+  (client/make-request "input" "Which city?"
+                       {:data      {:schema city-schema}
+                        ;; RFC3339; a host may drop the request once it passes
+                        :expiresAt (ktime/iso-str (+ (ktime/now-ms) 300000))})
+  "Input required: Which city?")
+;; => {:output "Input required: Which city?"
+;;     :isError true
+;;     :metadata {:pending {:id "sus-1754006400000-1"
+;;                          :kind "input"
+;;                          :prompt "Which city?"
+;;                          :data {:schema {…}}
+;;                          :expiresAt "2026-08-01T00:05:00Z"}}}
+```
+
+`:expiresAt` is advisory — the loop does not enforce it. It is there so a host queueing requests
+for a human can expire one instead of holding a run open forever.
+
+### An approval gate, end to end
+
+```clojure
+(def deploy
+  (tool/tool
+    {:name        "deploy"
+     :description "Deploy the current branch to an environment"
+     :execute
+     (fn ([args]
+          (if (= "production" (:env args))
+            (client/suspend
+              (client/make-request "approval"
+                                   (str "Deploy " (:branch args) " to production?")
+                                   {:data {:branch (:branch args) :env (:env args)}}))
+            (tool/success (str "deployed to " (:env args)))))
+       ([args ctx]
+        (if (get-in ctx [:answer :ok])
+          (tool/success (str "deployed " (:branch args) " to production"))
+          ;; the loop already turns a declined answer into an error result;
+          ;; reaching here means it was approved
+          (tool/failure "approval missing"))))}))
+
+;; Without :wait-for the run returns instead of blocking:
+(let [r (client/run llm "Ship release/1.4 to production"
+                    {:toolkit (tool/toolkit [deploy])})]
+  (when (= "pending" (:status r))
+    (println (get-in r [:pending :kind]))    ;; "approval"
+    (println (get-in r [:pending :prompt])) ;; "Deploy release/1.4 to production?"
+    (println (get-in r [:pending :id]))))   ;; correlate the human's answer with this
+```
+
+If several tools in the same turn suspend, the **first in tool-call order** wins and the later ones
+never enter the transcript. That makes concurrent suspensions deterministic rather than a function
+of thread scheduling, and the ones that were dropped simply suspend again on the next run.
+
+### The Request
+
+| Key | Required | What it is |
+|---|---|---|
+| `:id` | yes | Correlation key, `"sus-<epoch-ms>-<n>"` unless you pass `:id` in `opts`. |
+| `:kind` | yes | `"authorization"` · `"input"` · `"approval"` · `"question"` — a host-facing label. |
+| `:prompt` | yes | What to show the human. Also the transcript placeholder on a durable halt. |
+| `:url` | no | Where the human must go. Set by `auth-required`. |
+| `:data` | no | Arbitrary payload; `data.schema` is the convention for the answer's shape. |
+| `:expiresAt` | no | RFC3339. Advisory — the loop does not enforce it. |
+
+## See also
+
+- [`toolnexus.client/auth-required`](/api/clojure/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`toolnexus.client/create-client`](/api/clojure/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`toolnexus.client/pending-of`](/api/clojure/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`toolnexus.client/run`](/api/clojure/client/run/) — where a suspension becomes `:status "pending"` or a `pending` event.

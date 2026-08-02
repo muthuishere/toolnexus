@@ -1,0 +1,141 @@
+---
+title: "toolnexus.adapter/to-gemini"
+description: "Render the toolkit as Gemini function-declaration schema. — Clojure."
+sidebar:
+  label: "toolnexus.adapter/to-gemini"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/adapter.cljc">clojure/src/toolnexus/adapter.cljc</a>
+</p>
+
+```clojure
+(to-gemini tools-or-toolkit)
+
+;; ALWAYS a one-element vector, whatever the tool count:
+;; => [{:functionDeclarations
+;;      [{:name        "echo"
+;;        :description "Echo the input back."
+;;        :parameters  {:type "object" :properties {…} :required […]}}
+;;       …]}]
+```
+
+`to-gemini` is the outlier of the three. Where OpenAI and Anthropic return one entry per tool, this
+returns **exactly one element** — a wrapper map whose `:functionDeclarations` vector holds every
+tool. Two levels of nesting, not one, and the tool entries themselves are the OpenAI-style trio of
+`:name`, `:description` and `:parameters` rather than Anthropic's `:input_schema`.
+
+It stays a one-element vector even with no tools: `[{:functionDeclarations []}]`, not `[]`. That is
+not an accident of the implementation — every shipped port emits the wrapper with an empty
+declarations array, and matching them is the point of the parity contract. `to-openai` and
+`to-anthropic` both return a bare `[]` in the same situation.
+
+Everything else is shared with the other two adapters. Schema only, no network, no key. A toolkit
+is sorted by tool name because map order is not a contract on either host; an explicit seq keeps
+the order you gave it. `:description` defaults to `""` and `:parameters` to `{:type "object"}`, so
+neither can be `nil` in the payload.
+
+## When to use it
+
+- **Calling the Gemini `generateContent` API** — this is the `tools` value it expects.
+- **Rendering a subset per request** — pass a vector of tools rather than the whole toolkit.
+- **Writing the payload by hand** — the extra nesting is the thing people get wrong; render it
+  rather than hand-building it.
+- **Parity checks** — the empty case is the one that catches an adapter reimplemented from memory.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Do not unwrap it to look like the others">
+It is tempting to `first` the result so it matches [`to-openai`](/api/clojure/adapters/openai/) and
+[`to-anthropic`](/api/clojure/adapters/anthropic/), but the wrapper *is* the payload — Gemini
+accepts a list of tool groups, and toolnexus emits exactly one group. Send the vector as-is.
+</Aside>
+
+`toolnexus.core/to-gemini` re-exports this function, so `toolnexus.core` alone is enough for a
+caller who does not want a second require.
+
+## Examples
+
+### Render a toolkit, and note the two levels
+
+```clojure
+(require '[toolnexus.core :as toolnexus])
+
+(def tk (toolnexus/build {:skills "examples/skills"}))
+
+(count (toolnexus/to-gemini tk))                    ;=> 1   ; always
+(count (get-in (toolnexus/to-gemini tk) [0 :functionDeclarations]))   ;=> 11
+
+(get-in (toolnexus/to-gemini tk) [0 :functionDeclarations 0])
+;; => {:name "apply_patch"
+;;     :description "Apply an add/update/delete patch."
+;;     :parameters {:type "object"
+;;                  :properties {:patchText {:type "string" …}}
+;;                  :required ["patchText"]}}
+
+(map :name (get-in (toolnexus/to-gemini tk) [0 :functionDeclarations]))
+;; => ("apply_patch" "bash" "edit" "glob" "grep" "question" "read"
+;;     "skill" "todowrite" "webfetch" "write")
+```
+
+### The empty case, which is where ports drift
+
+```clojure
+(require '[toolnexus.adapter :as adapter]
+         '[toolnexus.tool :as tool])
+
+(adapter/to-gemini (tool/toolkit []))       ;=> [{:functionDeclarations []}]
+
+;; The other two collapse to nothing at all.
+(adapter/to-openai (tool/toolkit []))       ;=> []
+(adapter/to-anthropic (tool/toolkit []))    ;=> []
+```
+
+An agent configured with `:builtins false` and no other source hits this on every request, so it is
+worth having a test for rather than discovering against a live endpoint.
+
+### Closing the loop: `functionCall` back to `execute`
+
+```clojure
+(require '[toolnexus.core :as toolnexus])
+
+(def tk (toolnexus/build {:skills "examples/skills"}))
+
+(def request {:contents [] :tools (toolnexus/to-gemini tk)})
+
+;; Gemini returns a functionCall part: a name and already-parsed args.
+;; The reply goes back as a functionResponse part, not a plain string.
+(defn function-response [tk call]
+  (let [res (toolnexus/execute tk (get call "name") (get call "args"))]
+    {:functionResponse
+     {:name     (get call "name")
+      :response {:output  (:output res)
+                 ;; A failed tool is a value the model reads, not an exception.
+                 :isError (:isError res)}}}))
+
+(function-response tk {"name" "skill" "args" {"name" "hello-world"}})
+;; => {:functionResponse
+;;     {:name "skill"
+;;      :response {:output "<skill_content name=\"hello-world\">…" :isError false}}}
+```
+
+| Emitted key | Source |
+|---|---|
+| `[0] :functionDeclarations` | The whole tool list. Present even when empty. |
+| `:name` | The tool's `:name`. |
+| `:description` | The tool's `:description`, `""` when unset. |
+| `:parameters` | The tool's `:input-schema` verbatim, `{:type "object"}` when unset. |
+
+| Input | Result |
+|---|---|
+| a toolkit | One wrapper, declarations sorted by tool name. |
+| a seq of tools | One wrapper, declarations in the order given. |
+| an empty toolkit or seq | `[{:functionDeclarations []}]` — still one wrapper. |
+
+## See also
+
+- [`toolnexus.adapter/to-openai`](/api/clojure/adapters/openai/) — Render the toolkit as OpenAI function-calling schema.
+- [`toolnexus.adapter/to-anthropic`](/api/clojure/adapters/anthropic/) — Render the toolkit as Anthropic tool-use schema.
+- [`toolnexus.builtin/enabled-builtins`](/api/clojure/builtins/select/) — what decides how many declarations end up in the wrapper.

@@ -1,949 +1,1012 @@
 {
-  "$comment": "The top-level public surface of toolnexus, as defined by SPEC.md \u00a71\u2013\u00a711. This manifest is the single source of truth for the API Reference: it drives page generation, the sidebar, cross-language equivalent links, and the coverage gate. One entry here == one page per port at /api/<lang>/<group>/<member>. Data shapes (option bags, result records) are NOT entries \u2014 they are documented as field tables on the page of the entry point that consumes them. Add an entry only when SPEC.md gains a top-level entry point.",
-  "langs": [
-    "javascript",
-    "python",
-    "golang",
-    "java",
-    "csharp",
-    "elixir"
-  ],
-  "entries": [
-    {
-      "id": "types/tool",
-      "group": "types",
-      "member": "tool",
-      "title": "Tool \u2014 the one interface",
-      "spec": "\u00a71",
-      "summary": "The uniform shape every tool source collapses to: name, description, JSON-Schema parameters, execute.",
-      "symbols": {
-        "javascript": "Tool",
-        "python": "Tool",
-        "golang": "Tool",
-        "java": "Tool",
-        "csharp": "ITool",
-        "elixir": "Toolnexus.Tool"
-      }
-    },
-    {
-      "id": "types/tool-result",
-      "group": "types",
-      "member": "tool-result",
-      "title": "ToolResult \u2014 what execute returns",
-      "spec": "\u00a71",
-      "summary": "The result envelope: output text, optional error flag, optional Pending for suspension.",
-      "symbols": {
-        "javascript": "ToolResult",
-        "python": "ToolResult",
-        "golang": "ToolResult",
-        "java": "ToolResult",
-        "csharp": "ToolResult",
-        "elixir": "Toolnexus.ToolResult"
-      }
-    },
-    {
-      "id": "types/context",
-      "group": "types",
-      "member": "context",
-      "title": "ToolContext \u2014 what execute receives",
-      "spec": "\u00a71",
-      "summary": "Optional per-call context handed to execute: cancellation, identity, and host-supplied state.",
-      "symbols": {
-        "javascript": "ToolContext",
-        "python": "ToolContext",
-        "golang": "ToolContext",
-        "java": "ToolContext",
-        "csharp": "ToolContext",
-        "elixir": "Toolnexus.Context"
-      }
-    },
-    {
-      "id": "toolkit/create",
-      "group": "toolkit",
-      "member": "create",
-      "title": "createToolkit \u2014 the aggregator",
-      "spec": "\u00a74",
-      "summary": "Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.",
-      "symbols": {
-        "javascript": "createToolkit",
-        "python": "create_toolkit",
-        "golang": "CreateToolkit",
-        "java": "Toolkit.create",
-        "csharp": "Toolkit.CreateAsync",
-        "elixir": "Toolnexus.create_toolkit"
-      },
-      "sources": [
-        "js/examples/basic.ts",
-        "python/examples/basic.py",
-        "golang/examples/basic",
-        "elixir/examples/basic.exs"
-      ]
-    },
-    {
-      "id": "mcp/load",
-      "group": "mcp",
-      "member": "load",
-      "title": "loadMcp \u2014 connect to MCP servers",
-      "spec": "\u00a72",
-      "summary": "Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.",
-      "symbols": {
-        "javascript": "loadMcp",
-        "python": "load_mcp",
-        "golang": "LoadMcp",
-        "java": "McpSource.load",
-        "csharp": "McpSource.LoadAsync",
-        "elixir": "Toolnexus.Mcp.load"
-      },
-      "sources": [
-        "examples/mcp.json"
-      ]
-    },
-    {
-      "id": "mcp/load-with-context",
-      "group": "mcp",
-      "member": "load-with-context",
-      "title": "loadMcpWithContext \u2014 cancellable load",
-      "spec": "\u00a72",
-      "summary": "The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.",
-      "symbols": {
-        "javascript": "loadMcp",
-        "python": "load_mcp_with_context",
-        "golang": "LoadMcpWithContext",
-        "java": "McpSource.loadWith",
-        "csharp": "McpSource.LoadAsync",
-        "elixir": "Toolnexus.Mcp.load"
-      }
-    },
-    {
-      "id": "mcp/list-tools",
-      "group": "mcp",
-      "member": "list-tools",
-      "title": "listMcpTools \u2014 inventory without connecting",
-      "spec": "\u00a72",
-      "summary": "List what each configured server would expose, plus per-server status, without wiring it into a toolkit.",
-      "symbols": {
-        "javascript": "listMcpTools",
-        "python": "list_mcp_tools",
-        "golang": "ListMcpTools",
-        "java": "McpSource.listMcpTools",
-        "csharp": "McpSource.ListMcpToolsAsync",
-        "elixir": "Toolnexus.Mcp.list_tools"
-      }
-    },
-    {
-      "id": "mcp/parse-config",
-      "group": "mcp",
-      "member": "parse-config",
-      "title": "parseMcpConfig \u2014 validate an mcp.json",
-      "spec": "\u00a72",
-      "summary": "Parse and validate config without connecting \u2014 the fast fail for a malformed or misspelled server block.",
-      "symbols": {
-        "javascript": "parseMcpConfig",
-        "python": "parse_mcp_config",
-        "golang": "ParseMcpConfig",
-        "java": null,
-        "csharp": "McpSource.ParseConfig",
-        "elixir": "Toolnexus.Mcp.parse_config"
-      },
-      "parityNote": "Java keeps parseConfig package-private (McpSource.java:141) \u2014 there is no public config parser. C# exposes it as McpSource.ParseConfig, not ParseMcpConfig."
-    },
-    {
-      "id": "mcp/elicitation",
-      "group": "mcp",
-      "member": "elicitation",
-      "title": "Elicitation bridge \u2014 server asks the user",
-      "spec": "\u00a72",
-      "summary": "Map an MCP server's elicitation request onto the \u00a710 suspension contract, and map the answer back.",
-      "symbols": {
-        "javascript": "elicitationToRequest",
-        "python": "elicitation_to_request",
-        "golang": "ElicitationToRequest",
-        "java": "McpSource.elicitationToRequest",
-        "csharp": "McpSource.ElicitationToRequest",
-        "elixir": "Toolnexus.Mcp.Protocol.elicitation_to_request"
-      },
-      "parityNote": "Elixir's elicitation_to_request lives on Toolnexus.Mcp.Protocol, not Toolnexus.Mcp \u2014 there is no delegate on the top-level Mcp module."
-    },
-    {
-      "id": "skills/load",
-      "group": "skills",
-      "member": "load",
-      "title": "loadSkills \u2014 discover SKILL.md files",
-      "spec": "\u00a73",
-      "summary": "Glob a skills directory and expose one skill tool with progressive disclosure.",
-      "symbols": {
-        "javascript": "loadSkills",
-        "python": "load_skills",
-        "golang": "LoadSkills",
-        "java": "SkillSource.load",
-        "csharp": "SkillSource.Load",
-        "elixir": "Toolnexus.Skill.load"
-      },
-      "sources": [
-        "examples/skills"
-      ]
-    },
-    {
-      "id": "skills/load-with",
-      "group": "skills",
-      "member": "load-with",
-      "title": "loadSkillsWith \u2014 data skills, providers, filters",
-      "spec": "\u00a73",
-      "summary": "Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist.",
-      "symbols": {
-        "javascript": "loadSkills",
-        "python": "load_skills",
-        "golang": "LoadSkillsWith",
-        "java": "SkillSource.loadWith",
-        "csharp": "SkillSource.LoadWith",
-        "elixir": "Toolnexus.Skill.load"
-      }
-    },
-    {
-      "id": "skills/list",
-      "group": "skills",
-      "member": "list",
-      "title": "listSkills \u2014 inventory and skip reasons",
-      "spec": "\u00a73",
-      "summary": "Enumerate discovered skills and, crucially, the ones that were skipped and why.",
-      "symbols": {
-        "javascript": "listSkills",
-        "python": "list_skills",
-        "golang": "ListSkills",
-        "java": "SkillSource.listSkills",
-        "csharp": "SkillSource.ListSkills",
-        "elixir": "Toolnexus.Skill.list"
-      }
-    },
-    {
-      "id": "native/define-tool",
-      "group": "native",
-      "member": "define-tool",
-      "title": "defineTool \u2014 your own function as a tool",
-      "spec": "\u00a76",
-      "summary": "Wrap a plain function with a name, description and schema \u2014 the shortest path from code you have to a tool the LLM can call.",
-      "symbols": {
-        "javascript": "defineTool",
-        "python": "define_tool",
-        "golang": "NativeTool",
-        "java": "NativeTool.of",
-        "csharp": "NativeTool.Of",
-        "elixir": "Toolnexus.Native.define_tool"
-      },
-      "sources": [
-        "js/examples/advanced.ts",
-        "python/examples/advanced.py",
-        "golang/examples/advanced"
-      ]
-    },
-    {
-      "id": "native/reflect",
-      "group": "native",
-      "member": "reflect",
-      "title": "Annotation / reflection tools",
-      "spec": "\u00a76",
-      "summary": "Derive the schema from the function signature or annotation instead of writing it by hand.",
-      "symbols": {
-        "javascript": "tool",
-        "python": "tool",
-        "golang": "NativeToolReflect",
-        "java": "@Tool annotation",
-        "csharp": "ToolMethodAttribute",
-        "elixir": null
-      },
-      "parityNote": "Elixir has no reflection-based tool builder; use Toolnexus.Native.define_tool/1 with an explicit input_schema."
-    },
-    {
-      "id": "native/collect",
-      "group": "native",
-      "member": "collect",
-      "title": "collectTools \u2014 gather decorated functions",
-      "spec": "\u00a76",
-      "summary": "Sweep a module or class and collect every function marked as a tool.",
-      "symbols": {
-        "javascript": "collectTools",
-        "python": null,
-        "golang": null,
-        "java": "Tools.fromObject",
-        "csharp": "Tools.FromObject",
-        "elixir": null
-      },
-      "parityNote": "JS/Java/C# expose an explicit collector; Python, Go and Elixir have no equivalent public symbol."
-    },
-    {
-      "id": "http/tool",
-      "group": "http",
-      "member": "tool",
-      "title": "httpTool \u2014 a REST endpoint as a tool",
-      "spec": "\u00a77",
-      "summary": "Turn an HTTP endpoint into a tool: URL, method, headers with ${ENV} expansion, and a schema.",
-      "symbols": {
-        "javascript": "httpTool",
-        "python": "http_tool",
-        "golang": "HTTPTool",
-        "java": "HttpTool.of",
-        "csharp": "HttpTool.Of",
-        "elixir": "Toolnexus.Http.tool"
-      }
-    },
-    {
-      "id": "builtins/select",
-      "group": "builtins",
-      "member": "select",
-      "title": "selectBuiltins \u2014 choose the shipped tools",
-      "spec": "\u00a74A",
-      "summary": "Pick which built-in file/shell/web tools are in play, by name or by source toggle.",
-      "symbols": {
-        "javascript": "selectBuiltins",
-        "python": "select_builtins",
-        "golang": "SelectBuiltins",
-        "java": "BuiltinTools.select",
-        "csharp": "BuiltinTools.Select",
-        "elixir": "Toolnexus.Builtin.load"
-      },
-      "parityNote": "Elixir selects built-ins via Toolnexus.Builtin.load/1 (a config map), not a named select function."
-    },
-    {
-      "id": "builtins/create",
-      "group": "builtins",
-      "member": "create",
-      "title": "createBuiltinTools \u2014 the full built-in set",
-      "spec": "\u00a74A",
-      "summary": "Construct every built-in tool directly, outside a toolkit.",
-      "symbols": {
-        "javascript": "createBuiltinTools",
-        "python": "create_builtin_tools",
-        "golang": "CreateBuiltinTools",
-        "java": "BuiltinTools.create",
-        "csharp": "BuiltinTools.Create",
-        "elixir": "Toolnexus.Builtin.tools"
-      },
-      "parityNote": "Elixir has no Builtin.create/1 \u2014 the zero-arg 'build the full set' constructor is Toolnexus.Builtin.tools/0."
-    },
-    {
-      "id": "adapters/openai",
-      "group": "adapters",
-      "member": "openai",
-      "title": "toOpenAI \u2014 emit OpenAI tool schema",
-      "spec": "\u00a74",
-      "summary": "Render the toolkit as OpenAI function-calling schema.",
-      "symbols": {
-        "javascript": "toOpenAI",
-        "python": "to_openai",
-        "golang": "ToOpenAI",
-        "java": "Adapters.toOpenAI",
-        "csharp": "Adapters.ToOpenAI",
-        "elixir": "Toolnexus.Adapters.to_openai"
-      }
-    },
-    {
-      "id": "adapters/anthropic",
-      "group": "adapters",
-      "member": "anthropic",
-      "title": "toAnthropic \u2014 emit Anthropic tool schema",
-      "spec": "\u00a74",
-      "summary": "Render the toolkit as Anthropic tool-use schema.",
-      "symbols": {
-        "javascript": "toAnthropic",
-        "python": "to_anthropic",
-        "golang": "ToAnthropic",
-        "java": "Adapters.toAnthropic",
-        "csharp": "Adapters.ToAnthropic",
-        "elixir": "Toolnexus.Adapters.to_anthropic"
-      }
-    },
-    {
-      "id": "adapters/gemini",
-      "group": "adapters",
-      "member": "gemini",
-      "title": "toGemini \u2014 emit Gemini tool schema",
-      "spec": "\u00a74",
-      "summary": "Render the toolkit as Gemini function-declaration schema.",
-      "symbols": {
-        "javascript": "toGemini",
-        "python": "to_gemini",
-        "golang": "ToGemini",
-        "java": "Adapters.toGemini",
-        "csharp": "Adapters.ToGemini",
-        "elixir": "Toolnexus.Adapters.to_gemini"
-      }
-    },
-    {
-      "id": "client/create",
-      "group": "client",
-      "member": "create",
-      "title": "createClient \u2014 the tool-calling loop",
-      "spec": "\u00a78",
-      "summary": "The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.",
-      "symbols": {
-        "javascript": "createClient",
-        "python": "create_client",
-        "golang": "CreateClient",
-        "java": "LlmClient.create",
-        "csharp": "LlmClient.Create",
-        "elixir": "Toolnexus.Client.create"
-      },
-      "sources": [
-        "js/examples/basic.ts",
-        "python/examples/basic.py",
-        "golang/examples/basic"
-      ]
-    },
-    {
-      "id": "client/run",
-      "group": "client",
-      "member": "run",
-      "title": "run \u2014 one turn of the loop",
-      "spec": "\u00a78",
-      "summary": "Send a prompt, let the loop call tools until the model stops, get a RunResult.",
-      "symbols": {
-        "javascript": "Client.run",
-        "python": "Client.run",
-        "golang": "Client.Run",
-        "java": "LlmClient.run",
-        "csharp": "LlmClient.RunAsync",
-        "elixir": "Toolnexus.Client.run"
-      }
-    },
-    {
-      "id": "client/stream",
-      "group": "client",
-      "member": "stream",
-      "title": "stream \u2014 token and event streaming",
-      "spec": "\u00a78",
-      "summary": "The streaming loop: text deltas, tool-call events, and suspension events as they happen.",
-      "symbols": {
-        "javascript": "Client.stream",
-        "python": "Client.stream",
-        "golang": "Client.Stream",
-        "java": "LlmClient.stream",
-        "csharp": "LlmClient.StreamAsync",
-        "elixir": "Toolnexus.Client.stream"
-      },
-      "sources": [
-        "js/examples/streaming.ts",
-        "python/examples/streaming.py",
-        "golang/examples/streaming"
-      ]
-    },
-    {
-      "id": "client/hooks",
-      "group": "client",
-      "member": "hooks",
-      "title": "Hooks \u2014 lifecycle middleware",
-      "spec": "\u00a78",
-      "summary": "Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.",
-      "symbols": {
-        "javascript": "Hooks",
-        "python": "Hooks",
-        "golang": "Hooks",
-        "java": "LlmClient.Hooks",
-        "csharp": "LlmClient.Hooks",
-        "elixir": "Toolnexus.Client.create"
-      },
-      "sources": [
-        "js/examples/hooks.ts",
-        "python/examples/hooks.py",
-        "golang/examples/hooks",
-        "examples/agent-hooks"
-      ],
-      "parityNote": "Elixir has no separate Hooks type \u2014 pass a :hooks map (:before_llm, :after_llm, :before_tool, :after_tool) to Toolnexus.Client.create/1."
-    },
-    {
-      "id": "client/conversation",
-      "group": "client",
-      "member": "conversation",
-      "title": "Conversation \u2014 multi-turn memory",
-      "spec": "\u00a78",
-      "summary": "Keep a transcript across turns so the model remembers what it already did.",
-      "symbols": {
-        "javascript": "Conversation",
-        "python": "Conversation",
-        "golang": "Conversation",
-        "java": "LlmClient.Conversation",
-        "csharp": "LlmClient.Conversation",
-        "elixir": "Toolnexus.Client conversation"
-      },
-      "sources": [
-        "js/examples/memory.ts",
-        "python/examples/memory.py",
-        "golang/examples/memory"
-      ]
-    },
-    {
-      "id": "client/store",
-      "group": "client",
-      "member": "store",
-      "title": "ConversationStore \u2014 durable transcripts",
-      "spec": "\u00a78",
-      "summary": "Swap in-memory history for your own store so a conversation survives a process restart.",
-      "symbols": {
-        "javascript": "InMemoryConversationStore",
-        "python": "InMemoryConversationStore",
-        "golang": "NewInMemoryConversationStore",
-        "java": "LlmClient.ConversationStore",
-        "csharp": "LlmClient.IConversationStore",
-        "elixir": "Toolnexus.Client.InMemoryConversationStore"
-      }
-    },
-    {
-      "id": "client/metrics",
-      "group": "client",
-      "member": "metrics",
-      "title": "onMetric \u2014 observability",
-      "spec": "\u00a78",
-      "summary": "Emit one metric event per model call and per tool call: tokens, latency, outcome.",
-      "symbols": {
-        "javascript": "MetricEvent",
-        "python": "MetricEvent",
-        "golang": "MetricEvent",
-        "java": "LlmClient.MetricEvent",
-        "csharp": "MetricEvent",
-        "elixir": "Toolnexus.Client.MetricsRegistry"
-      },
-      "parityNote": "C# has no wrapping Metrics class \u2014 MetricEvent is a top-level record in namespace Toolnexus."
-    },
-    {
-      "id": "client/resilience",
-      "group": "client",
-      "member": "resilience",
-      "title": "Retries, timeout, cancellation",
-      "spec": "\u00a78",
-      "summary": "Classify an LLM error into retry / fail, bound a run with a deadline, and cancel cleanly.",
-      "symbols": {
-        "javascript": "ErrorInfo",
-        "python": "ErrorClassifier",
-        "golang": "ErrorInfo",
-        "java": "LlmClient.ErrorInfo",
-        "csharp": "LlmClient.ErrorInfo",
-        "elixir": "Toolnexus.Client.create"
-      },
-      "parityNote": "Elixir configures retries/timeout as options on Toolnexus.Client.create/1 rather than a distinct error-classifier type."
-    },
-    {
-      "id": "agents/agent",
-      "group": "agents",
-      "member": "agent",
-      "title": "agent \u2014 call a remote A2A peer",
-      "spec": "\u00a77A",
-      "summary": "Point at a remote agent's card and use it exactly like a local tool.",
-      "symbols": {
-        "javascript": "agent",
-        "python": "agent",
-        "golang": "agents.New",
-        "java": "A2A.agent",
-        "csharp": "A2A.Agent",
-        "elixir": "Toolnexus.A2a.agent"
-      },
-      "sources": [
-        "python/examples/a2a_agents.py"
-      ],
-      "parityNote": "Elixir's outbound A2A lives on Toolnexus.A2a, not Toolnexus.Agents \u2014 that module is the \u00a77D sub-agent runtime, a different concept with the same top-level name collision as JS's Agent (A2A card) vs agents.Agent (sub-agent)."
-    },
-    {
-      "id": "agents/agent-tools",
-      "group": "agents",
-      "member": "agent-tools",
-      "title": "agentTools \u2014 a peer's skills as tools",
-      "spec": "\u00a77A",
-      "summary": "Expand a remote agent card into one tool per advertised skill.",
-      "symbols": {
-        "javascript": "agentTools",
-        "python": "agent_tools",
-        "golang": "AgentTools",
-        "java": "A2A.agentTools",
-        "csharp": "A2A.AgentTools",
-        "elixir": "Toolnexus.A2a.agent_tools"
-      }
-    },
-    {
-      "id": "agents/parse-config",
-      "group": "agents",
-      "member": "parse-config",
-      "title": "parseAgentsConfig \u2014 agents from config",
-      "spec": "\u00a77A",
-      "summary": "Declare remote peers in config the way MCP servers are declared, with precedence rules.",
-      "symbols": {
-        "javascript": "parseAgentsConfig",
-        "python": "parse_agents_config",
-        "golang": "ParseAgentsConfig",
-        "java": "A2A.parseAgentsConfig",
-        "csharp": "A2A.ParseAgentsConfig",
-        "elixir": "Toolnexus.A2a.parse_agents_config"
-      }
-    },
-    {
-      "id": "serve/a2a",
-      "group": "serve",
-      "member": "a2a",
-      "title": "serve \u2014 expose your toolkit as an A2A agent",
-      "spec": "\u00a77B",
-      "summary": "Publish an Agent Card and answer JSON-RPC over the client loop \u2014 your toolkit becomes someone else's remote agent.",
-      "symbols": {
-        "javascript": "startA2AServer",
-        "python": "Toolkit.serve",
-        "golang": "Toolkit.Serve",
-        "java": "A2AServer.start",
-        "csharp": "A2AServer.StartAsync",
-        "elixir": "Toolnexus.Serve.start"
-      },
-      "parityNote": "Go names this Toolkit.Serve (a method), not a free StartAgent function \u2014 StartAgent is the unrelated \u00a77E persona-heartbeat starter."
-    },
-    {
-      "id": "serve/agent-card",
-      "group": "serve",
-      "member": "agent-card",
-      "title": "buildAgentCard \u2014 describe yourself to peers",
-      "spec": "\u00a77B",
-      "summary": "Construct the Agent Card that advertises your name, skills and endpoint.",
-      "symbols": {
-        "javascript": "buildAgentCard",
-        "python": "build_agent_card",
-        "golang": "BuildAgentCard",
-        "java": "A2AServer.buildAgentCard",
-        "csharp": "A2AServer.BuildAgentCard",
-        "elixir": "Toolnexus.Serve.build_agent_card"
-      }
-    },
-    {
-      "id": "serve/task-store",
-      "group": "serve",
-      "member": "task-store",
-      "title": "TaskStore \u2014 durable inbound tasks",
-      "spec": "\u00a77B",
-      "summary": "Persist inbound A2A tasks so a suspended request survives a restart.",
-      "symbols": {
-        "javascript": "FileTaskStore",
-        "python": "FileTaskStore",
-        "golang": "NewFileTaskStore",
-        "java": "A2AServer.FileTaskStore",
-        "csharp": "FileTaskStore",
-        "elixir": "Toolnexus.Serve task_store"
-      }
-    },
-    {
-      "id": "serve/mcp",
-      "group": "serve",
-      "member": "mcp",
-      "title": "buildMcpServer \u2014 expose your toolkit over MCP",
-      "spec": "\u00a77C",
-      "summary": "The inbound MCP profile: any MCP client can call your tools.",
-      "symbols": {
-        "javascript": "buildMcpServer",
-        "python": "build_mcp_server",
-        "golang": "ExposedMcpTools",
-        "java": "McpServe.build",
-        "csharp": "McpServe.BuildMcpServer",
-        "elixir": "Toolnexus.McpServe.exposed_tools"
-      }
-    },
-    {
-      "id": "runtime/agent",
-      "group": "runtime",
-      "member": "agent",
-      "title": "Agent \u2014 a composable sub-agent",
-      "spec": "\u00a77D",
-      "summary": "Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.",
-      "symbols": {
-        "javascript": "agents.Agent",
-        "python": "Agent",
-        "golang": "agents.New",
-        "java": "agents.Agent",
-        "csharp": "Agent",
-        "elixir": "Toolnexus.Agents"
-      },
-      "sources": [
-        "js/examples/agent.ts",
-        "python/examples/agent.py",
-        "golang/examples/agent",
-        "elixir/examples/agent.exs"
-      ]
-    },
-    {
-      "id": "runtime/runtime",
-      "group": "runtime",
-      "member": "runtime",
-      "title": "AgentRuntime \u2014 spawn, wait, interrupt",
-      "spec": "\u00a77D",
-      "summary": "The six host verbs that drive sub-agents, plus the read-only list and inspect views.",
-      "symbols": {
-        "javascript": "agents.AgentRuntime",
-        "python": "AgentRuntime",
-        "golang": "NewRuntime",
-        "java": "agents.Runtime",
-        "csharp": "AgentRuntime",
-        "elixir": "Toolnexus.Agents.Runtime"
-      },
-      "sources": [
-        "examples/subagent-lifecycle",
-        "examples/subagent-fanout"
-      ]
-    },
-    {
-      "id": "runtime/handle",
-      "group": "runtime",
-      "member": "handle",
-      "title": "Handle \u2014 a running sub-agent",
-      "spec": "\u00a77D",
-      "summary": "The state machine for one spawned agent: pending, running, suspended, done.",
-      "symbols": {
-        "javascript": "agents.Handle",
-        "python": "Handle",
-        "golang": "agents.Handle",
-        "java": "agents.Handle",
-        "csharp": "Handle",
-        "elixir": "Toolnexus.Agents.Handle"
-      }
-    },
-    {
-      "id": "runtime/budgets",
-      "group": "runtime",
-      "member": "budgets",
-      "title": "Budgets \u2014 hierarchical, live-enforced",
-      "spec": "\u00a77D",
-      "summary": "Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.",
-      "symbols": {
-        "javascript": "agents.Budget",
-        "python": "Budget",
-        "golang": "agents.Budget",
-        "java": "agents.Budget",
-        "csharp": "Budget",
-        "elixir": "Toolnexus.Agents budget"
-      },
-      "sources": [
-        "examples/subagent-budgets"
-      ]
-    },
-    {
-      "id": "runtime/task-tool",
-      "group": "runtime",
-      "member": "task-tool",
-      "title": "The task tool \u2014 model-facing delegation",
-      "spec": "\u00a77D",
-      "summary": "The opt-in tool that lets the model itself spawn a teammate. Default OFF.",
-      "symbols": {
-        "javascript": "agents.taskTool",
-        "python": null,
-        "golang": null,
-        "java": null,
-        "csharp": null,
-        "elixir": null
-      },
-      "parityNote": "Only JS exposes a constructible task tool symbol; elsewhere it is the `task` builtin, toggled on the runtime."
-    },
-    {
-      "id": "persona/compose-soul",
-      "group": "persona",
-      "member": "compose-soul",
-      "title": "composeSoul \u2014 the directory is the agent",
-      "spec": "\u00a77E",
-      "summary": "Build a persona's system prompt from its home directory: identity, memory, skills.",
-      "symbols": {
-        "javascript": "composeSoul",
-        "python": "compose_soul",
-        "golang": "ComposeSoul",
-        "java": "Home.composeSoul",
-        "csharp": "Home.ComposeSoul",
-        "elixir": "Toolnexus.Agents.Home.compose_soul"
-      },
-      "sources": [
-        "examples/persona-agent",
-        "js/examples/persona.ts",
-        "python/examples/persona.py",
-        "golang/examples/persona"
-      ]
-    },
-    {
-      "id": "persona/from-dir",
-      "group": "persona",
-      "member": "from-dir",
-      "title": "fromDir \u2014 load a persona from disk",
-      "spec": "\u00a77E",
-      "summary": "Point at an agent home directory and get a configured agent back.",
-      "symbols": {
-        "javascript": "fromDir",
-        "python": "agent_from_dir",
-        "golang": "FromDir",
-        "java": "A2A.agentFromDir",
-        "csharp": "Home.FromDir",
-        "elixir": "Toolnexus.Agents.Home.from_dir"
-      }
-    },
-    {
-      "id": "persona/memory-tool",
-      "group": "persona",
-      "member": "memory-tool",
-      "title": "memoryTool \u2014 file-backed memory",
-      "spec": "\u00a77E",
-      "summary": "The opt-in built-in that lets a persona write durable notes to its own home.",
-      "symbols": {
-        "javascript": "memoryTool",
-        "python": "memory_tool",
-        "golang": "MemoryTool",
-        "java": "Home.memoryTool",
-        "csharp": "Home.MemoryTool",
-        "elixir": "Toolnexus.Agents.Home.memory_tool"
-      }
-    },
-    {
-      "id": "compaction/compactor",
-      "group": "compaction",
-      "member": "compactor",
-      "title": "compactor \u2014 keep a long run under budget",
-      "spec": "\u00a77F",
-      "summary": "Summarise older turns when the transcript grows, so a long-lived agent stays inside its context window.",
-      "symbols": {
-        "javascript": "compactor",
-        "python": "compactor",
-        "golang": "Compactor",
-        "java": "Compaction.compactor",
-        "csharp": "Compaction.Compactor",
-        "elixir": "Toolnexus.Agents.Compaction.compactor"
-      },
-      "sources": [
-        "examples/compaction"
-      ]
-    },
-    {
-      "id": "suspension/pending",
-      "group": "suspension",
-      "member": "pending",
-      "title": "pending \u2014 suspend and ask a human",
-      "spec": "\u00a710",
-      "summary": "Return a Pending from a tool to park the run until someone answers.",
-      "symbols": {
-        "javascript": "pending",
-        "python": "pending",
-        "golang": "Pending",
-        "java": "Request.pending",
-        "csharp": "Suspension.Pending",
-        "elixir": null
-      },
-      "sources": [
-        "js/examples/pending.ts"
-      ],
-      "parityNote": "Elixir ships no pending/1 producer \u2014 construct %ToolResult{metadata: %{pending: %Request{}}} directly. Only the reader, ToolResult.pending?/1, exists."
-    },
-    {
-      "id": "suspension/auth-required",
-      "group": "suspension",
-      "member": "auth-required",
-      "title": "authRequired \u2014 suspend for authorization",
-      "spec": "\u00a710",
-      "summary": "The auth-shaped suspension: hand back a URL, resume once the user has granted access.",
-      "symbols": {
-        "javascript": "authRequired",
-        "python": "auth_required",
-        "golang": "AuthRequired",
-        "java": "Request.authRequired",
-        "csharp": "Suspension.AuthRequired",
-        "elixir": null
-      },
-      "parityNote": "Elixir ships no auth_required/pending producer helpers \u2014 build %ToolResult{metadata: %{pending: %Request{}}} by hand. Only the reader, ToolResult.pending?/1, exists."
-    },
-    {
-      "id": "suspension/wait-for",
-      "group": "suspension",
-      "member": "wait-for",
-      "title": "waitFor \u2014 the one host slot",
-      "spec": "\u00a710",
-      "summary": "The single hook where the host resolves a suspension \u2014 in-process prompt or durable queue, same contract.",
-      "symbols": {
-        "javascript": "waitFor",
-        "python": "WaitFor",
-        "golang": "WaitFor",
-        "java": "LlmClient.waitFor",
-        "csharp": "LlmClient.WaitFor",
-        "elixir": "Toolnexus.Client.create"
-      },
-      "parityNote": "Elixir passes :wait_for as an option to Toolnexus.Client.create/1 rather than exposing a WaitFor type."
-    },
-    {
-      "id": "suspension/pending-of",
-      "group": "suspension",
-      "member": "pending-of",
-      "title": "pendingOf \u2014 read a suspension off a result",
-      "spec": "\u00a710",
-      "summary": "Detect that a RunResult is parked rather than finished, and get the Request that parked it.",
-      "symbols": {
-        "javascript": "pendingOf",
-        "python": "pending_of",
-        "golang": "PendingOf",
-        "java": "Request.pendingOf",
-        "csharp": "Suspension.PendingOf",
-        "elixir": null
-      },
-      "parityNote": "Elixir has no pending_of/1; match on result.metadata or use ToolResult.pending?/1."
-    },
-    {
-      "id": "suspension/resume",
-      "group": "suspension",
-      "member": "resume",
-      "title": "AgentRuntime.resume \u2014 resume a suspended sub-agent",
-      "spec": "\u00a77D",
-      "summary": "Route an Answer to the deepest suspended sub-agent handle and resume it in place.",
-      "symbols": {
-        "javascript": "AgentRuntime.resume",
-        "python": "AgentRuntime.resume",
-        "golang": "Runtime.Resume",
-        "java": "AgentRuntime.resume",
-        "csharp": "AgentRuntime.ResumeAsync",
-        "elixir": "Toolnexus.Agents.Runtime.resume"
-      },
-      "sources": [
-        "examples/subagent-durable-resume"
-      ],
-      "parityNote": "Go additionally ships a separate, golang-only SPEC \u00a710 preview (Client.RunWithAnswer/Client.AskWithAnswer) for durable, cross-process resume of a bare-client run \u2014 not part of the \u00a70 conformance contract. Documented on Go's own page and cross-linked from suspension/relay."
-    },
-    {
-      "id": "suspension/relay",
-      "group": "suspension",
-      "member": "relay",
-      "title": "Relay tools \u2014 declaration-only",
-      "spec": "\u00a710",
-      "summary": "Declare a tool the host executes, not the library: the call rides out on the suspension.",
-      "symbols": {
-        "javascript": null,
-        "python": null,
-        "golang": "RelayTool",
-        "java": null,
-        "csharp": null,
-        "elixir": null
-      },
-      "parityNote": "Go-only today (golang/relay.go). SPEC \u00a710 addendum landed as a Go preview; the other five ports do not ship a relay tool yet."
-    },
-    {
-      "id": "translate/translate",
-      "group": "translate",
-      "member": "translate",
-      "title": "translate \u2014 one turn, no loop",
-      "spec": "\u00a711",
-      "summary": "Declare a toolkit to a provider and translate one request/response without executing anything or keeping state.",
-      "symbols": {
-        "javascript": "translate",
-        "python": "translate",
-        "golang": "Translate",
-        "java": "Translate.translate",
-        "csharp": "Translate.Run",
-        "elixir": "Toolnexus.Translate.translate"
-      }
-    },
-    {
-      "id": "translate/inbound",
-      "group": "translate",
-      "member": "inbound",
-      "title": "Inbound translation \u2014 transcripts across providers",
-      "spec": "\u00a711",
-      "summary": "Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong.",
-      "symbols": {
-        "javascript": "openAIMessagesToAnthropic",
-        "python": "openai_messages_to_anthropic",
-        "golang": null,
-        "java": "Translate.openAIMessagesToAnthropic",
-        "csharp": "Translate.OpenAIMessagesToAnthropic",
-        "elixir": "Toolnexus.Translate.openai_messages_to_anthropic"
-      },
-      "parityNote": "Go keeps openAIMessagesToAnthropic unexported (golang/translate.go:283) \u2014 inbound translation is reachable only through Translate."
-    }
-  ]
+	"$comment": "The top-level public surface of toolnexus, as defined by SPEC.md §1–§11. This manifest is the single source of truth for the API Reference: it drives page generation, the sidebar, cross-language equivalent links, and the coverage gate. One entry here == one page per port at /api/<lang>/<group>/<member>. Data shapes (option bags, result records) are NOT entries — they are documented as field tables on the page of the entry point that consumes them. Add an entry only when SPEC.md gains a top-level entry point.",
+	"langs": [
+		"javascript",
+		"python",
+		"golang",
+		"java",
+		"csharp",
+		"elixir",
+		"clojure"
+	],
+	"entries": [
+		{
+			"id": "types/tool",
+			"group": "types",
+			"member": "tool",
+			"title": "Tool — the one interface",
+			"spec": "§1",
+			"summary": "The uniform shape every tool source collapses to: name, description, JSON-Schema parameters, execute.",
+			"symbols": {
+				"javascript": "Tool",
+				"python": "Tool",
+				"golang": "Tool",
+				"java": "Tool",
+				"csharp": "ITool",
+				"elixir": "Toolnexus.Tool",
+				"clojure": "toolnexus.tool/tool"
+			}
+		},
+		{
+			"id": "types/tool-result",
+			"group": "types",
+			"member": "tool-result",
+			"title": "ToolResult — what execute returns",
+			"spec": "§1",
+			"summary": "The result envelope: output text, optional error flag, optional Pending for suspension.",
+			"symbols": {
+				"javascript": "ToolResult",
+				"python": "ToolResult",
+				"golang": "ToolResult",
+				"java": "ToolResult",
+				"csharp": "ToolResult",
+				"elixir": "Toolnexus.ToolResult",
+				"clojure": "toolnexus.tool/success"
+			}
+		},
+		{
+			"id": "types/context",
+			"group": "types",
+			"member": "context",
+			"title": "ToolContext — what execute receives",
+			"spec": "§1",
+			"summary": "Optional per-call context handed to execute: cancellation, identity, and host-supplied state.",
+			"symbols": {
+				"javascript": "ToolContext",
+				"python": "ToolContext",
+				"golang": "ToolContext",
+				"java": "ToolContext",
+				"csharp": "ToolContext",
+				"elixir": "Toolnexus.Context",
+				"clojure": null
+			},
+			"parityNote": "Clojure has no ToolContext type. The context is a plain map passed as the third argument to toolnexus.tool/execute; a native tool opts into receiving it with :ctx? true."
+		},
+		{
+			"id": "toolkit/create",
+			"group": "toolkit",
+			"member": "create",
+			"title": "createToolkit — the aggregator",
+			"spec": "§4",
+			"summary": "Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.",
+			"symbols": {
+				"javascript": "createToolkit",
+				"python": "create_toolkit",
+				"golang": "CreateToolkit",
+				"java": "Toolkit.create",
+				"csharp": "Toolkit.CreateAsync",
+				"elixir": "Toolnexus.create_toolkit",
+				"clojure": "toolnexus.core/build"
+			},
+			"sources": [
+				"js/examples/basic.ts",
+				"python/examples/basic.py",
+				"golang/examples/basic",
+				"elixir/examples/basic.exs"
+			]
+		},
+		{
+			"id": "mcp/load",
+			"group": "mcp",
+			"member": "load",
+			"title": "loadMcp — connect to MCP servers",
+			"spec": "§2",
+			"summary": "Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.",
+			"symbols": {
+				"javascript": "loadMcp",
+				"python": "load_mcp",
+				"golang": "LoadMcp",
+				"java": "McpSource.load",
+				"csharp": "McpSource.LoadAsync",
+				"elixir": "Toolnexus.Mcp.load",
+				"clojure": "toolnexus.mcp/from-config"
+			},
+			"sources": [
+				"examples/mcp.json"
+			]
+		},
+		{
+			"id": "mcp/load-with-context",
+			"group": "mcp",
+			"member": "load-with-context",
+			"title": "loadMcpWithContext — cancellable load",
+			"spec": "§2",
+			"summary": "The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.",
+			"symbols": {
+				"javascript": "loadMcp",
+				"python": "load_mcp_with_context",
+				"golang": "LoadMcpWithContext",
+				"java": "McpSource.loadWith",
+				"csharp": "McpSource.LoadAsync",
+				"elixir": "Toolnexus.Mcp.load",
+				"clojure": null
+			},
+			"parityNote": "Clojure has no ctx-aware load. toolnexus.mcp/from-config bounds each server with its own :timeout (toolnexus.mcp/default-timeout-ms); there is no cancellation handle."
+		},
+		{
+			"id": "mcp/list-tools",
+			"group": "mcp",
+			"member": "list-tools",
+			"title": "listMcpTools — inventory without connecting",
+			"spec": "§2",
+			"summary": "List what each configured server would expose, plus per-server status, without wiring it into a toolkit.",
+			"symbols": {
+				"javascript": "listMcpTools",
+				"python": "list_mcp_tools",
+				"golang": "ListMcpTools",
+				"java": "McpSource.listMcpTools",
+				"csharp": "McpSource.ListMcpToolsAsync",
+				"elixir": "Toolnexus.Mcp.list_tools",
+				"clojure": null
+			},
+			"parityNote": "Clojure ships no list-without-connecting inventory. toolnexus.mcp/parse-config validates config offline, and toolnexus.mcp/from-config returns :statuses alongside :tools once connected."
+		},
+		{
+			"id": "mcp/parse-config",
+			"group": "mcp",
+			"member": "parse-config",
+			"title": "parseMcpConfig — validate an mcp.json",
+			"spec": "§2",
+			"summary": "Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.",
+			"symbols": {
+				"javascript": "parseMcpConfig",
+				"python": "parse_mcp_config",
+				"golang": "ParseMcpConfig",
+				"java": null,
+				"csharp": "McpSource.ParseConfig",
+				"elixir": "Toolnexus.Mcp.parse_config",
+				"clojure": "toolnexus.mcp/parse-config"
+			},
+			"parityNote": "Java keeps parseConfig package-private (McpSource.java:141) — there is no public config parser. C# exposes it as McpSource.ParseConfig, not ParseMcpConfig."
+		},
+		{
+			"id": "mcp/elicitation",
+			"group": "mcp",
+			"member": "elicitation",
+			"title": "Elicitation bridge — server asks the user",
+			"spec": "§2",
+			"summary": "Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.",
+			"symbols": {
+				"javascript": "elicitationToRequest",
+				"python": "elicitation_to_request",
+				"golang": "ElicitationToRequest",
+				"java": "McpSource.elicitationToRequest",
+				"csharp": "McpSource.ElicitationToRequest",
+				"elixir": "Toolnexus.Mcp.Protocol.elicitation_to_request",
+				"clojure": "toolnexus.mcp/elicitation->request"
+			},
+			"parityNote": "Elixir's elicitation_to_request lives on Toolnexus.Mcp.Protocol, not Toolnexus.Mcp — there is no delegate on the top-level Mcp module."
+		},
+		{
+			"id": "skills/load",
+			"group": "skills",
+			"member": "load",
+			"title": "loadSkills — discover SKILL.md files",
+			"spec": "§3",
+			"summary": "Glob a skills directory and expose one skill tool with progressive disclosure.",
+			"symbols": {
+				"javascript": "loadSkills",
+				"python": "load_skills",
+				"golang": "LoadSkills",
+				"java": "SkillSource.load",
+				"csharp": "SkillSource.Load",
+				"elixir": "Toolnexus.Skill.load",
+				"clojure": "toolnexus.skill/load-skills"
+			},
+			"sources": [
+				"examples/skills"
+			]
+		},
+		{
+			"id": "skills/load-with",
+			"group": "skills",
+			"member": "load-with",
+			"title": "loadSkillsWith — data skills, providers, filters",
+			"spec": "§3",
+			"summary": "Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist.",
+			"symbols": {
+				"javascript": "loadSkills",
+				"python": "load_skills",
+				"golang": "LoadSkillsWith",
+				"java": "SkillSource.loadWith",
+				"csharp": "SkillSource.LoadWith",
+				"elixir": "Toolnexus.Skill.load",
+				"clojure": "toolnexus.skill/load-skills"
+			}
+		},
+		{
+			"id": "skills/list",
+			"group": "skills",
+			"member": "list",
+			"title": "listSkills — inventory and skip reasons",
+			"spec": "§3",
+			"summary": "Enumerate discovered skills and, crucially, the ones that were skipped and why.",
+			"symbols": {
+				"javascript": "listSkills",
+				"python": "list_skills",
+				"golang": "ListSkills",
+				"java": "SkillSource.listSkills",
+				"csharp": "SkillSource.ListSkills",
+				"elixir": "Toolnexus.Skill.list",
+				"clojure": "toolnexus.skill/list-skills"
+			}
+		},
+		{
+			"id": "native/define-tool",
+			"group": "native",
+			"member": "define-tool",
+			"title": "defineTool — your own function as a tool",
+			"spec": "§6",
+			"summary": "Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.",
+			"symbols": {
+				"javascript": "defineTool",
+				"python": "define_tool",
+				"golang": "NativeTool",
+				"java": "NativeTool.of",
+				"csharp": "NativeTool.Of",
+				"elixir": "Toolnexus.Native.define_tool",
+				"clojure": "toolnexus.native/native-tool"
+			},
+			"sources": [
+				"js/examples/advanced.ts",
+				"python/examples/advanced.py",
+				"golang/examples/advanced"
+			]
+		},
+		{
+			"id": "native/reflect",
+			"group": "native",
+			"member": "reflect",
+			"title": "Annotation / reflection tools",
+			"spec": "§6",
+			"summary": "Derive the schema from the function signature or annotation instead of writing it by hand.",
+			"symbols": {
+				"javascript": "tool",
+				"python": "tool",
+				"golang": "NativeToolReflect",
+				"java": "@Tool annotation",
+				"csharp": "ToolMethodAttribute",
+				"elixir": null,
+				"clojure": null
+			},
+			"parityNote": "Elixir has no reflection-based tool builder; use Toolnexus.Native.define_tool/1 with an explicit input_schema. Clojure has no reflection-based builder either — Clojure and cljgo share no portable fn-arity introspection, which is also why a context-taking tool declares :ctx? true. Use toolnexus.native/native-tool with an explicit :input-schema."
+		},
+		{
+			"id": "native/collect",
+			"group": "native",
+			"member": "collect",
+			"title": "collectTools — gather decorated functions",
+			"spec": "§6",
+			"summary": "Sweep a module or class and collect every function marked as a tool.",
+			"symbols": {
+				"javascript": "collectTools",
+				"python": null,
+				"golang": null,
+				"java": "Tools.fromObject",
+				"csharp": "Tools.FromObject",
+				"elixir": null,
+				"clojure": null
+			},
+			"parityNote": "JS/Java/C# expose an explicit collector; Python, Go and Elixir have no equivalent public symbol. Clojure has no collector either."
+		},
+		{
+			"id": "http/tool",
+			"group": "http",
+			"member": "tool",
+			"title": "httpTool — a REST endpoint as a tool",
+			"spec": "§7",
+			"summary": "Turn an HTTP endpoint into a tool: URL, method, headers with ${ENV} expansion, and a schema.",
+			"symbols": {
+				"javascript": "httpTool",
+				"python": "http_tool",
+				"golang": "HTTPTool",
+				"java": "HttpTool.of",
+				"csharp": "HttpTool.Of",
+				"elixir": "Toolnexus.Http.tool",
+				"clojure": "toolnexus.http/http-tool"
+			}
+		},
+		{
+			"id": "builtins/select",
+			"group": "builtins",
+			"member": "select",
+			"title": "selectBuiltins — choose the shipped tools",
+			"spec": "§4A",
+			"summary": "Pick which built-in file/shell/web tools are in play, by name or by source toggle.",
+			"symbols": {
+				"javascript": "selectBuiltins",
+				"python": "select_builtins",
+				"golang": "SelectBuiltins",
+				"java": "BuiltinTools.select",
+				"csharp": "BuiltinTools.Select",
+				"elixir": "Toolnexus.Builtin.load",
+				"clojure": "toolnexus.builtin/enabled-builtins"
+			},
+			"parityNote": "Elixir selects built-ins via Toolnexus.Builtin.load/1 (a config map), not a named select function."
+		},
+		{
+			"id": "builtins/create",
+			"group": "builtins",
+			"member": "create",
+			"title": "createBuiltinTools — the full built-in set",
+			"spec": "§4A",
+			"summary": "Construct every built-in tool directly, outside a toolkit.",
+			"symbols": {
+				"javascript": "createBuiltinTools",
+				"python": "create_builtin_tools",
+				"golang": "CreateBuiltinTools",
+				"java": "BuiltinTools.create",
+				"csharp": "BuiltinTools.Create",
+				"elixir": "Toolnexus.Builtin.tools",
+				"clojure": "toolnexus.builtin/builtin-tools"
+			},
+			"parityNote": "Elixir has no Builtin.create/1 — the zero-arg 'build the full set' constructor is Toolnexus.Builtin.tools/0."
+		},
+		{
+			"id": "adapters/openai",
+			"group": "adapters",
+			"member": "openai",
+			"title": "toOpenAI — emit OpenAI tool schema",
+			"spec": "§4",
+			"summary": "Render the toolkit as OpenAI function-calling schema.",
+			"symbols": {
+				"javascript": "toOpenAI",
+				"python": "to_openai",
+				"golang": "ToOpenAI",
+				"java": "Adapters.toOpenAI",
+				"csharp": "Adapters.ToOpenAI",
+				"elixir": "Toolnexus.Adapters.to_openai",
+				"clojure": "toolnexus.adapter/to-openai"
+			}
+		},
+		{
+			"id": "adapters/anthropic",
+			"group": "adapters",
+			"member": "anthropic",
+			"title": "toAnthropic — emit Anthropic tool schema",
+			"spec": "§4",
+			"summary": "Render the toolkit as Anthropic tool-use schema.",
+			"symbols": {
+				"javascript": "toAnthropic",
+				"python": "to_anthropic",
+				"golang": "ToAnthropic",
+				"java": "Adapters.toAnthropic",
+				"csharp": "Adapters.ToAnthropic",
+				"elixir": "Toolnexus.Adapters.to_anthropic",
+				"clojure": "toolnexus.adapter/to-anthropic"
+			}
+		},
+		{
+			"id": "adapters/gemini",
+			"group": "adapters",
+			"member": "gemini",
+			"title": "toGemini — emit Gemini tool schema",
+			"spec": "§4",
+			"summary": "Render the toolkit as Gemini function-declaration schema.",
+			"symbols": {
+				"javascript": "toGemini",
+				"python": "to_gemini",
+				"golang": "ToGemini",
+				"java": "Adapters.toGemini",
+				"csharp": "Adapters.ToGemini",
+				"elixir": "Toolnexus.Adapters.to_gemini",
+				"clojure": "toolnexus.adapter/to-gemini"
+			}
+		},
+		{
+			"id": "client/create",
+			"group": "client",
+			"member": "create",
+			"title": "createClient — the tool-calling loop",
+			"spec": "§8",
+			"summary": "The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.",
+			"symbols": {
+				"javascript": "createClient",
+				"python": "create_client",
+				"golang": "CreateClient",
+				"java": "LlmClient.create",
+				"csharp": "LlmClient.Create",
+				"elixir": "Toolnexus.Client.create",
+				"clojure": "toolnexus.client/create-client"
+			},
+			"sources": [
+				"js/examples/basic.ts",
+				"python/examples/basic.py",
+				"golang/examples/basic"
+			]
+		},
+		{
+			"id": "client/run",
+			"group": "client",
+			"member": "run",
+			"title": "run — one turn of the loop",
+			"spec": "§8",
+			"summary": "Send a prompt, let the loop call tools until the model stops, get a RunResult.",
+			"symbols": {
+				"javascript": "Client.run",
+				"python": "Client.run",
+				"golang": "Client.Run",
+				"java": "LlmClient.run",
+				"csharp": "LlmClient.RunAsync",
+				"elixir": "Toolnexus.Client.run",
+				"clojure": "toolnexus.client/run"
+			}
+		},
+		{
+			"id": "client/stream",
+			"group": "client",
+			"member": "stream",
+			"title": "stream — token and event streaming",
+			"spec": "§8",
+			"summary": "The streaming loop: text deltas, tool-call events, and suspension events as they happen.",
+			"symbols": {
+				"javascript": "Client.stream",
+				"python": "Client.stream",
+				"golang": "Client.Stream",
+				"java": "LlmClient.stream",
+				"csharp": "LlmClient.StreamAsync",
+				"elixir": "Toolnexus.Client.stream",
+				"clojure": null
+			},
+			"sources": [
+				"js/examples/streaming.ts",
+				"python/examples/streaming.py",
+				"golang/examples/streaming"
+			],
+			"parityNote": "Clojure ships no streaming loop. toolnexus.client/run takes an :on-event sink that emits tool_call, tool_result, pending, usage and done — but no text deltas, because the loop buffers the whole response and synthesising deltas from a buffered body would be a lie. Real SSE is a separate seam (koine.stream/sse-post) and is not wired in."
+		},
+		{
+			"id": "client/hooks",
+			"group": "client",
+			"member": "hooks",
+			"title": "Hooks — lifecycle middleware",
+			"spec": "§8",
+			"summary": "Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.",
+			"symbols": {
+				"javascript": "Hooks",
+				"python": "Hooks",
+				"golang": "Hooks",
+				"java": "LlmClient.Hooks",
+				"csharp": "LlmClient.Hooks",
+				"elixir": "Toolnexus.Client.create",
+				"clojure": "toolnexus.client/create-client"
+			},
+			"sources": [
+				"js/examples/hooks.ts",
+				"python/examples/hooks.py",
+				"golang/examples/hooks",
+				"examples/agent-hooks"
+			],
+			"parityNote": "Elixir has no separate Hooks type — pass a :hooks map (:before_llm, :after_llm, :before_tool, :after_tool) to Toolnexus.Client.create/1."
+		},
+		{
+			"id": "client/conversation",
+			"group": "client",
+			"member": "conversation",
+			"title": "Conversation — multi-turn memory",
+			"spec": "§8",
+			"summary": "Keep a transcript across turns so the model remembers what it already did.",
+			"symbols": {
+				"javascript": "Conversation",
+				"python": "Conversation",
+				"golang": "Conversation",
+				"java": "LlmClient.Conversation",
+				"csharp": "LlmClient.Conversation",
+				"elixir": "Toolnexus.Client conversation",
+				"clojure": "toolnexus.client/run"
+			},
+			"sources": [
+				"js/examples/memory.ts",
+				"python/examples/memory.py",
+				"golang/examples/memory"
+			]
+		},
+		{
+			"id": "client/store",
+			"group": "client",
+			"member": "store",
+			"title": "ConversationStore — durable transcripts",
+			"spec": "§8",
+			"summary": "Swap in-memory history for your own store so a conversation survives a process restart.",
+			"symbols": {
+				"javascript": "InMemoryConversationStore",
+				"python": "InMemoryConversationStore",
+				"golang": "NewInMemoryConversationStore",
+				"java": "LlmClient.ConversationStore",
+				"csharp": "LlmClient.IConversationStore",
+				"elixir": "Toolnexus.Client.InMemoryConversationStore",
+				"clojure": "toolnexus.client/in-memory-store"
+			}
+		},
+		{
+			"id": "client/metrics",
+			"group": "client",
+			"member": "metrics",
+			"title": "onMetric — observability",
+			"spec": "§8",
+			"summary": "Emit one metric event per model call and per tool call: tokens, latency, outcome.",
+			"symbols": {
+				"javascript": "MetricEvent",
+				"python": "MetricEvent",
+				"golang": "MetricEvent",
+				"java": "LlmClient.MetricEvent",
+				"csharp": "MetricEvent",
+				"elixir": "Toolnexus.Client.MetricsRegistry",
+				"clojure": "toolnexus.client/create-client"
+			},
+			"parityNote": "C# has no wrapping Metrics class — MetricEvent is a top-level record in namespace Toolnexus."
+		},
+		{
+			"id": "client/resilience",
+			"group": "client",
+			"member": "resilience",
+			"title": "Retries, timeout, cancellation",
+			"spec": "§8",
+			"summary": "Classify an LLM error into retry / fail, bound a run with a deadline, and cancel cleanly.",
+			"symbols": {
+				"javascript": "ErrorInfo",
+				"python": "ErrorClassifier",
+				"golang": "ErrorInfo",
+				"java": "LlmClient.ErrorInfo",
+				"csharp": "LlmClient.ErrorInfo",
+				"elixir": "Toolnexus.Client.create",
+				"clojure": "toolnexus.client/create-client"
+			},
+			"parityNote": "Elixir configures retries/timeout as options on Toolnexus.Client.create/1 rather than a distinct error-classifier type."
+		},
+		{
+			"id": "agents/agent",
+			"group": "agents",
+			"member": "agent",
+			"title": "agent — call a remote A2A peer",
+			"spec": "§7A",
+			"summary": "Point at a remote agent's card and use it exactly like a local tool.",
+			"symbols": {
+				"javascript": "agent",
+				"python": "agent",
+				"golang": "agents.New",
+				"java": "A2A.agent",
+				"csharp": "A2A.Agent",
+				"elixir": "Toolnexus.A2a.agent",
+				"clojure": "toolnexus.a2a/remote-agent"
+			},
+			"sources": [
+				"python/examples/a2a_agents.py"
+			],
+			"parityNote": "Elixir's outbound A2A lives on Toolnexus.A2a, not Toolnexus.Agents — that module is the §7D sub-agent runtime, a different concept with the same top-level name collision as JS's Agent (A2A card) vs agents.Agent (sub-agent)."
+		},
+		{
+			"id": "agents/agent-tools",
+			"group": "agents",
+			"member": "agent-tools",
+			"title": "agentTools — a peer's skills as tools",
+			"spec": "§7A",
+			"summary": "Expand a remote agent card into one tool per advertised skill.",
+			"symbols": {
+				"javascript": "agentTools",
+				"python": "agent_tools",
+				"golang": "AgentTools",
+				"java": "A2A.agentTools",
+				"csharp": "A2A.AgentTools",
+				"elixir": "Toolnexus.A2a.agent_tools",
+				"clojure": "toolnexus.a2a/agent-tools"
+			}
+		},
+		{
+			"id": "agents/parse-config",
+			"group": "agents",
+			"member": "parse-config",
+			"title": "parseAgentsConfig — agents from config",
+			"spec": "§7A",
+			"summary": "Declare remote peers in config the way MCP servers are declared, with precedence rules.",
+			"symbols": {
+				"javascript": "parseAgentsConfig",
+				"python": "parse_agents_config",
+				"golang": "ParseAgentsConfig",
+				"java": "A2A.parseAgentsConfig",
+				"csharp": "A2A.ParseAgentsConfig",
+				"elixir": "Toolnexus.A2a.parse_agents_config",
+				"clojure": "toolnexus.a2a/parse-agents-config"
+			}
+		},
+		{
+			"id": "serve/a2a",
+			"group": "serve",
+			"member": "a2a",
+			"title": "serve — expose your toolkit as an A2A agent",
+			"spec": "§7B",
+			"summary": "Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.",
+			"symbols": {
+				"javascript": "startA2AServer",
+				"python": "Toolkit.serve",
+				"golang": "Toolkit.Serve",
+				"java": "A2AServer.start",
+				"csharp": "A2AServer.StartAsync",
+				"elixir": "Toolnexus.Serve.start",
+				"clojure": "toolnexus.serve/serve"
+			},
+			"parityNote": "Go names this Toolkit.Serve (a method), not a free StartAgent function — StartAgent is the unrelated §7E persona-heartbeat starter."
+		},
+		{
+			"id": "serve/agent-card",
+			"group": "serve",
+			"member": "agent-card",
+			"title": "buildAgentCard — describe yourself to peers",
+			"spec": "§7B",
+			"summary": "Construct the Agent Card that advertises your name, skills and endpoint.",
+			"symbols": {
+				"javascript": "buildAgentCard",
+				"python": "build_agent_card",
+				"golang": "BuildAgentCard",
+				"java": "A2AServer.buildAgentCard",
+				"csharp": "A2AServer.BuildAgentCard",
+				"elixir": "Toolnexus.Serve.build_agent_card",
+				"clojure": "toolnexus.serve/agent-card"
+			}
+		},
+		{
+			"id": "serve/task-store",
+			"group": "serve",
+			"member": "task-store",
+			"title": "TaskStore — durable inbound tasks",
+			"spec": "§7B",
+			"summary": "Persist inbound A2A tasks so a suspended request survives a restart.",
+			"symbols": {
+				"javascript": "FileTaskStore",
+				"python": "FileTaskStore",
+				"golang": "NewFileTaskStore",
+				"java": "A2AServer.FileTaskStore",
+				"csharp": "FileTaskStore",
+				"elixir": "Toolnexus.Serve task_store",
+				"clojure": "toolnexus.serve/file-store"
+			}
+		},
+		{
+			"id": "serve/mcp",
+			"group": "serve",
+			"member": "mcp",
+			"title": "buildMcpServer — expose your toolkit over MCP",
+			"spec": "§7C",
+			"summary": "The inbound MCP profile: any MCP client can call your tools.",
+			"symbols": {
+				"javascript": "buildMcpServer",
+				"python": "build_mcp_server",
+				"golang": "ExposedMcpTools",
+				"java": "McpServe.build",
+				"csharp": "McpServe.BuildMcpServer",
+				"elixir": "Toolnexus.McpServe.exposed_tools",
+				"clojure": "toolnexus.serve/exposed-tools"
+			}
+		},
+		{
+			"id": "runtime/agent",
+			"group": "runtime",
+			"member": "agent",
+			"title": "Agent — a composable sub-agent",
+			"spec": "§7D",
+			"summary": "Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.",
+			"symbols": {
+				"javascript": "agents.Agent",
+				"python": "Agent",
+				"golang": "agents.New",
+				"java": "agents.Agent",
+				"csharp": "Agent",
+				"elixir": "Toolnexus.Agents",
+				"clojure": null
+			},
+			"sources": [
+				"js/examples/agent.ts",
+				"python/examples/agent.py",
+				"golang/examples/agent",
+				"elixir/examples/agent.exs"
+			],
+			"parityNote": "The Clojure port has no §7D sub-agent runtime (recorded parity debt). Remote A2A peers via toolnexus.a2a/remote-agent are the delegation this port does ship."
+		},
+		{
+			"id": "runtime/runtime",
+			"group": "runtime",
+			"member": "runtime",
+			"title": "AgentRuntime — spawn, wait, interrupt",
+			"spec": "§7D",
+			"summary": "The six host verbs that drive sub-agents, plus the read-only list and inspect views.",
+			"symbols": {
+				"javascript": "agents.AgentRuntime",
+				"python": "AgentRuntime",
+				"golang": "NewRuntime",
+				"java": "agents.Runtime",
+				"csharp": "AgentRuntime",
+				"elixir": "Toolnexus.Agents.Runtime",
+				"clojure": null
+			},
+			"sources": [
+				"examples/subagent-lifecycle",
+				"examples/subagent-fanout"
+			],
+			"parityNote": "The Clojure port has no §7D agent runtime (recorded parity debt)."
+		},
+		{
+			"id": "runtime/handle",
+			"group": "runtime",
+			"member": "handle",
+			"title": "Handle — a running sub-agent",
+			"spec": "§7D",
+			"summary": "The state machine for one spawned agent: pending, running, suspended, done.",
+			"symbols": {
+				"javascript": "agents.Handle",
+				"python": "Handle",
+				"golang": "agents.Handle",
+				"java": "agents.Handle",
+				"csharp": "Handle",
+				"elixir": "Toolnexus.Agents.Handle",
+				"clojure": null
+			},
+			"parityNote": "The Clojure port has no §7D handle type (recorded parity debt)."
+		},
+		{
+			"id": "runtime/budgets",
+			"group": "runtime",
+			"member": "budgets",
+			"title": "Budgets — hierarchical, live-enforced",
+			"spec": "§7D",
+			"summary": "Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.",
+			"symbols": {
+				"javascript": "agents.Budget",
+				"python": "Budget",
+				"golang": "agents.Budget",
+				"java": "agents.Budget",
+				"csharp": "Budget",
+				"elixir": "Toolnexus.Agents budget",
+				"clojure": null
+			},
+			"sources": [
+				"examples/subagent-budgets"
+			],
+			"parityNote": "The Clojure port has no §7D budgets (recorded parity debt)."
+		},
+		{
+			"id": "runtime/task-tool",
+			"group": "runtime",
+			"member": "task-tool",
+			"title": "The task tool — model-facing delegation",
+			"spec": "§7D",
+			"summary": "The opt-in tool that lets the model itself spawn a teammate. Default OFF.",
+			"symbols": {
+				"javascript": "agents.taskTool",
+				"python": null,
+				"golang": null,
+				"java": null,
+				"csharp": null,
+				"elixir": null,
+				"clojure": null
+			},
+			"parityNote": "Only JS exposes a constructible task tool symbol; elsewhere it is the `task` builtin, toggled on the runtime. Clojure has no task tool: it ships no sub-agent runtime for one to drive."
+		},
+		{
+			"id": "persona/compose-soul",
+			"group": "persona",
+			"member": "compose-soul",
+			"title": "composeSoul — the directory is the agent",
+			"spec": "§7E",
+			"summary": "Build a persona's system prompt from its home directory: identity, memory, skills.",
+			"symbols": {
+				"javascript": "composeSoul",
+				"python": "compose_soul",
+				"golang": "ComposeSoul",
+				"java": "Home.composeSoul",
+				"csharp": "Home.ComposeSoul",
+				"elixir": "Toolnexus.Agents.Home.compose_soul",
+				"clojure": "toolnexus.agents.home/compose-soul"
+			},
+			"sources": [
+				"examples/persona-agent",
+				"js/examples/persona.ts",
+				"python/examples/persona.py",
+				"golang/examples/persona"
+			]
+		},
+		{
+			"id": "persona/from-dir",
+			"group": "persona",
+			"member": "from-dir",
+			"title": "fromDir — load a persona from disk",
+			"spec": "§7E",
+			"summary": "Point at an agent home directory and get a configured agent back.",
+			"symbols": {
+				"javascript": "fromDir",
+				"python": "agent_from_dir",
+				"golang": "FromDir",
+				"java": "A2A.agentFromDir",
+				"csharp": "Home.FromDir",
+				"elixir": "Toolnexus.Agents.Home.from_dir",
+				"clojure": null
+			},
+			"parityNote": "from-dir composes a persona into an AgentDef, so it needs the §7D runtime this port does not ship yet. compose-soul and memory-tool — the two halves it would combine — ARE shipped: compose the soul yourself and pass it as :system-prompt."
+		},
+		{
+			"id": "persona/memory-tool",
+			"group": "persona",
+			"member": "memory-tool",
+			"title": "memoryTool — file-backed memory",
+			"spec": "§7E",
+			"summary": "The opt-in built-in that lets a persona write durable notes to its own home.",
+			"symbols": {
+				"javascript": "memoryTool",
+				"python": "memory_tool",
+				"golang": "MemoryTool",
+				"java": "Home.memoryTool",
+				"csharp": "Home.MemoryTool",
+				"elixir": "Toolnexus.Agents.Home.memory_tool",
+				"clojure": "toolnexus.agents.home/memory-tool"
+			}
+		},
+		{
+			"id": "compaction/compactor",
+			"group": "compaction",
+			"member": "compactor",
+			"title": "compactor — keep a long run under budget",
+			"spec": "§7F",
+			"summary": "Summarise older turns when the transcript grows, so a long-lived agent stays inside its context window.",
+			"symbols": {
+				"javascript": "compactor",
+				"python": "compactor",
+				"golang": "Compactor",
+				"java": "Compaction.compactor",
+				"csharp": "Compaction.Compactor",
+				"elixir": "Toolnexus.Agents.Compaction.compactor",
+				"clojure": "toolnexus.agents.compaction/compactor"
+			},
+			"sources": [
+				"examples/compaction"
+			]
+		},
+		{
+			"id": "suspension/pending",
+			"group": "suspension",
+			"member": "pending",
+			"title": "pending — suspend and ask a human",
+			"spec": "§10",
+			"summary": "Return a Pending from a tool to park the run until someone answers.",
+			"symbols": {
+				"javascript": "pending",
+				"python": "pending",
+				"golang": "Pending",
+				"java": "Request.pending",
+				"csharp": "Suspension.Pending",
+				"elixir": null,
+				"clojure": "toolnexus.client/suspend"
+			},
+			"sources": [
+				"js/examples/pending.ts"
+			],
+			"parityNote": "Elixir ships no pending/1 producer — construct %ToolResult{metadata: %{pending: %Request{}}} directly. Only the reader, ToolResult.pending?/1, exists."
+		},
+		{
+			"id": "suspension/auth-required",
+			"group": "suspension",
+			"member": "auth-required",
+			"title": "authRequired — suspend for authorization",
+			"spec": "§10",
+			"summary": "The auth-shaped suspension: hand back a URL, resume once the user has granted access.",
+			"symbols": {
+				"javascript": "authRequired",
+				"python": "auth_required",
+				"golang": "AuthRequired",
+				"java": "Request.authRequired",
+				"csharp": "Suspension.AuthRequired",
+				"elixir": null,
+				"clojure": "toolnexus.client/auth-required"
+			},
+			"parityNote": "Elixir ships no auth_required/pending producer helpers — build %ToolResult{metadata: %{pending: %Request{}}} by hand. Only the reader, ToolResult.pending?/1, exists."
+		},
+		{
+			"id": "suspension/wait-for",
+			"group": "suspension",
+			"member": "wait-for",
+			"title": "waitFor — the one host slot",
+			"spec": "§10",
+			"summary": "The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.",
+			"symbols": {
+				"javascript": "waitFor",
+				"python": "WaitFor",
+				"golang": "WaitFor",
+				"java": "LlmClient.waitFor",
+				"csharp": "LlmClient.WaitFor",
+				"elixir": "Toolnexus.Client.create",
+				"clojure": "toolnexus.client/create-client"
+			},
+			"parityNote": "Elixir passes :wait_for as an option to Toolnexus.Client.create/1 rather than exposing a WaitFor type."
+		},
+		{
+			"id": "suspension/pending-of",
+			"group": "suspension",
+			"member": "pending-of",
+			"title": "pendingOf — read a suspension off a result",
+			"spec": "§10",
+			"summary": "Detect that a RunResult is parked rather than finished, and get the Request that parked it.",
+			"symbols": {
+				"javascript": "pendingOf",
+				"python": "pending_of",
+				"golang": "PendingOf",
+				"java": "Request.pendingOf",
+				"csharp": "Suspension.PendingOf",
+				"elixir": null,
+				"clojure": "toolnexus.client/pending-of"
+			},
+			"parityNote": "Elixir has no pending_of/1; match on result.metadata or use ToolResult.pending?/1."
+		},
+		{
+			"id": "suspension/resume",
+			"group": "suspension",
+			"member": "resume",
+			"title": "AgentRuntime.resume — resume a suspended sub-agent",
+			"spec": "§7D",
+			"summary": "Route an Answer to the deepest suspended sub-agent handle and resume it in place.",
+			"symbols": {
+				"javascript": "AgentRuntime.resume",
+				"python": "AgentRuntime.resume",
+				"golang": "Runtime.Resume",
+				"java": "AgentRuntime.resume",
+				"csharp": "AgentRuntime.ResumeAsync",
+				"elixir": "Toolnexus.Agents.Runtime.resume",
+				"clojure": null
+			},
+			"sources": [
+				"examples/subagent-durable-resume"
+			],
+			"parityNote": "Go additionally ships a separate, golang-only SPEC §10 preview (Client.RunWithAnswer/Client.AskWithAnswer) for durable, cross-process resume of a bare-client run — not part of the §0 conformance contract. Documented on Go's own page and cross-linked from suspension/relay. Clojure has no sub-agent runtime to resume into. A suspension is resolved in-process by the :wait-for slot on toolnexus.client/create-client; durable, cross-process resume is recorded parity debt."
+		},
+		{
+			"id": "suspension/relay",
+			"group": "suspension",
+			"member": "relay",
+			"title": "Relay tools — declaration-only",
+			"spec": "§10",
+			"summary": "Declare a tool the host executes, not the library: the call rides out on the suspension.",
+			"symbols": {
+				"javascript": null,
+				"python": null,
+				"golang": "RelayTool",
+				"java": null,
+				"csharp": null,
+				"elixir": null,
+				"clojure": null
+			},
+			"parityNote": "Go-only today (golang/relay.go). SPEC §10 addendum landed as a Go preview; the other five ports do not ship a relay tool yet. Clojure does not ship a relay tool either."
+		},
+		{
+			"id": "translate/translate",
+			"group": "translate",
+			"member": "translate",
+			"title": "translate — one turn, no loop",
+			"spec": "§11",
+			"summary": "Declare a toolkit to a provider and translate one request/response without executing anything or keeping state.",
+			"symbols": {
+				"javascript": "translate",
+				"python": "translate",
+				"golang": "Translate",
+				"java": "Translate.translate",
+				"csharp": "Translate.Run",
+				"elixir": "Toolnexus.Translate.translate",
+				"clojure": "toolnexus.translate/translate"
+			}
+		},
+		{
+			"id": "translate/inbound",
+			"group": "translate",
+			"member": "inbound",
+			"title": "Inbound translation — transcripts across providers",
+			"spec": "§11",
+			"summary": "Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong.",
+			"symbols": {
+				"javascript": "openAIMessagesToAnthropic",
+				"python": "openai_messages_to_anthropic",
+				"golang": null,
+				"java": "Translate.openAIMessagesToAnthropic",
+				"csharp": "Translate.OpenAIMessagesToAnthropic",
+				"elixir": "Toolnexus.Translate.openai_messages_to_anthropic",
+				"clojure": "toolnexus.translate/openai-messages-to-anthropic"
+			},
+			"parityNote": "Go keeps openAIMessagesToAnthropic unexported (golang/translate.go:283) — inbound translation is reachable only through Translate."
+		}
+	]
 }

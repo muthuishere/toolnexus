@@ -1,0 +1,156 @@
+---
+title: "toolnexus.client/create-client"
+description: "Emit one metric event per model call and per tool call: tokens, latency, outcome. — Clojure."
+sidebar:
+  label: "toolnexus.client/create-client"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+```clojure
+(create-client {:base-url  "…"
+                :model     "…"
+                :on-metric (fn [event] nil)})   ; the whole observability surface
+
+;; three event shapes, distinguished by :event — plain maps, no type
+;; {:event "llm"  :model :status :ms :prompt_tokens :completion_tokens}
+;; {:event "tool" :tool :source :is_error :ms}
+;; {:event "run"  :model :turns :tool_calls :total_tokens :ms :error}
+```
+
+`:on-metric` is one function, called synchronously with one map per measurable thing the loop does:
+an `llm` event per successful provider round trip, a `tool` event per tool call, and exactly one
+`run` event per `run`. There is no `MetricEvent` type to import and no counter, gauge or histogram
+API — the events are semantic, and translating them into whatever your metrics backend calls a
+counter is your side of the seam, where the vocabulary belongs.
+
+With `:on-metric` unset the event map is **never built**. The emission point is guarded, so the
+cost of not observing is one `nil` check per event site rather than an allocated map thrown away.
+
+The timings are real: a `tool` event is emitted after its result lands, so `:ms` and `:is_error`
+describe what happened rather than what was attempted, and an `llm` event is emitted only on a
+successful response — a retried 429 does not produce one, though the retry that finally succeeded
+does.
+
+## When to use it
+
+- **Cost tracking** — `:prompt_tokens` and `:completion_tokens` per call, `:total_tokens` per run,
+  attributed to `:model`.
+- **Finding the slow tool** — the `tool` event carries `:ms` and `:source`, so "MCP server X is the
+  reason every run takes nine seconds" is one group-by away.
+- **A run-level SLO** — one `run` event per run with `:turns`, `:tool_calls`, `:ms` and `:error`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use :on-event when you need the run to be visible, not measured">
+[`:on-event`](/api/clojure/client/run/) on `run` reports the loop as it moves — `tool_call`,
+`tool_result`, `pending`, `usage`, `done` — with the arguments and outputs attached. That is the
+sink for a progress UI. `:on-metric` is for aggregate telemetry: it carries durations and token
+counts, never payloads, and is configured once on the client rather than per run.
+</Aside>
+
+If all you want is the token cost of one call, the RunResult's `:usage` already has it and needs no
+callback at all.
+
+## Examples
+
+### Counting tokens and spotting failures
+
+```clojure
+(require '[toolnexus.client :as client])
+
+(def totals (atom {:tokens 0 :tool-errors 0 :runs 0}))
+
+(def llm
+  (client/create-client
+    {:base-url  "https://api.openai.com/v1"
+     :model     "gpt-4.1"
+     :on-metric (fn [m]
+                  (case (:event m)
+                    "llm"  (swap! totals update :tokens
+                                  + (or (:prompt_tokens m) 0) (or (:completion_tokens m) 0))
+                    "tool" (when (:is_error m) (swap! totals update :tool-errors inc))
+                    "run"  (swap! totals update :runs inc)
+                    nil))}))
+
+(client/run llm "Audit the changelog" {:toolkit toolkit})
+@totals  ;; => {:tokens 4210 :tool-errors 1 :runs 1}
+```
+
+The `case` over `:event` is the whole dispatch. Keep the handler cheap — it runs on the loop's
+thread, and a slow one is a slow run.
+
+### Feeding a metrics backend
+
+Your backend's vocabulary lives in your adapter, not in the library.
+
+```clojure
+(defn statsd-sink [m]
+  (case (:event m)
+    "llm"  (do (timing! "toolnexus.llm.ms"     (:ms m) {:model (:model m)
+                                                        :status (str (:status m))})
+               (count!  "toolnexus.llm.tokens" (+ (or (:prompt_tokens m) 0)
+                                                  (or (:completion_tokens m) 0))
+                        {:model (:model m)}))
+    "tool" (timing! "toolnexus.tool.ms" (:ms m) {:tool   (:tool m)
+                                                 :source (:source m)
+                                                 :error  (str (:is_error m))})
+    "run"  (timing! "toolnexus.run.ms"  (:ms m) {:model (:model m)
+                                                 :turns (str (:turns m))})
+    nil))
+
+(def llm (client/create-client {:base-url  "https://api.anthropic.com"
+                                :style     "anthropic"
+                                :model     "claude-sonnet-4-5"
+                                :on-metric statsd-sink}))
+```
+
+`:source` on the `tool` event is the tool's origin — `"mcp"`, `"builtin"`, `"native"`, `"http"`,
+`"a2a"` or `"custom"` — which is what makes "which subsystem is slow" answerable rather than
+"which tool name".
+
+### Reading the whole surface once
+
+The cheapest way to learn the shapes is to collect them.
+
+```clojure
+(def seen (atom []))
+
+(client/run (client/create-client {:base-url base-url :model "gpt-4.1"
+                                   :on-metric #(swap! seen conj %)})
+            "Say hello and read README.md"
+            {:toolkit toolkit})
+
+(group-by :event @seen)
+;; {"llm"  [{:event "llm" :model "gpt-4.1" :status 200 :ms 812
+;;           :prompt_tokens 1204 :completion_tokens 63} …]
+;;  "tool" [{:event "tool" :tool "read" :source "builtin" :is_error false :ms 4}]
+;;  "run"  [{:event "run" :model "gpt-4.1" :turns 2 :tool_calls 1
+;;           :total_tokens 2140 :ms 1633 :error nil}]}
+```
+
+Note the key casing: metric events use snake_case keys (`:prompt_tokens`, `:is_error`,
+`:tool_calls`) because they mirror the provider's own field names and the other ports' event
+payloads. The RunResult, which never crosses a wire, stays kebab-case.
+
+### The events
+
+| `:event` | Keys | Emitted |
+|---|---|---|
+| `"llm"` | `:model` `:status` `:ms` `:prompt_tokens` `:completion_tokens` | Once per **successful** provider round trip. |
+| `"tool"` | `:tool` `:source` `:is_error` `:ms` | Once per tool call, after the result lands. |
+| `"run"` | `:model` `:turns` `:tool_calls` `:total_tokens` `:ms` `:error` | Exactly once per `run`, on every exit path. |
+
+Token fields come straight from the provider payload and may be `nil` if it sent none.
+
+## See also
+
+- [`toolnexus.client/create-client`](/api/clojure/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`toolnexus.client/run`](/api/clojure/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`toolnexus.client/run`](/api/clojure/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.
+- [`toolnexus.client/in-memory-store`](/api/clojure/client/store/) — Swap in-memory history for your own store so a conversation survives a process restart.
+- [`toolnexus.client/create-client`](/api/clojure/client/resilience/) — `:retries`, `:timeout-ms` and the `:on-error` classifier, whose retries are what `llm` events do and do not count.

@@ -1,6 +1,6 @@
 ---
 title: Zero to agent
-description: A toolkit with the ten built-in tools, a client pointed at any OpenAI- or Anthropic-style endpoint, and one run — in all six languages.
+description: A toolkit with the ten built-in tools, a client pointed at any OpenAI- or Anthropic-style endpoint, and one run — in all seven languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -86,6 +86,19 @@ client = Toolnexus.Client.create(
 )
 res = Toolnexus.Client.run(client, "List the files here, then read the largest one.", tk)
 IO.puts(res.text)
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.core :as tn] '[toolnexus.client :as client])
+
+(def tk (tn/build {:builtins true}))          ; 10 built-ins, on by default
+(def agent (client/create-client
+             {:base-url "https://openrouter.ai/api/v1" :style "openai"
+              :model "openai/gpt-4o-mini"}))  ; api-key from OPENROUTER_API_KEY
+(def res (client/run agent "List the files here, then read the largest one."
+                     {:toolkit tk}))
+(println (:text res))
 ```
 </TabItem>
 </Tabs>

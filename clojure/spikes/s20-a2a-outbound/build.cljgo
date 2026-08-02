@@ -1,0 +1,10 @@
+;; S20 — cljgo side. THE SAME src/toolnexus/a2aout.cljc, the same koine
+;; artifact from Clojars. No vendored copy, no reader conditional.
+;;
+;;   cljgo build        compile to a native binary
+;;   cljgo build run    ...and run it
+(defn build [b]
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.9.0"})
+  (let [app (exe b {:name "a2aout" :main "src/toolnexus/a2aout.cljc"})]
+    (install b app)
+    (run b app)))

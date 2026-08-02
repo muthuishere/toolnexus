@@ -1,0 +1,76 @@
+---
+title: "collectTools — gather decorated functions"
+description: "Sweep a module or class and collect every function marked as a tool. — Clojure."
+sidebar:
+  label: "native / collect"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/native.cljc">clojure/src/toolnexus/native.cljc</a>
+</p>
+
+<Aside type="caution" title="Not available in Clojure">
+This port has no collector. JS, Java and C# expose one because they have a decorator or attribute
+to collect; Python, Go and Elixir do not, and neither does Clojure. There is nothing to mark a
+function *with* here — see [Annotation / reflection tools](/api/clojure/native/reflect/) — so there
+is nothing to sweep a namespace for.
+</Aside>
+
+Sweep a module or class and collect every function marked as a tool.
+
+## What to use instead
+
+A vector. `toolnexus.native/native-tool` returns a plain map, so a namespace of tools is an
+ordinary `def` that names them all, and the "collection" is the thing you were going to write
+anyway:
+
+```clojure
+(ns myapp.tools
+  (:require [clojure.string :as str]
+            [toolnexus.native :as native]))
+
+(def upper
+  (native/native-tool
+    {:name         "upper"
+     :description  "Uppercase the text"
+     :input-schema {:type "object" :properties {:text {:type "string"}} :required ["text"]}
+     :run          (fn [args] (str/upper-case (str (:text args))))}))
+
+(def reverse-text
+  (native/native-tool
+    {:name         "reverse_text"
+     :description  "Reverse the text"
+     :input-schema {:type "object" :properties {:text {:type "string"}} :required ["text"]}
+     :run          (fn [args] (str/reverse (str (:text args))))}))
+
+(def all
+  "Every tool this namespace exports. One place to add to, one place to read."
+  [upper reverse-text])
+```
+
+Hand that vector to `toolnexus.core/build` under `:tools`, next to every other source:
+
+```clojure
+(require '[toolnexus.core :as toolnexus]
+         '[myapp.tools :as mytools])
+
+(def tk (toolnexus/build {:mcp    "examples/mcp.json"
+                          :skills "examples/skills"
+                          :tools  mytools/all}))
+
+(toolnexus/tool-names tk)
+;; => ["apply_patch" "bash" "edit" "glob" "grep" "question" "read" "reverse_text"
+;;     "skill" "todowrite" "upper" "webfetch" "write"]
+```
+
+If you really want the namespace scanned rather than listed, `ns-publics` will do it on the JVM —
+but it is host-specific reflection and this port keeps zero of that in the shared `.cljc` tree, so
+it would be your code and not the library's, and it would not run on cljgo. The explicit vector is
+also the only version in which the tool list is a diff a reviewer can read.
+
+## See also
+
+- [`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.
+- [Annotation / reflection tools](/api/clojure/native/reflect/) — why there is no decorator to collect in the first place.

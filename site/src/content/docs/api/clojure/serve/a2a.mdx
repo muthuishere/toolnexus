@@ -1,0 +1,198 @@
+---
+title: "toolnexus.serve/serve"
+description: "Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent. — Clojure."
+sidebar:
+  label: "toolnexus.serve/serve"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/serve.cljc">clojure/src/toolnexus/serve.cljc</a>
+</p>
+
+```clojure
+(toolnexus.serve/serve toolkit
+  {:port     0                       ; 0 ⇒ an OS-assigned port
+   :host     "127.0.0.1"
+   :a2a      {:name "tn-agent" ...}  ; §7B profile — omit and the A2A routes do not exist
+   :mcp      {:name "tn-mcp" ...}    ; §7C profile — omit and /mcp does not exist
+   :skills   skill-source            ; what the Agent Card advertises
+   :client   client                  ; or :run (fn [text] {:text "..."})
+   :store    "file:./tasks"          ; §7B TaskStore, default in-memory
+   :on-task  (fn [t] ...)            ; fires on a terminal task state
+   :on-call  (fn [c] ...)})          ; fires per inbound tools/call
+
+;; => {:url "http://127.0.0.1:54321" :port 54321
+;;     :store <store> :handle <koine handle> :stop! (fn [])}
+
+(toolnexus.serve/stop! handle)
+```
+
+`serve` is the inbound half of toolnexus: one HTTP server carrying two independent, opt-in profiles.
+The §7B `a2a` profile mounts `GET /.well-known/agent-card.json` and a JSON-RPC endpoint at `POST /`
+speaking `SendMessage` and `GetTask`. The §7C `mcp` profile mounts `POST /mcp` speaking `initialize`,
+`tools/list` and `tools/call`. Both, either, or neither — routing is per profile.
+
+**Absence is a behaviour.** Omit `:a2a` and the card path and `/` return 404 like any other unknown
+path; omit `:mcp` and `/mcp` does. Serving with neither profile gives you a server that 404s
+everything, which is the only reading under which §7B's "an absent `a2a` means every request 404s"
+and §7C's "an MCP-only serve 404s all other paths" are both true.
+
+A `SendMessage` returns immediately with the task in `submitted` state and fulfils it on a background
+thread: save `working`, run the fulfilment, then save `completed` with the answer as a text artifact
+— or `failed` carrying `status.message` and no artifacts if the fulfilment threw. Peers see progress
+by polling `GetTask`. Nothing a handler does can take the server down: a malformed body becomes
+JSON-RPC `-32700`, an escaped exception becomes `-32603`, and a fulfilment that throws leaves a
+`failed` task rather than a thread that dies holding the task in `working` forever.
+
+Fulfilment comes from either `:client` (a client map — `serve` calls its `:run` with `{:toolkit tk}`)
+or `:run` (a bare function of the task text returning a map with `:text`). Configure neither and
+every task fails loudly rather than hanging.
+
+## When to use it
+
+- **Making a toolkit reachable across processes or languages.** Another port's
+  [`remote-agent`](/api/clojure/agents/agent/) points at your card and your skills become its tools.
+- **Exposing tools to an MCP client** — an editor, a desktop assistant, anything speaking
+  streamable-HTTP MCP — without writing an MCP server.
+- **Both at once, from one process.** The two profiles share a port and a toolkit but nothing else.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Serving is not delegating in-process">
+This port has no §7D sub-agent runtime: there is no way to spawn a child agent inside your process
+and call it as a tool. `serve` plus [`remote-agent`](/api/clojure/agents/agent/) is the delegation it
+does ship, and it is cross-process by construction — a real HTTP hop, a real task id, a real store.
+That costs you a port and a serialisation boundary, and buys restartability and language
+independence. If you want an in-process child, that capability is recorded parity debt in
+`clojure/README.md`.
+</Aside>
+
+For a plain HTTP endpoint that is not an agent, don't use `serve` — write a handler over
+`koine.server` and call `toolnexus.tool/execute` yourself.
+
+## Examples
+
+### Serve a toolkit as an A2A agent
+
+```clojure
+(require '[toolnexus.core :as core]
+         '[toolnexus.serve :as serve])
+
+(def tk (core/build {:skills "examples/skills"}))
+
+(def h
+  (serve/serve tk {:port   0
+                   :a2a    {:name "tn-agent" :description "the docs example agent"}
+                   :skills (:skills tk)
+                   :run    (fn [text] {:text (str "ran: " text)})}))
+
+(println (:url h))   ;; => http://127.0.0.1:54321
+;; GET  <url>/.well-known/agent-card.json  -> the Agent Card
+;; POST <url>/                             -> SendMessage / GetTask
+
+(serve/stop! h)
+```
+
+`:run` is the shortcut for a fulfilment that is not an LLM loop. Pass `:client` instead — a map from
+[`toolnexus.client/create-client`](/api/clojure/client/create/) — and each task runs the real agent
+loop with this toolkit attached.
+
+### Both profiles, with durable tasks and observability
+
+```clojure
+(require '[toolnexus.core :as core]
+         '[toolnexus.client :as client]
+         '[toolnexus.serve :as serve])
+
+(def tk (core/build {:mcp "examples/mcp.json" :skills "examples/skills"}))
+
+(def c (client/create-client {:base-url "https://api.anthropic.com"
+                              :style    "anthropic"
+                              :model    "claude-sonnet-4-6"}))
+
+(def h
+  (serve/serve tk
+    {:port    8080
+     :a2a     {:name "tn-agent" :version "1.0.0"
+               :provider {:organization "toolnexus"}
+               :skills   ["hello-world"]}
+     :mcp     {:name "tn-mcp" :version "1.0.0" :tools ["skill"]}
+     :skills  (:skills tk)
+     :client  c
+     :store   "file:./tasks"
+     :on-task (fn [t] (println "task" (:id t) (:state t)))
+     :on-call (fn [c] (println "tools/call" (:name c) "isError" (:isError c)))}))
+```
+
+`:store "file:./tasks"` writes one `<id>.json` per task, so `GetTask` still answers after a restart.
+See [`toolnexus.serve/file-store`](/api/clojure/serve/task-store/).
+
+### The task lifecycle, from a peer's side
+
+```clojure
+(require '[koine.http :as http]
+         '[koine.json :as json])
+
+(defn rpc! [url method params]
+  (-> (http/post-json url {} (json/write-str {:jsonrpc "2.0" :id 1
+                                              :method method :params params}))
+      :body json/read-str))
+
+;; 1. submit — returns immediately, state "submitted"
+(def task (:result (rpc! (str base "/") "SendMessage"
+                         {:message {:role "user" :messageId "m1"
+                                    :parts [{:kind "text" :text "summarise the changelog"}]}
+                          :configuration {:blocking false}})))
+
+;; 2. poll until terminal: completed | failed | canceled
+(:result (rpc! (str base "/") "GetTask" {:id (:id task)}))
+;; completed => :artifacts [{:parts [{:kind "text" :text "..."}]}]
+;; failed    => :status {:state "failed" :message {:parts [{:kind "text" :text "..."}]}}
+
+;; unknown id  => JSON-RPC error -32001 "Task not found"
+;; unknown verb=> -32601 "Method not found"
+;; bad body    => -32700 "Parse error"
+```
+
+## Options
+
+| Key | Default | Meaning |
+|---|---|---|
+| `:port` | `0` | `0` asks the OS for a free port; read the real one back from `:port` on the handle. |
+| `:host` | koine's default | Bind address. |
+| `:a2a` | absent | §7B profile map — see [`agent-card`](/api/clojure/serve/agent-card/) for its keys. Absent ⇒ no card, no `/`. |
+| `:mcp` | absent | §7C profile map (`:name`, `:version`, `:protocolVersion`, `:tools`). Absent ⇒ no `/mcp`. |
+| `:skills` | none | The SkillSource the Agent Card advertises. Accepts a `list-skills` result, a name→info index, or a plain seq. |
+| `:client` | none | A client map; each task runs `((:run client) text {:toolkit tk})`. |
+| `:run` | none | A bare fulfilment `(fn [text] {:text "..."})`. Takes precedence over `:client`. |
+| `:store` | `"memory"` | `nil` / `"memory"`, `"file:<dir>"`, or a store map. See [`resolve-store`](/api/clojure/serve/task-store/). |
+| `:on-task` | none | Called with `{:id :task :state :result}` when a task settles. A throw inside it is swallowed. |
+| `:on-call` | none | Called with `{:name :source :isError}` per inbound `tools/call`. A throw inside it is swallowed. |
+
+### The handle
+
+| Key | What it is |
+|---|---|
+| `:url` | `http://127.0.0.1:<port>` — also the base the Agent Card's `url` is built from. |
+| `:port` | The bound port, resolved even when you asked for `0`. |
+| `:store` | The resolved TaskStore, so tests and admin code can read tasks directly. |
+| `:handle` | The underlying `koine.server` handle. |
+| `:stop!` | A zero-arg shutdown fn. Equivalent to `(toolnexus.serve/stop! handle)`; both are idempotent. |
+
+### Routes
+
+| Method and path | Mounted when | Answers |
+|---|---|---|
+| `GET /.well-known/agent-card.json` | `:a2a` present | The Agent Card. |
+| `POST /` | `:a2a` present | `SendMessage`, `GetTask`. |
+| `POST /mcp` | `:mcp` present | `initialize`, `tools/list`, `tools/call`. |
+| anything else | — | `404 Not Found`, `text/plain`. |
+
+## See also
+
+- [`toolnexus.serve/agent-card`](/api/clojure/serve/agent-card/) — the card this serves, buildable standalone
+- [`toolnexus.serve/exposed-tools`](/api/clojure/serve/mcp/) — which tools the §7C profile shows *and* allows
+- [`toolnexus.serve/file-store`](/api/clojure/serve/task-store/) — tasks that survive a restart
+- [`toolnexus.a2a/remote-agent`](/api/clojure/agents/agent/) — the client that consumes what this serves

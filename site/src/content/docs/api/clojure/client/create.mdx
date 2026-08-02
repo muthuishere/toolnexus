@@ -1,0 +1,180 @@
+---
+title: "toolnexus.client/create-client"
+description: "The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory. — Clojure."
+sidebar:
+  label: "toolnexus.client/create-client"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+```clojure
+(create-client opts) ; => client
+
+;; opts — idiomatic kebab-case; none of these keys ever reach the wire
+;;   :base-url        required   "https://api.anthropic.com"
+;;   :model           required   "claude-sonnet-4-5"
+;;   :style           "openai" (default) | "anthropic"
+;;   :api-key         optional; falls back to the environment
+;;   :headers         extra request headers
+;;   :system-prompt   prepended to the toolkit's skills prompt
+;;   :max-turns       default 10
+;;   :request-params  shallow-merged into the request body, wins on collision
+;;   :body-transform  (fn [body] body) — runs last, its return value is sent
+;;   :http-client     (fn [url headers body] response) — supply the transport
+;;   … plus the :hooks / :retries / :on-metric / :store / :wait-for slices, each on its own page
+
+;; the returned client is a plain map with the defaults filled in:
+;;   {:base-url "…" :model "…" :style "openai" :max-turns 10
+;;    :store {:get (fn [id]) :save (fn [id msgs])} …}
+```
+
+`create-client` builds nothing and connects to nothing. It validates that `:base-url` and `:model`
+are present, normalizes `:style` to exactly `"openai"` or `"anthropic"`, fills in `:max-turns` 10,
+and attaches a default [in-memory store](/api/clojure/client/store/) so two clients never share a
+transcript by accident. The result is an ordinary map — you can `assoc` into it, print it, or hold
+several of them side by side.
+
+The style decides two things: the endpoint and the tool-result wire shape. `"openai"` posts to
+`{base}/chat/completions`, carries the system prompt as message 0, and feeds results back as
+`role: "tool"` messages. `"anthropic"` posts to `{base}/v1/messages` (a `/v1` suffix already on
+your base URL is not doubled), carries `system` in the body alongside a default `max_tokens` of
+4096, and feeds results back as **one** `user` message of `tool_result` blocks. Both are
+implemented and both are exercised by the suite against a recording fake server, so "it composes"
+is a measurement rather than a claim.
+
+The API key is resolved at call time and only ever reaches a request header — never a log line,
+never a return value. With `:api-key` unset the client reads `ANTHROPIC_API_KEY` for the anthropic
+style, `OPENAI_API_KEY` for the openai style, then `OPENROUTER_API_KEY` as a shared fallback.
+
+## When to use it
+
+- **Once per model configuration**, at startup — a client is cheap, immutable data, and safe to
+  hold for the life of the process.
+- **When you want the loop**, not one round trip: system prompt plus skills prompt, tool schema
+  emission, parallel tool execution, results fed back in the provider's own shape, bounded by
+  `:max-turns`.
+- **When you need to reach a gateway** — OpenRouter, a company proxy, a local model server. Set
+  `:base-url` and the style its wire format matches; nothing else changes.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Skip the client entirely if you only want a schema">
+If your application already has an LLM SDK it likes, you do not need this client at all. Build a
+toolkit with [`toolnexus.core/build`](/api/clojure/toolkit/create/), emit the schema with
+`to-openai` / `to-anthropic` / `to-gemini`, and call `toolnexus.core/execute` when the model asks
+for a tool. The client is the batteries-included path, not the only path — and every tool source in
+this port works identically without it.
+</Aside>
+
+`toolnexus.client/call-provider` sits one level below `run`: it sends a body map **you** built
+through exactly the same endpoint, headers, retry policy and `llm` metric as the loop, without any
+loop at all. That is the seam for single-turn work where a full agent loop would be overhead.
+
+## Examples
+
+### A client and one run
+
+```clojure
+(require '[toolnexus.core :as tn]
+         '[toolnexus.client :as client])
+
+(def toolkit (tn/build {:skills "./skills"}))
+
+;; The key is read from the environment by the client; never hard-code it.
+(def llm
+  (client/create-client
+    {:base-url      "https://api.anthropic.com"
+     :style         "anthropic"
+     :model         "claude-sonnet-4-5"
+     :system-prompt "You are a release engineer. Be terse."}))
+
+(def result (client/run llm "What skills do you have?" {:toolkit toolkit}))
+
+(println (:text result))          ; the final assistant text
+(println (:turns result))         ; LLM round trips actually made
+(println (:tool-call-count result))
+```
+
+### Pointing at a gateway, and bounding the loop
+
+Anything OpenAI-shaped works with `:style "openai"` — only the base URL changes.
+
+```clojure
+(def llm
+  (client/create-client
+    {:base-url  "https://openrouter.ai/api/v1"
+     :model     "anthropic/claude-sonnet-4.5"
+     :max-turns 4                                    ; default is 10
+     :headers   {"http-referer" "https://example.com"
+                 "x-title"      "toolnexus demo"}}))
+
+(let [r (client/run llm "Summarise the repo" {:toolkit toolkit})]
+  (when (= "incomplete" (:status r))
+    ;; the loop hit :max-turns before the model produced text
+    (println "gave up after" (:turns r) "turns, limit" (:limit r))))
+```
+
+`:max-turns` is a hard stop, not a hint. When it fires the result comes back with
+`:status "incomplete"` and `:limit "maxTurns"` instead of silently truncated text.
+
+### Shaping the request body, and owning the transport
+
+`:request-params` is merged over the body the client assembled and **wins** on collision, which is
+how you override the anthropic style's built-in `max_tokens`. `:body-transform` runs last and its
+return value is what is marshalled, so it can drop keys the merge added. `:messages`, `:tools` and
+`:stream` are refused from `:request-params` with a warning on stderr — the loop owns them, and
+rewriting messages is deliberately `:body-transform`'s job.
+
+```clojure
+(require '[koine.http :as http])
+
+(def trace-header "corp-gateway-7f2a")
+
+(def llm
+  (client/create-client
+    {:base-url       "https://api.anthropic.com"
+     :style          "anthropic"
+     :model          "claude-sonnet-4-5"
+     :request-params {:max_tokens 1024 :temperature 0.2}
+     :body-transform (fn [body] (dissoc body :temperature))   ; last word wins
+     ;; same (url headers body) shape as koine.http/post-json, so wrapping is a one-liner
+     :http-client    (fn [url headers body]
+                       (http/post-json url (assoc headers "x-trace" trace-header) body))}))
+```
+
+`:http-client` exists for the credentials this library must never see — a corporate proxy, mTLS, a
+signing gateway. Its scope is the LLM path only; MCP transports are a separate seam and are not
+routed through it.
+
+## Options
+
+| Option | Default | What it does |
+|---|---|---|
+| `:base-url` | — | **Required.** Trailing slashes are trimmed. |
+| `:model` | — | **Required.** Sent as `model` and echoed on the RunResult. |
+| `:style` | `"openai"` | `"openai"` or `"anthropic"`. Anything else normalizes to `"openai"`. |
+| `:api-key` | env | Falls back to `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, then `OPENROUTER_API_KEY`. |
+| `:headers` | `nil` | Merged over the auth headers the style built. |
+| `:system-prompt` | `nil` | Joined to the toolkit's skills prompt with a blank line. Empty parts are dropped. |
+| `:max-turns` | `10` | Hard cap on LLM round trips. |
+| `:request-params` | `nil` | Shallow-merged into the body, wins on collision. `:messages` / `:tools` / `:stream` are ignored. |
+| `:body-transform` | `nil` | `(fn [body] body)` — runs after the merge; its return value is sent. |
+| `:http-client` | koine | `(fn [url headers body] response)` for the LLM call only. |
+| `:hooks` | `nil` | `{:before-llm :after-llm :before-tool :after-tool}` — §8 lifecycle middleware. Absent changes nothing. |
+
+With neither `:request-params` nor `:body-transform` set the body is byte-identical to the default,
+and explicitly-nil options are indistinguishable from absent ones.
+
+## See also
+
+- [`toolnexus.client/run`](/api/clojure/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`toolnexus.client/run`](/api/clojure/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.
+- [`toolnexus.client/in-memory-store`](/api/clojure/client/store/) — Swap in-memory history for your own store so a conversation survives a process restart.
+- [`toolnexus.client/create-client`](/api/clojure/client/metrics/) — Emit one metric event per model call and per tool call: tokens, latency, outcome.
+- [`toolnexus.client/create-client`](/api/clojure/client/resilience/) — `:retries`, `:retry-base-ms`, `:timeout-ms` and the `:on-error` classifier.
+- [`toolnexus.client/create-client`](/api/clojure/suspension/wait-for/) — `:wait-for`, the one host slot of SPEC §10.
+- [`toolnexus.client/create-client`](/api/clojure/client/hooks/) — `:hooks`, the four lifecycle interception points.

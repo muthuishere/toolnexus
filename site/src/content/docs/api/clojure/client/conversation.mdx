@@ -1,0 +1,134 @@
+---
+title: "toolnexus.client/run"
+description: "Keep a transcript across turns so the model remembers what it already did. — Clojure."
+sidebar:
+  label: "toolnexus.client/run"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+```clojure
+(run client prompt {:toolkit         tk
+                    :conversation-id "user-42"      ; memory is keyed by this
+                    :history         [{:role "user" :content "…"}]})  ; optional override
+
+;; the seed the loop starts from, in precedence order:
+;;   1. :history            — explicit, always wins
+;;   2. the client's :store — consulted only when :conversation-id is given
+;;   3. nothing             — a one-shot run
+```
+
+There is no `Conversation` type in this port and nothing to construct. Memory is a **key**: pass
+`:conversation-id` to `run` and the client's [store](/api/clojure/client/store/) loads that id's
+transcript before the run and saves the finished `:messages` after it. Reuse the id on the next
+call and the model sees everything that happened before.
+
+The precedence rule is deliberate. An explicit `:history` always wins, because a caller that hands
+over a transcript has already decided what the model should see. The store is consulted **only**
+when an id is supplied — without one, a run is one-shot and must not inherit a previous run's
+transcript, even from the same client.
+
+The save happens on every exit path, including the `:max-turns` one. Wiring it into only the
+success path is the classic half-fix: a turn-limit exit would silently forget the conversation and
+the next turn would look like a fresh start with no error anywhere.
+
+The default store is per-client and in-memory, so two clients never share a transcript by accident,
+and nothing survives a process restart until you supply your own.
+
+## When to use it
+
+- **A chat interface** — one id per user or per thread; the loop rebuilds context for you.
+- **A multi-step operator session** — the model calls tools in turn 1 and must remember what it
+  found in turn 3.
+- **Not for a one-shot** — omit `:conversation-id` entirely for classification, summarisation or
+  any request that should not see history.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Pass :history when you own the transcript">
+If your application already persists messages — a database table, an event log, a resumed job —
+skip `:conversation-id` and pass `:history` directly. It wins over the store, so there is no
+ambiguity about which transcript the model saw, and you avoid keeping the same conversation in two
+places that can drift apart.
+</Aside>
+
+Use `:conversation-id` when you want the client to be the one that remembers, and `:history` when
+you want to be. Mixing them is legal but pointless: `:history` simply overrides.
+
+## Examples
+
+### Two turns that remember each other
+
+```clojure
+(require '[toolnexus.core :as tn]
+         '[toolnexus.client :as client])
+
+(def toolkit (tn/build {:skills "./skills"}))
+(def llm (client/create-client {:base-url "https://api.openai.com/v1"
+                                :model    "gpt-4.1"}))
+
+(client/run llm "My deploy target is staging-eu." 
+            {:toolkit toolkit :conversation-id "ops-session-1"})
+
+;; turn 2 carries turn 1's messages — that is what memory IS
+(let [r (client/run llm "Deploy the current branch there."
+                    {:toolkit toolkit :conversation-id "ops-session-1"})]
+  (println (:text r)))
+```
+
+Without the id, the second call would start from an empty transcript and the model would have no
+idea what "there" means.
+
+### One conversation per user, in a request handler
+
+```clojure
+(defn handle-message
+  "One HTTP request, one turn of that user's conversation."
+  [user-id text]
+  (let [r (client/run llm text {:toolkit         toolkit
+                                :conversation-id (str "user:" user-id)})]
+    {:reply  (:text r)
+     :tools  (mapv :name (:tool-calls r))
+     :tokens (get-in r [:usage :total-tokens])}))
+```
+
+The id is an opaque string — namespace it however your application already namespaces things. With
+the default in-memory store this holds every live conversation in the process heap, which is fine
+for a CLI or a short-lived worker and is exactly the point at which you swap in
+[your own store](/api/clojure/client/store/).
+
+### Owning the transcript yourself
+
+```clojure
+;; Resume a job whose messages you persisted elsewhere.
+(def saved (read-transcript-from-db "job-77"))
+
+(def r (client/run llm "Continue where you stopped."
+                   {:toolkit toolkit
+                    :history saved}))
+
+;; :messages is the whole updated transcript — persist it and repeat.
+(write-transcript-to-db! "job-77" (:messages r))
+```
+
+`:messages` comes back in the provider's own message shape, which is the same shape `:history`
+takes, so a round trip through your own storage is a straight write and read.
+
+### The three inputs
+
+| Key | Where it goes | Notes |
+|---|---|---|
+| `:conversation-id` | Store `get` before the run, `save` after it | Absent ⇒ nothing is loaded and nothing is saved. |
+| `:history` | Seeds the transcript directly | Wins over the store. Provider-shaped messages. |
+| `:store` (on the client) | The two-operation provider | Defaults to [`in-memory-store`](/api/clojure/client/store/), per client. |
+
+## See also
+
+- [`toolnexus.client/create-client`](/api/clojure/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`toolnexus.client/run`](/api/clojure/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`toolnexus.client/in-memory-store`](/api/clojure/client/store/) — Swap in-memory history for your own store so a conversation survives a process restart.
+- [`toolnexus.client/create-client`](/api/clojure/client/metrics/) — Emit one metric event per model call and per tool call: tokens, latency, outcome.

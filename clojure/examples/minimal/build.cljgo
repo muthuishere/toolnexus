@@ -1,0 +1,15 @@
+;; cljgo. The SAME koine artifact from Clojars — cljgo resolves Maven deps as of
+;; its ADR 0095, so there is no git coordinate and no vendored copy.
+;;
+;;   cljgo build        build both binaries
+;;
+;; Two `exe` calls in one build used to corrupt the SECOND binary whenever the
+;; two entries shared a namespace (cljgo #169 — the namespace registry is
+;; process-global, so the second build saw the first's namespaces already
+;; interned and emitted hollow, unbound vars). Fixed in cljgo v0.8.3; verified
+;; here 2026-08-01 in BOTH declaration orders, so the separate aot-test/ build
+;; file this example used to carry is gone.
+(defn build [b]
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.9.0"})
+  (install b (exe b {:name "minimal"      :main "src/app/main.cljg"}))
+  (install b (exe b {:name "minimal-test" :main "src/app/test_main.cljc"})))

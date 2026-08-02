@@ -7,8 +7,13 @@ import { Aside, LinkButton } from '@astrojs/starlight/components';
 
 The rest of the docs are organised by **primitive** — MCP, skills, suspension, sub-agents. This
 section is organised by **what you're trying to build**. Each scenario page takes one real,
-production-shaped agent and wires it end to end in all six languages, including the parts that are
-*not* included and why.
+production-shaped agent and wires it end to end in the six published languages, including the parts
+that are *not* included and why. **Clojure** is held to the same `full` tier and covers the primitives it ships — MCP, skills, native/HTTP/built-in tools, conversation memory, the
+suspending refund gate, and A2A `serve` — so the
+[support agent](/toolnexus/scenarios/support-agent/) carries Clojure tabs; scenarios that lean on the
+sub-agent/`team`/`Budget` or heartbeat layers show none, because those subsystems (§7D–§7F) are
+Clojure parity debt the option gate structurally cannot see (see the
+[Clojure API page](/api/clojure/)).
 
 <Aside type="tip" title="New here? Start with the quickstart">
 If you have not run toolnexus yet, do [**zero to agent in 3 steps**](/toolnexus/quickstart/) first

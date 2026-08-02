@@ -1,0 +1,133 @@
+---
+title: "toolnexus.client/pending-of"
+description: "Detect that a RunResult is parked rather than finished, and get the Request that parked it. — Clojure."
+sidebar:
+  label: "toolnexus.client/pending-of"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+```clojure
+(pending-of result)   ; result is a ToolResult
+;; => the §10 Request iff this result is a suspension, else nil
+;; equivalent to (get-in result [:metadata :pending])
+```
+
+`pending-of` is the reader half of [`suspend`](/api/clojure/suspension/pending/). Hand it a
+`ToolResult` and it returns the `Request` buried in `metadata.pending`, or `nil` for an ordinary
+result. That is the entire function, and it is the only supported way to ask "did this suspend?" —
+`:isError` is `true` on a suspension as well as on a plain failure, so it cannot answer the
+question.
+
+Note the argument type. `pending-of` takes a **ToolResult**, not a RunResult. On a `RunResult` the
+parked request is already a top-level key: check `(= "pending" (:status r))` and read `(:pending
+r)`. Use `pending-of` when you are holding a tool's own return value — inside a wrapper, in a test,
+or when calling a tool directly without the client loop.
+
+## When to use it
+
+- **Wrapping a tool** — a decorator that logs, retries or vetoes must not treat a suspension as a
+  failure; `pending-of` is how it tells them apart.
+- **Testing a tool in isolation** — call `:execute` yourself and assert on the `Request` without
+  standing up a client or a fake LLM.
+- **Executing tools without the client loop** — if you drive your own provider calls, this is how
+  you detect that a result needs a human before you feed it back to the model.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="On a RunResult, read :status and :pending instead">
+`run` has already done this work: a parked run comes back with `:status "pending"` and the
+`Request` on `:pending`, and its `:text` is the unanswered prompt. Calling `pending-of` on a
+RunResult returns `nil` — the key is not nested under `:metadata` there. Reach for `pending-of` one
+level down, where tool results live.
+</Aside>
+
+Reading `(get-in result [:metadata :pending])` by hand does the same thing, but the accessor is the
+part of the contract other ports also expose, and it keeps the key path in one place.
+
+## Examples
+
+### Testing a suspending tool without a client
+
+```clojure
+(require '[toolnexus.tool :as tool]
+         '[toolnexus.client :as client])
+
+(def result ((:execute book-flight) {:flight "AI-503"}))
+
+(client/pending-of result)
+;; => {:id "sus-1754006400000-1" :kind "input" :prompt "Which city?"
+;;     :data {:schema {:type "object" …}}}
+
+(:isError result)   ;; => true — a suspension always reads as "no value produced"
+(:output result)    ;; => "Input required: Which city?"
+
+;; an ordinary result has no pending
+(client/pending-of (tool/success "plain"))   ;; => nil
+```
+
+Asserting on the `Request` directly is the cheapest test of a suspending tool: no server, no model,
+no loop.
+
+### A wrapper that must not mistake a suspension for a failure
+
+```clojure
+(defn retried
+  "Retry a tool once on failure — but never on a suspension, which is not a failure."
+  [t]
+  (update t :execute
+          (fn [f]
+            (fn
+              ([args]
+               (let [r (f args)]
+                 (if (and (:isError r) (nil? (client/pending-of r)))
+                   (f args)      ; a real error: one more go
+                   r)))          ; success, or a parked request: hand it straight back
+              ([args ctx] (f args ctx))))))
+```
+
+Retrying a suspension would ask the human the same question twice and discard the first `Request`
+id, which is exactly the bug this accessor exists to prevent.
+
+### Driving tools yourself, with no client loop
+
+```clojure
+(require '[toolnexus.core :as tn])
+
+(defn call-tool [toolkit name args]
+  (let [r (tn/execute toolkit name args)]
+    (if-let [req (client/pending-of r)]
+      ;; park it: the model gets the placeholder, the human gets the prompt
+      {:for-model (:output r)
+       :for-human (select-keys req [:id :kind :prompt :url :data :expiresAt])}
+      {:for-model (:output r)})))
+
+(call-tool toolkit "list_repos" {})
+;; => {:for-model "Login required: https://example.com/oauth/authorize"
+;;     :for-human  {:id "sus-…" :kind "authorization"
+;;                  :prompt "Connect your GitHub account to continue"
+;;                  :url "https://example.com/oauth/authorize"}}
+```
+
+Once the human answers, re-execute the same tool with the same args and the answer in Context —
+`(tn/execute toolkit name args {:answer answer})` — which is precisely what the client loop does
+internally.
+
+### RunResult vs ToolResult
+
+| You hold | Suspension check | The Request |
+|---|---|---|
+| A `ToolResult` (a tool's return value) | `(some? (client/pending-of r))` | `(client/pending-of r)` |
+| A `RunResult` (from `run`) | `(= "pending" (:status r))` | `(:pending r)` |
+| A `tool_result` event from `:on-event` | not exposed | use the earlier `pending` event's `:request` |
+
+## See also
+
+- [`toolnexus.client/suspend`](/api/clojure/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`toolnexus.client/auth-required`](/api/clojure/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`toolnexus.client/create-client`](/api/clojure/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`toolnexus.client/run`](/api/clojure/client/run/) — where `:status "pending"` and `:pending` come from.

@@ -1,0 +1,89 @@
+---
+title: "Agent — a composable sub-agent"
+description: "Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent. — Clojure."
+sidebar:
+  label: "runtime / agent"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+</p>
+
+<Aside type="caution" title="Not available in Clojure">
+This port ships no §7D sub-agent runtime, so there is no in-process `Agent` value to define. Its
+delegation story is cross-process: remote A2A peers through `toolnexus.a2a/remote-agent`, and serving
+itself as a peer through `toolnexus.serve/serve`.
+</Aside>
+
+Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+
+In the full-tier ports an `Agent` is a declarative value — a name, a system prompt, its own toolkit,
+a model, a budget — that the runtime can spawn and the parent can call as if it were a tool. The
+appeal is scoping: a researcher child sees only search tools, a writer child only file tools, and
+neither inherits the parent's full catalog or its transcript. Clojure has none of that machinery.
+
+## What to use instead
+
+The equivalent scoping is a **separate toolkit and a separate client**, called from a plain function.
+A "sub-agent" is a closure over the pair, wrapped as a native tool so the parent's model can reach it:
+
+```clojure
+(require '[toolnexus.core :as core]
+         '[toolnexus.client :as client]
+         '[toolnexus.native :as native]
+         '[toolnexus.tool :as tool])
+
+;; the child's world: its own toolkit, its own prompt, its own turn budget.
+;; :builtins :tools drops names off the all-on baseline — the child keeps
+;; read/grep/webfetch and never sees bash, write or edit.
+(def researcher-tk
+  (core/build {:builtins {:tools {:bash false :write false :edit false
+                                  :apply_patch false :todowrite false
+                                  :question false :glob false}}}))
+
+(def researcher
+  (client/create-client {:base-url      "https://api.anthropic.com"
+                         :style         "anthropic"
+                         :model         "claude-sonnet-4-6"
+                         :system-prompt "You research and report. Be terse."
+                         :max-turns     6}))
+
+(def research-tool
+  (native/native-tool
+    {:name         "research"
+     :description  "Delegate a research question to a scoped sub-agent."
+     :input-schema {:type "object"
+                    :properties {:question {:type "string"}}
+                    :required ["question"]}
+     :run          (fn [args]
+                     ;; no :conversation-id ⇒ a one-shot run, no inherited transcript
+                     (let [r (client/run researcher (str (:question args))
+                                         {:toolkit researcher-tk})]
+                       (tool/success (:text r)
+                                     {:turns (:turns r)
+                                      :tool-calls (:tool-call-count r)
+                                      :usage (:usage r)})))}))
+
+;; the parent sees one tool named "research" and nothing of the child's catalog
+(def parent-tk (core/build {:skills "examples/skills" :tools [research-tool]}))
+```
+
+What this gives you: tool scoping, an independent system prompt, an independent model, an isolated
+transcript, and a turn cap via `:max-turns`. What it does not give you: a handle you can inspect or
+interrupt mid-flight, budgets enforced across a team of children, or a `task` tool the model can use
+to spawn children it invents on its own. The run is synchronous — it returns when the child is done.
+
+For delegation that survives a restart, or that crosses a process or language boundary, run the child
+as a real agent behind [`toolnexus.serve/serve`](/api/clojure/serve/a2a/) and call it with
+[`toolnexus.a2a/remote-agent`](/api/clojure/agents/agent/). That is a genuine hop with a task id and
+a store, which is more machinery than a closure but is the only form of delegation here that can be
+paused, polled and resumed.
+
+## See also
+
+- [`toolnexus.client/run`](/api/clojure/client/run/) — the loop a hand-rolled child runs
+- [`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) — wrapping that child as a callable tool
+- [`toolnexus.a2a/remote-agent`](/api/clojure/agents/agent/) — the cross-process form of the same idea
+- [`runtime / runtime`](/api/clojure/runtime/runtime/) — the host verbs that would drive these, also absent

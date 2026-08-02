@@ -1,11 +1,11 @@
 ---
 title: API Reference
-description: The public surface of every port — toolkit options, client options, skill loading and inventory, MCP load, and adapters — with the exact symbol in all six languages side by side.
+description: The public surface of every port — toolkit options, client options, skill loading and inventory, MCP load, and adapters — with the exact symbol in all seven languages side by side.
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-The same API, six languages. Every entry below shows its **exact per-language equivalent** in
+The same API, seven languages. Every entry below shows its **exact per-language equivalent** in
 synced tabs — pick your language once and it sticks across the page. Each port's full reference
 has its own dedicated nav; open one in a new tab:
 <a href="/toolnexus/api/javascript/" target="_blank" rel="noopener">JavaScript</a> ·
@@ -13,7 +13,8 @@ has its own dedicated nav; open one in a new tab:
 <a href="/toolnexus/api/go/" target="_blank" rel="noopener">Go</a> ·
 <a href="/toolnexus/api/java/" target="_blank" rel="noopener">Java</a> ·
 <a href="/toolnexus/api/csharp/" target="_blank" rel="noopener">C#</a> ·
-<a href="/toolnexus/api/elixir/" target="_blank" rel="noopener">Elixir</a>.
+<a href="/toolnexus/api/elixir/" target="_blank" rel="noopener">Elixir</a> ·
+<a href="/toolnexus/api/clojure/" target="_blank" rel="noopener">Clojure</a>.
 
 <Aside type="tip">These are the public entry points. Behavior is identical across ports by
 contract — see <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC.md</a>.</Aside>
@@ -115,6 +116,19 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
   )
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.core :as tn])
+
+(def tk
+  (tn/build {:mcp      "./mcp.json"           ; path | map
+             :skills   ["./skills"]           ; a root, or a seq of roots
+             :builtins true                   ; §0.11 toggle
+             :tools    []}))                  ; extra Tools of your own
+;; => {:tools .. :skills .. :statuses .. :errors .. :connections ..}
+;; Not in this port: :skill-provider, :skills-filter, :agents (parity debt).
+```
+</TabItem>
 </Tabs>
 
 ## Skills — load, supply as data, filter, inventory
@@ -182,6 +196,16 @@ new SkillSource.SkillDef(Name, Description, Content,
 }
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+;; a data skill is a plain map; keys mirror the other ports
+{:name        "…"
+ :description "…"
+ :body        "…"      ; the markdown body (post-frontmatter)
+ :dir         "…"      ; base directory for the skill's files
+ :files       []}      ; sibling files sampled for the skill
+```
+</TabItem>
 </Tabs>
 
 ### List & validate — `ListSkills`
@@ -230,6 +254,15 @@ inv = Toolnexus.Skill.list("./skills")
 # inv.skills   inv.skipped  (%{location, reason})
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.skill :as skill])
+
+(def inv (skill/list-skills "./skills"))
+;; {:skills [..] :skipped [..]}  — skip reasons: missing-name ·
+;; malformed-frontmatter · duplicate-name · unreadable
+```
+</TabItem>
 </Tabs>
 
 ## Load MCP servers
@@ -269,6 +302,13 @@ var mcp = await McpSource.LoadAsync("./mcp.json");
 {:ok, mcp} = Toolnexus.Mcp.load("./mcp.json")   # mcp.tools
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.mcp :as mcp])
+(def m (mcp/from-config "./mcp.json"))   ; {:tools .. :statuses .. :connections ..}
+(mcp/tools m)
+```
+</TabItem>
 </Tabs>
 
 ## Adapters — emit provider schema
@@ -306,6 +346,11 @@ var tools = Adapters.ToOpenAI(tk);   // ToAnthropic · ToGemini
 <TabItem label="Elixir">
 ```elixir
 tools = Toolnexus.Adapters.to_openai(tk.tools)   # to_anthropic · to_gemini
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(tn/to-openai tk)   ; tn/to-anthropic · tn/to-gemini
 ```
 </TabItem>
 </Tabs>
@@ -361,6 +406,16 @@ var res = await client.AskAsync("…", tk);
 client = Toolnexus.Client.create(style: "openai", model: "gpt-5",
                                  base_url: "…", api_key: "…")
 res = Toolnexus.Client.run(client, "…", tk)
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.client :as client])
+
+(def c (client/create-client {:style "openai" :model "gpt-5"
+                              :base-url "…" :api-key "…"}))
+(def res (client/run c "…" {:toolkit tk}))
+;; {:text :messages :tool-calls :turns :usage :status}
 ```
 </TabItem>
 </Tabs>
@@ -423,6 +478,16 @@ add = Toolnexus.Native.define_tool(
 # execute may be fn args -> end or fn args, ctx -> end
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.native :as native])
+
+(def add
+  (native/native-tool {:name "add" :description "Add two numbers"
+                       :run (fn [args] (str (+ (:a args) (:b args))))}))
+;; a ctx-aware tool: {:ctx? true :run (fn [args ctx] …)}
+```
+</TabItem>
 </Tabs>
 
 ## HTTP / REST tools
@@ -483,6 +548,16 @@ weather = Toolnexus.Http.tool(
 # note: Toolnexus.Http.tool/1 (not http_tool); :timeout in ms
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.http :as http])
+
+(def weather
+  (http/http-tool {:name "weather" :description "Current weather"
+                   :method :get :url "https://api.example.com/weather/{city}"}))
+;; :timeout-ms (default 30000)
+```
+</TabItem>
 </Tabs>
 
 ## Built-in tools
@@ -535,6 +610,11 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options {
 <TabItem label="Elixir">
 ```elixir
 {:ok, tk} = Toolnexus.create_toolkit(builtins: %{"tools" => %{"bash" => false}})
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(tn/build {:builtins {:tools {"bash" false}}})   ; all built-ins except bash
 ```
 </TabItem>
 </Tabs>
@@ -632,6 +712,13 @@ r = Agents.run(coder,
 </TabItem>
 </Tabs>
 
+<Aside type="note" title="Clojure">
+Local sub-agents (`agents` / `team` / `Budget`) are **not** in the Clojure port — they are recorded
+as parity debt (see the [Clojure API page](/api/clojure/)). The cross-process form of delegation it
+does ship is **A2A remote agents** (below): expose a toolkit with `toolnexus.serve/serve` and consume
+a peer with `toolnexus.a2a/remote-agent`.
+</Aside>
+
 ## A2A — serve inbound, consume remote agents
 
 Two directions of the same protocol (JSON-RPC 2.0; card at `GET /.well-known/agent-card.json`).
@@ -691,6 +778,17 @@ handle = Toolnexus.Toolkit.serve(tk, "127.0.0.1:0",
 # handle.url ; Toolnexus.Serve.stop(handle)
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.serve :as serve])
+
+(def handle
+  (serve/serve tk {:port 0                       ; 0 ⇒ OS-assigned
+                   :client llm
+                   :a2a {:name "my-agent" :store "memory"}}))
+;; (:url handle) speaks A2A ; ((:stop! handle))
+```
+</TabItem>
 </Tabs>
 
 ### Remote agents — consume a peer
@@ -742,6 +840,15 @@ await tk.AddAgentAsync("https://other.example.com/.well-known/agent-card.json");
 {:ok, tk} = Toolnexus.create_toolkit(
   agents: [Toolnexus.A2A.agent(card: "https://peer.example.com/.well-known/agent-card.json")])
 Toolnexus.Toolkit.add_agent(tk, "https://other.example.com/.well-known/agent-card.json")
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.a2a :as a2a])
+
+(def peer (a2a/remote-agent {:card "https://peer.example.com/.well-known/agent-card.json"}))
+;; each of the peer's skills is a Tool in (:tools peer) — hand them to build:
+(tn/build {:tools (:tools peer)})
 ```
 </TabItem>
 </Tabs>
@@ -805,6 +912,15 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options()
   wait_for: fn req -> %Toolnexus.Answer{id: req.id, ok: true, data: %{"answer" => "…"}} end)
 # a tool suspends by returning %Toolnexus.ToolResult{is_error: true,
 #   metadata: %{pending: %Toolnexus.Request{kind: "input", prompt: "…"}}}
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(def c (client/create-client
+         {:base-url "…" :model "…"
+          :wait-for (fn [req] (client/make-answer (:id req) true {:answer "…"}))}))
+;; inside a tool: (client/suspend (client/make-request "input" "…"))
+;;                or (client/auth-required url) ; (client/pending-of result) -> Request|nil
 ```
 </TabItem>
 </Tabs>

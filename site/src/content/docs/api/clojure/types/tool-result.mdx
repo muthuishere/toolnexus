@@ -1,0 +1,136 @@
+---
+title: "toolnexus.tool/success"
+description: "The result envelope: output text, optional error flag, optional Pending for suspension. — Clojure."
+sidebar:
+  label: "toolnexus.tool/success"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/tool.cljc">clojure/src/toolnexus/tool.cljc</a>
+</p>
+
+```clojure
+(toolnexus.tool/success output)             ; => {:output "…" :isError false}
+(toolnexus.tool/success output metadata)    ; => {:output "…" :isError false :metadata {…}}
+
+(toolnexus.tool/failure output)             ; => {:output "…" :isError true}
+(toolnexus.tool/failure output metadata)    ; => {:output "…" :isError true  :metadata {…}}
+```
+
+There is **no ToolResult type** in this port. A result is a plain map with two keys and an optional
+third, built by one of these two functions. `output` is `str`ed on the way in — the model reads
+text, so `(success 42)` yields `"42"` rather than a number that each host would print differently.
+`metadata` is omitted from the map entirely when it is `nil`, so `(success "hi")` is exactly
+`{:output "hi" :isError false}` and nothing else.
+
+They are named `success` and `failure`, not `ok` and `err`. cljgo's `clojure.core` **has** `ok` and
+`err`; the JVM's does not. Defining `ok` would shadow a core name on one host only — a hazard that
+fires on one runtime and not the other, which is precisely the class of drift this port exists to
+prevent. The suite asserts it: no public name in `toolnexus.tool` resolves in `clojure.core`, on
+either host.
+
+`failure` is not an error-handling mechanism for *your* code. A tool error is a **value handed back
+to the model**, which is meant to read it and try something else. Throwing works too —
+`toolnexus.tool/execute` converts a throw into `(failure (ex-message e))` — but then the model gets
+whatever the exception happened to say. Call `failure` when you have a message worth writing.
+
+## When to use it
+
+- **Every `:execute` you write by hand.** [`toolnexus.tool/tool`](/api/clojure/types/tool/) does not
+  normalize return values; the map you hand back is the map the loop sees.
+- **Telling the model it went wrong, in words you chose** — a validation failure, a missing
+  argument, a 404 from an upstream service.
+- **Attaching out-of-band data** via `metadata`. The loop never shows metadata to the model; it is
+  read by the port itself (suspension) and by your own observability code.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Let native-tool do it when your function just returns a value">
+[`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) normalizes for you: a string
+becomes `success`, `nil` becomes `success` with empty output, and a map that already carries
+`:output` passes through with `:isError` coerced to a boolean. You only need `success` / `failure`
+explicitly when you want an **error** result, or metadata, or when you are constructing a Tool with
+`toolnexus.tool/tool` directly.
+</Aside>
+
+## What you get back
+
+| Key | Type | Always present | What it is |
+|---|---|---|---|
+| `:output` | string | yes | The text the model sees. Non-strings are `str`ed. |
+| `:isError` | boolean | yes | `false` from `success`, `true` from `failure`. |
+| `:metadata` | map | no | Present only when you passed one. `{:pending Request}` is the reserved §10 use. |
+
+## Examples
+
+### 1. Both results, and why output is always text
+
+```clojure
+(require '[toolnexus.tool :as tool])
+
+(tool/success "hi")            ;; => {:output "hi" :isError false}
+(tool/failure "no such row")   ;; => {:output "no such row" :isError true}
+
+(:output (tool/success 42))    ;; => "42"   — a number would print differently per host
+
+(:metadata (tool/success "x" {:name "s"}))   ;; => {:name "s"}
+(contains? (tool/success "x") :metadata)     ;; => false — omitted, not nil
+```
+
+### 2. A failure is a value the loop keeps going with
+
+```clojure
+(require '[toolnexus.tool :as tool])
+
+(def lookup
+  (tool/tool {:name "lookup"
+              :description "Look a customer up by id"
+              :execute (fn [args]
+                         (if-let [id (:id args)]
+                           (tool/success (str "customer " id))
+                           ;; the model can read this and call again with an id
+                           (tool/failure "missing required argument: id")))}))
+
+(def tk (tool/toolkit [lookup]))
+
+(tool/execute tk "lookup" {})           ;; => {:output "missing required argument: id" :isError true}
+(tool/execute tk "lookup" {:id "42"})   ;; => {:output "customer 42" :isError false}
+```
+
+Nothing here throws, and nothing above the tool has to catch. That is the point of §0.8: the
+toolkit boundary converts every failure mode — a thrown exception, an unknown tool name, a dead MCP
+server — into this same two-key map.
+
+### 3. Metadata carries a suspension
+
+SPEC §10 does not add a return type for "I need the human first". A suspension is an ordinary
+failure result whose `metadata` holds a `:pending` Request, which is why every tool source can
+suspend without changing `:execute`'s signature.
+
+```clojure
+(require '[toolnexus.tool :as tool]
+         '[toolnexus.client :as client])
+
+(def approval-request
+  (client/make-request "input" "Approve the refund?" {}))
+
+(def result (tool/failure "Waiting for a response." {:pending approval-request}))
+;; => {:output "Waiting for a response." :isError true :metadata {:pending {...}}}
+
+(client/pending-of result)   ;; => the Request — this result IS a suspension
+(client/pending-of (tool/success "done"))   ;; => nil
+```
+
+The client loop branches on `metadata.pending` alone and never on `:isError`, so the flag stays
+`true` here (the call did not produce a usable answer) without the run being counted as a tool
+error — the `tool` observability event carries `isError:false` plus a pending marker so error-rate
+metrics and circuit breakers do not fire.
+
+## See also
+
+- [`toolnexus.tool/tool`](/api/clojure/types/tool/) — the Tool whose `:execute` returns this map
+- [The context argument](/api/clojure/types/context/) — the optional third argument to `execute`
+- [`toolnexus.client/suspend`](/api/clojure/suspension/pending/) — build the suspension result for you
+- [`toolnexus.client/pending-of`](/api/clojure/suspension/pending-of/) — read the Request back out

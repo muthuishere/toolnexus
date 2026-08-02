@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Extract every `test`-tagged example out of the API Reference pages and run it in
-# all six ports. Hermetic — no network, no live LLM.
+# all seven ports. Hermetic — no network, no live LLM.
 #
-#   bash site/tests/run-all.sh              # all six
+# The clojure runner is the odd one out on purpose: it runs each example FOUR ways
+# (JVM main + JVM repl + cljgo run + cljgo AOT), because that port's claim is that
+# one source tree behaves identically on two hosts, and a single-mode runner cannot
+# see that claim break.
+#
+#   bash site/tests/run-all.sh              # all seven
 #   bash site/tests/run-all.sh javascript   # one port
 #
 # A docs example that no longer compiles or no longer produces its asserted result
@@ -17,7 +22,7 @@ echo "==> extracting snippets"
 node "$REPO_ROOT/site/scripts/extract-snippets.mjs"
 echo ""
 
-declare -a LANGS=(javascript python golang java csharp elixir)
+declare -a LANGS=(javascript python golang java csharp elixir clojure)
 declare -a FAILED=()
 
 for lang in "${LANGS[@]}"; do

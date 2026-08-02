@@ -1,0 +1,89 @@
+---
+title: "Relay tools — declaration-only"
+description: "Declare a tool the host executes, not the library: the call rides out on the suspension. — Clojure."
+sidebar:
+  label: "suspension / relay"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+<Aside type="caution" title="Not available in Clojure">
+There is no relay tool in this port. The SPEC §10 addendum landed as a Go-only preview
+(`golang/relay.go`); none of the other six ports ship one, and neither does Clojure.
+</Aside>
+
+Declare a tool the host executes, not the library: the call rides out on the suspension.
+
+## What to use instead
+
+Build the tool normally and have its `:execute` suspend instead of doing the work. The arguments
+the model supplied are already in your hands, so putting them on the `Request`'s `:data` gives you
+the same thing a relay does — a declared, schema'd tool whose execution happens somewhere else.
+
+```clojure
+(require '[toolnexus.tool :as tool]
+         '[toolnexus.client :as client]
+         '[koine.json :as json])
+
+(defn relayed
+  "A tool the model can call but this process cannot run: the call is handed
+  out on the suspension and the answer comes back as the result."
+  [nm description schema]
+  (tool/tool
+    {:name         nm
+     :description  description
+     :input-schema schema
+     :execute
+     (fn ([args]
+          ;; nothing is executed here — the call itself is the payload
+          (client/suspend
+            (client/make-request "input" (str "Execute " nm " on the device")
+                                 {:data {:tool nm :args args :schema schema}})
+            (str "Awaiting host execution of " nm)))
+       ([_args ctx]
+        ;; whatever the host ran, verbatim
+        (tool/success (json/write-str (get-in ctx [:answer :data])))))}))
+
+(def device-toolkit
+  (tool/toolkit
+    [(relayed "read_sensor" "Read a sensor on the paired device"
+              {:type "object"
+               :properties {:sensor {:type "string"}}
+               :required ["sensor"]})]))
+```
+
+The host side is the `:wait-for` slot, or the `"pending"` outcome if the executor is out of
+process:
+
+```clojure
+(def llm
+  (client/create-client
+    {:base-url "https://api.openai.com/v1"
+     :model    "gpt-4.1"
+     :wait-for (fn [request]
+                 (let [{:keys [tool args]} (:data request)]
+                   ;; ship the call to whoever can actually run it, block for the reply
+                   (client/make-answer (:id request) true
+                                       (invoke-on-device! tool args))))}))
+
+(client/run llm "What is the boiler temperature?" {:toolkit device-toolkit})
+```
+
+Two differences from a real relay are worth knowing before you rely on this. The tool still needs a
+local `:execute`, so the declaration is not quite free — that is a few lines, not a design problem.
+More importantly, only the **first** suspension in a turn survives when there is no `:wait-for`:
+later ones are dropped from the transcript and re-suspend on the next run. With `:wait-for` set,
+every suspension in the turn resolves, sequentially in call order, so a batch of relayed calls
+works — but a fire-and-forget host that relies on collecting several parked calls at once will only
+ever see one.
+
+## See also
+
+- [`toolnexus.client/suspend`](/api/clojure/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`toolnexus.client/auth-required`](/api/clojure/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`toolnexus.client/create-client`](/api/clojure/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`toolnexus.client/pending-of`](/api/clojure/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.

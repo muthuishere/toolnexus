@@ -33,6 +33,12 @@ inprogress.md
 # private launch/marketing drafts (not for the public repo)
 marketing/
 
+# Clojure port
+clojure/**/.cpcache/
+clojure/**/target/
+clojure/**/build.lock.edn
+.nrepl-port
+
 # docs example harness scratch
 site/tests/.work/
 site/tests/snippets/

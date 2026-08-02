@@ -1,6 +1,6 @@
 ---
 title: Native tools — your own functions
-description: Wrap a plain function as a tool that joins the toolkit, in all six languages.
+description: Wrap a plain function as a tool that joins the toolkit, in all seven languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -90,6 +90,21 @@ add = Toolnexus.define_tool(
   execute: fn %{"a" => a, "b" => b}, _ctx -> to_string(a + b) end
 )
 tk = Toolnexus.Toolkit.register(tk, [add])
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.core :as tn] '[toolnexus.native :as native])
+
+(def add
+  (native/native-tool
+    {:name "add" :description "Add two numbers and return the sum."
+     :input-schema {:type "object"
+                    :properties {:a {:type "number"} :b {:type "number"}}
+                    :required ["a" "b"]}
+     :run (fn [{:keys [a b]}] (str (+ a b)))}))
+;; hand your tools to the toolkit builder:
+(def tk (tn/build {:tools [add]}))
 ```
 </TabItem>
 </Tabs>

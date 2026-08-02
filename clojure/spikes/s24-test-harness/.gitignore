@@ -1,0 +1,4 @@
+.cpcache/
+harness
+empty-project/emptyproj
+empty-project/build.lock.edn

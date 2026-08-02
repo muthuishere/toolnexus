@@ -1,0 +1,189 @@
+---
+title: "toolnexus.translate/translate"
+description: "Declare a toolkit to a provider and translate one request/response without executing anything or keeping state. — Clojure."
+sidebar:
+  label: "toolnexus.translate/translate"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/translate.cljc">clojure/src/toolnexus/translate.cljc</a>
+</p>
+
+```clojure
+(toolnexus.translate/translate client
+  {:messages   [{:role "user" :content "what is the weather in Chennai?"}]
+   :tools      [...]        ; OpenAI `tools` array, verbatim — declaration only
+   :toolkit    tk           ; declared through the §5 adapters, NEVER executed
+   :toolChoice "auto"       ; OpenAI `tool_choice`, mapped for anthropic
+   :system     "You are terse."
+   :maxTokens  1024})
+
+;; => {:text         ""
+;;     :toolCalls    [{:id "call_1" :name "get_weather" :arguments "{\"city\":\"Chennai\"}"}]
+;;     :finishReason "tool_calls"          ; stop | tool_calls | length | content_filter
+;;     :usage        {:prompt-tokens 42 :completion-tokens 18 :total-tokens 60}
+;;     :model        "claude-sonnet-4-6"
+;;     :raw          {...}}                ; the provider's decoded response
+```
+
+`translate` is toolnexus used as a pure **wire-format translator**: OpenAI shapes in, exactly one
+provider call, OpenAI shapes out. No agent loop, no tool execution, no conversation state — so it is
+safe to call statelessly and concurrently, and the caller keeps full ownership of the transcript.
+
+Against an OpenAI-style client it is near-passthrough: `messages`, `tools` and `tool_choice` go out
+as given. Against an Anthropic-style client it does the real work — the transcript is restructured by
+[`openai-messages-to-anthropic`](/api/clojure/translate/inbound/), tools are converted to
+`input_schema` declarations, `tool_choice` is mapped, and the response's `tool_use` blocks are read
+back into OpenAI `tool_calls` with `arguments` as a JSON **string**. One shape in, one shape out,
+whichever provider is behind it.
+
+**Nothing executes, ever.** There is no execution path in this namespace. A `:toolkit` is declared
+through the adapters and never run — that is a property of the design, not of configuration. What
+comes back is the model's *intent* to call a tool; running it, appending the result and calling again
+is the caller's loop.
+
+Retries and backoff, request-param merging and the `llm` observability event are shared with the
+agent loop through the same internal provider call, so a translating caller loses neither resilience
+nor metrics.
+
+The camelCase keys are deliberate. `:toolCalls`, `:finishReason`, `:toolChoice` and `:maxTokens` are
+the cross-port §11 contract, and a keyword's name is the wire key — renaming them into kebab-case
+would be exactly the drift the ports exist to prevent. `:usage` alone uses the port's idiomatic §8
+shape, because Usage never crosses the wire.
+
+## When to use it
+
+- **The caller owns the conversation.** The standard OpenAI function-calling posture: every request
+  carries the full history including prior tool results, and your code decides what runs.
+- **You are a proxy or a gateway.** Accept OpenAI-shaped requests from existing clients and serve
+  them from an Anthropic-style provider without touching either side.
+- **Stateless and concurrent.** Nothing is stored between calls, so N in-flight translations from one
+  client map are fine.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use client/run when toolnexus should own the loop">
+[`toolnexus.client/run`](/api/clojure/client/run/) is the other posture: it executes tools, appends
+results, loops to `:max-turns`, honours §10 suspension through `:wait-for` and can persist a
+transcript. Take it when you want an agent. Take `translate` when you want a translator — when the
+thing on the other side is already a conforming OpenAI client and toolnexus's job is the wire format,
+not the control flow. Two postures, two mechanisms; mixing them means two places own the history.
+</Aside>
+
+## Examples
+
+### One turn against an Anthropic-style provider, in OpenAI shape
+
+```clojure
+(require '[toolnexus.client :as client]
+         '[toolnexus.translate :as translate])
+
+(def c (client/create-client {:base-url "https://api.anthropic.com"
+                              :style    "anthropic"
+                              :model    "claude-sonnet-4-6"}))
+
+(def r (translate/translate c {:messages [{:role "user" :content "Say hi."}]}))
+
+(:text r)          ;; => "Hi."
+(:finishReason r)  ;; => "stop"
+(:usage r)         ;; => {:prompt-tokens ... :completion-tokens ... :total-tokens ...}
+```
+
+### Declare a toolkit, run the tool yourself, translate again
+
+```clojure
+(require '[toolnexus.core :as core]
+         '[toolnexus.client :as client]
+         '[toolnexus.translate :as translate])
+
+(def tk (core/build {:skills "examples/skills"}))
+(def c  (client/create-client {:base-url "https://api.openai.com/v1"
+                               :model    "gpt-4.1"}))
+
+(def turn1
+  (translate/translate c {:messages [{:role "user" :content "load the hello-world skill"}]
+                          :toolkit  tk}))
+
+;; The model asked for a tool. translate did NOT run it — you do.
+(def call (first (:toolCalls turn1)))
+(def result (core/execute tk (:name call) (translate/args-object (:arguments call))))
+
+;; Append the assistant turn and the tool result, then translate the next turn.
+(def turn2
+  (translate/translate c
+    {:messages [{:role "user" :content "load the hello-world skill"}
+                {:role "assistant" :content (:text turn1)
+                 :tool_calls (translate/tool-calls-json turn1)}
+                {:role "tool" :tool_call_id (:id call) :content (:output result)}]
+     :toolkit  tk}))
+
+(:text turn2)
+```
+
+`tool-calls-json` renders `:toolCalls` back into the OpenAI `tool_calls` array shape, and
+`args-object` parses `:arguments` — which is a JSON string on the wire — into a map for execution.
+
+### A gateway: OpenAI in, whichever provider out
+
+```clojure
+(require '[toolnexus.translate :as translate]
+         '[koine.json :as json])
+
+(defn handle [req openai-client anthropic-client]
+  (let [body (json/read-str (:body req))
+        c    (if (= "anthropic" (:upstream body)) anthropic-client openai-client)
+        r    (translate/translate c {:messages   (:messages body)
+                                     :tools      (:tools body)
+                                     :toolChoice (:tool_choice body)
+                                     :maxTokens  (:max_tokens body)})]
+    {:status  200
+     :headers {"content-type" "application/json"}
+     :body    (json/write-str
+                {:model   (:model r)
+                 :choices [{:index 0
+                            :finish_reason (:finishReason r)
+                            :message (cond-> {:role "assistant" :content (:text r)}
+                                       (seq (:toolCalls r))
+                                       (assoc :tool_calls (translate/tool-calls-json r)))}]})}))
+```
+
+Callers keep speaking OpenAI. Swapping the upstream is one binding.
+
+## Request keys
+
+| Key | Meaning |
+|---|---|
+| `:messages` | The OpenAI `messages` array, verbatim — including assistant turns with `tool_calls` and `tool`-role results carrying `tool_call_id`. |
+| `:tools` | The OpenAI `tools` array, verbatim. Declaration only. |
+| `:toolkit` | An ordinary toolkit, declared via the §5 adapters and never executed. Composes with `:tools`; toolkit declarations come first. |
+| `:toolChoice` | The OpenAI `tool_choice`, verbatim. `"required"`/`"any"` → Anthropic `any`, `"none"` → `none`, a named function → `tool`; `"auto"` and anything unrecognized send nothing. |
+| `:system` | Overrides the client's system prompt. On the OpenAI path it is prepended as a `system` message only when the transcript has none. |
+| `:maxTokens` | Overrides the per-provider default. Anthropic requires one, so it defaults to `4096` there. |
+
+### Return keys
+
+| Key | Type | What it is |
+|---|---|---|
+| `:text` | string | The assistant text. `""` when the turn was tool calls only. |
+| `:toolCalls` | vector | `[{:id :name :arguments}]`. `:arguments` is a **JSON string**, the OpenAI wire form. |
+| `:finishReason` | string | `"stop"`, `"tool_calls"`, `"length"` or `"content_filter"`. Tool calls always win; on the OpenAI path the provider's own `finish_reason` is preferred when it sent one. |
+| `:usage` | map | `{:prompt-tokens :completion-tokens :total-tokens}`. |
+| `:model` | string | The client's model. |
+| `:raw` | map | The provider's decoded response, untouched — read anything not surfaced above from here. |
+
+### Helpers in the same namespace
+
+| Function | Use |
+|---|---|
+| `tool-calls-json` | Render `:toolCalls` as an OpenAI `tool_calls` array for an assistant message. |
+| `args-object` | Parse a call's `arguments` into a map. Accepts the object form too; malformed input yields `{}`. |
+| `args-string` | The reverse — render arguments as the JSON string form. |
+| `finish-reason-for` | The mapping rule on its own, if you are assembling a response by hand. |
+
+## See also
+
+- [`toolnexus.translate/openai-messages-to-anthropic`](/api/clojure/translate/inbound/) — the transcript conversion underneath the anthropic path
+- [`toolnexus.client/run`](/api/clojure/client/run/) — the other posture: toolnexus owns the loop
+- [`toolnexus.adapter/to-openai`](/api/clojure/adapters/openai/) — the declaration-only half, without a provider call

@@ -1,0 +1,202 @@
+---
+title: "toolnexus.mcp/from-config"
+description: "Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool. — Clojure."
+sidebar:
+  label: "toolnexus.mcp/from-config"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/mcp.cljc">clojure/src/toolnexus/mcp.cljc</a>
+</p>
+
+```clojure
+(toolnexus.mcp/from-config config)             ; config: a JSON string or an already-parsed map
+(toolnexus.mcp/from-config config conn-opts)   ; conn-opts: {:wait-for (fn [request] answer)}
+
+;; =>
+{:tools       [{...} {...}]                          ; §0.1 Tools, sorted by name
+ :statuses    {"docs" "connected" "old" "failed" "off" "disabled"}
+ :errors      {"old" "mcp server \"old\" failed at initialize: transport (connect-failed)"}
+ :connections [{:name "docs" :status "connected" :transport {...} :server-info {...} :tools [...]}]}
+```
+
+The whole MCP source in one call. `from-config` runs
+[`parse-config`](/api/clojure/mcp/parse-config/) over the config, then connects each server in
+turn — `initialize`, `notifications/initialized`, `tools/list` (following `nextCursor`) — and turns
+every listed remote tool into an ordinary [Tool](/api/clojure/types/tool/) named
+`sanitize(server)_sanitize(tool)`.
+
+**Local stdio and remote streamable-HTTP are the same code path.** A transport here is data —
+`{:rpc! fn :notify! fn :close! fn …}` — so the two legs differ only in those closures, and
+everything above them (lifecycle, paging, result shaping, naming) is written exactly once and
+cannot drift between them.
+
+**Servers are connected serially, in name order.** Serial is slower; it is also deterministic, and
+determinism is the premise of the whole project. A tool-name collision resolved by whichever server
+happened to answer first is exactly the drift these ports exist to prevent.
+
+**Nothing throws across this boundary.** SPEC §0.3 requires a bad server to be isolated, and an
+exception crossing here is how "isolated" quietly becomes "fatal". Every failure is data with a
+stable name — `transport`, `http-status`, `malformed-body`, `rpc-error`, `timeout`, `peer-eof`,
+`closed` — the same vocabulary for both transports, so your retry logic never has to know which leg
+it is on.
+
+The optional second argument threads the §10 host resolver into every server it connects. With a
+`:wait-for` present, `initialize` advertises `capabilities.elicitation` and a server may ask the user
+something mid-`tools/call`; **without one the capability is not advertised at all**, so a
+spec-compliant server never asks. Promising a capability you would then have to refuse is worse than
+degrading quietly.
+
+## When to use it
+
+- **MCP is your only source** — a CLI, a bridge, a test — and you want the tools without the rest of
+  the toolkit machinery.
+- **You need the per-server status.** `:statuses` and `:errors` are what a doctor command, a startup
+  health check or a dashboard reads.
+- **You want the connections.** `:connections` carries the transport, the peer's `serverInfo` and,
+  for a failed stdio server, the child's last stderr lines — usually the only thing that explains
+  why it died.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use core/build when MCP is one source among several">
+[`toolnexus.core/build`](/api/clojure/toolkit/create/) calls this for you and merges the result with
+builtins, skills and your own Tools **in the order SPEC §0.11 requires** — MCP registered last so it
+wins a name collision against a builtin. Calling `from-config` yourself means you own that merge. Do
+it when MCP is the only source, or when you want the raw connections; use `build` otherwise.
+</Aside>
+
+Reach for [`parse-config`](/api/clojure/mcp/parse-config/) instead when you only want to know whether
+the config is well-formed. It touches no network and starts no process.
+
+## Arguments
+
+| Argument | What it accepts |
+|---|---|
+| `config` | A JSON string, parsed with keyword keys · `{:mcpServers {…}}`, with `servers` and `mcp` as wrapper aliases · or a bare map of servers, in which case the object itself is the server map minus the reserved sibling keys `:builtins`, `:agents`, `:a2a`, `:mcpServer`. |
+| `conn-opts` | Optional. `{:wait-for (fn [request] answer)}` — the one §10 host resolver, applied to every server. Omit it and no server is told the client can be elicited. |
+
+## What you get back
+
+| Key | What it is |
+|---|---|
+| `:tools` | Every connected server's tools, flattened and sorted by name. |
+| `:statuses` | `server -> "connected"` / `"disabled"` / `"failed"`. Every configured server appears. |
+| `:errors` | `server -> message` for the failed ones only. The message names the phase and the stable error, and appends the child's stderr when there is any. |
+| `:connections` | One connection map per server, for `disconnect` / `disconnect-all` and for `:server-info`, `:phase`, `:error` and `:exit-code`. |
+
+## Examples
+
+### 1. Connect a config and call one of its tools
+
+```clojure
+(require '[toolnexus.mcp :as mcp]
+         '[toolnexus.tool :as tool])
+
+(def res (mcp/from-config (slurp "mcp.json")))
+
+(try
+  (:statuses res)                 ;; => {"docs" "connected"}
+  (mapv :name (:tools res))       ;; => ["docs_fetch" "docs_search"] — sorted, server-prefixed
+
+  (let [tk (tool/toolkit (:tools res))]
+    (tool/execute tk "docs_search" {:query "suspension"}))
+  ;; => {:output "…" :isError false}
+
+  (finally
+    (mcp/disconnect-all res)))
+```
+
+The tool name is not the remote name: SPEC §0.2 joins the sanitized server name and the sanitized
+remote name with `_`. `toolnexus.mcp/mcp-tool-name` computes it, so you can predict a name from the
+config without connecting. Each Tool also keeps `:server` and `:remote-name` for when you need to
+get back to the original.
+
+### 2. One dead server does not sink the others
+
+```clojure
+(require '[toolnexus.mcp :as mcp])
+
+(def res
+  (mcp/from-config
+    {:mcpServers {"live" {:url "http://127.0.0.1:8931/mcp" :timeout 5000}
+                  "dead" {:url "http://127.0.0.1:1/mcp"    :timeout 2000}
+                  "off"  {:url "http://127.0.0.1:8931/mcp" :enabled false}}}))
+
+(:statuses res)
+;; => {"live" "connected" "dead" "failed" "off" "disabled"}
+
+;; the live server's tools are all there, and usable
+(count (:tools res))
+
+;; the failure is reported with a phase and a stable error name
+(get (:errors res) "dead")
+;; => "mcp server \"dead\" failed at initialize: transport (connect-failed)"
+
+(->> (:connections res)
+     (filter #(= "dead" (:name %)))
+     first
+     :error :error)
+;; => "transport"
+
+(mcp/disconnect-all res)
+```
+
+A disabled server is never contacted at all — `disabled:true` and `enabled:false` are the same
+statement, and both mean no process is spawned and no request is sent.
+
+### 3. Letting a server ask the user, mid-call
+
+```clojure
+(require '[toolnexus.mcp :as mcp]
+         '[toolnexus.client :as client])
+
+(def res
+  (mcp/from-config {:mcpServers {"forms" {:command ["node" "forms-server.js"] :timeout 5000}}}
+                   {:wait-for (fn [request]
+                                ;; a real host shows this to a human and blocks
+                                (println (:prompt request))
+                                (client/make-answer (:id request) true {:name "Muthu"}))}))
+```
+
+The elicitation is answered **inline**, while the `tools/call` that triggered it is still in flight —
+nothing re-executes and no suspension reaches your loop. Drop the second argument and the same
+config connects with a bare `capabilities`, which is the byte-identical behaviour of every version
+before this option existed. See
+[`elicitation->request`](/api/clojure/mcp/elicitation/) for what your resolver receives and what it
+may return.
+
+### 4. Reading a failure properly, including the child's stderr
+
+```clojure
+(require '[toolnexus.mcp :as mcp])
+
+(def res (mcp/from-config {:mcpServers {"broken" {:command ["node" "typo.js"] :timeout 5000}}}))
+
+(def conn (first (:connections res)))
+
+(:status conn)                        ;; => "failed"
+(:phase conn)                         ;; => "initialize" — how far it got
+(get-in conn [:error :error])         ;; => a stable name: "transport" / "timeout" / "rpc-error" / …
+(:exit-code conn)                     ;; => the child's exit status, or nil when genuinely unknown
+(mcp/stderr conn)                     ;; => the last stderr lines the child managed to write
+
+(mcp/disconnect-all res)
+```
+
+A stdio peer that stops talking gives you EOF, and EOF alone cannot say whether the child exited,
+crashed, or merely closed stdout. The port waits up to ~250 ms for the process reaper and then
+reports `peer-exited (status N)` when it knows and `peer-eof (stdout closed, exit status unknown)`
+when it does not — rather than confidently claiming the peer is still alive. The status says *that*
+it died; `mcp/stderr` says *why*.
+
+## See also
+
+- [`toolnexus.mcp/parse-config`](/api/clojure/mcp/parse-config/) — validate the config offline first
+- [`toolnexus.mcp/elicitation->request`](/api/clojure/mcp/elicitation/) — the §10 bridge `:wait-for` drives
+- [Inventory without connecting](/api/clojure/mcp/list-tools/) — why `:statuses` is the closest thing
+- [Bounding a load](/api/clojure/mcp/load-with-context/) — `:timeout`, and how teardown is kept bounded
+- [`toolnexus.core/build`](/api/clojure/toolkit/create/) — MCP merged with every other source
+- [`toolnexus.tool/tool`](/api/clojure/types/tool/) — the shape each returned tool has

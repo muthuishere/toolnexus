@@ -1,0 +1,193 @@
+---
+title: "toolnexus.skill/load-skills"
+description: "Supply skills as data, narrow them per agent with an allowlist, and cap the sampled file list. — Clojure."
+sidebar:
+  label: "toolnexus.skill/load-skills"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/skill.cljc">clojure/src/toolnexus/skill.cljc</a>
+</p>
+
+```clojure
+(load-skills {:dirs         ["project/skills"]          ; roots, as usual
+              :skills       [{:name        "release"
+                              :description "Cut a release"
+                              :content     "1. Bump the version."
+                              :resources   ["checklist.md"]
+                              :base        "skill://release/"}]
+              :filter       {"release" true "deploy" true}
+              :sample-limit 10})
+
+;; => {:skills           [{… :origin "fs" | "logical"}]
+;;     :by-name          {"release" {…}}
+;;     :skipped          [{:location "skill://" :reason "missing-name"}]
+;;     :filter-unmatched ["typo"]
+;;     :sample-limit     10}
+```
+
+There is one function, not two. `load-skills` takes a root, a seq of roots, **or** an options map,
+and the map is where everything beyond the filesystem lives: skills supplied as data, the per-agent
+allowlist, and the sibling-file sampling limit. A map counts as options when it carries any of
+`:dirs`, `:skills`, `:filter` or `:sample-limit`; a map without them is read as a single skill
+definition, so `(load-skills {:name "release" :content "…"})` also works.
+
+Sources are collected in a fixed order — every root, in the order given, then the data definitions
+— and the existing first-name-wins rule resolves collisions across them without a second rule. A
+disk skill therefore shadows a data skill of the same name, and the data one comes back as a
+`"duplicate-name"` skip.
+
+A data skill never touches a disk. Its `:origin` is `"logical"` and its `:base` is
+`skill://<name>/` unless you supply one, so no host path can leak into the model's context from a
+source that was never on a filesystem. Its `<skill_files>` block lists the `:resources` you
+supplied, in the order supplied, and is omitted entirely when it has none — an on-disk skill, by
+contrast, emits the block even when the directory holds nothing but the `SKILL.md`.
+
+## When to use it
+
+- **Skills that are not files** — a database row, an HTTP response, an EDN blob shipped with the
+  app. Build the maps, pass them as `:skills`.
+- **Several agents, one tree** — load once per agent with a different `:filter` and each sees a
+  different subset of the same skills.
+- **Trimming the disclosed file list** — `:sample-limit` caps the `<skill_files>` block or removes
+  it, which matters for a skill sitting in a directory full of assets.
+- **Combining the two** — a shared on-disk tree plus a few per-tenant skills assembled at runtime,
+  in one catalog, under one collision rule.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Plain roots stay plain">
+If everything is on disk and every agent sees everything,
+[`(load-skills "examples/skills")`](/api/clojure/skills/load/) is the whole call. The option map is
+not a different function and not a different result shape, so moving to it later changes one
+argument and nothing else.
+</Aside>
+
+There is **no lazy provider slot** — nothing takes a function and calls it during load. Resolve your
+source first and pass the result to `:skills`. The difference that matters is isolation: in the
+other ports a throwing provider is caught and warned about, so here the `try` is yours to write.
+
+```clojure
+(def defs (try (skills-from-registry) (catch Throwable _ [])))
+(skill/load-skills {:dirs ["examples/skills"] :skills defs})
+```
+
+## Examples
+
+### Skills assembled in process
+
+```clojure
+(require '[toolnexus.skill :as skill])
+
+(def loaded
+  (skill/load-skills
+    {:skills [{:name        "release"
+               :description "Cut a release"
+               :content     "1. Bump the version.\n2. Tag it.\n3. Push the tag."
+               :resources   ["checklist.md" "changelog-template.md"]}
+              {:name        "triage"
+               :description "Triage an incoming bug report"
+               :content     "1. Reproduce it."}
+              ;; No :name — a typed skip, not a crash.
+              {:description "Anonymous" :content "…"}]}))
+
+(map (juxt :name :origin :base) (:skills loaded))
+;; => (["release" "logical" "skill://release/"] ["triage" "logical" "skill://triage/"])
+
+(:skipped loaded)                ;=> [{:location "skill://" :reason "missing-name"}]
+
+;; Supplied resources are what gets disclosed; nothing is globbed.
+(:output (skill/execute-skill loaded "release"))
+;; => "…<skill_files>\n<file>checklist.md</file>\n<file>changelog-template.md</file>\n</skill_files>…"
+
+;; An instruction-only skill has nothing to disclose, so it emits no block at all.
+(:output (skill/execute-skill loaded "triage"))
+```
+
+Supply `:base` yourself when the resources are addressable somewhere real — an `https://` prefix,
+say — and it replaces both the logical base and the skill's `:location`.
+
+### One tree, two agents, two allowlists
+
+```clojure
+(require '[toolnexus.skill :as skill])
+
+(def base {:dirs ["team/skills"]})
+
+(def deployer (skill/load-skills (assoc base :filter {"deploy" true "rollback" true})))
+(def support  (skill/load-skills (assoc base :filter {"deploy" false})))
+
+(map :name (:skills deployer))    ;=> ("deploy" "rollback")
+(map :name (:skills support))     ;=> ("rollback" "triage" "postmortem")
+
+;; A name that matched nothing is not an error — but it is returned and warned,
+;; so an allowlist typo narrows the agent visibly instead of silently.
+(:filter-unmatched (skill/load-skills (assoc base :filter {"deply" true})))
+;; => ["deply"]
+```
+
+| `:filter` value | Meaning |
+|---|---|
+| `nil` or `{}` | Every discovered skill. |
+| at least one `true` | Allowlist — exactly the true-mapped names survive. |
+| only `false` values | Drop-list over the all-on baseline. |
+| a name matching nothing | Ignored, returned in `:filter-unmatched`, warned on stdout. |
+
+Keys may be strings or keywords; both are read as the skill's name. Note that this is an
+allowlist-when-any-true rule, which is *not* how the builtins toggle behaves — see the caution on
+[`enabled-builtins`](/api/clojure/builtins/select/).
+
+### Capping and disabling the disclosed file list
+
+```clojure
+(require '[toolnexus.skill :as skill]
+         '[toolnexus.tool :as tool])
+
+;; 0 (the default) => 10 files.  n > 0 => at most n.  -1 => no block at all.
+(def loaded (skill/load-skills {:dirs ["examples/skills"] :sample-limit 3}))
+
+;; The limit rides on the loaded map, so the tool built from it inherits it.
+(def tk (tool/toolkit [(skill/skill-tool loaded)]))
+(:output (tool/execute tk "skill" {"name" "hello-world"}))
+
+;; …or override per call.
+(:output (skill/execute-skill loaded "hello-world" -1))
+;; the <skill_files> block AND its "Note: file list is sampled." line are both gone
+```
+
+Sampled files are sorted, exclude every `SKILL.md`, and skip `node_modules` and `.git`. The sort is
+this port's choice: the shipped ports slice raw directory-read order, which two runtimes are not
+guaranteed to agree on, and a port whose whole claim is byte-identical output on two hosts cannot
+depend on it.
+
+| Option | Default | What it does |
+|---|---|---|
+| `:dirs` | `[]` | Filesystem roots walked for `**/SKILL.md`. A bare string is accepted as a single root. |
+| `:skills` | `[]` | Skill definitions as maps: `:name` (required), `:description`, `:content`, `:resources`, `:base`. Collected after the roots. |
+| `:filter` | `nil` | Per-agent allowlist or drop-list, applied after discovery. |
+| `:sample-limit` | `0` | Sibling-file cap. `0` means 10, `n > 0` means `n`, `-1` disables the block. |
+
+| Return key | What it is |
+|---|---|
+| `:skills` | Surviving skills in collection order, after `:filter`. |
+| `:by-name` | The same skills keyed by name — what `execute-skill` looks up. |
+| `:skipped` | Rejected candidates, including nameless data definitions and cross-source duplicates. |
+| `:filter-unmatched` | Sorted filter names that matched no skill. |
+| `:sample-limit` | The limit as given, carried into `skill-tool`. |
+
+`toolnexus.core/build` passes `:skills` straight through, so the option map works there too:
+
+```clojure
+(require '[toolnexus.core :as toolnexus])
+
+(toolnexus/build {:skills {:dirs   ["examples/skills"]
+                           :skills [{:name "release" :content "1. Bump the version."}]
+                           :filter {"hello-world" true "release" true}}})
+```
+
+## See also
+
+- [`toolnexus.skill/load-skills` with plain roots](/api/clojure/skills/load/) — the short form, and how the loaded map becomes the `skill` tool.
+- [`toolnexus.skill/list-skills`](/api/clojure/skills/list/) — the same discovery as a report; it ignores `:filter`, because the inventory is what you author an allowlist from.

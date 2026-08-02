@@ -1,0 +1,145 @@
+---
+title: "toolnexus.builtin/enabled-builtins"
+description: "Pick which built-in file/shell/web tools are in play, by name or by source toggle. — Clojure."
+sidebar:
+  label: "toolnexus.builtin/enabled-builtins"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/builtin.cljc">clojure/src/toolnexus/builtin.cljc</a>
+</p>
+
+```clojure
+(enabled-builtins opt)        ; => [Tool …]   the builtins this config exposes
+(enabled-builtin-names opt)   ; => ["bash" "read" …]
+(source-on? opt)              ; => true | false   the whole-source gate
+(builtin-toolkit opt)         ; => {:tools {…} :sources {"builtin" "connected" | "disabled"}}
+
+;; opt — the SPEC §0.11 toggle, and the same value :builtins takes on
+;;       toolnexus.core/build
+;;   nil | true          ; absent => on
+;;   false               ; whole source off
+;;   {:disabled true}    ; whole source off
+;;   {:enabled false}    ; whole source off
+;;   {:tools {:bash false}}   ; per-tool drop-list over the all-on baseline
+```
+
+`enabled-builtins` answers one question: given this configuration, which of the ten built-in tools
+exist? It is a pure function over a toggle value, returning the tools themselves in SPEC table
+order, so you can inspect the decision without building a toolkit around it.
+
+The whole-source gate **short-circuits**. If `opt` turns the source off, the `:tools` map is never
+consulted at all — `{:disabled true :tools {:bash true}}` yields no tools, not one. `:disabled true`
+wins over `:enabled`, and an absent toggle means on.
+
+`builtin-toolkit` is the same decision wrapped as a toolkit, with a `"builtin"` source status of
+`"connected"` or `"disabled"`. `toolnexus.core/build` calls it first, before skills, your own tools
+and MCP, because registration order is what implements §0.11's rule that an MCP tool wins a name
+collision against a builtin of the same name.
+
+## When to use it
+
+- **Inspecting a policy before you apply it** — print `enabled-builtin-names` for a config and see
+  exactly what the agent will be able to do.
+- **Removing the dangerous ones** — drop `bash`, `write`, `edit` and `apply_patch` for a read-only
+  agent while keeping `read`, `grep` and `glob`.
+- **Turning the source off entirely** — an agent whose only tools should be your own or an MCP
+  server's.
+- **Building the toolkit yourself** — `builtin-toolkit` when you are assembling sources by hand
+  rather than through `toolnexus.core/build`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Pass :builtins to build unless you need the decision as a value">
+`(toolnexus.core/build {:builtins {:tools {:bash false}}})` applies the same toggle, in the right
+registration order, with the source status filled in. Call `enabled-builtins` directly when you
+want the tools as data — to assert on them in a test, to log them, or to hand a subset to a toolkit
+you are constructing yourself. See also
+[`toolnexus.builtin/builtin-tools`](/api/clojure/builtins/create/), the unfiltered vector.
+</Aside>
+
+## Examples
+
+### The default, and turning the source off
+
+```clojure
+(require '[toolnexus.builtin :as builtin])
+
+(builtin/enabled-builtin-names nil)
+;; => ["bash" "read" "write" "edit" "grep" "glob" "webfetch" "question" "apply_patch" "todowrite"]
+
+;; Three ways to say off, one result.
+(builtin/enabled-builtins false)                ;=> []
+(builtin/enabled-builtins {:disabled true})     ;=> []
+(builtin/enabled-builtins {:enabled false})     ;=> []
+
+(builtin/source-on? {:disabled true})           ;=> false
+
+;; The status is reported, not silent — a disabled source still shows up.
+(:sources (builtin/builtin-toolkit false))      ;=> {"builtin" "disabled"}
+```
+
+Note the order: `enabled-builtins` returns tools in the SPEC §4A table order, while a toolkit's
+`tool-names` are always sorted. Two different orders, both deliberate.
+
+### A read-only agent
+
+```clojure
+(require '[toolnexus.builtin :as builtin]
+         '[toolnexus.core :as toolnexus])
+
+(def read-only
+  {:tools {:bash false :write false :edit false :apply_patch false}})
+
+(builtin/enabled-builtin-names read-only)
+;; => ["read" "grep" "glob" "webfetch" "question" "todowrite"]
+
+;; The same value goes straight to build.
+(def tk (toolnexus/build {:builtins read-only :skills "examples/skills"}))
+
+(toolnexus/tool-names tk)
+;; => ["glob" "grep" "question" "read" "skill" "todowrite" "webfetch"]
+```
+
+Keys in `:tools` are keywords matching the tool name. `apply_patch` and `todowrite` keep their
+underscore-free spellings exactly as §4A names them — `:apply_patch`, not `:apply-patch`.
+
+### The one case that does not mean what it looks like
+
+```clojure
+(require '[toolnexus.builtin :as builtin])
+
+;; A `true` value does NOT make this an allowlist.
+(builtin/enabled-builtin-names {:tools {:bash true}})
+;; => ["bash" "read" "write" "edit" "grep" "glob" "webfetch" "question" "apply_patch" "todowrite"]
+
+;; To get bash alone, drop the other nine.
+(builtin/enabled-builtin-names
+  {:tools (zipmap (map keyword (remove #{"bash"} builtin/builtin-names)) (repeat false))})
+;; => ["bash"]
+```
+
+| Toggle value | Result |
+|---|---|
+| absent / `nil` / `true` | All ten tools. |
+| `false` | No tools. `:tools` is not consulted. |
+| `{:disabled true}` | No tools, and this wins over any `:enabled`. |
+| `{:enabled false}` | No tools. |
+| `{:tools {:name false}}` | Every tool except the false-mapped ones. |
+| `{:tools {:name true}}` | Every tool. A `true` is a no-op over the all-on baseline. |
+
+<Aside type="caution" title="`true` in `:tools` is a drop-list no-op, and SPEC contradicts itself here">
+§4A and §0.11 define `:tools` as a name-to-boolean map applied on the all-on baseline: `false`
+drops, `true` or absent stays on. §3's skills filter and §2's MCP per-server filter describe
+themselves as identical to §4A but specify an allowlist instead — at least one `true` means only
+the true-mapped names survive. This port implements the §4A wording, because §4A owns builtins and
+§0.11 restates it. The contradiction is reported upstream; until it is resolved, write drop-lists
+here and do not assume the skills or MCP filters behave the same way.
+</Aside>
+
+## See also
+
+- [`toolnexus.builtin/builtin-tools`](/api/clojure/builtins/create/) — Construct every built-in tool directly, outside a toolkit.
+- [`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) — adding tools of your own next to the builtins.

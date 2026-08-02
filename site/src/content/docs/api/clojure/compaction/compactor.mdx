@@ -1,0 +1,167 @@
+---
+title: "toolnexus.agents.compaction/compactor"
+description: "Summarise older turns when the transcript grows, so a long-lived agent stays inside its context window. — Clojure."
+sidebar:
+  label: "toolnexus.agents.compaction/compactor"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7F</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/agents/compaction.cljc">clojure/src/toolnexus/agents/compaction.cljc</a>
+</p>
+
+<Aside type="tip" title="Supported on Clojure (JVM) and on cljgo">
+One `.cljc` source tree, zero reader conditionals, verified in all five execution modes —
+`jvm-main`, `jvm-repl`, `cljgo-aot`, `cljgo-run`, `cljgo-repl`. Every example below is extracted
+and executed against `deps.edn` on the JVM **and** through `build.cljgo` on cljgo, including both
+REPLs.
+</Aside>
+
+```clojure
+(compactor {:max-tokens      120000            ; REQUIRED — compact only when the estimate exceeds this
+            :summarize       (fn [older] "…")  ; REQUIRED — MAY call an LLM; your choice
+            :keep-tail       60000             ; default: half of :max-tokens
+            :count-tokens    estimate-tokens   ; default: ceil(chars/4) summed over messages
+            :flush-to-memory false})           ; default: off
+;; => (fn [event] …) returning {:messages [...]} when it compacts, nil when it does not
+```
+
+`compactor` builds a `:before-llm` hook (§8) — the same seam `toolnexus.client/create-client`
+takes under `:hooks`. Below `:max-tokens` it returns `nil` and the transcript is untouched,
+byte-identical to a run with no compactor. Above it, the transcript becomes
+`[leading system message (verbatim), summary system message, (flush reminder?), …tail]`, where the
+tail is the largest **user-boundary** slice that fits `:keep-tail` — so a `tool` message is never
+orphaned from the `assistant` turn carrying its `tool_call_id`.
+
+## When to use it
+
+- **A long-lived agent's transcript keeps growing** and it must stay inside the model's context
+  window without losing the thread.
+- **You want summarisation on your own terms** — `:summarize` is a plain function. Call an LLM
+  from it, or don't; `compactor` never makes a model call on your behalf.
+- **You want it inside the existing loop**, not a second code path — it rides `:before-llm`, the
+  same hook whose rewritten transcript flows into the run result and the conversation store.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="It's a hook, not a different client">
+There is no "compacting client". `compactor` returns an ordinary function; hand it to
+`(create-client {:hooks {:before-llm …}})` and the loop behaves exactly as before, except the
+transcript it sends may now be a summary plus a tail. Leave it out and nothing changes shape.
+</Aside>
+
+## Examples
+
+### 1. Under budget is a no-op
+
+The hook returns `nil`, which the loop reads as "change nothing" — which is what makes a compactor
+safe to wire in before you actually need it.
+
+```clojure test
+(require '[toolnexus.agents.compaction :as compaction])
+
+(def msgs [{:role "system" :content "you are terse"}
+           {:role "user" :content "hello"}
+           {:role "assistant" :content "hi"}])
+
+(def hook (compaction/compactor {:max-tokens 100000
+                                 :summarize  (fn [_] "never called")}))
+
+(println "under budget =>" (pr-str (hook {:messages msgs})))
+(assert (nil? (hook {:messages msgs})))
+(println "OK")
+```
+
+### 2. Over budget — system prompt kept, older turns summarised
+
+`:count-tokens` is injected so the example is deterministic: one "token" per message makes
+`:max-tokens 4` mean "more than four messages".
+
+```clojure test
+(require '[toolnexus.agents.compaction :as compaction]
+         '[clojure.string :as str])
+
+(def transcript
+  (into [{:role "system" :content "you are terse"}]
+        (mapcat (fn [i] [{:role "user" :content (str "q" i)}
+                         {:role "assistant" :content (str "a" i)}])
+                (range 5))))
+
+(def hook
+  (compaction/compactor
+   {:max-tokens   4
+    :keep-tail    3
+    :count-tokens count                        ; one "token" per message
+    :summarize    (fn [older] (str "covered " (count older) " earlier messages"))}))
+
+(def out (:messages (hook {:messages transcript})))
+
+(println "before:" (count transcript) "after:" (count out))
+(println "summary:" (pr-str (:content (second out))))
+
+;; The leading system prompt survives verbatim — identity is never summarised.
+(assert (= (first transcript) (first out)))
+;; The summary carries the prefix every port emits.
+(assert (str/starts-with? (:content (second out)) "[Summary of earlier conversation]\n"))
+;; The retained tail begins at a user turn, so no tool message is orphaned.
+(assert (= "user" (:role (nth out 2))))
+(assert (< (count out) (count transcript)))
+(println "OK")
+```
+
+### 3. Wired into a client
+
+`:hooks` is the seam; nothing else about the client changes.
+
+```clojure test
+(require '[toolnexus.agents.compaction :as compaction]
+         '[toolnexus.client :as client])
+
+;; A real summariser would call an LLM here. Keeping it pure makes this example
+;; hermetic — and the library never summarises on your behalf by default.
+(defn elide [older] (str "…" (count older) " earlier messages elided…"))
+
+(def c (client/create-client
+        {:base-url "http://127.0.0.1:1"        ; never called in this example
+         :style    "openai"
+         :model    "gpt-4o-mini"
+         :api-key  "not-used"
+         :hooks    {:before-llm (compaction/compactor
+                                 {:max-tokens 120000 :summarize elide})}}))
+
+(assert (fn? (get-in c [:hooks :before-llm])))
+(println "client carries the compactor on :before-llm")
+(println "OK")
+```
+
+## `estimate-tokens`
+
+The default estimator: `ceil(chars/4)` over each message's JSON serialisation, summed. An
+**estimator, not a tokenizer** — exactness is your call, which is why `:count-tokens` exists.
+
+```clojure test
+(require '[toolnexus.agents.compaction :as compaction])
+
+(println "estimate =>" (compaction/estimate-tokens [{:role "user" :content "hello there"}]))
+(assert (pos? (compaction/estimate-tokens [{:role "user" :content "hello there"}])))
+
+;; Additive: two messages estimate as the sum of their individual estimates.
+(assert (= (+ (compaction/estimate-tokens [{:role "user" :content "a"}])
+              (compaction/estimate-tokens [{:role "user" :content "bb"}]))
+           (compaction/estimate-tokens [{:role "user" :content "a"}
+                                        {:role "user" :content "bb"}])))
+(println "OK")
+```
+
+<Aside type="caution" title="Counts are not comparable across ports">
+Each port serialises JSON with its own writer, so the *number* `estimate-tokens` returns may
+differ between Clojure and JavaScript for the same transcript. SPEC §7F pins the formula, not the
+byte count. If you need an exact budget, pass `:count-tokens`.
+</Aside>
+
+## See also
+
+- [`toolnexus.client/create-client`](/toolnexus/api/clojure/client/create/) — the `:hooks` seam
+- [`toolnexus.agents.home/memory-tool`](/toolnexus/api/clojure/persona/memory-tool/) — what
+  `:flush-to-memory` tells the model to write to

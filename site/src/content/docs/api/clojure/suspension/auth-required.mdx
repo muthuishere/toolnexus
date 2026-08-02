@@ -1,0 +1,150 @@
+---
+title: "toolnexus.client/auth-required"
+description: "The auth-shaped suspension: hand back a URL, resume once the user has granted access. — Clojure."
+sidebar:
+  label: "toolnexus.client/auth-required"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+```clojure
+(auth-required url)
+(auth-required url prompt)
+;; => {:output "Login required: <url>"
+;;     :isError true
+;;     :metadata {:pending {:id "sus-…" :kind "authorization"
+;;                          :prompt "<prompt>" :url "<url>"}}}
+```
+
+`auth-required` is [`suspend`](/api/clojure/suspension/pending/) with the authorization shape
+filled in: `kind` is `"authorization"`, the URL rides on the `Request`'s `:url`, and the transcript
+output is `"Login required: <url>"` whatever prompt you pass. One argument gives you a default
+prompt of the same text; two lets you say something the user will actually understand.
+
+The `"authorization"` kind is the one case where the answer's payload is irrelevant. The host's job
+is to get the human to the URL; when they come back and the answer is `ok`, the world changed out
+of band — the session is simply valid now — and your tool re-runs and succeeds without reading
+`answer.data`. That is why the retry arity typically only checks `(get-in ctx [:answer :ok])`.
+
+The URL is the whole point: a chat front end renders it as a link, a CLI prints it, a web app
+redirects to it. Everything else about the suspension is identical to any other.
+
+## When to use it
+
+- **A token expired mid-run** and the user must re-consent — OAuth, an SSO session, a device-code
+  flow.
+- **A tool hits 401 or 403** against an upstream API it can authorize interactively.
+- **Not for a missing server-side key** — if your process is misconfigured, no human click fixes
+  it. Return `toolnexus.tool/failure` and let the run end honestly.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use suspend directly when the answer carries data">
+`auth-required` is a shorthand, not a separate mechanism. If you need the human to supply a value —
+a workspace to connect, an account to pick, a scope to grant — build the request yourself with
+`make-request` of kind `"input"`, passing `:url` and a `:data` schema, so the answer's `data` has
+somewhere to land. Reach for `auth-required` when "they logged in" is the entire answer.
+</Aside>
+
+Both produce the same `ToolResult` shape, so a host that handles one handles the other.
+
+## Examples
+
+### A tool that needs a live session
+
+```clojure
+(require '[toolnexus.tool :as tool]
+         '[toolnexus.client :as client])
+
+(def list-repos
+  (tool/tool
+    {:name        "list_repos"
+     :description "List the user's repositories"
+     :execute
+     (fn ([_args]
+          (if (session-valid?)
+            (tool/success (fetch-repos!))
+            (client/auth-required "https://example.com/oauth/authorize?scope=repo"
+                                  "Connect your GitHub account to continue")))
+       ([_args ctx]
+        ;; the retry: the answer carries no payload — the session is simply valid now
+        (if (get-in ctx [:answer :ok])
+          (tool/success (fetch-repos!))
+          (tool/failure "still not connected"))))}))
+```
+
+Re-check the session in the retry arity rather than trusting `ok` blindly if a failed login is
+plausible in your flow; the loop will not call you a third time either way.
+
+### Pushing the link to the user, then resolving it
+
+The `pending` event fires **before** `:wait-for` runs, which is what lets a front end show the link
+at the moment the tool parks rather than after the human is already waiting.
+
+```clojure
+(def llm
+  (client/create-client
+    {:base-url "https://api.anthropic.com"
+     :style    "anthropic"
+     :model    "claude-sonnet-4-5"
+     ;; blocks the loop until the human comes back
+     :wait-for (fn [request]
+                 (if (= "authorization" (:kind request))
+                   (let [ok? (block-until-oauth-callback! (:id request) (:url request))]
+                     (client/make-answer (:id request) ok? nil
+                                         (when-not ok? "the user cancelled")))
+                   (client/make-answer (:id request) false nil "unsupported")))}))
+
+(client/run llm "Which of my repos have failing builds?"
+            {:toolkit  (tool/toolkit [list-repos])
+             :on-event (fn [ev]
+                         (when (= "pending" (:type ev))
+                           (send-to-chat! (str (get-in ev [:request :prompt]) "\n"
+                                               (get-in ev [:request :url])))))})
+```
+
+A declined answer is not a crash: the loop feeds `"declined/expired: <prompt>"` back to the model
+as an error result and keeps going, so the model can explain the situation instead of the run
+dying.
+
+### Handling it without blocking the run
+
+Omit `:wait-for` and the run returns as soon as the tool parks, with everything needed to resume
+later.
+
+```clojure
+(let [r (client/run llm "Which repos have failing builds?"
+                    {:toolkit (tool/toolkit [list-repos])})]
+  (when (= "pending" (:status r))
+    (let [req (:pending r)]
+      (queue-for-human! {:id     (:id req)        ; correlate the eventual answer
+                         :kind   (:kind req)      ; "authorization"
+                         :url    (:url req)       ; where to send them
+                         :prompt (:prompt req)})
+      ;; :messages holds the transcript up to and including the parked call
+      (persist-transcript! (:messages r)))))
+```
+
+There is no cross-process resume in this port: when the human is done, start a **new** run with the
+saved `:messages` as `:history` and a `:wait-for` that now answers immediately. See
+[resume](/api/clojure/suspension/resume/) for the shape of that gap.
+
+## Arities
+
+| Call | `prompt` | Output written to the transcript |
+|---|---|---|
+| `(auth-required url)` | `"Login required: <url>"` | `"Login required: <url>"` |
+| `(auth-required url prompt)` | your text | `"Login required: <url>"` |
+
+The output is fixed on purpose: the model should see a consistent, unmistakable marker, while the
+prompt is what a human reads.
+
+## See also
+
+- [`toolnexus.client/suspend`](/api/clojure/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`toolnexus.client/create-client`](/api/clojure/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`toolnexus.client/pending-of`](/api/clojure/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.

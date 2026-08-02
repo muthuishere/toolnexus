@@ -1,0 +1,67 @@
+---
+title: "stream — token and event streaming"
+description: "The streaming loop: text deltas, tool-call events, and suspension events as they happen. — Clojure."
+sidebar:
+  label: "client / stream"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+<Aside type="caution" title="Not available in Clojure">
+There is no streaming loop in this port. `toolnexus.client/run` takes an `:on-event` sink that
+emits `tool_call`, `tool_result`, `pending`, `usage` and `done` — but **no text deltas**, because
+the loop buffers the whole response and synthesising deltas out of a buffered body would be a lie.
+Real SSE is a separate seam (`koine.stream/sse-post`, proven on both hosts) and is not wired in.
+</Aside>
+
+The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+
+## What to use instead
+
+Everything in the §8 event vocabulary except text deltas is available today, through `:on-event`
+on [`toolnexus.client/run`](/api/clojure/client/run/). The sink is synchronous and called on the
+loop's own thread, so a handler that blocks slows the run down — push onto an atom, a queue or a
+socket and return.
+
+For the progress-reporting case this covers what a delta stream would: the user sees which tool is
+running, whether it succeeded, and what the run cost, in real time.
+
+```clojure
+(require '[toolnexus.client :as client])
+
+(client/run llm "Audit the repo and fix the lint errors"
+            {:toolkit  toolkit
+             :on-event (fn [ev]
+                         (case (:type ev)
+                           "tool_call"   (println "running" (:name ev))
+                           "tool_result" (println "  " (:name ev)
+                                                  (if (:isError ev) "failed" "ok"))
+                           "pending"     (notify-user! (get-in ev [:request :prompt]))
+                           "usage"       (println "  tokens so far"
+                                                  (get-in ev [:usage :total-tokens]))
+                           "done"        (println "finished:" (:status (:result ev)))
+                           nil))})
+```
+
+The `pending` event is the one worth wiring first: it fires **before** `:wait-for` runs, so a chat
+or web front end can push an approval prompt or a login link to the user at the moment the tool
+parks rather than after the answer comes back.
+
+What you cannot get is the assistant's prose arriving word by word. `run` returns the finished
+`:text` on the RunResult, and the whole response lands at once. If character-level output is a
+hard requirement for your interface, call the provider's streaming endpoint yourself with
+`koine.stream/sse-post` and use the toolkit only for the schema
+([`to-openai`](/api/clojure/adapters/openai/) / [`to-anthropic`](/api/clojure/adapters/anthropic/))
+and for `toolnexus.core/execute` — the tool sources in this port work identically without the
+client loop.
+
+## See also
+
+- [`toolnexus.client/create-client`](/api/clojure/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`toolnexus.client/run`](/api/clojure/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`toolnexus.client/run`](/api/clojure/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.
+- [`toolnexus.client/in-memory-store`](/api/clojure/client/store/) — Swap in-memory history for your own store so a conversation survives a process restart.

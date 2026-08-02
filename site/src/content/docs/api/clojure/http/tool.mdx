@@ -1,0 +1,187 @@
+---
+title: "toolnexus.http/http-tool"
+description: "Turn an HTTP endpoint into a tool: URL, method, headers with ${ENV} expansion, and a schema. — Clojure."
+sidebar:
+  label: "toolnexus.http/http-tool"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/http.cljc">clojure/src/toolnexus/http.cljc</a>
+</p>
+
+```clojure
+(http-tool {:name         "get_user"
+            :description  "Fetch a user by id"
+            :input-schema {:type "object" :properties {:id {:type "string"}} :required ["id"]}
+            :method       :get                      ; default :get
+            :url          "https://api.example.com/users/{id}"
+            :headers      {"authorization" "Bearer ${API_TOKEN}"}
+            :query        [:verbose]
+            :body         "json"                    ; "json" (default) | "form" | "raw"
+            :timeout-ms   30000                     ; MILLISECONDS, default 30000
+            :result-mode  "text"})                  ; "text" (default) | "json" | "status+text"
+
+;; => {:name "get_user" :description "…" :input-schema {…}
+;;     :source "http" :execute (fn ([args]) ([args ctx]))}
+```
+
+`http-tool` declares a remote endpoint as a Tool. The model supplies args; the tool decides where
+each one goes. Consumption order is fixed and worth memorising: URL `{placeholder}` names first,
+then the names listed in `:query`, and whatever is left becomes the request body on any non-GET
+method. Nothing is sent twice, and an arg with nowhere to go is dropped rather than appended.
+
+Status mapping follows SPEC §0.9. A 2xx returns `toolnexus.tool/success` with the body as output
+and `{:status n}` as metadata. A non-2xx returns `toolnexus.tool/failure` with
+`"HTTP <status>: <body>"` — a value the model reads and can act on, not an exception. A transport
+failure, where no status was ever produced, returns `"HTTP transport failure: <reason>"` with
+`{:error :timeout | :dns | :connect-failed | :transport}`.
+
+That last case is why this namespace never catches an exception class. `koine.http/request` returns
+the failure as data, because the host exception types cannot be named portably — the JVM has
+`java.net.*` classes and cljgo has Go errors, and a `catch` naming either would be a reader
+conditional in disguise. The branch is on `koine.http/failed?` instead, so one source file behaves
+identically on both hosts.
+
+Header values expand `${ENV_VAR}` from the environment at call time, not at declaration time.
+Nothing in the namespace logs, prints, or copies a header value into a ToolResult.
+
+## When to use it
+
+- **An internal service the model should be able to query** — a search endpoint, a status API, a
+  lookup. Declare it and it is a tool.
+- **A vendor REST API you have a token for** — put the token in the environment and reference it as
+  `${VENDOR_TOKEN}` in a header, so the value never lands in the config, the repo, or a log line.
+- **Anything a `native-tool` would only wrap** — if the function body would be "build a URL, set
+  headers, return the body", this already is that.
+- **Endpoints that must not hang the loop** — `:timeout-ms` is enforced, and a timeout arrives as
+  an error ToolResult rather than a stuck call.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use native-tool when there is logic, not just a call">
+[`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) is the right choice as soon as
+you need to pick between two endpoints, retry on a specific body, reshape the response, or read the
+Context. `http-tool` has no hooks and no response transform beyond `:result-mode` — that is
+deliberate, and the moment you want one, you want a native tool that calls your own HTTP client.
+</Aside>
+
+An MCP server is the other alternative. If the endpoint already speaks MCP, connect it as a server
+instead and get its whole tool list, descriptions included, rather than declaring each route by
+hand.
+
+## Examples
+
+### A GET with a path placeholder and a secret header
+
+```clojure
+(require '[toolnexus.http :as http]
+         '[toolnexus.tool :as tool])
+
+(def get-user
+  (http/http-tool
+    {:name         "get_user"
+     :description  "Fetch a user by id"
+     :input-schema {:type "object"
+                    :properties {:id {:type "string" :description "The user id"}}
+                    :required   ["id"]}
+     :method       :get
+     :url          "https://api.example.com/users/{id}"
+     ;; Expanded from the environment at call time. Never logged, never returned.
+     :headers      {"authorization" "Bearer ${API_TOKEN}"}}))
+
+(:source get-user)                              ;=> "http"
+
+(def tk (tool/toolkit [get-user]))
+(tool/execute tk "get_user" {:id "u-42"})
+;; 200 => {:output "{\"id\":\"u-42\",…}" :isError false :metadata {:status 200}}
+;; 404 => {:output "HTTP 404: not found"  :isError true  :metadata {:status 404}}
+```
+
+Placeholder values are percent-encoded, so an id containing a space produces a URL the host will
+accept rather than a transport failure. A placeholder with no matching arg is left verbatim: a
+half-built URL that 404s is debuggable, a silently blanked one is not.
+
+### A POST whose leftover args become the body
+
+```clojure
+(require '[toolnexus.http :as http])
+
+(def create-ticket
+  (http/http-tool
+    {:name         "create_ticket"
+     :description  "Open a support ticket for a project"
+     :input-schema {:type "object"
+                    :properties {:project  {:type "string"}
+                                 :notify   {:type "boolean"}
+                                 :title    {:type "string"}
+                                 :body     {:type "string"}}
+                    :required   ["project" "title"]}
+     :method       :post
+     :url          "https://api.example.com/projects/{project}/tickets"
+     :query        [:notify]
+     :body         "json"
+     :headers      {"authorization" "Bearer ${API_TOKEN}"}
+     :timeout-ms   10000
+     :result-mode  "json"}))
+
+((:execute create-ticket) {:project "acme" :notify true
+                           :title "Login fails" :body "Since 09:00."})
+;; POST https://api.example.com/projects/acme/tickets?notify=true
+;; content-type: application/json
+;; {"body":"Since 09:00.","title":"Login fails"}
+```
+
+`:project` was consumed by the placeholder and `:notify` by `:query`, so only `:title` and `:body`
+reach the request body. The `content-type` header is set from `:body` and does not need declaring.
+A GET never sends a body, whatever is left over.
+
+### Timeouts, transport failures, and the three result modes
+
+```clojure
+(require '[toolnexus.http :as http])
+
+(def slow
+  (http/http-tool {:name        "slow_probe"
+                   :description "Probe an endpoint that may not answer"
+                   :url         "https://api.example.com/health"
+                   :timeout-ms  1500                ; milliseconds, not seconds
+                   :result-mode "status+text"}))
+
+((:execute slow) {})
+;; answered   => {:output "HTTP 200\nok" :isError false :metadata {:status 200}}
+;; never answered =>
+;;   {:output "HTTP transport failure: timeout" :isError true :metadata {:error :timeout}}
+```
+
+| Option | Default | What it does |
+|---|---|---|
+| `:name` | required | The tool name the model calls. |
+| `:description` | `""` | What the model reads to decide whether to call it. |
+| `:input-schema` | `{:type "object"}` | JSON Schema for the args, emitted verbatim by the adapters. |
+| `:method` | `:get` | Any verb; a keyword or a string, lower-cased internally. |
+| `:url` | required | May contain `{placeholder}` names filled from args and percent-encoded. |
+| `:headers` | `{}` | Values expand `${ENV_VAR}` at call time. Never logged or returned. |
+| `:query` | `[]` | Arg names to send as the query string. Nil-valued args are omitted. |
+| `:body` | `"json"` | `"json"` sends the leftover args as a JSON object; `"form"` sends them URL-encoded, keys sorted; `"raw"` sends the first key's value as `text/plain`. |
+| `:timeout-ms` | `30000` | **Milliseconds.** Exceeding it is a transport failure, not a hang. |
+| `:result-mode` | `"text"` | `"text"` returns the body as-is; `"json"` re-serialises it with sorted keys, falling back to the raw body when it does not parse; `"status+text"` returns `"HTTP <status>\n<body>"`. |
+
+| Outcome | ToolResult |
+|---|---|
+| 2xx | `success`, output per `:result-mode`, metadata `{:status n}` |
+| non-2xx | `failure`, output `"HTTP <status>: <body>"`, metadata `{:status n}` |
+| no status at all | `failure`, output `"HTTP transport failure: <reason>"`, metadata `{:error kw}` |
+
+<Aside type="caution" title="`:timeout-ms` is milliseconds, and the builtin webfetch is not">
+`http-tool` takes `:timeout-ms` in milliseconds with a 30000 default. The built-in `webfetch` tool
+takes its `timeout` in **seconds** with a default of 30, because §4A pins that schema. Same
+duration, two units, two different tools — do not copy a number from one to the other.
+</Aside>
+
+## See also
+
+- [`toolnexus.native/native-tool`](/api/clojure/native/define-tool/) — when the call needs logic around it, or the Context.
+- [`toolnexus.builtin/builtin-tools`](/api/clojure/builtins/create/) — includes `webfetch`, the general-purpose fetch the model can point anywhere.
+- [`toolnexus.adapter/to-openai`](/api/clojure/adapters/openai/) — how the declared schema reaches the model.

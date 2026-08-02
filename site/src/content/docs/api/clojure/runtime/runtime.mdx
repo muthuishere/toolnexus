@@ -1,0 +1,86 @@
+---
+title: "AgentRuntime — spawn, wait, interrupt"
+description: "The six host verbs that drive sub-agents, plus the read-only list and inspect views. — Clojure."
+sidebar:
+  label: "runtime / runtime"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+</p>
+
+<Aside type="caution" title="Not available in Clojure">
+There is no §7D agent runtime in this port — no spawn, no wait, no interrupt, and no registry of
+running children to list or inspect. Delegation here is cross-process: `toolnexus.serve/serve` on one
+side, `toolnexus.a2a/remote-agent` on the other.
+</Aside>
+
+The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+
+The runtime is what makes §7D more than a function call: it owns the children, so a host can spawn
+one and keep going, wait on it later, interrupt it, list what is running and inspect a specific one.
+Without a runtime there is no registry — and without a registry, "what is my agent doing right now"
+has no answer.
+
+## What to use instead
+
+The A2A pair is the one place in this port where a delegated unit of work has an identity you can
+query after starting it. `SendMessage` returns immediately with a task id; `GetTask` is your
+inspect verb; the store is your registry.
+
+```clojure
+(require '[toolnexus.core :as core]
+         '[toolnexus.serve :as serve])
+
+;; the child, as a real agent with a durable task store
+(def child-tk (core/build {:skills "examples/skills"}))
+
+(def child
+  (serve/serve child-tk {:port    8081
+                         :a2a     {:name "researcher"}
+                         :skills  (:skills child-tk)
+                         :store   "file:./tasks"
+                         :client  child-client
+                         :on-task (fn [t] (println "settled" (:id t) (:state t)))}))
+
+;; "list" and "inspect": the store is the registry
+(def store (:store child))
+((:get store) "some-task-id")
+;; => {:id "..." :status {:state "working"}}   or completed / failed, with :artifacts
+```
+
+From the parent side, calling the peer's tool blocks until the task is terminal, and `:metadata` on
+the result carries the task id, the final state, the poll count and elapsed ms:
+
+```clojure
+(require '[toolnexus.a2a :as a2a]
+         '[toolnexus.tool :as tool])
+
+(def peer (a2a/remote-agent {:card "http://127.0.0.1:8081/.well-known/agent-card.json"
+                             :timeout 60000 :poll-every 500}))
+
+(tool/execute (tool/toolkit (:tools peer))
+              (:name (first (:tools peer)))
+              {:task "summarise the changelog"}
+              ;; the closest thing to `interrupt`: an abort predicate the poll loop checks
+              {:aborted? (fn [] @cancelled?)})
+```
+
+Map the verbs honestly: **spawn** is `SendMessage` (which the peer tool does for you), **wait** is
+the poll loop, **inspect** is `GetTask` or a direct store read, **list** is whatever your store can
+enumerate — `memory-store` has `:all`, `file-store` is a directory of JSON files. **Interrupt** is
+only local: `:aborted?` stops your side from waiting and reports the task as `canceled`, but the peer
+keeps working. There is no remote cancel.
+
+For work that is not worth a server, [`toolnexus.client/run`](/api/clojure/client/run/) called
+directly is a synchronous child with no handle at all — see
+[`runtime / agent`](/api/clojure/runtime/agent/).
+
+## See also
+
+- [`toolnexus.serve/serve`](/api/clojure/serve/a2a/) — the host side: a child with an addressable task lifecycle
+- [`toolnexus.serve/file-store`](/api/clojure/serve/task-store/) — the registry that outlives the process
+- [`toolnexus.a2a/remote-agent`](/api/clojure/agents/agent/) — spawn and wait, from the parent
+- [`runtime / handle`](/api/clojure/runtime/handle/) — the per-child state machine, also absent

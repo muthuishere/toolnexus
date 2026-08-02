@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **toolnexus** — a small, **vendor-neutral** library that gives *any* LLM the dynamic
 capabilities [opencode](https://github.com/anomalyco/opencode) has, ported **byte-identically
-across six languages** (`js/`, `python/`, `golang/`, `java/`, `csharp/`, `elixir/`):
+across seven languages** (`js/`, `python/`, `golang/`, `java/`, `csharp/`, `elixir/`, `clojure/`):
 
 1. **Dynamic MCP servers** — read an `mcp.json`, connect to every server (local stdio +
    remote streamable-HTTP), expose each server tool as a uniform `Tool`.
@@ -42,16 +42,16 @@ below.
 | `openspec/` | **Spec-driven change workflow (OpenSpec).** `changes/` = active proposals (`proposal.md` + spec deltas + `tasks.md`), `specs/` = canonical capability specs, `changes/archive/` = shipped changes. Run the `openspec` CLI from the repo root. |
 | `.github/workflows/ci.yml` | Runs all six suites (JS/Python/Go/Java/C#/Elixir), hermetically (no network, no live LLM). |
 
-## The prime directive: spec-driven, six-language parity
+## The prime directive: spec-driven, seven-language parity
 
-`SPEC.md` is the contract; the six ports are implementations of it. Two rules govern every change:
+`SPEC.md` is the contract; the seven ports are implementations of it. Two rules govern every change:
 
 1. **Behavior is defined in the spec before it is written in code.** `SPEC.md §0` is the
    conformance contract — if a change alters observable behavior (tool naming, config parsing,
    the `skill` tool's byte-exact output, adapter mapping, the client loop), it changes `SPEC.md`
    *first*, then the code. Any change of real substance goes through an **OpenSpec change** first
    (below) — the proposal's spec deltas are where intended behavior is pinned before code.
-2. **A behavior change lands in all six ports, or it is not done.** Do not ship a capability
+2. **A behavior change lands in all seven ports, or it is not done.** Do not ship a capability
    in `js/` and leave `python/`/`golang/`/`java/`/`csharp/` behind without explicitly saying so
    and tracking it in an in-progress spec. The ports are meant to be substitutable; silent drift
    is the one bug this repo exists to prevent.
@@ -122,14 +122,52 @@ Each port is self-contained and hermetic — `cd` into its directory first. CI r
 | `csharp/` | `dotnet build` | `dotnet test` |
 | `elixir/` | `mix deps.get && mix compile` | `mix test` · coverage gate: `mix coveralls` (min 95%) |
 
-All ports are versioned together (see the per-port manifests for the current number). Publishing runs through the **`release.yml`**
-GitHub Actions workflow: cut a GitHub Release `vX.Y.Z` (or `workflow_dispatch`) and each port
-publishes if its repo variable `ENABLE_*` is `true`. npm / PyPI / NuGet use **OIDC Trusted
-Publishing** (no stored tokens); Go is a tag push (`golang/vX.Y.Z`); Maven Central (Java) uses the
-`prod` environment secrets (`CENTRAL_USERNAME` / `CENTRAL_PASSWORD` / `GPG_*`); Hex.pm (Elixir)
-uses the `prod` environment secret `HEX_API_KEY` (no OIDC support on Hex). A `preflight` job fails
-the run unless all five manifests (js/python/csharp/java/elixir) match the release version — so
-bump them together. Never bake registry tokens into code, config, or CI; they are use-only env vars.
+## Releasing — the runbook, so nothing is missed
+
+**All ports are versioned and released together.** One tag, one set of versions, every registry.
+A partial bump is the failure this process exists to prevent.
+
+### The one-time setup an owner controls
+
+- Each registry publishes **only** if its repo variable is `true`: `ENABLE_NPM`, `ENABLE_PYPI`,
+  `ENABLE_GO`, `ENABLE_NUGET`, `ENABLE_JAVA`, `ENABLE_ELIXIR`, `ENABLE_CLOJARS`. A leg that is
+  off is skipped silently — **check the variables before concluding a release "worked"**.
+- Secrets live in the **`prod` GitHub environment**, never in the repo, never in code.
+
+| registry | mechanism | credentials |
+|---|---|---|
+| npm / PyPI / NuGet | **OIDC Trusted Publishing** | none stored; the trusted publisher is scoped to the `prod` environment |
+| Go | tag push `golang/vX.Y.Z` | none — `contents: write`; idempotent, skips if the tag exists |
+| Maven Central | Gradle `publishAndReleaseToMavenCentral` | `CENTRAL_USERNAME`, `CENTRAL_PASSWORD`, `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` |
+| Hex | `mix hex.publish --yes` | `HEX_API_KEY` |
+| Clojars | `clojure -T:build deploy` | `CLOJARS_USERNAME`, `CLOJARS_PASSWORD` — a Clojars **deploy token**, not the account password |
+
+Maven Central, Hex and Clojars use stored secrets only because none of the three offers OIDC.
+Never bake a registry token into code, config, a test or CI; they are use-only env vars read at
+the point of use.
+
+### Cutting a release
+
+1. **Bump every manifest to the same version** — js, python, csharp, java, elixir, and
+   `clojure/build.clj`. Go has no manifest; it releases as a tag. The `preflight` job **fails the
+   run** if any manifest disagrees with the tag, which is the guard against a partial bump.
+2. **Move the changelog**: `## Unreleased` becomes `## X.Y.Z — YYYY-MM-DD`, with a fresh empty
+   `## Unreleased` above it.
+3. **Cut a GitHub Release `vX.Y.Z`.** That is the trigger. `workflow_dispatch` also works for a
+   re-run. **The release body IS the changelog section** — not a second, divergent account.
+4. **Watch the run and read the job list.** A green workflow with three skipped legs is not a
+   release; confirm each enabled registry actually published.
+5. **Verify from the outside, as a consumer would** — install the published artifact from the
+   registry in a clean directory and run something. ADR-0012 exists because NuGet and Maven
+   publishes have **reported success without landing**, so a green CI job is not evidence that a
+   package is installable.
+
+### Do not
+
+- Do not tag or publish unless the owner asked. Cutting a release is outward-facing and
+  irreversible: a version number can never be reused on any of these registries.
+- Do not bump one port "to unblock" — that is exactly what `preflight` refuses.
+- Do not hand-write a GitHub Release body that disagrees with `CHANGELOG.md`.
 
 ## Coding conventions
 
@@ -145,6 +183,36 @@ bump them together. Never bake registry tokens into code, config, or CI; they ar
   where it helps, e.g. `feat(go client): …`, `test(js): …`. Do **not** add `Co-authored-by:`.
 - Touch only what the task needs; note unrelated issues rather than fixing them inline.
 
+## CHANGELOG.md — required, and it is not the git log
+
+`CHANGELOG.md` at the repo root is the **one place a user learns what changed**. Keeping it is
+part of the change, not a release chore: the person who made the behaviour is the only one who
+still knows *why*, and a changelog written later from `git log` reliably records what was
+touched rather than what a user gets.
+
+**Every change of substance adds to `## Unreleased` in the same PR that makes it.** A change is
+of substance if a user could notice it: new capability, new option, changed default, changed
+output, a fixed bug they could have hit, a new port, a moved contract. Typo and internal-only
+refactors do not qualify.
+
+**Write what a user gets, not what a file did.** `feat(clojure): add :on-error` is a commit
+subject; the entry says what the option is for, what happens without it, and what it now makes
+possible. Follow the existing entries — they lead with the user-visible change, then the
+reasoning, then the detail.
+
+**Say what is NOT done.** Every entry that ships a partial capability names the gap, and names
+where it is tracked (`openspec/changes/<name>`). A port at `core` tier lists its debt. This is
+the same rule as the option gate printing permitted absences by name: an omission that stops
+being mentioned is indistinguishable from something that was finished.
+
+**On release**, `## Unreleased` becomes `## X.Y.Z — YYYY-MM-DD` and a fresh empty `## Unreleased`
+goes above it. The version must match the GitHub Release tag and every port manifest — the
+`preflight` job in `release.yml` fails the run on drift. The GitHub Release body should be the
+changelog section, not a second, divergent account of the same work.
+
+**Per-port notes** belong in the shared entry, named inline (e.g. "golang only"), never in a
+per-port changelog — six parallel changelogs is exactly the drift this repo exists to prevent.
+
 ## Documentation map
 
 | Document | Purpose |
@@ -155,6 +223,7 @@ bump them together. Never bake registry tokens into code, config, or CI; they ar
 | `js/README.md`, `python/README.md`, `golang/README.md` + `golang/GUIDE.md`, `java/README.md`, `csharp/README.md` | Per-language end-user docs |
 | `openspec/changes/` | Active OpenSpec change proposals — feature/change work starts here (`/opsx:propose`) |
 | `openspec/specs/` | Canonical capability specs (accrue from archived changes) |
+| `CHANGELOG.md` | What changed, for users — updated in the SAME PR as the change (see above) |
 | `PUBLISHING.md` | How each port is published |
 
 Consult `SPEC.md`, `openspec/`, and the relevant port's README before making behavior changes.

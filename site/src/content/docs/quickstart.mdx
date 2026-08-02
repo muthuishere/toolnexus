@@ -1,6 +1,6 @@
 ---
 title: Quickstart
-description: Zero to a working agent in three steps — install, point at your tools, run. Same shape in JavaScript, Python, Go, Java, C# and Elixir.
+description: Zero to a working agent in three steps — install, point at your tools, run. Same shape in JavaScript, Python, Go, Java, C#, Elixir and Clojure.
 ---
 
 import { Tabs, TabItem, Steps, Aside } from '@astrojs/starlight/components';
@@ -50,6 +50,12 @@ Three steps to a working agent. Pick your language once — the tabs stay in syn
    <TabItem label="C#">
    ```sh
    dotnet add package Toolnexus
+   ```
+   </TabItem>
+   <TabItem label="Clojure">
+   ```clojure
+   ;; deps.edn — the toolnexus.* namespaces + koine (the only dependency)
+   {:deps {net.clojars.muthuishere/koine {:mvn/version "0.7.3"}}}
    ```
    </TabItem>
    </Tabs>
@@ -113,6 +119,17 @@ Three steps to a working agent. Pick your language once — the tabs stay in syn
    });
    ```
    </TabItem>
+   <TabItem label="Clojure">
+   ```clojure
+   (require '[toolnexus.core :as tn] '[toolnexus.client :as client])
+
+   (def tk (tn/build {:builtins true}))
+   (def agent (client/create-client
+                {:base-url "https://openrouter.ai/api/v1"
+                 :style "openai"
+                 :model "openai/gpt-4o-mini"}))
+   ```
+   </TabItem>
    </Tabs>
 
 3. **Run.** Tools are called for you and the loop runs to a final answer.
@@ -145,6 +162,12 @@ Three steps to a working agent. Pick your language once — the tabs stay in syn
    ```csharp
    var res = await agent.RunAsync("List the files here, then summarise the README.", tk);
    Console.WriteLine(res.Text);
+   ```
+   </TabItem>
+   <TabItem label="Clojure">
+   ```clojure
+   (def res (client/run agent "List the files here, then count them." {:toolkit tk}))
+   (println (:text res))
    ```
    </TabItem>
    </Tabs>
@@ -191,6 +214,11 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
     McpConfig = "./mcp.json",
     SkillsDir = "./skills",
 });
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(def tk (tn/build {:mcp "./mcp.json" :skills "./skills"}))
 ```
 </TabItem>
 </Tabs>

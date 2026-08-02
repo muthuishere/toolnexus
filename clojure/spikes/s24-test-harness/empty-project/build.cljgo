@@ -1,0 +1,6 @@
+;; S24 negative control — a cljgo project with a test/ directory and NO TESTS.
+;; `cljgo test` here prints "Ran 0 tests containing 0 assertions" and EXITS 0.
+;; That is the silent-green failure the counting gate exists to stop.
+(defn build [b]
+  (let [app (exe b {:name "emptyproj" :main "src/empty_project/core.cljc"})]
+    (install b app)))

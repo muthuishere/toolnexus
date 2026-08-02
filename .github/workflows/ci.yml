@@ -113,8 +113,76 @@ jobs:
       - run: mix compile --warnings-as-errors
       - run: mix coveralls   # runs the suite + enforces minimum_coverage 95 (coveralls.json)
 
+  clojure:
+    name: Clojure (JVM + cljgo)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clojure
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: DeLaGuardo/setup-clojure@13.4
+        with:
+          cli: latest
+      # The MCP stdio tests launch a REAL server
+      # (@modelcontextprotocol/server-everything). An MCP stdio server needs its
+      # own runtime the same way a Postgres test needs Postgres; without it those
+      # tests FAIL rather than skip, by design.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # cljgo is the second host. `go install …@vX.Y.Z` only produces a usable
+      # binary as of cljgo v0.8.5 (their #177 / ADR 0116) — earlier releases
+      # demanded a source checkout and CLJGO_SRC. v0.9.0 carries the LongRange
+      # negative-step fix this port found (cljgo #194) and ADR 0121, which makes
+      # an unknown `cljg.io/exec` option a hard error instead of a silent
+      # ignore — we reach that call through koine on every MCP stdio spawn.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - run: go install github.com/muthuishere/cljgo/cmd/cljgo@v0.9.0
+      - run: echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: clj-${{ runner.os }}-${{ hashFiles('clojure/deps.edn', 'clojure/build.cljgo') }}
+      # ALL FIVE execution modes, not two: jvm-main, jvm-repl, cljgo-aot,
+      # cljgo-run, cljgo-repl. A port proven only through its compiled path is
+      # proven in the mode developers use least, and cljgo's own ADR 0007 calls a
+      # REPL-vs-binary divergence unforgivable.
+      - run: ./all-modes-check.sh
+        env:
+          TN_EXAMPLES: ${{ github.workspace }}/examples
+      # koine must be the ONLY third-party dependency. S03 measured that 11 of 11
+      # popular Clojure libraries carry Java interop and none load on cljgo, so a
+      # stray dependency does not degrade the port — it ends the cljgo half.
+      - run: ./deps-purity-check.sh
+      # Someone with only a JDK must be able to use this like any other Clojure
+      # library. Poisons `cljgo` on PATH so a silent dependency becomes a loud
+      # failure.
+      - run: ./jvm-only-check.sh
+        env:
+          TN_EXAMPLES: ${{ github.workspace }}/examples
+      # The library must not hold a consumer's process open. This caught a 61s
+      # hang that 707 green assertions did not.
+      - run: ./consumer-exit-check.sh
+        env:
+          TN_EXAMPLES: ${{ github.workspace }}/examples
+      # The shipped examples, on BOTH hosts. A README example that no longer runs
+      # is a broken promise to the first person who tries the library.
+      - run: ./examples/clj/run.sh
+        env:
+          TN_EXAMPLES: ${{ github.workspace }}/examples
+      - run: ./examples/cljgo/run.sh
+        env:
+          TN_EXAMPLES: ${{ github.workspace }}/examples
+
   docs-examples:
-    name: Docs examples (all six ports)
+    name: Docs examples (seven ports)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -141,6 +209,15 @@ jobs:
         with:
           elixir-version: "1.17"
           otp-version: "27"
+      # Clojure runs its examples on BOTH hosts, so this job needs the cljgo
+      # toolchain as well as the JVM one — a docs example that works under
+      # `clojure -M` and fails under `cljgo build` is the drift the port exists
+      # to prevent, and only the second host can see it.
+      - uses: DeLaGuardo/setup-clojure@13.4
+        with:
+          cli: latest
+      - run: go install github.com/muthuishere/cljgo/cmd/cljgo@v0.9.0
+      - run: echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
       # Build the ports the runners link against.
       - run: npm install && npm run build

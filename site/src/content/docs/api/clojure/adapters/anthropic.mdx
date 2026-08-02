@@ -1,0 +1,154 @@
+---
+title: "toolnexus.adapter/to-anthropic"
+description: "Render the toolkit as Anthropic tool-use schema. — Clojure."
+sidebar:
+  label: "toolnexus.adapter/to-anthropic"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/adapter.cljc">clojure/src/toolnexus/adapter.cljc</a>
+</p>
+
+```clojure
+(to-anthropic tools-or-toolkit)
+
+;; => [{:name         "echo"
+;;      :description  "Echo the input back."
+;;      :input_schema {:type "object" :properties {…} :required […]}}
+;;     …]
+```
+
+`to-anthropic` renders each tool as a **flat** map — no wrapper object, no nested `:function` key.
+That is the first thing that differs from [`to-openai`](/api/clojure/adapters/openai/), and the
+second is the schema's key: Anthropic calls it **`:input_schema`**, in snake_case.
+
+The underscore is deliberate and must survive. It is a wire name, not a Clojure convention, so it
+is never kebab-ised to `:input-schema` on the way out — the tool's internal key is
+`:input-schema` and the emitted key is `:input_schema`, and the two are not the same keyword. Any
+JSON encoder you pass the result to will write it as `input_schema` verbatim.
+
+Everything else matches the other adapters. Schema only, no network. A toolkit is sorted by tool
+name because map order is not a contract on either host; an explicit seq of tools keeps the order
+you gave it. With no tools you get `[]` — Gemini is the one adapter that still emits a wrapper.
+
+## When to use it
+
+- **Calling the Anthropic Messages API** — this is the `tools` array it expects.
+- **Rendering a subset per request** — pass a vector instead of the toolkit.
+- **Checking the wire keys** — this is the adapter where a silent key rename would break a live
+  call, so it is worth asserting on in a test.
+- **Building a payload without an SDK** — the output is data, so a plain HTTP POST works.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="One shape per endpoint — they are not interchangeable">
+[`to-openai`](/api/clojure/adapters/openai/) wraps each tool in `{:type "function" :function {…}}`
+and names the schema `:parameters`; [`to-gemini`](/api/clojure/adapters/gemini/) puts everything
+inside one `:functionDeclarations` wrapper. Anthropic accepts neither. Choose by the endpoint you
+are posting to.
+</Aside>
+
+`toolnexus.core/to-anthropic` re-exports this function, so `toolnexus.core` alone is enough for a
+caller who does not want a second require.
+
+## Examples
+
+### Render a toolkit, and confirm the wire key
+
+```clojure
+(require '[toolnexus.core :as toolnexus]
+         '[toolnexus.adapter :as adapter])
+
+(def tk (toolnexus/build {:skills "examples/skills"}))
+
+(first (toolnexus/to-anthropic tk))
+;; => {:name "apply_patch"
+;;     :description "Apply an add/update/delete patch."
+;;     :input_schema {:type "object"
+;;                    :properties {:patchText {:type "string" …}}
+;;                    :required ["patchText"]}}
+
+;; snake_case out, kebab-case in — these are two different keywords.
+(contains? (first (adapter/to-anthropic tk)) :input_schema)   ;=> true
+(contains? (first (adapter/to-anthropic tk)) :input-schema)   ;=> false
+
+(map :name (toolnexus/to-anthropic tk))
+;; => ("apply_patch" "bash" "edit" "glob" "grep" "question" "read"
+;;     "skill" "todowrite" "webfetch" "write")
+```
+
+### A hand-ordered subset for one request
+
+```clojure
+(require '[toolnexus.adapter :as adapter]
+         '[toolnexus.http :as http]
+         '[toolnexus.native :as native])
+
+(def lookup
+  (http/http-tool {:name "lookup_order" :description "Fetch one order by id"
+                   :input-schema {:type "object"
+                                  :properties {:id {:type "string"}}
+                                  :required ["id"]}
+                   :url "https://api.example.com/orders/{id}"
+                   :headers {"authorization" "Bearer ${API_TOKEN}"}}))
+
+(def refund
+  (native/native-tool {:name "refund" :description "Refund an order"
+                       :run (fn [args] (str "refunded " (:id args)))}))
+
+;; A vector preserves this order; the toolkit form would sort it.
+(adapter/to-anthropic [lookup refund])
+;; => [{:name "lookup_order" :description "Fetch one order by id"
+;;      :input_schema {:type "object" :properties {:id {:type "string"}} :required ["id"]}}
+;;     {:name "refund" :description "Refund an order" :input_schema {:type "object"}}]
+
+(adapter/to-anthropic [])       ;=> []
+```
+
+The tool source makes no difference to the payload. An HTTP tool, a native tool, an MCP tool and
+the `skill` tool all render identically — that uniformity is the point of the `Tool` abstraction.
+
+### Closing the loop: `tool_use` block back to `execute`
+
+```clojure
+(require '[toolnexus.core :as toolnexus])
+
+(def tk (toolnexus/build {:skills "examples/skills"}))
+
+(def request {:model "claude-sonnet-4-5" :messages []
+              :tools (toolnexus/to-anthropic tk)})
+
+;; Anthropic hands back a tool_use content block: id, name, and args already
+;; parsed as an object — no JSON string to decode, unlike OpenAI.
+(defn tool-result-block [tk block]
+  (let [res (toolnexus/execute tk (get block "name") (get block "input"))]
+    {:type       "tool_result"
+     :tool_use_id (get block "id")
+     :content    (:output res)
+     ;; A failed tool is reported, not thrown — the model sees it and retries.
+     :is_error   (:isError res)}))
+
+(tool-result-block tk {"id" "toolu_1" "name" "skill" "input" {"name" "hello-world"}})
+;; => {:type "tool_result" :tool_use_id "toolu_1"
+;;     :content "<skill_content name=\"hello-world\">…" :is_error false}
+```
+
+| Emitted key | Source |
+|---|---|
+| `:name` | The tool's `:name`. |
+| `:description` | The tool's `:description`, `""` when unset — never `nil`. |
+| `:input_schema` | The tool's `:input-schema` verbatim, `{:type "object"}` when unset. Snake_case on the wire. |
+
+| Input | Order |
+|---|---|
+| a toolkit | Sorted by tool name. |
+| a seq of tools | Exactly as given. |
+| an empty toolkit or seq | `[]`. |
+
+## See also
+
+- [`toolnexus.adapter/to-openai`](/api/clojure/adapters/openai/) — Render the toolkit as OpenAI function-calling schema.
+- [`toolnexus.adapter/to-gemini`](/api/clojure/adapters/gemini/) — Render the toolkit as Gemini function-declaration schema.
+- [`toolnexus.builtin/builtin-tools`](/api/clojure/builtins/create/) — the other half of the loop: executing what the model picked, identically for every provider.

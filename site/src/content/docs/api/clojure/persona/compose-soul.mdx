@@ -1,0 +1,143 @@
+---
+title: "toolnexus.agents.home/compose-soul"
+description: "Build a persona's system prompt from its home directory: identity, memory, skills. — Clojure."
+sidebar:
+  label: "toolnexus.agents.home/compose-soul"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/agents/home.cljc">clojure/src/toolnexus/agents/home.cljc</a>
+</p>
+
+<Aside type="tip" title="Supported on Clojure (JVM) and on cljgo">
+One `.cljc` source tree, zero reader conditionals, verified in all five execution modes. The byte
+cap below is measured on real bytes on both hosts — through `koine.fs/read-bytes`, because
+`String.` is java.lang and Go's `[]byte`→string is unreachable from portable Clojure.
+</Aside>
+
+```clojure
+(compose-soul "./personas/ava")
+;; => {:soul  "## SOUL.md\n\nI am Ava\n\n## MEMORY.md\n\n- …"
+;;     :found ["SOUL.md" "MEMORY.md"]}
+```
+
+The directory **is** the agent. `compose-soul` reads the bootstrap files present in `dir` and
+returns one string to use as a system prompt, plus the list of files it found. Absent files are
+skipped entirely — they leave no heading and no empty section.
+
+## The bootstrap order
+
+Identity first, durable memory last. This order is part of the cross-port contract: a persona
+whose `MEMORY.md` outranked its `SOUL.md` would behave differently in seven languages.
+
+| # | file | role |
+|---|------|------|
+| 1 | `AGENTS.md` | operating instructions |
+| 2 | `SOUL.md` | identity / voice |
+| 3 | `IDENTITY.md` | who the agent is |
+| 4 | `USER.md` | model of the user |
+| 5 | `TOOLS.md` | tool guidance |
+| 6 | `HEARTBEAT.md` | what to do on a heartbeat |
+| 7 | `MEMORY.md` | durable long-term notes |
+
+Each present file becomes a `## <filename>` section with its body trimmed. Each is read with a
+**2 MiB cap measured in bytes** (`2097152`), not characters — a larger file is injected truncated
+with a notice, and the file on disk is untouched.
+
+## When to use it
+
+- **You keep an agent's identity in files** and want it in the system prompt without hand-rolling
+  read-and-concatenate.
+- **You want the identity frozen for a run.** Composition happens once, at session start; the soul
+  does not shift under a long-lived agent, which is what keeps it cache-stable.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="It returns a string — you decide where it goes">
+`compose-soul` is deliberately not a client constructor. It hands back a plain string, so it drops
+into `:system-prompt` on any client — and into an agent definition once the §7D runtime lands
+here. Nothing about it requires the runtime.
+</Aside>
+
+## Examples
+
+### 1. Compose a persona and use it as a system prompt
+
+```clojure test
+(require '[toolnexus.agents.home :as home]
+         '[toolnexus.client :as client]
+         '[clojure.string :as str]
+         '[koine.fs :as fs])
+
+(def dir (str (fs/temp-dir! "ava")))
+(fs/write-file (str dir "/SOUL.md")   "I am Ava. I answer in one sentence.")
+(fs/write-file (str dir "/MEMORY.md") "- the user prefers Clojure")
+
+(def composed (home/compose-soul dir))
+
+(println "found:" (pr-str (:found composed)))
+(println (:soul composed))
+
+;; Bootstrap ORDER, not directory order: SOUL.md outranks MEMORY.md.
+(assert (= ["SOUL.md" "MEMORY.md"] (:found composed)))
+(assert (< (str/index-of (:soul composed) "## SOUL.md")
+           (str/index-of (:soul composed) "## MEMORY.md")))
+
+;; It is just a string — hand it to any client.
+(def c (client/create-client {:base-url      "http://127.0.0.1:1"
+                              :style         "openai"
+                              :model         "gpt-4o-mini"
+                              :api-key       "not-used"
+                              :system-prompt (:soul composed)}))
+(assert (str/includes? (:system-prompt c) "I am Ava"))
+(fs/delete-tree! dir)
+(println "OK")
+```
+
+### 2. Absent files leave no trace
+
+A persona with one file gets exactly one section — not seven empty headings.
+
+```clojure test
+(require '[toolnexus.agents.home :as home]
+         '[koine.fs :as fs])
+
+(def dir (str (fs/temp-dir! "minimal")))
+(fs/write-file (str dir "/SOUL.md") "  just me  ")
+
+(def composed (home/compose-soul dir))
+(println (pr-str (:soul composed)))
+
+(assert (= "## SOUL.md\n\njust me" (:soul composed)))   ; body trimmed, nothing else
+(assert (= ["SOUL.md"] (:found composed)))
+
+;; An empty directory composes an empty string — never nil.
+(def empty-dir (str (fs/temp-dir! "empty")))
+(assert (= "" (:soul (home/compose-soul empty-dir))))
+(assert (= [] (:found (home/compose-soul empty-dir))))
+
+(fs/delete-tree! dir)
+(fs/delete-tree! empty-dir)
+(println "OK")
+```
+
+### 3. The order is the contract
+
+```clojure test
+(require '[toolnexus.agents.home :as home])
+
+(println (pr-str home/bootstrap-order))
+(assert (= ["AGENTS.md" "SOUL.md" "IDENTITY.md" "USER.md"
+            "TOOLS.md" "HEARTBEAT.md" "MEMORY.md"]
+           home/bootstrap-order))
+(assert (= 2097152 home/max-file-bytes))    ; bytes, not characters
+(println "OK")
+```
+
+## See also
+
+- [`toolnexus.agents.home/memory-tool`](/toolnexus/api/clojure/persona/memory-tool/) — durable
+  memory the agent edits itself
+- [`toolnexus.client/create-client`](/toolnexus/api/clojure/client/create/) — where the soul goes

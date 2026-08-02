@@ -1,0 +1,11 @@
+;; The Clojure port on cljgo. The SAME koine artifact from Clojars.
+;;
+;; ONE `exe` here because this project needs exactly one binary — NOT because
+;; of cljgo #169. That bug (two `exe` calls in one build corrupting the second
+;; when the entries shared a namespace) was fixed in cljgo v0.8.3 and verified
+;; here in both declaration orders on 2026-08-01; examples/minimal now builds
+;; two binaries from one file. Leaving the old warning up would have kept a
+;; constraint alive on the strength of a fix that had already landed.
+(defn build [b]
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.10.0"})
+  (install b (exe b {:name "toolnexus-test" :main "src/toolnexus/test_main.cljc"})))
