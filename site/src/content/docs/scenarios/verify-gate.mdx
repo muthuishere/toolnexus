@@ -242,6 +242,25 @@ verifier =
   )
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[koine.fs :as fs]
+         '[toolnexus.core :as tn]
+         '[toolnexus.tool :as tool])
+
+;; Inspection-only: it can read and run the tests, but never write, edit, patch, or commit.
+(def inspect-tk
+  (tn/build {:builtins {:tools {"write" false "edit" false "apply_patch" false}}}))
+
+(def verifier
+  {:name   "verifier"
+   :does   "Adversarially verifies an artifact against a task. Replies PASS or FAIL + critique. Read/test-only."
+   :soul   (fs/read-file "verifier/SOUL.md")   ; a soul is a string here — read the file yourself
+   :tools  (tool/all-tools inspect-tk)         ; read, grep, glob, bash(tests) — no write/edit/patch
+   :model  "openai/gpt-4o-mini"                ; cheap: verifying is not a frontier-model task
+   :budget {:max-turns 10 :max-tokens 40000}})
+```
+</TabItem>
 </Tabs>
 
 <Aside type="caution" title="`bash` is a real shell — scope it honestly">
@@ -465,6 +484,36 @@ def verified_run(worker, verifier, opts, task) do
       }
   end
 end
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.agents.runtime :as rt])
+
+(def max-retries 2)                  ; total attempts = max-retries + 1
+(def pass-line #"(?i)^\s*PASS\b")
+
+(defn verified-run [runtime task]
+  (loop [attempt 0, critique nil, artifact ""]
+    (if (> attempt max-retries)
+      ;; Retries exhausted. Return the best effort — LOUDLY marked, never a silent pass.
+      {:text     (str "⚠️ UNVERIFIED — failed " (inc max-retries) " checks.\n\n" artifact
+                      "\n\nUnresolved critique:\n" critique)
+       :verified false
+       :critique critique}
+      ;; Feed the previous critique back in — this is the only way the worker improves.
+      (let [prompt   (if critique
+                       (str task "\n\nA reviewer REJECTED your last attempt. Fix EXACTLY this and "
+                            "return the corrected artifact:\n" critique)
+                       task)
+            artifact (:text (rt/run-agent runtime "worker" prompt))
+            ;; The verifier sees the ARTIFACT — never the worker's reasoning.
+            verdict  (:text (rt/run-agent runtime "verifier"
+                                          (str "Verify this artifact against the task.\n\nTASK:\n"
+                                               task "\n\nARTIFACT:\n" artifact)))]
+        (if (re-find pass-line verdict)
+          {:text artifact :verified true}
+          (recur (inc attempt) verdict artifact))))))   ; carry the critique forward
 ```
 </TabItem>
 </Tabs>
@@ -745,6 +794,47 @@ else
 end
 ```
 </TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[koine.fs :as fs]
+         '[toolnexus.agents.runtime :as rt]
+         '[toolnexus.core :as tn]
+         '[toolnexus.tool :as tool])
+
+(def llm {:base-url "https://openrouter.ai/api/v1" :style "openai"})
+
+;; --- tool views: worker can change the tree; verifier can only inspect + test ---
+(def full (tn/build {}))                       ; read/write/edit/bash/…
+(def inspect-tk
+  (tn/build {:builtins {:tools {"write" false "edit" false "apply_patch" false}}}))
+
+;; --- the worker: strong model, full hands ---
+(def worker
+  {:name   "worker"
+   :does   "Implements a change in this repository and returns the diff."
+   :soul   (fs/read-file "AGENTS.md")
+   :tools  (tool/all-tools full)
+   :model  "anthropic/claude-sonnet-4"
+   :budget {:max-turns 40 :max-tokens 300000}})
+
+;; --- the verifier: cheap model, inspection-only, adversarial soul ---
+(def verifier
+  {:name   "verifier"
+   :does   "Adversarially verifies a diff. Compiles + runs the tests. PASS or FAIL + critique."
+   :soul   (fs/read-file "verifier/SOUL.md")
+   :tools  (tool/all-tools inspect-tk)
+   :model  "openai/gpt-4o-mini"
+   :budget {:max-turns 10 :max-tokens 40000}})
+
+;; --- the gate (verified-run as defined above), then act on the flag ---
+(def runtime (rt/create-runtime {:registry {"worker" worker "verifier" verifier} :llm llm}))
+(def result (verified-run runtime "Fix the child-process leak on MCP stdio reconnect. Add a test."))
+
+(if (:verified result)
+  (git-commit (:text result))               ; it passed the gate — safe to ship
+  (slack-post "#eng" (:text result)))       ; loudly unverified — a human decides
+```
+</TabItem>
 </Tabs>
 
 ## What you bring — and what this is not
@@ -752,7 +842,7 @@ end
 **The library gives you the hard parts:** isolated sub-agents (the verifier structurally cannot see
 the worker's reasoning), tool scoping (it structurally cannot mutate the artifact), hierarchical
 budgets (it cannot outspend its ceiling), and usage roll-up (you can measure the gate's true cost) —
-identical in six languages. The gate itself is yours, and so are its limits:
+identical in seven languages. The gate itself is yours, and so are its limits:
 
 | Not shipped | What you do instead |
 |---|---|

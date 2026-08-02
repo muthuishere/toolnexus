@@ -1,6 +1,6 @@
 ---
 title: Fail fast, or retry
-description: Own the retry-vs-fail decision for every LLM-call failure with one onError callback — in all six languages.
+description: Own the retry-vs-fail decision for every LLM-call failure with one onError callback — in all seven languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -86,6 +86,23 @@ client = Toolnexus.Client.create(
     end
   end
 )
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+;; NOT named `agent` — `clojure.core/agent` exists on both hosts, and shadowing a
+;; core name is the one thing this port never does.
+(def llm-client
+  (client/create-client
+   {:base-url base-url :style "openai" :model model :api-key api-key
+    :retries  2
+    ;; `info` is {:status :error :attempt :retryable?} — the predicate key keeps
+    ;; the `?` suffix Clojure uses for booleans.
+    :on-error (fn [info]
+                (cond
+                  (= 402 (:status info)) :fail
+                  (:retryable? info)     :retry
+                  :else                  :fail))}))
 ```
 </TabItem>
 </Tabs>

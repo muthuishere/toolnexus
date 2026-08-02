@@ -119,7 +119,9 @@ for (const h of r.runtime.list()) { // per-handle breakdown, tree order
 `totalTokens` on the result is universal (`total_tokens` / `TotalTokens` per port's casing). The
 `list()` view lives on the **runtime**: JS and Go hand it back from a one-shot run (`r.runtime`;
 Go's `Run` returns `(TaskResult, *Runtime)`), Elixir attaches `runtime` on a pending result, and
-in Java/C# you reach it by driving `AgentRuntime` directly rather than through `run()`. Budget
+in Java/C#/Clojure you reach it by driving the runtime directly rather than through `run()` —
+in Clojure that is `(rt/handles runtime)`, which is the same view under a name that does not
+shadow `clojure.core/list`. Budget
 reads are **eventually consistent between turn boundaries** — a handle mid-turn has not yet
 committed its usage.
 </Aside>
@@ -529,6 +531,69 @@ r =
     "Should we migrate billing off Stripe? We do ~40k charges/month across US and EU.")
 
 IO.puts("#{r.status} #{r.total_tokens}")   # whole-tree ledger
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.agents.runtime :as rt]
+         '[toolnexus.core :as tn]
+         '[toolnexus.tool :as tool])
+
+(def llm {:base-url "https://openrouter.ai/api/v1" :style "openai"
+          :model "anthropic/claude-sonnet-4"})
+
+;; Workers get a read-only view: fetch + search, never write or shell.
+(def research
+  (tn/build {:builtins {:tools {"bash" false "write" false
+                                "edit" false "apply_patch" false}}}))
+(def tools (tool/all-tools research))
+
+(defn worker [nm does soul]
+  {:name nm :does does :soul soul :tools tools
+   :budget {:max-turns 15 :max-tokens 80000}})
+
+(def team
+  [(worker "cost-analyst"
+           "Estimates one-time and recurring cost of a stated migration. Needs current volumes to be useful."
+           "Produce a cost range with the assumptions named. Say 'unknown' rather than inventing a number.")
+   (worker "competitor-scout"
+           "Finds what comparable companies did about a named decision, and what happened after."
+           "Three concrete examples with sources. No generic industry commentary.")
+   (worker "code-auditor"
+           "Answers what OUR codebase depends on for a named vendor. Read-only; cites file:line."
+           "Search the repo. Cite file:line for every dependency you report. Never guess.")
+   (worker "risk-officer"
+           "Argues the strongest case AGAINST a proposed change. Adversarial by design."
+           "Your job is to find what breaks. Be specific and concrete, never rhetorical.")])
+
+(def coordinator
+  {:name   "coordinator"
+   :does   "Answers a strategic question by delegating research and synthesizing the results"
+   :soul   "Split the question into INDEPENDENT parts, one per worker, and dispatch them ALL in a
+SINGLE turn so they run in parallel. Give each worker a self-contained prompt — they
+cannot see this conversation.
+
+If a worker errors or returns nothing: retry ONCE with a narrower prompt, then route to
+the closest other worker. If nothing covers it, state the gap under 'Not covered'.
+Never present a gap as a finding.
+
+Finish with a recommendation, the evidence for it, and what would change your mind."
+   :team   (mapv :name team)          ; a team is a list of NAMES in the registry
+   :budget {:max-turns 25 :max-tokens 600000 :max-concurrent 4 :max-children 8 :max-depth 2}})
+
+(def runtime
+  (rt/create-runtime
+   {:registry             (into {"coordinator" coordinator} (map (juxt :name identity)) team)
+    :llm                  llm
+    :max-concurrent-turns 3}))   ; provider-friendly: 4 workers, 3 requests in flight
+
+(def r (rt/run-agent runtime "coordinator"
+                     "Should we migrate billing off Stripe? We do ~40k charges/month across US and EU."))
+
+(println (:status r) (:total-tokens r))   ; whole-tree ledger
+(println (:text r))                        ; the brief
+(doseq [h (rt/handles runtime)]            ; per-handle breakdown, tree order
+  (println (:id h) (:state h) (:tokens h)))
 ```
 </TabItem>
 </Tabs>
