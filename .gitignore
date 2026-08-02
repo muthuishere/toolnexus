@@ -43,3 +43,7 @@ clojure/**/build.lock.edn
 site/tests/.work/
 site/tests/snippets/
 erl_crash.dump
+clojure/examples/cljgo-ex1/events
+clojure/examples/cljgo-ex2/inspect
+clojure/examples/cljgo-ex3/newsroom
+clojure/examples/cljgo-ex*/build.lock.edn
