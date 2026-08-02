@@ -4,7 +4,7 @@
 ;;   clojure -T:build jar                  build the release jar + pom
 {:paths ["src"]
  :deps  {org.clojure/clojure           {:mvn/version "1.12.5"}
-         net.clojars.muthuishere/koine {:mvn/version "0.9.1"}}
+         net.clojars.muthuishere/koine {:mvn/version "0.10.0"}}
  :aliases
  ;; Release tooling ONLY, and only reachable through this alias — it must never
  ;; move up into :deps. `./deps-purity-check.sh` resolves the DEFAULT transitive

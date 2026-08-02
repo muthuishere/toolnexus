@@ -8,7 +8,7 @@ implementation, byte-identical on both.
 ```clojure
 ;; deps.edn
 net.clojars.muthuishere/toolnexus {:mvn/version "0.12.0"}   ; this port
-net.clojars.muthuishere/koine     {:mvn/version "0.9.1"}    ; its only dependency
+net.clojars.muthuishere/koine     {:mvn/version "0.10.0"}    ; its only dependency
 ```
 
 Released to Clojars as **`net.clojars.muthuishere/toolnexus`** — see
@@ -23,7 +23,7 @@ is the only third-party dependency.
 
 ## Status
 
-263 tests / 1018 assertions, 0 failures, in **all five** execution modes:
+291 tests / 1100 assertions, 0 failures, in **all five** execution modes:
 
 | runtime | how |
 |---|---|
@@ -31,10 +31,12 @@ is the only third-party dependency.
 | cljgo, AOT binary | `cljgo build && ./toolnexus-test` |
 | cljgo, interpreted | `cljgo run src/run_tests.cljc` |
 
-Verified against koine 0.9.1 and the **published cljgo v0.8.8 release
+Verified against koine 0.10.0 and the **published cljgo v0.9.0 release
 archive** — no source checkout, no `CLJGO_SRC`. cljgo #177 is closed, so these
 numbers are re-runnable by anyone rather than only on the machine that produced
-them.
+them. Verify against a RELEASED binary, not a local build: a rebuild-from-source
+shim on PATH made this gate track an old checkout for a while, and it reported a
+mode as blocked upstream that no released cljgo has ever failed.
 
 Two gates beyond the suite:
 
@@ -75,7 +77,7 @@ from PATH would not be enough, because on a typical machine it sits in the same
 directory as `clojure` itself, and *"I didn't call it"* is not the same as
 *"it was not called"*.
 
-Result: 155 tests / 708 assertions, 0 failures, **no POISON line**. The example
+Result: 291 tests / 1100 assertions, 0 failures, **no POISON line**. The example
 in `examples/minimal` runs the same way, with `app/main.cljg` sitting in the
 same directory being correctly ignored — the JVM never looks for that extension.
 
@@ -111,12 +113,17 @@ exam is not a gate, and lowering the bar has to be a visible diff the other port
 **Still absent, and the option gate cannot see any of it** — it compares option NAMES in two
 files, so a missing subsystem has no names to compare:
 
-| capability | JS module |
-|---|---|
-| agent runtime (§7D) | `agents/runtime.ts` |
-| subagents / persona (§7E) | `agents/agent.ts` |
-| context compaction (§7F) | `agents/compaction.ts` |
-| agent home | `agents/home.ts` |
+| capability | JS module | state here |
+|---|---|---|
+| agent runtime (§7D) | `agents/runtime.ts` | absent |
+| subagents (§7D `task`) | `agents/agent.ts` | absent — needs the runtime |
+| context compaction (§7F) | `agents/compaction.ts` | **shipped** — `toolnexus.agents.compaction` |
+| agent home (§7E) | `agents/home.ts` | **partly** — `compose-soul` + the `memory` tool ship; `from-dir` and `start-agent` need the runtime |
+
+This is what holds the port back from Clojars. It is not a tier downgrade and not
+a quality gap in what exists — it is four subsystems that are not written yet, and
+publishing a port that silently lacks them would make "byte-identical across seven
+languages" false for anyone who reached for an agent team.
 
 Note `:agents` here is the **A2A** option — remote agents behind an Agent Card — which is a
 different capability from `openspec/specs/subagents` and does not satisfy it.
