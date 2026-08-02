@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # all-modes-check — the suite in EVERY way this port can be executed.
 #
-#   ./all-modes-check.sh        exit 0 = every unblocked mode green
+#   ./all-modes-check.sh        exit 0 = ALL FIVE modes green
 #
 # The port claims to work "on Clojure and on cljgo". That is four execution
 # paths, not two, and they are genuinely different machinery:
@@ -17,19 +17,26 @@
 # meets the library. A port proven only through its compiled path is proven in
 # the mode developers use least.
 #
-# STATUS 2026-08-01, cljgo v0.8.8, koine 0.8.2 — ALL FIVE GREEN:
+# STATUS 2026-08-02, cljgo v0.9.0, koine 0.9.1 — ALL FIVE GREEN, NONE WAIVED:
 #
-#   jvm-main    155 tests / 708 assertions   PASS
-#   jvm-repl    155 tests / 708 assertions   PASS
-#   cljgo-aot   155 tests / 708 assertions   PASS
-#   cljgo-run   155 tests / 708 assertions   PASS
-#   cljgo-repl  155 tests / 708 assertions   PASS  <- was BLOCKED; cljgo #185
+#   jvm-main    291 tests / 1100 assertions  PASS
+#   jvm-repl    291 tests / 1100 assertions  PASS
+#   cljgo-aot   291 tests / 1100 assertions  PASS
+#   cljgo-run   291 tests / 1100 assertions  PASS
+#   cljgo-repl  291 tests / 1100 assertions  PASS  <- was BLOCKED; cljgo #185,
+#                                                    fixed upstream in v0.9.0
 #
 # cljgo-repl WENT GREEN WITH NO EDIT HERE, which was the point of reporting it
 # as BLOCKED rather than skipping it: the leg kept attempting the real thing
 # every run, so the upstream fix landing is what turned it green, not a human
 # remembering to re-enable it. The history below is kept deliberately — a gate
 # that erases what it used to catch cannot be audited.
+#
+# THE WAIVER IS NOW RETIRED. With the defect fixed in the cljgo version this
+# port pins, a REPL that resolves nothing is a REGRESSION, not an upstream
+# absence — so that branch FAILS the run instead of reporting BLOCKED. A waiver
+# kept past the defect it excused cannot be told apart from a new break: the run
+# would read green with four modes proven instead of five.
 #
 # THE cljgo-repl BLOCKER — FIXED UPSTREAM in cljgo #185, kept here as history.
 # It was: `cljgo repl` resolved neither the project's own source root nor its
@@ -59,8 +66,9 @@
 # the require failed. That produced two false "it works" readings while this was
 # being investigated. Assert on the SUITE'S OWN verdict line and nothing else.
 #
-# BLOCKED is reported, never skipped, and it is not counted as a pass. When the
-# upstream fix lands this leg turns green on its own with no edit here.
+# (Historic note: while the defect was open, BLOCKED was reported and never
+# skipped, and never counted as a pass — which is what let the upstream fix turn
+# this leg green on its own, with no edit here.)
 #
 # KNOWN FLAKE, OPEN — recorded rather than waited out. The cljgo-run leg has
 # failed twice with `"error":1` and a short assertion count (704 and 700 of 708),
@@ -160,8 +168,17 @@ else
   # Distinguish "upstream cannot resolve anything" from a real port failure, by
   # asking the REPL for something that needs no project and no dependency.
   if printf '(println :repl-alive)\n' | $CLJGO repl 2>/dev/null | grep -q ':repl-alive'; then
-    log "  BLOCKED cljgo-repl — the REPL runs but resolves no project ns and no dep (upstream)"
-    rows="$rows{\"mode\":\"cljgo-repl\",\"gate\":\"BLOCKED: upstream, cljgo repl resolves no project namespace or dependency\"},"
+    # This WAS a tolerated BLOCKED state (cljgo #185: the REPL ran but resolved
+    # no project namespace and no dependency). cljgo v0.9.0 fixed it and the leg
+    # passes, so the waiver has expired and is now a FAILURE. A waiver kept past
+    # the defect it excused cannot be told apart from a regression: the next time
+    # this branch is taken it would report "not counted" and the run would read
+    # green with four modes proven instead of five.
+    log "  FAIL  cljgo-repl — the REPL resolves no project ns and no dep. This was"
+    log "        upstream cljgo #185, FIXED in v0.9.0 — so it is a REGRESSION now,"
+    log "        not a tolerated absence. Check the cljgo version on PATH first."
+    rows="$rows{\"mode\":\"cljgo-repl\",\"gate\":\"FAILED: repl resolves no project namespace or dependency (regression; fixed upstream in v0.9.0)\"},"
+    fail=1
   else
     log "  FAIL  cljgo-repl — the REPL did not even evaluate a bare println"
     rows="$rows{\"mode\":\"cljgo-repl\",\"gate\":\"FAILED: repl unusable\"},"
@@ -172,5 +189,5 @@ fi
 printf '{"check":"all-modes","gate":"%s","modes":[%s]}\n' \
   "$([ $fail -eq 0 ] && echo OK || echo FAILED)" "${rows%,}"
 
-[ $fail -eq 0 ] && log "PASS (blocked modes are reported, not counted)" || log "FAIL"
+[ $fail -eq 0 ] && log "PASS (all five modes; no mode is waived)" || log "FAIL"
 exit $fail

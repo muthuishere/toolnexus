@@ -137,11 +137,14 @@ jobs:
           node-version: "20"
       # cljgo is the second host. `go install …@vX.Y.Z` only produces a usable
       # binary as of cljgo v0.8.5 (their #177 / ADR 0116) — earlier releases
-      # demanded a source checkout and CLJGO_SRC.
+      # demanded a source checkout and CLJGO_SRC. v0.9.0 carries the LongRange
+      # negative-step fix this port found (cljgo #194) and ADR 0121, which makes
+      # an unknown `cljg.io/exec` option a hard error instead of a silent
+      # ignore — we reach that call through koine on every MCP stdio spawn.
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23"
-      - run: go install github.com/muthuishere/cljgo/cmd/cljgo@v0.8.9
+      - run: go install github.com/muthuishere/cljgo/cmd/cljgo@v0.9.0
       - run: echo "$HOME/go/bin" >> "$GITHUB_PATH"
       - uses: actions/cache@v4
         with:
