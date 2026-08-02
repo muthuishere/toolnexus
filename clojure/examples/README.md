@@ -1,15 +1,71 @@
-# toolnexus, in Clojure — one source, two runtimes
+# toolnexus in Clojure — runnable examples
 
-`src/toolnexus/demo.cljc` is **one file with no reader conditional in it**. It
-runs unmodified on Clojure (JVM) and on [cljgo](https://github.com/muthuishere/cljgo),
-which compiles Clojure to a native Go binary. Same bytes, same output.
+Everything here runs on **both hosts from the same source**: Clojure on the JVM, and
+[cljgo](https://github.com/muthuishere/cljgo), which hosts Clojure on Go. No reader
+conditionals anywhere — every host difference lives in
+[koine](https://github.com/muthuishere/koine), the port's only third-party dependency.
+
+There are four things in this directory, in the order you probably want them.
+
+| | what | live LLM? | how to run |
+|---|---|---|---|
+| **`clj-ex1` / `cljgo-ex1`** | an interactive agent: HTTP tool + filesystem MCP server + agent skill, answering your questions in a loop | yes | `task clj-ex1` · `task cljgo-ex1` |
+| **`clj` / `cljgo`** (+ `src/examples`) | five focused examples — skills, native+HTTP tools, persona/memory, compaction, and the parity demo | no | `./clj/run.sh` · `./cljgo/run.sh` — see [EXAMPLES.md](EXAMPLES.md) |
+| **`clojure-app` / `cljgo-app`** (+ `src/toolnexus`) | the parity demo: three tool sources, three execution modes, byte-identical output | no | `./run-both.sh` |
+| **`minimal`** | the smallest honest demonstration of the premise | no | see [minimal/README.md](minimal/README.md) |
+
+---
+
+## 1. The interactive agent — `clj-ex1` / `cljgo-ex1`
+
+The one to start with. It builds a toolkit from **three different sources at once** and then
+sits in a loop answering whatever you type:
+
+- an **HTTP tool** — one `http-tool` declaration that fetches the official Clojure events page
+- an **MCP server** — `@modelcontextprotocol/server-filesystem`, spawned over stdio; all
+  fourteen of its tools join the same registry
+- an **agent skill** — `skills/clojure-events/SKILL.md`, loaded on demand rather than stuffed
+  into the prompt
+
+```bash
+export OPENROUTER_API_KEY=...        # the value is never printed or logged
+
+task clj-ex1                          # Clojure on the JVM
+task cljgo-ex1                        # the same source on cljgo — no build step
+task clj-ex1 MODEL=qwen/qwen-2.5-72b-instruct   # any tool-capable OpenRouter model
+```
+
+On start it prints every tool, MCP tool and skill it discovered plus a few questions worth
+trying, then waits at `you>`. Every tool call and result prints as it happens, so you can watch
+the loop rather than take its word for it. `client/ask` with an `:id` gives it conversation
+memory, so follow-ups work. `exit` or Ctrl-D quits and disconnects the MCP server.
+
+`clj-ex1/src/chat.cljc` and `cljgo-ex1/src/chat.cljc` are the **same file**. The only thing
+`cljgo-ex1` adds is `src/run_chat.cljc`, two lines, because `cljgo run` evaluates top-level forms
+and does not call `-main`. `cljgo build` will AOT the same source into a self-contained binary —
+about 15 MB with the tools and MCP client included — but nothing here requires it.
+
+**This is the only example that needs an API key and the internet.** Everything below is hermetic.
+
+## 2. Five focused examples — `clj/` and `cljgo/`
+
+Skills, native + HTTP tools, persona/memory, compaction, and the parity demo below — each isolated,
+each run on both hosts. `./clj/run.sh` and `./cljgo/run.sh` run all five and fail loudly if any of
+them does not finish; every example prints `OK` as its last line and is judged on that marker, not
+on the exit status. [EXAMPLES.md](EXAMPLES.md) is the detail.
+
+## 3. The parity demo — `clojure-app/` and `cljgo-app/`
+
+`src/toolnexus/demo.cljc` is **one file, symlinked into both projects** — there is no second copy
+that can drift. It starts a real MCP server as a child process, reads real files off disk, and
+calls one tool from each of three sources.
 
 ```bash
 ./run-both.sh
 ```
 
-That runs it three ways — JVM, cljgo AOT binary, cljgo interpreted — prints all
-three reports, and **fails if they differ**.
+That runs it three ways — JVM, cljgo AOT binary, cljgo interpreted — prints all three reports and
+**fails if they differ**:
 
 ```
 == diff
@@ -17,120 +73,37 @@ three reports, and **fails if they differ**.
   jvm == cljgo/interp  (identical, 1529 bytes)
 ```
 
-## What the demo actually does
+The fixtures are the repo's **shared** `examples/` directory at the root — the same `mcp.json` and
+`skills/hello-world/` that the JS, Python, Go, Java, C# and Elixir ports run against. Set
+`TN_EXAMPLES` to point elsewhere. There is no LLM in this demo; it calls the tools directly.
 
-It is not a mock. It starts a real MCP server as a child process, reads real
-files off disk, and calls three real tools:
+The thing worth noticing in the source is how little there is. **An MCP tool, a skill and a local
+function are the same shape** — a name, a description, and something you can call. That
+equivalence is the whole library; everything else is transport.
 
-```
-1. MCP server "everything"  <- examples/mcp.json
-   npx -y @modelcontextprotocol/server-everything
-   13 tools discovered
-2. Agent skills  <- examples/skills/**/SKILL.md
-   1 skill(s): hello-world
-3. Native tool   <- a plain Clojure fn
-   shout
----------------------------------------------------------------
-unified toolkit — 15 tools, one namespace:
-   everything_echo   (mcp)
-   ...
-   shout   (native)
-   skill   (skill)
----------------------------------------------------------------
-one call per source:
-  [mcp] everything_echo {"message":"hello from Clojure"}
-      -> Echo: hello from Clojure
-  [skill] skill {"name":"hello-world"}
-      -> <skill_content name="hello-world">  … 1003 bytes of instructions injected
-  [native] shout {"text":"same file, both runtimes"}
-      -> SAME FILE, BOTH RUNTIMES
-```
+## What you need
 
-The fixtures are the repo's **shared** `examples/` directory at the root — the
-same `mcp.json` and the same `skills/hello-world/` that the JS, Python, Go,
-Java, C# and Elixir ports run against. Nothing here is Clojure-specific.
-
-## Run it yourself
-
-```bash
-cd clojure-app && clojure -M -m toolnexus.demo          # Clojure, JVM
-
-cd cljgo-app   && cljgo build && ./demo                 # cljgo, native binary
-                  cljgo run src/run_interpreted.cljc    # cljgo, interpreted
-```
-
-Set `TN_EXAMPLES` to point somewhere else for the fixtures; it defaults to the
-repo's shared `examples/`.
-
-You need `clojure`, `cljgo`, and `npx` on PATH. Nothing else — **no API key and
-no internet beyond the one `npx` fetch of the MCP server.** There is no live
-LLM in this demo.
-
-## What to look at in the source
-
-`src/toolnexus/demo.cljc`, in reading order:
-
-| lines | what |
+| | for what |
 |---|---|
-| `rpc!` / `connect-mcp!` | the MCP handshake and one JSON-RPC round trip over a child process's stdin/stdout |
-| `mcp-tools` | `tools/list` becomes a list of `{:name :description :source :execute}` maps |
-| `discover-skills` / `skill-tool` | every `**/SKILL.md` behind **one** `skill` tool — the model pays for a skill's instructions only when it asks for them (progressive disclosure) |
-| `native-tool` | your own function, wearing the same map |
-| `toolkit` / `call-tool` | the three merge into one flat namespace, and a failing tool returns a result rather than crashing the caller |
-
-The thing worth noticing is how little there is. **An MCP tool, a skill and a
-local function are the same shape** — a name, a description, and something you
-can call. That equivalence is the whole library; everything else is transport.
-
-## The layout, and why
-
-```
-src/toolnexus/demo.cljc      THE source — one copy
-clojure-app/
-  deps.edn                   koine from Clojars, Clojure 1.12.5
-  src/toolnexus/demo.cljc -> ../../../src/toolnexus/demo.cljc
-cljgo-app/
-  build.cljgo                koine from Clojars — the same artifact, same version
-  src/toolnexus/demo.cljc -> ../../../src/toolnexus/demo.cljc
-  src/run_interpreted.cljc   two lines, see below
-```
-
-The symlinks are the honest version of "one source": there is no second copy
-that can drift, and both projects read the exact same bytes.
-
-Every host-shaped thing goes through
-[koine](https://clojars.org/net.clojars.muthuishere/koine) — `koine.process`
-for the child, `koine.fs` for the files, `koine.json` for the wire, `koine.env`,
-`koine.host`. That is the **only** dependency: no HTTP client, no JSON library,
-no process library. While resolving it, cljgo prints
-
-```
-cljgo deps: net.clojars.muthuishere/koine 0.4.2 — 11 namespace(s) with no Java interop
-```
-
-which is the portability claim being machine-checked at dependency time.
-
-`src/run_interpreted.cljc` exists because **`cljgo run <file>` does not call
-`-main`** — it evaluates top-level forms and exits 0 having printed nothing,
-which is indistinguishable from success. Those two lines make the interpreted
-mode run the same program the binary runs. For the same reason `run-both.sh`
-asserts on **output**, never on the exit code.
+| `clojure` | any JVM example |
+| `cljgo` | any cljgo example (`go install github.com/muthuishere/cljgo/cmd/cljgo@latest`) |
+| `npx` | the examples that spawn an MCP server |
+| `task` | the `clj-ex1` / `cljgo-ex1` shortcuts ([Taskfile](https://taskfile.dev)) |
+| `OPENROUTER_API_KEY` | **only** `clj-ex1` / `cljgo-ex1` |
 
 ## Honest limits
 
-- **This is a teaching artifact, not the conformance suite.** It shows three
-  tool sources and one call each. It does *not* cover remote MCP over
-  streamable-HTTP, A2A inbound/outbound, `serve()`, the OpenAI/Anthropic/Gemini
-  adapters, suspension/resume, or the retry policy. `clojure/spikes/s17-composition`
-  drives all of that end to end; start there if you want coverage.
-- **There is no LLM.** The demo calls tools directly. The client loop that lets
-  a model choose them is exercised in `s16-client-loop` and `s17-composition`
-  against a scripted LLM over `127.0.0.1`.
-- **The tool count is whatever `@modelcontextprotocol/server-everything`
-  currently ships** (13 at the time of writing). If npm publishes a new version
-  the number in this README moves; the *identity* between runtimes does not.
-- **`run-both.sh` needs both toolchains.** It does not skip a missing one — if
-  `cljgo` is not installed it fails, because "one source, two runtimes" is the
-  claim being tested.
-- Three of the ~15 tools are actually called. The rest of the MCP server's
-  surface is discovered and listed, never invoked.
+- **These are teaching artifacts, not the conformance suite.** They show the shape of the library;
+  they do not cover every capability. Remote MCP over streamable-HTTP, A2A inbound/outbound,
+  `serve`, the OpenAI/Anthropic/Gemini adapters, suspension/resume and the retry policy are
+  exercised by the test suite, not here.
+- **Only `clj-ex1` / `cljgo-ex1` talks to a real model.** The rest use a scripted LLM or call tools
+  directly, so they are reproducible and cost nothing.
+- **Tool counts move when upstream moves.** The MCP servers ship whatever they ship; a number in
+  this README can go stale, but the *identity between the two hosts* does not.
+- **`run-both.sh` needs both toolchains** and does not skip a missing one — "one source, two
+  runtimes" is the claim being tested, so a half-run is a failure.
+- **cljgo is young.** It passes 238 of 242 files of the clojure-test-suite, `clojure.core` is not
+  complete, and it is not production-hardened; its
+  [Why page](https://muthuishere.github.io/cljgo/why/) says so first. These examples running
+  identically on both hosts is evidence, not a guarantee for your workload.
