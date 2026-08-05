@@ -1,5 +1,9 @@
 # toolnexus
 
+**We wrote one agent SDK and ported it, by hand, to seven languages — JS, Python, Go, Java,
+C#, Elixir, Clojure — until the same conformance suite passes byte-identical output in every
+one of them.**
+
 [![CI](https://github.com/muthuishere/toolnexus/actions/workflows/ci.yml/badge.svg)](https://github.com/muthuishere/toolnexus/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/toolnexus?logo=npm&label=npm)](https://www.npmjs.com/package/toolnexus)
 [![PyPI](https://img.shields.io/pypi/v/toolnexus?logo=pypi&logoColor=white&label=PyPI)](https://pypi.org/project/toolnexus/)
