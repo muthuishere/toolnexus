@@ -8,6 +8,19 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### Fixed — cancelling an A2A call reports `canceled` reliably (js)
+
+Aborting an in-flight A2A tool call reported one of three different states depending on when the
+signal landed. Between polls it correctly returned `canceled`; if the signal fired while a
+`SendMessage`/`GetTask` request was in flight, the aborted fetch threw and the result carried the
+last known state (`submitted` or `working`) plus a raw transport error message instead. `SPEC.md`
+§7A pins abort ⇒ `"A2A task <id> canceled"`, and the golang port already honored it on that path —
+this was **js drifting from the shared contract**, so a host could not treat the metadata state as
+meaningful for a cancelled call.
+
+Fixed in `js` only. The other five ports are **not audited** for the same hole; golang is known
+correct. If you rely on this, check your port.
+
 ### Fixed — compaction no longer orphans a tool result under the Anthropic style
 
 A long-running agent on `style:"anthropic"` could, the first time compaction fired, produce a
