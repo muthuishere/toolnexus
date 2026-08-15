@@ -97,29 +97,34 @@ func Compactor(opts CompactorOptions) func(context.Context, tn.BeforeLLMEvent) (
 		system := msgs[:head0]
 
 		// Find the split: the LARGEST tail (from a clean USER boundary) that fits
-		// keepTail. Scanning to a user turn guarantees tool-pair safety — a tail
-		// starting at a user message can never orphan a `tool` result from its
-		// tool_calls.
+		// keepTail. A boundary is a user turn that does NOT carry a tool result:
+		// under the anthropic dialect tool results ride inside a `user` message
+		// (client.go, tool_result blocks), so splitting there would orphan them
+		// from the assistant `tool_use` about to be summarized away.
 		split := len(msgs)
 		for i := len(msgs) - 1; i > head0; i-- {
-			if roleOf(msgs[i]) == "user" && count(msgs[i:]) <= keepTail {
+			if isBoundary(msgs[i]) && count(msgs[i:]) <= keepTail {
 				split = i
 			}
 			if count(msgs[i:]) > keepTail {
 				break
 			}
 		}
-		// If no clean user boundary fit in range, fall back to the most recent user
-		// turn so we still never split a tool group (may keep more than keepTail —
-		// safety over size).
+		// If no clean boundary fit in range, fall back to the most recent one so we
+		// still never split a tool group (may keep more than keepTail — safety over
+		// size).
 		if split == len(msgs) {
 			for i := len(msgs) - 1; i > head0; i-- {
-				if roleOf(msgs[i]) == "user" {
+				if isBoundary(msgs[i]) {
 					split = i
 					break
 				}
 			}
 		}
+		// No boundary anywhere ⇒ split stays len(msgs) and the whole body is
+		// summarized with an empty tail. That is bounded and cannot orphan anything
+		// (nothing is retained), and it is how a long agentic run — one user prompt
+		// followed by many assistant/tool turns — gets bounded at all.
 		if split <= head0 {
 			return nil, nil // nothing safely compactible
 		}
@@ -155,6 +160,37 @@ func Compactor(opts CompactorOptions) func(context.Context, tn.BeforeLLMEvent) (
 
 // roleOf extracts the "role" field of a message, tolerating the map shapes the
 // loop uses (map[string]any) as well as map[string]string.
+// isBoundary reports whether m may begin a retained tail: a `user` turn that is
+// not carrying a tool result. Under the anthropic dialect a tool result is a
+// `user` message whose content holds tool_result blocks, so such a message is a
+// tool-group member, not a conversational boundary.
+func isBoundary(m any) bool {
+	if roleOf(m) != "user" {
+		return false
+	}
+	return !carriesToolResult(m)
+}
+
+// carriesToolResult reports whether m's content holds any tool_result block.
+func carriesToolResult(m any) bool {
+	mm, ok := m.(map[string]any)
+	if !ok {
+		return false
+	}
+	blocks, ok := mm["content"].([]any)
+	if !ok {
+		return false
+	}
+	for _, b := range blocks {
+		if bm, ok := b.(map[string]any); ok {
+			if t, _ := bm["type"].(string); t == "tool_result" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func roleOf(m any) string {
 	switch v := m.(type) {
 	case map[string]any:

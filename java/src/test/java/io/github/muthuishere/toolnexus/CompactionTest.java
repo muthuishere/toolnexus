@@ -258,6 +258,79 @@ class CompactionTest {
         }
     }
 
+    // -- Dialect-blind tool-pair boundary (fix-compaction-tool-pair-dialect) -----
+    //
+    // Under the anthropic dialect a tool result is a `user` message carrying tool_result
+    // blocks, so a "clean user boundary" can be the tool-result carrier itself — orphaning
+    // it from the assistant tool_use that gets summarized away.
+
+    private static Map<String, Object> msg(String role, Object content) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("role", role);
+        m.put("content", content);
+        return m;
+    }
+
+    private static Map<String, Object> block(String type, String idKey, String id) {
+        Map<String, Object> b = new LinkedHashMap<>();
+        b.put("type", type);
+        b.put(idKey, id);
+        return b;
+    }
+
+    @Test
+    void anthropicToolResultCarrierIsNotATailBoundary() {
+        String pad = "x".repeat(400);
+        List<Object> msgs = new ArrayList<>(List.of(
+                msg("system", "soul"),
+                msg("user", "q1 " + pad),
+                msg("assistant", "a1 " + pad),
+                msg("user", "q2"),
+                msg("assistant", List.of(block("tool_use", "id", "tu_1"))),
+                msg("user", List.of(block("tool_result", "tool_use_id", "tu_1"))),
+                msg("assistant", "done")));
+
+        var hook = Compaction.compactor(new Compaction.Options()
+                .maxTokens(50).keepTail(20).summarize(SUMMARIZE));
+        LlmClient.LLMOverride out = hook.apply(ev(msgs));
+        assertNotNull(out, "expected compaction to fire");
+
+        String blob = String.valueOf(out.messages());
+        boolean hasResult = blob.contains("tool_result");
+        boolean hasUse = blob.contains("tool_use,") || blob.contains("tool_use}") || blob.contains("type=tool_use");
+        assertFalse(hasResult && !hasUse, "orphaned tool_result with no matching tool_use: " + blob);
+        assertTrue(blob.contains("done"), "most recent turn was lost: " + blob);
+    }
+
+    @Test
+    void openaiDialectBoundariesUnchanged() {
+        String pad = "x".repeat(400);
+        Map<String, Object> toolCall = new LinkedHashMap<>();
+        toolCall.put("id", "tc_1");
+        Map<String, Object> assistantCall = new LinkedHashMap<>();
+        assistantCall.put("role", "assistant");
+        assistantCall.put("content", null);
+        assistantCall.put("tool_calls", List.of(toolCall));
+        Map<String, Object> toolMsg = new LinkedHashMap<>();
+        toolMsg.put("role", "tool");
+        toolMsg.put("tool_call_id", "tc_1");
+        toolMsg.put("content", "echoed");
+
+        List<Object> msgs = new ArrayList<>(List.of(
+                msg("system", "soul"),
+                msg("user", "q1 " + pad),
+                assistantCall,
+                toolMsg,
+                msg("user", "q2"),
+                msg("assistant", "done")));
+
+        var hook = Compaction.compactor(new Compaction.Options()
+                .maxTokens(50).keepTail(20).summarize(SUMMARIZE));
+        LlmClient.LLMOverride out = hook.apply(ev(msgs));
+        assertNotNull(out, "expected compaction to fire");
+        assertTrue(String.valueOf(out.messages()).contains("q2"), "openai boundary moved");
+    }
+
     private static void respond(HttpExchange exchange, int status, String body) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json");

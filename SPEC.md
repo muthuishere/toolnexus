@@ -959,10 +959,15 @@ the resumed replay compacts again.
 The compacted transcript is `[leading system prompt (verbatim), summary system message,
 (flush reminder?), …tail]`. Two invariants ports MUST hold:
 
-- **Tool-pair safety.** The retained tail SHALL begin at a `user` turn, so no `tool` message
-  is ever orphaned from the `assistant` carrying its `tool_call_id`. The split is the largest
-  user-boundary tail that fits `keepTail`; if none fits, extend to the most recent user turn
-  (safety over size).
+- **Tool-pair safety.** The retained tail SHALL begin at a `user` turn that does **not** carry a
+  tool result, so no tool result is ever orphaned from the assistant turn carrying its matching
+  tool-call id. The split is the largest such tail that fits `keepTail`; if none fits, extend to the
+  most recent valid boundary (safety over size); if no valid boundary exists at all, the body is
+  summarized with an empty tail, which is bounded and cannot orphan anything.
+  The rule is **dialect-neutral**. Under `openai` a tool result is a `tool` message, so every `user`
+  message is a boundary. Under `anthropic` a tool result is a `user` message whose content holds
+  `tool_result` blocks — such a message is a tool-group member, **not** a boundary, and splitting
+  there would orphan it from the `tool_use` about to be summarized away.
 - **System prompt preserved.** A leading `system` message (identity / soul / skills) is kept
   unchanged; only the body between it and the tail is summarized.
 

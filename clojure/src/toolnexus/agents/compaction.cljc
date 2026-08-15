@@ -51,6 +51,27 @@
           0
           messages))
 
+(defn- carries-tool-result?
+  "Does this message carry a tool result? Under the anthropic dialect a tool result
+  is a `user` message whose `:content` holds `tool_result` blocks, making it a member
+  of a tool group rather than a conversational boundary.
+
+  clojure.core only — no host interop (ADR 0009: this file compiles on the JVM and
+  three Go-hosted dialects)."
+  [m]
+  (let [content (:content m)]
+    (boolean
+     (when (sequential? content)
+       (some (fn [b]
+               (and (map? b)
+                    (contains? #{"tool_result" :tool_result} (:type b))))
+             content)))))
+
+(defn- boundary?
+  "A valid tail boundary: a `user` turn that is not carrying a tool result."
+  [m]
+  (and (= "user" (:role m)) (not (carries-tool-result? m))))
+
 (defn- tail-start
   "Index where the retained tail begins.
 
@@ -67,7 +88,7 @@
                     (if (> tail-tokens keep-tail)
                       split                       ; past budget — stop scanning back
                       (recur (dec i)
-                             (if (= "user" (:role (nth msgs i))) i split))))))]
+                             (if (boundary? (nth msgs i)) i split))))))]
     (if (not= split n)
       split
       ;; No user boundary fit within keep-tail — fall back to the most recent one.
@@ -81,7 +102,7 @@
       (loop [i (dec n)]
         (cond
           (<= i head-end)                  n
-          (= "user" (:role (nth msgs i)))  i
+          (boundary? (nth msgs i))         i
           :else                            (recur (dec i)))))))
 
 (defn compactor

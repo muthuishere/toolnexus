@@ -121,11 +121,30 @@ export function compactor(
 }
 
 /**
- * Locate the index where the retained tail begins. Tool-pair safety requires the tail
- * to start at a `user` turn: the largest user-boundary tail that still fits `keepTail`.
- * If no user boundary fits within `keepTail`, fall back to the most recent user turn
+ * Does this message carry a tool result? Under the anthropic dialect a tool result is a
+ * `user` message whose content holds `tool_result` blocks, so such a message is a member
+ * of a tool group rather than a conversational boundary.
+ */
+function carriesToolResult(m: Message): boolean {
+  const content = (m as { content?: unknown }).content
+  if (!Array.isArray(content)) return false
+  return content.some(
+    (b) => typeof b === "object" && b !== null && (b as { type?: unknown }).type === "tool_result",
+  )
+}
+
+/** A valid tail boundary: a `user` turn that is not carrying a tool result. */
+function isBoundary(m: Message): boolean {
+  return m.role === "user" && !carriesToolResult(m)
+}
+
+/**
+ * Locate the index where the retained tail begins. Tool-pair safety requires the tail to
+ * start at a `user` turn that is not a tool-result carrier: the largest such tail that
+ * still fits `keepTail`. If none fits, fall back to the most recent valid boundary
  * (favoring safety over size). Returns `msgs.length` (no tail) only when there is no
- * user turn after the head at all.
+ * valid boundary after the head at all — the whole body is then summarized, which is
+ * bounded and cannot orphan anything since nothing is retained.
  */
 function findTailStart(
   msgs: Message[],
@@ -136,13 +155,13 @@ function findTailStart(
   let split = msgs.length
   for (let i = msgs.length - 1; i > headEnd; i--) {
     if (count(msgs.slice(i)) > keepTail) break
-    if (msgs[i].role === "user") split = i
+    if (isBoundary(msgs[i])) split = i
   }
   if (split !== msgs.length) return split
 
-  // No user boundary fit within keepTail — extend back to the most recent user turn.
+  // No boundary fit within keepTail — extend back to the most recent valid one.
   for (let i = msgs.length - 1; i > headEnd; i--) {
-    if (msgs[i].role === "user") return i
+    if (isBoundary(msgs[i])) return i
   }
   return msgs.length
 }

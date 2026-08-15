@@ -94,22 +94,23 @@ public static class Compaction
             var system = msgs.Take(head0).ToList();
 
             // Find the split: the LARGEST tail (from a clean USER boundary) that fits keepTail.
-            // Scanning to a user turn guarantees tool-pair safety — a tail starting at a user
-            // message can never orphan a `tool` result from its `tool_calls`.
+            // A boundary is a user turn that does NOT carry a tool result: under the anthropic
+            // dialect tool results ride inside a `user` message, so splitting there would orphan
+            // them from the assistant `tool_use` about to be summarized away.
             var split = msgs.Count;
             for (var i = msgs.Count - 1; i > head0; i--)
             {
                 var tailTokens = count(Slice(msgs, i));
-                if (Role(msgs[i]) == "user" && tailTokens <= keepTail) split = i;
+                if (IsBoundary(msgs[i]) && tailTokens <= keepTail) split = i;
                 if (tailTokens > keepTail) break;
             }
-            // If no clean user boundary was found in range, fall back to the most recent user turn so
-            // we still never split a tool group (may keep more than keepTail — safety over size).
+            // If no clean boundary was found in range, fall back to the most recent one so we still
+            // never split a tool group (may keep more than keepTail — safety over size).
             if (split == msgs.Count)
             {
                 for (var i = msgs.Count - 1; i > head0; i--)
                 {
-                    if (Role(msgs[i]) == "user") { split = i; break; }
+                    if (IsBoundary(msgs[i])) { split = i; break; }
                 }
             }
             if (split <= head0) return null; // nothing safely compactible
@@ -141,6 +142,25 @@ public static class Compaction
 
     private static string? Role(object? message)
         => (message as IDictionary<string, object?>)?.Get("role") as string;
+
+    /// <summary>
+    /// A valid tail boundary: a <c>user</c> turn that is not carrying a tool result. Under the
+    /// anthropic dialect a tool result is a <c>user</c> message whose content holds
+    /// <c>tool_result</c> blocks, making it a tool-group member rather than a boundary.
+    /// </summary>
+    private static bool IsBoundary(object? message)
+        => Role(message) == "user" && !CarriesToolResult(message);
+
+    private static bool CarriesToolResult(object? message)
+    {
+        if ((message as IDictionary<string, object?>)?.Get("content") is not IEnumerable<object?> blocks)
+            return false;
+        foreach (var b in blocks)
+        {
+            if ((b as IDictionary<string, object?>)?.Get("type") as string == "tool_result") return true;
+        }
+        return false;
+    }
 
     /// <summary>msgs[from..] — the suffix starting at <paramref name="from"/>.</summary>
     private static List<object?> Slice(IReadOnlyList<object?> msgs, int from)

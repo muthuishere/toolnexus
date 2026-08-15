@@ -260,3 +260,60 @@ async def test_c6_end_to_end_across_compaction():
         )
     finally:
         await tk.close()
+
+
+# --------------------------------------------------------------------------- #
+# Dialect-blind tool-pair boundary (fix-compaction-tool-pair-dialect)
+#
+# Under the anthropic dialect a tool result is a ``user`` message carrying
+# ``tool_result`` blocks, so a "clean user boundary" can be the tool-result
+# carrier itself — orphaning it from the assistant ``tool_use`` that gets
+# summarized away.
+# --------------------------------------------------------------------------- #
+async def test_anthropic_tool_result_carrier_is_not_a_boundary():
+    pad = "x" * 400
+    msgs = [
+        {"role": "system", "content": "soul"},
+        {"role": "user", "content": "q1 " + pad},
+        {"role": "assistant", "content": "a1 " + pad},
+        {"role": "user", "content": "q2"},  # the boundary the tail should reach
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "tu_1", "name": "echo", "input": {"v": 1}}
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "tu_1", "content": "echoed"}
+            ],
+        },
+        {"role": "assistant", "content": "done"},
+    ]
+    out = await compactor(max_tokens=50, keep_tail=20, summarize=_summarize)(
+        {"messages": msgs, "tools": [], "model": "m", "turn": 0}
+    )
+    assert out is not None, "expected compaction to fire"
+    blob = json.dumps(out["messages"])
+    has_result = '"type": "tool_result"' in blob
+    has_use = '"type": "tool_use"' in blob
+    assert not (has_result and not has_use), f"orphaned tool_result: {blob}"
+    assert '"content": "done"' in blob, "most recent turn was lost"
+
+
+async def test_openai_dialect_boundaries_unchanged():
+    pad = "x" * 400
+    msgs = [
+        {"role": "system", "content": "soul"},
+        {"role": "user", "content": "q1 " + pad},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "tc_1"}]},
+        {"role": "tool", "tool_call_id": "tc_1", "content": "echoed"},
+        {"role": "user", "content": "q2"},
+        {"role": "assistant", "content": "done"},
+    ]
+    out = await compactor(max_tokens=50, keep_tail=20, summarize=_summarize)(
+        {"messages": msgs, "tools": [], "model": "m", "turn": 0}
+    )
+    assert out is not None, "expected compaction to fire"
+    assert '"content": "q2"' in json.dumps(out["messages"]), "openai boundary moved"
