@@ -344,6 +344,14 @@ function skillTool(agentName: string, endpoint: string, skill: A2ASkill, ag: Age
           metadata: meta(),
         }
       } catch (e) {
+        // An abort that lands WHILE an RPC is in flight surfaces as a transport error
+        // (AbortError), not through the two checks in the poll loop. Report it as the
+        // cancel it is, so a cancelled call is `canceled` regardless of whether the
+        // signal fired between polls or mid-request.
+        if (ctx?.signal?.aborted) {
+          state = "canceled"
+          return { output: `A2A task ${taskId} canceled`, isError: true, metadata: meta() }
+        }
         return { output: e instanceof Error ? e.message : String(e), isError: true, metadata: meta() }
       }
     },

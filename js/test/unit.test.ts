@@ -1305,7 +1305,16 @@ test("a2a: ctx cancel mid-poll stops further GetTask calls", async () => {
     const tk = await createToolkit({ builtins: false, agents: [agent({ card: cardUrl, pollEvery: 10 })] })
     const ctrl = new AbortController()
     const p = tk.execute("reviewer_review", { task: "slow one" }, { signal: ctrl.signal })
-    setTimeout(() => ctrl.abort(), 35)
+    // Abort once the poll loop is DEMONSTRABLY running, rather than racing a
+    // wall-clock timeout against pollEvery: a fixed setTimeout(35) could fire before
+    // the first GetTask under load, and the run then returned the SendMessage state
+    // ("working") instead of "canceled". Flaked ~2 in 12 locally.
+    const deadline = Date.now() + 2000
+    while (seen.getTaskCalls < 1 && Date.now() < deadline) {
+      await new Promise((res) => setTimeout(res, 2))
+    }
+    assert.ok(seen.getTaskCalls >= 1, "poll loop never started — cannot test cancel mid-poll")
+    ctrl.abort()
     const r = await p
     assert.equal(r.isError, true)
     assert.equal((r.metadata as any).state, "canceled")
