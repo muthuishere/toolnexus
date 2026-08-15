@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.14.0 — 2026-08-15
+
 ### Fixed — cancelling an A2A call reports `canceled` reliably (js)
 
 Aborting an in-flight A2A tool call reported one of three different states depending on when the
