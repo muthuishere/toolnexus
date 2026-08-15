@@ -219,3 +219,49 @@
       (is (= [:messages] (keys r))
           "it returns ONLY :messages — a hook that also rewrote :tools would be a
            silent contract nobody asked for"))))
+
+;; Dialect-blind tool-pair boundary (fix-compaction-tool-pair-dialect).
+;;
+;; Under the anthropic dialect a tool result is a `user` message carrying
+;; tool_result blocks, so a "clean user boundary" can be the tool-result carrier
+;; itself — orphaning it from the assistant tool_use that gets summarized away.
+(deftest anthropic-tool-result-carrier-is-not-a-boundary
+  (testing "a user message carrying tool_result blocks is NOT a tail boundary"
+    (let [msgs [(msg "system" "soul")
+                (msg "user" "u0")
+                (msg "assistant" "a0")
+                (msg "user" "u1")
+                (msg "assistant" [{:type "tool_use" :id "tu_1"}])
+                (msg "user" [{:type "tool_result" :tool_use_id "tu_1"}])
+                (msg "assistant" "done")]
+          f    (compaction/compactor {:max-tokens 3
+                                      :keep-tail 3
+                                      :count-tokens per-message
+                                      :summarize summarize-marker})
+          out  (:messages (f {:messages msgs}))]
+      (is (some? out))
+      (let [first-non-system (first (remove #(= "system" (:role %)) out))
+            carries? (fn [m] (and (sequential? (:content m))
+                                  (some #(= "tool_result" (:type %)) (:content m))))]
+        (is (not (carries? first-non-system))
+            "the tail MUST NOT begin on a tool-result carrier — its tool_use is gone")
+        (is (some (fn [m] (= "done" (:content m))) out)
+            "the most recent turn survived")))))
+
+(deftest openai-dialect-boundaries-unchanged
+  (testing "every user message stays a valid boundary in the openai dialect"
+    (let [msgs [(msg "system" "soul")
+                (msg "user" "u0")
+                (msg "assistant" "a0")
+                (assoc (msg "assistant" nil) :tool_calls [{:id "c1"}])
+                (assoc (msg "tool" "result") :tool_call_id "c1")
+                (msg "user" "u1")
+                (msg "assistant" "done")]
+          f    (compaction/compactor {:max-tokens 3
+                                      :keep-tail 3
+                                      :count-tokens per-message
+                                      :summarize summarize-marker})
+          out  (:messages (f {:messages msgs}))]
+      (is (some? out))
+      (is (= "user" (:role (nth out 2)))
+          "the tail still begins at the plain user turn"))))

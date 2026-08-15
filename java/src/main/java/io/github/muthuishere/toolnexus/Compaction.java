@@ -91,23 +91,24 @@ public final class Compaction {
             List<Object> system = new ArrayList<>(msgs.subList(0, head0));
 
             // Find the split: the LARGEST tail (from a clean USER boundary) that fits keepTail.
-            // Scanning to a user turn guarantees tool-pair safety — a tail starting at a user
-            // message can never orphan a `tool` result from its `tool_calls`.
+            // A boundary is a user turn that does NOT carry a tool result: under the anthropic
+            // dialect tool results ride inside a `user` message, so splitting there would orphan
+            // them from the assistant `tool_use` about to be summarized away.
             int split = msgs.size();
             for (int i = msgs.size() - 1; i > head0; i--) {
                 List<Object> tailFromI = msgs.subList(i, msgs.size());
-                if ("user".equals(roleOf(msgs.get(i))) && count.apply(tailFromI) <= keepTail) {
+                if (isBoundary(msgs.get(i)) && count.apply(tailFromI) <= keepTail) {
                     split = i;
                 }
                 if (count.apply(tailFromI) > keepTail) {
                     break;
                 }
             }
-            // If no clean user boundary fit, fall back to the most recent user turn so we still
-            // never split a tool group (may keep more than keepTail — safety over size).
+            // If no clean boundary fit, fall back to the most recent one so we still never split
+            // a tool group (may keep more than keepTail — safety over size).
             if (split == msgs.size()) {
                 for (int i = msgs.size() - 1; i > head0; i--) {
-                    if ("user".equals(roleOf(msgs.get(i)))) {
+                    if (isBoundary(msgs.get(i))) {
                         split = i;
                         break;
                     }
@@ -138,6 +139,32 @@ public final class Compaction {
     }
 
     @SuppressWarnings("unchecked")
+    /**
+     * A valid tail boundary: a {@code user} turn that is not carrying a tool result. Under the
+     * anthropic dialect a tool result is a {@code user} message whose content holds
+     * {@code tool_result} blocks, making it a tool-group member rather than a boundary.
+     */
+    private static boolean isBoundary(Object message) {
+        return "user".equals(roleOf(message)) && !carriesToolResult(message);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static boolean carriesToolResult(Object message) {
+        if (!(message instanceof Map<?, ?> m)) {
+            return false;
+        }
+        Object content = ((Map<String, Object>) m).get("content");
+        if (!(content instanceof List<?> blocks)) {
+            return false;
+        }
+        for (Object b : blocks) {
+            if (b instanceof Map<?, ?> bm && "tool_result".equals(((Map<String, Object>) bm).get("type"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static String roleOf(Object message) {
         if (message instanceof Map<?, ?> m) {
             Object role = ((Map<String, Object>) m).get("role");

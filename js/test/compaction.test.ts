@@ -196,3 +196,65 @@ test("C6: wired via beforeLLM, the run continues past a mid-run compaction", asy
     `final transcript should be bounded, got ${estimateTokens(r.messages as Message[])}`,
   )
 })
+
+/**
+ * Dialect-blind tool-pair boundary (fix-compaction-tool-pair-dialect).
+ *
+ * Under the anthropic dialect a tool result is a `user` message carrying
+ * `tool_result` blocks, so a "clean user boundary" can be the tool-result carrier
+ * itself — orphaning it from the assistant `tool_use` that gets summarized away.
+ */
+test("anthropic tool-result carrier is not used as a tail boundary", () => {
+  const pad = (n: number) => "x".repeat(n)
+  const msgs = [
+    { role: "system", content: "soul" },
+    { role: "user", content: "q1 " + pad(400) },
+    { role: "assistant", content: "a1 " + pad(400) },
+    { role: "user", content: "q2" }, // the boundary the tail SHOULD reach back to
+    {
+      role: "assistant",
+      content: [{ type: "tool_use", id: "tu_1", name: "echo", input: { v: 1 } }],
+    },
+    {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "tu_1", content: "echoed" }],
+    },
+    { role: "assistant", content: "done" },
+  ]
+
+  const hook = compactor({ maxTokens: 50, keepTail: 20, summarize: async () => "SUMMARY" })
+  const out = hook({ messages: msgs as never, tools: [], model: "m", turn: 1 })
+  return Promise.resolve(out).then((ov) => {
+    assert.ok(ov?.messages, "expected compaction to fire")
+    const json = JSON.stringify(ov!.messages)
+    const hasResult = json.includes('"type":"tool_result"')
+    const hasUse = json.includes('"type":"tool_use"')
+    assert.ok(
+      !(hasResult && !hasUse),
+      `orphaned tool_result with no matching tool_use: ${json}`,
+    )
+    assert.ok(json.includes('"content":"done"'), "most recent turn was lost")
+  })
+})
+
+test("openai dialect boundaries are unchanged", () => {
+  const pad = (n: number) => "x".repeat(n)
+  const msgs = [
+    { role: "system", content: "soul" },
+    { role: "user", content: "q1 " + pad(400) },
+    { role: "assistant", content: null, tool_calls: [{ id: "tc_1", type: "function" }] },
+    { role: "tool", tool_call_id: "tc_1", content: "echoed" },
+    { role: "user", content: "q2" },
+    { role: "assistant", content: "done" },
+  ]
+  const hook = compactor({ maxTokens: 50, keepTail: 20, summarize: async () => "SUMMARY" })
+  return Promise.resolve(hook({ messages: msgs as never, tools: [], model: "m", turn: 1 })).then(
+    (ov) => {
+      assert.ok(ov?.messages, "expected compaction to fire")
+      assert.ok(
+        JSON.stringify(ov!.messages).includes('"content":"q2"'),
+        "openai boundary moved",
+      )
+    },
+  )
+})

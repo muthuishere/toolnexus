@@ -70,6 +70,84 @@ public class CompactionTests
     private static LlmClient.LLMOverride? Run(Compaction.Options opts, List<object?> msgs)
         => Compaction.Compactor(opts)(new LlmClient.BeforeLLMEvent(msgs, new List<Dictionary<string, object?>>(), "m", 0));
 
+    // ---- Dialect-blind tool-pair boundary (fix-compaction-tool-pair-dialect) ----
+    //
+    // Under the anthropic dialect a tool result is a `user` message carrying tool_result
+    // blocks, so a "clean user boundary" can be the tool-result carrier itself — orphaning
+    // it from the assistant tool_use that gets summarized away.
+
+    [Fact]
+    public void AnthropicToolResultCarrierIsNotATailBoundary()
+    {
+        var pad = Repeat("x", 400);
+        var msgs = new List<object?>
+        {
+            new Dictionary<string, object?> { ["role"] = "system", ["content"] = "soul" },
+            new Dictionary<string, object?> { ["role"] = "user", ["content"] = "q1 " + pad },
+            new Dictionary<string, object?> { ["role"] = "assistant", ["content"] = "a1 " + pad },
+            new Dictionary<string, object?> { ["role"] = "user", ["content"] = "q2" },
+            new Dictionary<string, object?>
+            {
+                ["role"] = "assistant",
+                ["content"] = new List<object?>
+                {
+                    new Dictionary<string, object?> { ["type"] = "tool_use", ["id"] = "tu_1" },
+                },
+            },
+            new Dictionary<string, object?>
+            {
+                ["role"] = "user",
+                ["content"] = new List<object?>
+                {
+                    new Dictionary<string, object?> { ["type"] = "tool_result", ["tool_use_id"] = "tu_1" },
+                },
+            },
+            new Dictionary<string, object?> { ["role"] = "assistant", ["content"] = "done" },
+        };
+
+        var outp = Run(new Compaction.Options { MaxTokens = 50, KeepTail = 20, Summarize = Summarize }, msgs);
+        Assert.NotNull(outp);
+
+        var tail = outp!.Messages!;
+        var firstNonSystem = tail.FirstOrDefault(m => Role(m) != "system");
+        Assert.False(CarriesToolResultBlock(firstNonSystem),
+            "tail begins on a tool-result carrier — its tool_use was summarized away");
+        Assert.Contains(tail, m => ContentStr(m) == "done");
+    }
+
+    [Fact]
+    public void OpenAiDialectBoundariesUnchanged()
+    {
+        var pad = Repeat("x", 400);
+        var msgs = new List<object?>
+        {
+            new Dictionary<string, object?> { ["role"] = "system", ["content"] = "soul" },
+            new Dictionary<string, object?> { ["role"] = "user", ["content"] = "q1 " + pad },
+            new Dictionary<string, object?>
+            {
+                ["role"] = "assistant",
+                ["content"] = null,
+                ["tool_calls"] = new List<object?> { new Dictionary<string, object?> { ["id"] = "tc_1" } },
+            },
+            new Dictionary<string, object?> { ["role"] = "tool", ["tool_call_id"] = "tc_1", ["content"] = "echoed" },
+            new Dictionary<string, object?> { ["role"] = "user", ["content"] = "q2" },
+            new Dictionary<string, object?> { ["role"] = "assistant", ["content"] = "done" },
+        };
+
+        var outp = Run(new Compaction.Options { MaxTokens = 50, KeepTail = 20, Summarize = Summarize }, msgs);
+        Assert.NotNull(outp);
+        Assert.Contains(outp!.Messages!, m => ContentStr(m) == "q2");
+    }
+
+    private static bool CarriesToolResultBlock(object? m)
+    {
+        if (m is not IDictionary<string, object?> d) return false;
+        if (!d.TryGetValue("content", out var c) || c is not IEnumerable<object?> blocks) return false;
+        return blocks.Any(b => b is IDictionary<string, object?> bd
+                               && bd.TryGetValue("type", out var t)
+                               && (t as string) == "tool_result");
+    }
+
     // ---- small readers over the boxed JSON-object messages ----
 
     private static string? Role(object? m) =>

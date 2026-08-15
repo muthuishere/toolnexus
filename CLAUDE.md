@@ -40,7 +40,7 @@ below.
 | `elixir/` | Elixir port — `toolnexus` (Hex), Elixir ≥ 1.16/OTP 26. MCP client: **in-house** (`Toolnexus.Mcp.*` — no mature Elixir SDK exists); coverage gate ≥ 95%. |
 | `examples/` | **Shared cross-language fixtures** — `mcp.json` + `skills/hello-world/`. Every port runs against these; outputs must match. |
 | `openspec/` | **Spec-driven change workflow (OpenSpec).** `changes/` = active proposals (`proposal.md` + spec deltas + `tasks.md`), `specs/` = canonical capability specs, `changes/archive/` = shipped changes. Run the `openspec` CLI from the repo root. |
-| `.github/workflows/ci.yml` | Runs all six suites (JS/Python/Go/Java/C#/Elixir), hermetically (no network, no live LLM). |
+| `.github/workflows/ci.yml` | Runs all seven suites (JS/Python/Go/Java/C#/Elixir/Clojure), hermetically (no network, no live LLM). |
 
 ## The prime directive: spec-driven, seven-language parity
 

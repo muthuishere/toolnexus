@@ -115,7 +115,7 @@ defmodule Toolnexus.Agents.Compaction do
 
   defp scan_down(msgs, i, head0, keep, count, split) do
     tail_count = count.(Enum.drop(msgs, i))
-    split = if role_at(msgs, i) == "user" and tail_count <= keep, do: i, else: split
+    split = if boundary_at?(msgs, i) and tail_count <= keep, do: i, else: split
 
     if tail_count > keep do
       split
@@ -127,10 +127,27 @@ defmodule Toolnexus.Agents.Compaction do
   defp fallback_user(_msgs, i, head0, default) when i <= head0, do: default
 
   defp fallback_user(msgs, i, head0, default) do
-    if role_at(msgs, i) == "user",
+    if boundary_at?(msgs, i),
       do: i,
       else: fallback_user(msgs, i - 1, head0, default)
   end
+
+  # A valid tail boundary: a "user" turn that is NOT carrying a tool result. Under the
+  # anthropic dialect a tool result is a "user" message whose content holds tool_result
+  # blocks, making it a tool-group member rather than a conversational boundary — so
+  # splitting there would orphan it from the assistant tool_use about to be summarized.
+  defp boundary_at?(msgs, i) do
+    role_at(msgs, i) == "user" and not carries_tool_result?(Enum.at(msgs, i))
+  end
+
+  defp carries_tool_result?(%{"content" => blocks}) when is_list(blocks) do
+    Enum.any?(blocks, fn
+      %{"type" => "tool_result"} -> true
+      _ -> false
+    end)
+  end
+
+  defp carries_tool_result?(_), do: false
 
   defp role_at(msgs, i) do
     case Enum.at(msgs, i) do

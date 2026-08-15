@@ -38,6 +38,25 @@ def _serialize(message: Message) -> str:
     return json.dumps(message, separators=(",", ":"), ensure_ascii=False)
 
 
+def _carries_tool_result(message: Message) -> bool:
+    """Does this message carry a tool result?
+
+    Under the anthropic dialect a tool result is a ``user`` message whose content holds
+    ``tool_result`` blocks, making it a tool-group member rather than a boundary.
+    """
+    content = message.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(block, dict) and block.get("type") == "tool_result" for block in content
+    )
+
+
+def _is_boundary(message: Message) -> bool:
+    """A valid tail boundary: a ``user`` turn that is not carrying a tool result."""
+    return message.get("role") == "user" and not _carries_tool_result(message)
+
+
 def estimate_tokens(messages: list[Message]) -> int:
     """Cheap, deterministic token estimate (chars/4). Override for a real tokenizer.
 
@@ -86,19 +105,20 @@ def compactor(
         system = msgs[:head0]
 
         # Find the split: the LARGEST tail (from a clean USER boundary) that fits keep_tail.
-        # Scanning to a user turn guarantees tool-pair safety — a tail starting at a user
-        # message can never orphan a `tool` result from its `tool_calls`.
+        # A boundary is a user turn that does NOT carry a tool result: under the anthropic
+        # dialect tool results ride inside a `user` message, so splitting there would
+        # orphan them from the assistant `tool_use` about to be summarized away.
         split = len(msgs)
         for i in range(len(msgs) - 1, head0, -1):
-            if msgs[i].get("role") == "user" and count(msgs[i:]) <= tail_budget:
+            if _is_boundary(msgs[i]) and count(msgs[i:]) <= tail_budget:
                 split = i
             if count(msgs[i:]) > tail_budget:
                 break
-        # If no clean user boundary fit in range, fall back to the last user turn so we
-        # still never split a tool group (may keep more than keep_tail — safety over size).
+        # If no clean boundary fit in range, fall back to the most recent one so we still
+        # never split a tool group (may keep more than keep_tail — safety over size).
         if split == len(msgs):
             for i in range(len(msgs) - 1, head0, -1):
-                if msgs[i].get("role") == "user":
+                if _is_boundary(msgs[i]):
                     split = i
                     break
         if split <= head0:

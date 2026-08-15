@@ -8,6 +8,41 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### Fixed — cancelling an A2A call reports `canceled` reliably (js)
+
+Aborting an in-flight A2A tool call reported one of three different states depending on when the
+signal landed. Between polls it correctly returned `canceled`; if the signal fired while a
+`SendMessage`/`GetTask` request was in flight, the aborted fetch threw and the result carried the
+last known state (`submitted` or `working`) plus a raw transport error message instead. `SPEC.md`
+§7A pins abort ⇒ `"A2A task <id> canceled"`, and the golang port already honored it on that path —
+this was **js drifting from the shared contract**, so a host could not treat the metadata state as
+meaningful for a cancelled call.
+
+Fixed in `js` only. The other five ports are **not audited** for the same hole; golang is known
+correct. If you rely on this, check your port.
+
+### Fixed — compaction no longer orphans a tool result under the Anthropic style
+
+A long-running agent on `style:"anthropic"` could, the first time compaction fired, produce a
+transcript the Anthropic API rejects. Compaction keeps the most recent tail and requires that tail
+to begin at a `user` turn, which guarantees tool-pair safety in the OpenAI dialect — a tool result
+there is a `tool` message. Under Anthropic a tool result *is* a `user` message carrying
+`tool_result` blocks, so the tail could begin on the tool result itself while the `assistant`
+message holding the matching `tool_use` was summarized away. The provider rejects a `tool_result`
+with no `tool_use`, so the agent broke at exactly the point its context filled up.
+
+The tail boundary is now dialect-neutral: a `user` turn carrying tool results is not a boundary, and
+the tail extends back to a genuine one (the same "safety over size" fallback the rule already used).
+**OpenAI-style transcripts are unaffected** — every `user` message remains a boundary and output is
+byte-identical. Fixed in all seven ports.
+
+Not done: the underlying reason the rule could be dialect-bound at all — conversation history is
+stored in whichever provider dialect produced it — is tracked in
+`openspec/changes/add-canonical-transcript`, which makes a tool result a first-class message kind so
+"a user turn" can no longer mean "a tool result". Regression tests currently ship in golang, js and
+python; java, csharp, elixir and clojure carry the fix and pass their existing suites, with the
+shared fixture tracked in `openspec/changes/fix-compaction-tool-pair-dialect` (task 1.3).
+
 ### Changed — performance benchmarks re-run in full, and Clojure joins the table
 
 The whole benchmark suite was re-measured in **one sitting on 2 August 2026** — 39 framework

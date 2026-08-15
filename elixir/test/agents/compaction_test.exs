@@ -224,4 +224,62 @@ defmodule Toolnexus.Agents.CompactionTest do
     assert String.contains?(r.text, "compacted=true"), r.text
     assert Compaction.estimate_tokens(r.messages) < 4000
   end
+  # Dialect-blind tool-pair boundary (fix-compaction-tool-pair-dialect) ----------
+  #
+  # Under the anthropic dialect a tool result is a "user" message carrying
+  # tool_result blocks, so a "clean user boundary" can be the tool-result carrier
+  # itself — orphaning it from the assistant tool_use that gets summarized away.
+  test "anthropic tool-result carrier is not used as a tail boundary" do
+    pad = String.duplicate("x", 400)
+
+    msgs = [
+      %{"role" => "system", "content" => "soul"},
+      %{"role" => "user", "content" => "q1 " <> pad},
+      %{"role" => "assistant", "content" => "a1 " <> pad},
+      %{"role" => "user", "content" => "q2"},
+      %{"role" => "assistant", "content" => [%{"type" => "tool_use", "id" => "tu_1"}]},
+      %{"role" => "user", "content" => [%{"type" => "tool_result", "tool_use_id" => "tu_1"}]},
+      %{"role" => "assistant", "content" => "done"}
+    ]
+
+    hook = Compaction.compactor(max_tokens: 50, keep_tail: 20, summarize: &summarize/1)
+    out = hook.(ev(msgs))
+    assert out != nil, "expected compaction to fire"
+
+    tail = out[:messages] || out["messages"]
+    first_non_system = Enum.find(tail, fn m -> m["role"] != "system" end)
+
+    refute carries_tool_result?(first_non_system),
+           "tail begins on a tool-result carrier — its tool_use was summarized away"
+
+    assert Enum.any?(tail, fn m -> m["content"] == "done" end), "most recent turn was lost"
+  end
+
+  test "openai dialect boundaries are unchanged" do
+    pad = String.duplicate("x", 400)
+
+    msgs = [
+      %{"role" => "system", "content" => "soul"},
+      %{"role" => "user", "content" => "q1 " <> pad},
+      %{"role" => "assistant", "content" => nil, "tool_calls" => [%{"id" => "tc_1"}]},
+      %{"role" => "tool", "tool_call_id" => "tc_1", "content" => "echoed"},
+      %{"role" => "user", "content" => "q2"},
+      %{"role" => "assistant", "content" => "done"}
+    ]
+
+    hook = Compaction.compactor(max_tokens: 50, keep_tail: 20, summarize: &summarize/1)
+    out = hook.(ev(msgs))
+    assert out != nil, "expected compaction to fire"
+    tail = out[:messages] || out["messages"]
+    assert Enum.any?(tail, fn m -> m["content"] == "q2" end), "openai boundary moved"
+  end
+
+  defp carries_tool_result?(%{"content" => blocks}) when is_list(blocks) do
+    Enum.any?(blocks, fn
+      %{"type" => "tool_result"} -> true
+      _ -> false
+    end)
+  end
+
+  defp carries_tool_result?(_), do: false
 end
