@@ -23,8 +23,15 @@ defmodule Toolnexus.Agents.HomeTest do
   defp opts, do: %{transport: Mock.transport(&Mock.home/1)}
 
   defp mkdir(files) do
-    dir = Path.join(System.tmp_dir!(), "home-#{System.unique_integer([:positive])}")
+    # `System.unique_integer` is unique WITHIN a VM run only, so its counter restarts
+    # every `mix test` and a fresh run could reuse a directory an earlier run left
+    # behind — inheriting its files. That made H1 intermittently discover a stray
+    # HEARTBEAT.md written by the heartbeat tests (~1 run in 10). Make the name unique
+    # ACROSS runs, and remove the directory when the test ends.
+    token = :crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false)
+    dir = Path.join(System.tmp_dir!(), "home-#{System.unique_integer([:positive])}-#{token}")
     File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
     for {f, body} <- files, do: File.write!(Path.join(dir, f), body)
     dir
   end
