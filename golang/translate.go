@@ -154,13 +154,13 @@ func (c *Client) translateOpenAI(ctx context.Context, req TranslateRequest) (Tra
 		} `json:"choices"`
 		Usage map[string]any `json:"usage"`
 	}
-	if err := json.Unmarshal(raw, &data); err != nil {
+	if err := raw.decodeInto(&data); err != nil {
 		c.emitLLM("error", t0, 0, 0)
 		return TranslateResult{}, err
 	}
 	p, cp := perCall(data.Usage, string(StyleOpenAI))
 	c.emitLLM("ok", t0, p, cp)
-	out := TranslateResult{Model: c.opts.Model, Raw: decodeResponse(raw)}
+	out := TranslateResult{Model: c.opts.Model, Raw: raw.decodeResponseMap()}
 	addUsage(&out.Usage, data.Usage, string(StyleOpenAI))
 	c.afterLLMHook(ctx, out.Raw)
 	if len(data.Choices) == 0 {
@@ -239,13 +239,13 @@ func (c *Client) translateAnthropic(ctx context.Context, req TranslateRequest) (
 		StopReason string         `json:"stop_reason"`
 		Usage      map[string]any `json:"usage"`
 	}
-	if err := json.Unmarshal(raw, &data); err != nil {
+	if err := raw.decodeInto(&data); err != nil {
 		c.emitLLM("error", t0, 0, 0)
 		return TranslateResult{}, err
 	}
 	p, cp := perCall(data.Usage, string(StyleAnthropic))
 	c.emitLLM("ok", t0, p, cp)
-	out := TranslateResult{Model: c.opts.Model, Raw: decodeResponse(raw)}
+	out := TranslateResult{Model: c.opts.Model, Raw: raw.decodeResponseMap()}
 	addUsage(&out.Usage, data.Usage, string(StyleAnthropic))
 	c.afterLLMHook(ctx, out.Raw)
 

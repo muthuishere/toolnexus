@@ -6,7 +6,6 @@ package toolnexus
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -89,6 +88,8 @@ type ClientOptions struct {
 	// included). Nil ⇒ http.DefaultClient. Scope is the LLM path only; MCP transports
 	// use the MCP SDK's own clients.
 	HTTPClient *http.Client
+	// Transport (ADR 0019 REVISED) — one seam, PARSED body in and out.
+	Transport Transport
 	// OnError (§8 Resilience) classifies each failed LLM attempt into TierRetry or
 	// TierFail. Nil ⇒ the default classifier (retryable status/network ⇒ retry, else
 	// fail) — byte-identical to today. A TierRetry is always bounded by Retries; the
@@ -349,6 +350,7 @@ func addUsage(acc *Usage, raw map[string]any, style string) {
 type Client struct {
 	opts ClientOptions
 	http *http.Client
+	tr   Transport
 	// store is the conversation provider for Ask — from opts.Store, else a fresh
 	// in-memory store.
 	store ConversationStore
@@ -367,7 +369,14 @@ func CreateClient(opts ClientOptions) *Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &Client{opts: opts, http: httpClient, store: store, registry: newMetricsRegistry()}
+	if opts.HTTPClient != nil && opts.Transport != nil {
+		panic("toolnexus: set HTTPClient or Transport, not both")
+	}
+	tr := opts.Transport
+	if tr == nil {
+		tr = httpTransport{client: httpClient}
+	}
+	return &Client{opts: opts, http: httpClient, tr: tr, store: store, registry: newMetricsRegistry()}
 }
 
 // Metrics renders the cumulative metrics as Prometheus text exposition format
@@ -679,7 +688,7 @@ func (c *Client) backoff(attempt int, retryAfter string) time.Duration {
 // llmFetch issues the POST with retry + exponential backoff on 429/5xx/network,
 // honoring Retry-After. ctx cancellation/timeout aborts the in-flight request
 // and is NOT retried. The caller owns resp.Body. Mirrors js Client.llmFetch.
-func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[string]string, raw []byte) (*http.Response, error) {
+func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[string]string, body any, stream bool) (*TransportResponse, error) {
 	retries := c.retries()
 	// Default classifier = today's behavior, expressed as an OnError. A TierRetry is
 	// always capped by the budget below (attempt == retries stops regardless).
@@ -694,18 +703,14 @@ func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[stri
 	}
 	var lastErr error
 	for attempt := 0; attempt <= retries; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Content-Type", "application/json")
+		h := map[string]string{"Content-Type": "application/json"}
 		for k, v := range headers {
-			req.Header.Set(k, v)
+			h[k] = v
 		}
 		for k, v := range c.opts.Headers {
-			req.Header.Set(k, v)
+			h[k] = v
 		}
-		resp, err := c.http.Do(req)
+		resp, err := c.tr.RoundTrip(ctx, TransportRequest{URL: endpoint, Method: http.MethodPost, Headers: h, Body: body, Stream: stream})
 		if err != nil {
 			// ctx cancelled/timed out: abort, never retry.
 			if ctx.Err() != nil {
@@ -721,16 +726,16 @@ func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[stri
 			}
 			continue
 		}
-		if resp.StatusCode < 300 {
+		if resp.Status < 300 {
 			return resp, nil
 		}
-		retryable := retryableStatus[resp.StatusCode]
-		tier := classify(ErrorInfo{Status: resp.StatusCode, Attempt: attempt, Retryable: retryable})
+		retryable := retryableStatus[resp.Status]
+		tier := classify(ErrorInfo{Status: resp.Status, Attempt: attempt, Retryable: retryable})
 		if tier == TierFail || attempt == retries {
 			return resp, nil // caller surfaces the non-ok status
 		}
-		ra := resp.Header.Get("Retry-After")
-		resp.Body.Close()
+		ra := resp.header("Retry-After")
+		resp.closeBody()
 		if werr := sleep(ctx, c.backoff(attempt, ra)); werr != nil {
 			return nil, werr
 		}
@@ -768,21 +773,15 @@ func (c *Client) finalizeBody(body map[string]any) map[string]any {
 	return body
 }
 
-func (c *Client) postJSON(ctx context.Context, endpoint string, headers map[string]string, body any) ([]byte, error) {
-	raw, err := json.Marshal(body)
+func (c *Client) postJSON(ctx context.Context, endpoint string, headers map[string]string, body any) (*TransportResponse, error) {
+	resp, err := c.llmFetch(ctx, endpoint, headers, body, false)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.llmFetch(ctx, endpoint, headers, raw)
-	if err != nil {
-		return nil, err
+	if resp.Status < 200 || resp.Status >= 300 {
+		return nil, fmt.Errorf("LLM %d: %s", resp.Status, resp.text())
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("LLM %d: %s", resp.StatusCode, string(out))
-	}
-	return out, nil
+	return resp, nil
 }
 
 // ---- OpenAI-style: POST {baseURL}/chat/completions ----
@@ -843,7 +842,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 		}
 		body = c.finalizeBody(body)
 		t0 := time.Now()
-		raw, err := c.postJSON(ctx, endpoint, map[string]string{"Authorization": "Bearer " + key}, body)
+		tres, err := c.postJSON(ctx, endpoint, map[string]string{"Authorization": "Bearer " + key}, body)
 		if err != nil {
 			c.emitLLM("error", t0, 0, 0)
 			return RunResult{}, err
@@ -865,7 +864,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 			} `json:"choices"`
 			Usage map[string]any `json:"usage"`
 		}
-		if err := json.Unmarshal(raw, &data); err != nil {
+		if err := tres.decodeInto(&data); err != nil {
 			c.emitLLM("error", t0, 0, 0)
 			return RunResult{}, err
 		}
@@ -873,7 +872,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 		c.emitLLM("ok", t0, p, cp)
 		addUsage(&usage, data.Usage, string(StyleOpenAI))
 		if c.opts.Hooks != nil && c.opts.Hooks.AfterLLM != nil {
-			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: decodeResponse(raw), Model: c.opts.Model, Turn: turn}); err != nil {
+			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: tres.decodeResponseMap(), Model: c.opts.Model, Turn: turn}); err != nil {
 				return RunResult{}, err
 			}
 		}
@@ -1117,7 +1116,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 		}
 		body = c.finalizeBody(body)
 		t0 := time.Now()
-		raw, err := c.postJSON(ctx, endpoint, headers, body)
+		tres, err := c.postJSON(ctx, endpoint, headers, body)
 		if err != nil {
 			c.emitLLM("error", t0, 0, 0)
 			return RunResult{}, err
@@ -1132,7 +1131,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 			} `json:"content"`
 			Usage map[string]any `json:"usage"`
 		}
-		if err := json.Unmarshal(raw, &data); err != nil {
+		if err := tres.decodeInto(&data); err != nil {
 			c.emitLLM("error", t0, 0, 0)
 			return RunResult{}, err
 		}
@@ -1140,7 +1139,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 		c.emitLLM("ok", t0, p, cp)
 		addUsage(&usage, data.Usage, string(StyleAnthropic))
 		if c.opts.Hooks != nil && c.opts.Hooks.AfterLLM != nil {
-			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: decodeResponse(raw), Model: c.opts.Model, Turn: turn}); err != nil {
+			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: tres.decodeResponseMap(), Model: c.opts.Model, Turn: turn}); err != nil {
 				return RunResult{}, err
 			}
 		}
@@ -1412,29 +1411,28 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, h
 			sbody["tools"] = tools
 			sbody["tool_choice"] = "auto"
 		}
-		body, err := json.Marshal(c.finalizeBody(sbody))
-		if err != nil {
-			return err
-		}
+		body := c.finalizeBody(sbody)
 		t0 := time.Now()
 		beforeP, beforeC := usage.PromptTokens, usage.CompletionTokens
-		resp, err := c.llmFetch(ctx, endpoint, map[string]string{"Authorization": "Bearer " + key}, body)
+		resp, err := c.llmFetch(ctx, endpoint, map[string]string{"Authorization": "Bearer " + key}, body, true)
 		if err != nil {
 			c.emitLLM("error", t0, 0, 0)
 			return err
 		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			out, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
+		if resp.Status < 200 || resp.Status >= 300 {
 			c.emitLLM("error", t0, 0, 0)
-			return fmt.Errorf("LLM %d: %s", resp.StatusCode, string(out))
+			return fmt.Errorf("LLM %d: %s", resp.Status, resp.text())
+		}
+		rbody, err := resp.stream()
+		if err != nil {
+			return err
 		}
 
 		var content strings.Builder
 		// acc maps tool_call index -> assembled call; order preserves first-seen index.
 		acc := map[int]*streamCall{}
 		var order []int
-		sErr := scanSSE(ctx, resp.Body, func(line string) (bool, error) {
+		sErr := scanSSE(ctx, rbody, func(line string) (bool, error) {
 			if !strings.HasPrefix(line, "data:") {
 				return true, nil
 			}
@@ -1488,7 +1486,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, h
 			}
 			return true, nil
 		})
-		resp.Body.Close()
+		rbody.Close()
 		if sErr != nil {
 			c.emitLLM("error", t0, 0, 0)
 			return sErr
@@ -1672,28 +1670,27 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 		if len(tools) > 0 {
 			reqBody["tools"] = tools
 		}
-		body, err := json.Marshal(c.finalizeBody(reqBody))
-		if err != nil {
-			return err
-		}
+		body := c.finalizeBody(reqBody)
 		t0 := time.Now()
 		beforeP, beforeC := usage.PromptTokens, usage.CompletionTokens
-		resp, err := c.llmFetch(ctx, endpoint, headers, body)
+		resp, err := c.llmFetch(ctx, endpoint, headers, body, true)
 		if err != nil {
 			c.emitLLM("error", t0, 0, 0)
 			return err
 		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			out, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
+		if resp.Status < 200 || resp.Status >= 300 {
 			c.emitLLM("error", t0, 0, 0)
-			return fmt.Errorf("LLM %d: %s", resp.StatusCode, string(out))
+			return fmt.Errorf("LLM %d: %s", resp.Status, resp.text())
+		}
+		rbody, err := resp.stream()
+		if err != nil {
+			return err
 		}
 
 		blocks := map[int]*streamBlock{}
 		var order []int
 		stopReason := ""
-		sErr := scanSSE(ctx, resp.Body, func(line string) (bool, error) {
+		sErr := scanSSE(ctx, rbody, func(line string) (bool, error) {
 			if !strings.HasPrefix(line, "data:") {
 				return true, nil
 			}
@@ -1749,7 +1746,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 			}
 			return true, nil
 		})
-		resp.Body.Close()
+		rbody.Close()
 		if sErr != nil {
 			c.emitLLM("error", t0, 0, 0)
 			return sErr
