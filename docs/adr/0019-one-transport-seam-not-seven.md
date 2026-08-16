@@ -1,11 +1,17 @@
 # ADR 0019 — one transport seam, not seven: an interface whose **default implementation is today's client**
 
-- **Status:** **Proposed — REVISED 2026-08-16 after four spikes.** The first draft was not spiked and
-  said so. It has now been attacked by an analyst, an adversarial reviewer, and two implementation
-  spikes (Go, and js+python). **Its headline justification did not survive, its signature did not
-  survive, and its shape did not survive.** What survives is the underlying problem and a smaller,
-  additive fix. Everything below is rewritten on that evidence; the spikes are re-runnable and cited
-  inline.
+- **Status:** **Proposed — REVISED 2026-08-16 after seven spikes.** The first draft was not spiked
+  and said so. It has now been attacked by an analyst, an adversarial reviewer, and five
+  implementation spikes (Go; js+python; Java; Elixir+Clojure cancellation; parsed-vs-bytes bodies).
+  **Its headline justification did not survive, its signature did not survive, its shape did not
+  survive — and the revision's own correction 3 was then half-falsified by the last spike.** What
+  survives is the underlying problem and a smaller, additive fix. Everything below is rewritten on
+  that evidence; the spikes are re-runnable and cited inline.
+
+  **The short version after all seven:** every port *can* express an in-process transport today
+  (Java, the last claimed blocker, is 94 ugly lines). So this is no longer a capability change. It
+  is a **uniformity, discoverability and one-cookbook-page change** — worth doing, but it must be
+  argued and sized as that, and it still has not met its own gate.
 - **Date:** 2026-08-16
 - **Driver:** a consumer (modelnexus) wanting toolnexus to talk to an **in-process** model with no
   socket.
@@ -38,12 +44,26 @@ second manifest row (two logical options for one job — the drift the manifest 
 sixth alias, under which **a port shipping only one of the two still passes CI**. See the Decision
 for the shape that avoids this.
 
-**3. Bytes-in/bytes-out is the wrong signature — it makes the driving use case worse.** Measured
+**3. Bytes-in/bytes-out is the wrong signature for four ports — and a wash for three.** *(This
+correction was itself half-falsified by a later spike; the original claim and its correction are
+both kept, because the overstatement is the instructive part.)* Measured
 (`scratchpad/adr19-jspy/`): Python's shipped seam hands the transport an **already-parsed dict** and
-takes a dict back — zero serialization. A bytes-shaped `Transport` would force a JSON round-trip
-*introduced purely to satisfy a shape borrowed from HTTP*, for a model that has no wire. Elixir is the
-same (`client.ex:890-903`, un-marshalled map). **The draft would have made the two most ergonomic
-ports worse in order to make Go's tidier.**
+takes a dict back. A bytes-shaped `Transport` would force a JSON round-trip *introduced purely to
+satisfy a shape borrowed from HTTP*, for a model that has no wire. Elixir is the same
+(`client.ex:890-903`, un-marshalled map).
+
+But "the draft would have made every port worse" was too strong. Counting serialization ops on one
+non-streaming turn:
+
+| | bytes-in/bytes-out | parsed-in/parsed-out |
+|---|---|---|
+| Python (dict-shaped) | `dumps=2 loads=3` | **`dumps=0 loads=1`** |
+| Go (struct-shaped) | `marshal=2 unmarshal=2` | `marshal=2 unmarshal=2` — **no change** |
+
+Go still marshals, because it decodes into typed structs on the way in and out regardless of what
+the seam hands it; the parse simply moves. So the honest claim is **a real win for the four
+dict-shaped ports (Python, Elixir, JS, Clojure) and neutral-with-new-hazards for the three
+typed ones (Go, Java, C#)** — see "What parsed bodies cost" below.
 
 **4. `ctx` is missing from the signature, and its absence is not cosmetic.** `Transport :=
 (TransportRequest) -> TransportResponse` makes cancellation *impossible* — there is nothing to cancel
@@ -72,7 +92,14 @@ streaming loop at all (`client.cljc:673`).
 - **The seven signatures genuinely are incompatible** — concrete struct, concrete JDK class, two
   concrete types, a Web-API function, a two-method Protocol, a 1-arg function, a 3-arg function. No
   single portable fake, and **no single cookbook page**, can be written. That is the honest case.
-- **Java cannot do this cleanly** — the one port with a real capability gap.
+- ~~**Java cannot do this cleanly** — the one port with a real capability gap.~~ **Falsified by
+  spike.** Subclassing the JDK `HttpClient` to answer in-process is **94 lines** and works: the full
+  agent turn runs with the network unreachable, streaming arrives incrementally, and a
+  transport-reported 429 retries identically. It is *ugly* — you must implement six abstract methods
+  you do not want, and `sendAsync`'s generic `BodyHandler` plumbing is the bulk of it — but ugly is
+  not blocked. **The last capability argument for this ADR is gone**; every port can express an
+  in-process transport today. What is left is that four of them require a trick the docs do not
+  mention.
 - **The in-process model** — the case that prompted the ADR.
 - **TypeScript hosts must fabricate HTTP semantics.** Confirmed, not argued: a duck-typed response
   runs fine but fails to typecheck — `TS2322: missing redirected, statusText, type, url, and 7 more`.
@@ -103,8 +130,10 @@ divergence is load-bearing:
 - **Go, Java and C# cannot express an in-process transport without lying.** All three demand a
   concrete class whose job is to open sockets. You get there by fabricating an `http.Response` /
   `HttpResponse<T>` / subclassing `HttpMessageHandler`. Go is the least bad — `http.RoundTripper`
-  is a real interface, and `golang/rag_consumer_test.go:147` already exploits it — but a JDK
-  `HttpClient` has no interceptor at all.
+  is a real interface, and `golang/rag_consumer_test.go:147` already exploits it. Java is the worst:
+  a JDK `HttpClient` has no interceptor, so the only route is subclassing the class itself —
+  **measured at 94 lines**, six of them methods you neither want nor use. Possible everywhere;
+  discoverable nowhere.
 - **Elixir hands the transport an un-marshalled body map; everyone else hands it bytes.** One port
   JSON-encodes inside the seam, six encode outside it. That is not a naming difference.
 - **Python's seam is two methods** because streaming and non-streaming were split at the port level
@@ -150,37 +179,113 @@ Java and C# *toward* the other four — not the other four toward HTTP.
 on evidence (correction 3).
 
 ```
-Transport := (ctx, TransportRequest) -> TransportResponse
+Transport := (TransportRequest) -> TransportResponse
 
-TransportRequest  = { url, method, headers, body: <parsed request>, stream: bool }
+TransportRequest  = { url, method, headers, body: <parsed request>, stream: bool,
+                      cancel: <host-native cancellation token>,   ← a FIELD, not a parameter
+                      onEvent: <optional push callback> }         ← the second streaming spelling
 TransportResponse = { status, headers, body: <parsed response> | <byte stream> }
 ```
 
-Five rules, each traceable to a spike:
+Six rules, each traceable to a spike:
 
-1. **`ctx` is a parameter, not optional.** Spelled per language: `context.Context` / `CancellationToken`
-   / `AbortSignal` / `asyncio` cancellation. Elixir has no equivalent and needs an explicit answer —
-   that is an open question, not a detail (correction 4).
+1. **Cancellation is a REQUEST FIELD, not a positional parameter — and the library cannot enforce
+   it.** Two separate findings, and both cut against the previous wording:
+
+   *Shape.* A leading `ctx` parameter is wrong for at least two ports. JS already carries
+   cancellation inside the request (`RequestInit.signal`), so a positional argument would duplicate
+   it; and Clojure's shipped seam is `(url headers body)` — a fourth positional breaks every
+   existing `:http-client` at once, for a change advertised as additive. As a field it is optional
+   per port, ignorable by transports that do not care, and costs no arity.
+
+   *Enforcement.* **In six of seven ports, honouring cancellation is the transport's obligation and
+   the library cannot enforce it.** Only Elixir can act unilaterally — it kills the task and
+   returns in **101 ms against a 100 ms deadline** where an ignoring transport ran **601 ms**,
+   because the caller owns the process. Everywhere else, a transport that ignores the token simply
+   is not interrupted. Clojure is the sharp case: `future-cancel` **returns `true` and stops
+   nothing** on all three hosts. So the spec must say *"a transport SHOULD observe `cancel`"*, and
+   `Timeout` must be documented as **best-effort in the presence of a custom transport** — which is
+   a real, user-visible loss of a guarantee the concrete `*http.Client` gave you for free
+   (correction 4).
+
 2. **The body crosses parsed, both ways.** An in-process model returns a map/dict/object and pays no
    serialization. A proxy transport that wants bytes marshals them itself — the cost lands on the case
-   that actually has a wire.
-3. **A streaming response MAY return a byte stream instead**, and `stream: true` in the request says
-   which is expected. Python's `post`/`open` split collapses to one method losing nothing: the payload
-   **already** carries `stream` (measured: `[('post', None), ('open', True)]`).
-4. **Header lookup is case-insensitive**, normatively. Multi-value headers are explicitly out of scope
+   that actually has a wire. Wins four ports, neutral in three (correction 3).
+
+3. **Streaming has TWO permitted spellings, and the byte-stream arm is mandatory when
+   `stream: true`.** The single "returns a byte stream" rule is unsatisfiable in Clojure: the port
+   has no pull-shaped incremental body at all, and incrementality exists only as an **`on-event`
+   push callback**. Forcing one spelling would either exclude Clojure from the seam or require a
+   pull/push bridge with its own buffering — the exact regression this ADR is trying to prevent.
+   So a conforming transport satisfies streaming by **either** returning a byte stream **or**
+   invoking `onEvent` per chunk.
+
+   And normatively, in both spellings: **a transport MUST NOT answer a `stream: true` request with
+   the parsed arm.** Nothing in either spiked port rejects it today — the run completes with **0
+   deltas and empty text**, a silent wrong answer with no error anywhere. A union cannot be policed
+   by a type system, so this needs a runtime check plus a conformance case, not just prose.
+
+   Python's `post`/`open` split then collapses to one method losing nothing: the payload **already**
+   carries `stream` (measured: `[('post', None), ('open', True)]`).
+
+4. **The byte arm is not optional sugar — it is load-bearing.** A parsed-*only* seam is
+   unimplementable: an HTML 502 from a load balancer is not a dict, and NDJSON bodies (Ollama)
+   are not one object. Keeping both arms is what let the "no lost bytes" check below come back
+   clean.
+
+5. **Header lookup is case-insensitive**, normatively. Multi-value headers are explicitly out of scope
    and `Set-Cookie` is unrepresentable — say so rather than discover it (correction 5).
-5. **Absent ⇒ byte-identical.** The default implementation is today's client; a host that sets nothing
+
+6. **Absent ⇒ byte-identical.** The default implementation is today's client; a host that sets nothing
    gets exactly today's bytes.
+
+### What parsed bodies cost — the hazards the win obscures
+
+The parsed body was un-rejected on evidence, so its costs get the same treatment. None of these is
+individually blocking; together they are the reason this ADR still says *Proposed*.
+
+- **"Byte-identical" stops being a property the library can assert.** Two conforming encoders,
+  handed the same parsed body, emit different bytes — `{"a":"<x>"}` vs `{"a":"<x>"}`.
+  Once the library does not build the bytes, request signing (SigV4/HMAC), record-replay fixtures
+  and request-hash caching become permanently the transport's problem. Rule 6 above is about the
+  *default* path only, and should say so.
+- **An in-process double is weaker evidence than a bytes double.** Parsed bodies accept payloads no
+  wire can carry: `NaN` and `2**70` pass straight through in-process and fail `json.dumps(...,
+  allow_nan=False)`. A test that passes against a parsed transport can therefore describe a request
+  that could never have been sent.
+- **Round-trip fidelity is per-language, not a contract property.** Go silently loses integer
+  precision through `float64` — `9007199254740993` comes back `9007199254740992`. The seam cannot
+  promise the object it returns equals the object it was given.
+- **Checked and clean:** a grep across all seven ports for `hmac|sigv4|content-length|gzip|etag|
+  digest` on the LLM path returns **zero hits**. Nothing shipped today depends on seeing request
+  bytes. That is the finding that keeps this survivable — and it only holds because rule 4 keeps
+  the bytes arm.
 
 ### Do these regardless of whether the interface ships
 
-Both are bugs found while spiking, and neither depends on this ADR:
+All three are bugs found while spiking, and none depends on this ADR shipping:
 
+- **`Retry-After` is parsed seven ways, and two ports disagree with the other five.** Python
+  (`client.py:207`, `float(ra)`) and JS (`client.ts:646`, `Number(...)`) accept a **fractional**
+  value; Go (`strconv.Atoi`), Java (`\d+`), C# (`long.TryParse`), Elixir (`parse_int`) and Clojure
+  (`#"\d+"`) all reject it and fall back to exponential backoff. Given `Retry-After: 0.5`, two ports
+  wait 500 ms and five wait the backoff. RFC 9110 defines `delay-seconds` as `1*DIGIT`, so the five
+  are right and the two are silently over-lenient. Negative values diverge the same way. **This is
+  exactly the drift this repo exists to prevent, and no test catches it in any port.** Fixed
+  separately in `openspec/changes/fix-retry-after-parity`.
 - **Export Python's `_HttpError`.** `HttpTransport`'s own docstring instructs hosts to raise it, and it
-  is private and absent from `__all__` — a public seam requiring a private import.
+  is private and absent from `__all__` — a public seam requiring a private import. Note that this
+  bug **disappears on its own** if the seam returns a status instead of raising: with `status` in
+  `TransportResponse` there is no error type for a host to import. Do not fix it twice.
 - **Add a TIMING-based streaming conformance test to every port.** Content and delta-count assertions
   provably cannot catch a buffered body (correction 7). `scratchpad/adr19-jspy/py/02_streaming.py`
   variant B is a ready-made shape.
+
+And one implementation note that will bite whoever writes this: **the default implementation must
+delegate to the existing method, not reimplement it.** Collapsing Python's `post`/`open` into one
+method broke **7 in-suite tests** that monkeypatch `_post` — not because the behaviour changed, but
+because the seam they patch stopped being on the path. A port's default impl calling its own shipped
+code keeps every existing test honest.
 
 ### Scope: what this does NOT cover
 
@@ -248,7 +353,14 @@ mapping toolnexus already owns, and makes `Style` meaningless.
 **Cost.** Seven ports × (one type + two records + one call-site swap) plus a spec delta modifying
 §8 Gap 2. The call site is a single line per port — `golang/client.go:708` is representative.
 Elixir and Clojure are nearly there already and mostly need reshaping; Python needs its two methods
-collapsed into one; Go, Java and C# need the genuinely new type.
+collapsed into one (with the default impl **delegating**, see above); Go, Java and C# need the
+genuinely new type. **Java is measured, not estimated: +124/−39 in one file, with all 161 tests
+still passing** — and it deletes the 94-line subclass a host would otherwise write.
+
+**Cost not on that list.** `Timeout` weakens from a guarantee to best-effort whenever a custom
+transport is installed (rule 1), and the library stops being able to say what bytes went on the
+wire (rule 2's hazards). Both are real regressions in what the library can promise, and both are
+invisible until someone depends on them.
 
 **Benefit, beyond the driver.** Five ports gain proxy support, credential injection, request
 logging, record-replay and hermetic offline tests that today only Go and Java have.
