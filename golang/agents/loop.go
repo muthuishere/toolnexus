@@ -51,7 +51,7 @@ func guardedHooks(sp Spec) *tn.Hooks {
 // Loop is a live execution of an Agent. Its only verbs are Run and Resume.
 type Loop struct {
 	agent   *Agent
-	client  *tn.Client
+	opts    tn.ClientOptions // kept so a per-run Model override can rebuild the client
 	toolkit *tn.Toolkit
 	history []any
 	calls   []tn.ToolCall // accumulated across attempts — see Run
@@ -77,9 +77,28 @@ type Outcome struct {
 	Result    tn.RunResult
 }
 
-// Loop opens a live execution for an agent against a client and toolkit.
-func (a *Agent) Loop(c *tn.Client, tk *tn.Toolkit) *Loop {
-	return &Loop{agent: a, client: c, toolkit: tk, status: "idle"}
+// Loop opens a live execution for an agent. It takes the CLIENT OPTIONS rather
+// than a built client, because RunOpts.Model must be able to override the model
+// for a single call — and the model is fixed when a client is constructed.
+func (a *Agent) Loop(opts tn.ClientOptions, tk *tn.Toolkit) *Loop {
+	return &Loop{agent: a, opts: opts, toolkit: tk, status: "idle"}
+}
+
+// clientFor returns the client for this call, applying a per-run Model override
+// via RequestParams (`model` is NOT in the forbidden set — client.go forbids only
+// messages/tools/stream — and the merge reaches the wire; spiked).
+func (l *Loop) clientFor(o RunOpts) *tn.Client {
+	if o.Model == "" {
+		return tn.CreateClient(l.opts)
+	}
+	opts := l.opts
+	rp := map[string]any{}
+	for k, v := range opts.RequestParams {
+		rp[k] = v
+	}
+	rp["model"] = o.Model
+	opts.RequestParams = rp
+	return tn.CreateClient(opts)
 }
 
 // Status is observed, never set by the caller.
@@ -103,6 +122,7 @@ func (l *Loop) Run(ctx context.Context, prompt string, opts RunOpts) (Outcome, e
 		maxAttempts = comp.MaxAttempts
 	}
 
+	client := l.clientFor(opts)
 	l.status = "running"
 	var last tn.RunResult
 	var lastReason string
@@ -111,7 +131,7 @@ func (l *Loop) Run(ctx context.Context, prompt string, opts RunOpts) (Outcome, e
 		if n > 1 {
 			p = "Your work did not verify: " + lastReason + ". Fix it and finish."
 		}
-		r, err := l.client.RunWithHistory(ctx, p, l.toolkit, l.history)
+		r, err := client.RunWithHistory(ctx, p, l.toolkit, l.history)
 		if err != nil {
 			l.status = "error"
 			return Outcome{Status: "error", StoppedBy: err.Error(), Attempts: n, Turns: l.turns}, err
@@ -224,7 +244,15 @@ func runGated(ctx context.Context, c *tn.Client, prompt string, tk *tn.Toolkit,
 		r.ToolCalls = acc
 		last = r
 		if r.Status != "" && r.Status != "done" {
-			return r, nil // suspended / limited — already has a reason
+			// The run stopped for its own reason (suspension, budget). If the gate
+			// was mid-retry, the caller must learn BOTH — otherwise a budget stop
+			// masks the verification failure and they never see why it was looping.
+			// Spiked: without this the caller reads only "hit maxTurns".
+			if reason != "" && r.Status != "pending" {
+				r.Text = fmt.Sprintf("%s [while verifying: attempt %d last failed: %s]",
+					r.Text, n, reason)
+			}
+			return r, nil
 		}
 		ok, why := comp.Verify(r)
 		if ok {
