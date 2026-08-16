@@ -127,10 +127,20 @@ a threshold is a domain decision, and encoding one in the loop is exactly the do
 
 ## Open questions
 
-**Q1 — What does the verifier see?** The spike passes the whole `RunResult`. That is enough for
-"did it answer" but not for "do the tests pass", which needs the workspace, not the transcript. If
-the answer is "the verifier is just a function the host closes over", that is fine and should be
-said; if verifiers are meant to be portable, they need a defined input.
+**Q1 — What does the verifier see? — ANSWERED (owner, 2026-08-16): plan/todo/goal state.**
+The spike passes the whole `RunResult`, which is enough for "did it answer" but not for "is the work
+finished". The resolution is not to widen the input but to give the agent **structured task state**
+and verify against it: *not done until every todo is checked off*.
+
+This is better than a workspace handle for the reason that governs this whole design — it is a
+**structural** check, not a domain one. The loop counts unchecked items; it never learns what a todo
+means, so rule 3 (the loop never interprets the verifier) holds by construction. It also means the
+library ships a *useful default verifier* instead of a gate that every host must supply domain code
+to make meaningful.
+
+Consequence: plan/todo/goal stop being speculative primitives and become the substrate this ADR
+depends on. A host may still close over anything it likes for a domain check — that path is
+unchanged and needs no defined input.
 
 **Q2 — How is the failure fed back?** The spike appends a `user` message. That is the obvious shape
 and it is load-bearing for parity, since seven ports must produce identical bytes. It also interacts
