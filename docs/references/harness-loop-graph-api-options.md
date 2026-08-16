@@ -166,7 +166,40 @@ implementation of a contract). Shipping the swappability as public API is not.
 
 ---
 
-## Recommendation
+## DECIDED (owner, 2026-08-16): factory functions, one shape for all three
+
+`harness(...)`, `loop(...)`, `graph(...)` are **factory functions over existing types**, never new
+types. This is the option that survives the seven-language filter (S1): every language has
+functions, whereas type aliases work in Go/TS/Python and **do not exist in Java or C#** — which
+would force a subclass or a duplicate there, i.e. exactly the drift this repo exists to prevent.
+It also matches the convention already shipped: `createClient`, `createToolkit`, `defineTool`.
+
+Landed in golang:
+
+```go
+func Harness(s Spec) Spec { return s }   // agents/agent.go
+```
+
+`Harness` is the word you read; `Spec` is the one type underneath. They cannot drift because they
+are the same type — asserted by `TestHarnessIsAFactoryNotASecondType`, which assigns a `Harness`
+result straight back to a `Spec`.
+
+**Per-language shape, same behaviour** (the repo's standing rule — idiomatic per language, identical
+in behavior):
+
+| | harness | loop |
+|---|---|---|
+| js / python / elixir / clojure | `harness({…})` | `loop(agent, …)` |
+| go | `agents.Harness(Spec{…})` | `a.Loop(client, toolkit)` — a method reads naturally in Go |
+| java / csharp | `Harness.of(…)` | `agent.loop(…)` |
+
+Go keeps `Loop` as a method because `type Loop` and `func Loop` cannot coexist in one package, and
+`a.Loop(...)` is the idiomatic Go spelling. That is not an inconsistency — it is the rule working.
+
+`graph(...)` follows the same shape when it lands, so the vocabulary is uniform without a uniform
+implementation.
+
+## Recommendation (pre-decision, kept for the reasoning)
 
 **Option A for the surface, Option B's axiom underneath, Option C's framing in the spec.**
 
