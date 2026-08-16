@@ -55,9 +55,9 @@ func todowriteTool(t *testing.T) tn.Tool {
 	return tn.Tool{}
 }
 
-func clientWith(rt http.RoundTripper) *tn.Client {
-	return tn.CreateClient(tn.ClientOptions{BaseURL: "http://mock/v1", Style: tn.StyleOpenAI,
-		Model: "m", APIKey: "x", HTTPClient: &http.Client{Transport: rt}})
+func clientWith(rt http.RoundTripper) tn.ClientOptions {
+	return tn.ClientOptions{BaseURL: "http://mock/v1", Style: tn.StyleOpenAI,
+		Model: "m", APIKey: "x", HTTPClient: &http.Client{Transport: rt}}
 }
 func todoToolkit(t *testing.T) *tn.Toolkit {
 	t.Helper()
@@ -286,5 +286,48 @@ func TestHarnessIsAFactoryNotASecondType(t *testing.T) {
 	a := agents.New("worker", h)
 	if a.Spec.Completion == nil || a.Spec.Completion.MaxAttempts != 2 {
 		t.Fatal("the completion gate did not survive the harness factory")
+	}
+}
+
+// RunOpts.Model must actually reach the wire — an option that silently does
+// nothing is worse than no option.
+func TestRunOptsModelReachesTheWire(t *testing.T) {
+	rec := &modelRec{reply: func(int) map[string]any { return text("ok") }}
+	tk, _ := tn.CreateToolkit(nil, tn.Options{Builtins: false})
+	a := agents.New("w", agents.Spec{Does: "w"})
+	l := a.Loop(tn.ClientOptions{BaseURL: "http://mock/v1", Style: tn.StyleOpenAI,
+		Model: "default-model", APIKey: "x", HTTPClient: &http.Client{Transport: rec}}, tk)
+
+	if _, err := l.Run(context.Background(), "a", agents.RunOpts{}); err != nil { t.Fatal(err) }
+	if _, err := l.Run(context.Background(), "b", agents.RunOpts{Model: "per-run-model"}); err != nil { t.Fatal(err) }
+
+	if len(rec.models) != 2 || rec.models[0] != "default-model" || rec.models[1] != "per-run-model" {
+		t.Fatalf("models on the wire = %v; want [default-model per-run-model]", rec.models)
+	}
+}
+
+// When another limit stops a run while the gate was retrying, the caller must
+// learn BOTH reasons — otherwise the budget stop masks the verification failure.
+func TestBudgetStopCarriesTheVerificationReason(t *testing.T) {
+	rec := &modelRec{reply: func(n int) map[string]any {
+		if n == 1 { return callTodo([]any{todo("1", "never", false)}) }
+		return text("claiming done")
+	}}
+	tw := todowriteTool(t)
+	child := agents.New("child", agents.Spec{Does: "w", Tools: []tn.Tool{tw},
+		Completion: &agents.Completion{Verify: agents.AllTodosDone, MaxAttempts: 5}})
+	r := agents.NewRuntime(agents.Options{Registry: child.Registry(), Transport: rec,
+		LLM: &agents.LLMOptions{BaseURL: "http://mock/v1", Style: tn.StyleOpenAI, APIKey: "x", Model: "m"}})
+	h, _ := r.Spawn(r.Root, "child", nil)
+	r.Wake(h, "go")
+	res := r.Wait(h, 0)
+	defer r.Close(h, nil)
+
+	if res.Status == "done" { t.Fatal("silently done despite an open todo") }
+	if !strings.Contains(res.Text, "maxTurns") {
+		t.Fatalf("lost the run's own stop reason: %q", res.Text)
+	}
+	if !strings.Contains(res.Text, "while verifying") || !strings.Contains(res.Text, "still open") {
+		t.Fatalf("the verification reason was MASKED — caller cannot tell why it was looping: %q", res.Text)
 	}
 }
