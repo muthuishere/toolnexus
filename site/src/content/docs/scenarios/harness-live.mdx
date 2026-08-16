@@ -1,0 +1,61 @@
+---
+title: Harness and loop — proved against live models
+description: Seven harness scenarios — guardrails, the completion gate over the todowrite builtin, budget ceilings, delegation and conversation threading — run against four real models on OpenRouter. Every result on this page came from a live run, not a mock.
+---
+
+The rest of this site shows what toolnexus *can* do. This page shows what it **did**, against real
+models, on a real network. Every cell below is a live run: real tool calls, real token spend, no
+mocks and no scripted responses.
+
+## The run
+
+| Scenario | `openai/gpt-4o-mini` | `google/gemini-3.7-flash` | `qwen/qwen3.7-flash` | `deepseek/deepseek-v4-flash-0731` |
+|---|---|---|---|---|
+| S1 guardrail denies prod deploy | ✅ | ✅ | ✅ | ✅ |
+| S2 completion gate over todowrite | ✅ | ✅ | ✅ | ✅ |
+| S2b gate catches a genuinely open todo | ✅ | ✅ | ✅ | ✅ |
+| S3 unverifiable run stops loudly | ✅ | ✅ | ✅ | ✅ |
+| S4 budget stops the run, named | ✅ | ✅ | ✅ | ❌ |
+| S5 delegation via the task tool | ✅ | ✅ | ✅ | ✅ |
+| S6 conversation survives across runs | ✅ | ✅ | ✅ | ✅ |
+
+Suite: [`docs/spikes/0011-live-harness-scenarios.mjs`](https://github.com/muthuishere/toolnexus/blob/main/docs/spikes/0011-live-harness-scenarios.mjs).
+Run it yourself with an `OPENROUTER_API_KEY` in your environment — the key is read at the point of
+use and never printed.
+
+## What each scenario proves
+
+- **S1 guardrail denies prod deploy** — the tool is denied and never executes; the model reports the block
+- **S2 completion gate over todowrite** — the run only reports done once every todo is checked off
+- **S2b gate catches a genuinely open todo** — an open item must block done; this exercises the gate against real model output
+- **S3 unverifiable run stops loudly** — bounded by maxAttempts; stop reason is named, never a silent done
+- **S4 budget stops the run, named** — a maxTurns ceiling yields status:incomplete with the limit named — never done
+- **S5 delegation via the task tool** — the parent delegates to a scoped child; the child's transcript stays out of the parent
+- **S6 conversation survives across runs** — history threads across run() calls, so a model may change between turns
+
+## The one failure, and why it is ours not the library's
+
+`deepseek/deepseek-v4-flash-0731` failed **S4**. The scenario gives the agent a tool that says
+"call me again" and a `maxTurns: 3` ceiling, then asserts the run stops with `status:"incomplete"`.
+DeepSeek simply **stopped calling the tool on its own** after three turns, so the run finished
+legitimately — `status:"done"` — without ever reaching the ceiling.
+
+That is a defect in the scenario, not in the budget enforcement: S4 mixes *model willingness to
+loop* with *library enforcement of a ceiling*, and only the second is ours to guarantee. The
+enforcement itself is pinned deterministically by the conformance suite on a virtual clock. We are
+leaving the failure visible rather than tuning the prompt until it goes green, because a green
+matrix that was massaged into place tells you nothing.
+
+One incidental observation from that run, filed rather than fixed: the completed run returned
+**empty text**. A `done` status with no content is a shape worth looking at.
+
+## What this does and does not tell you
+
+**Does:** the guardrail, completion-gate, delegation and history mechanisms work against four
+independent model families with different tool-calling implementations — so they are not tuned to
+one provider's quirks.
+
+**Does not:** these ran in `js` only, once each, on one day. They are not a benchmark, not a
+statistical claim, and not a substitute for the hermetic conformance suite that actually pins
+cross-port behaviour. Live runs catch integration truths mocks cannot; the conformance suite catches
+parity truths live runs cannot. Both exist for a reason.
