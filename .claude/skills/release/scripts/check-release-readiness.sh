@@ -106,6 +106,39 @@ else
 fi
 
 echo
+echo "== 6. Licensing =="
+missing=""
+for d in js python golang java csharp elixir clojure; do
+  [ -f "$d/LICENSE" ] || missing="$missing $d"
+done
+[ -z "$missing" ] && ok "every port carries a LICENSE" || bad "no LICENSE in:$missing"
+[ -f THIRD-PARTY-NOTICES.md ] && ok "THIRD-PARTY-NOTICES.md present" || bad "THIRD-PARTY-NOTICES.md missing"
+
+# The real drift risk: a dependency was added and never listed in the notices.
+# Name-presence only — verifying the LICENSE of each pinned version needs a
+# per-ecosystem resolver, which this gate deliberately does not attempt.
+if [ -f THIRD-PARTY-NOTICES.md ]; then
+  undoc=""
+  add() { grep -q -- "$1" THIRD-PARTY-NOTICES.md || undoc="$undoc\n    $2: $1"; }
+  for dep in $(node -p "Object.keys(require('./js/package.json').dependencies||{}).join('\n')" 2>/dev/null); do add "$dep" js; done
+  for dep in $(sed -n '/^dependencies = \[/,/^\]/p' python/pyproject.toml | grep -oE '"[a-zA-Z0-9_.-]+' | tr -d '"' | grep -v '^dependencies$'); do add "$dep" python; done
+  for dep in $(grep -oE '^\t[a-z0-9./-]+\.[a-z]+/[^ ]+' golang/go.mod | tr -d '\t'); do add "$dep" golang; done
+  # shipped configurations only — testImplementation/testRuntimeOnly are not distributed
+  for dep in $(grep -E "^\s+(api|implementation|compileOnly|runtimeOnly) " java/build.gradle \
+               | grep -oE "'[a-z0-9.]+:[a-z0-9.-]+:[0-9]" | sed -E "s/'([^:]+:[^:]+):.*/\1/"); do add "$dep" java; done
+  for dep in $(grep -oE 'PackageReference Include="[^"]+"' csharp/src/Toolnexus/Toolnexus.csproj | sed 's/.*="//;s/"//'); do add "$dep" csharp; done
+  for dep in $(sed -n '/defp deps do/,/^  end/p' elixir/mix.exs | grep -oE '\{:[a-z_]+' | tr -d '{:' | grep -vE '^(excoveralls|ex_doc)$'); do add "$dep" elixir; done
+  for dep in $(grep -oE '^\s+[a-z0-9./]+/[a-z0-9.-]+ \{:mvn' clojure/deps.edn | awk '{print $1}'); do add "$dep" clojure; done
+  if [ -n "$undoc" ]; then
+    bad "declared dependencies absent from THIRD-PARTY-NOTICES.md:"; printf "$undoc\n"
+  else
+    ok "every declared dependency appears in THIRD-PARTY-NOTICES.md"
+  fi
+fi
+grep -q 'LICENSE' elixir/mix.exs && ok "elixir Hex package ships LICENSE" \
+  || bad "elixir mix.exs \`files:\` omits LICENSE — Hex consumers get no license text"
+
+echo
 if [ "$fail" = "0" ]; then
   echo "READY for $V. Cutting the release is still an owner decision."
 else

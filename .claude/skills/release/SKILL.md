@@ -48,7 +48,16 @@ It replicates `release.yml`'s `preflight` locally **and adds the check preflight
 that the versioned install coordinates in the docs match the release. It checks: six manifests in
 lockstep (golang has none — it releases as a tag), docs install coordinates, a dated `## <version>`
 changelog section with a fresh `## Unreleased` above it, clean tree on `main` in sync with origin,
-the tag being free, and all seven `ENABLE_*` gates.
+the tag being free, all seven `ENABLE_*` gates, and **licensing**.
+
+The licensing check covers what actually drifts: a LICENSE file in every port, `THIRD-PARTY-NOTICES.md`
+present, the elixir Hex package still shipping LICENSE in its `files:` list, and **every declared
+dependency appearing in the notices** — the real failure mode being a dependency added and never
+listed. It matches names only across shipped configurations (test/dev deps are excluded: java
+`testImplementation`, elixir `excoveralls`/`ex_doc`). It does **not** verify the license of each
+pinned version — that needs a per-ecosystem resolver, and the notices file instead states the rule:
+re-verify on add/remove/major-version change, because an upstream can relicense between releases
+(`ModelContextProtocol` for C# is Apache-2.0 while the other MCP SDKs are MIT).
 
 Fix every `✗` before continuing.
 

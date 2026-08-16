@@ -49,7 +49,7 @@ defmodule Toolnexus.MixProject do
       name: "toolnexus",
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
-      files: ~w(lib mix.exs README.md)
+      files: ~w(lib mix.exs README.md LICENSE)
     ]
   end
 
