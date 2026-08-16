@@ -185,3 +185,57 @@ func AllTodosDone(r tn.RunResult) (bool, string) {
 	}
 	return true, ""
 }
+
+// runGated wraps a client run with the completion gate. It is the SHARED
+// implementation used by both the standalone Loop and the §7D runtime turn, so
+// a delegated child gets exactly the same guarantee as a directly-driven one.
+//
+// Rule 2 in force: a run that is `pending` (suspended on a human) or otherwise
+// non-done already carries its own reason, so the gate never re-judges it. That
+// keeps `pending` and `incomplete` distinct — the caller can always tell whether
+// it owes an Answer or a fix.
+func runGated(ctx context.Context, c *tn.Client, prompt string, tk *tn.Toolkit,
+	history []any, comp *Completion) (tn.RunResult, error) {
+	if comp == nil {
+		return c.RunWithHistory(ctx, prompt, tk, history)
+	}
+	maxAttempts := comp.MaxAttempts
+	if maxAttempts < 1 {
+		return tn.RunResult{}, fmt.Errorf("toolnexus: Completion.MaxAttempts must be >= 1")
+	}
+	if comp.Verify == nil {
+		return tn.RunResult{}, fmt.Errorf("toolnexus: Completion.Verify is required")
+	}
+	var acc []tn.ToolCall
+	var last tn.RunResult
+	var reason string
+	for n := 1; n <= maxAttempts; n++ {
+		p := prompt
+		if n > 1 {
+			p = "Your work did not verify: " + reason + ". Fix it and finish."
+		}
+		r, err := c.RunWithHistory(ctx, p, tk, history)
+		if err != nil {
+			return r, err
+		}
+		// The gate judges the accumulated work, so an agent cannot escape it by
+		// declining to re-declare its plan on a retry.
+		acc = append(acc, r.ToolCalls...)
+		r.ToolCalls = acc
+		last = r
+		if r.Status != "" && r.Status != "done" {
+			return r, nil // suspended / limited — already has a reason
+		}
+		ok, why := comp.Verify(r)
+		if ok {
+			return r, nil
+		}
+		reason = why
+		history = append(r.Messages, map[string]any{
+			"role": "user", "content": "verification failed: " + why})
+	}
+	last.Status = "incomplete"
+	last.Text = fmt.Sprintf("%s\n\n[stopped: completion.verify failed %d×: %s]",
+		last.Text, maxAttempts, reason)
+	return last, nil
+}

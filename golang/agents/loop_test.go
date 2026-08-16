@@ -41,6 +41,20 @@ func todo(id, txt string, done bool) any {
 	return map[string]any{"id": id, "text": txt, "completed": done}
 }
 
+// todowriteTool returns the SHIPPED todowrite builtin as a Tool, so an agent Def
+// can scope it in. Builtins are never added to a Def implicitly (§7D: the
+// toolkit view IS the security model).
+func todowriteTool(t *testing.T) tn.Tool {
+	t.Helper()
+	for _, tool := range todoToolkit(t).Tools() {
+		if tool.Name == "todowrite" {
+			return tool
+		}
+	}
+	t.Fatal("todowrite builtin not found")
+	return tn.Tool{}
+}
+
 func clientWith(rt http.RoundTripper) *tn.Client {
 	return tn.CreateClient(tn.ClientOptions{BaseURL: "http://mock/v1", Style: tn.StyleOpenAI,
 		Model: "m", APIKey: "x", HTTPClient: &http.Client{Transport: rt}})
@@ -152,4 +166,105 @@ func TestGuardrailFirstDenyWins(t *testing.T) {
 		t.Fatalf("wrong denial surfaced: %q", ov.Result.Output)
 	}
 	if executed { t.Fatal("the tool executed despite the denial") }
+}
+
+// THE point of putting Completion on the agent: a DELEGATED child inherits its
+// own gate. A host-side retry loop lives at the call site and cannot reach here.
+func TestCompletionGateReachesDelegatedChild(t *testing.T) {
+	rt := &scripted{replies: []map[string]any{
+		callTodo([]any{todo("1", "work", false)}), text("claiming done"),
+		callTodo([]any{todo("1", "work", true)}), text("really done"),
+	}}
+	child := agents.New("child", agents.Spec{Does: "does the work",
+		Tools:      []tn.Tool{todowriteTool(t)},
+		Completion: &agents.Completion{Verify: agents.AllTodosDone, MaxAttempts: 3}})
+	r := agents.NewRuntime(agents.Options{
+		Registry: child.Registry(), Transport: rt,
+		LLM: &agents.LLMOptions{BaseURL: "http://mock/v1", Style: tn.StyleOpenAI, APIKey: "x", Model: "m"},
+	})
+	h, err := r.Spawn(r.Root, "child", nil)
+	if err != nil { t.Fatal(err) }
+	r.Wake(h, "do the work")
+	res := r.Wait(h, 0)
+	defer r.Close(h, nil)
+	if res.Status != "done" {
+		t.Fatalf("status=%s text=%q", res.Status, res.Text)
+	}
+	if rt.n < 4 {
+		t.Fatalf("the gate did not re-run inside the runtime turn (consumed %d replies)", rt.n)
+	}
+}
+
+// An unpassable gate inside the runtime stops the handle LOUDLY as incomplete.
+func TestDelegatedGateStopsLoudly(t *testing.T) {
+	// The agent declares an item it never completes. Plenty of turns available,
+	// so the GATE is unambiguously the limit that fires — not maxTurns.
+	rt := &scripted{replies: []map[string]any{
+		callTodo([]any{todo("1", "never", false)}), text("done?"), text("done?"), text("done?"),
+	}}
+	child := agents.New("child", agents.Spec{Does: "works",
+		Tools:      []tn.Tool{todowriteTool(t)},
+		Budget:     &agents.Budget{MaxTurns: 30},
+		Completion: &agents.Completion{Verify: agents.AllTodosDone, MaxAttempts: 2}})
+	r := agents.NewRuntime(agents.Options{
+		Registry: child.Registry(), Transport: rt,
+		LLM: &agents.LLMOptions{BaseURL: "http://mock/v1", Style: tn.StyleOpenAI, APIKey: "x", Model: "m"},
+	})
+	h, _ := r.Spawn(r.Root, "child", nil)
+	r.Wake(h, "go")
+	res := r.Wait(h, 0)
+	defer r.Close(h, nil)
+	if res.Status != "incomplete" {
+		t.Fatalf("status=%s, want incomplete; text=%q", res.Status, res.Text)
+	}
+	// KNOWN INTERACTION, found by this spike and not yet designed away: the gate's
+	// retries share the handle's turn budget, and the client counts turns across
+	// REPLAYED HISTORY. So each retry starts nearer the ceiling and the budget stop
+	// can fire first — reporting "hit maxTurns" instead of the verification reason.
+	// Both are honest, loud stops (never a silent done), which is what this asserts.
+	// The open question is whether the gate should carry its own allowance, or the
+	// two reasons should compose ("hit maxTurns while verifying; last failure: X").
+	named := strings.Contains(res.Text, "completion.verify failed") ||
+		strings.Contains(res.Text, "maxTurns")
+	if !named {
+		t.Fatalf("stop was not named at all: %q", res.Text)
+	}
+}
+
+// SUSPENSION must survive the gate: a §10 pending is NOT a verification failure.
+func TestSuspensionIsNotReJudgedByTheGate(t *testing.T) {
+	asked := false
+	ask := tn.Tool{Name: "ask_human", Description: "asks", Source: tn.SourceCustom,
+		InputSchema: tn.JSONSchema{"type": "object", "properties": map[string]any{}},
+		Execute: func(_ map[string]any, ctx *tn.ToolContext) (tn.ToolResult, error) {
+			if ctx != nil && ctx.Answer != nil {
+				return tn.ToolResult{Output: "human said yes"}, nil
+			}
+			asked = true
+			return tn.Pending(tn.Request{ID: "req-1", Kind: "question", Prompt: "Proceed?"}), nil
+		}}
+	callAsk := map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+		map[string]any{"id": "a1", "type": "function",
+			"function": map[string]any{"name": "ask_human", "arguments": "{}"}}}}
+	rt := &scripted{replies: []map[string]any{callAsk, text("finished")}}
+
+	child := agents.New("child", agents.Spec{Does: "asks", Tools: []tn.Tool{ask},
+		Completion: &agents.Completion{
+			Verify:      func(tn.RunResult) (bool, string) { return false, "must never be consulted on a pending" },
+			MaxAttempts: 2}})
+	r := agents.NewRuntime(agents.Options{
+		Registry: child.Registry(), Transport: rt,
+		LLM: &agents.LLMOptions{BaseURL: "http://mock/v1", Style: tn.StyleOpenAI, APIKey: "x", Model: "m"},
+	})
+	h, _ := r.Spawn(r.Root, "child", nil)
+	r.Wake(h, "go")
+	res := r.Wait(h, 0)
+	if !asked { t.Fatal("the suspending tool never ran") }
+	if res.Status != "pending" {
+		t.Fatalf("status=%s, want pending — the gate re-judged a suspension; text=%q", res.Status, res.Text)
+	}
+	if res.Pending == nil || res.Pending.Prompt != "Proceed?" {
+		t.Fatalf("the §10 Request did not survive the gate: %+v", res.Pending)
+	}
+	r.Close(h, nil)
 }

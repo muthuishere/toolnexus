@@ -114,7 +114,8 @@ func (a *Agent) registryInto(acc map[string]Def) {
 		WaitFor:  a.Spec.WaitFor,
 		OnSpawn:  a.Spec.OnSpawn,
 		OnClose:  a.Spec.OnClose,
-		Hooks:    guardedHooks(a.Spec),
+		Hooks:      guardedHooks(a.Spec),
+		Completion: a.Spec.Completion,
 		OnMetric: a.Spec.OnMetric,
 	}
 	for _, t := range a.Spec.Team {

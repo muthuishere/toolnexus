@@ -130,6 +130,11 @@ type Def struct {
 	// Tools is the scoped toolkit VIEW for this agent — scoping is the security
 	// model. Builtins are never added implicitly.
 	Tools []tn.Tool
+	// Completion, when set, gates this agent's `done`: the loop re-runs with the
+	// failure reason until Verify passes or MaxAttempts is spent. It lives on the
+	// Def so it TRAVELS WITH THE AGENT — a parent delegating via `task` inherits
+	// it, which a host-side retry loop cannot do.
+	Completion *Completion
 	// Team lists this agent's task-tool targets. Delegation is opt-in: an agent
 	// with an empty Team gets NO task tool (recursion is never the default).
 	Team []string
@@ -1149,7 +1154,7 @@ func (rt *Runtime) execute(runCtx context.Context, h *Handle, def Def, input str
 			OnMetric:     onMetric,
 		})
 		history, _ := rt.store.Get(h.ID)
-		r, err = client.RunWithHistory(runCtx, input, toolkit, history)
+		r, err = runGated(runCtx, client, input, toolkit, history, def.Completion)
 	}
 
 	if err != nil {
