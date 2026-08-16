@@ -168,3 +168,15 @@ func (a *Agent) AsTool(opts Options) tn.Tool {
 		},
 	}
 }
+
+// Harness names the capability set an agent needs to COMPLETE its problem, plus
+// the boundaries it may not cross: soul, tools, team, budget ceiling, guardrails,
+// the completion gate, and §10 interpreter authority.
+//
+// It is a FACTORY over Spec, not a second type — so `harness` is the word you
+// read while there stays exactly one type underneath, and the two can never
+// drift. Model is deliberately absent: Model + Harness = Agent.
+//
+//	h := agents.Harness(agents.Spec{Soul: …, Tools: …, Guardrails: …})
+//	a := agents.New("worker", h)
+func Harness(s Spec) Spec { return s }

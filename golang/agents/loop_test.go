@@ -268,3 +268,23 @@ func TestSuspensionIsNotReJudgedByTheGate(t *testing.T) {
 	}
 	r.Close(h, nil)
 }
+
+// Harness is a FACTORY over Spec, never a second type — so the name is
+// first-class while exactly one type exists underneath and the two cannot drift.
+func TestHarnessIsAFactoryNotASecondType(t *testing.T) {
+	sp := agents.Spec{Does: "works", Soul: "be brief",
+		Completion: &agents.Completion{Verify: agents.AllTodosDone, MaxAttempts: 2}}
+	h := agents.Harness(sp)
+
+	// Identical value, and assignable both ways — it IS Spec, so no drift is
+	// possible between "harness" and "spec".
+	var back agents.Spec = h
+	if back.Does != sp.Does || back.Soul != sp.Soul || back.Completion != sp.Completion {
+		t.Fatal("Harness did not round-trip its Spec")
+	}
+	// And an agent built through the harness name behaves identically.
+	a := agents.New("worker", h)
+	if a.Spec.Completion == nil || a.Spec.Completion.MaxAttempts != 2 {
+		t.Fatal("the completion gate did not survive the harness factory")
+	}
+}
