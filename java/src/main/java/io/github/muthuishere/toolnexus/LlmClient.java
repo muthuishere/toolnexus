@@ -119,6 +119,97 @@ public final class LlmClient {
         public Options bodyTransform(Function<Map<String, Object>, Map<String, Object>> v) { this.bodyTransform = v; return this; }
         public Options httpClient(HttpClient v) { this.httpClient = v; return this; }
         public Options onError(Function<ErrorInfo, Tier> v) { this.onError = v; return this; }
+        /** ADR 0019: the transport seam. Null ⇒ {@link HttpClientTransport} over
+         * {@link #httpClient} (or the shared default) — byte-identical to today. */
+        public Transport transport;
+        public Options transport(Transport v) { this.transport = v; return this; }
+    }
+
+    // ------------------------------------------------------------------
+    // ADR 0019 — one transport seam. `httpClient(x)` is sugar that builds the
+    // DEFAULT implementation of it.
+    // ------------------------------------------------------------------
+
+    /** ADR 0019: take this request, give me that response. */
+    public interface Transport {
+        TransportResponse send(TransportContext ctx, TransportRequest req) throws IOException, InterruptedException;
+    }
+
+    /** Java's `ctx`: the run's remaining budget + cancel state. */
+    public interface TransportContext {
+        boolean cancelled();
+        /** Remaining run budget; {@link Long#MAX_VALUE} = unbounded. */
+        long remainingMs();
+    }
+
+    /** Body crosses PARSED. `stream` says which response shape is expected. */
+    public record TransportRequest(String url, String method, Map<String, String> headers,
+                                   Map<String, Object> body, boolean stream) {}
+
+    /** Either a parsed body OR a line stream. Header lookup is case-insensitive (normative). */
+    public static final class TransportResponse {
+        public final int status;
+        private final Map<String, String> headers; // stored lowercased
+        public final Map<String, Object> body;     // null when streaming
+        public final Stream<String> lines;         // null when not streaming
+        private TransportResponse(int status, Map<String, String> h, Map<String, Object> body, Stream<String> lines) {
+            this.status = status;
+            Map<String, String> lower = new LinkedHashMap<>();
+            if (h != null) h.forEach((k, v) -> lower.put(k.toLowerCase(java.util.Locale.ROOT), v));
+            this.headers = lower;
+            this.body = body;
+            this.lines = lines;
+        }
+        public static TransportResponse json(int status, Map<String, String> h, Map<String, Object> body) {
+            return new TransportResponse(status, h, body, null);
+        }
+        public static TransportResponse stream(int status, Map<String, String> h, Stream<String> lines) {
+            return new TransportResponse(status, h, null, lines);
+        }
+        public java.util.Optional<String> header(String name) {
+            return java.util.Optional.ofNullable(headers.get(name.toLowerCase(java.util.Locale.ROOT)));
+        }
+        /** Text for an error message, whichever shape arrived. */
+        String errorText() {
+            if (lines != null) return lines.collect(Collectors.joining("\n"));
+            if (body == null) return "";
+            if (body.size() == 1 && body.get("__raw") instanceof String s) return s; // default-transport passthrough
+            return Json.stringify(body);
+        }
+    }
+
+    /** The DEFAULT implementation: today's JDK {@link HttpClient} path, unchanged in behaviour. */
+    public static final class HttpClientTransport implements Transport {
+        private final HttpClient http;
+        public HttpClientTransport(HttpClient http) { this.http = http != null ? http : HTTP; }
+        @Override
+        public TransportResponse send(TransportContext ctx, TransportRequest req)
+                throws IOException, InterruptedException {
+            HttpRequest.Builder rb = HttpRequest.newBuilder()
+                    .uri(URI.create(req.url()))
+                    .POST(HttpRequest.BodyPublishers.ofString(Json.stringify(req.body()), StandardCharsets.UTF_8));
+            req.headers().forEach(rb::header);
+            long remain = ctx.remainingMs();
+            if (remain != Long.MAX_VALUE) {
+                if (remain <= 0) throw new TimeoutException("run timeout");
+                rb.timeout(Duration.ofMillis(remain));
+            }
+            HttpRequest r = rb.build();
+            if (req.stream()) {
+                HttpResponse<Stream<String>> res = http.send(r, HttpResponse.BodyHandlers.ofLines());
+                return TransportResponse.stream(res.statusCode(), flatten(res.headers()), res.body());
+            }
+            HttpResponse<String> res = http.send(r, HttpResponse.BodyHandlers.ofString());
+            Map<String, Object> parsed;
+            if (res.statusCode() >= 200 && res.statusCode() < 300) parsed = Json.toMap(res.body());
+            else parsed = Map.of("__raw", res.body() == null ? "" : res.body());
+            return TransportResponse.json(res.statusCode(), flatten(res.headers()), parsed);
+        }
+        private static Map<String, String> flatten(java.net.http.HttpHeaders h) {
+            Map<String, String> m = new LinkedHashMap<>();
+            h.map().forEach((k, v) -> { if (!v.isEmpty()) m.put(k, v.get(0)); });
+            return m;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -557,14 +648,15 @@ public final class LlmClient {
     /** Conversation provider for {@link #ask} — from {@code opts.store}, else in-memory. */
     private final ConversationStore store;
     /** §8 Gap 2: HTTP client for LLM requests — from {@code opts.httpClient}, else the shared default. */
-    private final HttpClient http;
+    private final Transport transport;
     /** Cumulative Prometheus registry fed by the same events {@code onMetric} sees. */
     private final MetricsRegistry registry = new MetricsRegistry();
 
     private LlmClient(Options opts) {
         this.opts = opts;
         this.store = opts.store != null ? opts.store : new InMemoryConversationStore();
-        this.http = opts.httpClient != null ? opts.httpClient : HTTP;
+        // ADR 0019: one seam. httpClient(x) is sugar constructing the default implementation.
+        this.transport = opts.transport != null ? opts.transport : new HttpClientTransport(opts.httpClient);
     }
 
     /**
@@ -1315,13 +1407,11 @@ public final class LlmClient {
                 List<Integer> order = new ArrayList<>();
                 try {
                     // The JDK HttpClient streams the SSE response as lines — ideal for SSE.
-                    HttpResponse<Stream<String>> res =
-                            llmSend(url, headers, body, deadline, HttpResponse.BodyHandlers.ofLines());
-                    if (res.statusCode() < 200 || res.statusCode() >= 300) {
-                        String b = res.body() == null ? "" : res.body().collect(Collectors.joining("\n"));
-                        throw new RuntimeException("LLM " + res.statusCode() + ": " + b);
+                    TransportResponse res = llmSend(url, headers, body, deadline, true);
+                    if (res.status < 200 || res.status >= 300) {
+                        throw new RuntimeException("LLM " + res.status + ": " + res.errorText());
                     }
-                    try (Stream<String> lines = res.body()) {
+                    try (Stream<String> lines = res.lines) {
                         for (String line : (Iterable<String>) lines::iterator) {
                             if (!line.startsWith("data:")) continue;
                             String payload = line.substring(5).trim();
@@ -1498,13 +1588,11 @@ public final class LlmClient {
                 List<Integer> order = new ArrayList<>();
                 String[] stopReason = {""};
                 try {
-                    HttpResponse<Stream<String>> res =
-                            llmSend(endpoint, headers, body, deadline, HttpResponse.BodyHandlers.ofLines());
-                    if (res.statusCode() < 200 || res.statusCode() >= 300) {
-                        String b = res.body() == null ? "" : res.body().collect(Collectors.joining("\n"));
-                        throw new RuntimeException("LLM " + res.statusCode() + ": " + b);
+                    TransportResponse res = llmSend(endpoint, headers, body, deadline, true);
+                    if (res.status < 200 || res.status >= 300) {
+                        throw new RuntimeException("LLM " + res.status + ": " + res.errorText());
                     }
-                    try (Stream<String> lines = res.body()) {
+                    try (Stream<String> lines = res.lines) {
                         for (String line : (Iterable<String>) lines::iterator) {
                             if (!line.startsWith("data:")) continue;
                             Map<String, Object> j = parseObjOrNull(line.substring(5).trim());
@@ -1855,37 +1943,32 @@ public final class LlmClient {
         return new Deadline(System.nanoTime() + opts.timeoutMs * 1_000_000L, opts.timeoutMs, cancel);
     }
 
-    private HttpRequest buildRequest(String url, Map<String, String> headers,
-                                     Map<String, Object> body, Deadline deadline) {
-        HttpRequest.Builder rb = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .POST(HttpRequest.BodyPublishers.ofString(Json.stringify(body), StandardCharsets.UTF_8));
-        for (Map.Entry<String, String> e : headers.entrySet()) rb.header(e.getKey(), e.getValue());
-        // Per-request timeout = remaining run budget (capped > 0); JS sets request timeout from the signal.
-        if (deadline.bounded()) {
-            long remain = deadline.remainingMs();
-            if (remain <= 0) throw new TimeoutException("run timeout after " + deadline.timeoutMs + "ms");
-            rb.timeout(Duration.ofMillis(remain));
-        }
-        return rb.build();
+    /** ADR 0019: Java's `ctx` — the run deadline + cancel token, seen by the transport. */
+    private static TransportContext ctxOf(Deadline deadline) {
+        return new TransportContext() {
+            @Override public boolean cancelled() { return deadline.cancelled(); }
+            @Override public long remainingMs() {
+                return deadline.bounded() ? deadline.remainingMs() : Long.MAX_VALUE;
+            }
+        };
     }
 
     /**
      * Send with retry on 429/5xx + IOException, exponential backoff + jitter, honoring Retry-After.
      * The whole-run {@code deadline} is enforced before/after each attempt; timeouts are not retried.
      */
-    private <T> HttpResponse<T> llmSend(String url, Map<String, String> headers,
-                                        Map<String, Object> body, Deadline deadline,
-                                        HttpResponse.BodyHandler<T> handler) {
+    private TransportResponse llmSend(String url, Map<String, String> headers,
+                                      Map<String, Object> body, Deadline deadline,
+                                      boolean stream) {
         int retries = retries();
         long base = retryBaseMs();
         RuntimeException lastErr = null;
         for (int attempt = 0; attempt <= retries; attempt++) {
             deadline.check();
-            HttpRequest req = buildRequest(url, headers, body, deadline);
+            TransportRequest req = new TransportRequest(url, "POST", headers, body, stream);
             try {
-                HttpResponse<T> res = http.send(req, handler);
-                int status = res.statusCode();
+                TransportResponse res = transport.send(ctxOf(deadline), req);
+                int status = res.status;
                 if (status >= 200 && status < 300) return res;
                 // §8 Resilience: classify EVERY non-2xx (the host may retry a normally-terminal
                 // status, or fail a retryable one). A RETRY is still bounded by the budget below.
@@ -1895,6 +1978,8 @@ public final class LlmClient {
                 long wait = retryAfterMs(res).orElse((long) (base * Math.pow(2, attempt) + Math.random() * 100));
                 sleep(wait, deadline);
             } catch (HttpTimeoutException e) {
+                throw new TimeoutException("run timeout after " + deadline.timeoutMs + "ms"); // not retried
+            } catch (TimeoutException e) {
                 throw new TimeoutException("run timeout after " + deadline.timeoutMs + "ms"); // not retried
             } catch (IOException e) {
                 lastErr = new RuntimeException("LLM request failed: " + e.getMessage(), e);
@@ -1913,8 +1998,8 @@ public final class LlmClient {
         throw lastErr != null ? lastErr : new RuntimeException("LLM request failed");
     }
 
-    private static java.util.OptionalLong retryAfterMs(HttpResponse<?> res) {
-        return res.headers().firstValue("retry-after")
+    private static java.util.OptionalLong retryAfterMs(TransportResponse res) {
+        return res.header("retry-after")
                 .map(String::trim)
                 .filter(s -> s.matches("\\d+"))
                 .map(s -> java.util.OptionalLong.of(Long.parseLong(s) * 1000L))
@@ -1957,11 +2042,11 @@ public final class LlmClient {
     /** Send and parse a JSON object response, retrying transient failures + enforcing the deadline. */
     private Map<String, Object> postJson(String url, Map<String, String> headers,
                                          Map<String, Object> body, Deadline deadline) {
-        HttpResponse<String> res = llmSend(url, headers, body, deadline, HttpResponse.BodyHandlers.ofString());
-        if (res.statusCode() < 200 || res.statusCode() >= 300) {
-            throw new RuntimeException("LLM " + res.statusCode() + ": " + res.body());
+        TransportResponse res = llmSend(url, headers, body, deadline, false);
+        if (res.status < 200 || res.status >= 300) {
+            throw new RuntimeException("LLM " + res.status + ": " + res.errorText());
         }
-        return Json.toMap(res.body());
+        return res.body;
     }
 
     @SuppressWarnings("unchecked")
