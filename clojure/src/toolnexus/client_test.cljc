@@ -1133,3 +1133,39 @@
               "…and the first answer")
           (is (not-any? #(= ["user" "first question"] %) (roles+content third-body))
               "an ask WITHOUT an id is a stateless one-shot — no leakage from the store"))))))
+
+;; ---------------------------------------------------------------------------
+;; Retry-After parsing — the same table in all seven ports
+;; ---------------------------------------------------------------------------
+;;
+;; The delay-seconds form only (RFC 9110 §10.2.3): ASCII digits in
+;; 0..2147483647. Anything else falls back to backoff. This port already had the
+;; shape right and the range wrong — `parse-long` answers nil for a digit string
+;; wider than a long, and `(* 1000 nil)` threw from inside the retry path, so an
+;; absurd header killed the run instead of being ignored.
+
+(defn- ra
+  "Run the parser over a Retry-After header value, as a response would carry it."
+  [v]
+  (#'client/retry-after-ms {:headers {"retry-after" v}}))
+
+(deftest retry-after-parsing
+  (testing "the delay-seconds form is honoured, in whole seconds"
+    (is (= 2000 (ra "2")))
+    (is (= 7000 (ra "  7  ")) "surrounding whitespace is trimmed")
+    (is (= 5000 (ra "0000005")) "leading zeros are still digits")
+    (is (= 2147483647000 (ra "2147483647"))))
+
+  (testing "zero means retry now, not 'no opinion'"
+    (is (= 0 (ra "0"))))
+
+  (testing "everything else falls back to backoff, and never throws"
+    (is (nil? (ra "0.5")) "fractional: honoured by python/js before this change")
+    (is (nil? (ra "5.9")) "elixir truncated this to 5s before this change")
+    (is (nil? (ra "-5")) "must never become an immediate or negative wait")
+    (is (nil? (ra "+5")) "go's Atoi accepted a leading sign")
+    (is (nil? (ra "2147483648")))
+    (is (nil? (ra "99999999999999999999")) "parse-long -> nil -> (* 1000 nil) used to throw")
+    (is (nil? (ra "")))
+    (is (nil? (ra "Wed, 21 Oct 2015 07:28:00 GMT")))
+    (is (nil? (ra "abc")))))

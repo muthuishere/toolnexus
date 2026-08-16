@@ -114,6 +114,28 @@ export class InMemoryConversationStore implements ConversationStore {
 
 const RETRYABLE = new Set([429, 500, 502, 503, 504])
 
+/** ~68 years; the widest whole-second count all seven ports represent exactly. */
+const RETRY_AFTER_MAX_SECONDS = 2147483647
+
+/**
+ * Honour `Retry-After` only in its delay-seconds form: a run of ASCII digits
+ * (RFC 9110 §10.2.3) in 0…2147483647, returned in milliseconds.
+ *
+ * `Number()` is far too permissive for this — it accepts `"0.5"`, `"-5"`, `"1e3"`
+ * and `" "` (as 0), which is how this port came to wait for fractional seconds
+ * that five of the other six rejected outright. Fractional, signed, HTTP-date and
+ * out-of-range values are not delays we can honour, so the caller falls back to
+ * backoff rather than guessing. `0` is a real answer, so it returns `0`, not
+ * `null`, and callers must use `??` rather than `||`.
+ */
+function retryAfterMs(raw: string | null | undefined): number | null {
+  if (raw == null) return null
+  const s = raw.trim()
+  if (!/^[0-9]+$/.test(s)) return null
+  const secs = Number(s)
+  return secs <= RETRY_AFTER_MAX_SECONDS ? secs * 1000 : null
+}
+
 function delay(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const t = setTimeout(resolve, ms)
@@ -643,8 +665,9 @@ export class Client {
         const retryable = RETRYABLE.has(res.status)
         const tier = classify({ status: res.status, attempt, retryable })
         if (tier === "fail" || attempt === retries) return res // caller surfaces the non-ok status
-        const ra = Number(res.headers.get("retry-after"))
-        await delay(ra ? ra * 1000 : base * 2 ** attempt + Math.random() * 100, signal)
+        const ra = retryAfterMs(res.headers.get("retry-after"))
+        // `?? `, not `|| `: Retry-After: 0 means "retry now", not "no opinion".
+        await delay(ra ?? base * 2 ** attempt + Math.random() * 100, signal)
       } catch (e) {
         if (signal.aborted) throw e // abort/timeout: don't retry
         lastErr = e

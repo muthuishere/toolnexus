@@ -2046,3 +2046,61 @@ test("gap3: parent signal aborts the whole load promptly", async () => {
     fs.rmSync(script, { force: true })
   }
 })
+
+// Retry-After is parsed identically in all seven ports: the delay-seconds form
+// only (RFC 9110 §10.2.3) — ASCII digits in 0…2147483647. This port has no
+// public hook on the parser, so the rule is asserted where it is observable:
+// how long the client actually waits before retrying. Before this change JS used
+// Number(), which honoured "0.5" (five ports backed off), retried IMMEDIATELY on
+// "-5" (a hot loop against a server asking for calm), and treated "0" as absent.
+async function retryDelayMs(retryAfter: string, retryBaseMs: number): Promise<number> {
+  let hits = 0
+  const s = http.createServer((req, res) => {
+    hits++
+    if (hits < 2) { res.writeHead(429, { "retry-after": retryAfter }); res.end("slow down"); return }
+    res.writeHead(200, { "content-type": "application/json" })
+    res.end(JSON.stringify({ choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+  })
+  await new Promise<void>((r) => s.listen(0, r))
+  const port = (s.address() as any).port
+  const tk = await createToolkit({ builtins: false })
+  const c = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "x", apiKey: "k", retries: 3, retryBaseMs })
+  const t0 = Date.now()
+  assert.equal((await c.run("hi", { toolkit: tk })).text, "ok")
+  const elapsed = Date.now() - t0
+  await tk.close(); s.close()
+  return elapsed
+}
+
+test("resilience: a fractional Retry-After is ignored, not honoured", async () => {
+  // Old behaviour: Number("0.5") -> waits 500ms. New: falls back to a ~5ms backoff.
+  const elapsed = await retryDelayMs("0.5", 5)
+  assert.ok(elapsed < 300, `fractional Retry-After should fall back to backoff, waited ${elapsed}ms`)
+})
+
+test("resilience: a negative Retry-After cannot cause an immediate retry", async () => {
+  // Old behaviour: Number("-5") -> delay(-5000) -> retries instantly.
+  const elapsed = await retryDelayMs("-5", 400)
+  assert.ok(elapsed >= 300, `negative Retry-After should back off, waited only ${elapsed}ms`)
+})
+
+test("resilience: Retry-After: 0 means retry now, not 'no opinion'", async () => {
+  // Old behaviour: 0 is falsy, so the header was discarded and backoff applied.
+  const elapsed = await retryDelayMs("0", 600)
+  assert.ok(elapsed < 400, `Retry-After: 0 should retry promptly, waited ${elapsed}ms`)
+})
+
+test("resilience: an out-of-range Retry-After cannot stall the run", async () => {
+  const elapsed = await retryDelayMs("99999999999999999999", 5)
+  assert.ok(elapsed < 300, `absurd Retry-After should fall back to backoff, waited ${elapsed}ms`)
+})
+
+test("resilience: an HTTP-date Retry-After falls back to backoff", async () => {
+  const elapsed = await retryDelayMs("Wed, 21 Oct 2015 07:28:00 GMT", 5)
+  assert.ok(elapsed < 300, `HTTP-date Retry-After should fall back to backoff, waited ${elapsed}ms`)
+})
+
+test("resilience: an integer Retry-After is honoured over backoff", async () => {
+  const elapsed = await retryDelayMs("1", 5)
+  assert.ok(elapsed >= 900, `Retry-After: 1 should wait a second, waited ${elapsed}ms`)
+})

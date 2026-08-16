@@ -182,6 +182,29 @@ def _resolve_key(api_key: Optional[str], style: ClientStyle) -> str:
     return key
 
 
+_RETRY_AFTER_MAX = 2147483647  # ~68 years; the widest second count all seven ports hold exactly
+
+
+def _parse_retry_after(value: Optional[str]) -> Optional[int]:
+    """Honour ``Retry-After`` only in its delay-seconds form.
+
+    RFC 9110 §10.2.3 defines ``delay-seconds`` as ``1*DIGIT`` — unsigned, whole.
+    ``str.isdigit`` is deliberately not used: it accepts superscripts and other
+    Unicode digits that ``int()`` then rejects. Fractional, signed, HTTP-date and
+    out-of-range values are not delays we can honour, so the caller falls back to
+    backoff rather than guessing. ``0`` is a real answer — the server is saying
+    "retry now" — so it comes back as ``0``, not ``None``, and every caller must
+    test ``is not None`` rather than truthiness.
+    """
+    if not value:
+        return None
+    s = value.strip()
+    if not s or any(c not in "0123456789" for c in s):
+        return None
+    n = int(s)
+    return n if n <= _RETRY_AFTER_MAX else None
+
+
 class _HttpError(Exception):
     """Carries an HTTP status + body so the retry loop can inspect ``status``."""
 
@@ -201,13 +224,7 @@ def _open(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: f
     except urllib.error.HTTPError as e:
         text = e.read().decode("utf-8", errors="replace")
         ra = e.headers.get("Retry-After") if e.headers else None
-        retry_after = None
-        if ra:
-            try:
-                retry_after = float(ra)
-            except ValueError:
-                retry_after = None
-        raise _HttpError(e.code, text, retry_after) from None
+        raise _HttpError(e.code, text, _parse_retry_after(ra)) from None
 
 
 def _post(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float) -> dict[str, Any]:
@@ -800,7 +817,12 @@ class Client:
                 tier = classify({"status": e.status, "attempt": attempt, "retryable": retryable})
                 if tier == "fail" or attempt == self.retries:
                     raise
-                wait = e.retry_after if e.retry_after else base * (2 ** attempt) + random.random() * 0.1
+                # `is not None`, not truthiness: `Retry-After: 0` means retry now.
+                wait = (
+                    e.retry_after
+                    if e.retry_after is not None
+                    else base * (2 ** attempt) + random.random() * 0.1
+                )
                 await self._sleep(wait, deadline, cancel)
             except (RunTimeout, RunCancelled):
                 raise  # never retry an abort

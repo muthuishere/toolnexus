@@ -1413,14 +1413,27 @@ public sealed class LlmClient
         throw lastErr ?? new InvalidOperationException("LLM request failed");
     }
 
+    /// <summary>~68 years; the widest whole-second count all seven ports represent exactly.</summary>
+    private const long RetryAfterMaxSeconds = 2147483647L;
+
+    /// <summary>
+    /// Honours <c>Retry-After</c> only in its delay-seconds form: a run of ASCII digits
+    /// (RFC 9110 §10.2.3) in 0…2147483647. <c>long.TryParse</c> alone is too permissive —
+    /// it accepts a leading sign, so <c>Retry-After: -5</c> parsed to −5000 ms and, since
+    /// <c>SleepAsync</c> returns at once for a non-positive delay, produced an immediate
+    /// retry against a server that had just asked for calm. Fractional, signed, HTTP-date
+    /// and out-of-range values are not delays we can honour, so the caller falls back to
+    /// backoff rather than guessing. Zero is a real answer — "retry now" — so it is
+    /// returned as 0 rather than null.
+    /// </summary>
     private static long? RetryAfterMs(HttpResponseMessage res)
     {
-        if (res.Headers.TryGetValues("retry-after", out var values))
-        {
-            var v = values.FirstOrDefault()?.Trim();
-            if (v != null && long.TryParse(v, out var secs)) return secs * 1000L;
-        }
-        return null;
+        if (!res.Headers.TryGetValues("retry-after", out var values)) return null;
+        var v = values.FirstOrDefault()?.Trim();
+        if (string.IsNullOrEmpty(v)) return null;
+        foreach (var c in v) if (c < '0' || c > '9') return null;
+        if (!long.TryParse(v, out var secs) || secs > RetryAfterMaxSeconds) return null;
+        return secs * 1000L;
     }
 
     private static async Task SleepAsync(long ms, Deadline deadline, CancellationToken external)

@@ -8,6 +8,45 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### Fixed — `Retry-After` meant seven different things in seven ports (all ports)
+
+`SPEC.md` says the LLM request retries "honoring `Retry-After`". Every port implemented that
+sentence, and no two of them agreed on what a header value means. Handed the same `429`, the ports
+waited for different lengths of time — and three of them could be made to misbehave outright:
+
+- **Fractional values split three ways.** `Retry-After: 5.9` waited 5.9s in python and js, **5s in
+  elixir** (`Integer.parse` stops at the first non-digit, so it silently truncated), and fell back
+  to backoff in golang, java, csharp and clojure.
+- **A negative value produced an immediate retry** in js and csharp — a client hot-looping against
+  a server that had just asked it to slow down — and a **negative sleep** in python.
+- **An absurd value crashed the run** in java (`NumberFormatException` thrown from inside the retry
+  path) and in clojure (`parse-long` answers nil past a long, and `(* 1000 nil)` throws), and
+  parked python, js and elixir on a sleep measured in millennia.
+- **`Retry-After: 0`** — the server saying "retry now" — was discarded as "no opinion" by python,
+  js and elixir, which then applied backoff anyway.
+
+All seven ports now implement one rule: honour `Retry-After` **only** in its `delay-seconds` form,
+a run of ASCII digits (RFC 9110 §10.2.3) in `0 … 2147483647`, waited as exactly that many whole
+seconds, including `0`. Everything else — fractional, signed, the HTTP-date form, out of range,
+empty, unparseable — falls back to exponential backoff, and can no longer raise, wait a negative
+duration, or retry without delay. The HTTP-date form stays deliberately unsupported, uniformly:
+it buys one avoided backoff in exchange for portable date parsing in seven languages, and a server
+that sends it now gets our backoff rather than a wrong answer in some ports and a crash in others.
+
+**What you may notice:** if a provider sends a fractional `Retry-After`, python and js now back off
+instead of waiting the fraction, and elixir no longer truncates it. Every port gains a regression
+test pinning the same table of inputs — there was previously **no test for this in any port**, which
+is why the drift survived seven ports and a conformance suite. Tracked in
+`openspec/changes/fix-retry-after-parity`.
+
+**Not done:** an honoured delay is interruptible by the whole-run deadline in five ports (golang
+`sleep(ctx, …)`, python `_sleep(…, deadline)`, js `delay(ms, signal)`, java and csharp
+`sleep(ms, deadline)`) but **not in elixir (`Process.sleep`) or clojure (`ktime/sleep!`)**, which
+sleep the full delay and only notice the deadline on the next attempt. With the range now capped at
+~68 years that is a long-tail annoyance rather than a hang, but it is a real remaining divergence.
+It is a bounding question rather than a parsing one, so it is deliberately left out of this change
+and not yet tracked by its own proposal.
+
 ## 0.14.0 — 2026-08-15
 
 ### Fixed — cancelling an A2A call reports `canceled` reliably (js)

@@ -1913,11 +1913,28 @@ public final class LlmClient {
         throw lastErr != null ? lastErr : new RuntimeException("LLM request failed");
     }
 
+    /** ~68 years; the widest whole-second count all seven ports represent exactly. */
+    private static final long RETRY_AFTER_MAX_SECONDS = 2147483647L;
+
+    /**
+     * Honors {@code Retry-After} only in its delay-seconds form: a run of ASCII digits
+     * (RFC 9110 §10.2.3) in 0…2147483647. The {@code \d+} filter was already right about
+     * shape but not about range — {@code Long.parseLong} throws {@code NumberFormatException}
+     * on a digit string wider than a long, and it threw from inside the retry path, so a
+     * server sending an absurd value killed the run instead of being ignored. Fractional,
+     * signed, HTTP-date and out-of-range values are not delays we can honor, so the caller
+     * falls back to backoff. Zero is a real answer — "retry now" — and is returned as 0.
+     *
+     * <p>Note {@code \d} is Unicode-aware in Java only under UNICODE_CHARACTER_CLASS, which
+     * is off here, so it matches ASCII digits exactly as the other six ports do.
+     */
     private static java.util.OptionalLong retryAfterMs(HttpResponse<?> res) {
         return res.headers().firstValue("retry-after")
                 .map(String::trim)
                 .filter(s -> s.matches("\\d+"))
-                .map(s -> java.util.OptionalLong.of(Long.parseLong(s) * 1000L))
+                .map(java.math.BigInteger::new) // never throws once the shape is digits-only
+                .filter(n -> n.compareTo(java.math.BigInteger.valueOf(RETRY_AFTER_MAX_SECONDS)) <= 0)
+                .map(n -> java.util.OptionalLong.of(n.longValueExact() * 1000L))
                 .orElse(java.util.OptionalLong.empty());
     }
 

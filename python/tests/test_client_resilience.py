@@ -329,3 +329,41 @@ async def test_on_error_retry_extends_nonretryable_status_to_budget():
         assert "400" in str(ei.value)
     finally:
         await tk.close()
+
+
+# Retry-After is parsed identically in all seven ports: the delay-seconds form only
+# (RFC 9110 §10.2.3) — ASCII digits in 0…2147483647. Anything else falls back to
+# backoff. This table is mirrored verbatim in go/js/java/csharp/elixir/clojure.
+# Before this change Python honoured fractional and negative values that five other
+# ports rejected, and nothing caught it.
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("2", 2),
+        ("0", 0),  # the server is saying "retry now", not "no opinion"
+        ("  7  ", 7),
+        ("2147483647", 2147483647),
+        ("0.5", None),  # python honoured this; go/java/csharp/clojure never did
+        ("5.9", None),  # elixir truncated this to 5s
+        ("-5", None),  # must never become a negative sleep
+        ("+5", None),  # go's Atoi accepted this
+        ("2147483648", None),
+        ("99999999999999999999", None),  # java threw; python slept for millennia
+        ("", None),
+        (None, None),
+        ("Wed, 21 Oct 2015 07:28:00 GMT", None),
+        ("abc", None),
+        ("٢", None),  # Arabic-Indic digit: isdigit() says yes, the wire says no
+    ],
+)
+def test_retry_after_parsing(raw, expected):
+    from toolnexus.client import _parse_retry_after
+
+    assert _parse_retry_after(raw) == expected
+
+
+def test_retry_after_zero_is_honored_not_treated_as_absent():
+    """`0` must reach the sleep as 0, not fall through to backoff."""
+    from toolnexus.client import _parse_retry_after
+
+    assert _parse_retry_after("0") is not None
