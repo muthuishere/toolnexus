@@ -1,4 +1,4 @@
-# ADR 0018 — §8 Gap 2 already exists **seven times, in seven shapes**; converge it into one `Transport`
+# ADR 0019 — §8 Gap 2 already exists **seven times, in seven shapes**; converge it into one `Transport`
 
 - **Status:** **Proposed** (2026-08-16) — **not spiked.** ADR 0017 earned its status with four
   runnable spikes; this one has none, and says so. The gate it should pass is at the bottom.
@@ -8,6 +8,25 @@
   shipped in all seven ports and no two ports agree on its shape.
 - **Supersedes:** the first draft of this ADR, which proposed an `invoke(request_body) ->
   response_body` callback. That draft is rejected here, by me, on the evidence below.
+
+## The short version
+
+Replace the concrete HTTP client with an **interface anyone can implement — including a mock**.
+
+That sentence is the whole change, and the mock is the part that matters most. One seam buys
+five things, and today five of the seven ports have none of them:
+
+| | who has it today |
+|---|---|
+| **hermetic tests — no network, no mock server, no fixture process** | Go, Java |
+| corporate proxy / mTLS | Go, Java |
+| record–replay fixtures | Go, Java |
+| per-request credential refresh | Go, Java |
+| an in-process model — no socket at all | nobody, cleanly |
+
+The in-process case is what prompted this. The testing case is what justifies it: a library
+owes its users the ability to test against it offline, and five of seven ports cannot.
+
 
 ## Context
 
@@ -153,6 +172,32 @@ passes every existing test while quietly destroying streaming. Conformance must 
 arrival*, not final content.
 
 **Migration.** Additive. Absent a `Transport`, every port is byte-identical to today.
+
+## Prior art, checked rather than assumed
+
+Vercel's AI SDK ships a **versioned Language Model Specification** — now v3, and bumping it
+forced a major release. With 25+ providers on that spec, interoperating with LangChain still
+required a dedicated `@ai-sdk/langchain` adapter package with its own conversion functions.
+
+Two lessons, both taken here:
+
+1. **A small versioned spec beats a rich interface.** Version this contract from the start.
+   Vercel did not, and paid with a major bump.
+2. **Adapters are a package, not a feature.** Nobody has avoided that, so do not design around
+   trying to. The glue that makes a specific provider satisfy this `Transport` belongs in a
+   third place — an example, or a package that depends on both — never inside this library.
+
+## Sibling decision
+
+CiteNexus has the same problem in a different vocabulary: its model seam is specified as an
+*OpenAI-compatible endpoint*, its embedder exists in six incompatible shapes across three
+ports, its Go seam cannot report failure, and its JS seam is synchronous and therefore
+un-satisfiable by anything that touches a network. See
+`rag-cite-nexus/docs/adr/0014-the-model-seam-is-a-contract-not-an-endpoint.md`.
+
+The two ADRs share one requirement, and it is the load-bearing one: **the seam must not assume
+a transport.** Once it does, HTTP stops being one implementation and becomes the shape
+everything must fit.
 
 ## What would earn this an "Accepted"
 
