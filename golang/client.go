@@ -6,7 +6,6 @@ package toolnexus
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -89,6 +88,12 @@ type ClientOptions struct {
 	// included). Nil ⇒ http.DefaultClient. Scope is the LLM path only; MCP transports
 	// use the MCP SDK's own clients.
 	HTTPClient *http.Client
+	// Transport (§8 Gap 2, ADR 0019) is the one seam: any implementation answers a
+	// TransportRequest with a TransportResponse. Nil ⇒ the HTTPClient path (byte-
+	// identical to today). Setting BOTH HTTPClient and Transport is rejected at
+	// construction — a silent winner between two transports is a debugging session
+	// nobody should have.
+	Transport Transport
 	// OnError (§8 Resilience) classifies each failed LLM attempt into TierRetry or
 	// TierFail. Nil ⇒ the default classifier (retryable status/network ⇒ retry, else
 	// fail) — byte-identical to today. A TierRetry is always bounded by Retries; the
@@ -349,6 +354,7 @@ func addUsage(acc *Usage, raw map[string]any, style string) {
 type Client struct {
 	opts ClientOptions
 	http *http.Client
+	tr   Transport
 	// store is the conversation provider for Ask — from opts.Store, else a fresh
 	// in-memory store.
 	store ConversationStore
@@ -367,7 +373,14 @@ func CreateClient(opts ClientOptions) *Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &Client{opts: opts, http: httpClient, store: store, registry: newMetricsRegistry()}
+	if opts.HTTPClient != nil && opts.Transport != nil {
+		panic("toolnexus: set HTTPClient or Transport, not both")
+	}
+	tr := opts.Transport
+	if tr == nil {
+		tr = httpTransport{client: httpClient}
+	}
+	return &Client{opts: opts, http: httpClient, tr: tr, store: store, registry: newMetricsRegistry()}
 }
 
 // Metrics renders the cumulative metrics as Prometheus text exposition format
@@ -679,7 +692,7 @@ func (c *Client) backoff(attempt int, retryAfter string) time.Duration {
 // llmFetch issues the POST with retry + exponential backoff on 429/5xx/network,
 // honoring Retry-After. ctx cancellation/timeout aborts the in-flight request
 // and is NOT retried. The caller owns resp.Body. Mirrors js Client.llmFetch.
-func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[string]string, raw []byte) (*http.Response, error) {
+func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[string]string, raw []byte) (*TransportResponse, error) {
 	retries := c.retries()
 	// Default classifier = today's behavior, expressed as an OnError. A TierRetry is
 	// always capped by the budget below (attempt == retries stops regardless).
@@ -694,18 +707,14 @@ func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[stri
 	}
 	var lastErr error
 	for attempt := 0; attempt <= retries; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Content-Type", "application/json")
+		h := map[string]string{"Content-Type": "application/json"}
 		for k, v := range headers {
-			req.Header.Set(k, v)
+			h[k] = v
 		}
 		for k, v := range c.opts.Headers {
-			req.Header.Set(k, v)
+			h[k] = v
 		}
-		resp, err := c.http.Do(req)
+		resp, err := c.tr.RoundTrip(ctx, TransportRequest{URL: endpoint, Method: http.MethodPost, Headers: h, Body: raw})
 		if err != nil {
 			// ctx cancelled/timed out: abort, never retry.
 			if ctx.Err() != nil {
@@ -721,15 +730,15 @@ func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[stri
 			}
 			continue
 		}
-		if resp.StatusCode < 300 {
+		if resp.Status < 300 {
 			return resp, nil
 		}
-		retryable := retryableStatus[resp.StatusCode]
-		tier := classify(ErrorInfo{Status: resp.StatusCode, Attempt: attempt, Retryable: retryable})
+		retryable := retryableStatus[resp.Status]
+		tier := classify(ErrorInfo{Status: resp.Status, Attempt: attempt, Retryable: retryable})
 		if tier == TierFail || attempt == retries {
 			return resp, nil // caller surfaces the non-ok status
 		}
-		ra := resp.Header.Get("Retry-After")
+		ra := resp.header("Retry-After")
 		resp.Body.Close()
 		if werr := sleep(ctx, c.backoff(attempt, ra)); werr != nil {
 			return nil, werr
@@ -779,8 +788,8 @@ func (c *Client) postJSON(ctx context.Context, endpoint string, headers map[stri
 	}
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("LLM %d: %s", resp.StatusCode, string(out))
+	if resp.Status < 200 || resp.Status >= 300 {
+		return nil, fmt.Errorf("LLM %d: %s", resp.Status, string(out))
 	}
 	return out, nil
 }
@@ -1423,11 +1432,11 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, h
 			c.emitLLM("error", t0, 0, 0)
 			return err
 		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp.Status < 200 || resp.Status >= 300 {
 			out, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			c.emitLLM("error", t0, 0, 0)
-			return fmt.Errorf("LLM %d: %s", resp.StatusCode, string(out))
+			return fmt.Errorf("LLM %d: %s", resp.Status, string(out))
 		}
 
 		var content strings.Builder
@@ -1683,11 +1692,11 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 			c.emitLLM("error", t0, 0, 0)
 			return err
 		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp.Status < 200 || resp.Status >= 300 {
 			out, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			c.emitLLM("error", t0, 0, 0)
-			return fmt.Errorf("LLM %d: %s", resp.StatusCode, string(out))
+			return fmt.Errorf("LLM %d: %s", resp.Status, string(out))
 		}
 
 		blocks := map[int]*streamBlock{}
