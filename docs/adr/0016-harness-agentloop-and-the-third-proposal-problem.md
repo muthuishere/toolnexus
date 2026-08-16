@@ -1,6 +1,14 @@
-# ADR 0016 — Harness and AgentLoop: **reject as public surface**; the concepts are already shipped under other names
+# ADR 0016 — Harness as an option, and a loop with verifiable properties (revised)
 
-- **Status:** **Proposed** (2026-08-15) — recommending that Phases 1–3 of the loop/graph
+- **Status:** **SUPERSEDED IN PART by the owner (2026-08-16)** — and the correction is on me,
+  not on the proposal. This ADR argued Harness/AgentLoop should not be built because they
+  duplicate `AgentDef` and the shipped status vocabularies. The owner's actual ask is narrower and
+  survives that argument: **`harness` as an ADDITIVE OPTION on `agent`, and a loop with VERIFIABLE
+  PROPERTIES.** Neither is the rename I rejected. See "What the owner asked for, and why this ADR
+  was answering the wrong question" below; the original argument is kept intact underneath because
+  it still governs what must NOT be built. Spike:
+  `docs/spikes/0009-harness-option-and-loop-invariants.mjs`.
+- **Original status:** Proposed (2026-08-15) — recommending that Phases 1–3 of the loop/graph
   architecture proposal **not** be built. Everything they name already exists in `SPEC.md §7D`
   and `§8`; building them adds a second vocabulary for one runtime across seven ports. Graph
   (Phases 4–5) is a different question and is ADR 0017's.
@@ -18,6 +26,76 @@
   proposal's author wants from `Harness`: if the goal is a **serializable agent definition**
   rather than a new type, that is a materially different and much cheaper ask (see "What I might
   be wrong about").
+
+## What the owner asked for, and why this ADR was answering the wrong question
+
+I evaluated `Harness` as a **replacement vocabulary** for `AgentDef` and rejected it on churn: a
+second name for a shipped type in seven languages, buying nothing. That rejection stands for a
+rename. It does not answer the ask, which is two additive things:
+
+**1. `harness` as an option, not a replacement.** `agent(name, {model, harness})` alongside the
+existing flat form. Spiked (`0009`, part A) as a **pure value constructor** over the fields
+`AgentDef` already has, plus `guardrails`:
+
+```
+agent built from harness carries: name, does, model, soul, tools, budget, onMetric, hooks
+guardrail compiled into hooks.beforeTool: true
+run status: done | guardrail DENIED the tool (never executed): true
+```
+
+Zero library change in the spike — `harness()` returns a plain value and `agent()` spreads it. The
+cost I priced was the cost of *replacing* `AgentDef`; the cost of a constructor **beside** it is a
+factory function per port. That is a real difference and I should have separated them.
+
+The guardrail composition follows the reference harness rather than being invented here:
+guardrails compile into one `beforeTool` with **first-deny-wins**, so a later stage cannot widen an
+earlier denial (`packages/core/tools/README.md:25` in `deepseek-harness-master`; the same asymmetry
+ADR 0014 rule 3 already proposed — pipeline for rewrites, first-deny-wins for vetoes).
+
+**2. A loop with verifiable properties.** This is the part I missed entirely, and the reference
+names it precisely. `docs/subsystems/invariants.md` describes a registry where each package
+publishes runtime invariant checks, with three rules worth taking:
+
+- Checks assert on **"authoritative event streams or mutable data, never service or method
+  presence"** — behavioral, not structural. A check that asserts a method exists proves nothing.
+- Failure is **attributed** (`InvariantError` with `code: 'INVARIANT'` and the owning package).
+- **Absence must be explained.** `verify-package-invariants` mechanically rejects an unexplained
+  empty installer: a package with nothing checkable must export one whose comment starts
+  `No runtime invariant:` and say why. An omission that stops being mentioned is indistinguishable
+  from something forgotten — the same rule `CHANGELOG.md` already applies to permitted absences.
+
+**toolnexus can do this today with no new substrate**, because `AgentRuntime.trace`
+(`js/src/agents/runtime.ts:303`) is already the cross-port conformance artifact — per-handle
+transition traces on a virtual clock. Invariants assert over it. Spiked (`0009`, part B):
+
+```
+✓ suspended-exits-only-via-answer   ✓ no-transition-from-closed
+✓ every-run-starts-idle-to-running  ✓ budget-stops-are-named
+— no-invariant: scheduling order  [not-applicable, with reason recorded]
+```
+
+The `not-applicable` entry is the load-bearing one: §7D deliberately leaves scheduling
+**unobservable**, so asserting an order would pin what the spec refuses to pin. Following the
+reference's rule, that absence is *named and justified* rather than silently missing.
+
+**Verified not vacuous.** An invariant that cannot fail is decoration, so each was fed a violating
+trace: **4/4 detected** (`suspended→done`, `closed→running`, a run starting from `closed`, and a
+silent `incomplete` with empty text).
+
+### What this changes, and what it does not
+
+| ask | verdict |
+|---|---|
+| `harness(...)` as an additive option | **Build it.** Small, additive, and it gives guardrails a home. |
+| Guardrails inside the harness | **Build it**, first-deny-wins. This revives `add-governed-execution-layer` — the reviving change owes an argument against its recorded supersession reason. |
+| Loop invariants over `trace` | **Build it.** No new substrate; the trace already exists and is already normative. |
+| `Harness` REPLACING `AgentDef` | **Still no.** A rename across seven ports and every fixture, for zero behavior. |
+| `LoopState` as a new status enum | **Still no.** `SPEC.md:785-787` pins `TaskStatus` as identical across ports; a second vocabulary needs the same pinning and the same fixtures. Define it as the existing one or not at all. |
+| Graph subsystem | Still ADR 0017's: a host layer, one missing join primitive. |
+
+The three-overlapping-designs problem below is **unchanged and still the first thing to resolve** —
+`add-agent-pipeline` already proposes an `Agent` with its own scoped toolkit, which is the same
+territory as `harness`.
 
 ## Context
 
