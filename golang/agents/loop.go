@@ -262,8 +262,10 @@ func runGated(ctx context.Context, c *tn.Client, prompt string, tk *tn.Toolkit,
 		history = append(r.Messages, map[string]any{
 			"role": "user", "content": "verification failed: " + why})
 	}
+	// Structured, not prose: `Limit` is how a caller (and the §7D runtime) tells
+	// WHICH limit stopped the run. Text carries the human reason.
 	last.Status = "incomplete"
-	last.Text = fmt.Sprintf("%s\n\n[stopped: completion.verify failed %d×: %s]",
-		last.Text, maxAttempts, reason)
+	last.Limit = "completion"
+	last.Text = fmt.Sprintf("completion.verify failed %d×: %s", maxAttempts, reason)
 	return last, nil
 }

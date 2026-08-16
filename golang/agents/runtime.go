@@ -1210,7 +1210,14 @@ func (rt *Runtime) execute(runCtx context.Context, h *Handle, def Def, input str
 		h.drained = nil
 		_ = rt.store.Save(h.ID, r.Messages)
 		rt.t(fmt.Sprintf("%s: running→idle (INCOMPLETE at maxTurns %d)", h.ID, maxTurns))
-		return TaskResult{Text: "hit maxTurns without a final answer", IsError: true, Status: "incomplete", Turns: r.Turns, TotalTokens: r.Usage.TotalTokens}
+		// WHICH limit stopped the run is structured (RunResult.Limit), so the
+		// caller is never told the wrong reason. A completion-gate stop carries
+		// its own message; only a turn-cap stop gets the maxTurns wording.
+		msg := "hit maxTurns without a final answer"
+		if r.Limit == "completion" {
+			msg = r.Text
+		}
+		return TaskResult{Text: msg, IsError: true, Status: "incomplete", Turns: r.Turns, TotalTokens: r.Usage.TotalTokens}
 	default:
 		if h.state != StateClosed {
 			h.state = StateIdle
