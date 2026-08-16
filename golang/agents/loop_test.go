@@ -324,10 +324,15 @@ func TestBudgetStopCarriesTheVerificationReason(t *testing.T) {
 	defer r.Close(h, nil)
 
 	if res.Status == "done" { t.Fatal("silently done despite an open todo") }
-	if !strings.Contains(res.Text, "maxTurns") {
-		t.Fatalf("lost the run's own stop reason: %q", res.Text)
+	// The caller must be told the reason that ACTUALLY stopped the run. Before
+	// the Limit field was threaded, the runtime hardcoded "hit maxTurns without a
+	// final answer" for every incomplete — masking a completion-gate stop behind
+	// a turn-cap message the run never hit.
+	if strings.Contains(res.Text, "maxTurns") {
+		t.Fatalf("MASKED: reported a turn-cap stop, but the completion gate is what "+
+			"exhausted: %q", res.Text)
 	}
-	if !strings.Contains(res.Text, "while verifying") || !strings.Contains(res.Text, "still open") {
-		t.Fatalf("the verification reason was MASKED — caller cannot tell why it was looping: %q", res.Text)
+	if !strings.Contains(res.Text, "completion.verify failed") || !strings.Contains(res.Text, "still open") {
+		t.Fatalf("the gate's reason did not reach the caller: %q", res.Text)
 	}
 }
