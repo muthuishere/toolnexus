@@ -91,7 +91,6 @@ so that a framework that fails to stand up in a future run is named rather than 
   `npm install` re-syncs it. Nothing user-visible changed, but a lockfile that disagrees with its
   manifest is the kind of drift a release should not carry.
 
-||||||| ddb2cbe
 
 ## 0.13.0 — 2026-08-02
 
