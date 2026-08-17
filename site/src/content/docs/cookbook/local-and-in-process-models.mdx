@@ -20,140 +20,324 @@ just a `baseUrl`, so it needs no recipe. This page is about the case that does:
 
 ## One option changes. Nothing else does.
 
-```py
-client = create_client(
-    base_url="http://in-process.invalid", style="openai", model="qwen2.5-1.5b", api_key="unused",
-    http_transport=OnnxTransport(model),   # ← this line, and nothing else
-)
+The agent loop, tool calling, MCP servers and skills are untouched and never
+learn that a model moved. You supply one thing: a **method that answers a
+request**.
+
+## The contract
+
+Your method receives the request body and returns the response body, both in the
+**OpenAI shape**. That is the entire interface — how you load or run the model is
+your business, and this page deliberately says nothing about it.
+
+**You receive** the assembled request:
+
+```json
+{
+  "model": "local",
+  "messages": [ {"role": "user", "content": "What is 2 + 3?"} ],
+  "tools":    [ {"type": "function", "function": {"name": "add", "parameters": {}}} ]
+}
 ```
 
-The agent loop, tool calling, MCP servers and skills are untouched and never
-learn that a model moved.
+**You must return** exactly one assistant message, either with `content` or with
+`tool_calls` — never both — plus `usage`:
 
-<Aside type="caution" title="You are implementing a response shape, not a model API">
-Your seam receives an **OpenAI-shaped request body** and must return an
-**OpenAI-shaped response body** — `choices[0].message` with either `content` or
-`tool_calls`, plus `usage`. If your model speaks something else (Qwen's ChatML
-and `<tool_call>` tags, say), that translation is your transport's job. Keeping
-it there is what keeps it out of the agent loop.
+```json
+{
+  "choices": [{
+    "index": 0,
+    "message": {"role": "assistant", "content": "The answer is 5."},
+    "finish_reason": "stop"
+  }],
+  "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+}
+```
+
+To call a tool, return `tool_calls` instead and set `finish_reason` to
+`"tool_calls"`. `arguments` is a **JSON string**, not an object — that is the
+OpenAI wire format, and the loop parses it:
+
+```json
+{"role": "assistant", "tool_calls": [
+  {"id": "c1", "type": "function",
+   "function": {"name": "add", "arguments": "{\"a\":2,\"b\":3}"}}
+]}
+```
+
+The loop then runs the tool, appends the result, and calls you again. Returning
+`content` ends the run.
+
+<Aside type="note" title="If your model does not speak this">
+Most local models do not. A Qwen-style model wants ChatML in and emits
+`<tool_call>` tags out; a llama.cpp binding may want a prompt string. **That
+translation belongs in your method**, not in the agent loop — which is exactly
+why the seam is shaped as "a request in, a response out" rather than as a model
+API.
 </Aside>
 
-## Two runnable examples, with a real tool-calling model
+## The seam, in every language
 
-Both live in the repo and both were executed against
-`Qwen/Qwen2.5-1.5B-Instruct` exported to ONNX and quantized to int8 (1.7 GB):
-
-| | |
-|---|---|
-| **Python** | [`python/examples/local_onnx_model.py`](https://github.com/muthuishere/toolnexus/blob/main/python/examples/local_onnx_model.py) |
-| **Go** | [`golang/examples/onnx/`](https://github.com/muthuishere/toolnexus/tree/main/golang/examples/onnx) |
+Each of these runs a full tool-calling turn — the model asks for `add`, the tool
+executes, the model answers — with **zero sockets opened**. `generate` stands in
+for your model; everything around it is the whole integration.
 
 <Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+class LocalModel {
+  generate(messages, tools) { /* → one assistant message */ }
+}
+
+// THE SEAM: a fetch-shaped function.
+const localFetch = (model) => async (_url, init) => {
+  const payload = JSON.parse(init.body)
+  const message = { role: "assistant", ...model.generate(payload.messages, payload.tools) }
+  return new Response(JSON.stringify({
+    choices: [{ index: 0, message, finish_reason: message.tool_calls ? "tool_calls" : "stop" }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  }), { status: 200, headers: { "content-type": "application/json" } })
+}
+
+const client = createClient({
+  baseUrl: "http://in-process.invalid", style: "openai", model: "local", apiKey: "unused",
+  fetch: localFetch(new LocalModel()),          // ← this line, and nothing else
+})
+```
+</TabItem>
 <TabItem label="Python">
-```
-$ ONNX_MODEL_DIR=./qwen-int8 python examples/local_onnx_model.py
-loaded: 28 layers, 2 kv heads, head dim 128
-
-tool call : get_weather({'city': 'Chennai'}) -> {"city": "Chennai", "tempC": 31, "sky": "clear"}
-answer    : The current weather in Chennai is 31°C with clear skies.
-turns     : 2 | sockets opened: 0
-```
-
-The transport is the whole integration — `post` receives the request body as a
-**dict** and returns a **dict**, so an in-process model pays no serialization:
-
 ```python
-class OnnxTransport:
+class LocalModel:
+    def generate(self, messages, tools): ...   # → one assistant message
+
+class LocalTransport:
+    """THE SEAM: post() gets a dict and returns a dict — no JSON round trip."""
     def __init__(self, model): self.model = model
 
     def post(self, url, headers, payload, timeout):
-        prompt = to_chatml(payload.get("messages") or [], payload.get("tools"))
-        raw = self.model.generate(prompt)
-        message = to_openai_response(raw)          # <tool_call> -> OpenAI tool_calls
+        message = {"role": "assistant", **self.model.generate(payload["messages"], payload.get("tools"))}
         return {
             "choices": [{"index": 0, "message": message,
                          "finish_reason": "tool_calls" if "tool_calls" in message else "stop"}],
-            "usage": {"prompt_tokens": len(self.model.tok.encode(prompt).ids),
-                      "completion_tokens": len(self.model.tok.encode(raw).ids),
-                      "total_tokens": 0},
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         }
 
     def open(self, url, headers, payload, timeout):
         raise NotImplementedError("non-streaming path only")
-```
 
-Dependencies are `onnxruntime`, `tokenizers` and `numpy` — deliberately **not**
-`transformers`, so the chat template and tool-call parsing stay visible in the
-example instead of hidden in a library.
+client = create_client(
+    base_url="http://in-process.invalid", style="openai", model="local", api_key="unused",
+    http_transport=LocalTransport(LocalModel()),   # ← this line, and nothing else
+)
+```
 </TabItem>
 <TabItem label="Go">
-```
-$ ONNX_MODEL_DIR=./qwen-int8 ORT_DYLIB_PATH=… CGO_LDFLAGS=… go run .
-loaded: 28 layers, 2 kv heads, head dim 128
-
-tool call : get_weather(map[city:Chennai]) -> {"city":"Chennai","sky":"clear","tempC":31}
-answer    : The weather in Chennai is currently clear with a temperature of 31°C.
-turns     : 2 | tokens: 2245 | sockets opened: 0
-```
-
-`http.RoundTripper` is a real interface, so the seam is an ordinary
-`*http.Client` that simply never reaches the network:
-
 ```go
-type localRoundTripper struct{ model *OnnxModel }
+type LocalModel struct{}
+
+func (m *LocalModel) Generate(messages []any, tools []any) map[string]any { /* → one message */ }
+
+// THE SEAM: http.RoundTripper is a real interface, so no socket is opened.
+type localRoundTripper struct{ model *LocalModel }
 
 func (rt *localRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
     var body map[string]any
     raw, _ := io.ReadAll(req.Body)
     _ = json.Unmarshal(raw, &body)
+    msgs, _ := body["messages"].([]any)
+    tools, _ := body["tools"].([]any)
 
-    text, promptTokens, completionTokens, err := rt.model.Generate(toChatML(body), 256)
-    if err != nil { return nil, err }
-
-    message := toOpenAIMessage(text)   // <tool_call> -> OpenAI tool_calls
+    message := rt.model.Generate(msgs, tools)
+    message["role"] = "assistant"
     finish := "stop"
     if _, ok := message["tool_calls"]; ok { finish = "tool_calls" }
+
     out, _ := json.Marshal(map[string]any{
         "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": finish}},
-        "usage":   map[string]any{"prompt_tokens": promptTokens, "completion_tokens": completionTokens,
-                                  "total_tokens": promptTokens + completionTokens},
+        "usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
     })
     return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(out)),
         Header: http.Header{"Content-Type": []string{"application/json"}}, Request: req}, nil
 }
 
 client := tn.CreateClient(tn.ClientOptions{
-    BaseURL: "http://in-process.invalid", Style: tn.StyleOpenAI,
-    Model: "qwen2.5-1.5b-instruct-onnx", APIKey: "unused",
-    HTTPClient: &http.Client{Transport: &localRoundTripper{model: model}},
+    BaseURL: "http://in-process.invalid", Style: tn.StyleOpenAI, Model: "local", APIKey: "unused",
+    HTTPClient: &http.Client{Transport: &localRoundTripper{model: &LocalModel{}}},  // ← one line
 })
 ```
+</TabItem>
+<TabItem label="Java">
+```java
+// The JDK's HttpClient has no interceptor, so the seam is a subclass.
+// Only send() is ever called by toolnexus — the rest are inert.
+static final class LocalHttpClient extends HttpClient {
+    private final LocalModel model;
+    LocalHttpClient(LocalModel model) { this.model = model; }
 
-It is a **separate Go module** on purpose: in-process ONNX needs two native
-artifacts, and toolnexus itself must not acquire them — a nested `go.mod` keeps
-`go build ./...` in the library free of both.
+    @Override @SuppressWarnings("unchecked")
+    public <T> HttpResponse<T> send(HttpRequest req, HttpResponse.BodyHandler<T> handler) {
+        String message = model.generate();                 // → one assistant message, as JSON
+        String finish  = message.contains("tool_calls") ? "tool_calls" : "stop";
+        String json = "{\"choices\":[{\"index\":0,\"message\":" + message
+                + ",\"finish_reason\":\"" + finish + "\"}],"
+                + "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}";
+        return (HttpResponse<T>) new LocalResponse(req, json);
+    }
+
+    @Override public Optional<CookieHandler> cookieHandler() { return Optional.empty(); }
+    @Override public Optional<Duration> connectTimeout()     { return Optional.empty(); }
+    @Override public Redirect followRedirects()              { return Redirect.NEVER; }
+    @Override public Optional<ProxySelector> proxy()         { return Optional.empty(); }
+    @Override public SSLContext sslContext()       { throw new UnsupportedOperationException(); }
+    @Override public SSLParameters sslParameters() { throw new UnsupportedOperationException(); }
+    @Override public Optional<Authenticator> authenticator() { return Optional.empty(); }
+    @Override public Version version()                       { return Version.HTTP_1_1; }
+    @Override public Optional<Executor> executor()           { return Optional.empty(); }
+    @Override public <T> CompletableFuture<HttpResponse<T>> sendAsync(
+            HttpRequest r, HttpResponse.BodyHandler<T> h) {
+        return CompletableFuture.completedFuture(send(r, h));
+    }
+    @Override public <T> CompletableFuture<HttpResponse<T>> sendAsync(
+            HttpRequest r, HttpResponse.BodyHandler<T> h, HttpResponse.PushPromiseHandler<T> p) {
+        return sendAsync(r, h);
+    }
+}
+
+// A record covers the response side (statusCode/body/headers do the work).
+record LocalResponse(HttpRequest req, String payload) implements HttpResponse<String> {
+    @Override public int statusCode()  { return 200; }
+    @Override public String body()     { return payload; }
+    @Override public HttpRequest request() { return req; }
+    @Override public HttpHeaders headers() {
+        return HttpHeaders.of(Map.of("content-type", List.of("application/json")), (a, b) -> true);
+    }
+    @Override public Optional<HttpResponse<String>> previousResponse() { return Optional.empty(); }
+    @Override public Optional<SSLSession> sslSession() { return Optional.empty(); }
+    @Override public URI uri() { return req.uri(); }
+    @Override public HttpClient.Version version() { return HttpClient.Version.HTTP_1_1; }
+}
+
+LlmClient client = LlmClient.create(new LlmClient.Options()
+        .baseUrl("http://in-process.invalid").style("openai").model("local").apiKey("unused")
+        .httpClient(new LocalHttpClient(new LocalModel())));      // ← one line
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+// THE SEAM: an HttpMessageHandler. No socket is opened.
+private sealed class LocalHandler : HttpMessageHandler
+{
+    private readonly LocalModel _model;
+    public LocalHandler(LocalModel model) => _model = model;
+
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var requestBody = request.Content is null
+            ? "" : await request.Content.ReadAsStringAsync(cancellationToken);
+
+        var message = _model.Generate(requestBody);      // → one assistant message, as JSON
+        var finish  = message.Contains("tool_calls") ? "tool_calls" : "stop";
+        var json = "{\"choices\":[{\"index\":0,\"message\":" + message
+                 + ",\"finish_reason\":\"" + finish + "\"}],"
+                 + "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}";
+
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json"),
+        };
+    }
+}
+
+var client = LlmClient.Create(new LlmClient.Options {
+    BaseUrl = "http://in-process.invalid", Style = "openai", Model = "local", ApiKey = "unused",
+    HttpHandler = new LocalHandler(new LocalModel()),            // ← this line
+});
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+defmodule LocalModel do
+  def generate(messages, tools), do: ...   # → one assistant message
+end
+
+# THE SEAM: a one-arg function. req.body is an UN-MARSHALLED map and the
+# response body goes back as a map — no JSON round trip for an in-process model.
+local_transport = fn req ->
+  message =
+    LocalModel.generate(req.body["messages"], req.body["tools"])
+    |> Map.put("role", "assistant")
+
+  finish = if Map.has_key?(message, "tool_calls"), do: "tool_calls", else: "stop"
+
+  {:ok,
+   %{status: 200,
+     headers: %{"content-type" => "application/json"},
+     body: %{
+       "choices" => [%{"index" => 0, "message" => message, "finish_reason" => finish}],
+       "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+     }}}
+end
+
+client =
+  Toolnexus.Client.create(
+    base_url: "http://in-process.invalid", style: "openai", model: "local",
+    api_key: "unused", transport: local_transport      # ← this line
+  )
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(defn generate [messages tools] ...)   ; → one assistant message
+
+;; THE SEAM: (fn [url headers body] response). `body` arrives as a JSON STRING
+;; and `:body` goes back as one. NOTE koine's `read-str` KEYWORDIZES.
+(defn local-http-client [_url _headers body]
+  (let [payload (json/read-str (if (string? body) body (json/write-str body)))
+        message (assoc (generate (:messages payload) (:tools payload)) :role "assistant")
+        finish  (if (contains? message :tool_calls) "tool_calls" "stop")]
+    {:status  200
+     :headers {"content-type" "application/json"}
+     :body    (json/write-str
+               {:choices [{:index 0 :message message :finish_reason finish}]
+                :usage   {:prompt_tokens 1 :completion_tokens 1 :total_tokens 2}})}))
+
+;; NOT named `agent` — `clojure.core/agent` exists on both hosts.
+(def llm-client
+  (client/create-client
+   {:base-url "http://in-process.invalid" :style "openai" :model "local" :api-key "unused"
+    :http-client local-http-client}))     ; ← this line
+```
 </TabItem>
 </Tabs>
 
-### Three things that will cost you an afternoon
+<Aside type="tip" title="All seven were executed, not written from memory">
+Each tab above was run against its port before publication, and each produced
+the same turn: `add -> 5`, then *"The answer is 5."* Clojure was run on **both**
+hosts (JVM and cljgo) from one source. Java reports `5.0` — the JSON number
+round-trip, not a discrepancy.
+</Aside>
 
-Each of these was hit while building the examples, not anticipated:
+## A real model, end to end
 
-1. **Pick a model actually trained for tool calling.** `SmolLM2-135M-Instruct`
-   cannot do it — it hallucinates an answer instead of calling, prefill-forcing
-   produces looping malformed JSON, and constrained scoring picks `get_weather`
-   for *"what is 2 plus 3?"*. No amount of transport code fixes the model.
-2. **Export with `--task text-generation-with-past`.** That flag is what emits
-   the `past_key_values`/`present` pairs. Without the KV cache, generation is
-   quadratic. After quantizing, delete the `model.onnx_data` left over from the
-   fp32 export — the int8 graph is self-contained, and that file is 6.6 GB
-   nothing reads.
-3. **In Go, a pure-Go tokenizer will not do.** Qwen's pre-tokenizer regex uses a
-   negative lookahead (`\s+(?!\S)`) that Go's RE2 engine cannot compile, so
-   `sugarme/tokenizer` panics at load. The example uses `daulet/tokenizers`, a
-   CGO binding to HuggingFace's Rust tokenizers. Separately, `onnxruntime_go`
-   v1.33 needs ORT **≥ 1.29**, or it fails with
-   `The requested API version [29] is not available`.
+The seam above is model-agnostic. Two runnable examples in the repo wire it to an
+actual ONNX model — `Qwen/Qwen2.5-1.5B-Instruct`, int8, 1.7 GB — including the
+ChatML template and `<tool_call>` parsing that a real model needs:
+
+| | |
+|---|---|
+| **Python** | [`python/examples/local_onnx_model.py`](https://github.com/muthuishere/toolnexus/blob/main/python/examples/local_onnx_model.py) |
+| **Go** | [`golang/examples/onnx/`](https://github.com/muthuishere/toolnexus/tree/main/golang/examples/onnx) |
+
+```
+tool call : get_weather({'city': 'Chennai'}) -> {"city": "Chennai", "tempC": 31, "sky": "clear"}
+answer    : The current weather in Chennai is 31°C with clear skies.
+turns     : 2 | sockets opened: 0
+```
+
+One warning worth inheriting: **pick a model actually trained for tool calling.**
+A 135M instruct model will hallucinate an answer rather than call, and no amount
+of transport code fixes that.
 
 
 ## What crosses the seam, per port
