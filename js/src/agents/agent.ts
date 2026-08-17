@@ -11,6 +11,9 @@ import fs from "node:fs"
 import { defineTool } from "../native.js"
 import type { Answer, Request, Tool } from "../types.js"
 import { AgentRuntime, isVerbError, type AgentDef, type Budget, type Handle, type RuntimeOptions, type TaskResult } from "./runtime.js"
+import { Loop, guardedHooks, type Completion, type Guardrail } from "./loop.js"
+import type { ClientOptions } from "../client.js"
+import type { Toolkit } from "../toolkit.js"
 
 /** The declarative agent spec (§7D Level-1 surface). */
 export interface AgentSpec {
@@ -38,6 +41,15 @@ export interface AgentSpec {
   /** §8 observability sink for this agent. Set ⇒ replaces the runtime-wide
    * `onMetric` for this agent; resolves independently of `hooks`. */
   onMetric?: AgentDef["onMetric"]
+  /** POLICY checks on tool calls — "may it?", never "is it right?". They compile
+   * into one `beforeTool` with FIRST-DENY-WINS: a later guardrail can never widen
+   * an earlier denial. Composed with `hooks.beforeTool`, which runs only if every
+   * guardrail allows. Empty ⇒ byte-identical. */
+  guardrails?: Guardrail[]
+  /** When set, the gate that stops this agent claiming `done` before its work
+   * verifies. It travels WITH the agent, so a caller that delegates via `task`
+   * inherits it — which a host-side retry loop cannot do. Omitted ⇒ byte-identical. */
+  completion?: Completion
 }
 
 /** Runtime options for a one-shot `run`/`asTool` (the registry is derived). */
@@ -72,11 +84,23 @@ export class Agent {
       waitFor: this.spec.waitFor,
       onSpawn: this.spec.onSpawn,
       onClose: this.spec.onClose,
-      hooks: this.spec.hooks,
+      // Guardrails are compiled into the hook HERE, at the registry boundary, so a
+      // delegated child is governed by them too — not only a directly-driven one.
+      hooks: guardedHooks(this.spec.guardrails, this.spec.hooks),
       onMetric: this.spec.onMetric,
+      completion: this.spec.completion,
     }
     for (const t of this.spec.team ?? []) t.registry(acc)
     return acc
+  }
+
+  /**
+   * Open a LIVE EXECUTION of this agent. Takes client OPTIONS rather than a built
+   * client, because a per-call `model` override must be able to change the model —
+   * which is fixed when a client is constructed.
+   */
+  loop(options: ClientOptions, toolkit: Toolkit): Loop {
+    return new Loop(this, options, toolkit)
   }
 
   /** Build a runtime scoped to this agent's reachable team graph. */
@@ -134,4 +158,14 @@ export class Agent {
 /** The one new noun: define an agent. */
 export function agent(name: string, spec: AgentSpec): Agent {
   return new Agent(name, spec)
+}
+
+/**
+ * `Harness` is a NAME, not a type. An agent spec already IS the harness — tools,
+ * soul, team, budget, model, policy, ceilings — so this is the word landing in the
+ * API without a second concept to learn or migrate to. A spec built through
+ * `harness` and one written inline are indistinguishable.
+ */
+export function harness(spec: AgentSpec): AgentSpec {
+  return spec
 }

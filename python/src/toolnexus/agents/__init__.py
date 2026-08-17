@@ -26,6 +26,16 @@ from .runtime import (
     SpawnError,
     TaskResult,
 )
+from .loop import (
+    Completion,
+    Loop,
+    Outcome,
+    Verdict,
+    all_todos_done,
+    guarded_hooks,
+    harness,
+    run_gated,
+)
 from .surface import (
     BOOTSTRAP_ORDER,
     HEARTBEAT_OK,
@@ -39,6 +49,14 @@ from .surface import (
 )
 
 __all__ = [
+    "Completion",
+    "Loop",
+    "Outcome",
+    "Verdict",
+    "all_todos_done",
+    "guarded_hooks",
+    "harness",
+    "run_gated",
     "Agent",
     "AgentDef",
     "AgentRuntime",

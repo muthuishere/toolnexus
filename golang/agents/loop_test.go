@@ -30,6 +30,34 @@ func (s *scripted) RoundTrip(_ *http.Request) (*http.Response, error) {
 }
 func min(a, b int) int { if a < b { return a }; return b }
 
+// modelRec is `scripted` plus a record of the `model` each request carried, so a
+// test can assert what actually reached the wire rather than what was configured.
+// `reply` is called with the 1-based request number.
+type modelRec struct {
+	reply  func(n int) map[string]any
+	models []string
+	n      int
+}
+
+func (m *modelRec) RoundTrip(req *http.Request) (*http.Response, error) {
+	m.n++
+	var sent map[string]any
+	if req.Body != nil {
+		raw, _ := io.ReadAll(req.Body)
+		_ = json.Unmarshal(raw, &sent)
+	}
+	model, _ := sent["model"].(string)
+	m.models = append(m.models, model)
+
+	body, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": m.reply(m.n)}},
+		"usage":   map[string]any{"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+	})
+	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(body))),
+		Header: http.Header{"Content-Type": []string{"application/json"}}}, nil
+}
+
+
 func text(s string) map[string]any { return map[string]any{"role": "assistant", "content": s} }
 func callTodo(todos []any) map[string]any {
 	args, _ := json.Marshal(map[string]any{"todos": todos})

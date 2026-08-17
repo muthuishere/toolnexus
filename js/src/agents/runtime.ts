@@ -15,6 +15,7 @@
  * identical per-handle transition traces against `examples/subagent-*` fixtures.
  */
 import { createClient, InMemoryConversationStore, type ClientStyle, type ConversationStore, type Hooks, type MetricEvent } from "../client.js"
+import { runGated, type Completion } from "./loop.js"
 import { createToolkit, type Toolkit } from "../toolkit.js"
 import { defineTool } from "../native.js"
 import type { Answer, Request, Tool, ToolResult } from "../types.js"
@@ -98,6 +99,10 @@ export interface AgentDef {
   /** §8 observability sink for THIS agent's client. Set ⇒ REPLACES the runtime-wide
    * `onMetric` for this agent. Resolves independently of `hooks`. Forwarded verbatim. */
   onMetric?: (ev: MetricEvent) => void
+  /** §7D completion gate, projected from the agent spec. Present ⇒ this agent's
+   * turns run through the gate even when it is a DELEGATED child — which is what a
+   * host-side retry loop cannot do. */
+  completion?: Completion
 }
 
 /** An unsolicited inbox item. Delivered ONLY as part of a fresh turn's coalesced
@@ -768,7 +773,13 @@ export class AgentRuntime {
         hooks: h.def.hooks ?? this.opts.hooks,
         onMetric: h.def.onMetric ?? this.opts.onMetric,
       })
-      const r = await client.ask(input, { toolkit, id: h.id, signal: h.abort!.signal })
+      // The gate runs HERE, inside the runtime turn, which is what makes it reach a
+      // delegated child: `task` executes the child through this same path.
+      const r = await runGated(
+        (p) => client.ask(p, { toolkit, id: h.id, signal: h.abort!.signal }),
+        input,
+        h.def.completion,
+      )
       h.turnsTotal += r.turns
       this.rollUp(h, r.usage.totalTokens, r.toolCallCount)
       if (r.status === "pending" && r.pending) {
@@ -787,7 +798,12 @@ export class AgentRuntime {
         h.state = "idle"
         h.drained = []
         this.t(`${h.id}: running→idle (incomplete: ${r.limit ?? "maxTurns"})`)
-        result = { text: "hit maxTurns without a final answer", isError: true, status: "incomplete", turns: r.turns, totalTokens: r.usage.totalTokens }
+        // A completion stop carries its own reason; only a maxTurns stop gets the
+        // generic sentence. Reading `limit` is how the runtime tells them apart.
+        result = {
+          text: r.limit === "completion" ? r.text : "hit maxTurns without a final answer",
+          isError: true, status: "incomplete", turns: r.turns, totalTokens: r.usage.totalTokens,
+        }
       } else {
         h.state = "idle"
         h.drained = []
