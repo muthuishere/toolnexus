@@ -1,0 +1,250 @@
+---
+title: Harness & loop
+description: The harness is everything an agent MAY do, fixed per problem. The loop is one live execution of it. Two names for two things toolnexus already had — in all seven languages.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+An agent framework has two things you must be able to name:
+
+- **The harness** — everything the agent *may* do. Its tools, identity, team, ceilings, policy.
+  Fixed **per problem**.
+- **The loop** — a *live execution* of that harness. What happened, how many turns it spent,
+  whether it finished. **Observed**, never configured.
+
+toolnexus already shipped both and named neither, so everyone invented their own vocabulary. These
+are the names.
+
+## The placement law
+
+This is the whole design in four rows. If you are unsure where an option belongs, it is answering
+one of these questions:
+
+| question | answered by | scope |
+|---|---|---|
+| **MAY it?** — capability, tools, ceilings | the **harness** | per problem |
+| **with WHAT?** — the model for this call | **run options** | per call |
+| **DID it?** — status, turns, stop reason | the **loop** | observed |
+| **is it RIGHT?** | a tool, a skill, or another agent | never the loop |
+
+Two consequences fall out of it, and both are deliberate:
+
+**The loop takes no configuration.** There is nothing to set on it. Capability belongs to the
+harness; per-call choices belong to the run options. A loop is read, not tuned.
+
+**The model is per call, not per loop.** So one conversation may change model between turns — cheap
+model to plan, expensive model to finish — without rebuilding anything.
+
+<Aside type="tip" title="`harness()` is a name, not a type">
+An agent spec already **is** the harness. `harness()` returns it unchanged, so a spec built through
+it and one written inline are indistinguishable. Nothing to migrate, nothing new to learn — the
+word simply exists now.
+</Aside>
+
+## Opening a loop
+
+A loop takes **client options**, not a built client — because a per-call model override has to be
+able to change the model, and the model is fixed the moment a client is constructed.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+import { agents, createToolkit } from "toolnexus"
+
+const writer = agents.agent("writer", {
+  does: "drafts release notes",
+  soul: "You write terse, factual release notes.",
+})
+
+const toolkit = await createToolkit({ builtins: false })
+const loop = writer.loop(
+  { baseUrl: "https://openrouter.ai/api/v1", style: "openai",
+    model: "openai/gpt-4o-mini", apiKey: process.env.OPENROUTER_API_KEY },
+  toolkit,
+)
+
+const out = await loop.run("Draft notes for 0.15.0.")
+console.log(out.status)      // "done"
+console.log(out.turns)       // model round trips
+console.log(out.stoppedBy)   // undefined when done; ALWAYS set otherwise
+
+// A different model for one call only. The conversation continues.
+await loop.run("Now tighten it.", { model: "openai/gpt-4o" })
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_toolkit
+from toolnexus.agents import agent
+
+writer = agent("writer", does="drafts release notes",
+               soul="You write terse, factual release notes.")
+
+toolkit = await create_toolkit(builtins=False)
+loop = writer.loop(
+    {"base_url": "https://openrouter.ai/api/v1", "style": "openai",
+     "model": "openai/gpt-4o-mini", "api_key": os.environ["OPENROUTER_API_KEY"]},
+    toolkit,
+)
+
+out = await loop.run("Draft notes for 0.15.0.")
+print(out.status)       # "done"
+print(out.turns)
+print(out.stopped_by)   # "" when done; ALWAYS set otherwise
+
+# A different model for one call only.
+await loop.run("Now tighten it.", model="openai/gpt-4o")
+```
+</TabItem>
+<TabItem label="Go">
+```go
+writer := agents.New("writer", agents.Spec{
+    Does: "drafts release notes",
+    Soul: "You write terse, factual release notes.",
+})
+
+tk, _ := tn.CreateToolkit(ctx, tn.Options{Builtins: false})
+loop := writer.Loop(tn.ClientOptions{
+    BaseURL: "https://openrouter.ai/api/v1", Style: tn.StyleOpenAI,
+    Model: "openai/gpt-4o-mini", APIKey: os.Getenv("OPENROUTER_API_KEY"),
+}, tk)
+
+out, err := loop.Run(ctx, "Draft notes for 0.15.0.", agents.RunOpts{})
+fmt.Println(out.Status)     // "done"
+fmt.Println(out.Turns)
+fmt.Println(out.StoppedBy)  // "" when done; ALWAYS set otherwise
+
+// A different model for one call only.
+loop.Run(ctx, "Now tighten it.", agents.RunOpts{Model: "openai/gpt-4o"})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Agents.Agent writer = Agents.agent("writer", new Agents.AgentSpec()
+        .does("drafts release notes")
+        .soul("You write terse, factual release notes."));
+
+Toolkit tk = Toolkit.create(new Toolkit.Options());
+LlmClient.Options o = new LlmClient.Options();
+o.baseUrl = "https://openrouter.ai/api/v1";
+o.style = "openai";
+o.model = "openai/gpt-4o-mini";
+o.apiKey = System.getenv("OPENROUTER_API_KEY");
+
+Loop loop = writer.loop(o, tk);
+Loop.Outcome out = loop.run("Draft notes for 0.15.0.");
+System.out.println(out.status);     // "done"
+System.out.println(out.turns);
+System.out.println(out.stoppedBy);  // null when done; ALWAYS set otherwise
+
+// A different model for one call only.
+loop.run("Now tighten it.", new Loop.RunOptions().model("openai/gpt-4o"));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var writer = new Agent("writer", new AgentSpec {
+    Does = "drafts release notes",
+    Soul = "You write terse, factual release notes.",
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false });
+var loop = writer.Loop(new LlmClient.Options {
+    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai",
+    Model = "openai/gpt-4o-mini",
+    ApiKey = Environment.GetEnvironmentVariable("OPENROUTER_API_KEY"),
+}, tk);
+
+var outcome = await loop.RunAsync("Draft notes for 0.15.0.");
+Console.WriteLine(outcome.Status);     // "done"
+Console.WriteLine(outcome.Turns);
+Console.WriteLine(outcome.StoppedBy);  // null when done; ALWAYS set otherwise
+
+// A different model for one call only.
+await loop.RunAsync("Now tighten it.", new LoopRunOptions { Model = "openai/gpt-4o" });
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Agents
+alias Toolnexus.Agents.Loop
+
+writer = Agents.agent("writer",
+  does: "drafts release notes",
+  soul: "You write terse, factual release notes.")
+
+{:ok, tk} = Toolnexus.create_toolkit(builtins: false)
+
+loop =
+  Agents.loop(writer,
+    %{base_url: "https://openrouter.ai/api/v1", style: "openai",
+      model: "openai/gpt-4o-mini", api_key: System.get_env("OPENROUTER_API_KEY")},
+    tk)
+
+# `run` returns {outcome, loop} — the loop is a VALUE, so thread it forward.
+{out, loop} = Loop.run(loop, "Draft notes for 0.15.0.")
+out.status      # "done"
+out.turns
+out.stopped_by  # nil when done; ALWAYS set otherwise
+
+# A different model for one call only.
+{_out, _loop} = Loop.run(loop, "Now tighten it.", model: "openai/gpt-4o")
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.core :as toolnexus]
+         '[toolnexus.agents.loop :as tnloop]
+         '[koine.env :as env])
+
+(def tk (toolnexus/build {:builtins false}))
+
+;; The agent def IS the harness — there is no separate constructor to learn.
+(def lp
+  (tnloop/create
+   {:name "writer" :does "drafts release notes"
+    :soul "You write terse, factual release notes."}
+   {:base-url "https://openrouter.ai/api/v1" :style "openai"
+    :model "openai/gpt-4o-mini" :api-key (env/get-env "OPENROUTER_API_KEY")}
+   tk))
+
+;; `run` returns [outcome loop] — the loop is a VALUE, so thread it forward.
+(let [[out lp] (tnloop/run lp "Draft notes for 0.15.0.")]
+  (:status out)      ; "done"
+  (:turns out)
+  (:stopped-by out)  ; nil when done; ALWAYS set otherwise
+  ;; A different model for one call only.
+  (tnloop/run lp "Now tighten it." {:model "openai/gpt-4o"}))
+```
+</TabItem>
+</Tabs>
+
+## What a run reports
+
+Every run returns an **Outcome**. The field that matters most is the one that is easy to skip:
+
+| field | meaning |
+|---|---|
+| `text` | the final answer |
+| `status` | `done` · `incomplete` · `pending` · `error` — the **shipped** vocabulary, no new strings |
+| `stoppedBy` | **always set when `status` is not `done`** — a loop never stops silently |
+| `attempts` | how many times the completion gate ran the work (1 when there is no gate) |
+| `turns` | model round trips, accumulated across runs on this loop |
+| `result` | the underlying `RunResult`, including `limit` for a structured stop reason |
+
+<Aside type="caution" title="A loop never stops silently">
+If `status` is not `done`, `stoppedBy` says why — in words. `result.limit` says which limit, as a
+value you can branch on (`"maxTurns"`, `"completion"`). A stop you cannot explain to a user is a
+bug, not a state.
+</Aside>
+
+## Where the loop deliberately stops short
+
+The loop answers *did it finish?* — never *is the work any good?* That question belongs to a tool,
+a skill, or another agent, because only your domain can answer it.
+
+The one exception is structural, and it is the next page: a **completion gate** that refuses to let
+an agent report `done` while its own declared plan is unfinished.
+
+Next: [The completion gate](/toolnexus/harness/completion-gate/) · or see it
+[proved against live models](/toolnexus/harness/live/).

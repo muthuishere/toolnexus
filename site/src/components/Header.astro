@@ -12,6 +12,12 @@ import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
 
 import LanguagePicker from './LanguagePicker.astro';
 
+// Injected by astro.config.mjs, which reads js/package.json at config time. Not a
+// literal here: `preflight` refuses a release whose six manifests disagree, so any
+// one of them is authoritative — and a hand-typed version would be stale the moment
+// it is bumped, which is exactly the drift this repo keeps re-discovering.
+const version = __TOOLNEXUS_VERSION__;
+
 const shouldRenderSearch =
 	config.pagefind || config.components.Search !== '@astrojs/starlight/components/Search.astro';
 ---
@@ -19,6 +25,13 @@ const shouldRenderSearch =
 <div class="header">
 	<div class="title-wrapper sl-flex">
 		<SiteTitle />
+		<a
+			class="version-badge"
+			href={`https://github.com/muthuishere/toolnexus/releases/tag/v${version}`}
+			target="_blank"
+			rel="noopener"
+			title={`toolnexus v${version} — release notes`}>v{version}</a
+		>
 	</div>
 	<div class="sl-flex print:hidden">
 		{shouldRenderSearch && <Search />}
@@ -48,6 +61,35 @@ const shouldRenderSearch =
 			padding: 0.25rem;
 			margin: -0.25rem;
 			min-width: 0;
+			align-items: center;
+			gap: 0.5rem;
+		}
+
+		/* A quiet pill, not a shout: it answers "which version am I reading?" without
+		   competing with the wordmark. Hidden on narrow screens, where the header is
+		   already fighting for room. */
+		.version-badge {
+			flex-shrink: 0;
+			padding: 0.125rem 0.5rem;
+			border: 1px solid var(--sl-color-gray-5);
+			border-radius: 999px;
+			font-size: var(--sl-text-xs);
+			font-variant-numeric: tabular-nums;
+			line-height: 1.4;
+			color: var(--sl-color-gray-2);
+			text-decoration: none;
+			white-space: nowrap;
+		}
+		.version-badge:hover,
+		.version-badge:focus-visible {
+			color: var(--sl-color-white);
+			border-color: var(--sl-color-accent);
+		}
+
+		@media (max-width: 30rem) {
+			.version-badge {
+				display: none;
+			}
 		}
 
 		.right-group,

@@ -1,0 +1,253 @@
+---
+title: The completion gate & guardrails
+description: An agent can report done while its own declared plan is unfinished. The completion gate refuses that — and because it lives on the harness, it survives delegation, which a host-side retry loop cannot.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+The loop stops when the model stops asking for tools. Nothing in that sentence checks whether the
+work the agent **said it would do** actually got done — so an agent can announce `done` over an
+unfinished plan, and the loop will believe it.
+
+You can bolt a retry loop on the outside. But a host-side loop **cannot follow a delegation**: when
+agent A hands work to agent B via the `task` tool, B runs to completion *inside the runtime* and
+A's caller never sees it. That is the gap this closes.
+
+<Aside type="tip" title="Why it lives on the harness">
+Putting `completion` on the harness — not on the loop, not on the call — is what makes it **travel
+with the agent**. Delegate to that agent from anywhere and the check comes along.
+</Aside>
+
+## The gate
+
+`completion = { verify, maxAttempts }`. When set, it runs at exactly the point the loop would
+otherwise report `done`. If the verifier fails, the loop hands the reason back to the agent and
+tries again — bounded by `maxAttempts`.
+
+The built-in verifier reads the shipped `todowrite` builtin and requires every declared item to be
+checked. It is **structural**: it counts unchecked boxes and never learns what a todo *means*, so
+the loop stays domain-blind.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+const shipper = agents.agent("shipper", {
+  does: "ships the release",
+  completion: { verify: agents.allTodosDone, maxAttempts: 3 },
+})
+
+const out = await shipper.loop(clientOptions, toolkit).run("Cut 0.15.0.")
+
+if (out.status === "incomplete" && out.result.limit === "completion") {
+  console.error(out.stoppedBy)   // "completion.verify failed 3×: 1 item(s) still open: proofread"
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus.agents import Completion, agent, all_todos_done
+
+shipper = agent("shipper", does="ships the release",
+                completion=Completion(verify=all_todos_done, max_attempts=3))
+
+out = await shipper.loop(client_options, toolkit).run("Cut 0.15.0.")
+
+if out.status == "incomplete" and out.result.limit == "completion":
+    print(out.stopped_by)   # "completion.verify failed 3x: 1 item(s) still open: proofread"
+```
+</TabItem>
+<TabItem label="Go">
+```go
+shipper := agents.New("shipper", agents.Spec{
+    Does:       "ships the release",
+    Completion: &agents.Completion{Verify: agents.AllTodosDone, MaxAttempts: 3},
+})
+
+out, _ := shipper.Loop(clientOptions, tk).Run(ctx, "Cut 0.15.0.", agents.RunOpts{})
+
+if out.Status == "incomplete" && out.Result.Limit == "completion" {
+    log.Println(out.StoppedBy) // completion.verify failed 3x: 1 item(s) still open: proofread
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Agents.Agent shipper = Agents.agent("shipper", new Agents.AgentSpec()
+        .does("ships the release")
+        .completion(new Loop.Completion(Loop::allTodosDone, 3)));
+
+Loop.Outcome out = shipper.loop(clientOptions, tk).run("Cut 0.15.0.");
+
+if ("incomplete".equals(out.status) && "completion".equals(out.result.limit)) {
+    System.err.println(out.stoppedBy);
+}
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var shipper = new Agent("shipper", new AgentSpec {
+    Does = "ships the release",
+    Completion = new Completion { Verify = LoopSupport.AllTodosDone, MaxAttempts = 3 },
+});
+
+var outcome = await shipper.Loop(clientOptions, tk).RunAsync("Cut 0.15.0.");
+
+if (outcome.Status == "incomplete" && outcome.Result!.Limit == "completion")
+    Console.Error.WriteLine(outcome.StoppedBy);
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+shipper =
+  Agents.agent("shipper",
+    does: "ships the release",
+    completion: %{verify: &Loop.all_todos_done/1, max_attempts: 3})
+
+{out, _loop} = Loop.run(Agents.loop(shipper, client_options, tk), "Cut 0.15.0.")
+
+if out.status == "incomplete" and out.result.limit == "completion" do
+  IO.warn(out.stopped_by)
+end
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(def lp
+  (tnloop/create
+   {:name "shipper" :does "ships the release"
+    :completion {:verify tnloop/all-todos-done :max-attempts 3}}
+   client-options tk))
+
+(let [[out _] (tnloop/run lp "Cut 0.15.0.")]
+  (when (and (= "incomplete" (:status out))
+             (= "completion" (:limit (:result out))))
+    (println (:stopped-by out))))
+```
+</TabItem>
+</Tabs>
+
+## Six rules it obeys
+
+Every one of these was found by **prototyping**, not by design, and every one is tested in all
+seven ports. They are the difference between a gate and a suggestion:
+
+1. **It judges accumulated work, not one attempt.** Otherwise an agent escapes by simply not
+   re-declaring its plan on the retry: the fresh run carries no `todowrite`, the verifier sees "no
+   plan", and passes.
+2. **It never re-judges a run that stopped for its own reason.** A suspension or a budget stop
+   already carries its own reason, so the gate cannot override a budget stop or turn a `pending`
+   into an `incomplete`. You can always tell whether you owe an *answer* or a *fix*.
+3. **`maxAttempts` is required, not defaulted.** An unbounded verify loop is a denial-of-service on
+   your own bill.
+4. **A failed gate stops loudly** — `incomplete`, plus a structured `limit: "completion"` and a
+   human reason. Never a silent `done`.
+5. **When another limit fires mid-verification, you learn both.** Otherwise a budget stop masks the
+   verification failure and you never see why it was looping.
+6. **It reaches delegated children**, because it is compiled in at the registry boundary rather
+   than wrapped around the caller.
+
+<Aside type="note" title="No plan declared ⇒ it passes">
+`allTodosDone` passes when the agent never called `todowrite`. The gate exists to catch an agent
+abandoning **its own** stated plan — not to force every agent to write one.
+</Aside>
+
+## Guardrails
+
+Guardrails answer *may it?* — never *is it right?* They run before a tool executes and either allow
+the call or deny it with a reason.
+
+They compose into a single `beforeTool` hook with **first-deny-wins**: a later guardrail can never
+widen an earlier denial, and any hook you already had runs only if every guardrail allows.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+const ops = agents.agent("ops", {
+  does: "operates the fleet",
+  guardrails: [
+    (ev) => (ev.name === "deploy" && ev.args.env === "prod" ? "prod needs human approval" : "allow"),
+    (ev) => (ev.name === "bash" ? "shell is off in this agent" : "allow"),
+  ],
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+ops = agent("ops", does="operates the fleet", guardrails=[
+    lambda ev: "prod needs human approval"
+        if ev.get("name") == "deploy" and (ev.get("args") or {}).get("env") == "prod" else "allow",
+    lambda ev: "shell is off in this agent" if ev.get("name") == "bash" else "allow",
+])
+```
+</TabItem>
+<TabItem label="Go">
+```go
+ops := agents.New("ops", agents.Spec{
+    Does: "operates the fleet",
+    Guardrails: []agents.Guardrail{
+        func(ev tn.BeforeToolEvent) string {
+            if ev.Name == "deploy" && ev.Args["env"] == "prod" {
+                return "prod needs human approval"
+            }
+            return "allow"
+        },
+    },
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Agents.Agent ops = Agents.agent("ops", new Agents.AgentSpec()
+        .does("operates the fleet")
+        .guardrails(
+                ev -> "deploy".equals(ev.name()) && "prod".equals(ev.args().get("env"))
+                        ? "prod needs human approval" : "allow",
+                ev -> "bash".equals(ev.name()) ? "shell is off in this agent" : "allow"));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var ops = new Agent("ops", new AgentSpec {
+    Does = "operates the fleet",
+    Guardrails = new List<Guardrail> {
+        ev => ev.Name == "deploy" && ev.Args.Get("env") as string == "prod"
+            ? "prod needs human approval" : "allow",
+        ev => ev.Name == "bash" ? "shell is off in this agent" : "allow",
+    },
+});
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+ops =
+  Agents.agent("ops",
+    does: "operates the fleet",
+    guardrails: [
+      fn ev -> if ev[:name] == "deploy" and ev[:args]["env"] == "prod",
+                 do: "prod needs human approval", else: "allow" end,
+      fn ev -> if ev[:name] == "bash", do: "shell is off in this agent", else: "allow" end
+    ])
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+{:name "ops" :does "operates the fleet"
+ :guardrails [(fn [ev]
+                (if (and (= "deploy" (:name ev)) (= "prod" (get-in ev [:args "env"])))
+                  "prod needs human approval"
+                  "allow"))
+              (fn [ev] (if (= "bash" (:name ev)) "shell is off in this agent" "allow"))]}
+```
+</TabItem>
+</Tabs>
+
+A denied call never executes; the model receives the denial as the tool result and can react to it.
+
+## Absent ⇒ byte-identical
+
+No `completion` and no `guardrails` is the pre-existing path, unchanged. Nothing was added to the
+status vocabulary either — `SPEC.md` pins the statuses across all seven ports, so the gate reuses
+`incomplete` and distinguishes itself through `limit`.
+
+Next: [proved against live models](/toolnexus/harness/live/) — the same mechanisms, run against
+four real providers.

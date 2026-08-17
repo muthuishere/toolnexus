@@ -1154,7 +1154,9 @@ func (rt *Runtime) execute(runCtx context.Context, h *Handle, def Def, input str
 			OnMetric:     onMetric,
 		})
 		history, _ := rt.store.Get(h.ID)
-		r, err = runGated(runCtx, client, input, toolkit, history, def.Completion)
+		r, err = runGated(func(p string) (tn.RunResult, error) {
+			return client.RunWithHistory(runCtx, p, toolkit, history)
+		}, input, def.Completion)
 	}
 
 	if err != nil {

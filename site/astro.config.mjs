@@ -4,15 +4,27 @@ import starlight from '@astrojs/starlight';
 import starlightLlmsTxt from 'starlight-llms-txt';
 import starlightSidebarTopics from 'starlight-sidebar-topics';
 import { apiTopics } from './scripts/lib/sidebar.mjs';
+import { readFileSync } from 'node:fs';
+
+// The released version, for the header badge. js/package.json is the source of
+// truth by proxy: release.yml's `preflight` fails the run if the six manifests
+// disagree, so any one of them is the version.
+const toolnexusVersion = JSON.parse(readFileSync('../js/package.json', 'utf8')).version;
 
 // Project GitHub Pages: https://muthuishere.github.io/toolnexus
 // https://astro.build/config
 export default defineConfig({
+	vite: { define: { __TOOLNEXUS_VERSION__: JSON.stringify(toolnexusVersion) } },
 	site: 'https://muthuishere.github.io',
 	base: '/toolnexus',
 	// The old "One demo, five sources" page duplicated the quickstart; published
 	// links to it must not 404.
-	redirects: { '/demo': '/toolnexus/quickstart/' },
+	// The live-harness page moved out of Scenarios into its own section; published
+	// links to the old slug must not 404.
+	redirects: {
+		'/demo': '/toolnexus/quickstart/',
+		'/scenarios/harness-live': '/toolnexus/harness/live/',
+	},
 	integrations: [
 		starlight({
 			title: 'toolnexus',
@@ -54,7 +66,14 @@ export default defineConfig({
 										{ label: 'A support agent', slug: 'scenarios/support-agent' },
 										{ label: 'A self-improving agent', slug: 'scenarios/self-improving-agent' },
 										{ label: 'A verify-before-commit gate', slug: 'scenarios/verify-gate' },
-										{ label: 'Proved on live models', slug: 'scenarios/harness-live' },
+									],
+								},
+								{
+									label: 'Harness & loop',
+									items: [
+										{ label: 'Harness & loop', slug: 'harness' },
+										{ label: 'Completion gate & guardrails', slug: 'harness/completion-gate' },
+										{ label: 'Proved on live models', slug: 'harness/live' },
 									],
 								},
 								{

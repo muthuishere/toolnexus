@@ -110,69 +110,41 @@ func (l *Loop) Turns() int { return l.turns }
 // Run executes one request. When the agent's Spec declares a Completion, the
 // gate runs exactly where the loop would otherwise have returned `done`.
 func (l *Loop) Run(ctx context.Context, prompt string, opts RunOpts) (Outcome, error) {
-	comp := l.agent.Spec.Completion
-	maxAttempts := 1
-	if comp != nil {
-		if comp.MaxAttempts < 1 {
-			return Outcome{}, fmt.Errorf("toolnexus: Completion.MaxAttempts must be >= 1")
-		}
-		if comp.Verify == nil {
-			return Outcome{}, fmt.Errorf("toolnexus: Completion.Verify is required")
-		}
-		maxAttempts = comp.MaxAttempts
-	}
-
 	client := l.clientFor(opts)
 	l.status = "running"
-	var last tn.RunResult
-	var lastReason string
-	for n := 1; n <= maxAttempts; n++ {
-		p := prompt
-		if n > 1 {
-			p = "Your work did not verify: " + lastReason + ". Fix it and finish."
-		}
-		r, err := client.RunWithHistory(ctx, p, l.toolkit, l.history)
-		if err != nil {
-			l.status = "error"
-			return Outcome{Status: "error", StoppedBy: err.Error(), Attempts: n, Turns: l.turns}, err
-		}
-		last = r
-		l.turns += r.Turns
-		l.history = r.Messages
-		// The gate judges the LOOP's accumulated work, not one attempt. Without
-		// this, an agent escapes the gate by simply not re-declaring its plan on
-		// the retry: the fresh run carries no todowrite, the verifier sees "no
-		// plan", and passes. Found by prototyping; see loop_test.go.
-		l.calls = append(l.calls, r.ToolCalls...)
-		r.ToolCalls = l.calls
 
-		// Rule 2: a suspension or a limit stop already carries its own reason.
-		// The gate never re-judges those, so it can never override a budget stop
-		// or turn a `pending` into an `incomplete`.
-		if r.Status != "" && r.Status != "done" {
-			l.status = r.Status
-			return Outcome{Text: r.Text, Status: r.Status, StoppedBy: "run reported " + r.Status,
-				Attempts: n, Turns: l.turns, Result: r}, nil
+	attempts := 0
+	// The gate lives in runGated, NOT here. An inline second copy is how this port
+	// came to report a completion stop without setting Result.Limit, while the
+	// runtime path set it — one behaviour, two implementations, one of them wrong.
+	r, err := runGated(func(p string) (tn.RunResult, error) {
+		attempts++
+		out, err := client.RunWithHistory(ctx, p, l.toolkit, l.history)
+		if err != nil {
+			return out, err
 		}
-		if comp == nil {
-			l.status = "idle"
-			return Outcome{Text: r.Text, Status: "done", Attempts: n, Turns: l.turns, Result: r}, nil
-		}
-		ok, reason := comp.Verify(r)
-		if ok {
-			l.status = "idle"
-			return Outcome{Text: r.Text, Status: "done", Attempts: n, Turns: l.turns, Result: r}, nil
-		}
-		lastReason = reason
-		l.history = append(r.Messages, map[string]any{
-			"role": "user", "content": "verification failed: " + reason})
+		l.turns += out.Turns
+		l.history = out.Messages
+		return out, nil
+	}, prompt, l.agent.Spec.Completion)
+
+	if err != nil {
+		l.status = "error"
+		return Outcome{Status: "error", StoppedBy: err.Error(), Attempts: attempts, Turns: l.turns}, err
 	}
-	l.status = "incomplete"
-	return Outcome{
-		Text: last.Text, Status: "incomplete",
-		StoppedBy: fmt.Sprintf("completion.verify failed %d×: %s", maxAttempts, lastReason),
-		Attempts:  maxAttempts, Turns: l.turns, Result: last,
-	}, nil
+
+	if r.Status != "" && r.Status != "done" {
+		l.status = r.Status
+		stoppedBy := "run reported " + r.Status
+		if r.Limit == "completion" {
+			stoppedBy = r.Text
+		}
+		return Outcome{Text: r.Text, Status: r.Status, StoppedBy: stoppedBy,
+			Attempts: attempts, Turns: l.turns, Result: r}, nil
+	}
+
+	l.status = "idle"
+	return Outcome{Text: r.Text, Status: "done", Attempts: attempts, Turns: l.turns, Result: r}, nil
 }
 
 // AllTodosDone is the built-in completion verifier. It reads the SHIPPED
@@ -214,10 +186,14 @@ func AllTodosDone(r tn.RunResult) (bool, string) {
 // non-done already carries its own reason, so the gate never re-judges it. That
 // keeps `pending` and `incomplete` distinct — the caller can always tell whether
 // it owes an Answer or a fix.
-func runGated(ctx context.Context, c *tn.Client, prompt string, tk *tn.Toolkit,
-	history []any, comp *Completion) (tn.RunResult, error) {
+// ask runs ONE attempt. Taking a closure rather than a client is what lets the
+// standalone Loop and the runtime turn share this function instead of keeping two
+// copies of the six rules — which is how the two drifted in the first place.
+type ask func(prompt string) (tn.RunResult, error)
+
+func runGated(a ask, prompt string, comp *Completion) (tn.RunResult, error) {
 	if comp == nil {
-		return c.RunWithHistory(ctx, prompt, tk, history)
+		return a(prompt)
 	}
 	maxAttempts := comp.MaxAttempts
 	if maxAttempts < 1 {
@@ -234,7 +210,7 @@ func runGated(ctx context.Context, c *tn.Client, prompt string, tk *tn.Toolkit,
 		if n > 1 {
 			p = "Your work did not verify: " + reason + ". Fix it and finish."
 		}
-		r, err := c.RunWithHistory(ctx, p, tk, history)
+		r, err := a(p)
 		if err != nil {
 			return r, err
 		}
@@ -259,8 +235,6 @@ func runGated(ctx context.Context, c *tn.Client, prompt string, tk *tn.Toolkit,
 			return r, nil
 		}
 		reason = why
-		history = append(r.Messages, map[string]any{
-			"role": "user", "content": "verification failed: " + why})
 	}
 	// Structured, not prose: `Limit` is how a caller (and the §7D runtime) tells
 	// WHICH limit stopped the run. Text carries the human reason.
