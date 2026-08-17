@@ -26,7 +26,7 @@ The surface, once, so every port implements the same thing:
 - [x] `java/` — root-package `Loop.java`; 11 tests
 - [x] `csharp/` — `Agents/Loop.cs`; 11 tests
 - [x] `elixir/` — `agents/loop.ex`; 12 tests
-- [ ] `clojure/` (must pass all five execution modes)
+- [x] `clojure/` — `agents/loop.cljc`; 12 tests; all five execution modes agree (409 tests / 1650 assertions)
 
 Each port needs, and is not done without:
 

@@ -511,12 +511,19 @@
 
 (defn- t-todowrite
   "Stateless in v1 — it echoes the list back. The RENDERING is not pinned by
-  §4A; `- [x] text` / `- [ ] text` is this port's choice (reported)."
+  §4A; `- [x] text` / `- [ ] text` is this port's choice (reported).
+
+  The `:todos` METADATA is not cosmetic: the other six ports all return it, and a
+  host reading the plan back (the §7D completion gate does) has no other
+  structured way to see which items are still open. This port was the only one
+  omitting it."
   [args _ctx]
-  (tool/success (str/join "\n"
-                     (map (fn [t] (str "- [" (if (true? (:completed t)) "x" " ") "] "
-                                       (:text t)))
-                          (vec (:todos args))))))
+  (let [todos (vec (:todos args))]
+    (tool/success (str/join "\n"
+                            (map (fn [t] (str "- [" (if (true? (:completed t)) "x" " ") "] "
+                                              (:text t)))
+                                 todos))
+                  {:todos todos})))
 
 ;; ---------------------------------------------------------------------------
 ;; the builtin source
