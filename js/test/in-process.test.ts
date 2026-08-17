@@ -100,6 +100,27 @@ test("streaming is refused loudly, never faked as one chunk", async () => {
   await tk.close()
 })
 
+test("failures are NOT retried — there is no wire to have a transient failure", async () => {
+  const tk = await createToolkit({ builtins: false })
+  let calls = 0
+  const client = createInProcessClient({
+    model: "m",
+    generate: () => { calls++; throw new Error("my model blew up") },
+  })
+  const t0 = Date.now()
+  await assert.rejects(() => client.run("hi", { toolkit: tk }), /my model blew up/)
+  assert.equal(calls, 1, "a local generate that throws will throw again; retrying is backoff over a bug")
+  assert.ok(Date.now() - t0 < 500, `should fail immediately, took ${Date.now() - t0}ms`)
+
+  // NOT asserted: that an explicit `retries: N` re-runs a throwing generate. Whether a
+  // raised error is retryable at all is per-port — python's loop catches only
+  // HTTP/OS errors, so a plain throw there propagates on the first attempt whatever
+  // `retries` says. That divergence predates this constructor; pinning it here would
+  // assert something false in another port.
+
+  await tk.close()
+})
+
 test("generate is required", () => {
   assert.throws(() => createInProcessClient({ model: "m" } as any), /requires a `generate` function/)
 })

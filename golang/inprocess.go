@@ -57,6 +57,10 @@ type InProcessOptions struct {
 	// assistant message.
 	Generate func(InProcessRequest) (InProcessResponse, error)
 
+	// OnError, when set, classifies a failed Generate exactly as it would a failed HTTP
+	// attempt. Unset ⇒ every failure is FINAL (see CreateInProcessClient) — set this to
+	// opt back into retries for a model that is genuinely flaky, e.g. a GPU that OOMs.
+	OnError        func(ErrorInfo) Tier
 	SystemPrompt   string
 	MaxTurns       int
 	Hooks          *Hooks
@@ -181,7 +185,20 @@ func CreateInProcessClient(opts InProcessOptions) *Client {
 	if opts.Generate == nil {
 		panic("toolnexus: CreateInProcessClient requires a Generate function")
 	}
+	// Every failure is FINAL by default. There is no wire, so there is no transient
+	// failure to ride out: whatever Generate returns will be returned again, and
+	// retrying only buys backoff before the caller sees their own bug — measured at
+	// 3.7s for the streaming refusal before this.
+	//
+	// This goes through OnError rather than Retries because this port documents
+	// `Retries: 0 ⇒ 2`, so zero cannot mean zero here without changing shipped
+	// semantics for every network client.
+	onError := opts.OnError
+	if onError == nil {
+		onError = func(ErrorInfo) Tier { return TierFail }
+	}
 	return CreateClient(ClientOptions{
+		OnError:       onError,
 		BaseURL:       inProcessBaseURL,
 		Style:         StyleOpenAI,
 		Model:         opts.Model,

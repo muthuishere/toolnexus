@@ -143,6 +143,25 @@ public class InProcessTests
     }
 
     [Fact]
+    public async Task FailuresAreNotRetriedByDefault()
+    {
+        // There is no wire, so there is no transient failure to ride out.
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false });
+        var calls = 0;
+        var client = InProcess.CreateClient(new InProcess.Options
+        {
+            Model = "m",
+            Generate = _ => { calls++; throw new InvalidOperationException("my model blew up"); },
+        });
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await Assert.ThrowsAnyAsync<Exception>(() => client.RunAsync("hi", tk));
+        sw.Stop();
+        Assert.Equal(1, calls);
+        Assert.True(sw.ElapsedMilliseconds < 500, $"took {sw.ElapsedMilliseconds}ms; must fail immediately");
+    }
+
+    [Fact]
     public void GenerateIsRequired() =>
         Assert.Throws<ArgumentException>(() =>
             InProcess.CreateClient(new InProcess.Options { Model = "m" }));

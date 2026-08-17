@@ -71,6 +71,8 @@ public static class InProcess
         public Action<MetricEvent>? OnMetric { get; set; }
         public Func<Toolnexus.Request, Task<Answer>>? WaitFor { get; set; }
         public IDictionary<string, object?>? RequestParams { get; set; }
+        /// <summary>Defaults to 0 for an in-process client. Set only if your model is genuinely flaky.</summary>
+        public int? Retries { get; set; }
     }
 
     /// <summary>
@@ -98,6 +100,9 @@ public static class InProcess
             OnMetric = opts.OnMetric,
             WaitFor = opts.WaitFor,
             RequestParams = opts.RequestParams is null ? null : new Dictionary<string, object?>(opts.RequestParams),
+            // Zero retries by default: there is no wire, so there is no transient failure to ride
+            // out, and retrying only buys backoff before the caller sees their own bug.
+            Retries = opts.Retries ?? 0,
         };
         // Only when set: a 0 here is not "no timeout", it is "already expired".
         if (opts.MaxTurns is > 0) o.MaxTurns = opts.MaxTurns.Value;

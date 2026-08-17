@@ -125,6 +125,27 @@ defmodule Toolnexus.InProcessTest do
     assert Exception.message(err) =~ "does not support streaming"
   end
 
+  test "failures are not retried by default — there is no wire" do
+    {:ok, calls} = Agent.start_link(fn -> 0 end)
+
+    client =
+      Client.create_in_process(
+        model: "m",
+        generate: fn _ ->
+          Agent.update(calls, &(&1 + 1))
+          raise "my model blew up"
+        end
+      )
+
+    started = System.monotonic_time(:millisecond)
+    assert_raise RuntimeError, ~r/my model blew up/, fn ->
+      Client.run(client, "hi", bare_toolkit())
+    end
+
+    assert Agent.get(calls, & &1) == 1, "a local failure is not transient"
+    assert System.monotonic_time(:millisecond) - started < 500
+  end
+
   test "generate is required, and wire options are refused" do
     assert_raise ArgumentError, ~r/`:generate` function/, fn ->
       Client.create_in_process(model: "m")

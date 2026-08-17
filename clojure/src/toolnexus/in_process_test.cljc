@@ -82,6 +82,17 @@
                         (client/create-in-process-client
                          {:model "m" :generate (fn [_] {}) :base-url "http://x"}))))
 
+(deftest failures-are-not-retried-by-default
+  ;; There is no wire, so there is no transient failure to ride out: a generate that
+  ;; throws will throw again, and retrying only buys backoff over the caller's own bug.
+  (let [calls (atom 0)
+        c (client/create-in-process-client
+           {:model "m"
+            :generate (fn [_] (swap! calls inc) (throw (ex-info "my model blew up" {})))})]
+    (is (thrown-with-msg? Throwable #"my model blew up"
+                          (client/run c "hi" {:toolkit (bare-toolkit)})))
+    (is (= 1 @calls) "a local failure is not transient")))
+
 (deftest streaming-has-no-entry-point-in-this-port
   (testing "this port has no streaming loop, so unlike the other six there is nothing
             to refuse — recorded as a fact rather than faked with a raise"

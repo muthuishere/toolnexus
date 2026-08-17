@@ -238,7 +238,10 @@
                            " — an in-process model has no wire to configure. Use "
                            "create-client for a network-backed model.")
                       {:option reserved}))))
+  ;; Zero retries by default: there is no wire, so there is no transient failure to
+  ;; ride out, and retrying only buys backoff before the caller sees their own bug.
   (-> opts
+      (update :retries #(or % 0))
       (dissoc :generate)
       (assoc :base-url in-process-base-url
              :style "openai"

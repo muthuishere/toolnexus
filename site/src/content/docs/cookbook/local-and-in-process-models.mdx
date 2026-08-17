@@ -67,6 +67,17 @@ builds the `choices` envelope, and it **encodes tool arguments** — pass a stru
 value and it is serialized for you, or pass an already-encoded string and it goes
 through untouched.
 
+<Aside type="note" title="Failures are final, not retried">
+A network client retries transient failures. An in-process one **does not**, by default:
+there is no wire, so there is nothing transient — whatever your `generate` throws, it
+will throw again. Retrying only buys backoff before you see your own bug. Concretely,
+the streaming refusal below took **3.7 seconds** to surface before this default, and
+now takes **1 millisecond**.
+
+A model that genuinely is flaky (a GPU that OOMs, say) can opt back in: set `retries`,
+or in Go — where `Retries: 0` already means "use the default of 2" — supply `OnError`.
+</Aside>
+
 <Aside type="caution" title="Streaming is refused, not faked">
 `generate` returns a whole answer, so a stream would be one chunk pretending to be
 many — and a buffered body is indistinguishable from a real stream by content or by

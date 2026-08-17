@@ -43,6 +43,13 @@ AI's `Model` all take messages in and a response out, and **none requires a base
 is an SDK-level pattern, not a framework one. All three also ship a built-in fake model, treating
 this case as first-class.
 
+**Failures are final, not retried.** A network client rides out transient failures; an in-process
+one has no wire, so there is nothing transient — whatever `generate` throws will throw again, and
+retrying only buys backoff before you see your own bug. Measured: the streaming refusal took **3.7s**
+to surface before this default and **1ms** after. A genuinely flaky model can opt back in with
+`retries` — or, in golang, with `OnError`, because that port documents `Retries: 0 ⇒ 2` and zero
+cannot mean zero there without changing shipped semantics for every network client.
+
 **Streaming is refused, not faked.** A `generate` returns a whole answer, and a single-chunk stream
 is indistinguishable from a real one by content or delta count, so the streaming path raises with a
 message naming the limitation. The exception is clojure, which has no streaming entry point at all,

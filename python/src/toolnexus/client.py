@@ -2026,6 +2026,8 @@ def create_in_process_client(*, model: str, generate: Callable[[dict[str, Any]],
                 f"toolnexus: create_in_process_client does not take `{reserved}` — an in-process "
                 "model has no wire to configure. Use create_client for a network-backed model."
             )
+    # Retries default to ZERO here, unlike a network client. There is no wire, so there is no transient failure to ride out: whatever `generate` throws will throw again. Retrying only buys backoff before the host sees their own bug — measured at 3.7s for the streaming refusal. A host whose model really is flaky can still set retries explicitly.
+    options.setdefault("retries", 0)
     return create_client(
         base_url=_IN_PROCESS_BASE_URL,
         style="openai",

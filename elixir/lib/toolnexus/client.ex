@@ -640,7 +640,10 @@ defmodule Toolnexus.Client do
       end
     end
 
+    # Zero retries by default: there is no wire, so there is no transient failure to
+    # ride out, and retrying only buys backoff before the caller sees their own bug.
     opts
+    |> Keyword.put_new(:retries, 0)
     |> Keyword.drop([:generate])
     |> Keyword.merge(
       base_url: @in_process_base_url,

@@ -3,6 +3,8 @@ package toolnexus
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"time"
 	"strconv"
 	"strings"
 	"testing"
@@ -174,4 +176,30 @@ func TestInProcessStreamingIsRefusedLoudly(t *testing.T) {
 		}
 	}
 	t.Fatal("streaming was neither refused nor errored")
+}
+
+// There is no wire, so there is no transient failure to ride out: a Generate that
+// fails will fail again, and retrying only buys backoff before the caller sees their
+// own bug. Measured at 3.7s for the streaming refusal before retries defaulted to 0.
+func TestInProcessDoesNotRetryByDefault(t *testing.T) {
+	tk := bareToolkit(t)
+	defer tk.Close()
+
+	calls := 0
+	c := CreateInProcessClient(InProcessOptions{Model: "m",
+		Generate: func(InProcessRequest) (InProcessResponse, error) {
+			calls++
+			return InProcessResponse{}, fmt.Errorf("my model blew up")
+		}})
+
+	start := time.Now()
+	if _, err := c.Run(context.Background(), "hi", tk); err == nil {
+		t.Fatal("expected the generate error to surface")
+	}
+	if calls != 1 {
+		t.Fatalf("generate called %d times; a local failure is not transient", calls)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("took %v; a configuration error must fail immediately", elapsed)
+	}
 }

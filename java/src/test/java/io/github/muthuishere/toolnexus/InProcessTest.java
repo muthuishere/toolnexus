@@ -129,6 +129,22 @@ class InProcessTest {
     }
 
     @Test
+    void failuresAreNotRetriedByDefault() throws IOException {
+        // There is no wire, so there is no transient failure to ride out: a generate that
+        // fails will fail again, and retrying only buys backoff over the caller's own bug.
+        Toolkit tk = Toolkit.create(new Toolkit.Options());
+        AtomicInteger calls = new AtomicInteger();
+        LlmClient client = InProcess.createClient(new InProcess.Options().model("m")
+                .generate(req -> { calls.incrementAndGet(); throw new IllegalStateException("my model blew up"); }));
+
+        long started = System.nanoTime();
+        assertThrows(Exception.class, () -> client.run("hi", tk));
+        assertEquals(1, calls.get(), "a local failure is not transient");
+        assertTrue((System.nanoTime() - started) / 1_000_000 < 500, "must fail immediately");
+        tk.close();
+    }
+
+    @Test
     void generateIsRequired() {
         assertThrows(IllegalArgumentException.class,
                 () -> InProcess.createClient(new InProcess.Options().model("m")));

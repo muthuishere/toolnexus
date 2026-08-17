@@ -116,6 +116,8 @@ public final class InProcess {
         public java.util.function.Consumer<LlmClient.MetricEvent> onMetric;
         public Function<io.github.muthuishere.toolnexus.Request, Answer> waitFor;
         public Map<String, Object> requestParams;
+        /** Defaults to 0 for an in-process client. Set only if your model is genuinely flaky. */
+        public Integer retries;
 
         public Options model(String v) { this.model = v; return this; }
         public Options generate(Function<Request, Response> v) { this.generate = v; return this; }
@@ -126,6 +128,7 @@ public final class InProcess {
         public Options store(LlmClient.ConversationStore v) { this.store = v; return this; }
         public Options onMetric(java.util.function.Consumer<LlmClient.MetricEvent> v) { this.onMetric = v; return this; }
         public Options requestParams(Map<String, Object> v) { this.requestParams = v; return this; }
+        public Options retries(int v) { this.retries = v; return this; }
     }
 
     /**
@@ -154,6 +157,9 @@ public final class InProcess {
         o.onMetric = opts.onMetric;
         o.waitFor = opts.waitFor;
         o.requestParams = opts.requestParams;
+        // Zero retries by default: there is no wire, so there is no transient failure to
+        // ride out, and retrying only buys backoff before the caller sees their own bug.
+        o.retries = opts.retries != null ? opts.retries : 0;
         return LlmClient.create(o);
     }
 

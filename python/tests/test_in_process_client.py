@@ -102,6 +102,32 @@ async def test_streaming_is_refused_loudly():
             pass
 
 
+@pytest.mark.asyncio
+async def test_failures_are_not_retried_by_default():
+    """There is no wire, so there is no transient failure to ride out."""
+    import time
+
+    tk = await create_toolkit(builtins=False)
+    calls = {"n": 0}
+
+    def boom(_req):
+        calls["n"] += 1
+        raise RuntimeError("my model blew up")
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="my model blew up"):
+        await create_in_process_client(model="m", generate=boom).run("hi", toolkit=tk)
+    assert calls["n"] == 1, "retrying a local function that threw is backoff over a bug"
+    assert time.monotonic() - started < 0.5
+
+    # NOT asserted: that an explicit `retries=N` re-runs a throwing generate. Whether a
+    # raised exception is retryable at all is per-port — this port's loop catches
+    # _HttpError/URLError/OSError/TimeoutError, so a RuntimeError from generate
+    # propagates on the first attempt no matter what `retries` says, while js retries
+    # any throw. That divergence predates this constructor; pinning it here in one port
+    # would assert something false in another.
+
+
 def test_generate_is_required_and_wire_options_are_refused():
     with pytest.raises(TypeError, match="callable `generate`"):
         create_in_process_client(model="m", generate=None)

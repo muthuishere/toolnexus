@@ -1211,6 +1211,12 @@ export function createInProcessClient(opts: InProcessOptions): Client {
   }
 
   return new Client({
+    // Retries default to ZERO here, unlike a network client. There is no wire, so
+    // there is no transient failure to ride out: whatever `generate` throws will
+    // throw again. Retrying it only buys backoff before the user sees their own bug —
+    // measured at 3.7s for the streaming refusal before this default. A host whose
+    // model really is flaky (a GPU that OOMs, say) can still set `retries`.
+    retries: 0,
     ...(rest as ClientOptions),
     baseUrl: IN_PROCESS_BASE_URL,
     style: "openai",
