@@ -128,6 +128,8 @@ counts_of() {
 # worse than one that refuses to run.
 LOGDIR=${LOGDIR:-/tmp/tn-all-modes-$$}
 mkdir -p "$LOGDIR"
+# A fixed path, so the last failure is always findable without knowing the PID.
+FAILED_LOG=${FAILED_LOG:-/tmp/tn-all-modes-LAST-FAILURE.log}
 
 run_mode() {  # $1 = label, $2 = shell command
   local label=$1 cmd=$2 line
@@ -142,8 +144,17 @@ run_mode() {  # $1 = label, $2 = shell command
   case "$line" in
     *'"gate":"OK"'*) log "  ok    $label  $line" ;;
     *)               log "  FAIL  $label  $line"
-                     log "        detail: $LOGDIR/$label.log"
-                     grep -B2 -A12 -E "ERROR in|FAIL in" "$LOGDIR/$label.log" | head -20 >&2
+                     # Keep a STABLE copy. $LOGDIR is per-PID, so after the run the
+                     # evidence is one of a dozen /tmp/tn-all-modes-* dirs and nobody
+                     # can tell which — that is how three intermittent failures here
+                     # went undiagnosed.
+                     cp "$LOGDIR/$label.log" "$FAILED_LOG" 2>/dev/null
+                     log "        detail: $LOGDIR/$label.log  (stable copy: $FAILED_LOG)"
+                     # To the LOG, not just stderr: a caller piping stdout through grep
+                     # (CI, or an agent) otherwise sees a bare FAIL with no reason.
+                     grep -B2 -A12 -E "ERROR in|FAIL in" "$LOGDIR/$label.log" | head -20 | while IFS= read -r l; do
+                       log "        | $l"
+                     done
                      fail=1 ;;
   esac
   rows="$rows{\"mode\":\"$label\",\"summary\":$line},"

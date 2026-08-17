@@ -78,6 +78,36 @@
   [ns-sym]
   (count (filter (fn [v] (:test (meta v))) (vals (ns-interns ns-sym)))))
 
+(defn- describe-throwable
+  "clojure.test prints a caught throwable with `pr`, which on cljgo renders an
+  ExceptionInfo as a bare `#object[*lang.ExceptionInfo]` — no message, no ex-data.
+  Three intermittent failures in this suite were each reported that way and were
+  undiagnosable from the log alone.
+
+  So print what the object actually says. Costs nothing on a green run."
+  [e]
+  (let [msg  (try (ex-message e) (catch Throwable _ nil))
+        data (try (ex-data e) (catch Throwable _ nil))
+        cause (try (ex-cause e) (catch Throwable _ nil))]
+    (str (or msg (pr-str e))
+         (when data (str " | ex-data: " (pr-str data)))
+         (when cause (str " | cause: " (or (try (ex-message cause) (catch Throwable _ nil))
+                                           (pr-str cause)))))))
+
+(defmethod t/report :error [m]
+  ;; Same shape clojure.test uses, plus the message/ex-data it drops on the floor.
+  (t/with-test-out
+    (t/inc-report-counter :error)
+    (println "\nERROR in" (t/testing-vars-str m))
+    (when (seq t/*testing-contexts*) (println (t/testing-contexts-str)))
+    (when-let [message (:message m)] (println message))
+    (println "expected:" (pr-str (:expected m)))
+    (print "  actual: ")
+    (let [actual (:actual m)]
+      (println (if (instance? Throwable actual)
+                 (describe-throwable actual)
+                 (pr-str actual))))))
+
 (defn run []
   (let [s          (apply t/run-tests suites)
         assertions (+ (:pass s 0) (:fail s 0) (:error s 0))
