@@ -73,8 +73,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with: { go-version: "1.23" }
+      # The live tests SKIP when the key is absent, which is right for a laptop and
+      # wrong for this gate: a skipped proof would report green and prove nothing,
+      # so the gate would be theatre. Fail loudly instead, before any leg publishes.
+      - name: Require the key (a skipped live proof is not a proof)
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::error::OPENROUTER_API_KEY is not set in the 'prod' environment. The live"
+            echo "::error::scenarios would SKIP and this job would go green having verified"
+            echo "::error::nothing. Add the secret to the prod environment, then re-run."
+            exit 1
+          fi
       - name: Live harness scenarios (guardrail, completion gate, bounded stop, delegation)
-        run: go test -tags live -run TestLive -v ./...
+        # -count=1 so a cached PASS can never stand in for a real provider call.
+        run: go test -tags live -run TestLive -v -count=1 ./...
         env:
           # Use-only: read by the test at the point of use, never logged.
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
