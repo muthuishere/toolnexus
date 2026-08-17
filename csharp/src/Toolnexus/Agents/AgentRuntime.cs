@@ -514,8 +514,13 @@ public sealed class AgentRuntime
             // checkpoint and idempotency comes from task-key REATTACHMENT (§7D). The client gets
             // NO store of its own — the runtime's explicit save below is the only writer.
             var history = await _store.GetAsync(h.ConvId).ConfigureAwait(false);
-            var r = await client.RunAsync(input, toolkit, history is { Count: > 0 } ? history : null,
-                h.Cts!.Token).ConfigureAwait(false);
+            // The gate runs HERE, inside the runtime turn, which is what makes it reach a
+            // delegated child: `task` executes the child through this same path.
+            var r = await Loop.RunGatedAsync(
+                text => client.RunAsync(text, toolkit, history is { Count: > 0 } ? history : null,
+                    h.Cts!.Token),
+                input,
+                h.Def.Completion).ConfigureAwait(false);
             if (r.Status != "pending")
                 await _store.SaveAsync(h.ConvId, r.Messages).ConfigureAwait(false);
 

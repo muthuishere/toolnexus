@@ -24,7 +24,7 @@ The surface, once, so every port implements the same thing:
 - [x] `js/` — `agents/loop.ts`; 13 tests (registered in `package.json`, which lists test files explicitly)
 - [x] `python/` — `agents/loop.py`; 13 tests
 - [ ] `java/`
-- [ ] `csharp/`
+- [x] `csharp/` — `Agents/Loop.cs`; 11 tests
 - [ ] `elixir/`
 - [ ] `clojure/` (must pass all five execution modes)
 
