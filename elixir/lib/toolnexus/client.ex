@@ -859,12 +859,14 @@ defmodule Toolnexus.Client do
         else
           retry_after =
             case Req.Response.get_header(resp, "retry-after") do
-              [v | _] -> parse_int(v)
+              [v | _] -> parse_retry_after(v)
               _ -> nil
             end
 
+          # `!= nil`, not truthiness: `Retry-After: 0` means retry now, and 0 is
+          # truthy in Elixir but was previously rejected by the parser's `n > 0`.
           sleep_ms =
-            if retry_after,
+            if retry_after != nil,
               do: retry_after * 1000,
               else: client.retry_base_ms * Integer.pow(2, attempt) + :rand.uniform(100)
 
@@ -922,10 +924,25 @@ defmodule Toolnexus.Client do
   defp classify_error(%{on_error: nil}, %{retryable: retryable}), do: if(retryable, do: :retry, else: :fail)
   defp classify_error(%{on_error: fun}, info) when is_function(fun, 1), do: fun.(info)
 
-  defp parse_int(s) do
-    case Integer.parse(to_string(s)) do
-      {n, _} when n > 0 -> n
-      _ -> nil
+  # Honour `Retry-After` only in its delay-seconds form: a run of ASCII digits
+  # (RFC 9110 §10.2.3) in 0..2_147_483_647. `Integer.parse/1` alone is not enough
+  # — it stops at the first non-digit, so it read "5.9" as 5 and silently waited
+  # five seconds where every other port fell back to backoff. Fractional, signed,
+  # HTTP-date and out-of-range values are not delays we can honour, so the caller
+  # backs off rather than guessing. `0` is a real answer, hence the `>= 0` guard.
+  @retry_after_max 2_147_483_647
+  defp parse_retry_after(s) do
+    case String.trim(to_string(s)) do
+      "" ->
+        nil
+
+      trimmed ->
+        if String.match?(trimmed, ~r/\A[0-9]+\z/) do
+          case Integer.parse(trimmed) do
+            {n, ""} when n >= 0 and n <= @retry_after_max -> n
+            _ -> nil
+          end
+        end
     end
   end
 

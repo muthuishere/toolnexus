@@ -1073,7 +1073,12 @@ a callback/Stream).
 
 `ClientOptions`: `retries` (default 2), `retryBaseMs` (default 500), `timeoutMs` (whole-run
 deadline, optional). The LLM request retries on `429`/`500`/`502`/`503`/`504` and network errors
-with exponential backoff + jitter, honoring `Retry-After`. A run-level abort signal is built from
+with exponential backoff + jitter, honoring `Retry-After`. **`Retry-After` is honored only in its
+`delay-seconds` form** — a run of ASCII digits (RFC 9110 §10.2.3) in `0 … 2147483647`, waited as
+exactly that many whole seconds, **including `0`** ("retry now"). Every other value — fractional,
+signed, the HTTP-date form, out of range, empty, unparseable — falls back to backoff, and never
+raises, waits a negative duration, or retries without delay. Header lookup is case-insensitive.
+A run-level abort signal is built from
 `timeoutMs` + an external cancel token (`run(prompt, { toolkit, signal })`) and threaded into the
 HTTP request, so a timeout or external cancel aborts the in-flight call. Aborts are not retried.
 

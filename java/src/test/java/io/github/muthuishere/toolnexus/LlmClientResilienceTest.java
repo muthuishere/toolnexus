@@ -208,4 +208,70 @@ class LlmClientResilienceTest {
         assertEquals(1, hits.get(), "default fails a non-retryable 400 without retry");
         tk.close();
     }
+    // Retry-After is parsed identically in all seven ports: the delay-seconds form
+    // only (RFC 9110 §10.2.3) — ASCII digits in 0…2147483647. The parser is private,
+    // so the rule is asserted where it is observable: how long the client actually
+    // waits. This port's shape filter was already right; its range was not —
+    // Long.parseLong threw NumberFormatException from inside the retry path on an
+    // absurd digit string, killing the run instead of ignoring the header.
+    private long retryDelayMs(String retryAfter, int retryBaseMs) throws IOException {
+        AtomicInteger hits = new AtomicInteger(0);
+        int port = start(ex -> {
+            if (hits.incrementAndGet() < 2) {
+                ex.getResponseHeaders().add("Retry-After", retryAfter);
+                respond(ex, 429, "slow down");
+                return;
+            }
+            respond(ex, 200, "{\"choices\":[{\"message\":{\"content\":\"ok\"}}],"
+                    + "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}");
+        });
+
+        Toolkit tk = Toolkit.create(new Toolkit.Options());
+        LlmClient client = LlmClient.create(new LlmClient.Options()
+                .baseUrl("http://127.0.0.1:" + port)
+                .style("openai")
+                .model("x")
+                .apiKey("k")
+                .retries(3)
+                .retryBaseMs(retryBaseMs));
+
+        long t0 = System.nanoTime();
+        LlmClient.RunResult res = client.run("hi", tk);
+        long elapsed = (System.nanoTime() - t0) / 1_000_000L;
+        assertEquals("ok", res.text);
+        tk.close();
+        return elapsed;
+    }
+
+    @Test
+    void outOfRangeRetryAfterIsIgnoredRatherThanThrowing() throws IOException {
+        // Before this change: NumberFormatException out of the retry path.
+        assertTrue(retryDelayMs("99999999999999999999", 5) < 400);
+    }
+
+    @Test
+    void fractionalRetryAfterFallsBackToBackoff() throws IOException {
+        assertTrue(retryDelayMs("0.5", 5) < 400);
+    }
+
+    @Test
+    void negativeRetryAfterFallsBackToBackoff() throws IOException {
+        assertTrue(retryDelayMs("-5", 400) >= 300);
+    }
+
+    @Test
+    void zeroRetryAfterMeansRetryNow() throws IOException {
+        assertTrue(retryDelayMs("0", 700) < 450);
+    }
+
+    @Test
+    void httpDateRetryAfterFallsBackToBackoff() throws IOException {
+        assertTrue(retryDelayMs("Wed, 21 Oct 2015 07:28:00 GMT", 5) < 400);
+    }
+
+    @Test
+    void integerRetryAfterIsHonoredOverBackoff() throws IOException {
+        assertTrue(retryDelayMs("1", 5) >= 900);
+    }
+
 }

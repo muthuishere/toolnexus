@@ -286,6 +286,10 @@
   host `:on-error` says otherwise."
   #{429 500 502 503 504})
 
+(def ^:private retry-after-max-seconds
+  "~68 years; the widest whole-second count all seven ports represent exactly."
+  2147483647)
+
 (defn- retry-after-ms
   "Honour a `Retry-After` header when the server sends one. Seconds only: the
   HTTP-date form needs date parsing, which is not portable across these two
@@ -298,8 +302,13 @@
   on every host and `header` is the one lookup that cannot be mis-cased."
   [res]
   (let [h (http/header res "retry-after")
-        n (when h (re-matches #"\d+" (str/trim (str h))))]
-    (when n (* 1000 (parse-long n)))))
+        digits (when h (re-matches #"[0-9]+" (str/trim (str h))))
+        ;; `parse-long` answers nil for a digit string wider than a long, and
+        ;; `(* 1000 nil)` throws — so a server sending an absurd value used to kill
+        ;; the run from inside the retry path. Range-check before multiplying.
+        n (some-> digits parse-long)]
+    (when (and n (<= 0 n retry-after-max-seconds))
+      (* 1000 n))))
 
 (defn- post-llm
   "The one HTTP call. `:http-client` lets a host supply the transport — for a

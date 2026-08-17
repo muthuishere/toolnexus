@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	"net/http"
 	"os"
@@ -663,13 +664,36 @@ func sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// backoff computes the exponential-backoff-with-jitter delay for an attempt, or
-// honors a Retry-After header (in seconds) when present.
-func (c *Client) backoff(attempt int, retryAfter string) time.Duration {
-	if retryAfter != "" {
-		if secs, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil && secs >= 0 {
-			return time.Duration(secs) * time.Second
+// retryAfterSeconds honors a Retry-After header only in its delay-seconds form:
+// a run of ASCII digits (RFC 9110 §10.2.3) in 0…2147483647. Fractional, signed,
+// out-of-range and HTTP-date values are not delays we can honor, so the caller
+// falls back to backoff rather than guessing. Zero is a real answer — the server
+// is saying "retry now" — so it returns ok, not a fallback.
+//
+// The digit scan is not redundant with ParseInt: ParseInt accepts a leading sign,
+// and "+5" must fall back so that every port agrees on the same set of inputs.
+func retryAfterSeconds(v string) (time.Duration, bool) {
+	s := strings.TrimSpace(v)
+	if s == "" {
+		return 0, false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
 		}
+	}
+	secs, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || secs > math.MaxInt32 {
+		return 0, false
+	}
+	return time.Duration(secs) * time.Second, true
+}
+
+// backoff computes the exponential-backoff-with-jitter delay for an attempt, or
+// honors a Retry-After header (in whole seconds) when present.
+func (c *Client) backoff(attempt int, retryAfter string) time.Duration {
+	if d, ok := retryAfterSeconds(retryAfter); ok {
+		return d
 	}
 	base := c.retryBaseMs()
 	ms := base*(1<<attempt) + rand.Intn(100)

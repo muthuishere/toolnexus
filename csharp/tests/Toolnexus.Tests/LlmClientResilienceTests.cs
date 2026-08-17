@@ -179,4 +179,69 @@ public class LlmClientResilienceTests
         await Assert.ThrowsAnyAsync<Exception>(() => client.RunAsync("hi", tk));
         Assert.Equal(1, hits);
     }
+    // Retry-After is parsed identically in all seven ports: the delay-seconds form
+    // only (RFC 9110 §10.2.3) — ASCII digits in 0…2147483647. The parser is private,
+    // so the rule is asserted where it is observable: how long the client actually
+    // waits. Before this change long.TryParse accepted a leading sign, so
+    // `Retry-After: -5` produced −5000 ms and SleepAsync returned at once — an
+    // immediate retry against a server asking for calm.
+    private static async Task<long> RetryDelayMsAsync(string retryAfter, int retryBaseMs)
+    {
+        var hits = 0;
+        using var server = new StubServer(ctx =>
+        {
+            var n = Interlocked.Increment(ref hits);
+            if (n < 2)
+            {
+                ctx.Response.Headers.Add("Retry-After", retryAfter);
+                StubServer.Respond(ctx, 429, "slow down");
+                return;
+            }
+            StubServer.Respond(ctx, 200,
+                "{\"choices\":[{\"message\":{\"content\":\"ok\"}}],"
+                + "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}");
+        });
+
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+        var client = LlmClient.Create(new LlmClient.Options
+        {
+            BaseUrl = server.BaseUrl,
+            Style = "openai",
+            Model = "x",
+            ApiKey = "k",
+            Retries = 3,
+            RetryBaseMs = retryBaseMs,
+        });
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var res = await client.RunAsync("hi", tk);
+        sw.Stop();
+        Assert.Equal("ok", res.Text);
+        return sw.ElapsedMilliseconds;
+    }
+
+    [Fact]
+    public async Task NegativeRetryAfterCannotCauseAnImmediateRetry()
+        => Assert.True(await RetryDelayMsAsync("-5", 400) >= 300);
+
+    [Fact]
+    public async Task FractionalRetryAfterFallsBackToBackoff()
+        => Assert.True(await RetryDelayMsAsync("0.5", 5) < 300);
+
+    [Fact]
+    public async Task ZeroRetryAfterMeansRetryNow()
+        => Assert.True(await RetryDelayMsAsync("0", 600) < 400);
+
+    [Fact]
+    public async Task OutOfRangeRetryAfterCannotStallTheRun()
+        => Assert.True(await RetryDelayMsAsync("99999999999999999999", 5) < 300);
+
+    [Fact]
+    public async Task HttpDateRetryAfterFallsBackToBackoff()
+        => Assert.True(await RetryDelayMsAsync("Wed, 21 Oct 2015 07:28:00 GMT", 5) < 300);
+
+    [Fact]
+    public async Task IntegerRetryAfterIsHonoredOverBackoff()
+        => Assert.True(await RetryDelayMsAsync("1", 5) >= 900);
+
 }

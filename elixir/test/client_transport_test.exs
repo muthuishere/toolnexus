@@ -101,4 +101,48 @@ defmodule Toolnexus.ClientTransportTest do
     events = Client.stream(client(transport), "hi", []) |> Enum.to_list()
     assert %{type: "done", result: %{text: "hello"}} = List.last(events)
   end
+  # Retry-After is parsed identically in all seven ports: the delay-seconds form
+  # only (RFC 9110 §10.2.3) — ASCII digits in 0..2_147_483_647. This port's parser
+  # is private, so the rule is asserted where it is observable: how long the client
+  # actually waits. Before this change `Integer.parse/1` read "5.9" as 5 and waited
+  # five seconds where every other port backed off, and `n > 0` discarded a valid 0.
+  defp retry_delay_ms(retry_after, retry_base_ms) do
+    {:ok, calls} = Agent.start_link(fn -> 0 end)
+
+    transport = fn _req ->
+      n = Agent.get_and_update(calls, &{&1, &1 + 1})
+
+      if n == 0,
+        do: {:ok, %{status: 429, headers: %{"retry-after" => [retry_after]}, body: %{"error" => "slow down"}}},
+        else: {:ok, %{status: 200, headers: %{}, body: openai_text("ok")}}
+    end
+
+    t0 = System.monotonic_time(:millisecond)
+    r = Client.run(client(transport, retries: 2, retry_base_ms: retry_base_ms), "go", [])
+    assert r.text == "ok"
+    System.monotonic_time(:millisecond) - t0
+  end
+
+  test "a fractional Retry-After is ignored, not truncated to whole seconds" do
+    # Old behaviour: Integer.parse("5.9") -> {5, ".9"} -> a five-second wait.
+    assert retry_delay_ms("5.9", 5) < 1_000
+  end
+
+  test "Retry-After: 0 means retry now, not 'no opinion'" do
+    # Old behaviour: the `n > 0` guard discarded 0, so backoff applied instead.
+    assert retry_delay_ms("0", 600) < 400
+  end
+
+  test "an out-of-range Retry-After cannot stall the run" do
+    assert retry_delay_ms("2147483648", 5) < 1_000
+  end
+
+  test "a negative Retry-After falls back to backoff, never an immediate retry" do
+    assert retry_delay_ms("-5", 400) >= 300
+  end
+
+  test "an HTTP-date Retry-After falls back to backoff" do
+    assert retry_delay_ms("Wed, 21 Oct 2015 07:28:00 GMT", 5) < 1_000
+  end
+
 end

@@ -448,3 +448,51 @@ func TestDefaultClassifierFailsOn400(t *testing.T) {
 		t.Fatalf("server calls = %d, want 1 (400 not retryable)", got)
 	}
 }
+
+// Retry-After is parsed identically in all seven ports: the delay-seconds form
+// only (RFC 9110 §10.2.3) — a run of ASCII digits in 0…2147483647. Anything else
+// falls back to backoff. This table is mirrored verbatim in js/python/java/
+// csharp/elixir/clojure; before this change the seven ports disagreed on the
+// fractional, signed and out-of-range rows, and nothing caught it.
+func TestRetryAfterParsing(t *testing.T) {
+	cases := []struct {
+		in      string
+		ok      bool
+		seconds int64
+	}{
+		{"2", true, 2},
+		{"0", true, 0}, // the server is saying "retry now", not "no opinion"
+		{"  7  ", true, 7},
+		{"2147483647", true, 2147483647},
+		{"0.5", false, 0},   // fractional: honored by py/js before this change
+		{"5.9", false, 0},   // elixir truncated this to 5s before this change
+		{"-5", false, 0},    // must never become an immediate or negative wait
+		{"+5", false, 0},    // Atoi accepted this; the regex ports never did
+		{"2147483648", false, 0},
+		{"99999999999999999999", false, 0}, // java threw on this one
+		{"", false, 0},
+		{"Wed, 21 Oct 2015 07:28:00 GMT", false, 0},
+		{"abc", false, 0},
+	}
+	for _, c := range cases {
+		got, ok := retryAfterSeconds(c.in)
+		if ok != c.ok {
+			t.Fatalf("retryAfterSeconds(%q): honored=%v, want %v", c.in, ok, c.ok)
+		}
+		if ok && got != time.Duration(c.seconds)*time.Second {
+			t.Fatalf("retryAfterSeconds(%q) = %v, want %ds", c.in, got, c.seconds)
+		}
+	}
+}
+
+// A rejected Retry-After must reach the backoff path, not a zero delay.
+func TestRetryAfterRejectedFallsBackToBackoff(t *testing.T) {
+	c := &Client{opts: ClientOptions{RetryBaseMs: 40}}
+	d := c.backoff(0, "0.5")
+	if d < 40*time.Millisecond {
+		t.Fatalf("rejected Retry-After should back off, got %v", d)
+	}
+	if honored := c.backoff(0, "3"); honored != 3*time.Second {
+		t.Fatalf("accepted Retry-After should win over backoff, got %v", honored)
+	}
+}
