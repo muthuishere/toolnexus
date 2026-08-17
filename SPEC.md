@@ -1069,6 +1069,22 @@ index). Anthropic: `stream:true`, SSE `content_block_*` / `message_delta` events
 exposes the idiomatic stream type (JS async generator, Python async generator, Go channel, Java
 a callback/Stream).
 
+### In-process models
+
+A client MAY be constructed around a host-supplied **generate** function instead of an endpoint:
+`createInProcessClient({ model, generate, …every other client option })` (idiomatic name per port).
+It takes **no `baseUrl`, `apiKey` or `style`** — there is no wire — and requires no HTTP type from
+the host. `generate(request) -> { content } | { toolCalls }` returns exactly one assistant message
+(+ optional `usage`); the library derives `finish_reason`, builds the `choices` envelope, and
+encodes tool arguments unless already a string. Tool calls cross flat: `{id?, name, arguments}`.
+
+Messages are always **OpenAI-shaped** (there is no wire to be neutral about). Failures are **final
+by default** — no wire means no transient failure to retry. The streaming path **raises**, because a
+`generate` returns a whole answer and a single-chunk stream is indistinguishable from a real one by
+content or delta count; the exception is Clojure, which has no streaming entry point to refuse from.
+The injectable transport (Gap 2) is unchanged and remains the answer for proxy, mTLS and
+record-replay — this is a second constructor over it, not a second seam.
+
 ### Resilience (retries + timeout/cancel)
 
 `ClientOptions`: `retries` (default 2), `retryBaseMs` (default 500), `timeoutMs` (whole-run

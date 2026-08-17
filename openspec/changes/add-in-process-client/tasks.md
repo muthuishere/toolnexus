@@ -14,8 +14,8 @@ The surface, once, so every port implements the same thing:
 
 - [x] Spec delta at `specs/client-request-shaping/spec.md`
 - [x] `openspec validate add-in-process-client --strict`
-- [ ] `SPEC.md` §8 — the in-process constructor alongside Gap 2
-- [ ] `docs/adr/0019` — amend: the semantic callback is un-rejected AS A LAYER, not as a replacement
+- [x] `SPEC.md` §8 — the in-process constructor alongside Gap 2
+- [x] `docs/adr/0019` — alternative 4 rewritten (and the ADR landed on main, where it was missing)
 
 ## Per-language parity checklist
 
@@ -33,6 +33,15 @@ derived · streaming refused loudly · generate required.
 
 ## Conformance & docs
 
-- [ ] `conformance/options_manifest.json` — a row for the in-process constructor
+- [x] `conformance/options_manifest.json` — **decided: no row**, with the reason recorded rather
+      than skipped. The checker tokenizes ONE designated file per port
+      (`clientOptions.files`), and go/java/csharp keep their in-process code in a second file
+      (`inprocess.go`, `InProcess.java`, `InProcess.cs`). A `generate` row would therefore fail
+      those three for a filename, not for a missing capability — verified by scanning the
+      designated files: js/python/elixir/clojure contain `generate`, the other three do not.
+      Parity is guarded instead by the per-port suites (7–9 tests each), which fail if a port
+      drops the constructor. **Known gap:** the manifest cannot see an option that lives outside
+      its one file per port, which is newly relevant now that a port can have more than one
+      constructor.
 - [x] Rewrite `cookbook/local-and-in-process-models` around it (seven tabs, all executed)
-- [ ] `CHANGELOG.md`
+- [x] `CHANGELOG.md`
