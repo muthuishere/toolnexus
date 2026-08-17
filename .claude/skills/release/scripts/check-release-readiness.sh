@@ -51,11 +51,14 @@ for f in $DOCS; do
   while IFS= read -r hit; do
     echo "$hit" | grep -q ":toolnexus:$V" || stale="$stale\n  $f: $hit"
   done < <(grep -n 'io\.github\.muthuishere:toolnexus:[0-9]' "$f" 2>/dev/null)
-  # c) clojars:  net.clojars.muthuishere/toolnexus {:mvn/version "0.14.0"}
+  # c) clojars, BOTH spellings — deps.edn leaves the artifact bare, cljgo's
+  #    build.cljgo quotes it: (dep b "net.clojars.muthuishere/toolnexus" {...}).
+  #    Matching only the bare form let a cljgo-ex1 coordinate sit at 0.13.0 for
+  #    two releases, which is precisely what this section exists to prevent.
   while IFS= read -r hit; do
     echo "$hit" | grep -q '"<version>"' && continue    # PUBLISHING.md templates
     echo "$hit" | grep -q "\"$V\"" || stale="$stale\n  $f: $hit"
-  done < <(grep -n 'muthuishere/toolnexus {:mvn/version' "$f" 2>/dev/null)
+  done < <(grep -n 'muthuishere/toolnexus" \?{:mvn/version\|muthuishere/toolnexus {:mvn/version' "$f" 2>/dev/null)
   # d) maven xml: <version>..</version> in a file that installs the java artifact
   if grep -q 'artifactId>toolnexus<' "$f" 2>/dev/null; then
     while IFS= read -r hit; do
