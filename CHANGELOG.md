@@ -8,6 +8,17 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.16.0 — 2026-08-17
+
+### Fixed — an in-process client no longer needs an API key
+
+`createInProcessClient` advertised "no `apiKey`" and then failed without one: the client resolves a
+key from the environment and errors when it finds none, so an in-process model — which has no
+endpoint to authenticate to — still demanded one. Every local run passed because a developer shell
+has `OPENROUTER_API_KEY` set; CI, which has none, failed the in-process tests in **all seven ports**
+at once. The constructor now supplies its own sentinel so that resolution never runs, and js/python
+pin it with a test that strips the variables from the environment first.
+
 ### Added — `createInProcessClient`: a model in your process, with no wire to configure (all ports)
 
 Running a model inside your own process was possible, and it made you lie three times: a `baseUrl`

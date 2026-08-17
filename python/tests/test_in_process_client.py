@@ -128,6 +128,19 @@ async def test_failures_are_not_retried_by_default():
     # would assert something false in another.
 
 
+@pytest.mark.asyncio
+async def test_works_with_no_api_key_anywhere(monkeypatch):
+    """The client resolves a key from env and fails when it finds none, so an
+    in-process client still demanded one. Every local run passed because a developer
+    shell has OPENROUTER_API_KEY; CI, which has none, failed all seven ports."""
+    for var in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+
+    tk = await create_toolkit(builtins=False)
+    client = create_in_process_client(model="m", generate=lambda _r: {"content": "no key needed"})
+    assert (await client.run("hi", toolkit=tk)).text == "no key needed"
+
+
 def test_generate_is_required_and_wire_options_are_refused():
     with pytest.raises(TypeError, match="callable `generate`"):
         create_in_process_client(model="m", generate=None)

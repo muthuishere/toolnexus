@@ -34,7 +34,7 @@ Go 1.23 · also ships the `toolnexus` CLI · MCP SDK: `mark3labs/mcp-go`
 <dependency>
   <groupId>io.github.muthuishere</groupId>
   <artifactId>toolnexus</artifactId>
-  <version>0.15.0</version>
+  <version>0.16.0</version>
 </dependency>
 ```
 Java 21 · [Maven Central](https://central.sonatype.com/artifact/io.github.muthuishere/toolnexus) · MCP SDK: `io.modelcontextprotocol.sdk:mcp`
@@ -49,7 +49,7 @@ dotnet add package Toolnexus
 ```elixir
 # mix.exs
 def deps do
-  [{:toolnexus, "~> 0.15"}]
+  [{:toolnexus, "~> 0.16"}]
 end
 ```
 Elixir ≥ 1.16 / OTP 26 · [Hex · toolnexus](https://hex.pm/packages/toolnexus) · MCP client: in-house (OTP-supervised, no SDK)
@@ -57,12 +57,12 @@ Elixir ≥ 1.16 / OTP 26 · [Hex · toolnexus](https://hex.pm/packages/toolnexus
 <TabItem label="Clojure">
 ```clojure
 ;; deps.edn — one artifact; koine (the portability seam) comes with it
-{:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.15.0"}}}
+{:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.16.0"}}}
 ```
 
 Works as an ordinary Clojure library on the JVM, and as a
 [cljgo](https://github.com/muthuishere/cljgo) dependency (`build.cljgo`:
-`(dep b "net.clojars.muthuishere/toolnexus" {:mvn/version "0.15.0"})`) compiled
+`(dep b "net.clojars.muthuishere/toolnexus" {:mvn/version "0.16.0"})`) compiled
 to a native Go binary — the same artifact, verified on both.
 Clojure CLI (JVM) or [cljgo](https://github.com/muthuishere/cljgo) · MCP client: in-house over
 [koine](https://github.com/muthuishere/koine) (`koine.process` stdio / `koine.http` streamable-HTTP)
