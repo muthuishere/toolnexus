@@ -1922,3 +1922,114 @@ def create_client(
         http_transport=http_transport,
         on_error=on_error,
     )
+
+
+# --------------------------------------------------------------------------- #
+# In-process models (SPEC §8 Gap 2, semantic form).
+# --------------------------------------------------------------------------- #
+
+# The sentinel base URL. Never dialled — the transport answers every request before
+# the network is reached — but the client builds a URL string internally, so it must
+# be syntactically valid. `.invalid` is reserved by RFC 2606 precisely so a name can
+# never resolve.
+_IN_PROCESS_BASE_URL = "http://in-process.invalid/v1"
+
+
+class _InProcessTransport:
+    """Turns a semantic ``generate`` into the shipped ``HttpTransport`` seam.
+
+    The host returns one assistant message; this builds the provider envelope
+    (``choices``, ``finish_reason``, ``usage``) so a model author never has to.
+    """
+
+    def __init__(self, generate: Callable[[dict[str, Any]], Any]) -> None:
+        self._generate = generate
+
+    def post(self, url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        request = {
+            "messages": payload.get("messages") or [],
+            "tools": payload.get("tools"),
+            "model": payload.get("model"),
+            "body": payload,
+        }
+        answer = self._generate(request)
+        if inspect.isawaitable(answer):  # pragma: no cover - a coroutine cannot be awaited here
+            raise TypeError(
+                "toolnexus: create_in_process_client's `generate` must be synchronous — it runs on "
+                "the client's worker thread. Do async work before the call, or block inside it."
+            )
+        answer = answer or {}
+
+        tool_calls = answer.get("tool_calls") or answer.get("toolCalls")
+        message: dict[str, Any] = {"role": "assistant"}
+        if tool_calls:
+            message["tool_calls"] = [
+                {
+                    "id": c.get("id") or f"call_{i}",
+                    "type": "function",
+                    "function": {
+                        "name": c.get("name"),
+                        # A string is already encoded; anything else is encoded here so
+                        # a model author never has to think about the wire.
+                        "arguments": c["arguments"] if isinstance(c.get("arguments"), str)
+                        else json.dumps(c.get("arguments") or {}),
+                    },
+                }
+                for i, c in enumerate(tool_calls)
+            ]
+        else:
+            message["content"] = answer.get("content") or ""
+
+        usage = answer.get("usage") or {}
+        prompt = usage.get("prompt_tokens", usage.get("promptTokens", 0)) or 0
+        completion = usage.get("completion_tokens", usage.get("completionTokens", 0)) or 0
+        return {
+            "choices": [{
+                "index": 0,
+                "message": message,
+                "finish_reason": "tool_calls" if "tool_calls" in message else "stop",
+            }],
+            "usage": {
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "total_tokens": usage.get("total_tokens", usage.get("totalTokens")) or prompt + completion,
+            },
+        }
+
+    def open(self, url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float):  # noqa: A003
+        # A generate() returns a whole answer, so a stream would be one chunk pretending
+        # to be many. Content and delta-count assertions cannot tell that from a real
+        # stream, so refuse instead of degrading silently.
+        raise NotImplementedError(
+            "toolnexus: create_in_process_client does not support streaming — `generate` returns a "
+            "complete answer. Use the non-streaming run, or supply an http_transport that streams."
+        )
+
+
+def create_in_process_client(*, model: str, generate: Callable[[dict[str, Any]], Any], **options: Any) -> Client:
+    """A client backed by a model running IN THIS PROCESS — no server, no socket, and
+    no HTTP types to construct.
+
+    This is a second constructor, not a second seam: it builds on the same injectable
+    transport that ``http_transport`` uses, so the tool-calling loop, MCP servers,
+    skills, sub-agents, hooks, metrics and the completion gate behave identically.
+
+    ``generate(request) -> {"content": ...}`` finishes the run;
+    ``-> {"tool_calls": [{"name": ..., "arguments": {...}}]}`` asks for tools.
+    ``usage`` is optional. No ``base_url``, ``api_key`` or ``style`` — there is no wire.
+    """
+    if not callable(generate):
+        raise TypeError("toolnexus: create_in_process_client requires a callable `generate`")
+    for reserved in ("base_url", "api_key", "style", "http_transport"):
+        if reserved in options:
+            raise TypeError(
+                f"toolnexus: create_in_process_client does not take `{reserved}` — an in-process "
+                "model has no wire to configure. Use create_client for a network-backed model."
+            )
+    return create_client(
+        base_url=_IN_PROCESS_BASE_URL,
+        style="openai",
+        model=model,
+        http_transport=_InProcessTransport(generate),
+        **options,
+    )

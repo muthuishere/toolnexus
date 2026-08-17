@@ -34,6 +34,7 @@ from .client import (
     RunTimeout,
     UrllibTransport,
     create_client,
+    create_in_process_client,
 )
 from .builtin import (
     BuiltinsConfig,
@@ -210,4 +211,5 @@ __all__ = [
     "RunTimeout",
     "WaitFor",
     "create_client",
+    "create_in_process_client",
 ]

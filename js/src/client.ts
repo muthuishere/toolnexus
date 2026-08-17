@@ -1097,6 +1097,127 @@ export function createClient(opts: ClientOptions): Client {
   return new Client(opts)
 }
 
+
+// --------------------------------------------------------------------------- //
+// In-process models (SPEC §8 Gap 2, semantic form).
+// --------------------------------------------------------------------------- //
+
+/** One tool call an in-process model asks for. Flat on purpose: the nested
+ *  `function: {}` wrapper is a wire detail, not something a model author should type.
+ *  `arguments` may be a structured value (encoded for you) or an encoded string. */
+export interface InProcessToolCall {
+  id?: string
+  name: string
+  arguments?: unknown
+}
+
+/** What an in-process model is handed: the assembled request for THIS call. */
+export interface InProcessRequest {
+  messages: any[]
+  tools?: any[]
+  model: string
+  /** Every other key the client assembled, for a model that wants them. */
+  body: Record<string, any>
+}
+
+/** What an in-process model returns: exactly one assistant message. Return `content`
+ *  to finish, or `toolCalls` to ask for tools — never both. `usage` is optional; when
+ *  omitted the run reports zero tokens rather than failing. */
+export interface InProcessResponse {
+  content?: string
+  toolCalls?: InProcessToolCall[]
+  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number }
+}
+
+/** Options for {@link createInProcessClient}: every client option EXCEPT the three
+ *  that describe a wire — `baseUrl`, `apiKey` and `style` — plus `generate`. */
+export type InProcessOptions = Omit<ClientOptions, "baseUrl" | "apiKey" | "style" | "fetch"> & {
+  /** Your model. Receives the assembled request, returns one assistant message. */
+  generate: (request: InProcessRequest) => InProcessResponse | Promise<InProcessResponse>
+}
+
+/** The sentinel base URL. Never dialled — the transport below answers every request
+ *  before the network is reached — but the client builds a URL string internally, so
+ *  it must be syntactically valid. `.invalid` is reserved by RFC 2606 precisely so a
+ *  name can never resolve. */
+const IN_PROCESS_BASE_URL = "http://in-process.invalid/v1"
+
+/**
+ * A client backed by a model running IN THIS PROCESS — no server, no socket, and no
+ * HTTP types to construct.
+ *
+ * This is a second constructor, not a second seam: it builds on the same injectable
+ * transport that `fetch`/`httpClient` uses, so the tool-calling loop, MCP servers,
+ * skills, sub-agents, hooks, metrics and the completion gate all behave identically.
+ *
+ * Streaming is refused rather than faked — see the thrown error.
+ */
+export function createInProcessClient(opts: InProcessOptions): Client {
+  const { generate, ...rest } = opts
+  if (typeof generate !== "function") {
+    throw new Error("toolnexus: createInProcessClient requires a `generate` function")
+  }
+
+  const inProcessFetch: typeof fetch = async (_url, init) => {
+    const body = JSON.parse(String((init as any)?.body ?? "{}"))
+
+    // A generate() returns a whole answer, so a stream would be one chunk pretending
+    // to be many. Content and delta-count assertions cannot tell that from a real
+    // stream, so refuse instead of degrading silently.
+    if (body.stream) {
+      throw new Error(
+        "toolnexus: createInProcessClient does not support streaming — `generate` returns a " +
+          "complete answer. Use the non-streaming run, or supply a `fetch`/transport that streams.",
+      )
+    }
+
+    const answer = await generate({
+      messages: body.messages ?? [],
+      tools: body.tools,
+      model: body.model,
+      body,
+    })
+
+    const message: Record<string, any> = { role: "assistant" }
+    if (answer.toolCalls && answer.toolCalls.length > 0) {
+      message.tool_calls = answer.toolCalls.map((c, i) => ({
+        id: c.id ?? `call_${i}`,
+        type: "function",
+        function: {
+          name: c.name,
+          // A string is already encoded; anything else is encoded here so a model
+          // author never has to think about the wire.
+          arguments: typeof c.arguments === "string" ? c.arguments : JSON.stringify(c.arguments ?? {}),
+        },
+      }))
+    } else {
+      message.content = answer.content ?? ""
+    }
+
+    const u = answer.usage ?? {}
+    const prompt = u.promptTokens ?? 0
+    const completion = u.completionTokens ?? 0
+    return new Response(
+      JSON.stringify({
+        choices: [{ index: 0, message, finish_reason: message.tool_calls ? "tool_calls" : "stop" }],
+        usage: {
+          prompt_tokens: prompt,
+          completion_tokens: completion,
+          total_tokens: u.totalTokens ?? prompt + completion,
+        },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    )
+  }
+
+  return new Client({
+    ...(rest as ClientOptions),
+    baseUrl: IN_PROCESS_BASE_URL,
+    style: "openai",
+    fetch: inProcessFetch,
+  })
+}
+
 /** Stateful multi-turn conversation: each send() continues the same transcript (memory). */
 export class Conversation {
   /** Full running transcript (system + user + assistant + tool messages). */
