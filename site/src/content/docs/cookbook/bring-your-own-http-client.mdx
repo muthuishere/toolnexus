@@ -21,6 +21,11 @@ build the client however your stack does it, hand it in, and toolnexus uses it f
 **every** request, including its own retry/backoff loop. Nothing is wrapped or
 re-implemented.
 
+The same seam has a second, bigger use: **if you supply the response instead of
+forwarding the request, you have supplied the model.** That is how you run an
+ONNX / llama.cpp / in-process model with no server at all — see
+[Local & in-process models](/toolnexus/cookbook/local-and-in-process-models/).
+
 Two seams, side by side:
 
 - **The HTTP client** — a full client object you own (proxy, TLS, timeouts, custom
@@ -125,8 +130,22 @@ var agent = LlmClient.Create(new LlmClient.Options {
 client = Toolnexus.Client.create(
   base_url: "https://openrouter.ai/api/v1", style: "openai",
   model: "openai/gpt-4o-mini", api_key: System.get_env("OPENROUTER_API_KEY"),
-  http_options: [connect_options: [proxy: {:http, "proxy.corp", 8080, []}]],  # ← your transport
+  http_options: [connect_options: [proxy: {:http, "proxy.corp", 8080, []}]],  # ← tune Req
   headers: %{"X-Egress-Token" => System.get_env("EGRESS_TOKEN")}
+)
+
+# Or replace the wire call outright with `:transport` — a one-arg function.
+# Retries, backoff, Retry-After, the deadline and error classification still run
+# AROUND it, so you only implement the call itself.
+transport = fn req ->
+  # req = %{method:, url:, headers:, body: <un-marshalled map>, receive_timeout:}
+  {:ok, %{status: 200, headers: %{}, body: my_client_call(req)}}
+end
+
+client = Toolnexus.Client.create(
+  base_url: "https://openrouter.ai/api/v1", style: "openai",
+  model: "openai/gpt-4o-mini", api_key: System.get_env("OPENROUTER_API_KEY"),
+  transport: transport                                    # ← the full seam
 )
 ```
 </TabItem>
@@ -165,7 +184,7 @@ The injection seam per port:
 | Go | `HTTPClient` (`*http.Client`; default honors proxy env) | `Headers` |
 | Java | `httpClient` (`java.net.http.HttpClient`) | `headers` |
 | C# | `HttpClient` or `HttpHandler` (default honors system proxy) | `Headers` |
-| Elixir | `http_options` (Req/Finch options) | `headers` |
+| Elixir | `transport` (a 1-arg fn — the full seam) or `http_options` (Req/Finch options) | `headers` |
 | Clojure | `:http-client` — a `(fn [url headers body] response)`, same shape as `koine.http/post-json` | `:headers` |
 
 Scope is the **LLM path** only — MCP transports use their own SDK clients. Whatever

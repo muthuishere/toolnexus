@@ -1,0 +1,380 @@
+---
+title: Run a local model (ONNX, llama.cpp, in-process)
+description: Point toolnexus at a local OpenAI-compatible server with one option, or skip the server entirely — the HTTP seam takes an in-process model that never opens a socket.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+Not every model lives behind a URL. Yours might be an ONNX Runtime session, a
+llama.cpp binding, a fine-tune loaded straight into your process, or a router you
+wrote yourself. toolnexus never assumes a network: the same seam that lets you
+supply a proxy lets you supply **the model itself**. Everything above it — the
+tool-calling loop, MCP tools, skills, sub-agents, retries, memory — works
+unchanged, because none of it knows whether a socket was involved.
+</Aside>
+
+There are two levels here, and **most people only need the first**.
+
+## Level 1 — a local OpenAI-compatible server (no code)
+
+llama.cpp's `llama-server`, Ollama, vLLM, LM Studio, and ONNX Runtime GenAI's
+server all speak the OpenAI wire format. So they are not a special case at all —
+they are a `baseUrl`:
+
+```ts
+const agent = createClient({
+  baseUrl: "http://127.0.0.1:8080/v1",   // llama-server / Ollama / vLLM / LM Studio
+  style: "openai",
+  model: "qwen2.5-coder-7b",
+  apiKey: "unused",                       // most local servers ignore it; send anything
+})
+```
+
+That is the whole integration. Nothing below this line is needed unless you want
+to remove the server too.
+
+## Level 2 — no server at all (in-process, zero sockets)
+
+When the model runs **inside your process**, the HTTP client seam becomes the
+model seam: you hand toolnexus a function or object that takes the request body
+and returns the response body. It is never asked to open a connection.
+
+<Aside type="caution" title="You are implementing a response shape, not a model API">
+Your seam receives an **OpenAI-shaped request body** and must return an
+**OpenAI-shaped response body**. That is the contract — `choices[0].message`
+with either `content` or `tool_calls`, plus `usage`. If your model emits
+something else, the mapping is your job, and it belongs in your transport rather
+than in the agent loop.
+</Aside>
+
+Every example below was **executed against its port** — each one runs a full
+tool-calling turn (model asks for `add`, tool runs, model answers) with no socket
+opened.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+// Whatever runs your weights — onnxruntime-node, node-llama-cpp, a WASM build.
+class LocalModel {
+  constructor() { this.turn = 0 }
+  generate(messages, tools) {
+    this.turn++
+    if (this.turn === 1) {
+      return { tool_calls: [{ id: "c1", type: "function",
+        function: { name: "add", arguments: '{"a":2,"b":3}' } }] }
+    }
+    return { content: `The answer is ${messages.at(-1).content}.` }
+  }
+}
+
+// The whole seam: a fetch-shaped function returning a real Response.
+function localFetch(model) {
+  return async (_url, init) => {
+    const payload = JSON.parse(init.body)
+    const msg = model.generate(payload.messages, payload.tools)
+    const body = {
+      choices: [{ message: { role: "assistant", ...msg },
+                  finish_reason: msg.tool_calls ? "tool_calls" : "stop" }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }
+    return new Response(JSON.stringify(body),
+      { status: 200, headers: { "content-type": "application/json" } })
+  }
+}
+
+const client = createClient({
+  baseUrl: "http://local.invalid", style: "openai", model: "local", apiKey: "unused",
+  fetch: localFetch(new LocalModel()),     // ← the model IS the transport
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+class LocalModel:
+    """Whatever runs your weights — onnxruntime_genai, llama_cpp, transformers."""
+    def __init__(self): self.turn = 0
+    def generate(self, messages, tools):
+        self.turn += 1
+        if self.turn == 1:
+            return {"tool_calls": [{"id": "c1", "type": "function",
+                    "function": {"name": "add", "arguments": '{"a":2,"b":3}'}}]}
+        return {"content": f"The answer is {messages[-1]['content']}."}
+
+class LocalTransport:
+    """The whole seam. `post` gets the request body as a DICT and returns a
+    DICT — this port never marshals JSON for you, so an in-process model pays
+    no serialization at all."""
+    def __init__(self, model): self.model = model
+
+    def post(self, url, headers, payload, timeout):
+        msg = self.model.generate(payload["messages"], payload.get("tools"))
+        return {"choices": [{"message": {"role": "assistant", **msg},
+                             "finish_reason": "tool_calls" if "tool_calls" in msg else "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError("streaming not supported by this local model")
+
+client = create_client(
+    base_url="http://local.invalid", style="openai", model="local", api_key="unused",
+    http_transport=LocalTransport(LocalModel()),   # ← the model IS the transport
+)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+// LocalModel is whatever runs your weights — onnxruntime_go, a cgo llama.cpp
+// binding, a pure-Go transformer.
+type LocalModel struct{ turn int }
+
+func (m *LocalModel) Generate(payload map[string]any) map[string]any {
+    m.turn++
+    if m.turn == 1 {
+        return map[string]any{"tool_calls": []any{map[string]any{
+            "id": "c1", "type": "function",
+            "function": map[string]any{"name": "add", "arguments": `{"a":2,"b":3}`},
+        }}}
+    }
+    msgs := payload["messages"].([]any)
+    last := msgs[len(msgs)-1].(map[string]any)
+    return map[string]any{"content": fmt.Sprintf("The answer is %v.", last["content"])}
+}
+
+// http.RoundTripper is a real interface, so no socket is ever opened.
+type localRoundTripper struct{ model *LocalModel }
+
+func (rt *localRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+    var payload map[string]any
+    if req.Body != nil {
+        b, _ := io.ReadAll(req.Body)
+        _ = json.Unmarshal(b, &payload)
+    }
+    msg := rt.model.Generate(payload)
+    finish := "stop"
+    if _, ok := msg["tool_calls"]; ok {
+        finish = "tool_calls"
+    }
+    msg["role"] = "assistant"
+    body, _ := json.Marshal(map[string]any{
+        "choices": []any{map[string]any{"message": msg, "finish_reason": finish}},
+        "usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    })
+    return &http.Response{
+        StatusCode: 200,
+        Header:     http.Header{"Content-Type": []string{"application/json"}},
+        Body:       io.NopCloser(bytes.NewReader(body)),
+        Request:    req,
+    }, nil
+}
+
+client := toolnexus.CreateClient(toolnexus.ClientOptions{
+    BaseURL: "http://local.invalid", Style: toolnexus.StyleOpenAI,
+    Model: "local", APIKey: "unused",
+    HTTPClient: &http.Client{Transport: &localRoundTripper{model: &LocalModel{}}},
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+// The JDK's HttpClient has no interceptor, so the in-process route is to
+// subclass it. Only send() is ever called by toolnexus — the rest are inert.
+static final class LocalHttpClient extends HttpClient {
+    private final LocalModel model;
+    LocalHttpClient(LocalModel model) { this.model = model; }
+
+    @Override @SuppressWarnings("unchecked")
+    public <T> HttpResponse<T> send(HttpRequest req, HttpResponse.BodyHandler<T> handler) {
+        return (HttpResponse<T>) new LocalResponse(req, model.generate());
+    }
+
+    @Override public Optional<CookieHandler> cookieHandler() { return Optional.empty(); }
+    @Override public Optional<Duration> connectTimeout()     { return Optional.empty(); }
+    @Override public Redirect followRedirects()              { return Redirect.NEVER; }
+    @Override public Optional<ProxySelector> proxy()         { return Optional.empty(); }
+    @Override public SSLContext sslContext()       { throw new UnsupportedOperationException(); }
+    @Override public SSLParameters sslParameters() { throw new UnsupportedOperationException(); }
+    @Override public Optional<Authenticator> authenticator() { return Optional.empty(); }
+    @Override public Version version()                       { return Version.HTTP_1_1; }
+    @Override public Optional<Executor> executor()           { return Optional.empty(); }
+    @Override public <T> CompletableFuture<HttpResponse<T>> sendAsync(
+            HttpRequest r, HttpResponse.BodyHandler<T> h) {
+        return CompletableFuture.completedFuture(send(r, h));
+    }
+    @Override public <T> CompletableFuture<HttpResponse<T>> sendAsync(
+            HttpRequest r, HttpResponse.BodyHandler<T> h, HttpResponse.PushPromiseHandler<T> p) {
+        return sendAsync(r, h);
+    }
+}
+
+// A record is enough for the response side.
+record LocalResponse(HttpRequest req, String payload) implements HttpResponse<String> {
+    @Override public int statusCode()  { return 200; }
+    @Override public String body()     { return payload; }
+    @Override public HttpRequest request() { return req; }
+    @Override public HttpHeaders headers() {
+        return HttpHeaders.of(Map.of("content-type", List.of("application/json")), (a, b) -> true);
+    }
+    @Override public Optional<HttpResponse<String>> previousResponse() { return Optional.empty(); }
+    @Override public Optional<SSLSession> sslSession() { return Optional.empty(); }
+    @Override public URI uri()                  { return req.uri(); }
+    @Override public HttpClient.Version version() { return HttpClient.Version.HTTP_1_1; }
+}
+
+LlmClient client = LlmClient.create(new LlmClient.Options()
+        .baseUrl("http://local.invalid").style("openai").model("local").apiKey("unused")
+        .httpClient(new LocalHttpClient(new LocalModel())));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+// Whatever runs your weights — Microsoft.ML.OnnxRuntimeGenAI, LLamaSharp, …
+private sealed class LocalModel
+{
+    private int _turn;
+    public string Generate() =>
+        Interlocked.Increment(ref _turn) == 1
+            ? """{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"add","arguments":"{\"a\":2,\"b\":3}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"""
+            : """{"choices":[{"message":{"role":"assistant","content":"The answer is 5."},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}""";
+}
+
+// The whole seam: an HttpMessageHandler. No socket is opened.
+private sealed class LocalHandler : HttpMessageHandler
+{
+    private readonly LocalModel _model;
+    public LocalHandler(LocalModel model) => _model = model;
+
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var body = new StringContent(_model.Generate(), Encoding.UTF8, "application/json");
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = body });
+    }
+}
+
+var client = LlmClient.Create(new LlmClient.Options {
+    BaseUrl = "http://local.invalid", Style = "openai", Model = "local", ApiKey = "unused",
+    HttpHandler = new LocalHandler(new LocalModel()),   // ← the model IS the transport
+});
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+defmodule LocalModel do
+  def start, do: Agent.start_link(fn -> 0 end, name: __MODULE__)
+
+  def generate(payload) do
+    n = Agent.get_and_update(__MODULE__, &{&1, &1 + 1})
+
+    if n == 0 do
+      %{"tool_calls" => [%{"id" => "c1", "type" => "function",
+          "function" => %{"name" => "add", "arguments" => ~s({"a":2,"b":3})}}]}
+    else
+      last = payload["messages"] |> List.last()
+      %{"content" => "The answer is #{last["content"]}."}
+    end
+  end
+end
+
+# The whole seam: a one-arg function. `req.body` is an UN-MARSHALLED map and the
+# response body goes back as a map — no JSON round-trip for an in-process model.
+local_transport = fn req ->
+  msg = LocalModel.generate(req.body)
+  finish = if Map.has_key?(msg, "tool_calls"), do: "tool_calls", else: "stop"
+
+  {:ok,
+   %{status: 200,
+     headers: %{"content-type" => "application/json"},
+     body: %{
+       "choices" => [%{"message" => Map.put(msg, "role", "assistant"),
+                       "finish_reason" => finish}],
+       "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+     }}}
+end
+
+client =
+  Toolnexus.Client.create(
+    base_url: "http://local.invalid", style: "openai", model: "local",
+    api_key: "unused", transport: local_transport
+  )
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[koine.json :as json]
+         '[toolnexus.client :as client])
+
+(def turn (atom 0))
+
+(defn generate
+  "Whatever runs your weights. NOTE koine's `read-str` KEYWORDIZES, so the
+  request body arrives with keyword keys; `write-str` turns them back."
+  [payload]
+  (if (= 1 (swap! turn inc))
+    {:tool_calls [{:id "c1" :type "function"
+                   :function {:name "add" :arguments "{\"a\":2,\"b\":3}"}}]}
+    {:content (str "The answer is " (:content (last (:messages payload))) ".")}))
+
+(defn local-http-client
+  "The whole seam: (fn [url headers body] response). `body` arrives as a JSON
+  STRING and `:body` goes back as a JSON string — the same shape koine.http
+  returns, so retries and error classification work unchanged."
+  [_url _headers body]
+  (let [payload (json/read-str (if (string? body) body (json/write-str body)))
+        msg     (generate payload)
+        finish  (if (contains? msg :tool_calls) "tool_calls" "stop")]
+    {:status  200
+     :headers {"content-type" "application/json"}
+     :body    (json/write-str
+               {:choices [{:message (assoc msg :role "assistant")
+                           :finish_reason finish}]
+                :usage   {:prompt_tokens 1 :completion_tokens 1 :total_tokens 2}})}))
+
+;; NOT named `agent` — `clojure.core/agent` exists on both hosts.
+(def llm-client
+  (client/create-client
+   {:base-url "http://local.invalid" :style "openai" :model "local"
+    :api-key "unused"
+    :http-client local-http-client}))     ; ← the model IS the transport
+```
+</TabItem>
+</Tabs>
+
+## What crosses the seam, per port
+
+The seams are idiomatic per language, which means the **body shape differs** —
+this is the detail that costs people an afternoon, so it is spelled out:
+
+| Port | Seam | Request body you receive | Response body you return |
+|------|------|--------------------------|--------------------------|
+| JavaScript | `fetch` | `init.body` — a JSON **string** | a `Response` (JSON string) |
+| Python | `http_transport` (`post`/`open`) | a **dict** | a **dict** |
+| Go | `HTTPClient` (`http.RoundTripper`) | `req.Body` — **bytes** | `*http.Response` (bytes) |
+| Java | `httpClient` (subclass `HttpClient`) | `HttpRequest` — **bytes** | `HttpResponse<String>` |
+| C# | `HttpHandler` (`HttpMessageHandler`) | `HttpRequestMessage` — **bytes** | `HttpResponseMessage` |
+| Elixir | `transport` (1-arg fn) | `req.body` — an **un-marshalled map** | a **map** |
+| Clojure | `:http-client` (`(url headers body)`) | a JSON **string** | `{:status :headers :body}`, body a JSON string |
+
+Python and Elixir hand you the body already parsed, so an in-process model there
+pays **no serialization at all**. The other five hand you bytes, because that is
+what their HTTP client hands them.
+
+<Aside type="note" title="Streaming, honestly">
+The recipes above implement the non-streaming path, which is what a tool-calling
+loop uses. If you also want `runStream`, your seam must return an **incremental**
+body — a buffered one produces the same final text and the same delta count as a
+real stream, so a test asserting on content cannot tell them apart. Python's seam
+splits this explicitly (`post` vs `open`); the others distinguish it by
+`stream: true` in the request body.
+</Aside>
+
+## What this does *not* cover
+
+The seam is the **LLM path only**. MCP servers, the `http` tool, the `webfetch`
+builtin and outbound A2A calls construct their own clients, so an in-process
+transport does not make the whole library offline — it makes **model calls**
+offline. If your goal is a fully hermetic test, disable those sources rather than
+assuming this covers them.
+
+Related: [Bring your own HTTP client](/toolnexus/cookbook/bring-your-own-http-client/)
+for the proxy / mTLS / credentials version of the same seam.
