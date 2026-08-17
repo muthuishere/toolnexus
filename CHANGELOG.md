@@ -8,6 +8,50 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### Added — `createInProcessClient`: a model in your process, with no wire to configure (all ports)
+
+Running a model inside your own process was possible, and it made you lie three times: a `baseUrl`
+that is never dialled, an `apiKey` for an endpoint with no auth, and a `style` for a wire that does
+not exist. Two of those were already optional and were only ever noise in our own docs. `baseUrl`
+was genuinely required — and omitting it did not error, it crashed with
+`Cannot read properties of undefined (reading 'replace')`.
+
+The bigger tax was the envelope. The seam is HTTP-shaped, so a host that only wanted to answer a
+question had to **build an HTTP response first** — a `Response` in JS, an `*http.Response` in Go, an
+`HttpResponseMessage` in C#, and in Java a **94-line `HttpClient` subclass**. Every example in our
+own cookbook opened by defining the same `LocalModel.generate` wrapper to hide it. When every
+example needs the same adapter, the adapter belongs in the library.
+
+```js
+createInProcessClient({ model: "my-local", generate: (req) => ({ content: "…" }) })
+```
+
+`generate` returns **one assistant message** — `{content}` to finish, `{toolCalls}` to call tools —
+plus optional `usage`. The library derives `finish_reason`, builds the `choices` envelope, and
+encodes tool arguments unless they are already a string. Tool calls are **flat**
+(`{id, name, arguments}`): the nested `function:{}` wrapper is a wire detail, not something a model
+author should have to type.
+
+It is an ordinary client. MCP servers, agent skills, sub-agents, hooks, metrics, conversation memory
+and the completion gate all behave exactly as against a hosted model, because this is a second
+**constructor** built on the shipped transport — not a second seam. That transport is unchanged and
+remains the answer for proxy, mTLS, credential injection and record-replay.
+
+Shaped against the ecosystem rather than invented: Vercel's `LanguageModelV4`
+(`doGenerate → content/finishReason/usage`), Microsoft.Extensions.AI's `IChatClient` and Pydantic
+AI's `Model` all take messages in and a response out, and **none requires a base URL or key** — that
+is an SDK-level pattern, not a framework one. All three also ship a built-in fake model, treating
+this case as first-class.
+
+**Streaming is refused, not faked.** A `generate` returns a whole answer, and a single-chunk stream
+is indistinguishable from a real one by content or delta count, so the streaming path raises with a
+message naming the limitation. The exception is clojure, which has no streaming entry point at all,
+so there is nothing there to refuse — stated rather than papered over.
+
+`docs/adr/0019` rejected a semantic callback as a **replacement** for the transport seam; layering
+one on top is a different claim, and the ADR is amended rather than quietly contradicted. Tracked in
+`openspec/changes/add-in-process-client`.
+
 ## 0.15.0 — 2026-08-17
 
 ### Added — a harness, a loop, and a completion gate that survives delegation (all ports)

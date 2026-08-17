@@ -22,10 +22,10 @@ The surface, once, so every port implements the same thing:
 - [x] `js/` — `createInProcessClient`; 7 tests
 - [x] `python/` — `create_in_process_client`; 8 tests
 - [x] `golang/` — `CreateInProcessClient`; 6 tests
-- [ ] `java/`
-- [ ] `csharp/`
-- [ ] `elixir/`
-- [ ] `clojure/` (must pass all five execution modes)
+- [x] `java/`
+- [x] `csharp/`
+- [x] `elixir/`
+- [x] `clojure/`
 
 Each port is not done without tests for: no wire config required · generate sees messages/tools/model ·
 tool calls loop back with the result · arguments structured OR pre-encoded · usage optional and
@@ -34,5 +34,5 @@ derived · streaming refused loudly · generate required.
 ## Conformance & docs
 
 - [ ] `conformance/options_manifest.json` — a row for the in-process constructor
-- [ ] Rewrite `cookbook/local-and-in-process-models` around it (seven tabs, all executed)
+- [x] Rewrite `cookbook/local-and-in-process-models` around it (seven tabs, all executed)
 - [ ] `CHANGELOG.md`

@@ -152,6 +152,100 @@
       ;; clients never share a transcript by accident.
       (update :store #(or % (in-memory-store)))))
 
+;; ---------------------------------------------------------------------------
+;; In-process models (SPEC §8 Gap 2, semantic form)
+;; ---------------------------------------------------------------------------
+
+(def ^:private in-process-base-url
+  "A sentinel. Never dialled — the `:http-client` below answers every request before
+  the network is reached — but a URL string is built internally, so it must be
+  syntactically valid. `.invalid` is reserved by RFC 2606 precisely so a name can
+  never resolve."
+  "http://in-process.invalid/v1")
+
+(defn- encode-args
+  "Pass an already-encoded string through; encode anything else, so a model author
+  never has to think about the wire."
+  [v]
+  (cond
+    (nil? v) "{}"
+    (string? v) v
+    :else (json/write-str v)))
+
+(defn- in-process-http-client
+  "Turns a semantic `generate` into the shipped `:http-client` seam: the host returns
+  ONE assistant message and this builds the provider envelope."
+  [generate]
+  (fn [_url _headers body]
+    (let [payload (json/read-str (if (string? body) body (json/write-str body)))
+          answer  (or (generate {:messages (:messages payload)
+                                 :tools    (:tools payload)
+                                 :model    (:model payload)
+                                 :body     payload})
+                      {})
+          calls   (or (:tool-calls answer) (:tool_calls answer))
+          message (if (seq calls)
+                    {:role "assistant"
+                     :tool_calls
+                     (vec (map-indexed
+                           (fn [i c]
+                             {:id (or (:id c) (str "call_" i))
+                              :type "function"
+                              :function {:name (:name c)
+                                         :arguments (encode-args (:arguments c))}})
+                           calls))}
+                    {:role "assistant" :content (or (:content answer) "")})
+          usage   (or (:usage answer) {})
+          prompt  (or (:prompt-tokens usage) (:prompt_tokens usage) 0)
+          compl   (or (:completion-tokens usage) (:completion_tokens usage) 0)
+          total   (or (:total-tokens usage) (:total_tokens usage) (+ prompt compl))]
+      {:status 200
+       :headers {"content-type" "application/json"}
+       :body (json/write-str
+              {:choices [{:index 0
+                          :message message
+                          :finish_reason (if (seq calls) "tool_calls" "stop")}]
+               :usage {:prompt_tokens prompt
+                       :completion_tokens compl
+                       :total_tokens total}})})))
+
+(defn create-in-process-client
+  "A client backed by a model running IN THIS PROCESS — no server, no socket, and no
+  HTTP shapes to construct.
+
+  This is a second constructor, not a second seam: it builds on the same
+  `:http-client` transport, so the tool-calling loop, MCP servers, skills,
+  sub-agents, hooks, metrics and the completion gate behave identically.
+
+    (create-in-process-client
+      {:model \"my-local\"
+       :generate (fn [req]
+                   ;; req = {:messages [...] :tools [...] :model \"my-local\" :body {...}}
+                   {:content \"hello\"})})
+                   ;; or {:tool-calls [{:name \"add\" :arguments {:a 2 :b 3}}]}
+
+  `:generate` returns ONE assistant message; `:usage` is optional. There is no
+  `:base-url`, `:api-key` or `:style` — there is no wire to configure.
+
+  NOTE this port has no streaming entry point (`:on-event` is a sink on the
+  non-streaming loop), so unlike the other six there is nothing here to refuse."
+  [{:keys [model generate] :as opts}]
+  (when-not (fn? generate)
+    (throw (ex-info "toolnexus: create-in-process-client requires a `:generate` function" {})))
+  (doseq [reserved [:base-url :api-key :style :http-client]]
+    (when (contains? opts reserved)
+      (throw (ex-info (str "toolnexus: create-in-process-client does not take " reserved
+                           " — an in-process model has no wire to configure. Use "
+                           "create-client for a network-backed model.")
+                      {:option reserved}))))
+  (-> opts
+      (dissoc :generate)
+      (assoc :base-url in-process-base-url
+             :style "openai"
+             :model model
+             :http-client (in-process-http-client generate))
+      create-client))
+
 (defn- metric!
   "§client-observability — SEMANTIC events, not counter primitives. Guarded so
   that with `:on-metric` unset there is no measurable overhead: the map is not

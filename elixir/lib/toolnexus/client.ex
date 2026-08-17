@@ -590,6 +590,141 @@ defmodule Toolnexus.Client do
     )
   end
 
+  # --------------------------------------------------------------------------
+  # In-process models (SPEC §8 Gap 2, semantic form).
+  # --------------------------------------------------------------------------
+
+  # A sentinel. Never dialled — the transport answers every request before the
+  # network is reached — but a URL string is built internally, so it must be
+  # syntactically valid. `.invalid` is reserved by RFC 2606 precisely so a name can
+  # never resolve.
+  @in_process_base_url "http://in-process.invalid/v1"
+
+  @doc """
+  A client backed by a model running IN THIS PROCESS — no server, no socket, and no
+  HTTP shapes to construct.
+
+  This is a second constructor, not a second seam: it builds on the same injectable
+  `:transport`, so the tool-calling loop, MCP servers, skills, sub-agents, hooks,
+  metrics and the completion gate behave identically.
+
+      Toolnexus.Client.create_in_process(
+        model: "my-local",
+        generate: fn req ->
+          # req = %{messages: [...], tools: [...], model: "my-local", body: %{...}}
+          %{content: "hello"}
+          # or: %{tool_calls: [%{name: "add", arguments: %{"a" => 2, "b" => 3}}]}
+        end
+      )
+
+  `generate` returns ONE assistant message. `:usage` is optional. There is no
+  `:base_url`, `:api_key` or `:style` — there is no wire to configure.
+
+  Streaming raises: a `generate` returns a whole answer, and a single-chunk stream is
+  indistinguishable from a real one by content or delta count.
+  """
+  @spec create_in_process(keyword() | map()) :: t()
+  def create_in_process(opts) do
+    opts = if is_map(opts), do: Map.to_list(opts), else: opts
+    generate = Keyword.get(opts, :generate)
+
+    unless is_function(generate, 1) do
+      raise ArgumentError, "toolnexus: create_in_process requires a `:generate` function of arity 1"
+    end
+
+    for reserved <- [:base_url, :api_key, :style, :transport] do
+      if Keyword.has_key?(opts, reserved) do
+        raise ArgumentError,
+              "toolnexus: create_in_process does not take `#{inspect(reserved)}` — an in-process " <>
+                "model has no wire to configure. Use create/1 for a network-backed model."
+      end
+    end
+
+    opts
+    |> Keyword.drop([:generate])
+    |> Keyword.merge(
+      base_url: @in_process_base_url,
+      style: "openai",
+      transport: in_process_transport(generate)
+    )
+    |> create()
+  end
+
+  defp in_process_transport(generate) do
+    fn req ->
+      body = req.body || %{}
+
+      if body["stream"] do
+        raise ArgumentError,
+              "toolnexus: create_in_process does not support streaming — `generate` returns a " <>
+                "complete answer. Use run/4, or supply a `:transport` that streams."
+      end
+
+      answer =
+        generate.(%{
+          messages: body["messages"] || [],
+          tools: body["tools"],
+          model: body["model"],
+          body: body
+        }) || %{}
+
+      tool_calls = Map.get(answer, :tool_calls) || Map.get(answer, "tool_calls")
+
+      message =
+        if tool_calls && tool_calls != [] do
+          %{
+            "role" => "assistant",
+            "tool_calls" =>
+              tool_calls
+              |> Enum.with_index()
+              |> Enum.map(fn {c, i} ->
+                %{
+                  "id" => Map.get(c, :id) || Map.get(c, "id") || "call_#{i}",
+                  "type" => "function",
+                  "function" => %{
+                    "name" => Map.get(c, :name) || Map.get(c, "name"),
+                    "arguments" => encode_args(Map.get(c, :arguments) || Map.get(c, "arguments"))
+                  }
+                }
+              end)
+          }
+        else
+          %{"role" => "assistant", "content" => Map.get(answer, :content) || Map.get(answer, "content") || ""}
+        end
+
+      usage = Map.get(answer, :usage) || %{}
+      prompt = Map.get(usage, :prompt_tokens) || Map.get(usage, "prompt_tokens") || 0
+      completion = Map.get(usage, :completion_tokens) || Map.get(usage, "completion_tokens") || 0
+      total = Map.get(usage, :total_tokens) || Map.get(usage, "total_tokens") || prompt + completion
+
+      {:ok,
+       %{
+         status: 200,
+         headers: %{"content-type" => "application/json"},
+         body: %{
+           "choices" => [
+             %{
+               "index" => 0,
+               "message" => message,
+               "finish_reason" => if(Map.has_key?(message, "tool_calls"), do: "tool_calls", else: "stop")
+             }
+           ],
+           "usage" => %{
+             "prompt_tokens" => prompt,
+             "completion_tokens" => completion,
+             "total_tokens" => total
+           }
+         }
+       }}
+    end
+  end
+
+  # Pass an already-encoded string through; encode anything else, so a model author
+  # never has to think about the wire.
+  defp encode_args(nil), do: "{}"
+  defp encode_args(v) when is_binary(v), do: v
+  defp encode_args(v), do: Jason.encode!(v)
+
   # ---- toolkit protocol: a plain list of tools, or anything with :tools / :prompt ----
 
   defp tools_of(tools) when is_list(tools), do: tools
