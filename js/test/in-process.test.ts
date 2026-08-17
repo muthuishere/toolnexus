@@ -121,6 +121,23 @@ test("failures are NOT retried — there is no wire to have a transient failure"
   await tk.close()
 })
 
+test("works with NO api key anywhere — not even in the environment", async () => {
+  // The bug this pins: the client resolves a key from env and fails when it finds
+  // none, so an in-process client still demanded one. Every local run passed because
+  // a developer shell has OPENROUTER_API_KEY set; CI, which has none, failed all
+  // seven ports. The env is stripped here so the test cannot be masked the same way.
+  const saved = { ...process.env }
+  for (const k of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]) delete process.env[k]
+  try {
+    const tk = await createToolkit({ builtins: false })
+    const client = createInProcessClient({ model: "m", generate: () => ({ content: "no key needed" }) })
+    assert.equal((await client.run("hi", { toolkit: tk })).text, "no key needed")
+    await tk.close()
+  } finally {
+    Object.assign(process.env, saved)
+  }
+})
+
 test("generate is required", () => {
   assert.throws(() => createInProcessClient({ model: "m" } as any), /requires a `generate` function/)
 })

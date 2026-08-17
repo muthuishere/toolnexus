@@ -245,6 +245,8 @@
       (dissoc :generate)
       (assoc :base-url in-process-base-url
              :style "openai"
+             ;; An in-process model has no endpoint to authenticate to, so the host must never need a key — but the client resolves one from the environment and fails when it finds none. A sentinel keeps that resolution from ever running. Caught by CI, which has no OPENROUTER_API_KEY; every local run passed because a developer shell has one.
+             :api-key "in-process"
              :model model
              :http-client (in-process-http-client generate))
       create-client))
