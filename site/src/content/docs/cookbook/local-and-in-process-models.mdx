@@ -368,13 +368,59 @@ splits this explicitly (`post` vs `open`); the others distinguish it by
 `stream: true` in the request body.
 </Aside>
 
-## What this does *not* cover
+## What you do **not** have to change
 
-The seam is the **LLM path only**. MCP servers, the `http` tool, the `webfetch`
-builtin and outbound A2A calls construct their own clients, so an in-process
-transport does not make the whole library offline — it makes **model calls**
-offline. If your goal is a fully hermetic test, disable those sources rather than
-assuming this covers them.
+This is the part worth being explicit about: **you swap one option, and nothing
+else in your setup moves.**
+
+The seam is scoped to the LLM path on purpose. Your MCP servers, agent skills,
+native and HTTP tools, built-ins and outbound A2A agents keep using their own
+clients and keep working **exactly as they did against a hosted model** — you do
+not re-register them, re-wire them, or run them in a special mode:
+
+```ts
+// The ONLY line that changes when you move from GPT-4o to a model in your process.
+const client = createClient({
+  baseUrl: "http://local.invalid", style: "openai", model: "local", apiKey: "unused",
+  fetch: localFetch(new LocalModel()),   // ← this line, and nothing else
+})
+
+// Untouched. Still real MCP servers over stdio and HTTP, still real skills.
+const toolkit = await createToolkit({
+  mcpConfig: "./mcp.json",
+  skillsDir: "./skills",
+})
+```
+
+That separation is deliberate, and it is what makes a local model *useful* rather
+than merely isolated. A model running in your process still needs to read files,
+query GitHub, call your REST API and hand work to another agent — so the MCP
+servers and HTTP tools **should** open their real connections. A seam that
+silenced them along with the model would have turned a working agent into a
+sandbox.
+
+Run against the shared `examples/mcp.json` fixture, that is exactly what you get
+— a socket-free model calling a real stdio MCP server it knows nothing about:
+
+```
+mcp status : {"example-remote":"disabled","everything":"connected"}
+tools      : 24 | has everything_echo: true | has skill: true
+text       : MCP replied: Echo: hello from a local model
+toolCalls  : [ [ 'everything_echo', 'Echo: hello from a local model' ] ]
+```
+
+The MCP server was spawned, connected and called normally. The model never
+opened a connection. Neither half knows about the other, which is the whole
+design.
+
+<Aside type="note" title="So it is not an 'offline mode' switch">
+One consequence to be precise about: because tool sources keep their own clients,
+an in-process model makes **model calls** socket-free, not the whole process. If
+what you actually want is a fully hermetic test, that is a different job — reach
+for the toolkit's own controls (`builtins: false`, `disableTools`, an empty
+`mcp.json`) and choose which sources exist, rather than expecting the model seam
+to mute them.
+</Aside>
 
 Related: [Bring your own HTTP client](/toolnexus/cookbook/bring-your-own-http-client/)
 for the proxy / mTLS / credentials version of the same seam.
