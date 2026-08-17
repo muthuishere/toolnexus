@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.15.0 — 2026-08-17
+
 ### Added — a harness, a loop, and a completion gate that survives delegation (all ports)
 
 An agent framework has two things you must be able to name: **the harness** (everything the agent

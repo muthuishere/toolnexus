@@ -1,0 +1,41 @@
+{
+  "name": "toolnexus",
+  "modules": [
+    {
+      "path": "benchmarks/resilience/run_go"
+    },
+    {
+      "path": "benchmarks/run_eino"
+    },
+    {
+      "path": "benchmarks/run_langchain4j"
+    },
+    {
+      "path": "benchmarks/run_langchaingo"
+    },
+    {
+      "path": "benchmarks/run_springai"
+    },
+    {
+      "path": "benchmarks/run_toolnexus_go"
+    },
+    {
+      "path": "benchmarks/run_toolnexus_java"
+    },
+    {
+      "path": "golang"
+    },
+    {
+      "path": "java"
+    },
+    {
+      "path": "js"
+    },
+    {
+      "path": "python"
+    },
+    {
+      "path": "site"
+    }
+  ]
+}

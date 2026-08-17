@@ -32,9 +32,9 @@ npm i toolnexus                                   # JS / TypeScript
 pip install toolnexus                             # Python
 go get github.com/muthuishere/toolnexus/golang    # Go
 dotnet add package Toolnexus                       # C#
-{:toolnexus, "~> 0.14"}                             # Elixir (mix.exs deps)
-# Java (Maven): io.github.muthuishere:toolnexus:0.14.0
-# Clojure (deps.edn): net.clojars.muthuishere/toolnexus {:mvn/version "0.14.0"} — JVM and cljgo
+{:toolnexus, "~> 0.15"}                             # Elixir (mix.exs deps)
+# Java (Maven): io.github.muthuishere:toolnexus:0.15.0
+# Clojure (deps.edn): net.clojars.muthuishere/toolnexus {:mvn/version "0.15.0"} — JVM and cljgo
 ```
 
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
