@@ -8,6 +8,52 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### Added — a harness, a loop, and a completion gate that survives delegation (all ports)
+
+An agent framework has two things you must be able to name: **the harness** (everything the agent
+*may* do — tools, identity, team, ceilings, policy) and **the loop** (a live execution of it).
+toolnexus already shipped both and named neither, so every user invented their own vocabulary.
+`harness()` now puts the word in the API without adding a type — a spec built through it and one
+written inline are indistinguishable, so there is nothing to migrate. `loop()` opens a live
+execution that reports `status`, `turns` and an `Outcome` whose stop reason is **always named**.
+
+The loop deliberately takes **no configuration**: capability belongs to the harness, per-call
+choices to the run options, and the loop only reports what happened. That is why `model` sits on
+the run options — one conversation may change model between turns.
+
+**The part that is genuinely new is the gate.** An agent could report `done` while its own declared
+plan was still unfinished. You could bolt a retry loop on the outside, but a host-side loop
+**cannot follow a delegation** — when agent A hands work to B via `task`, B runs to completion
+inside the runtime and A's caller never sees it. Putting `completion = {verify, maxAttempts}` on
+the harness is what makes the check travel with the agent. A built-in verifier, `allTodosDone`,
+reads the shipped `todowrite` builtin and requires every declared item to be checked; it is
+structural, never learns what a todo *means*, and passes when no plan was declared.
+
+Six rules, each found by prototyping rather than design, and each tested in all seven ports:
+
+- it judges **accumulated** work, or an agent escapes by not re-declaring its plan on the retry
+- a non-`done` run is never re-judged, so the gate cannot turn a `pending` into an `incomplete`
+- `maxAttempts` is **required** — an unbounded verify loop is a DoS on your own bill
+- a failed gate stops **loudly**: `incomplete` plus a structured `limit: "completion"`
+- when another limit fires mid-verification, the caller learns **both** reasons
+- it reaches delegated children, because it is compiled in at the registry boundary
+
+**Guardrails** ship alongside: policy-only checks on tool calls composed into one `beforeTool` with
+**first-deny-wins**, so a later guardrail can never widen an earlier denial.
+
+**Absent ⇒ byte-identical.** No guardrails and no completion is the existing path, unchanged. No new
+status strings were minted — `SPEC.md` pins `TaskStatus` across ports, so the gate reuses
+`incomplete` and distinguishes itself via `limit`.
+
+### Fixed — `todowrite` did not return its `{todos}` metadata (clojure)
+
+Six ports attach the todo list as result metadata; clojure returned only the rendered text. Nothing
+had ever read the plan back, so nothing caught it — until the completion gate, which uses exactly
+that metadata to see which items are still open. In clojure the gate therefore passed an unfinished
+plan silently. Fixed, with the parity note recorded in the builtin itself.
+
+Tracked in `openspec/changes/add-harness-and-loop`.
+
 ### Fixed — `Retry-After` meant seven different things in seven ports (all ports)
 
 `SPEC.md` says the LLM request retries "honoring `Retry-After`". Every port implemented that
