@@ -23,7 +23,7 @@ The surface, once, so every port implements the same thing:
 - [x] `golang/` — prototype: `agents/loop.go`, `agents/agent.go`, `agents/runtime.go`; 8 unit tests + 4 live-model scenarios
 - [x] `js/` — `agents/loop.ts`; 13 tests (registered in `package.json`, which lists test files explicitly)
 - [x] `python/` — `agents/loop.py`; 13 tests
-- [ ] `java/`
+- [x] `java/` — root-package `Loop.java`; 11 tests
 - [x] `csharp/` — `Agents/Loop.cs`; 11 tests
 - [ ] `elixir/`
 - [ ] `clojure/` (must pass all five execution modes)

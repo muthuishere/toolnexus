@@ -43,6 +43,10 @@ public final class AgentDef {
      * {@link RuntimeOptions#onMetric} for this agent. Resolves INDEPENDENTLY of {@link #hooks}. */
     public Consumer<io.github.muthuishere.toolnexus.LlmClient.MetricEvent> onMetric;
 
+    /** §7D completion gate, projected from the agent spec. Present ⇒ this agent's turns run
+     * through the gate even when it is a DELEGATED child. */
+    public io.github.muthuishere.toolnexus.Loop.Completion completion;
+
     public AgentDef(String name, String does, String soul, String model) {
         this.name = name;
         this.does = does;
