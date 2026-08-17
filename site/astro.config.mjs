@@ -54,6 +54,7 @@ export default defineConfig({
 										{ label: 'A support agent', slug: 'scenarios/support-agent' },
 										{ label: 'A self-improving agent', slug: 'scenarios/self-improving-agent' },
 										{ label: 'A verify-before-commit gate', slug: 'scenarios/verify-gate' },
+										{ label: 'Proved on live models', slug: 'scenarios/harness-live' },
 									],
 								},
 								{

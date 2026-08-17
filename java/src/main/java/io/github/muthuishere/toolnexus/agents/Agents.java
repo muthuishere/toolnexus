@@ -71,6 +71,15 @@ public final class Agents {
         /** §8 observability sink for this agent; REPLACES the runtime-wide {@code onMetric}.
          * Resolves independently of {@link #hooks}. */
         public Consumer<io.github.muthuishere.toolnexus.LlmClient.MetricEvent> onMetric;
+        /** POLICY checks on tool calls — "may it?", never "is it right?". Compiled into one
+         * {@code beforeTool} with FIRST-DENY-WINS: a later guardrail can never widen an earlier
+         * denial. Composed with {@code hooks.beforeTool}, which runs only if every guardrail
+         * allows. Empty ⇒ byte-identical. */
+        public java.util.List<io.github.muthuishere.toolnexus.Loop.Guardrail> guardrails;
+        /** When set, the gate that stops this agent claiming {@code done} before its work
+         * verifies. It travels WITH the agent, so a caller that delegates via {@code task}
+         * inherits it — which a host-side retry loop cannot do. Null ⇒ byte-identical. */
+        public io.github.muthuishere.toolnexus.Loop.Completion completion;
         /** §7E persona surface: {@code false} omits the file-backed {@code memory} builtin that
          * {@link #agentFromDir} otherwise wires (read-only personas). {@code null} ⇒ enabled. */
         public Boolean memory;
@@ -89,6 +98,12 @@ public final class Agents {
         public AgentSpec hooks(io.github.muthuishere.toolnexus.LlmClient.Hooks v) { this.hooks = v; return this; }
         public AgentSpec onMetric(Consumer<io.github.muthuishere.toolnexus.LlmClient.MetricEvent> v) { this.onMetric = v; return this; }
         public AgentSpec memory(boolean v) { this.memory = v; return this; }
+        public AgentSpec guardrails(io.github.muthuishere.toolnexus.Loop.Guardrail... v) {
+            this.guardrails = java.util.List.of(v); return this;
+        }
+        public AgentSpec completion(io.github.muthuishere.toolnexus.Loop.Completion v) {
+            this.completion = v; return this;
+        }
     }
 
     /** The one new noun. */
@@ -103,6 +118,18 @@ public final class Agents {
         Agent(String name, AgentSpec spec) {
             this.name = name;
             this.spec = spec;
+        }
+
+        /**
+         * Open a LIVE EXECUTION of this agent. Takes client OPTIONS rather than a built client,
+         * because a per-call {@code model} override must be able to change the model — which is
+         * fixed when a client is constructed.
+         */
+        public io.github.muthuishere.toolnexus.Loop loop(
+                io.github.muthuishere.toolnexus.LlmClient.Options options,
+                io.github.muthuishere.toolnexus.Toolkit toolkit) {
+            return new io.github.muthuishere.toolnexus.Loop(
+                    options, toolkit, spec.soul, spec.guardrails, spec.hooks, spec.completion);
         }
 
         /** Collect this agent + its whole team graph into a runtime registry (transitive closure
@@ -123,8 +150,11 @@ public final class Agents {
             def.waitFor = spec.waitFor;
             def.onSpawn = spec.onSpawn;
             def.onClose = spec.onClose;
-            def.hooks = spec.hooks;
+            // Guardrails are compiled HERE, at the registry boundary, so a delegated child is
+            // governed by them too — not only a directly-driven one.
+            def.hooks = io.github.muthuishere.toolnexus.Loop.guardedHooks(spec.guardrails, spec.hooks);
             def.onMetric = spec.onMetric;
+            def.completion = spec.completion;
             // Team scoping: task targets = ONLY this agent's team (empty = no delegation at all —
             // recursion is opt-in, never default).
             List<String> targets = new ArrayList<>();

@@ -130,6 +130,11 @@ type Def struct {
 	// Tools is the scoped toolkit VIEW for this agent — scoping is the security
 	// model. Builtins are never added implicitly.
 	Tools []tn.Tool
+	// Completion, when set, gates this agent's `done`: the loop re-runs with the
+	// failure reason until Verify passes or MaxAttempts is spent. It lives on the
+	// Def so it TRAVELS WITH THE AGENT — a parent delegating via `task` inherits
+	// it, which a host-side retry loop cannot do.
+	Completion *Completion
 	// Team lists this agent's task-tool targets. Delegation is opt-in: an agent
 	// with an empty Team gets NO task tool (recursion is never the default).
 	Team []string
@@ -1149,7 +1154,7 @@ func (rt *Runtime) execute(runCtx context.Context, h *Handle, def Def, input str
 			OnMetric:     onMetric,
 		})
 		history, _ := rt.store.Get(h.ID)
-		r, err = client.RunWithHistory(runCtx, input, toolkit, history)
+		r, err = runGated(runCtx, client, input, toolkit, history, def.Completion)
 	}
 
 	if err != nil {
@@ -1205,7 +1210,14 @@ func (rt *Runtime) execute(runCtx context.Context, h *Handle, def Def, input str
 		h.drained = nil
 		_ = rt.store.Save(h.ID, r.Messages)
 		rt.t(fmt.Sprintf("%s: running→idle (INCOMPLETE at maxTurns %d)", h.ID, maxTurns))
-		return TaskResult{Text: "hit maxTurns without a final answer", IsError: true, Status: "incomplete", Turns: r.Turns, TotalTokens: r.Usage.TotalTokens}
+		// WHICH limit stopped the run is structured (RunResult.Limit), so the
+		// caller is never told the wrong reason. A completion-gate stop carries
+		// its own message; only a turn-cap stop gets the maxTurns wording.
+		msg := "hit maxTurns without a final answer"
+		if r.Limit == "completion" {
+			msg = r.Text
+		}
+		return TaskResult{Text: msg, IsError: true, Status: "incomplete", Turns: r.Turns, TotalTokens: r.Usage.TotalTokens}
 	default:
 		if h.state != StateClosed {
 			h.state = StateIdle

@@ -560,7 +560,10 @@ public final class AgentRuntime {
                 // and a re-invoked `task` REATTACHES (idempotency by reattachment, not transcript
                 // inspection — SPEC §7D "Suspension escalation & durable resume").
                 List<Object> checkpoint = store.get(h.id);
-                LlmClient.RunResult r = client.ask(input, toolkit, h.id, cancel);
+                // The gate runs HERE, inside the runtime turn, which is what makes it reach a
+                // delegated child: `task` executes the child through this same path.
+                LlmClient.RunResult r = io.github.muthuishere.toolnexus.Loop.runGated(
+                        text -> client.ask(text, toolkit, h.id, cancel), input, h.def.completion);
                 synchronized (lock) {
                     h.turnsTotal += r.turns;
                     rollupLocked(h, r.usage.totalTokens, r.toolCallCount);

@@ -60,8 +60,41 @@ jobs:
           [ "$CLJ" = "$VERSION" ] || { echo "::error::clojure/build.clj is $CLJ, expected $VERSION"; fail=1; }
           exit $fail
 
-  npm:
+  live-scenarios:
+    # Live harness proof against a REAL model, golang only. The other six ports
+    # prove parity hermetically; this proves the mechanisms actually work against
+    # a provider before we publish. Gates every registry leg below.
     needs: preflight
+    runs-on: ubuntu-latest
+    environment: prod          # OPENROUTER_API_KEY lives in this environment's secrets
+    permissions: { contents: read }
+    defaults: { run: { working-directory: golang } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.23" }
+      # The live tests SKIP when the key is absent, which is right for a laptop and
+      # wrong for this gate: a skipped proof would report green and prove nothing,
+      # so the gate would be theatre. Fail loudly instead, before any leg publishes.
+      - name: Require the key (a skipped live proof is not a proof)
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::error::OPENROUTER_API_KEY is not set in the 'prod' environment. The live"
+            echo "::error::scenarios would SKIP and this job would go green having verified"
+            echo "::error::nothing. Add the secret to the prod environment, then re-run."
+            exit 1
+          fi
+      - name: Live harness scenarios (guardrail, completion gate, bounded stop, delegation)
+        # -count=1 so a cached PASS can never stand in for a real provider call.
+        run: go test -tags live -run TestLive -v -count=1 ./...
+        env:
+          # Use-only: read by the test at the point of use, never logged.
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+
+  npm:
+    needs: [preflight, live-scenarios]
     if: ${{ vars.ENABLE_NPM == 'true' }}
     runs-on: ubuntu-latest
     environment: prod          # the npm Trusted Publisher is scoped to this environment
@@ -82,7 +115,7 @@ jobs:
         # No NODE_AUTH_TOKEN: npm uses the OIDC token via the configured Trusted Publisher.
 
   pypi:
-    needs: preflight
+    needs: [preflight, live-scenarios]
     if: ${{ vars.ENABLE_PYPI == 'true' }}
     runs-on: ubuntu-latest
     environment: prod
@@ -100,7 +133,7 @@ jobs:
         # OIDC trusted publishing — no API token.
 
   go-tag:
-    needs: preflight
+    needs: [preflight, live-scenarios]
     if: ${{ vars.ENABLE_GO == 'true' }}
     runs-on: ubuntu-latest
     environment: prod
@@ -120,7 +153,7 @@ jobs:
           fi
 
   nuget:
-    needs: preflight
+    needs: [preflight, live-scenarios]
     if: ${{ vars.ENABLE_NUGET == 'true' }}
     runs-on: ubuntu-latest
     environment: prod          # the NuGet Trusted Publishing policy is scoped to this environment
@@ -146,7 +179,7 @@ jobs:
         # No stored key: the API key is minted via the Trusted Publishing policy + OIDC.
 
   maven:
-    needs: preflight
+    needs: [preflight, live-scenarios]
     if: ${{ vars.ENABLE_JAVA == 'true' }}
     runs-on: ubuntu-latest
     environment: prod          # Central Portal token + GPG key live in this environment's secrets
@@ -166,7 +199,7 @@ jobs:
       - run: ./gradlew publishAndReleaseToMavenCentral --no-daemon --no-configuration-cache
 
   hex:
-    needs: preflight
+    needs: [preflight, live-scenarios]
     if: ${{ vars.ENABLE_ELIXIR == 'true' }}
     runs-on: ubuntu-latest
     environment: prod          # HEX_API_KEY lives in this environment's secrets (Hex has no OIDC)
@@ -185,7 +218,7 @@ jobs:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
 
   clojars:
-    needs: preflight
+    needs: [preflight, live-scenarios]
     if: ${{ vars.ENABLE_CLOJARS == 'true' }}
     runs-on: ubuntu-latest
     environment: prod          # CLOJARS_* live in this environment's secrets (Clojars has no OIDC)

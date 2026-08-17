@@ -53,6 +53,7 @@
             [koine.http :as khttp]
             [koine.process :as proc]
             [koine.time :as ktime]
+            [toolnexus.agents.loop :as tnloop]
             [toolnexus.client :as client]
             [toolnexus.native :as native]
             [toolnexus.tool :as tool]))
@@ -376,7 +377,13 @@
   An AgentDef is a map:
 
     {:name :does :soul :model :tools :team :budget
-     :wait-for :on-spawn :on-close :hooks :on-metric}
+     :wait-for :on-spawn :on-close :hooks :on-metric
+     :guardrails :completion}
+
+  `:guardrails` are POLICY checks on tool calls — `may it?`, never `is it right?` —
+  compiled into one `:before-tool` with FIRST-DENY-WINS. `:completion` is the gate
+  that stops this agent claiming `done` before its work verifies; it travels WITH
+  the def, so `task` delegation inherits it. Both absent ⇒ byte-identical.
 
   `:on-spawn` is `(fn [runtime handle-id])`, `:on-close` is
   `(fn [runtime handle-id reason])` and `:wait-for` is `(fn [request] answer)`.
@@ -756,7 +763,9 @@
       :http-client   (gated-http-client rt (:cancel h))
       :store         (:store rt)
       :wait-for      (or one-shot-wait-for (wrap-wait-for rt id d))
-      :hooks         (or (:hooks d) (:hooks opts))
+      ;; Guardrails compile into the hook HERE, where the runtime builds the client,
+      ;; so a DELEGATED child is governed by them too — not only a directly-driven one.
+      :hooks         (tnloop/guarded-hooks (:guardrails d) (or (:hooks d) (:hooks opts)))
       :on-metric     (or (:on-metric d) (:on-metric opts))})))
 
 (defn- finish-turn!
@@ -795,7 +804,14 @@
         (try
           (let [c  (build-client rt id h one-shot-wait-for)
                 tk (toolkit-for rt id (:def h))
-                r  (client/run c input {:toolkit tk :conversation-id id})]
+                ;; The gate runs HERE, inside the runtime turn, which is what makes it
+                ;; reach a delegated child: `task` executes the child through this path.
+                [r _] (tnloop/run-gated
+                       (fn [text st]
+                         [(client/run c text {:toolkit tk :conversation-id id}) st])
+                       input
+                       (:completion (:def h))
+                       nil)]
             {:run r})
           (catch Throwable e {:err e}))]
     (if-let [r (:run outcome)]

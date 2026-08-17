@@ -87,8 +87,13 @@ defmodule Toolnexus.Agents do
           on_spawn: spec[:on_spawn],
           on_close: spec[:on_close],
           # §8 seams for THIS agent; set ⇒ replaces the runtime-wide value (never merged)
-          hooks: spec[:hooks],
+          # Guardrails are compiled HERE, at the registry boundary, so a delegated child
+          # is governed by them too — not only a directly-driven one.
+          hooks: Toolnexus.Agents.Loop.guarded_hooks(spec[:guardrails], spec[:hooks]),
           on_metric: spec[:on_metric],
+          # The §7D completion gate travels WITH the agent, so `task` delegation
+          # inherits it — which a host-side retry loop cannot do.
+          completion: spec[:completion],
           # task targets = ONLY this agent's team, sorted (never the whole registry)
           task_targets: team |> Enum.map(& &1.name) |> Enum.sort()
         })
@@ -96,6 +101,15 @@ defmodule Toolnexus.Agents do
       Enum.reduce(team, acc, fn t, acc -> registry(t, acc) end)
     end
   end
+
+  @doc """
+  Open a LIVE EXECUTION of this agent over client OPTIONS (not a built client),
+  because a per-call `:model` override must be able to change the model — which is
+  fixed when a client is constructed.
+  """
+  @spec loop(AgentDef.t(), keyword() | map(), term()) :: %Toolnexus.Agents.Loop{}
+  def loop(%AgentDef{} = a, options, toolkit),
+    do: Toolnexus.Agents.Loop.new(a, options, toolkit)
 
   @doc """
   Level 1: one-shot — build a runtime, run the agent to completion, tear down.

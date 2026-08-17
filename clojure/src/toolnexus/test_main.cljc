@@ -29,6 +29,7 @@
             [toolnexus.core-test]
             [toolnexus.agents.compaction-test]
             [toolnexus.agents.home-test]
+            [toolnexus.agents.loop-test]
             [toolnexus.agents.runtime-test]
             [toolnexus.agents.runtime-fixture-test]))
 
@@ -49,6 +50,7 @@
     toolnexus.core-test
     toolnexus.agents.compaction-test
     toolnexus.agents.home-test
+    toolnexus.agents.loop-test
     toolnexus.agents.runtime-test
     toolnexus.agents.runtime-fixture-test])
 
@@ -64,7 +66,7 @@
 ;; and the count stays above any floor. Comparing `suites` against a constant is
 ;; the only check that can see the vector shrink, because every count derived
 ;; FROM the vector shrinks with it. Adding a suite is meant to be a two-line diff.
-(def expected-suite-count 18)
+(def expected-suite-count 19)
 
 (defn- declared-tests
   "How many deftests a namespace actually holds, read off its interns rather than

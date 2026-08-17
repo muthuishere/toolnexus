@@ -77,11 +77,17 @@ public sealed class AgentDef
     /// <see cref="Hooks"/> — a def may override one and inherit the other.</summary>
     public Action<MetricEvent>? OnMetric { get; set; }
 
+    /// <summary>(SPEC §7D) The completion gate, projected from the agent spec. Present ⇒ this
+    /// agent's turns run through the gate even when it is a DELEGATED child.</summary>
+    public Completion? Completion { get; set; }
+
     internal AgentDef CloneWith(Budget budget) => new()
     {
         Name = Name, Does = Does, Soul = Soul, Model = Model, Budget = budget,
         Tools = Tools, Team = Team, WaitFor = WaitFor, OnSpawn = OnSpawn, OnClose = OnClose,
-        Hooks = Hooks, OnMetric = OnMetric,
+        // Completion MUST ride along: the runtime clones a def to apply a budget, and
+        // dropping the gate here would silently un-gate every budgeted agent.
+        Hooks = Hooks, OnMetric = OnMetric, Completion = Completion,
     };
 }
 

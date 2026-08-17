@@ -39,6 +39,30 @@ type Spec struct {
 	// OnMetric is the §8 observability sink for THIS agent's turns; set ⇒
 	// replaces Options.OnMetric for this agent (never merged).
 	OnMetric func(tn.MetricEvent)
+	// Guardrails are POLICY checks on tool calls — "may it?", never "is it
+	// right?". They compile into one BeforeTool with FIRST-DENY-WINS: a later
+	// guardrail can never widen an earlier denial. Composed with Hooks.BeforeTool,
+	// which runs only if every guardrail allows. Empty ⇒ byte-identical.
+	Guardrails []Guardrail
+	// Completion, when set, is the gate that stops this agent claiming `done`
+	// before its work verifies. It travels with the agent, so a caller that
+	// delegates via `task` inherits it — which a host-side retry loop cannot do.
+	// Nil ⇒ byte-identical.
+	Completion *Completion
+}
+
+// Guardrail is a POLICY check on a tool call: return "" or "allow" to permit, or
+// a reason to deny. Never a correctness check — "did the tests pass" is a tool.
+type Guardrail func(ev tn.BeforeToolEvent) string
+
+// Completion is the gate an agent must pass before it may report `done`. The
+// loop NEVER interprets Verify — it only counts attempts and reports honestly,
+// which is what keeps the loop domain-neutral and therefore portable.
+type Completion struct {
+	// Verify reports (ok, reason). Reason is fed back to the agent on failure.
+	Verify func(tn.RunResult) (bool, string)
+	// MaxAttempts is REQUIRED (>= 1): an unbounded gate is a runaway loop.
+	MaxAttempts int
 }
 
 // Agent is the one new noun.
@@ -90,7 +114,8 @@ func (a *Agent) registryInto(acc map[string]Def) {
 		WaitFor:  a.Spec.WaitFor,
 		OnSpawn:  a.Spec.OnSpawn,
 		OnClose:  a.Spec.OnClose,
-		Hooks:    a.Spec.Hooks,
+		Hooks:      guardedHooks(a.Spec),
+		Completion: a.Spec.Completion,
 		OnMetric: a.Spec.OnMetric,
 	}
 	for _, t := range a.Spec.Team {
@@ -143,3 +168,15 @@ func (a *Agent) AsTool(opts Options) tn.Tool {
 		},
 	}
 }
+
+// Harness names the capability set an agent needs to COMPLETE its problem, plus
+// the boundaries it may not cross: soul, tools, team, budget ceiling, guardrails,
+// the completion gate, and §10 interpreter authority.
+//
+// It is a FACTORY over Spec, not a second type — so `harness` is the word you
+// read while there stays exactly one type underneath, and the two can never
+// drift. Model is deliberately absent: Model + Harness = Agent.
+//
+//	h := agents.Harness(agents.Spec{Soul: …, Tools: …, Guardrails: …})
+//	a := agents.New("worker", h)
+func Harness(s Spec) Spec { return s }

@@ -25,6 +25,7 @@ from typing import Any, Callable, Optional
 
 from ..client import ConversationStore, HttpTransport
 from ..types import Tool, ToolResult
+from .loop import Loop, guarded_hooks
 from .runtime import AgentDef, AgentRuntime, Budget, Clock, Handle, InboxItem, TaskResult
 
 # Bootstrap discovery order for agent_from_dir (all files optional). Each found
@@ -159,6 +160,8 @@ class Agent:
         on_close: Optional[Callable[..., Any]] = None,
         hooks: Optional[Any] = None,
         on_metric: Optional[Callable[[dict[str, Any]], None]] = None,
+        guardrails: Optional[list[Any]] = None,
+        completion: Optional[Any] = None,
     ) -> None:
         self.name = name
         self.does = does
@@ -174,6 +177,19 @@ class Agent:
         # §8 seams for THIS agent (§7D) — set ⇒ replaces the runtime-wide value.
         self.hooks = hooks
         self.on_metric = on_metric
+        # POLICY checks on tool calls — "may it?", never "is it right?". Compiled
+        # into one before_tool with FIRST-DENY-WINS. Empty ⇒ byte-identical.
+        self.guardrails = guardrails or []
+        # The gate that stops this agent claiming `done` before its work verifies.
+        # It travels WITH the agent, so delegation via `task` inherits it — which a
+        # host-side retry loop cannot do. None ⇒ byte-identical.
+        self.completion = completion
+
+    def loop(self, options: dict[str, Any], toolkit: Any) -> Loop:
+        """Open a LIVE EXECUTION of this agent. Takes client OPTIONS rather than a
+        built client, because a per-call ``model`` override must be able to change
+        the model — which is fixed when a client is constructed."""
+        return Loop(self, options, toolkit)
 
     def registry(self, acc: Optional[dict[str, AgentDef]] = None) -> dict[str, AgentDef]:
         """The runtime registry = the TRANSITIVE CLOSURE of this agent's team graph
@@ -195,8 +211,11 @@ class Agent:
             wait_for=self.wait_for,
             on_spawn=self.on_spawn,
             on_close=self.on_close,
-            hooks=self.hooks,
+            # Guardrails are compiled HERE, at the registry boundary, so a delegated
+            # child is governed by them too — not only a directly-driven one.
+            hooks=guarded_hooks(self.guardrails, self.hooks),
             on_metric=self.on_metric,
+            completion=self.completion,
             # task targets = ONLY this agent's team, never the whole registry.
             task_targets=[a.name for a in self.team],
         )

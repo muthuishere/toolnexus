@@ -53,6 +53,7 @@ import time
 from dataclasses import dataclass, field, fields, replace
 from typing import Any, Callable, Optional, Protocol
 
+from .loop import run_gated
 from ..client import (
     ConversationStore,
     HttpTransport,
@@ -165,6 +166,9 @@ class AgentDef:
     # Set ⇒ REPLACES the runtime-wide ``on_metric`` (never merged); None ⇒ inherit.
     # Resolves INDEPENDENTLY of ``hooks``.
     on_metric: Optional[Callable[[dict[str, Any]], None]] = None
+    # §7D completion gate, projected from the agent spec. Present ⇒ this agent's
+    # turns run through the gate even when it is a DELEGATED child.
+    completion: Optional[Any] = None
 
 
 @dataclass
@@ -795,7 +799,15 @@ class AgentRuntime:
             # cascading parent re-emits its task call and REATTACHES — the §7D
             # idempotency mechanism. Completed turns commit; transcripts survive.
             snapshot = await self._store.get(h.conv_id)
-            ask_task = asyncio.ensure_future(client.ask(input_text, toolkit, id=h.conv_id))
+            # The gate runs HERE, inside the runtime turn, which is what makes it
+            # reach a delegated child: `task` executes the child through this path.
+            ask_task = asyncio.ensure_future(
+                run_gated(
+                    lambda text: client.ask(text, toolkit, id=h.conv_id),
+                    input_text,
+                    h.defn.completion,
+                )
+            )
             h._ask_task = ask_task
             if h._abort_reason is not None:
                 # The abort verb ran between admission and the ask install — the

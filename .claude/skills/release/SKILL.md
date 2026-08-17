@@ -79,6 +79,24 @@ Leave historical statements alone: "on Clojars since v0.13.0", "Relay ships in g
 0.12.0", and `docs/performance-benchmarks.md`'s "Versions measured". Rewriting those falsifies the
 record.
 
+### 3b. Know that the release gates on a LIVE model run
+
+`release.yml` has a `live-scenarios` job — **golang only**, behind the `live` build tag — that runs
+the harness scenarios against a real model on OpenRouter before **any** registry leg publishes
+(every leg `needs: [preflight, live-scenarios]`). The other six ports prove parity hermetically in
+CI; this proves the mechanisms actually work against a provider before anything ships.
+
+It needs **`OPENROUTER_API_KEY` in the `prod` environment**. If it is missing the whole release
+fails at the gate, before publishing — which is the correct failure, but check it is present before
+cutting rather than discovering it mid-release. Run the same suite locally first:
+
+```sh
+cd golang && OPENROUTER_API_KEY=… go test -tags live -run TestLive -v ./...
+```
+
+The tag keeps these out of normal CI: `go test ./...` never sees them, and the tests skip cleanly
+when the key is absent.
+
 ### 4. Open the PR and wait for all nine CI jobs
 
 "Docs examples (seven ports)" legitimately takes **13–18 minutes**. It is not hung. Do not merge on

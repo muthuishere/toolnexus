@@ -41,6 +41,17 @@ public sealed class AgentSpec
     /// <summary>The §8 observability sink for this agent's runs (SPEC §7D). Resolves independently
     /// of <see cref="Hooks"/>.</summary>
     public Action<MetricEvent>? OnMetric { get; set; }
+
+    /// <summary>POLICY checks on tool calls — "may it?", never "is it right?". They compile into
+    /// one <c>BeforeTool</c> with FIRST-DENY-WINS: a later guardrail can never widen an earlier
+    /// denial. Composed with <c>Hooks.BeforeTool</c>, which runs only if every guardrail allows.
+    /// Empty ⇒ byte-identical.</summary>
+    public List<Guardrail>? Guardrails { get; set; }
+
+    /// <summary>When set, the gate that stops this agent claiming <c>done</c> before its work
+    /// verifies. It travels WITH the agent, so a caller that delegates via <c>task</c> inherits
+    /// it — which a host-side retry loop cannot do. Null ⇒ byte-identical.</summary>
+    public Completion? Completion { get; set; }
 }
 
 /// <summary>
@@ -59,6 +70,13 @@ public sealed class Agent
         Name = name;
         Spec = spec;
     }
+
+    /// <summary>
+    /// Open a LIVE EXECUTION of this agent. Takes client OPTIONS rather than a built client,
+    /// because a per-call <c>Model</c> override must be able to change the model — which is fixed
+    /// when a client is constructed.
+    /// </summary>
+    public Loop Loop(LlmClient.Options options, Toolkit toolkit) => new(this, options, toolkit);
 
     /// <summary>
     /// The runtime registry = the transitive closure of this agent's team graph (unreachable
@@ -81,8 +99,11 @@ public sealed class Agent
             WaitFor = Spec.WaitFor,
             OnSpawn = Spec.OnSpawn,
             OnClose = Spec.OnClose,
-            Hooks = Spec.Hooks,
+            // Guardrails are compiled HERE, at the registry boundary, so a delegated child is
+            // governed by them too — not only a directly-driven one.
+            Hooks = LoopSupport.GuardedHooks(Spec.Guardrails, Spec.Hooks),
             OnMetric = Spec.OnMetric,
+            Completion = Spec.Completion,
             // Team scoping: task targets = ONLY this agent's team; null team ⇒ no task tool.
             Team = Spec.Team?.Select(a => a.Name).ToList(),
         };
