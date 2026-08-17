@@ -25,7 +25,7 @@ The surface, once, so every port implements the same thing:
 - [x] `python/` — `agents/loop.py`; 13 tests
 - [x] `java/` — root-package `Loop.java`; 11 tests
 - [x] `csharp/` — `Agents/Loop.cs`; 11 tests
-- [ ] `elixir/`
+- [x] `elixir/` — `agents/loop.ex`; 12 tests
 - [ ] `clojure/` (must pass all five execution modes)
 
 Each port needs, and is not done without:

@@ -718,14 +718,22 @@ defmodule Toolnexus.Agents.Handle do
 
   defp spawn_run(st, input, one_shot) do
     handle = self()
-    %{client: client0, tools: tools, id: id, ctx: ctx, escalator: escalator} = st
+    %{client: client0, tools: tools, id: id, ctx: ctx, escalator: escalator, def: defn} = st
 
     spawn_monitor(fn ->
       outcome =
         try do
           client = %{client0 | wait_for: one_shot || escalator}
           history = store_get(ctx.store, id) || []
-          r = Client.run(client, input, tools, history: history)
+          # The gate runs HERE, inside the runtime turn, which is what makes it reach a
+          # delegated child: `task` executes the child through this same path.
+          {r, _} =
+            Toolnexus.Agents.Loop.run_gated(
+              fn text, st -> {Client.run(client, text, tools, history: history), st} end,
+              input,
+              defn[:completion],
+              nil
+            )
 
           # A COMPLETED turn commits the transcript; a killed Run commits nothing;
           # a SUSPENDED turn (status "pending") commits nothing either — the store
