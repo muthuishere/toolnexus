@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.16.0 — 2026-08-17
+
 ### Added — `createInProcessClient`: a model in your process, with no wire to configure (all ports)
 
 Running a model inside your own process was possible, and it made you lie three times: a `baseUrl`
