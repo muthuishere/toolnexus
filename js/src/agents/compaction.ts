@@ -23,6 +23,7 @@
  *     hooks: { beforeLLM: agents.compactor({ maxTokens: 120_000, summarize }) },
  *   })
  */
+import { partTokens } from "../content.js"
 
 /**
  * A chat message in the working transcript. Structural and provider-neutral — only the
@@ -44,8 +45,45 @@ export interface Message {
  */
 export function estimateTokens(messages: Message[]): number {
   let total = 0
-  for (const m of messages) total += Math.ceil(JSON.stringify(m).length / 4)
+  for (const m of messages) {
+    const { text, partBytes } = stripPartPayloads(m)
+    total += Math.ceil(text.length / 4)
+    // §1B: a media part is charged from its BYTE LENGTH. Scoring it by its `mimeType`
+    // string would price a 5 MB image at ~3 tokens, so the compactor would evict text and
+    // keep every image forever — the exact opposite of what a budget is for. Charging the
+    // base64 verbatim is the other failure: it prices an 82-byte PNG like 30 lines of prose.
+    for (const bytes of partBytes) total += partTokens(bytes)
+  }
   return total
+}
+
+/** Keys whose string value is a media payload rather than prose. */
+const PAYLOAD_KEYS = new Set(["data", "file_data", "blob"])
+
+/**
+ * Serialize a message for estimation with its media payloads replaced by "", returning the
+ * decoded byte length of each one so the caller can charge it properly. Recognises both the
+ * canonical `ContentPart` (`data`) and every provider block shape it encodes to
+ * (`image_url.url` as a data: URL, `file.file_data`, `input_audio.data`).
+ */
+function stripPartPayloads(m: Message): { text: string; partBytes: number[] } {
+  const partBytes: number[] = []
+  const walk = (v: unknown, key?: string): unknown => {
+    if (typeof v === "string") {
+      const b64 = PAYLOAD_KEYS.has(key ?? "") ? v : v.startsWith("data:") ? v.slice(v.indexOf(",") + 1) : undefined
+      if (b64 === undefined) return v
+      partBytes.push(Math.max(0, Math.floor((b64.length * 3) / 4)))
+      return ""
+    }
+    if (Array.isArray(v)) return v.map((x) => walk(x))
+    if (v && typeof v === "object") {
+      const out: Record<string, unknown> = {}
+      for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = walk(val, k)
+      return out
+    }
+    return v
+  }
+  return { text: JSON.stringify(walk(m)) ?? "", partBytes }
 }
 
 /** Options for {@link compactor}. */

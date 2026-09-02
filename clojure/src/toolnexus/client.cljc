@@ -34,6 +34,7 @@
             [koine.process :as proc]
             [koine.time :as ktime]
             [toolnexus.adapter :as adapter]
+            [toolnexus.content :as content]
             [toolnexus.tool :as tool]))
 
 ;; ---------------------------------------------------------------------------
@@ -137,6 +138,14 @@
                     {:before-llm :after-llm :before-tool :after-tool}; see
                     `before-llm!` / `execute-tool`. Absent => nothing changes.
     :wait-for       (fn [request] answer) — the ONE host slot of §10.
+    :max-part-bytes §1B — reject a content part carrying more than this many
+                    DECODED bytes (never the +33% base64 string). Unset => no
+                    limit, exactly as before.
+    :on-unsupported-part
+                    §8A — \"error\" | \"text\", overriding the provenance rule
+                    uniformly. Unset => an ATTACHED part the style cannot
+                    represent stops the run, a TOOL-DERIVED one degrades to a
+                    text placeholder and warns once.
 
   On the name of that slot: §10 says \"never `await`\" because `await` is
   reserved in JS/Python/C#. In Clojure it is not reserved — it is
@@ -483,6 +492,24 @@
                   (recur (inc attempt)))
               (throw!))))))))
 
+(defn wire-opts
+  "The §1B/§8A shaping options every wire build shares."
+  [client]
+  {:style (:style client)
+   :on-unsupported-part (:on-unsupported-part client)
+   :max-part-bytes (:max-part-bytes client)})
+
+(defn user-message
+  "§1B — the ONE place a caller's prompt becomes a message in this port.
+
+  `run` is fixed 3-arity (`ctx` is required), so a new arity is impossible and
+  the dispatch is on the VALUE: a string is the pre-0.17 path and is stored
+  verbatim, byte-identical; a sequence is a ContentPart list and is stored as the
+  canonical transcript shape, which `content/build-wire` encodes on the way out."
+  [prompt]
+  {:role "user"
+   :content (if (sequential? prompt) (vec prompt) prompt)})
+
 (defn- llm-call
   "The agent loop's round trip: build the loop's body, then post it."
   [client system messages tools]
@@ -547,12 +574,21 @@
   [client settled]
   (if (= "anthropic" (:style client))
     [{:role "user"
-      :content (mapv (fn [s] {:type "tool_result"
-                              :tool_use_id (:id s)
-                              :content (:output (:result s))
-                              :is_error (boolean (:isError (:result s)))})
+      :content (mapv (fn [s] (cond-> {:type "tool_result"
+                                      :tool_use_id (:id s)
+                                      :content (:output (:result s))
+                                      :is_error (boolean (:isError (:result s)))}
+                               ;; §1B/§8A: parts ride on the CANONICAL transcript
+                               ;; under `:parts`; `toolnexus.content/build-wire`
+                               ;; is the only thing that turns them into blocks.
+                               ;; `cond->`, so a text-only result is byte-identical.
+                               (seq (:parts (:result s))) (assoc :parts (vec (:parts (:result s))))))
                      settled)}]
-    (mapv (fn [s] {:role "tool" :tool_call_id (:id s) :content (:output (:result s))})
+    (mapv (fn [s] (cond-> {:role "tool" :tool_call_id (:id s) :content (:output (:result s))}
+                    ;; `:name` is carried ONLY when there are parts — the §8A
+                    ;; relocation header needs it, and the wire build strips both.
+                    (seq (:parts (:result s))) (assoc :name (str (:name s))
+                                                      :parts (vec (:parts (:result s))))))
           settled)))
 
 (def zero-usage
@@ -743,6 +779,23 @@
              :status (if incomplete? "incomplete" "done")}
       incomplete? (assoc :limit "maxTurns"))))
 
+(defn- content-error-result
+  "§8A — the run stopped before any HTTP call because a content part could not be
+  sent. Reported in the vocabulary §8 already has: a non-`done` status plus a
+  STRUCTURED `:limit` naming which limit stopped it, and `:text` carrying the
+  human reason. No exception crosses the boundary; see `toolnexus.content`."
+  [client err messages tool-calls turns usage]
+  {:text (:error err)
+   :messages messages
+   :tool-calls tool-calls
+   :tool-call-count (count tool-calls)
+   :turns turns
+   :usage usage
+   :model (:model client)
+   :status "incomplete"
+   :limit "contentPart"
+   :error {:code (:code err) :message (:error err)}})
+
 (defn- pending-result [client request messages tool-calls turns usage]
   {:text (:prompt request)
    :messages messages
@@ -817,7 +870,7 @@
     ;; `tools` is loop state, not a constant: §8 says a `:before-llm` hook that
     ;; returns `:messages`/`:tools` replaces them FOR THE REST OF THE RUN, so a
     ;; turn-0 override must still be in force on turn 1.
-    (loop [messages   (conj seed {:role "user" :content prompt})
+    (loop [messages   (conj seed (user-message prompt))
            tools      tools
            turn       0
            turns      0
@@ -834,56 +887,73 @@
         (let [hooked  (before-llm! client messages tools turn)
               messages (first hooked)
               tools    (second hooked)
-              body    (llm-call client system messages tools)
-              usage   (add-usage usage client (:usage body))
-              _       (after-llm! client body turn)
-              _       (emit! on-event {:type "usage" :usage usage})
-              turns   (inc turns)
-              msg     (assistant-message client body)
-              calls   (tool-calls-of client body)
-              messages (conj messages msg)]
-          (if (empty? calls)
-            (let [r (finish! (run-result client (final-text client body) messages tool-calls turns usage false))]
+              ;; §8A: the canonical transcript becomes wire messages HERE, so
+              ;; `messages` (and therefore RunResult.messages, the store and
+              ;; `translate`) never sees a synthetic user turn or a provider
+              ;; block. A part the style cannot send stops the run before any
+              ;; HTTP call, as DATA.
+              wire    (content/build-wire messages (wire-opts client))]
+          (if (:error wire)
+            (let [r (finish! (content-error-result client wire messages tool-calls turns usage))]
               (emit! on-event {:type "done" :result r})
               r)
-            (let [_       (doseq [c calls]
-                            (emit! on-event {:type "tool_call" :id (:id c) :name (:name c) :args (:args c)}))
-                  ;; parallel execution, results in call order …
-                  settled (execute-calls client toolkit calls turn)
-                  ;; … then §10 resolution, sequential and in the same order.
-                  settled (reduce (fn [acc s]
-                                    (if (some :halt acc)
-                                      ;; a durable halt already happened earlier in
-                                      ;; call order: later suspensions' placeholders
-                                      ;; never enter the transcript — they re-suspend
-                                      ;; on resume (§10).
-                                      acc
-                                      (let [req (pending-of (:result s))]
-                                        (conj acc (if req
-                                                    (merge s (resolve-pending client toolkit s req on-event turn))
-                                                    s)))))
-                                  [] settled)
-                  ;; §10 durable halt: the transcript keeps the calls UP TO AND
-                  ;; INCLUDING the first halted one, and nothing after it —
-                  ;; deterministic by call order, never by scheduling.
-                  halt-ix (first (keep-indexed (fn [i s] (when (:halt s) i)) settled))
-                  settled (if halt-ix (vec (take (inc halt-ix) settled)) settled)
-                  _       (doseq [s settled]
-                            (emit! on-event {:type "tool_result" :id (:id s) :name (:name s)
-                                             :output (:output (:result s))
-                                             :isError (boolean (:isError (:result s)))}))
-                  records (mapv (fn [s] {:name (:name s) :args (:args s)
-                                         :output (:output (:result s))
-                                         :isError (boolean (:isError (:result s)))
-                                         :metadata (:metadata (:result s))})
-                                settled)
-                  halted  (first (keep :halt settled))
-                  msgs    (into messages (tool-result-messages client settled))]
-              (if halted
-                (let [r (pending-result client halted msgs (into tool-calls records) turns usage)]
+            (let [body    (llm-call client system (:messages wire) tools)
+                  usage   (add-usage usage client (:usage body))
+                  _       (after-llm! client body turn)
+                  _       (emit! on-event {:type "usage" :usage usage})
+                  turns   (inc turns)
+                  msg     (assistant-message client body)
+                  calls   (tool-calls-of client body)
+                  messages (conj messages msg)]
+              (if (empty? calls)
+                (let [r (finish! (run-result client (final-text client body) messages tool-calls turns usage false))]
                   (emit! on-event {:type "done" :result r})
                   r)
-                (recur msgs tools (inc turn) turns (into tool-calls records) usage)))))))))
+                (let [_       (doseq [c calls]
+                                (emit! on-event {:type "tool_call" :id (:id c) :name (:name c) :args (:args c)}))
+                      ;; parallel execution, results in call order …
+                      settled (execute-calls client toolkit calls turn)
+                      ;; … then §10 resolution, sequential and in the same order.
+                      settled (reduce (fn [acc s]
+                                        (if (some :halt acc)
+                                          ;; a durable halt already happened earlier in
+                                          ;; call order: later suspensions' placeholders
+                                          ;; never enter the transcript — they re-suspend
+                                          ;; on resume (§10).
+                                          acc
+                                          (let [req (pending-of (:result s))]
+                                            (conj acc (if req
+                                                        (merge s (resolve-pending client toolkit s req on-event turn))
+                                                        s)))))
+                                      [] settled)
+                      ;; §10 durable halt: the transcript keeps the calls UP TO AND
+                      ;; INCLUDING the first halted one, and nothing after it —
+                      ;; deterministic by call order, never by scheduling.
+                      halt-ix (first (keep-indexed (fn [i s] (when (:halt s) i)) settled))
+                      settled (if halt-ix (vec (take (inc halt-ix) settled)) settled)
+                      _       (doseq [s settled]
+                                (emit! on-event
+                                       ;; §1B: a part is rendered {type, mimeType, bytes}.
+                                       ;; `data` NEVER reaches an event payload or a log
+                                       ;; line — same rule as never-log-headers.
+                                       (cond-> {:type "tool_result" :id (:id s) :name (:name s)
+                                                :output (:output (:result s))
+                                                :isError (boolean (:isError (:result s)))}
+                                         (seq (:parts (:result s)))
+                                         (assoc :parts (mapv content/describe-part
+                                                             (:parts (:result s)))))))
+                      records (mapv (fn [s] {:name (:name s) :args (:args s)
+                                             :output (:output (:result s))
+                                             :isError (boolean (:isError (:result s)))
+                                             :metadata (:metadata (:result s))})
+                                    settled)
+                      halted  (first (keep :halt settled))
+                      msgs    (into messages (tool-result-messages client settled))]
+                  (if halted
+                    (let [r (pending-result client halted msgs (into tool-calls records) turns usage)]
+                      (emit! on-event {:type "done" :result r})
+                      r)
+                    (recur msgs tools (inc turn) turns (into tool-calls records) usage)))))))))))
 
 
 (defn ask

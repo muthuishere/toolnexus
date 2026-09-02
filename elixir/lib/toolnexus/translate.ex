@@ -17,6 +17,8 @@ defmodule Toolnexus.Translate do
   `Toolnexus.Client`.
   """
 
+  alias Toolnexus.ContentPart
+
   defmodule ToolCall do
     @moduledoc """
     One tool call the model asked for, in OpenAI shape (§11).
@@ -230,20 +232,42 @@ defmodule Toolnexus.Translate do
     end
   end
 
+  # §11: a `content` array has its text parts concatenated and its non-text parts
+  # translated into the provider's native block shape (§8A). Nothing is flattened away or
+  # passed through raw — six ports used to do exactly that, undocumented.
   defp put_user({out, system_parts, pending}, m) do
-    content = Map.get(m, "content")
-
-    case content_text(content) do
-      "" ->
-        if is_list(content) and content != [] do
-          {[%{"role" => "user", "content" => content} | out], system_parts, pending}
-        else
-          {out, system_parts, pending}
+    case Map.get(m, "content") do
+      content when is_list(content) ->
+        case content_blocks(content) do
+          [] -> {out, system_parts, pending}
+          blocks -> {[%{"role" => "user", "content" => user_content(blocks)} | out], system_parts, pending}
         end
 
-      s ->
-        {[%{"role" => "user", "content" => s} | out], system_parts, pending}
+      content ->
+        case content_text(content) do
+          "" -> {out, system_parts, pending}
+          s -> {[%{"role" => "user", "content" => s} | out], system_parts, pending}
+        end
     end
+  end
+
+  # All-text stays a plain string, exactly as before; anything else keeps its blocks.
+  defp user_content(blocks) do
+    if Enum.all?(blocks, &(is_map(&1) and Map.get(&1, "type") == "text")) do
+      Enum.map_join(blocks, "", &(Map.get(&1, "text") || ""))
+    else
+      blocks
+    end
+  end
+
+  defp content_blocks(content) do
+    Enum.flat_map(content, fn entry ->
+      if ContentPart.part?(entry) do
+        ContentPart.encode([entry], "anthropic")
+      else
+        [entry]
+      end
+    end)
   end
 
   @doc """

@@ -8,6 +8,183 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.17.0 — 2026-09-02
+
+### Fixed — an aborted A2A call reports a cancel, not a transport error (all ports)
+
+`SPEC.md` §7A pins the contract: a `ctx` abort means `"A2A task <id> canceled"` with
+`metadata.state == "canceled"`. That held when the abort landed *between* polls. When it landed
+while a `SendMessage`/`GetTask` request was in flight, four of seven ports reported whatever the
+transport happened to raise instead — Java surfaced the literal string
+`"java.lang.InterruptedException"`, Go returned `context canceled` with the state still
+`submitted`, and Elixir had no abort semantics at all: `Context.signal` existed in the struct and
+nothing in the port ever read it.
+
+Every error and exit path of an agent tool's `execute` now re-checks the abort signal before
+reporting a transport error, so an abort observed anywhere — between polls, mid-`SendMessage`,
+mid-`GetTask` — produces the same result. Each port gained tests for both in-flight cases.
+
+Worth naming because it explains a symptom you may have seen: in the JS port this defect class had
+already shown up as a "flaky" test that failed roughly twice in twelve runs. It was not flaky. It
+was intermittently catching a real defect, which is what prompted the cross-port audit.
+
+Closes #64. Tracked in `openspec/changes/audit-a2a-cancel-mid-request`.
+
+### Fixed — MCP tools no longer lose their images (all ports)
+
+Every port filtered an MCP `CallToolResult`'s `content[]` down to text parts and **silently
+discarded the rest**. Point toolnexus at a screenshot tool, a chart tool, or Playwright MCP and
+you got an empty string — no error, no log line, no way to distinguish "the tool returned
+nothing" from "your picture was thrown away". It was specified that way (`SPEC.md:218`), so it
+was a contract bug, not a slip, and it was identical in js, python, golang, java, csharp, elixir
+and clojure.
+
+Non-text content now becomes `ToolResult.parts`: image, audio, embedded resource, and
+**`resource_link`** — a fifth block type that every SDK exposes and that we were dropping too.
+Parts are collected on **every** branch, including the `structuredContent` and `isError`
+short-circuits that returned before the content list was ever read; a server sending structured
+content *and* an image kept neither before, and keeps both now. A text-only tool result is
+byte-identical to before, down to the absent `parts` key.
+
+**This is a behaviour change.** If you relied on non-text MCP content vanishing, it no longer
+does — see the unsupported-part rule below, which is designed so that this cannot break a run
+that works today.
+
+### Added — attachments: images, PDFs and audio, in and out (all ports)
+
+You could not hand the loop an image, and a tool could not return one. Both now work.
+
+```js
+await client.run(["What is broken in this screenshot?", await attach("./shot.png")], { toolkit })
+```
+
+Parts go in the **first** argument, alongside your text, because the order of text and image is
+semantic to a model and an `{attachments}` option throws it away. Passing a plain string is
+unchanged and byte-identical — no existing call site moves.
+
+A `ContentPart` is `text`, `image`, `file` or `audio`, carrying base64 `data` or a `url` plus a
+`mimeType`. **It never holds a filesystem path**: a path does not survive a transcript being
+persisted and replayed, or crossing into a subagent, a served toolkit, or an A2A peer. The
+convenience lives at the edge instead — the constructors take a path, native bytes, or a `data:`
+URL and normalise immediately, so the disk touch is one legible call and the part that reaches
+your transcript is portable. Mime type comes from a fixed extension table shared with `read`;
+it is never sniffed and never resolved through the platform mime database, whose contents differ
+per machine and would quietly break cross-port parity.
+
+**The edge takes what you already have.** A caller holding an `InputStream`, a `FileInfo`, a
+`Blob`, an `io.Reader` or an open file handle should not have to convert it by hand — that tax is
+paid in every calling program instead of once in the library, and it is the same tax as making
+you base64 things yourself. So each port accepts its own native sources: `File`/`Blob`/
+`ArrayBuffer` in js, `os.PathLike` and any binary file-like object in python, `io.Reader`/
+`fs.File`/`fs.FS` (so an `embed.FS` works) in golang, `java.io.File` and `InputStream` in java,
+`FileInfo` and `Stream` in csharp, iodata and `File.Stream` in elixir. Clojure takes a path or
+bytes and **says so** — `java.io.File` is JVM-only and cannot appear in dual-host `.cljc`, so
+rather than fake it that port gives you a named error telling you what to pass.
+
+The rule is *accept broadly, store narrowly*: whatever goes in, what lands in your transcript is
+bytes and a mime type. Streams are read **eagerly at construction** — a part holding a half-read
+stream would survive a replay no better than a path does — and a handle you supplied is read, not
+closed; disposing it stays yours.
+
+Tools can return parts too — `ToolResult` gains an optional `parts` alongside its still-required
+`output`, so the transcript, compaction and any text-only provider keep seeing text.
+
+`read` now returns an image part for a recognised media file. **golang only**: `File(path)`
+carries its read error until `RunParts` surfaces it, so attaching a file adds no second `err` to
+handle. **python only**: reading a binary file used to raise an unwrapped `UnicodeDecodeError`
+straight into the client loop rather than returning an error result; it now returns one.
+
+### Added — a tool that returns an image reaches the model on every provider
+
+The two provider styles disagree, and the disagreement is load-bearing. Anthropic accepts image
+blocks inside `tool_result.content`. OpenAI rejects them outright — `Image URLs are only allowed
+for messages with role 'user', but this message with role 'tool' contains an image URL`, a hard
+400, verified live rather than assumed.
+
+So parts ride natively where the style has a shape for them, and only for `openai` are they
+relocated into a single synthetic `user` message after the last tool message, in tool-call order,
+each labelled with the tool it came from. Relocating on *every* style would have been simpler to
+describe and worse to use: it discards the `tool_use_id` association, breaks cache breakpoints,
+and makes the model read tool output as user input. The synthetic message is an adapter artifact
+and is never written to `RunResult.messages` or the `ConversationStore`, so switching provider
+mid-conversation leaves no OpenAI-shaped residue.
+
+### Changed — an unsupported part is never dropped, and never breaks a working run
+
+Silence is what this whole change exists to remove, so nothing is discarded quietly. But
+erroring on everything would have been its own regression: an MCP server that volunteers an audio
+clip would start failing runs that succeed today. The rule therefore follows **intent**. A part
+*you attached* that the provider cannot represent is a typed error before any HTTP call — you
+asked for something specific and silently changing it is the betrayal. A part that merely *arrived
+from a tool* degrades to a named placeholder with a warn-once. `onUnsupportedPart: "error" |
+"text"` overrides both.
+
+The guard is a positive allowlist over the encoded block, not a mapping that hopes for the best.
+That is not caution for its own sake: sending an unrecognised block type upstream returns **HTTP
+200 with the content silently discarded** — the same failure this release fixes, one layer up.
+
+`anthropic` names `audio` as a refusal, because the provider defines no audio block.
+
+**clojure only**: that "typed error" is a **value**, not a throw — the port's rule is that nothing
+crosses a source boundary as an exception. An unsendable part (attached-and-unsupported, both
+`data` and `url`, an unknown extension, over `:max-part-bytes`) comes back as a `RunResult` with
+`:status "incomplete"`, `:limit "contentPart"` and an `:error {:code :message}`, and no HTTP
+request is made. The edge constructors follow the same rule: they return an error part carrying
+the reason rather than raising, the way the Go port's `File(path)` defers its read error.
+
+### Changed — content parts survive translation (`SPEC.md` §11)
+
+The spec said an array `content` is flattened to text. Six of seven ports actually passed a
+text-empty array through raw and undocumented — one of them with a comment explaining it. Both
+the spec and the code now carry one rule: text parts concatenate, non-text parts translate. The
+seven ports agree by specification rather than by coincidence.
+
+### Known upstream hazard — routing an image through OpenRouter to an Anthropic model
+
+Verified live while building this release, and worth knowing before it wastes your afternoon: a
+correct openai-style image block, sent to `openrouter.ai` for an **Anthropic** model, returns
+**HTTP 200 with the image silently discarded**. Measured on `anthropic/claude-haiku-4.5`: the
+prompt grew by **4 tokens** where the same request to `gpt-4o-mini` grew by 8 500 and to
+`gemini-2.5-flash-lite` by 258 — and the model cheerfully described colours it had never seen.
+
+Nothing in toolnexus can fix that; the block we emit is the documented one. Use
+`style: "anthropic"` for Anthropic models, and note that `scripts/live-multimodal-check.py`
+proves image arrival by **prompt-token delta** rather than by reading the model's answer, for
+exactly this reason: a model asked to name colours will name colours it never received, which is
+how a dropped image hides.
+
+### Also — the A2A cancel contract is now documented, and Clojure's example mirror is guarded
+
+`SPEC.md` §7A described the abort as stopping "before the next `GetTask`" — which is exactly the
+narrow between-polls reading the fix above corrects. The contract now says an abort counts wherever
+it is observed. The docs site never described cancellation at all: `a2a.mdx` gains a "Timeouts and
+cancellation" section with the full result table and migration note.
+
+**clojure only**: `examples/src/toolnexus/` is a real copy of the library source that both example
+projects compile, and nothing kept it in sync — a namespace added to `src/` and forgotten there
+failed four examples with a classpath error naming the file but not the reason. A new
+`examples-mirror-check.sh` runs in CI ahead of the example suites and says why.
+
+**csharp only**: the test suite no longer runs classes in parallel. Several tests assert on
+wall-clock behaviour — a 60ms run deadline against an 800ms stub, heartbeat ticks coalescing — and
+this release's 26 blocking file reads starved the thread pool enough that the timeout fired late
+and the response won, so a *timeout* test failed with "No exception was thrown". Measured 3/3 green
+without the new tests and roughly 1 in 3 red with them. Serialising costs about three seconds on a
+suite that ran in two, and makes the result deterministic.
+
+### Not done, and where it is tracked
+
+Tracked in `openspec/changes/add-multimodal-content`:
+
+- **Gemini request emission.** No port has a Gemini request path — `ClientStyle` is
+  `openai | anthropic`, and `toGemini` only emits tool declarations for a caller's own client.
+  Attachments work on both implemented styles; Gemini needs a client first.
+- **A2A message parts** and **skill resources as parts** — both still text-only.
+- **Provider `fileId`** — the answer to sending the same 5 MB PDF on twenty turns. Deferred.
+- **Model image *output*.** Input only.
+- **python only**: `countTokens` does not exist in that port, so the compaction mitigation that
+  charges for part bytes has nothing to hook into there yet.
+
 ## 0.16.0 — 2026-08-17
 
 ### Fixed — an in-process client no longer needs an API key

@@ -21,6 +21,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from .content import UnsupportedPartError, encode_part, is_part_dict, placeholder_text
+
 
 @dataclass
 class TranslatedToolCall:
@@ -132,6 +134,25 @@ def tool_calls_of(message: dict[str, Any]) -> list[TranslatedToolCall]:
     return out
 
 
+def part_to_anthropic(part: dict[str, Any]) -> dict[str, Any]:
+    """One §1B part -> its Anthropic block, through the same §8A mapping the loop uses.
+    A part the style cannot carry (audio) degrades to a text placeholder naming its type
+    and mime type — this is a pure function with no run to fail, and §11 forbids a
+    silent drop."""
+    try:
+        return encode_part(part, "anthropic")
+    except UnsupportedPartError:
+        return {"type": "text", "text": placeholder_text(part, "anthropic")}
+
+
+def anthropic_blocks(content: Any) -> list[dict[str, Any]]:
+    """The Anthropic blocks for the non-text §1B parts in a ``content`` value, or ``[]``
+    when it holds none (a string, or a text-only parts array)."""
+    if not isinstance(content, list):
+        return []
+    return [part_to_anthropic(b) for b in content if is_part_dict(b) and b.get("type") != "text"]
+
+
 def openai_messages_to_anthropic(messages: list[Any]) -> tuple[list[dict[str, Any]], str]:
     """Convert an OpenAI ``messages`` array into Anthropic-native messages plus the
     extracted system prompt, preserving the tool structure a text flattening destroys:
@@ -167,6 +188,11 @@ def openai_messages_to_anthropic(messages: list[Any]) -> tuple[list[dict[str, An
                 system_parts.append(s)
         elif role in ("tool", "function"):
             block: dict[str, Any] = {"type": "tool_result", "content": content_text(m.get("content"))}
+            media = anthropic_blocks(m.get("content"))
+            if media:
+                # Non-text parts on a tool result are emitted NATIVELY inside
+                # tool_result.content, keyed to the tool_use_id (§8A).
+                block["content"] = [{"type": "text", "text": block["content"]}, *media]
             if m.get("tool_call_id"):
                 block["tool_use_id"] = str(m["tool_call_id"])
             pending_results.append(block)
@@ -183,11 +209,30 @@ def openai_messages_to_anthropic(messages: list[Any]) -> tuple[list[dict[str, An
             out.append({"role": "assistant", "content": blocks})
         else:
             flush()
-            s = content_text(m.get("content"))
+            content = m.get("content")
+            media = anthropic_blocks(content)
+            if media:
+                # A parts array: text parts concatenate, non-text parts translate into
+                # the provider's native blocks, in the order given. Nothing is dropped —
+                # six ports previously passed a text-empty array through raw (§11).
+                s = content_text(content)
+                blocks: list[dict[str, Any]] = []
+                for b in content:
+                    if is_part_dict(b) and b.get("type") != "text":
+                        blocks.append(part_to_anthropic(b))
+                    elif isinstance(b, dict) and b.get("type") == "text":
+                        continue
+                    else:
+                        blocks.append(b)
+                out.append(
+                    {"role": "user", "content": ([{"type": "text", "text": s}] if s else []) + blocks}
+                )
+                continue
+            s = content_text(content)
             if s:
                 out.append({"role": "user", "content": s})
-            elif isinstance(m.get("content"), list) and m["content"]:
-                out.append({"role": "user", "content": m["content"]})
+            elif isinstance(content, list) and content:
+                out.append({"role": "user", "content": content})
 
     flush()
     return out, "\n\n".join(system_parts)

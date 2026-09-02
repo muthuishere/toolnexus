@@ -449,6 +449,12 @@ func skillTool(agentName, endpoint string, skill A2ASkill, ag Agent) Tool {
 			}
 			raw, err := jsonRPC(parent, endpoint, "SendMessage", sendParams, headers, budget)
 			if err != nil {
+				// A cancellation that lands mid-request is still a cancel, not
+				// a transport error (§7A: ctx abort ⇒ "A2A task <id> canceled").
+				if aborted(parent) {
+					state = "canceled"
+					return ToolResult{Output: fmt.Sprintf("A2A task %s canceled", taskID), IsError: true, Metadata: meta()}, nil
+				}
 				return ToolResult{Output: err.Error(), IsError: true, Metadata: meta()}, nil
 			}
 			var task A2ATask

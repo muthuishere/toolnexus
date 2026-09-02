@@ -139,15 +139,28 @@ public final class Loop {
 
     public Outcome run(String prompt) { return run(prompt, new RunOptions()); }
 
-    public Outcome run(String prompt, RunOptions opts) {
+    public Outcome run(String prompt, RunOptions opts) { return runAny(prompt, opts); }
+
+    /** §1B multimodal entry: the first attempt carries the caller's parts, in their order. */
+    public Outcome run(List<ContentPart> prompt) { return run(prompt, new RunOptions()); }
+
+    /** §1B multimodal {@link #run(String, RunOptions)}. A gate retry re-asks in text. */
+    public Outcome run(List<ContentPart> prompt, RunOptions opts) { return runAny(prompt, opts); }
+
+    @SuppressWarnings("unchecked")
+    private Outcome runAny(Object prompt, RunOptions opts) {
         LlmClient client = LlmClient.create(clientOptions(opts));
         status = "running";
 
         int[] attempts = {0};
         List<Object>[] history = new List[]{null};
+        boolean[] first = {true};
         Ask ask = text -> {
             attempts[0]++;
-            LlmClient.RunResult r = client.run(text, toolkit, history[0]);
+            LlmClient.RunResult r = first[0] && prompt instanceof List
+                    ? client.run((List<ContentPart>) prompt, toolkit, history[0])
+                    : client.run(text, toolkit, history[0]);
+            first[0] = false;
             turns += r.turns;
             history[0] = r.messages;
             return r;
@@ -155,7 +168,7 @@ public final class Loop {
 
         LlmClient.RunResult r;
         try {
-            r = runGated(ask, prompt, completion);
+            r = runGated(ask, promptText(prompt), completion);
         } catch (RuntimeException e) {
             status = "error";
             throw e;
@@ -168,6 +181,16 @@ public final class Loop {
         }
         status = "idle";
         return new Outcome(r.text, "done", null, attempts[0], turns, r);
+    }
+
+    /** The text of a prompt: a string as-is, a part list as its concatenated text parts. */
+    private static String promptText(Object prompt) {
+        if (!(prompt instanceof List<?> list)) return prompt == null ? "" : String.valueOf(prompt);
+        StringBuilder sb = new StringBuilder();
+        for (Object o : list) {
+            if (o instanceof ContentPart p && ContentPart.TEXT.equals(p.type())) sb.append(p.text());
+        }
+        return sb.toString();
     }
 
     /**
@@ -201,6 +224,7 @@ public final class Loop {
         c.timeoutMs = o.timeoutMs; c.store = o.store; c.onMetric = o.onMetric;
         c.waitFor = o.waitFor; c.requestParams = o.requestParams;
         c.bodyTransform = o.bodyTransform; c.httpClient = o.httpClient; c.onError = o.onError;
+        c.maxPartBytes = o.maxPartBytes; c.onUnsupportedPart = o.onUnsupportedPart;
         return c;
     }
 

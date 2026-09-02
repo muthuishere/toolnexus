@@ -32,6 +32,7 @@
             [koine.process :as proc]
             [koine.stream :as stream]
             [koine.time :as ktime]
+            [toolnexus.content :as content]
             [toolnexus.tool :as tool]))
 
 ;; ---------------------------------------------------------------------------
@@ -639,6 +640,64 @@
 ;; §0.4  result shaping
 ;; ---------------------------------------------------------------------------
 
+(defn- embedded-texts
+  "An embedded `resource` carrying TEXT is text the server meant the model to
+  read, not a binary attachment, so §0.4 appends it to `output` rather than
+  making it a part."
+  [content]
+  (keep (fn [item]
+          (when (= "resource" (:type item))
+            (let [t (get-in item [:resource :text])]
+              (when (string? t) t))))
+        content))
+
+(defn collect-parts
+  "SPEC §0.4 — an MCP `content[]` as §1B parts: `image`⇒image, `audio`⇒audio,
+  `resource_link`⇒`file{url}`, `resource` with a blob⇒`file{data}`. A `resource`
+  carrying text went to `output` instead, and text entries ARE `output`. Nothing
+  is ever dropped silently — five content types, and the fifth (`resource_link`)
+  is the one every port was also losing.
+
+  `data`/`blob` are base64 STRINGS off the wire and are passed through VERBATIM,
+  so no encoder on either host can drift the bytes.
+
+  Called on EVERY branch of `shape-result`. A short-circuit that skips it — the
+  `structuredContent` early return, the error path — reintroduces exactly the
+  silent drop this mapping exists to remove."
+  [content]
+  (vec
+   (keep
+    (fn [item]
+      (let [kind (:type item)]
+        (cond
+          (contains? #{"image" "audio"} kind)
+          (when (and (string? (:data item)) (string? (:mimeType item)))
+            {:type kind :mimeType (:mimeType item) :data (:data item)})
+
+          (= "resource_link" kind)
+          (when (some? (:uri item))
+            (cond-> {:type "file"
+                     :mimeType (or (:mimeType item) "application/octet-stream")
+                     :url (str (:uri item))}
+              (and (string? (:name item)) (not= "" (:name item))) (assoc :name (:name item))))
+
+          (= "resource" kind)
+          (let [res (:resource item)]
+            (when (string? (:blob res))
+              (cond-> {:type "file"
+                       :mimeType (or (:mimeType res) "application/octet-stream")
+                       :data (:blob res)}
+                (some? (:uri res)) (assoc :name (str (:uri res))))))
+
+          :else nil)))
+    (when (sequential? content) content))))
+
+(defn- describe-parts
+  "What `output` says when a server returned ONLY non-text content: name the
+  parts rather than hand the model an empty string."
+  [parts]
+  (str/join "\n" (map content/summarize-part parts)))
+
 (defn shape-result
   "SPEC §0.4, all three branches:
      isError            ⇒ error ToolResult carrying the joined text
@@ -647,13 +706,23 @@
 
   koine's `write-str` sorts keys, so the structured branch is byte-identical on
   both hosts — which is what makes §0's cross-language byte comparison possible
-  at all."
+  at all.
+
+  §1B: non-text `content[]` entries additionally become `ToolResult.parts`, and
+  the parts are collected BEFORE the branch, not inside one. A text-only result
+  gets no `:parts` key and is byte-identical to what this returned before."
   [result]
-  (let [text (str/join "\n" (keep :text (:content result)))]
-    (cond
-      (:isError result)           (tool/failure text)
-      (:structuredContent result) (tool/success (json/write-str (:structuredContent result)))
-      :else                       (tool/success text))))
+  (let [content (:content result)
+        text    (str/join "\n" (concat (keep :text content) (embedded-texts content)))
+        parts   (collect-parts content)]
+    (tool/with-parts
+      (cond
+        (:isError result)           (tool/failure text)
+        (:structuredContent result) (tool/success (json/write-str (:structuredContent result)))
+        ;; §1B: an image-only result must not hand the model an empty string.
+        (and (= "" text) (seq parts)) (tool/success (describe-parts parts))
+        :else                       (tool/success text))
+      parts)))
 
 (defn- failure-text [server-name phase failure]
   (str "mcp server \"" server-name "\" failed at " phase ": " (:error failure)

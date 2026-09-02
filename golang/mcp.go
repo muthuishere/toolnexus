@@ -254,9 +254,70 @@ func joinTextContent(content []mcp.Content) string {
 	for _, c := range content {
 		if text, ok := isTextContent(c); ok {
 			parts = append(parts, text)
+			continue
+		}
+		// An embedded resource carrying TEXT is text: it joins output in place,
+		// in content order, rather than becoming a part (§0.4).
+		if er, ok := mcp.AsEmbeddedResource(c); ok {
+			if tr, ok := mcp.AsTextResourceContents(er.Resource); ok {
+				parts = append(parts, tr.Text)
+			}
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// mcpContentParts maps every NON-TEXT content[] entry to a §1B ContentPart:
+// image⇒image, audio⇒audio, resource_link⇒file{url}, resource-with-blob⇒file{data}.
+// A resource carrying text is not a part — joinTextContent appends it to output.
+// Nothing is dropped silently, on any branch (§0.4).
+func mcpContentParts(content []mcp.Content) []ContentPart {
+	var parts []ContentPart
+	for _, c := range content {
+		switch {
+		case isTextOf(c):
+			// text ⇒ output, not a part
+		default:
+			if ic, ok := mcp.AsImageContent(c); ok {
+				parts = append(parts, ContentPart{Type: PartImage, MimeType: ic.MIMEType, Data: ic.Data})
+				continue
+			}
+			if ac, ok := mcp.AsAudioContent(c); ok {
+				parts = append(parts, ContentPart{Type: PartAudio, MimeType: ac.MIMEType, Data: ac.Data})
+				continue
+			}
+			// ResourceLink has no As… helper in mark3labs/mcp-go — match the type.
+			if rl, ok := c.(mcp.ResourceLink); ok {
+				parts = append(parts, ContentPart{Type: PartFile, MimeType: rl.MIMEType, URL: rl.URI, Name: rl.Name})
+				continue
+			}
+			if rl, ok := c.(*mcp.ResourceLink); ok && rl != nil {
+				parts = append(parts, ContentPart{Type: PartFile, MimeType: rl.MIMEType, URL: rl.URI, Name: rl.Name})
+				continue
+			}
+			if er, ok := mcp.AsEmbeddedResource(c); ok {
+				if br, ok := mcp.AsBlobResourceContents(er.Resource); ok {
+					parts = append(parts, ContentPart{Type: PartFile, MimeType: br.MIMEType, Data: br.Blob, Name: br.URI})
+				}
+			}
+		}
+	}
+	return parts
+}
+
+func isTextOf(c mcp.Content) bool {
+	_, ok := isTextContent(c)
+	return ok
+}
+
+// describeParts names the returned parts, so an image-only MCP result reaches the
+// model as a description rather than an empty string (§0.4).
+func describeParts(parts []ContentPart) string {
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, describePart(p))
+	}
+	return strings.Join(out, "\n")
 }
 
 // buildInputSchema mirrors the JS conversion: spread the server's schema, then
@@ -313,17 +374,25 @@ func convertTool(server string, def mcp.Tool, client *mcpclient.Client, defTimeo
 			if err != nil {
 				return ToolResult{Output: err.Error(), IsError: true, Metadata: meta}, nil
 			}
+			// Collect parts BEFORE any branch: the structuredContent short-circuit
+			// below never looks at Content, and the error path did not either —
+			// either one would silently drop a returned image (§0.4).
+			parts := mcpContentParts(result.Content)
 			if result.IsError {
-				return ToolResult{Output: formatToolErrorContent(result.Content), IsError: true, Metadata: meta}, nil
+				return ToolResult{Output: formatToolErrorContent(result.Content), IsError: true, Parts: parts, Metadata: meta}, nil
 			}
 			if result.StructuredContent != nil {
 				b, mErr := json.Marshal(result.StructuredContent)
 				if mErr != nil {
 					return ToolResult{Output: mErr.Error(), IsError: true, Metadata: meta}, nil
 				}
-				return ToolResult{Output: string(b), IsError: false, Metadata: meta}, nil
+				return ToolResult{Output: string(b), IsError: false, Parts: parts, Metadata: meta}, nil
 			}
-			return ToolResult{Output: joinTextContent(result.Content), IsError: false, Metadata: meta}, nil
+			output := joinTextContent(result.Content)
+			if output == "" && len(parts) > 0 {
+				output = describeParts(parts)
+			}
+			return ToolResult{Output: output, IsError: false, Parts: parts, Metadata: meta}, nil
 		},
 	}
 }

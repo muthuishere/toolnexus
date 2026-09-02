@@ -164,7 +164,7 @@ Fixed order, each `source: "builtin"`:
 | # | Name | What it does |
 |---|---|---|
 | 1 | `bash` | Run a shell command; combined stdout+stderr; non-zero exit is an error. |
-| 2 | `read` | Read a UTF-8 file, optionally windowed by `offset`/`limit`. |
+| 2 | `read` | Read a file: a recognised media extension (png jpg jpeg gif webp pdf mp3 wav) comes back as a described `output` plus one `parts` entry carrying its bytes; otherwise UTF-8 text, optionally windowed by `offset`/`limit`. Undecodable bytes are an `isError` result, never a raised exception. |
 | 3 | `write` | Create/overwrite a file, creating parent directories. |
 | 4 | `edit` | Exact-string replace; unique-by-default, `replaceAll` for every occurrence. |
 | 5 | `grep` | Regex search file contents under a directory. |

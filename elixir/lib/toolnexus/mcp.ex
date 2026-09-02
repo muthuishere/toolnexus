@@ -14,7 +14,7 @@ defmodule Toolnexus.Mcp do
 
   require Logger
 
-  alias Toolnexus.{Tool, ToolResult}
+  alias Toolnexus.{ContentPart, Tool, ToolResult}
   alias Toolnexus.Mcp.Connection
   alias Toolnexus.Mcp.Transport.StreamableHttp
 
@@ -343,32 +343,54 @@ defmodule Toolnexus.Mcp do
   end
 
   # §0.4: isError ⇒ error w/ joined text; structuredContent ⇒ JSON encode; else joined text parts.
+  #
+  # Parts are collected BEFORE either short-circuit (SPEC §2): a server returning structured
+  # content — or an error — alongside an image must keep the image. Nothing is dropped silently.
   defp map_call_result(result, server) do
     metadata = %{server: server}
+    content = result["content"]
+    parts = content_parts(content)
 
-    cond do
-      result["isError"] ->
-        %ToolResult{
-          output: format_error_content(result["content"]),
-          is_error: true,
-          metadata: metadata
-        }
+    base =
+      cond do
+        result["isError"] ->
+          %ToolResult{output: format_error_content(content), is_error: true, metadata: metadata}
 
-      result["structuredContent"] != nil ->
-        %ToolResult{
-          output: Jason.encode!(result["structuredContent"]),
-          is_error: false,
-          metadata: metadata
-        }
+        result["structuredContent"] != nil ->
+          %ToolResult{output: Jason.encode!(result["structuredContent"]), is_error: false, metadata: metadata}
 
-      true ->
-        %ToolResult{
-          output: join_text_content(result["content"]),
-          is_error: false,
-          metadata: metadata
-        }
+        true ->
+          %ToolResult{output: join_text_content(content), is_error: false, metadata: metadata}
+      end
+
+    case parts do
+      [] -> base
+      parts -> %{base | parts: parts, output: output_for(base.output, parts)}
     end
   end
+
+  # An image-only result must not be the empty string (SPEC §2) — name what came back.
+  defp output_for("", parts), do: Enum.map_join(parts, "\n", &ContentPart.summary/1)
+  defp output_for(output, _parts), do: output
+
+  # SPEC §2: image ⇒ image, audio ⇒ audio, resource_link ⇒ file{url}, resource w/ blob ⇒
+  # file{data}. A `resource` carrying text is appended to `output`, not made a part.
+  defp content_parts(content) when is_list(content), do: Enum.flat_map(content, &content_part/1)
+  defp content_parts(_), do: []
+
+  defp content_part(%{"type" => "image", "data" => data} = c) when is_binary(data),
+    do: [%ContentPart{type: "image", mime_type: c["mimeType"], data: data}]
+
+  defp content_part(%{"type" => "audio", "data" => data} = c) when is_binary(data),
+    do: [%ContentPart{type: "audio", mime_type: c["mimeType"], data: data}]
+
+  defp content_part(%{"type" => "resource_link", "uri" => uri} = c) when is_binary(uri),
+    do: [%ContentPart{type: "file", mime_type: c["mimeType"], url: uri, name: c["name"]}]
+
+  defp content_part(%{"type" => "resource", "resource" => %{"blob" => blob} = r}) when is_binary(blob),
+    do: [%ContentPart{type: "file", mime_type: r["mimeType"], data: blob, name: r["uri"]}]
+
+  defp content_part(_), do: []
 
   defp format_error_content(content) when is_list(content) do
     joined =
@@ -388,6 +410,10 @@ defmodule Toolnexus.Mcp do
   defp join_text_content(_), do: ""
 
   defp text_part(%{"type" => "text", "text" => text}) when is_binary(text), do: [text]
+
+  # SPEC §2: an embedded resource carrying text is appended to `output`, never a part.
+  defp text_part(%{"type" => "resource", "resource" => %{"text" => text}}) when is_binary(text), do: [text]
+
   defp text_part(_), do: []
 
   defp error_text({:rpc_error, %{"message" => m}}) when is_binary(m), do: m

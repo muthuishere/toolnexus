@@ -26,6 +26,7 @@
             [koine.json :as json]
             [koine.process :as proc]
             [koine.text :as text]
+            [toolnexus.content :as content]
             [toolnexus.tool :as tool]))
 
 (defn- suspend
@@ -246,10 +247,72 @@
       (zero? (long (:exit r))) (tool/success out)
       :else (tool/failure (str out "exit code " (:exit r))))))
 
+(defn- valid-utf8?
+  "Is `bs` a well-formed UTF-8 byte sequence?
+
+  Hand-rolled because there is nothing else: `koine.fs/read-file` is `slurp`,
+  which REPLACES a malformed byte with U+FFFD — identically on both hosts — so it
+  can never report the failure §4A requires `read` to report. Decoding through
+  host interop is not available to a `.cljc` with zero `java.*`. The walk is over
+  UNSIGNED values (`bit-and 255`), which is how koine folds the JVM's signed
+  bytes and Go's unsigned ones together."
+  [bs]
+  (let [v (vec (map (fn [b] (bit-and (long b) 255)) (seq bs)))
+        n (count v)
+        cont? (fn [i] (and (< i n) (= 128 (bit-and (nth v i) 192))))]
+    (loop [i 0]
+      (if (>= i n)
+        true
+        (let [b (nth v i)
+              [len lo hi]
+              (cond
+                (< b 128)                    [1 0 0]
+                (= 192 (bit-and b 224))      [2 128 2047]
+                (= 224 (bit-and b 240))      [3 2048 65535]
+                (= 240 (bit-and b 248))      [4 65536 1114111]
+                :else                        nil)]
+          (cond
+            (nil? len) false
+            (= 1 len)  (recur (inc i))
+            (not (every? cont? (range (inc i) (+ i len)))) false
+            :else
+            (let [cp (reduce (fn [acc j] (+ (* acc 64) (bit-and (nth v j) 63)))
+                             (bit-and b (case len 2 31 3 15 4 7))
+                             (range (inc i) (+ i len)))]
+              ;; over-long encodings and the UTF-16 surrogate range are malformed
+              (if (or (< cp lo) (> cp hi) (and (>= cp 55296) (<= cp 57343)))
+                false
+                (recur (+ i len))))))))))
+
 (defn- t-read [args _ctx]
-  (let [p (str (:path args))]
-    (if-not (fs/exists? p)
+  (let [p     (str (:path args))
+        media (content/media-type-for p)]
+    (cond
+      (not (fs/exists? p))
       (tool/failure (str "read: file not found: " p))
+
+      ;; §4A + §1B: a recognised media extension comes back as a CONTENT PART.
+      ;; The mime type is the fixed table's, never sniffed and never resolved
+      ;; through a platform mime database — `/etc/mime.types` varies per machine
+      ;; and would break the byte-identical cross-port fixture.
+      media
+      (let [bs   (fs/read-bytes p)
+            part (content/from-bytes bs (:mimeType media) {:name (content/base-name p)})]
+        (if (content/error-part? part)
+          (tool/failure (str "read: " (:error part)))
+          (tool/with-parts
+            ;; §1B pins this string byte-identically across the seven ports.
+            (tool/success (str p " (" (:mimeType media) ", "
+                               (content/part-bytes part) " bytes)"))
+            [(assoc part :name (content/base-name p))])))
+
+      ;; §4A: undecodable bytes are an ERROR RESULT naming the file — never a
+      ;; raised exception escaping `execute` into the loop, and never the silent
+      ;; U+FFFD replacement `slurp` would otherwise hand the model.
+      (not (valid-utf8? (fs/read-bytes p)))
+      (tool/failure (str "read: " p " is not valid UTF-8 text"))
+
+      :else
       (let [text (str (fs/read-file p))
             off  (:offset args)
             lim  (:limit args)]
@@ -543,7 +606,11 @@
 (def builtin-tools
   "The ten §4A builtins, in the order of the SPEC table."
   [(builtin "bash"        "Run a shell command."                bash-schema        t-bash)
-   (builtin "read"        "Read a UTF-8 text file."             read-schema        t-read)
+   (builtin "read"        (str "Read a file. A known media file (png/jpg/jpeg/gif/webp/pdf/"
+                               "mp3/wav) comes back as a content part; otherwise it is read "
+                               "as UTF-8 text, and with offset/limit only that line window "
+                               "is returned.")
+                                                                read-schema        t-read)
    (builtin "write"       "Write a file, creating parent dirs." write-schema       t-write)
    (builtin "edit"        "Exact-string replace in a file."     edit-schema        t-edit)
    (builtin "grep"        "Search file contents by regex."      grep-schema        t-grep)

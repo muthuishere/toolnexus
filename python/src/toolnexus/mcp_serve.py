@@ -23,7 +23,17 @@ import anyio
 from mcp.server.lowlevel import Server
 from mcp.server.streamable_http import StreamableHTTPServerTransport
 from mcp.shared.exceptions import McpError
-from mcp.types import INVALID_PARAMS, CallToolResult, ErrorData, TextContent
+from mcp.types import (
+    INVALID_PARAMS,
+    AudioContent,
+    BlobResourceContents,
+    CallToolResult,
+    EmbeddedResource,
+    ErrorData,
+    ImageContent,
+    ResourceLink,
+    TextContent,
+)
 from mcp.types import Tool as McpToolDef
 
 from .types import Tool, ToolResult
@@ -117,11 +127,49 @@ def build_mcp_server(
             except Exception:  # noqa: BLE001 — host callback errors are isolated
                 pass
         return CallToolResult(
-            content=[TextContent(type="text", text=result.output)],
+            content=[TextContent(type="text", text=result.output), *_parts_to_content(result.parts)],
             isError=result.is_error,
         )
 
     return server
+
+
+def _parts_to_content(parts: Optional[list[dict[str, Any]]]) -> list[Any]:
+    """A served tool's §1B non-text parts as MCP content blocks, appended after the text
+    part in order: ``image`` ⇒ image content, ``audio`` ⇒ audio content, ``file`` ⇒ an
+    embedded resource. Base64 is passed through verbatim."""
+    out: list[Any] = []
+    for p in parts or []:
+        kind = p.get("type")
+        mime = p.get("mimeType") or "application/octet-stream"
+        data = p.get("data")
+        if kind == "text":
+            out.append(TextContent(type="text", text=p.get("text") or ""))
+        elif kind == "image" and data:
+            out.append(ImageContent(type="image", data=data, mimeType=mime))
+        elif kind == "audio" and data:
+            out.append(AudioContent(type="audio", data=data, mimeType=mime))
+        elif kind == "file":
+            uri = p.get("url") or f"file:///{p.get('name') or 'part'}"
+            if data:
+                out.append(
+                    EmbeddedResource(
+                        type="resource",
+                        resource=BlobResourceContents(uri=uri, mimeType=mime, blob=data),
+                    )
+                )
+            else:
+                # No bytes to embed — the link is the content, which is exactly what an
+                # inbound resource_link maps back to (§2).
+                out.append(
+                    ResourceLink(
+                        type="resource_link",
+                        uri=uri,
+                        name=p.get("name") or str(uri),
+                        mimeType=mime,
+                    )
+                )
+    return out
 
 
 # ---------------------------------------------------------------------------

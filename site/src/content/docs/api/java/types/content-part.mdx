@@ -1,0 +1,265 @@
+---
+title: "ContentPart"
+description: "The non-text half of a message: text | image | file | audio, carrying base64 bytes or a URL plus a mimeType — never a path. — Java."
+sidebar:
+  label: "ContentPart"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/ContentPart.java">ContentPart.java</a>
+</p>
+
+```java
+public record ContentPart(String type, String text, String mimeType, String data,
+                          String url, String name) {
+
+    public static ContentPart text(String text);
+
+    // Edge constructors — read now, base64 now, store no handle.
+    public static ContentPart ofFile(Path path);                 // + (Path, String mimeType)
+    public static ContentPart ofFile(java.io.File file);         // + (File, String mimeType)
+    public static ContentPart ofStream(InputStream in, String mimeType);
+    public static ContentPart ofStream(InputStream in, String name, String mimeType);
+    public static ContentPart ofBytes(String type, String mimeType, byte[] bytes);
+    public static ContentPart ofBase64(String type, String mimeType, String base64);
+    public static ContentPart ofUrl(String type, String url);    // + (type, mimeType, url)
+
+    // Checked siblings, for callers who want IOException on the signature.
+    public static ContentPart ofFileChecked(Path path) throws IOException;      // + File, + mimeType
+    public static ContentPart ofStreamChecked(InputStream in, String mimeType) throws IOException;
+
+    // Named shorthands.
+    public static ContentPart image(String mimeType, byte[] bytes);
+    public static ContentPart audio(String mimeType, byte[] bytes);
+    public static ContentPart file(String mimeType, byte[] bytes, String name);
+
+    public ContentPart withName(String name);
+    public long bytes();                        // DECODED bytes, 0 for a url/text part
+    public Map<String, Object> describe();      // {type, mimeType, bytes} — never `data`
+    public static void setMaxPartBytes(long bytes);   // process-wide edge limit; 0 = unlimited
+}
+```
+
+The non-text half of a message: `text | image | file | audio`, carrying base64 bytes or a URL plus
+a `mimeType` — never a path. A non-text part carries **exactly one** of `data` (standard base64,
+padded, no line breaks) or `url`; both, or neither, is a construction error.
+
+## When to use it
+
+Two places, and they are the same type on both ends:
+
+- **Attaching** an image, a PDF or an audio clip to a run — `LlmClient` takes a
+  `List<ContentPart>` wherever it takes a `String` prompt (`run`, `stream`, `ask`, `send`).
+- **Returning** one from a tool — [`ToolResult`](/api/java/types/tool-result/) has a `parts` list,
+  so a screenshot tool hands back the image itself rather than a description of it.
+
+The built-in `read` already does the second: a recognised media file comes back as a part.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="A part never holds a path — and that is not a style choice">
+The obvious design is to keep the `Path` and read it when the request is assembled. It breaks the
+moment the message stops being in-process. A transcript is persisted by a `ConversationStore`,
+replayed later, handed to a subagent, served over `toolkit.serve`, or forwarded to an A2A peer —
+and on the far side of every one of those boundaries the path names a file that is not there, or
+worse, a different one. So the **edge constructors normalise at construction**: `ofFile`,
+`ofStream`, `ofBytes`, `ofUrl` accept broadly — a `Path`, a `java.io.File`, an `InputStream`,
+`byte[]`, a `data:` URL — and store narrowly: `mimeType` + base64 `data`. A stream is read
+**eagerly**, because a half-read stream survives the transcript boundary no better than a path.
+</Aside>
+
+The error design is deliberate too, and it is the reason there are two spellings of each reader:
+
+- `ofFile` / `ofStream` throw **`UncheckedIOException`**. Forcing a `try`/`catch` around a literal
+  argument (`ContentPart.ofFile(Path.of("shot.png"))`) is hostile in exactly the way
+  `Files.lines` and `Files.walk` decided it was — they set the precedent, this follows it.
+- `ofFileChecked` / `ofStreamChecked` are the same calls with `throws IOException` on the
+  signature, for code that wants the checked form.
+- An extension outside the fixed table (`png jpg jpeg gif webp pdf mp3 wav`) is an
+  **`IllegalArgumentException` naming the extension** — never a silent
+  `application/octet-stream`. Mime is never sniffed from content and never read from a platform
+  mime database: `/etc/mime.types` varies per machine, which would break cross-port parity.
+
+## Examples
+
+### 1. A text part and an image part
+
+The base64 is asserted against the **committed golden** at `examples/media/fixture.png.base64`,
+read from disk — never a hardcoded string and never a re-encoding, because the fixture's bytes are
+the source of truth in all seven ports.
+
+```java test
+import io.github.muthuishere.toolnexus.ContentPart;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Path fixture = Path.of("examples/media/fixture.png");
+
+        // This is the shape LlmClient.run(List<ContentPart>, toolkit) takes.
+        List<ContentPart> prompt = List.of(
+            ContentPart.text("What colour is the top-left quadrant?"),
+            ContentPart.ofFile(fixture)   // read now, base64 now — the part holds no path
+        );
+
+        ContentPart image = prompt.get(1);
+        if (!image.type().equals("image")) throw new AssertionError(image.type());
+        if (!image.mimeType().equals("image/png")) throw new AssertionError(image.mimeType());
+
+        String golden = Files.readString(Path.of("examples/media/fixture.png.base64")).trim();
+        if (!image.data().equals(golden)) throw new AssertionError("base64 differs from the golden");
+
+        // bytes() is the DECODED length, which is what logs and the token estimate use.
+        if (image.bytes() != 82) throw new AssertionError("bytes: " + image.bytes());
+
+        // describe() is how a part reaches a log line or a §9 event. `data` is never in it.
+        if (image.describe().containsKey("data")) throw new AssertionError("data must never be logged");
+        if (image.toString().contains(golden)) throw new AssertionError("toString must not print data");
+
+        System.out.println("ok: " + image.describe());
+    }
+}
+```
+
+### 2. The sources a Java caller already holds
+
+`Path`, `java.io.File`, an `InputStream`, raw `byte[]` — four ways in, one shape out. A stream is
+**read, not closed**: it is the caller's, so a `try`-with-resources around the call still works and
+a shared stream is not yanked out from under its owner.
+
+```java test
+import io.github.muthuishere.toolnexus.ContentPart;
+import java.io.ByteArrayInputStream;
+import java.lang.reflect.RecordComponent;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+
+public class Example {
+    /** A stream that records whether anyone closed it. */
+    static final class Watched extends ByteArrayInputStream {
+        boolean closed = false;
+        Watched(byte[] b) { super(b); }
+        @Override public void close() { closed = true; }
+    }
+
+    public static void main(String[] args) throws Exception {
+        Path fixture = Path.of("examples/media/fixture.png");
+        byte[] bytes = Files.readAllBytes(fixture);
+        String golden = Files.readString(Path.of("examples/media/fixture.png.base64")).trim();
+
+        ContentPart fromPath   = ContentPart.ofFile(fixture);
+        ContentPart fromFile   = ContentPart.ofFile(fixture.toFile());   // java.io.File
+        ContentPart fromBytes  = ContentPart.image("image/png", bytes);  // raw byte[]
+
+        Watched stream = new Watched(bytes);
+        ContentPart fromStream;
+        try (Watched in = stream) {                       // the CALLER closes, as usual
+            fromStream = ContentPart.ofStream(in, "image/png");
+            if (in.closed) throw new AssertionError("ofStream must not close a caller's stream");
+        }
+        if (!stream.closed) throw new AssertionError("try-with-resources still closes it");
+
+        // All four normalise to the same part.
+        for (ContentPart p : List.of(fromPath, fromFile, fromBytes, fromStream)) {
+            if (!p.data().equals(golden)) throw new AssertionError("differs: " + p);
+            if (!p.type().equals("image")) throw new AssertionError(p.type());
+            if (p.url() != null) throw new AssertionError("data and url are exclusive");
+        }
+
+        // And none of them can be carrying a handle: these are the only six fields there are.
+        for (RecordComponent rc : ContentPart.class.getRecordComponents()) {
+            if (rc.getType() != String.class) {
+                throw new AssertionError("a part field that is not a String: " + rc.getName());
+            }
+        }
+
+        System.out.println("ok: 4 sources, identical part, stream left open");
+    }
+}
+```
+
+### 3. The failure modes, and what a part costs
+
+```java test
+import io.github.muthuishere.toolnexus.Compaction;
+import io.github.muthuishere.toolnexus.ContentPart;
+import java.nio.file.Path;
+
+public class Example {
+    static String rejects(Runnable r) {
+        try {
+            r.run();
+        } catch (IllegalArgumentException e) {
+            return e.getMessage();
+        }
+        throw new AssertionError("expected a rejection");
+    }
+
+    public static void main(String[] args) {
+        // 1. data AND url is a construction error — the canonical constructor validates.
+        String both = rejects(() ->
+            new ContentPart("image", null, "image/png", "aGk=", "https://example.com/a.png", null));
+        if (!both.contains("not both")) throw new AssertionError(both);
+
+        // 2. An unknown extension is refused BY NAME — never a silent application/octet-stream.
+        String unknown = rejects(() -> ContentPart.ofFile(Path.of("notes.xyz")));
+        if (!unknown.contains("\"xyz\"")) throw new AssertionError(unknown);
+        // The escape hatch is an explicit mimeType, not sniffing.
+
+        // 3. maxPartBytes fails fast at the edge (LlmClient.Options.maxPartBytes is the
+        //    guarantee — it also covers parts an MCP server produced).
+        ContentPart.setMaxPartBytes(64);
+        try {
+            String over = rejects(() -> ContentPart.ofFile(Path.of("examples/media/fixture.png")));
+            if (!over.contains("maxPartBytes limit of 64")) throw new AssertionError(over);
+        } finally {
+            ContentPart.setMaxPartBytes(0);   // 0 = unlimited
+        }
+
+        // 4. A part is charged max(85, decodedBytes / 750) tokens — identical in every port.
+        //    Byte-derived, so a 5 MB image is neither free nor the only thing compaction evicts.
+        ContentPart tiny = ContentPart.ofFile(Path.of("examples/media/fixture.png"));  // 82 bytes
+        if (Compaction.estimatePartTokens(tiny) != 85) throw new AssertionError("floor is 85");
+
+        ContentPart big = ContentPart.image("image/png", new byte[750_000]);
+        if (Compaction.estimatePartTokens(big) != 1000) {
+            throw new AssertionError("estimate: " + Compaction.estimatePartTokens(big));
+        }
+
+        System.out.println("ok: rejected both/unknown/oversize; 82B=85 tokens, 750kB=1000 tokens");
+    }
+}
+```
+
+## Members
+
+| Member | Type | What it is |
+|---|---|---|
+| `type()` | `String` | `"text"`, `"image"`, `"file"` or `"audio"`. |
+| `text()` | `String` | The text, on a `text` part only. |
+| `mimeType()` | `String` | Required on every non-text part. Spelled `mimeType` on the wire in all seven ports. |
+| `data()` | `String` | Standard base64 (padded, no line breaks — not the URL-safe alphabet). |
+| `url()` | `String` | An `https:` URL. Exactly one of `data` / `url` is set. |
+| `name()` | `String` | A `file` part's display name. |
+| `bytes()` | `long` | **Decoded** byte count; `0` for a `url` or `text` part. |
+| `describe()` | `Map<String,Object>` | `{type, mimeType, bytes}` — how a part appears in logs and §9 events. `data` never is. |
+
+## Notes
+
+- A `data:<mime>;base64,<b64>` URL passed to `ofUrl` is **parsed into `{mimeType, data}`**, never
+  stored as a `url` — two spellings of the same bytes cannot diverge downstream. Any other URL is
+  kept as `url`, and then `mimeType` is required.
+- `setMaxPartBytes` is process-wide because the edge constructors are static. It is a fast-fail
+  convenience; [`LlmClient.Options.maxPartBytes`](/api/java/client/create/) is the actual
+  guarantee, enforced at request assembly over every part regardless of provenance.
+
+## See also
+
+- [`Tool`](/api/java/types/tool/) — The uniform shape every tool source collapses to: name, description, JSON-Schema parameters, execute.
+- [`ToolResult`](/api/java/types/tool-result/) — The result envelope: output text, optional error flag, optional non-text parts, and optional metadata that can carry a suspension.
+- [`ToolContext`](/api/java/types/context/) — Optional per-call context handed to execute: cancellation, identity, and host-supplied state.

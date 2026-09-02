@@ -228,6 +228,51 @@ dropped). You can also pass `ExtraTools` / `AnnotatedObjects` straight into `Too
 
 All of them appear as one uniform `ITool` in `tk.Tools()`.
 
+## Images, PDFs and audio (content parts)
+
+`RunAsync` also takes a list of content parts, so media sits next to your text, in your order —
+the order of text and image is semantic to a model:
+
+```csharp
+var res = await agent.RunAsync(new ContentPart[]
+{
+    ContentPart.FromText("What is broken in this screenshot?"),
+    await ContentPart.FromFileAsync("shot.png"),
+}, tk);
+```
+
+`ContentPart` takes what a .NET caller already holds:
+
+| constructor | source |
+|---|---|
+| `FromFile(string path)` / `FromFile(FileInfo)` (+ `FromFileAsync`) | read now; mime from the fixed extension table |
+| `FromStream(Stream, mimeType?, name?)` (+ `FromStreamAsync`) | any stream, read forward to the end now — a pipe or network stream works |
+| `FromBytes(byte[] / ReadOnlySpan<byte> / ReadOnlyMemory<byte>, mimeType)` | bytes in hand; `mimeType` required — bytes carry no extension |
+| `FromUrl(url)` | a `data:<mime>;base64,…` URL, parsed into `{MimeType, Data}`; an `https:` URL kept as `Url` |
+| `FromText(string)` | a text part — a plain `string` converts implicitly |
+
+Mime types come from a fixed extension table (`png jpg jpeg gif webp pdf mp3 wav`) — never
+sniffed, never resolved through the platform mime database, so every port agrees. `RunAsync` with
+a plain string is unchanged and byte-identical.
+
+A tool can answer with media too — `Parts` is the fourth positional member of `ToolResult`, next
+to the still-required `Output`, which is what the transcript, compaction and any text-only
+provider keep seeing:
+
+```csharp
+return ToolResult.OkWithParts("screenshot, 1280x720 png",
+    new[] { ContentPart.FromFile("shot.png") });
+```
+
+**MCP tools' images now survive.** Non-text content from an MCP server — image, audio, embedded
+resource, `resource_link` — used to be filtered out silently; it is preserved as `Parts` and
+emitted per provider style (Anthropic inside `tool_result`; OpenAI, whose `tool` message rejects
+an image, in a synthetic user message that never enters your transcript).
+
+Whatever you pass in, a part stores **bytes plus a `MimeType`** — never a `FileInfo`, a `Stream`
+or a path — so a persisted transcript replays without the original file. A stream is read
+**eagerly** at construction and is **not** disposed; the handle stays yours to `using`.
+
 ## Built-in tools
 
 toolnexus ships **10 built-in tools** — `bash`, `read`, `write`, `edit`, `grep`, `glob`,

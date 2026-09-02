@@ -34,8 +34,12 @@ const (
 
 // ToolResult is the uniform result handed back to the model.
 type ToolResult struct {
-	Output   string         `json:"output"`
-	IsError  bool           `json:"isError"`
+	Output  string `json:"output"`
+	IsError bool   `json:"isError"`
+	// Parts is non-text output (§1B). Absent ⇒ byte-identical to pre-0.17.
+	// Output stays required even when Parts is set: it is what the transcript,
+	// compaction, token estimation and any text-only provider see.
+	Parts    []ContentPart  `json:"parts,omitempty"`
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 

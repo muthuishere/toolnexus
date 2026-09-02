@@ -14,6 +14,22 @@ from .a2a import (
     parse_agents_config,
 )
 from .adapters import to_anthropic, to_gemini, to_openai
+from .content import (
+    MEDIA_TYPES,
+    ContentPart,
+    ContentPartError,
+    UnsupportedPartError,
+    audio,
+    encode_part,
+    estimate_tokens,
+    file,
+    get_max_part_bytes,
+    image,
+    part,
+    set_max_part_bytes,
+    summarize,
+    text,
+)
 from .translate import TranslatedToolCall, TranslateResult
 from .client import (
     Client,
@@ -116,6 +132,21 @@ __all__ = [
     "ToolResult",
     "ToolSource",
     "sanitize",
+    # content parts (§1B)
+    "ContentPart",
+    "ContentPartError",
+    "UnsupportedPartError",
+    "MEDIA_TYPES",
+    "text",
+    "image",
+    "file",
+    "audio",
+    "part",
+    "encode_part",
+    "estimate_tokens",
+    "summarize",
+    "set_max_part_bytes",
+    "get_max_part_bytes",
     # suspension (§10)
     "Request",
     "Answer",

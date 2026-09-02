@@ -1,6 +1,6 @@
 {
   "name": "toolnexus",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "description": "Dynamic MCP servers + agent skills as uniform tools for any LLM (opencode-style).",
   "type": "module",
   "main": "./dist/index.js",
@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --experimental-strip-types --test test/unit.test.ts test/agents.test.ts test/agent-hooks.test.ts test/home.test.ts test/compaction.test.ts test/loop.test.ts test/in-process.test.ts",
+    "test": "npm run build && node --experimental-strip-types --test test/unit.test.ts test/agents.test.ts test/agent-hooks.test.ts test/home.test.ts test/compaction.test.ts test/loop.test.ts test/in-process.test.ts test/translate.test.ts test/multimodal.test.ts",
     "example": "node --experimental-strip-types examples/basic.ts"
   },
   "keywords": [

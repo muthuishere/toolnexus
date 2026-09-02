@@ -96,11 +96,22 @@ func startA2AStub() (*httptest.Server, *a2aSeen) {
 				for _, pt := range p.Message.Parts {
 					text += pt.Text
 				}
+				if strings.Contains(text, "hangsend") {
+					// Hang, then 500 — opens a deterministic mid-SendMessage window:
+					// the client aborts while this request is in flight, then the
+					// RPC fails. §7A: still a cancel, not a transport error.
+					time.Sleep(300 * time.Millisecond)
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte("stub: hangsend"))
+					return
+				}
 				mode := "completed"
 				if strings.Contains(text, "fail") {
 					mode = "failed"
 				} else if strings.Contains(text, "slow") {
 					mode = "slow"
+				} else if strings.Contains(text, "hangpoll") {
+					mode = "hangpoll"
 				}
 				mu.Lock()
 				counter++
@@ -121,6 +132,11 @@ func startA2AStub() (*httptest.Server, *a2aSeen) {
 				mode := tk.mode
 				mu.Unlock()
 				switch {
+				case mode == "hangpoll" && polls >= 2:
+					// Hang, then 500 — the mid-GetTask cancel window (§7A).
+					time.Sleep(300 * time.Millisecond)
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte("stub: hangpoll"))
 				case mode == "slow" || polls < 2:
 					writeResult(w, rpc.ID, map[string]any{"id": p.ID, "status": map[string]any{"state": "working"}})
 				case mode == "failed":
@@ -281,6 +297,103 @@ func TestA2ACancelStopsPolling(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 	if got := atomic.LoadInt64(&seen.getTaskCalls); got != afterAbort {
 		t.Fatalf("GetTask calls after abort = %d, want %d (no further polling)", got, afterAbort)
+	}
+}
+
+// waitForA2ACalls blocks until the stub's counter reaches want (or fails after 2s).
+// Used to abort while a request is DEMONSTRABLY in flight, rather than racing a
+// wall-clock sleep against pollEvery.
+func waitForA2ACalls(t *testing.T, target *int64, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt64(target) < want && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if atomic.LoadInt64(target) < want {
+		t.Fatalf("timed out waiting for stub call count >= %d", want)
+	}
+}
+
+// §7A: an abort that lands while a GetTask RPC is in flight is still a cancel,
+// not a transport error (issue #64).
+func TestA2ACancelMidGetTask(t *testing.T) {
+	srv, seen := startA2AStub()
+	defer srv.Close()
+	cardURL := srv.URL + "/.well-known/agent-card.json"
+
+	tk, err := CreateToolkit(context.Background(), Options{
+		Builtins: false,
+		Agents:   []Agent{{Card: cardURL, PollEvery: 5}},
+	})
+	if err != nil {
+		t.Fatalf("CreateToolkit: %v", err)
+	}
+	defer tk.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resCh := make(chan ToolResult, 1)
+	go func() {
+		r, _ := tk.Execute(ctx, "reviewer_review", map[string]any{"task": "hangpoll"})
+		resCh <- r
+	}()
+	// Abort while GetTask #2 is demonstrably in flight (the stub hangs it ~300ms).
+	waitForA2ACalls(t, &seen.getTaskCalls, 2)
+	cancel()
+	r := <-resCh
+	if !r.IsError {
+		t.Fatal("expected isError=true after mid-request cancel")
+	}
+	if r.Output != "A2A task t1 canceled" {
+		t.Fatalf("output = %q, want %q", r.Output, "A2A task t1 canceled")
+	}
+	if r.Metadata["state"] != "canceled" {
+		t.Fatalf("metadata.state = %v, want canceled", r.Metadata["state"])
+	}
+	// Let the stub's hung handler finish, then assert no further poll started.
+	afterAbort := atomic.LoadInt64(&seen.getTaskCalls)
+	time.Sleep(400 * time.Millisecond)
+	if got := atomic.LoadInt64(&seen.getTaskCalls); got != afterAbort {
+		t.Fatalf("GetTask calls after abort = %d, want %d (no further polling)", got, afterAbort)
+	}
+}
+
+// §7A: an abort that lands while the SendMessage RPC is in flight is still a
+// cancel — the task id is empty because SendMessage never completed (js parity).
+func TestA2ACancelMidSendMessage(t *testing.T) {
+	srv, seen := startA2AStub()
+	defer srv.Close()
+	cardURL := srv.URL + "/.well-known/agent-card.json"
+
+	tk, err := CreateToolkit(context.Background(), Options{
+		Builtins: false,
+		Agents:   []Agent{{Card: cardURL, PollEvery: 5}},
+	})
+	if err != nil {
+		t.Fatalf("CreateToolkit: %v", err)
+	}
+	defer tk.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resCh := make(chan ToolResult, 1)
+	go func() {
+		r, _ := tk.Execute(ctx, "reviewer_review", map[string]any{"task": "hangsend"})
+		resCh <- r
+	}()
+	// Abort while the SendMessage is demonstrably in flight.
+	waitForA2ACalls(t, &seen.sendMessageCalls, 1)
+	cancel()
+	r := <-resCh
+	if !r.IsError {
+		t.Fatal("expected isError=true after mid-SendMessage cancel")
+	}
+	if r.Output != "A2A task  canceled" {
+		t.Fatalf("output = %q, want %q (empty task id, js parity)", r.Output, "A2A task  canceled")
+	}
+	if r.Metadata["state"] != "canceled" {
+		t.Fatalf("metadata.state = %v, want canceled", r.Metadata["state"])
+	}
+	if got := atomic.LoadInt64(&seen.getTaskCalls); got != 0 {
+		t.Fatalf("GetTask calls = %d, want 0 (SendMessage never completed)", got)
 	}
 }
 

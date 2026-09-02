@@ -1,6 +1,6 @@
 ---
 title: ToolResult
-description: The result envelope every tool returns — output text, an error flag, and optional metadata that can carry a suspension. JavaScript.
+description: The result envelope every tool returns — output text, an error flag, optional non-text parts, and optional metadata that can carry a suspension. JavaScript.
 sidebar:
   label: ToolResult
 ---
@@ -15,13 +15,15 @@ import { Aside } from '@astrojs/starlight/components';
 interface ToolResult {
   output: string
   isError: boolean
+  parts?: ContentPart[]
   metadata?: Record<string, unknown>
 }
 ```
 
-What every `execute` returns. Three fields, and the whole tool-calling loop is built on them:
-`output` is the text handed back to the model, `isError` says whether the call failed, and
-`metadata` is free-form — except for one reserved key that turns a result into a suspension.
+What every `execute` returns. Four fields, and the whole tool-calling loop is built on them:
+`output` is the text handed back to the model, `isError` says whether the call failed, `parts`
+carries anything that is not text, and `metadata` is free-form — except for one reserved key that
+turns a result into a suspension.
 
 ## When to use it
 
@@ -40,6 +42,19 @@ flag for anything the model could plausibly recover from; let genuine programmin
 `output` is always a `string` — it is what the model reads. Serialize structured data yourself
 (`JSON.stringify`) rather than expecting the loop to do it, so you control exactly what the model
 sees.
+
+## `output` stays required, even with `parts`
+
+<Aside type="note" title="`parts` is additional, never a replacement">
+`parts` (a list of [`ContentPart`](/api/javascript/types/content-part/)) is how a tool returns an
+image, a PDF or an audio clip. It does **not** relieve you of `output`: `output` is what the
+transcript, compaction, token estimation and any **text-only provider** see — the three places
+where the bytes are absent but the run still has to make sense.
+
+So a tool returning an image sets `output` to a description (`"screenshot, 1280x720 png"`) and
+`parts` to the image. The built-in `read` does exactly this for a recognised media file. Omitting
+`parts` entirely is byte-identical to the pre-`parts` behaviour, so nothing existing changed.
+</Aside>
 
 ## Examples
 
@@ -97,7 +112,40 @@ assert.ok(res.output.includes("Advanced usage"))
 console.log("ok:", res.metadata?.title)
 ```
 
-### 3. The reserved key — `metadata.pending` is a suspension
+### 3. Returning an image — `output` describes it, `parts` carries it
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import { attach, partBytes, type ToolResult } from "toolnexus"
+
+async function screenshot(path: string): Promise<ToolResult> {
+  const part = await attach(path)
+  return {
+    // The transcript, the compactor and a text-only provider only ever see this.
+    output: `${path} (${(part as any).mimeType}, ${partBytes(part)} bytes)`,
+    isError: false,
+    // A vision-capable provider additionally gets the bytes.
+    parts: [part],
+  }
+}
+
+const golden = fs.readFileSync("examples/media/fixture.png.base64", "utf8").trim()
+const res = await screenshot("examples/media/fixture.png")
+
+assert.equal(res.isError, false)
+assert.equal(res.output, "examples/media/fixture.png (image/png, 82 bytes)")
+assert.equal(res.parts?.length, 1)
+assert.equal((res.parts?.[0] as any).data, golden)
+
+// Text-only tools simply omit `parts` — byte-identical to the pre-parts contract.
+const plain: ToolResult = { output: "done", isError: false }
+assert.equal(plain.parts, undefined)
+
+console.log("ok:", res.output)
+```
+
+### 4. The reserved key — `metadata.pending` is a suspension
 
 `metadata` is free-form with one exception. A `pending` key holding a `Request` means "this tool
 cannot finish until something out-of-band happens" — the loop parks the run instead of returning.
@@ -140,10 +188,12 @@ Do not treat `isError` alone as "the tool broke"; check
 |---|---|---|
 | `output` | `string` | The text handed to the model. Always a string — serialize structured data yourself. |
 | `isError` | `boolean` | Whether the call failed. Fed back to the model, not thrown. |
+| `parts` | `ContentPart[]` | Non-text output — image / file / audio. Additional to `output`, never instead of it. Absent ⇒ byte-identical to before. |
 | `metadata` | `Record<string, unknown>` | Free-form, for your code. **Reserved:** `pending` holds a §10 `Request`. |
 
 ## See also
 
+- [`ContentPart`](/api/javascript/types/content-part/) — what goes in `parts`
 - [`Tool`](/api/javascript/types/tool/) — what returns this
 - [`ToolContext`](/api/javascript/types/context/) — what `execute` receives
 - [`pending`](/api/javascript/suspension/pending/) — build a suspending result

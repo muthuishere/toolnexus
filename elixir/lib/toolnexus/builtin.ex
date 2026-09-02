@@ -12,7 +12,7 @@ defmodule Toolnexus.Builtin do
   webfetch, question, apply_patch, todowrite.
   """
 
-  alias Toolnexus.{Tool, ToolResult, Request}
+  alias Toolnexus.{ContentPart, Tool, ToolResult, Request}
 
   @ignore_dirs ["node_modules", ".git"]
   @file_marker ~r/^\*\*\* (Add|Update|Delete) File: (.+)$/
@@ -279,19 +279,36 @@ defmodule Toolnexus.Builtin do
                 err("read: #{p}: #{:file.format_error(reason)}")
 
               {:ok, content} ->
-                if args["offset"] == nil and args["limit"] == nil do
-                  ok(content)
-                else
-                  lines = String.split(content, "\n")
-                  offset = if is_number(args["offset"]), do: max(1, trunc(args["offset"])), else: 1
-                  start = offset - 1
+                # SPEC §6: a recognised media extension returns a one-line description plus
+                # one content part. Fixed table only — never sniffed, never a platform mime
+                # database, whose contents vary per machine and would break port parity.
+                cond do
+                  match?({:ok, _}, ContentPart.media_for_path(p)) ->
+                    {:ok, {mime, type}} = ContentPart.media_for_path(p)
 
-                  limit =
-                    if is_number(args["limit"]),
-                      do: max(0, trunc(args["limit"])),
-                      else: max(0, length(lines) - start)
+                    %ToolResult{
+                      output: "#{p} (#{mime}, #{byte_size(content)} bytes)",
+                      is_error: false,
+                      parts: [%ContentPart{type: type, mime_type: mime, data: Base.encode64(content), name: Path.basename(p)}]
+                    }
 
-                  ok(lines |> Enum.slice(start, limit) |> Enum.join("\n"))
+                  not String.valid?(content) ->
+                    err("read: #{p}: not valid UTF-8 text and not a recognised media file")
+
+                  args["offset"] == nil and args["limit"] == nil ->
+                    ok(content)
+
+                  true ->
+                    lines = String.split(content, "\n")
+                    offset = if is_number(args["offset"]), do: max(1, trunc(args["offset"])), else: 1
+                    start = offset - 1
+
+                    limit =
+                      if is_number(args["limit"]),
+                        do: max(0, trunc(args["limit"])),
+                        else: max(0, length(lines) - start)
+
+                    ok(lines |> Enum.slice(start, limit) |> Enum.join("\n"))
                 end
             end
         end

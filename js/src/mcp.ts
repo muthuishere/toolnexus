@@ -11,6 +11,7 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js"
 import type { Tool as McpToolDef, ElicitRequest, ElicitResult } from "@modelcontextprotocol/sdk/types.js"
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { type JSONSchema, type Tool, type ToolContext, type ToolResult, type McpStatus, type Request, type Answer, sanitize } from "./types.js"
+import { type ContentPart, summarizePart } from "./content.js"
 
 // ---------------------------------------------------------------------------
 // MCP elicitation bridge (§10). A server can ask US for input mid-`tools/call`
@@ -108,6 +109,43 @@ export function expandEnvHeaders(headers?: Record<string, string>): Record<strin
   return out
 }
 
+/**
+ * §0.4 / §2. Map every non-text `content[]` entry to a `ContentPart`, so nothing an MCP
+ * server returns is dropped silently: image ⇒ image, audio ⇒ audio, `resource_link` ⇒
+ * `file{url}`, an embedded `resource` carrying a blob ⇒ `file{data}`. An embedded resource
+ * carrying *text* is not a part — it belongs in `output`, and {@link joinTextContent}
+ * takes it there.
+ */
+export function mcpContentToParts(content: unknown): ContentPart[] | undefined {
+  if (!Array.isArray(content)) return undefined
+  const parts: ContentPart[] = []
+  for (const item of content) {
+    const it = item as any
+    if (!it || typeof it !== "object") continue
+    // `data` / `blob` are base64 STRINGS in the SDK, never bytes — passed through verbatim
+    // so no encoder of ours can drift them away from what the server sent.
+    if (it.type === "image" && typeof it.data === "string") {
+      parts.push({ type: "image", mimeType: String(it.mimeType ?? "application/octet-stream"), data: it.data })
+    } else if (it.type === "audio" && typeof it.data === "string") {
+      parts.push({ type: "audio", mimeType: String(it.mimeType ?? "application/octet-stream"), data: it.data })
+    } else if (it.type === "resource_link" && it.uri) {
+      const part: ContentPart = { type: "file", mimeType: String(it.mimeType ?? "application/octet-stream"), url: String(it.uri) }
+      if (it.name) (part as any).name = String(it.name)
+      parts.push(part)
+    } else if (it.type === "resource" && typeof it.resource?.blob === "string") {
+      const part: ContentPart = { type: "file", mimeType: String(it.resource.mimeType ?? "application/octet-stream"), data: it.resource.blob }
+      if (it.resource.uri) (part as any).name = String(it.resource.uri)
+      parts.push(part)
+    }
+  }
+  return parts.length ? parts : undefined
+}
+
+/** An image-only result must not answer the model with "". Name what came back instead. */
+function describeMcpParts(parts: ContentPart[] | undefined): string {
+  return parts ? parts.map(summarizePart).join("\n") : ""
+}
+
 function formatToolErrorContent(content: unknown): string {
   if (!Array.isArray(content)) return "MCP tool returned an error"
   return (
@@ -127,10 +165,17 @@ function isTextContent(value: unknown): value is { type: "text"; text: string } 
   )
 }
 
+/** An embedded resource carrying text is text: it joins `output` in place, keeping the
+ *  server's ordering, rather than being discarded with the other non-text entries. */
+function isResourceText(value: unknown): value is { resource: { text: string } } {
+  const v = value as any
+  return v?.type === "resource" && typeof v?.resource?.text === "string"
+}
+
 function joinTextContent(content: unknown): string {
   if (!Array.isArray(content)) return ""
   return content
-    .flatMap((item) => (isTextContent(item) ? [item.text] : []))
+    .flatMap((item) => (isTextContent(item) ? [item.text] : isResourceText(item) ? [item.resource.text] : []))
     .join("\n")
 }
 
@@ -202,13 +247,19 @@ function convertTool(server: string, def: McpToolDef, client: Client, timeout: n
           undefined,
           { resetTimeoutOnProgress: true, signal: ctx?.signal, timeout: ctx?.timeout ?? timeout },
         )
+        // Parts are collected BEFORE any branch returns: the isError and structuredContent
+        // short-circuits both read `content[]` on the way past, so neither reintroduces the
+        // silent drop this mapping exists to remove (§2).
+        const parts = mcpContentToParts(result.content)
+        const withParts = (r: ToolResult): ToolResult => (parts ? { ...r, parts } : r)
         if (result.isError) {
-          return { output: formatToolErrorContent(result.content), isError: true, metadata: { server } }
+          return withParts({ output: formatToolErrorContent(result.content), isError: true, metadata: { server } })
         }
         if (result.structuredContent !== undefined && result.structuredContent !== null) {
-          return { output: JSON.stringify(result.structuredContent), isError: false, metadata: { server } }
+          return withParts({ output: JSON.stringify(result.structuredContent), isError: false, metadata: { server } })
         }
-        return { output: joinTextContent(result.content), isError: false, metadata: { server } }
+        const text = joinTextContent(result.content)
+        return withParts({ output: text || describeMcpParts(parts), isError: false, metadata: { server } })
       } catch (e) {
         return { output: e instanceof Error ? e.message : String(e), isError: true, metadata: { server } }
       }

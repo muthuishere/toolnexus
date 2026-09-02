@@ -96,6 +96,20 @@ type ClientOptions struct {
 	// classifier cannot loop unbounded. There is no "suspend" tier — suspension (§10)
 	// stays a user-action pause, not an error path. Mirrors js ClientOptions.onError.
 	OnError func(ErrorInfo) Tier
+	// MaxPartBytes (§1B) caps the DECODED byte length of any content part,
+	// enforced at request assembly over every part regardless of provenance;
+	// 0 ⇒ no limit (DefaultMaxPartBytes). Going over follows the §8A
+	// provenance rule: an ATTACHED part (RunParts) is a typed *PartError
+	// before any HTTP call; a TOOL/MCP-derived one degrades to the canonical
+	// placeholder and warns once, so a remote server still cannot fail the
+	// run. The edge constructors additionally fail fast with the same check.
+	MaxPartBytes int
+	// OnUnsupportedPart (§8A) overrides the provenance rule for a part the
+	// selected style cannot represent. "" (the default) ⇒ a part the CALLER
+	// attached is a typed error at assembly, while a part derived from a tool or
+	// MCP result degrades to a text placeholder and warns once. "error" ⇒ always
+	// error; "text" ⇒ always degrade. A part is NEVER dropped silently.
+	OnUnsupportedPart string
 }
 
 // Tier (§8 Resilience) is what to do with a failed LLM call: retry it (within the
@@ -582,6 +596,38 @@ func (c *Client) Run(ctx context.Context, prompt string, tk *Toolkit) (RunResult
 // Client.run(prompt, { history }). A run-level TimeoutMs (if set) and ctx
 // cancellation both abort in-flight requests.
 func (c *Client) RunWithHistory(ctx context.Context, prompt string, tk *Toolkit, history []any) (RunResult, error) {
+	return c.runAny(ctx, prompt, tk, history)
+}
+
+// RunParts is Run with a §1B content-part prompt instead of a string — the port's
+// named-sibling idiom (RunWithHistory, StreamWithID), since Go has no overloading.
+// Parts keep the caller's ordering, which is semantic to a model. The first part
+// carrying a deferred construction error (File on a missing or unknown-extension
+// path, an oversized Bytes) is surfaced here, before any HTTP call.
+func (c *Client) RunParts(ctx context.Context, parts []ContentPart, tk *Toolkit) (RunResult, error) {
+	return c.RunPartsWithHistory(ctx, parts, tk, nil)
+}
+
+// RunPartsWithHistory is RunWithHistory with a §1B content-part prompt.
+func (c *Client) RunPartsWithHistory(ctx context.Context, parts []ContentPart, tk *Toolkit, history []any) (RunResult, error) {
+	if err := checkParts(parts, c.opts.MaxPartBytes); err != nil {
+		return RunResult{}, err
+	}
+	return c.runAny(ctx, parts, tk, history)
+}
+
+// checkParts surfaces the first part's deferred construction error and enforces
+// MaxPartBytes, so a bad part fails at the edge rather than on the wire.
+func checkParts(parts []ContentPart, maxBytes int) error {
+	for _, p := range parts {
+		if err := p.Validate(maxBytes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) runAny(ctx context.Context, prompt any, tk *Toolkit, history []any) (RunResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -811,7 +857,7 @@ func (c *Client) postJSON(ctx context.Context, endpoint string, headers map[stri
 
 // ---- OpenAI-style: POST {baseURL}/chat/completions ----
 
-func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, history []any) (res RunResult, err error) {
+func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history []any) (res RunResult, err error) {
 	key, err := c.resolveKey()
 	if err != nil {
 		return RunResult{}, err
@@ -825,8 +871,8 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 	} else if sys := c.system(tk); sys != "" {
 		messages = append(messages, map[string]any{"role": "system", "content": sys})
 	}
-	if prompt != resumeNoPrompt { // a resume continues from the transcript, with no new user turn
-		messages = append(messages, map[string]any{"role": "user", "content": prompt})
+	if prompt != any(resumeNoPrompt) { // a resume continues from the transcript, with no new user turn
+		messages = append(messages, userMessage(prompt))
 	}
 	tools := tk.ToOpenAI()
 	var toolCalls []ToolCall
@@ -857,9 +903,13 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 				}
 			}
 		}
+		wire, err := c.emitMessages(messages)
+		if err != nil {
+			return RunResult{}, err
+		}
 		body := map[string]any{
 			"model":    c.opts.Model,
-			"messages": messages,
+			"messages": wire,
 		}
 		if len(tools) > 0 {
 			body["tools"] = tools
@@ -973,11 +1023,11 @@ func (c *Client) runOpenAI(ctx context.Context, prompt string, tk *Toolkit, hist
 					IsError:  result.IsError,
 					Metadata: result.Metadata,
 				}
-				results[i] = map[string]any{
+				results[i] = withToolParts(map[string]any{
 					"role":         "tool",
 					"tool_call_id": tc.ID,
 					"content":      result.Output,
-				}
+				}, tc.Function.Name, result.Parts)
 			}(i, tc)
 		}
 		wg.Wait()
@@ -1078,7 +1128,7 @@ func (c *Client) resolvePending(ctx context.Context, tk *Toolkit, name string, a
 
 // ---- Anthropic-style: POST {baseURL}/messages ----
 
-func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, history []any) (res RunResult, err error) {
+func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, history []any) (res RunResult, err error) {
 	key, err := c.resolveKey()
 	if err != nil {
 		return RunResult{}, err
@@ -1093,8 +1143,8 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 	if len(history) > 0 {
 		messages = append(messages, history...)
 	}
-	if prompt != resumeNoPrompt { // a resume continues from the transcript, with no new user turn
-		messages = append(messages, map[string]any{"role": "user", "content": prompt})
+	if prompt != any(resumeNoPrompt) { // a resume continues from the transcript, with no new user turn
+		messages = append(messages, userMessage(prompt))
 	}
 	tools := tk.ToAnthropic()
 	var toolCalls []ToolCall
@@ -1128,10 +1178,14 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 				}
 			}
 		}
+		wire, err := c.emitMessages(messages)
+		if err != nil {
+			return RunResult{}, err
+		}
 		body := map[string]any{
 			"model":      c.opts.Model,
 			"max_tokens": 4096,
-			"messages":   messages,
+			"messages":   wire,
 		}
 		if system != "" {
 			body["system"] = system
@@ -1247,12 +1301,12 @@ func (c *Client) runAnthropic(ctx context.Context, prompt string, tk *Toolkit, h
 					IsError:  result.IsError,
 					Metadata: result.Metadata,
 				}
-				results[i] = map[string]any{
+				results[i] = withToolParts(map[string]any{
 					"type":        "tool_result",
 					"tool_use_id": u.ID,
 					"content":     result.Output,
 					"is_error":    result.IsError,
-				}
+				}, u.Name, result.Parts)
 			}(i, u)
 		}
 		wg.Wait()
@@ -1382,7 +1436,7 @@ func (c *Client) StreamWithID(ctx context.Context, prompt string, tk *Toolkit, i
 
 // ---- Streaming: OpenAI-style ----
 
-func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, history []any, ch chan<- StreamEvent) (err error) {
+func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, history []any, ch chan<- StreamEvent) (err error) {
 	key, err := c.resolveKey()
 	if err != nil {
 		return err
@@ -1396,8 +1450,8 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, h
 	} else if sys := c.system(tk); sys != "" {
 		messages = append(messages, map[string]any{"role": "system", "content": sys})
 	}
-	if prompt != resumeNoPrompt { // a resume continues from the transcript, with no new user turn
-		messages = append(messages, map[string]any{"role": "user", "content": prompt})
+	if prompt != any(resumeNoPrompt) { // a resume continues from the transcript, with no new user turn
+		messages = append(messages, userMessage(prompt))
 	}
 	tools := tk.ToOpenAI()
 	var toolCalls []ToolCall
@@ -1426,9 +1480,13 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, h
 				}
 			}
 		}
+		wire, err := c.emitMessages(messages)
+		if err != nil {
+			return err
+		}
 		sbody := map[string]any{
 			"model":          c.opts.Model,
-			"messages":       messages,
+			"messages":       wire,
 			"stream":         true,
 			"stream_options": map[string]any{"include_usage": true},
 		}
@@ -1589,7 +1647,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt string, tk *Toolkit, h
 					return
 				}
 				records[i] = ToolCall{Name: cc.name, Args: args, Output: result.Output, IsError: result.IsError, Metadata: result.Metadata}
-				results[i] = map[string]any{"role": "tool", "tool_call_id": cc.id, "content": result.Output}
+				results[i] = withToolParts(map[string]any{"role": "tool", "tool_call_id": cc.id, "content": result.Output}, cc.name, result.Parts)
 				events[i] = StreamEvent{Type: "tool_result", ID: cc.id, Name: cc.name, Output: result.Output, IsError: result.IsError}
 			}(i, cc)
 		}
@@ -1637,7 +1695,7 @@ func lastText(messages []any) string {
 
 // ---- Streaming: Anthropic-style ----
 
-func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit, history []any, ch chan<- StreamEvent) (err error) {
+func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, history []any, ch chan<- StreamEvent) (err error) {
 	key, err := c.resolveKey()
 	if err != nil {
 		return err
@@ -1652,8 +1710,8 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 	if len(history) > 0 {
 		messages = append(messages, history...)
 	}
-	if prompt != resumeNoPrompt { // a resume continues from the transcript, with no new user turn
-		messages = append(messages, map[string]any{"role": "user", "content": prompt})
+	if prompt != any(resumeNoPrompt) { // a resume continues from the transcript, with no new user turn
+		messages = append(messages, userMessage(prompt))
 	}
 	tools := tk.ToAnthropic()
 	var toolCalls []ToolCall
@@ -1684,10 +1742,14 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 				}
 			}
 		}
+		wire, err := c.emitMessages(messages)
+		if err != nil {
+			return err
+		}
 		reqBody := map[string]any{
 			"model":      c.opts.Model,
 			"max_tokens": 4096,
-			"messages":   messages,
+			"messages":   wire,
 			"stream":     true,
 		}
 		if system != "" {
@@ -1851,7 +1913,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt string, tk *Toolkit
 					return
 				}
 				records[i] = ToolCall{Name: u.name, Args: args, Output: result.Output, IsError: result.IsError, Metadata: result.Metadata}
-				results[i] = map[string]any{"type": "tool_result", "tool_use_id": u.id, "content": result.Output, "is_error": result.IsError}
+				results[i] = withToolParts(map[string]any{"type": "tool_result", "tool_use_id": u.id, "content": result.Output, "is_error": result.IsError}, u.name, result.Parts)
 				events[i] = StreamEvent{Type: "tool_result", ID: u.id, Name: u.name, Output: result.Output, IsError: result.IsError}
 			}(i, u)
 		}

@@ -122,9 +122,18 @@ public static class McpServe
                 catch { /* Host callback errors are isolated. */ }
             }
 
+            // §7C: the text part first, then each non-text ContentPart as the corresponding MCP
+            // content block, in order — image ⇒ image, audio ⇒ audio, file ⇒ embedded resource.
+            var content = new List<ContentBlock> { new TextContentBlock { Text = result.Output } };
+            foreach (var part in result.Parts ?? Array.Empty<ContentPart>())
+            {
+                var block = ToContentBlock(part);
+                if (block != null) content.Add(block);
+            }
+
             return new CallToolResult
             {
-                Content = new List<ContentBlock> { new TextContentBlock { Text = result.Output } },
+                Content = content,
                 IsError = result.IsError,
             };
         };
@@ -142,6 +151,46 @@ public static class McpServe
         Description = t.Description,
         InputSchema = SchemaElement(t.InputSchema),
     };
+
+    /// <summary>
+    /// Map one §1B <see cref="ContentPart"/> onto its MCP content block. A <c>text</c> part is
+    /// already covered by the result's own text block, so it maps to a further text block; a
+    /// <c>file</c> part becomes an embedded resource (blob) or a resource link (url).
+    /// </summary>
+    private static ContentBlock? ToContentBlock(ContentPart part)
+    {
+        var mime = part.MimeType ?? "application/octet-stream";
+        switch (part.Type)
+        {
+            case "text":
+                return new TextContentBlock { Text = part.Text ?? "" };
+            case "image":
+                return part.Data != null
+                    ? new ImageContentBlock { Data = B64Bytes(part.Data), MimeType = mime }
+                    : new ResourceLinkBlock { Uri = part.Url ?? "", Name = part.Name ?? "", MimeType = mime };
+            case "audio":
+                return part.Data != null
+                    ? new AudioContentBlock { Data = B64Bytes(part.Data), MimeType = mime }
+                    : new ResourceLinkBlock { Uri = part.Url ?? "", Name = part.Name ?? "", MimeType = mime };
+            case "file":
+                if (part.Data != null)
+                    return new EmbeddedResourceBlock
+                    {
+                        Resource = new BlobResourceContents
+                        {
+                            Uri = part.Name ?? "file://part",
+                            MimeType = mime,
+                            Blob = B64Bytes(part.Data),
+                        },
+                    };
+                return new ResourceLinkBlock { Uri = part.Url ?? "", Name = part.Name ?? "", MimeType = mime };
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>The SDK carries base64 as UTF-8 bytes; hand it ours verbatim (no re-encoding).</summary>
+    private static ReadOnlyMemory<byte> B64Bytes(string? b64) => System.Text.Encoding.UTF8.GetBytes(b64 ?? "");
 
     /// <summary>Convert a tool's plain-dictionary JSON Schema into the SDK's <see cref="JsonElement"/> form.</summary>
     private static JsonElement SchemaElement(IDictionary<string, object?> schema)

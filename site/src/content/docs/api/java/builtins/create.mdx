@@ -69,6 +69,11 @@ public class Example {
 
 ### 2. Calling `read` directly — a failure is a `ToolResult`, not a thrown exception
 
+`read` is not text-only: a recognised media file (`png jpg jpeg gif webp pdf mp3 wav`) comes back
+as a [`ContentPart`](/api/java/types/content-part/) on `ToolResult.parts`, with `output` describing
+it. Anything else is read as UTF-8 text windowed by `offset`/`limit`, and bytes that are not valid
+UTF-8 are an `isError` result — never a thrown exception.
+
 ```java test
 import io.github.muthuishere.toolnexus.*;
 import java.nio.file.Files;
@@ -130,6 +135,7 @@ public class Example {
 | `create()` | `List<Tool>` | All ten built-ins, fixed order, `source() == "builtin"` on each. |
 | Failure contract | — | Every built-in returns `ToolResult{isError:true}` on failure — never throws across `execute`. |
 | Paths | — | Resolve relative to the process working directory unless absolute. |
+| `read` on media | — | A `png/jpg/jpeg/gif/webp/pdf/mp3/wav` file returns a content part; undecodable bytes return an `isError` result. |
 
 ## See also
 

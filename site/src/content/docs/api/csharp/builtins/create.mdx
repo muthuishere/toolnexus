@@ -107,7 +107,7 @@ Console.WriteLine($"ok: {schema.Count} built-ins as OpenAI schema, first={fnName
 | Name | What it does |
 |---|---|
 | `bash` | Run a shell command; returns combined stdout+stderr. |
-| `read` | Read a UTF-8 text file, optionally windowed by offset/limit. |
+| `read` | Read a file. A recognised media file (png/jpg/jpeg/gif/webp/pdf/mp3/wav) comes back as a [`ContentPart`](/api/csharp/types/content-part/); otherwise UTF-8 text, optionally windowed by offset/limit. Undecodable bytes are an `IsError` result — it decodes strictly, because `File.ReadAllText` silently substitutes U+FFFD and would hand the model garbage. |
 | `write` | Write (create/overwrite) a file, creating parent directories. |
 | `edit` | Exact-string replace, single-occurrence by default. |
 | `grep` | Regex search over file contents under a directory. |

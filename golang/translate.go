@@ -329,10 +329,15 @@ func openAIMessagesToAnthropic(messages []any) ([]any, string) {
 			out = append(out, map[string]any{"role": "assistant", "content": blocks})
 		default: // user and anything else
 			flushResults()
-			if s := contentText(m["content"]); s != "" {
+			if raw, ok := m["content"].([]any); ok && len(raw) > 0 {
+				// §11: a parts array has its text concatenated and its NON-TEXT parts
+				// translated into the provider's block shape — never flattened away
+				// and never passed through raw (which is what six ports used to do).
+				if content := translateContentArray(raw); content != nil {
+					out = append(out, map[string]any{"role": "user", "content": content})
+				}
+			} else if s := contentText(m["content"]); s != "" {
 				out = append(out, map[string]any{"role": "user", "content": s})
-			} else if blocks, ok := m["content"].([]any); ok && len(blocks) > 0 {
-				out = append(out, map[string]any{"role": "user", "content": blocks})
 			}
 		}
 	}
@@ -573,4 +578,124 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// translateContentArray maps an OpenAI-shaped (or §1B-shaped) content array to
+// Anthropic content. An all-text array collapses to the concatenated string, as
+// before; otherwise blocks are emitted in the order given, with consecutive text
+// parts concatenated. Nothing is dropped: a part the target style cannot
+// represent becomes a named text placeholder.
+func translateContentArray(raw []any) any {
+	parts := contentArrayParts(raw)
+	if len(parts) == 0 {
+		return nil
+	}
+	allText := true
+	for _, p := range parts {
+		if p.nonText() {
+			allText = false
+			break
+		}
+	}
+	if allText {
+		var sb strings.Builder
+		for _, p := range parts {
+			sb.WriteString(p.Text)
+		}
+		if sb.Len() == 0 {
+			return nil
+		}
+		return sb.String()
+	}
+	blocks := make([]any, 0, len(parts))
+	var pending strings.Builder
+	flushText := func() {
+		if pending.Len() > 0 {
+			blocks = append(blocks, map[string]any{"type": "text", "text": pending.String()})
+			pending.Reset()
+		}
+	}
+	for _, p := range parts {
+		if !p.nonText() {
+			pending.WriteString(p.Text)
+			continue
+		}
+		flushText()
+		block, err := encodePart(StyleAnthropic, p)
+		if err != nil {
+			blocks = append(blocks, unsupportedPlaceholder(p))
+			continue
+		}
+		blocks = append(blocks, block)
+	}
+	flushText()
+	return blocks
+}
+
+// contentArrayParts reads a content array as §1B parts, accepting both the
+// OpenAI wire shapes a caller sends and toolnexus's own canonical part shape.
+func contentArrayParts(raw []any) []ContentPart {
+	out := make([]ContentPart, 0, len(raw))
+	for _, e := range raw {
+		if p, ok := e.(ContentPart); ok {
+			out = append(out, p)
+			continue
+		}
+		m, ok := asJSONMap(e)
+		if !ok {
+			continue
+		}
+		kind, _ := m["type"].(string)
+		str := func(k string) string { v, _ := m[k].(string); return v }
+		switch kind {
+		case PartText:
+			out = append(out, Text(str("text")))
+		case PartImage, PartAudio:
+			out = append(out, ContentPart{Type: kind, MimeType: str("mimeType"), Data: str("data"), URL: str("url"), Name: str("name")})
+		case PartFile:
+			// "file" is both a §1B part type and OpenAI's wire block; tell them
+			// apart by the nested `file` object the wire shape carries.
+			if f, ok := asJSONMap(m["file"]); ok {
+				fd, _ := f["file_data"].(string)
+				name, _ := f["filename"].(string)
+				p := fromWireURL(PartFile, fd)
+				if p.Name == "" {
+					p.Name = name
+				}
+				out = append(out, p)
+				continue
+			}
+			out = append(out, ContentPart{Type: kind, MimeType: str("mimeType"), Data: str("data"), URL: str("url"), Name: str("name")})
+		case "image_url":
+			iu, _ := asJSONMap(m["image_url"])
+			url, _ := iu["url"].(string)
+			out = append(out, fromWireURL(PartImage, url))
+		case "input_audio":
+			ia, _ := asJSONMap(m["input_audio"])
+			data, _ := ia["data"].(string)
+			format, _ := ia["format"].(string)
+			mime := "audio/" + format
+			if format == "mp3" {
+				mime = "audio/mpeg"
+			}
+			out = append(out, ContentPart{Type: PartAudio, MimeType: mime, Data: data})
+		default:
+			// An unrecognised entry with a `text` field is still text.
+			if t, _ := m["text"].(string); t != "" {
+				out = append(out, Text(t))
+			}
+		}
+	}
+	return out
+}
+
+// fromWireURL turns an OpenAI wire URL (a data: URL or an https: one) into a part
+// of the given type without re-encoding the bytes.
+func fromWireURL(kind, u string) ContentPart {
+	if strings.HasPrefix(u, "data:") {
+		if mime, b64, err := parseDataURL(u); err == nil {
+			return ContentPart{Type: kind, MimeType: mime, Data: b64}
+		}
+	}
+	return ContentPart{Type: kind, URL: u}
 }

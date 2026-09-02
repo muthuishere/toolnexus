@@ -173,6 +173,69 @@ public final class Translate {
         return out;
     }
 
+    /**
+     * §11: a {@code content} given as an array of parts has its <b>text parts concatenated</b> and
+     * its <b>non-text parts translated</b> into the provider's block shape (§8A) — never flattened
+     * away, never passed through raw. An all-text array collapses to the concatenated string (the
+     * shape a text-only caller has always seen); a mixed array becomes a block list in the order
+     * given. Returns {@code null} when there is nothing to send.
+     */
+    static Object translateContent(Object content) {
+        if (content instanceof String s) return s.isEmpty() ? null : s;
+        if (!(content instanceof List<?> raw) || raw.isEmpty()) return null;
+        List<Object> blocks = new ArrayList<>();
+        boolean anyNonText = false;
+        for (Object p : raw) {
+            ContentPart part = asPart(p);
+            if (part == null) {
+                // Already a provider-native block (or something we do not model): pass it along
+                // rather than dropping it.
+                blocks.add(p);
+                anyNonText = true;
+                continue;
+            }
+            if (ContentPart.TEXT.equals(part.type())) {
+                blocks.add(ContentParts.textBlock(part.text()));
+                continue;
+            }
+            anyNonText = true;
+            Map<String, Object> block = ContentParts.toBlock("anthropic", part);
+            blocks.add(block != null
+                    ? block
+                    : ContentParts.textBlock(ContentParts.placeholder(part)));
+        }
+        if (!anyNonText) {
+            String s = contentText(content);
+            return s.isEmpty() ? null : s;
+        }
+        return blocks;
+    }
+
+    /** Read one content entry as a §1B part — either the type itself or its wire map. */
+    @SuppressWarnings("unchecked")
+    static ContentPart asPart(Object o) {
+        if (o instanceof ContentPart p) return p;
+        if (!(o instanceof Map<?, ?> mm)) return null;
+        Map<String, Object> m = (Map<String, Object>) mm;
+        if (!(m.get("type") instanceof String type)) return null;
+        if (ContentPart.TEXT.equals(type)) {
+            return m.get("text") instanceof String t ? ContentPart.text(t) : null;
+        }
+        if (!ContentPart.IMAGE.equals(type) && !ContentPart.FILE.equals(type)
+                && !ContentPart.AUDIO.equals(type)) {
+            return null; // a provider-native block (image_url, tool_use, ...), not a §1B part
+        }
+        String mime = m.get("mimeType") instanceof String s ? s : null;
+        String data = m.get("data") instanceof String s ? s : null;
+        String url = m.get("url") instanceof String s ? s : null;
+        String name = m.get("name") instanceof String s ? s : null;
+        try {
+            return new ContentPart(type, null, mime, data, url, name);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
     /** The result of converting an OpenAI message list: provider messages + hoisted system. */
     public record Converted(List<Object> messages, String system) {}
 
@@ -251,16 +314,12 @@ public final class Translate {
                 }
                 default -> {
                     flush.run();
-                    String s = contentText(m.get("content"));
                     Map<String, Object> turn = new LinkedHashMap<>();
                     turn.put("role", "user");
-                    if (!s.isEmpty()) {
-                        turn.put("content", s);
-                        out.add(turn);
-                    } else if (m.get("content") instanceof List<?> blocks && !blocks.isEmpty()) {
-                        turn.put("content", blocks);
-                        out.add(turn);
-                    }
+                    Object content = translateContent(m.get("content"));
+                    if (content == null) continue;
+                    turn.put("content", content);
+                    out.add(turn);
                 }
             }
         }

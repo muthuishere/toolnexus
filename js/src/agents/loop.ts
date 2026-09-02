@@ -12,6 +12,7 @@
  *
  * So Loop takes no options: it is read, not configured.
  */
+import type { PromptInput } from "../content.js"
 import { createClient, type ClientOptions, type Hooks, type RunResult } from "../client.js"
 import type { Toolkit } from "../toolkit.js"
 import type { Agent } from "./agent.js"
@@ -114,8 +115,8 @@ export function allTodosDone(result: RunResult): Verdict {
  * it owes an Answer or a fix.
  */
 export async function runGated(
-  ask: (prompt: string) => Promise<RunResult>,
-  prompt: string,
+  ask: (prompt: PromptInput) => Promise<RunResult>,
+  prompt: PromptInput,
   completion: Completion | undefined,
 ): Promise<RunResult> {
   if (!completion) return ask(prompt)
@@ -187,14 +188,14 @@ export class Loop {
     return this.#turns
   }
 
-  async run(prompt: string, opts: LoopRunOptions = {}): Promise<Outcome> {
+  async run(prompt: PromptInput, opts: LoopRunOptions = {}): Promise<Outcome> {
     const completion = this.agent.spec.completion
     const client = createClient(this.#clientOptions(opts))
     this.#status = "running"
 
     let attempts = 0
     let history: any[] = []
-    const ask = async (p: string): Promise<RunResult> => {
+    const ask = async (p: PromptInput): Promise<RunResult> => {
       attempts++
       const r = await client.run(p, { toolkit: this.toolkit, history })
       this.#turns += r.turns

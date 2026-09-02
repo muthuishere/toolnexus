@@ -10,6 +10,7 @@ reference (``js/src/builtin.ts``); same behavior, idiomatic Python shape.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -18,6 +19,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Awaitable, Callable, Optional, Union
 
+from .content import MEDIA_TYPES
 from .types import JSONSchema, Tool, ToolContext, ToolResult, pending
 
 # A single global builtin toggle (mirrors MCP is_enabled precedence). The dict
@@ -214,11 +216,35 @@ def _read_tool() -> Tool:
         p = str(args.get("path") or "")
         if not p:
             return _err("read: path is required")
+        media = MEDIA_TYPES.get(os.path.splitext(p)[1].lstrip(".").lower())
+        if media is not None:
+            mime, part_type = media
+            try:
+                with open(p, "rb") as f:
+                    raw = f.read()
+            except OSError as e:
+                return _err(f"read: {e}")
+            return ToolResult(
+                output=f"{p} ({mime}, {len(raw)} bytes)",
+                is_error=False,
+                parts=[
+                    {
+                        "type": part_type,
+                        "mimeType": mime,
+                        "data": base64.b64encode(raw).decode("ascii"),
+                        "name": os.path.basename(p),
+                    }
+                ],
+            )
         try:
             with open(p, "r", encoding="utf-8") as f:
                 content = f.read()
         except OSError as e:
             return _err(f"read: {e}")
+        except UnicodeDecodeError:
+            # UnicodeDecodeError is a ValueError, NOT an OSError: without this branch it
+            # escapes execute() unwrapped and lands raw in the client loop.
+            return _err(f"read: {p} is not valid UTF-8 text")
         if args.get("offset") is None and args.get("limit") is None:
             return _ok(content)
         lines = content.split("\n")
@@ -231,7 +257,9 @@ def _read_tool() -> Tool:
 
     return _builtin(
         "read",
-        "Read a UTF-8 text file. With offset/limit, return only that line window.",
+        "Read a file. A known media file (png/jpg/jpeg/gif/webp/pdf/mp3/wav) comes back "
+        "as a content part; otherwise it is read as UTF-8 text, and with offset/limit "
+        "only that line window is returned.",
         {
             "type": "object",
             "properties": {

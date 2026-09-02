@@ -122,6 +122,7 @@ public static class Translate
             var sb = new System.Text.StringBuilder();
             foreach (var p in parts)
             {
+                if (p is ContentPart cp) { if (cp.Type == "text") sb.Append(cp.Text ?? ""); continue; }
                 if (p is IDictionary<string, object?> pm && pm.Get("text") is string t) sb.Append(t);
             }
             return sb.ToString();
@@ -224,7 +225,9 @@ public static class Translate
                     var block = new Dictionary<string, object?>
                     {
                         ["type"] = "tool_result",
-                        ["content"] = ContentText(m.Get("content")),
+                        // Anthropic's tool_result.content takes native blocks (§8A), so a tool
+                        // result carrying an image survives translation too.
+                        ["content"] = ContentToAnthropic(m.Get("content")),
                     };
                     if (m.Get("tool_call_id") is string id && id.Length > 0) block["tool_use_id"] = id;
                     pending.Add(block);
@@ -253,14 +256,17 @@ public static class Translate
                 default:
                 {
                     Flush();
-                    var s = ContentText(m.Get("content"));
-                    if (s.Length > 0)
+                    // §11: text parts concatenate, non-text parts translate into the provider's
+                    // native block shape (§8A). Nothing is flattened away or dropped.
+                    var translated = ContentToAnthropic(m.Get("content"));
+                    if (translated is string str)
                     {
-                        outMsgs.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = s });
+                        if (str.Length > 0)
+                            outMsgs.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = str });
                     }
-                    else if (m.Get("content") is IEnumerable<object?> blocks && blocks.Any())
+                    else if (translated is List<object?> blocks && blocks.Count > 0)
                     {
-                        outMsgs.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = blocks.ToList() });
+                        outMsgs.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = blocks });
                     }
                     break;
                 }
@@ -315,6 +321,90 @@ public static class Translate
             return new Dictionary<string, object?> { ["type"] = "tool", ["name"] = name };
         }
         return null;
+    }
+
+    /// <summary>
+    /// (§11) Translate an OpenAI <c>content</c> value into the Anthropic shape, preserving
+    /// non-text parts instead of flattening them away. An all-text value collapses to the
+    /// concatenated string (byte-identical to the previous behaviour); anything else becomes a
+    /// native block array in the order given. A part the style cannot represent degrades to a
+    /// named text placeholder — it is never dropped silently, and it never fails the call.
+    /// </summary>
+    public static object? ContentToAnthropic(object? content)
+    {
+        if (content is not IEnumerable<object?> raw || content is string) return ContentText(content);
+        var items = raw.ToList();
+        if (items.Count == 0) return "";
+
+        var parts = items.Select(AsPart).ToList();
+        if (parts.All(x => x is { Type: "text" }))
+            return string.Concat(parts.Select(x => x!.Text ?? ""));
+
+        var blocks = new List<object?>();
+        for (var i = 0; i < items.Count; i++)
+        {
+            var part = parts[i];
+            if (part == null) { blocks.Add(items[i]); continue; } // already provider-native
+            var block = ContentEmitBlock(part);
+            blocks.Add(block ?? new Dictionary<string, object?>
+            {
+                ["type"] = "text",
+                ["text"] = part.UnsupportedPlaceholderText(),
+            });
+        }
+        return blocks;
+    }
+
+    private static Dictionary<string, object?>? ContentEmitBlock(ContentPart part)
+    {
+        var block = ContentEmit.Encode(part, "anthropic");
+        return block != null && block["type"] is "text" or "image" or "document" ? block : null;
+    }
+
+    /// <summary>
+    /// Read one <c>content</c> entry as a §1B part. Returns null when the entry is already a
+    /// provider-native block we should not touch.
+    /// </summary>
+    private static ContentPart? AsPart(object? item)
+    {
+        if (item is ContentPart cp) return cp;
+        if (item is string s) return ContentPart.FromText(s);
+        if (item is not IDictionary<string, object?> m) return null;
+        var type = m.Get("type") as string ?? "";
+        switch (type)
+        {
+            case "text":
+                return ContentPart.FromText(m.Get("text") as string ?? "");
+            case "image" or "file" or "audio" when m.Get("mimeType") is string mime:
+                // Our own §1B shape, arriving as a plain map.
+                return new ContentPart
+                {
+                    Type = type,
+                    MimeType = mime,
+                    Data = m.Get("data") as string,
+                    Url = m.Get("url") as string,
+                    Name = m.Get("name") as string,
+                };
+            case "image_url":
+                return FromDataOrUrl("image", (m.Get("image_url") as IDictionary<string, object?>)?.Get("url") as string);
+            case "input_audio":
+            {
+                var ia = m.Get("input_audio") as IDictionary<string, object?>;
+                var data = ia?.Get("data") as string;
+                if (data == null) return null;
+                var fmt = ia?.Get("format") as string ?? "mpeg";
+                return new ContentPart { Type = "audio", MimeType = fmt == "mp3" ? "audio/mpeg" : $"audio/{fmt}", Data = data };
+            }
+            default:
+                return null; // already Anthropic-native (image/document with a source), or unknown
+        }
+    }
+
+    private static ContentPart? FromDataOrUrl(string type, string? url)
+    {
+        if (string.IsNullOrEmpty(url)) return null;
+        try { return ContentPart.FromUrl(url!, type == "image" ? "image/png" : null); }
+        catch (ContentPart.InvalidPartException) { return null; }
     }
 
     /// <summary>True when the message list already carries a system-ish message.</summary>

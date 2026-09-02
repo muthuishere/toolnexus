@@ -45,6 +45,22 @@
    (cond-> {:output (str output) :isError true}
      metadata (assoc :metadata metadata))))
 
+(defn with-parts
+  "SPEC §1B — attach non-text `parts` to a ToolResult.
+
+  `cond->`, so an EMPTY or absent parts list leaves the result byte-identical to
+  what `success`/`failure` produced. That is the whole compatibility story: the
+  52 construction sites in this port are untouched, and a text-only tool's JSON
+  does not move by a byte.
+
+  `output` stays REQUIRED and stays what the transcript, compaction, token
+  estimation and any text-only provider see — a tool returning an image sets
+  `output` to a description and `parts` to the image."
+  [result parts]
+  (cond-> result
+    (seq parts) (assoc :parts (vec parts))))
+
+
 ;; --------------------------------------------------------------------------
 ;; the toolkit
 ;; --------------------------------------------------------------------------

@@ -100,6 +100,18 @@ public final class LlmClient {
          * a {@code FAIL} surfaces the error immediately, skipping remaining retries. There is no
          * "suspend" tier — a failure is never a §10 {@code Pending}. Aborts (timeout/cancel) bypass it. */
         public Function<ErrorInfo, Tier> onError; // optional; null = default classifier
+        /** §1B: reject a content part larger than this many <b>decoded</b> bytes (not the base64
+         * string, which is +33%) at request assembly. Null ⇒ unlimited. The edge constructors
+         * enforce the same limit process-wide via {@link ContentPart#setMaxPartBytes(long)};
+         * this catches parts that never passed an edge constructor (an MCP server's, say). */
+        public Long maxPartBytes;      // optional; null = unlimited
+        /** §8A: override the provenance-based handling of a part the provider style cannot
+         * represent. {@code "error"} ⇒ always a typed error at assembly, before any HTTP call;
+         * {@code "text"} ⇒ always a text placeholder naming the type and mime type, warned once.
+         * Null (the default) ⇒ by provenance: a part the CALLER attached errors, a part derived
+         * from a tool/MCP result degrades to a placeholder (failing a run because a server
+         * volunteered an audio clip would be a regression). A part is NEVER dropped silently. */
+        public String onUnsupportedPart; // optional; null = by provenance
 
         public Options baseUrl(String v) { this.baseUrl = v; return this; }
         public Options style(String v) { this.style = v; return this; }
@@ -119,6 +131,8 @@ public final class LlmClient {
         public Options bodyTransform(Function<Map<String, Object>, Map<String, Object>> v) { this.bodyTransform = v; return this; }
         public Options httpClient(HttpClient v) { this.httpClient = v; return this; }
         public Options onError(Function<ErrorInfo, Tier> v) { this.onError = v; return this; }
+        public Options maxPartBytes(long v) { this.maxPartBytes = v; return this; }
+        public Options onUnsupportedPart(String v) { this.onUnsupportedPart = v; return this; }
     }
 
     // ------------------------------------------------------------------
@@ -494,28 +508,36 @@ public final class LlmClient {
      */
     public record StreamEvent(Kind type, String delta, String id, String name,
                               Map<String, Object> args, String output, boolean isError,
-                              Usage usage, RunResult result, Request request) {
+                              Usage usage, RunResult result, Request request,
+                              List<Map<String, Object>> parts) {
         public enum Kind { TEXT, TOOL_CALL, TOOL_RESULT, USAGE, PENDING, DONE }
 
         static StreamEvent text(String delta) {
-            return new StreamEvent(Kind.TEXT, delta, null, null, null, null, false, null, null, null);
+            return new StreamEvent(Kind.TEXT, delta, null, null, null, null, false, null, null, null, null);
         }
         static StreamEvent toolCall(String id, String name, Map<String, Object> args) {
-            return new StreamEvent(Kind.TOOL_CALL, null, id, name, args, null, false, null, null, null);
+            return new StreamEvent(Kind.TOOL_CALL, null, id, name, args, null, false, null, null, null, null);
         }
         static StreamEvent toolResult(String id, String name, String output, boolean isError) {
-            return new StreamEvent(Kind.TOOL_RESULT, null, id, name, null, output, isError, null, null, null);
+            return toolResult(id, name, output, isError, null);
+        }
+        /** §9: parts are rendered as {@code {type, mimeType, bytes}} — a part's {@code data}
+         * never appears in an event payload. */
+        static StreamEvent toolResult(String id, String name, String output, boolean isError,
+                                      List<ContentPart> parts) {
+            return new StreamEvent(Kind.TOOL_RESULT, null, id, name, null, output, isError, null, null,
+                    null, ContentPart.describeAll(parts));
         }
         static StreamEvent usage(Usage usage) {
-            return new StreamEvent(Kind.USAGE, null, null, null, null, null, false, usage, null, null);
+            return new StreamEvent(Kind.USAGE, null, null, null, null, null, false, usage, null, null, null);
         }
         /** §10: a tool is waiting on an out-of-band resolution — emitted BEFORE {@code waitFor}
          * runs so a channel handler can push the link in real time. */
         static StreamEvent pending(Request request) {
-            return new StreamEvent(Kind.PENDING, null, null, null, null, null, false, null, null, request);
+            return new StreamEvent(Kind.PENDING, null, null, null, null, null, false, null, null, request, null);
         }
         static StreamEvent done(RunResult result) {
-            return new StreamEvent(Kind.DONE, null, null, null, null, null, false, null, result, null);
+            return new StreamEvent(Kind.DONE, null, null, null, null, null, false, null, result, null, null);
         }
     }
 
@@ -629,8 +651,230 @@ public final class LlmClient {
         return new long[]{asLong(raw.get("prompt_tokens")), asLong(raw.get("completion_tokens"))};
     }
 
+
+    // ------------------------------------------------------------------
+    // §1B/§8A — content parts: loop input, tool-result emission, relocation.
+    // Emission lives HERE, in message assembly, not in Adapters (schema only).
+    // ------------------------------------------------------------------
+
+    /**
+     * A content part the provider style cannot represent, or one over
+     * {@link Options#maxPartBytes}. Raised at request assembly — before any HTTP call — so a
+     * caller's attached part never silently becomes something else.
+     */
+    public static final class UnsupportedPartException extends RuntimeException {
+        public UnsupportedPartException(String message) {
+            super(message);
+        }
+    }
+
+    /** §8A warn-once for a degraded (tool/MCP-derived) part. */
+    private final java.util.concurrent.atomic.AtomicBoolean warnedUnsupportedPart =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    private String styleName() {
+        return ContentParts.isAnthropic(opts.style) ? "anthropic" : "openai";
+    }
+
+    /**
+     * §8A: encode parts into this style's blocks, asserted against the positive allowlist.
+     * {@code attached} marks provenance — a part the CALLER supplied errors when unrepresentable
+     * OR oversized; one derived from a tool/MCP result degrades to a text placeholder and warns
+     * once in either case. {@link Options#onUnsupportedPart} overrides both uniformly. A part is
+     * NEVER dropped silently.
+     *
+     * <p>§1B: {@link Options#maxPartBytes} is enforced HERE — at assembly, over every part
+     * regardless of provenance — not only in the edge constructors, which a tool/MCP-derived part
+     * never passes through. A limit an MCP server can walk straight around is not a limit.
+     */
+    private List<Object> encodeParts(List<ContentPart> parts, boolean attached) {
+        List<Object> blocks = new ArrayList<>();
+        for (ContentPart p : parts == null ? List.<ContentPart>of() : parts) {
+            if (p == null) continue;
+            String oversize = oversizeReason(p);
+            if (oversize != null) {
+                blocks.add(unrepresentable(p, attached, oversize));
+                continue;
+            }
+            Map<String, Object> block = ContentParts.toBlock(opts.style, p);
+            if (block != null) {
+                blocks.add(block);
+                continue;
+            }
+            blocks.add(unrepresentable(p, attached, "content part of type \"" + p.type()
+                    + "\" (" + p.mimeType() + ") is not representable in the " + styleName()
+                    + " style"));
+        }
+        return blocks;
+    }
+
+    /**
+     * The provenance rule, shared by "unrepresentable in this style" and "over maxPartBytes": an
+     * ATTACHED part (or {@link Options#onUnsupportedPart} {@code "error"}) throws the typed
+     * {@link UnsupportedPartException} before any HTTP call; a tool/MCP-derived one degrades to
+     * the canonical {@link ContentParts#placeholder} text, warned once per client.
+     */
+    private Object unrepresentable(ContentPart p, boolean attached, String reason) {
+        boolean asError = "error".equals(opts.onUnsupportedPart)
+                || (opts.onUnsupportedPart == null && attached);
+        if (asError) {
+            throw new UnsupportedPartException(reason);
+        }
+        if (warnedUnsupportedPart.compareAndSet(false, true)) {
+            System.err.println("[toolnexus] " + reason + " — sending a text placeholder instead");
+        }
+        return ContentParts.textBlock(ContentParts.placeholder(p));
+    }
+
+    /** {@code null} within {@link Options#maxPartBytes}, else the reason it is over the limit. */
+    private String oversizeReason(ContentPart p) {
+        if (opts.maxPartBytes == null) return null;
+        long bytes = p.bytes();
+        if (bytes <= opts.maxPartBytes) return null;
+        return "content part is " + bytes + " decoded bytes, over the maxPartBytes limit of " + opts.maxPartBytes;
+    }
+
+    /**
+     * The seed user message's content: a plain {@code String} prompt stays a string — the
+     * assembled message is BYTE-IDENTICAL to a pre-multimodal port — while a list of
+     * {@link ContentPart} becomes provider blocks in the caller's order (ordering is semantic).
+     */
+    @SuppressWarnings("unchecked")
+    private Object seed(Object prompt) {
+        if (prompt instanceof List<?> list) return encodeParts((List<ContentPart>) list, true);
+        return prompt;
+    }
+
+    /** Text on the seed, for {@code RunResult}/pending prompts. */
+    private static String promptText(Object prompt) {
+        if (prompt instanceof List<?> list) {
+            StringBuilder sb = new StringBuilder();
+            for (Object o : list) {
+                if (o instanceof ContentPart p && ContentPart.TEXT.equals(p.type())) sb.append(p.text());
+            }
+            return sb.toString();
+        }
+        return prompt == null ? "" : String.valueOf(prompt);
+    }
+
+    private static List<ContentPart> partsOfKind(ToolResult r, boolean text) {
+        List<ContentPart> out = new ArrayList<>();
+        if (r.parts() == null) return out;
+        for (ContentPart p : r.parts()) {
+            if (ContentPart.TEXT.equals(p.type()) == text) out.add(p);
+        }
+        return out;
+    }
+
+    /**
+     * §8A relocation rule: the {@code openai} {@code tool} message carries {@code output} plus
+     * TEXT parts only — an image there is a hard 400 ("Image URLs are only allowed for messages
+     * with role 'user'").
+     */
+    private Object openAIToolContent(ToolResult r) {
+        List<ContentPart> texts = partsOfKind(r, true);
+        if (texts.isEmpty()) return r.output();   // byte-identical to a text-only result
+        List<Object> blocks = new ArrayList<>();
+        blocks.add(ContentParts.textBlock(r.output()));
+        for (ContentPart t : texts) blocks.add(ContentParts.textBlock(t.text()));
+        return blocks;
+    }
+
+    /**
+     * §8A: {@code anthropic} defines a shape for content inside {@code tool_result}, so parts are
+     * emitted NATIVELY there, keyed to the {@code tool_use_id} — no synthetic message, no lost
+     * association, no broken cache breakpoint.
+     */
+    private Object anthropicToolContent(ToolResult r) {
+        if (r.parts() == null) return r.output();  // byte-identical to a text-only result
+        List<Object> blocks = new ArrayList<>();
+        blocks.add(ContentParts.textBlock(r.output()));
+        blocks.addAll(encodeParts(partsOfKind(r, true), false));
+        blocks.addAll(encodeParts(partsOfKind(r, false), false));
+        return blocks;
+    }
+
+    /** §8A: append one tool result's non-text parts to the turn's relocation buffer, labelled. */
+    private void collectRelocated(List<Object> sink, String name, Object callId, ToolResult r) {
+        List<ContentPart> nonText = partsOfKind(r, false);
+        if (nonText.isEmpty()) return;
+        sink.add(ContentParts.textBlock("Output of tool " + name + " (" + callId + "):"));
+        sink.addAll(encodeParts(nonText, false));
+    }
+
+    /**
+     * §8A: the wire message list — the canonical transcript with each turn's synthetic user
+     * message spliced in immediately after its last tool message. The synthetic message is an
+     * ADAPTER ARTIFACT ONLY: it is never written to {@code messages}, so it reaches neither
+     * {@code RunResult.messages}, the {@link ConversationStore}, nor {@code translate} output, and
+     * switching provider mid-conversation leaves no OpenAI-shaped residue.
+     */
+    private static List<Object> wireMessages(List<Object> messages,
+                                             java.util.IdentityHashMap<Object, Object> relocated) {
+        if (relocated.isEmpty()) return messages;
+        List<Object> out = new ArrayList<>(messages.size() + relocated.size());
+        for (Object m : messages) {
+            out.add(m);
+            Object synthetic = relocated.get(m);
+            if (synthetic != null) out.add(synthetic);
+        }
+        return out;
+    }
+
+    /** Wrap the turn's relocated blocks into the single synthetic user message. */
+    private static Map<String, Object> syntheticUserMessage(List<Object> blocks) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("role", "user");
+        m.put("content", blocks);
+        return m;
+    }
+
     public RunResult run(String prompt, Toolkit toolkit) {
-        return run(prompt, toolkit, null);
+        return run(prompt, toolkit, (List<Object>) null);
+    }
+
+    /**
+     * §1B multimodal entry: the prompt as a list of {@link ContentPart}, in the SAME first
+     * position, so the caller's text/image ordering is preserved (ordering is semantic to a
+     * model). The {@code String} overload is untouched and byte-identical.
+     *
+     * <p>Note: {@code run(null, toolkit)} is now an ambiguous overload and will not compile —
+     * cast the null ({@code run((String) null, toolkit)}) or, better, pass a real prompt.
+     */
+    public RunResult run(List<ContentPart> prompt, Toolkit toolkit) {
+        return run(prompt, toolkit, null, null);
+    }
+
+    /** {@link #run(List, Toolkit)} continuing a prior {@code history} transcript. */
+    public RunResult run(List<ContentPart> prompt, Toolkit toolkit, List<Object> history) {
+        return run(prompt, toolkit, history, null);
+    }
+
+    /** {@link #run(List, Toolkit, List)} with an external {@link CancelToken}. */
+    public RunResult run(List<ContentPart> prompt, Toolkit toolkit, List<Object> history,
+                         CancelToken cancel) {
+        return runAny(prompt, toolkit, history, cancel);
+    }
+
+    /** §1B multimodal {@link #stream(String, Toolkit, Consumer)}. */
+    public RunResult stream(List<ContentPart> prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent) {
+        return streamAny(prompt, toolkit, onEvent, null);
+    }
+
+    /** §1B multimodal {@link #stream(String, Toolkit, Consumer, String)}. */
+    public RunResult stream(List<ContentPart> prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent,
+                            String id) {
+        return streamAny(prompt, toolkit, onEvent, id);
+    }
+
+    /** §1B multimodal {@link #ask(String, Toolkit, String)}. */
+    public RunResult ask(List<ContentPart> prompt, Toolkit toolkit, String id) {
+        if (id == null || id.isEmpty()) return run(prompt, toolkit);
+        List<Object> history = store.get(id);
+        if (history == null) history = new ArrayList<>();
+        RunResult result = run(prompt, toolkit, history);
+        store.save(id, result.messages);
+        return result;
     }
 
     /**
@@ -849,21 +1093,17 @@ public final class LlmClient {
      * is the full updated transcript. Mirrors JS {@code run(prompt, { history })}.
      */
     public RunResult run(String prompt, Toolkit toolkit, List<Object> history) {
-        Deadline deadline = newDeadline();
-        return "anthropic".equals(opts.style)
-                ? runAnthropic(prompt, toolkit, history, deadline)
-                : runOpenAI(prompt, toolkit, history, deadline);
+        return runAny(prompt, toolkit, history, null);
     }
 
-    /**
-     * §7D cancellation seam: {@link #run(String, Toolkit, List)} with an external
-     * {@link CancelToken}. {@code cancel.cancel()} aborts the run — between attempts at minimum,
-     * mid-request typically (interruptible send) — and the run throws {@link CancelledException}.
-     * See {@link CancelToken} for the full documented contract. A {@code null} token is identical
-     * to the plain overload.
-     */
-    public RunResult run(String prompt, Toolkit toolkit, List<Object> history, CancelToken cancel) {
-        if (cancel == null) return run(prompt, toolkit, history);
+    /** The one run seam both prompt shapes go through ({@code prompt} = String | List&lt;ContentPart&gt;). */
+    private RunResult runAny(Object prompt, Toolkit toolkit, List<Object> history, CancelToken cancel) {
+        if (cancel == null) {
+            Deadline deadline = newDeadline();
+            return "anthropic".equals(opts.style)
+                    ? runAnthropic(prompt, toolkit, history, deadline)
+                    : runOpenAI(prompt, toolkit, history, deadline);
+        }
         cancel.register(Thread.currentThread());
         try {
             Deadline deadline = newDeadline(cancel);
@@ -875,6 +1115,33 @@ public final class LlmClient {
             // A cancel that landed after the run finished must not leak the interrupt flag.
             if (cancel.isCancelled()) Thread.interrupted();
         }
+    }
+
+    /** The one stream seam both prompt shapes go through. */
+    private RunResult streamAny(Object prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent, String id) {
+        Deadline deadline = newDeadline();
+        boolean stateful = id != null && !id.isEmpty();
+        List<Object> history = null;
+        if (stateful) {
+            history = store.get(id);
+            if (history == null) history = new ArrayList<>();
+        }
+        RunResult result = "anthropic".equals(opts.style)
+                ? streamAnthropic(prompt, toolkit, onEvent, deadline, history)
+                : streamOpenAI(prompt, toolkit, onEvent, deadline, history);
+        if (stateful) store.save(id, result.messages);
+        return result;
+    }
+
+    /**
+     * §7D cancellation seam: {@link #run(String, Toolkit, List)} with an external
+     * {@link CancelToken}. {@code cancel.cancel()} aborts the run — between attempts at minimum,
+     * mid-request typically (interruptible send) — and the run throws {@link CancelledException}.
+     * See {@link CancelToken} for the full documented contract. A {@code null} token is identical
+     * to the plain overload.
+     */
+    public RunResult run(String prompt, Toolkit toolkit, List<Object> history, CancelToken cancel) {
+        return runAny(prompt, toolkit, history, cancel);
     }
 
     /**
@@ -916,18 +1183,7 @@ public final class LlmClient {
      * {@code stream(prompt, { id })}.
      */
     public RunResult stream(String prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent, String id) {
-        Deadline deadline = newDeadline();
-        boolean stateful = id != null && !id.isEmpty();
-        List<Object> history = null;
-        if (stateful) {
-            history = store.get(id);
-            if (history == null) history = new ArrayList<>();
-        }
-        RunResult result = "anthropic".equals(opts.style)
-                ? streamAnthropic(prompt, toolkit, onEvent, deadline, history)
-                : streamOpenAI(prompt, toolkit, onEvent, deadline, history);
-        if (stateful) store.save(id, result.messages);
-        return result;
+        return streamAny(prompt, toolkit, onEvent, id);
     }
 
     /**
@@ -1016,7 +1272,7 @@ public final class LlmClient {
 
     // ---- OpenAI-style: POST {baseUrl}/chat/completions ----
     @SuppressWarnings("unchecked")
-    private RunResult runOpenAI(String prompt, Toolkit toolkit, List<Object> history, Deadline deadline) {
+    private RunResult runOpenAI(Object prompt, Toolkit toolkit, List<Object> history, Deadline deadline) {
         String key = resolveKey();
         List<Object> messages = new ArrayList<>();
         if (history != null && !history.isEmpty()) {
@@ -1026,12 +1282,14 @@ public final class LlmClient {
             String system = system(toolkit);
             if (!system.isEmpty()) messages.add(msg("system", system));
         }
-        messages.add(msg("user", prompt));
+        messages.add(msg("user", seed(prompt)));
         List<Map<String, Object>> tools = toolkit.toOpenAI();
         List<ToolCall> toolCalls = new ArrayList<>();
         Usage usage = new Usage();
         int turns = 0;
         long runStart = System.currentTimeMillis();
+        // §8A: tool message -> the synthetic user message spliced in after it on the wire only.
+        java.util.IdentityHashMap<Object, Object> relocated = new java.util.IdentityHashMap<>();
 
         // One virtual-thread executor for the whole run; tool calls in a turn run on it.
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
@@ -1046,7 +1304,7 @@ public final class LlmClient {
                 }
                 Map<String, Object> body = new LinkedHashMap<>();
                 body.put("model", opts.model);
-                body.put("messages", messages);
+                body.put("messages", wireMessages(messages, relocated));
                 // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
                 if (tools != null && !tools.isEmpty()) {
                     body.put("tools", tools);
@@ -1080,6 +1338,9 @@ public final class LlmClient {
                 int n = calls.size();
                 Map<String, Object>[] toolMsgs = new Map[n];
                 ToolCall[] recorded = new ToolCall[n];
+                ToolResult[] results = new ToolResult[n];
+                String[] callNames = new String[n];
+                Object[] callIds = new Object[n];
                 Request[] haltedAt = new Request[n];
                 CompletableFuture<Void>[] futures = new CompletableFuture[n];
                 for (int i = 0; i < n; i++) {
@@ -1090,6 +1351,8 @@ public final class LlmClient {
                     Map<String, Object> args = Json.parseObjectLoose(
                             fn.get("arguments") == null ? "{}" : String.valueOf(fn.get("arguments")));
                     Object callId = call.get("id");
+                    callNames[idx] = fnName;
+                    callIds[idx] = callId;
                     final int t = turn;
                     futures[idx] = CompletableFuture.supplyAsync(
                             () -> runToolResolved(toolkit, fnName,
@@ -1099,10 +1362,12 @@ public final class LlmClient {
                         haltedAt[idx] = outcome.halted();
                         recorded[idx] = new ToolCall(fnName, run.args(),
                                 run.result().output(), run.result().isError(), run.result().metadata());
+                        results[idx] = run.result();
                         Map<String, Object> toolMsg = new LinkedHashMap<>();
                         toolMsg.put("role", "tool");
                         toolMsg.put("tool_call_id", callId);
-                        toolMsg.put("content", run.result().output());
+                        // §8A: the openai tool message carries `output` plus TEXT parts only.
+                        toolMsg.put("content", openAIToolContent(run.result()));
                         toolMsgs[idx] = toolMsg;
                     });
                 }
@@ -1111,12 +1376,19 @@ public final class LlmClient {
                 // Record in tool-call order; on the FIRST durable halt, surface it and stop —
                 // deterministic, and the later suspensions' placeholder results never enter the
                 // transcript (they re-suspend on resume). Mirrors the streaming path.
+                List<Object> relocatedBlocks = new ArrayList<>();
                 for (int i = 0; i < n; i++) {
                     toolCalls.add(recorded[i]);
                     messages.add(toolMsgs[i]);
+                    collectRelocated(relocatedBlocks, callNames[i], callIds[i], results[i]);
                     if (haltedAt[i] != null) {
                         return pendingRun(runStart, haltedAt[i], messages, toolCalls, turns, usage);
                     }
+                }
+                // §8A: ONE synthetic user message per assistant turn, in tool-call order, spliced
+                // in after the last tool message — on the wire only, never in the transcript.
+                if (!relocatedBlocks.isEmpty()) {
+                    relocated.put(toolMsgs[n - 1], syntheticUserMessage(relocatedBlocks));
                 }
             }
             return incompleteRun(runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
@@ -1130,7 +1402,7 @@ public final class LlmClient {
 
     // ---- Anthropic-style: POST {baseUrl}/messages ----
     @SuppressWarnings("unchecked")
-    private RunResult runAnthropic(String prompt, Toolkit toolkit, List<Object> history, Deadline deadline) {
+    private RunResult runAnthropic(Object prompt, Toolkit toolkit, List<Object> history, Deadline deadline) {
         String key = resolveKey();
         String base = stripTrailingSlash(opts.baseUrl);
         String endpoint = base.endsWith("/v1") ? base + "/messages" : base + "/v1/messages";
@@ -1139,7 +1411,7 @@ public final class LlmClient {
         // Anthropic carries the system prompt out-of-band (the `system` field), not in messages,
         // so continuing history just means appending to the prior transcript.
         if (history != null && !history.isEmpty()) messages.addAll(history);
-        messages.add(msg("user", prompt));
+        messages.add(msg("user", seed(prompt)));
         List<Map<String, Object>> tools = toolkit.toAnthropic();
         List<ToolCall> toolCalls = new ArrayList<>();
         Usage usage = new Usage();
@@ -1201,6 +1473,7 @@ public final class LlmClient {
                 // Execute all tool_use blocks in this turn concurrently (true parallel tool calling).
                 int n = uses.size();
                 Map<String, Object>[] resultBlocks = new Map[n];
+                ToolResult[] results = new ToolResult[n];
                 ToolCall[] recorded = new ToolCall[n];
                 Request[] haltedAt = new Request[n];
                 CompletableFuture<Void>[] futures = new CompletableFuture[n];
@@ -1221,10 +1494,10 @@ public final class LlmClient {
                         haltedAt[idx] = outcome.halted();
                         recorded[idx] = new ToolCall(useName, run.args(),
                                 run.result().output(), run.result().isError(), run.result().metadata());
+                        results[idx] = run.result();
                         Map<String, Object> tr = new LinkedHashMap<>();
                         tr.put("type", "tool_result");
                         tr.put("tool_use_id", useId);
-                        tr.put("content", run.result().output());
                         tr.put("is_error", run.result().isError());
                         resultBlocks[idx] = tr;
                     });
@@ -1234,17 +1507,21 @@ public final class LlmClient {
                 // Record in tool-call order; on the FIRST durable halt, surface it and stop — the
                 // later suspensions' placeholder results never enter the transcript (they re-suspend
                 // on resume). Mirrors the streaming path.
-                List<Object> results = new ArrayList<>();
+                List<Object> resultTurn = new ArrayList<>();
                 Request halted = null;
                 for (int i = 0; i < n; i++) {
                     toolCalls.add(recorded[i]);
-                    results.add(resultBlocks[i]);
+                    // §8A: anthropic has a shape for parts INSIDE tool_result — emit natively.
+                    // Encoded HERE, on the calling thread, so an unrepresentable part surfaces as
+                    // the typed error rather than a CompletionException from the tool stage.
+                    resultBlocks[i].put("content", anthropicToolContent(results[i]));
+                    resultTurn.add(resultBlocks[i]);
                     if (haltedAt[i] != null) { halted = haltedAt[i]; break; }
                 }
 
                 Map<String, Object> userMsg = new LinkedHashMap<>();
                 userMsg.put("role", "user");
-                userMsg.put("content", results);
+                userMsg.put("content", resultTurn);
                 messages.add(userMsg);
                 if (halted != null) {
                     return pendingRun(runStart, halted, messages, toolCalls, turns, usage);
@@ -1261,7 +1538,7 @@ public final class LlmClient {
 
     // ---- Streaming: OpenAI-style (SSE, line-by-line) ----
     @SuppressWarnings("unchecked")
-    private RunResult streamOpenAI(String prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent,
+    private RunResult streamOpenAI(Object prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent,
                                    Deadline deadline, List<Object> history) {
         String key = resolveKey();
         List<Object> messages = new ArrayList<>();
@@ -1271,12 +1548,14 @@ public final class LlmClient {
             String system = system(toolkit);
             if (!system.isEmpty()) messages.add(msg("system", system));
         }
-        messages.add(msg("user", prompt));
+        messages.add(msg("user", seed(prompt)));
         List<Map<String, Object>> tools = toolkit.toOpenAI();
         List<ToolCall> toolCalls = new ArrayList<>();
         Usage usage = new Usage();
         int turns = 0;
         long runStart = System.currentTimeMillis();
+        // §8A: tool message -> the synthetic user message spliced in after it on the wire only.
+        java.util.IdentityHashMap<Object, Object> relocated = new java.util.IdentityHashMap<>();
 
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         try {
@@ -1289,7 +1568,7 @@ public final class LlmClient {
                 }
                 Map<String, Object> body = new LinkedHashMap<>();
                 body.put("model", opts.model);
-                body.put("messages", messages);
+                body.put("messages", wireMessages(messages, relocated));
                 // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
                 if (tools != null && !tools.isEmpty()) {
                     body.put("tools", tools);
@@ -1413,6 +1692,8 @@ public final class LlmClient {
                 }
                 CompletableFuture.allOf(futures).join();
                 Request halted = null;
+                List<Object> relocatedBlocks = new ArrayList<>();
+                Map<String, Object> lastToolMsg = null;
                 for (int i = 0; i < n; i++) {
                     String[] slot = acc.get(order.get(i));
                     ToolRun r = runs[i];
@@ -1428,9 +1709,17 @@ public final class LlmClient {
                     Map<String, Object> toolMsg = new LinkedHashMap<>();
                     toolMsg.put("role", "tool");
                     toolMsg.put("tool_call_id", slot[0]);
-                    toolMsg.put("content", r.result().output());
+                    // §8A: the openai tool message carries `output` plus TEXT parts only.
+                    toolMsg.put("content", openAIToolContent(r.result()));
                     messages.add(toolMsg);
-                    onEvent.accept(StreamEvent.toolResult(slot[0], slot[1], r.result().output(), r.result().isError()));
+                    lastToolMsg = toolMsg;
+                    collectRelocated(relocatedBlocks, slot[1], slot[0], r.result());
+                    onEvent.accept(StreamEvent.toolResult(slot[0], slot[1], r.result().output(),
+                            r.result().isError(), r.result().parts()));
+                }
+                // §8A: ONE synthetic user message per assistant turn — wire only, never persisted.
+                if (!relocatedBlocks.isEmpty() && lastToolMsg != null) {
+                    relocated.put(lastToolMsg, syntheticUserMessage(relocatedBlocks));
                 }
                 if (halted != null) {
                     RunResult done = pendingRun(runStart, halted, messages, toolCalls, turns, usage);
@@ -1451,7 +1740,7 @@ public final class LlmClient {
 
     // ---- Streaming: Anthropic-style (SSE content_block_* / message_delta) ----
     @SuppressWarnings("unchecked")
-    private RunResult streamAnthropic(String prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent,
+    private RunResult streamAnthropic(Object prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent,
                                       Deadline deadline, List<Object> history) {
         String key = resolveKey();
         String base = stripTrailingSlash(opts.baseUrl);
@@ -1459,7 +1748,7 @@ public final class LlmClient {
         String system = system(toolkit);
         List<Object> messages = new ArrayList<>();
         if (history != null && !history.isEmpty()) messages.addAll(history);
-        messages.add(msg("user", prompt));
+        messages.add(msg("user", seed(prompt)));
         List<Map<String, Object>> tools = toolkit.toAnthropic();
         List<ToolCall> toolCalls = new ArrayList<>();
         Usage usage = new Usage();
@@ -1636,10 +1925,12 @@ public final class LlmClient {
                     Map<String, Object> tr = new LinkedHashMap<>();
                     tr.put("type", "tool_result");
                     tr.put("tool_use_id", id);
-                    tr.put("content", r.result().output());
+                    // §8A: anthropic has a shape for parts INSIDE tool_result — emit natively.
+                    tr.put("content", anthropicToolContent(r.result()));
                     tr.put("is_error", r.result().isError());
                     results.add(tr);
-                    onEvent.accept(StreamEvent.toolResult(id, name, r.result().output(), r.result().isError()));
+                    onEvent.accept(StreamEvent.toolResult(id, name, r.result().output(),
+                            r.result().isError(), r.result().parts()));
                 }
                 Map<String, Object> userMsg = new LinkedHashMap<>();
                 userMsg.put("role", "user");
@@ -1801,7 +2092,7 @@ public final class LlmClient {
         }
     }
 
-    private static Map<String, Object> msg(String role, String content) {
+    private static Map<String, Object> msg(String role, Object content) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("role", role);
         m.put("content", content);
@@ -2013,6 +2304,13 @@ public final class LlmClient {
 
         /** Send the next user turn; prior history is retained automatically. */
         public RunResult send(String prompt) {
+            RunResult result = client.run(prompt, toolkit, messages);
+            this.messages = result.messages;
+            return result;
+        }
+
+        /** §1B multimodal turn: the prompt as content parts, in the caller's order. */
+        public RunResult send(List<ContentPart> prompt) {
             RunResult result = client.run(prompt, toolkit, messages);
             this.messages = result.messages;
             return result;

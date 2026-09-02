@@ -32,9 +32,9 @@ npm i toolnexus                                   # JS / TypeScript
 pip install toolnexus                             # Python
 go get github.com/muthuishere/toolnexus/golang    # Go
 dotnet add package Toolnexus                       # C#
-{:toolnexus, "~> 0.16"}                             # Elixir (mix.exs deps)
-# Java (Maven): io.github.muthuishere:toolnexus:0.16.0
-# Clojure (deps.edn): net.clojars.muthuishere/toolnexus {:mvn/version "0.16.0"} — JVM and cljgo
+{:toolnexus, "~> 0.17"}                             # Elixir (mix.exs deps)
+# Java (Maven): io.github.muthuishere:toolnexus:0.17.0
+# Clojure (deps.edn): net.clojars.muthuishere/toolnexus {:mvn/version "0.17.0"} — JVM and cljgo
 ```
 
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
@@ -217,6 +217,27 @@ The source is **on by default** with two levels of control:
 
 Because `bash`/`write`/`edit`/`apply_patch` run commands and mutate the filesystem, these switches
 are the off-switch for locked-down hosts.
+
+## Attachments — images, PDFs and audio
+
+Hand the loop a screenshot, and let a tool hand one back. Parts go in the **first** argument,
+alongside your text, because the order of text and image is semantic to a model:
+
+```ts
+const { text } = await agent.run(
+  ["What is broken in this screenshot?", await attach("./shot.png")],
+  { toolkit: tk },
+)
+```
+
+Each port's edge constructor takes the file and byte objects its users already hold (a `Blob`, an
+`InputStream`, a `FileInfo`, an `io.Reader`, a `File.Stream`, a path), and stores only bytes plus
+a `mimeType` — never a handle or a path — so a persisted transcript replays. Tools return media on
+`parts`, and non-text content from **MCP** servers (image, audio, embedded resource,
+`resource_link`), which every port used to drop silently, now reaches the model.
+
+Full treatment: the [attachments cookbook](https://muthuishere.github.io/toolnexus/cookbook/attachments/)
+and each [per-language README](#per-language-docs) — the accepted native sources differ per port.
 
 ## A2A agents — call remote agents, or be one
 

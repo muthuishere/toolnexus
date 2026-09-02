@@ -1,6 +1,6 @@
 ---
 title: ToolResult
-description: The result envelope every tool returns — output text, an error flag, and optional metadata that can carry a suspension. C#.
+description: The result envelope every tool returns — output text, an error flag, optional non-text parts, and optional metadata that can carry a suspension. C#.
 sidebar:
   label: ToolResult
 ---
@@ -12,19 +12,26 @@ import { Aside } from '@astrojs/starlight/components';
 </p>
 
 ```csharp
-public sealed record ToolResult(string Output, bool IsError, IDictionary<string, object?>? Metadata = null)
+public sealed record ToolResult(
+    string Output,
+    bool IsError,
+    IDictionary<string, object?>? Metadata = null,
+    IReadOnlyList<ContentPart>? Parts = null)
 {
     public static ToolResult Ok(string output, IDictionary<string, object?>? metadata = null);
     public static ToolResult Error(string output, IDictionary<string, object?>? metadata = null);
+    public static ToolResult OkWithParts(string output, IReadOnlyList<ContentPart> parts,
+                                         IDictionary<string, object?>? metadata = null);
     public static ToolResult Pending(Request request);
     public static ToolResult AuthRequired(string url, string prompt = "Authorization required to continue");
     public static Request? PendingOf(ToolResult? result);
 }
 ```
 
-What every `ExecuteAsync` returns. Three fields, and the whole tool-calling loop is built on them:
-`Output` is the text handed back to the model, `IsError` says whether the call failed, and
-`Metadata` is free-form — except for one reserved key that turns a result into a suspension.
+What every `ExecuteAsync` returns. Four fields, and the whole tool-calling loop is built on them:
+`Output` is the text handed back to the model, `IsError` says whether the call failed, `Metadata`
+is free-form — except for one reserved key that turns a result into a suspension — and
+[`Parts`](/api/csharp/types/content-part/) carries non-text output: an image, a PDF, an audio clip.
 
 It is a `record`, so it is immutable and gives you value equality and `with` expressions for free.
 
@@ -32,6 +39,24 @@ It is a `record`, so it is immutable and gives you value equality and `with` exp
 
 Every time you write a tool. It is the return type of
 [`ITool.ExecuteAsync`](/api/csharp/types/tool/), so you construct one on every code path.
+
+## Why `Parts` is the fourth parameter, and `Output` is still required
+
+<Aside type="note" title="An append, so nothing had to be rewritten">
+`Parts` was appended **after** `Metadata` rather than slotted in beside `Output`. That ordering is
+the whole point: 19 existing `new ToolResult(output, isError, meta)` call sites across the port kept
+compiling unchanged, and a tool written before content parts existed is byte-identical afterwards.
+An absent `Parts` means exactly what it always meant.
+</Aside>
+
+`Output` stays **required** even when `Parts` is present. It is what the canonical transcript, the
+compactor, token estimation and any text-only provider see — a tool returning a screenshot sets
+`Output` to a description (`"screenshot, 1280x720 png"`) and `Parts` to the image. Returning an
+image with an empty `Output` makes the result invisible to everything except the one provider call
+that happened to render it.
+
+Use `OkWithParts(output, parts)` rather than the positional constructor; it says what it means and
+cannot get the argument order wrong.
 
 ## Why the static factories rather than the constructor
 
@@ -135,6 +160,31 @@ if (ToolResult.PendingOf(ToolResult.Ok("done")) is not null) throw new Exception
 Console.WriteLine($"ok: {req.Kind} | {authReq.Kind}");
 ```
 
+### 4. Non-text output — `Parts`
+
+```csharp test
+using Toolnexus;
+
+var repo = Environment.GetEnvironmentVariable("TOOLNEXUS_REPO") ?? ".";
+var png = Path.Combine(repo, "examples/media/fixture.png");
+
+// Output DESCRIBES; Parts CARRIES. Both, always.
+var res = ToolResult.OkWithParts(
+    ContentPart.FromFile(png).DescribeInText(),   // "image (image/png, 82 bytes)"
+    [ContentPart.FromFile(png)]);
+
+if (res.IsError) throw new Exception("a screenshot is a success");
+if (res.Parts is null || res.Parts.Count != 1) throw new Exception("one part");
+if (res.Parts[0].Type != "image") throw new Exception(res.Parts[0].Type);
+// The transcript and the compactor read Output, never the base64.
+if (res.Output != "image (image/png, 82 bytes)") throw new Exception(res.Output);
+
+// Absent Parts is the pre-multimodal shape, unchanged.
+if (ToolResult.Ok("done").Parts is not null) throw new Exception("absent means absent");
+
+Console.WriteLine($"ok: {res.Output} | {res.Parts[0].Describe()}");
+```
+
 <Aside type="caution">
 A suspension sets `IsError` to true. That is deliberate — a parked call has not produced an answer.
 Do not treat `IsError` alone as "the tool broke"; check `ToolResult.PendingOf(result)` when
@@ -148,6 +198,7 @@ suspension is in play.
 | `Output` | `string` | The text handed to the model. `null` is normalised to `""`. |
 | `IsError` | `bool` | Whether the call failed. Fed back to the model, not thrown. |
 | `Metadata` | `IDictionary<string, object?>?` | Free-form, may be null. **Reserved:** `pending` holds a §10 `Request`. |
+| `Parts` | `IReadOnlyList<ContentPart>?` | Non-text output (§1B). The **fourth** positional parameter, appended after `Metadata`. Absent ⇒ byte-identical to pre-multimodal behaviour. |
 
 ## Static factories
 
@@ -155,12 +206,14 @@ suspension is in play.
 |---|---|
 | `Ok(output, metadata?)` | A success result. |
 | `Error(output, metadata?)` | A failure result the model can recover from. |
+| `OkWithParts(output, parts, metadata?)` | A success carrying non-text content alongside its describing text. |
 | `Pending(request)` | A §10 suspension. Generates an `Id` when the request has none. |
 | `AuthRequired(url, prompt?)` | Sugar for `Kind:"authorization"` at a login URL. |
 | `PendingOf(result)` | Reads the `Request` back off a result, or `null`. |
 
 ## See also
 
+- [`ContentPart`](/api/csharp/types/content-part/) — what `Parts` holds
 - [`ITool`](/api/csharp/types/tool/) — what returns this
 - [`ToolContext`](/api/csharp/types/context/) — what `ExecuteAsync` receives
 - [`Suspension.Pending`](/api/csharp/suspension/pending/) — the suspension entry point

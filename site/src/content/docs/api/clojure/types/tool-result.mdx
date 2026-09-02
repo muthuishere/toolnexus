@@ -1,6 +1,6 @@
 ---
 title: "toolnexus.tool/success"
-description: "The result envelope: output text, optional error flag, optional Pending for suspension. — Clojure."
+description: "The result envelope: output text, optional error flag, optional non-text parts, and optional metadata that can carry a suspension. — Clojure."
 sidebar:
   label: "toolnexus.tool/success"
 ---
@@ -17,10 +17,13 @@ import { Aside } from '@astrojs/starlight/components';
 
 (toolnexus.tool/failure output)             ; => {:output "…" :isError true}
 (toolnexus.tool/failure output metadata)    ; => {:output "…" :isError true  :metadata {…}}
+
+(toolnexus.tool/with-parts result parts)    ; => result + {:parts [ContentPart …]}
+;; an EMPTY or absent parts list leaves the result byte-identical to what it was
 ```
 
-There is **no ToolResult type** in this port. A result is a plain map with two keys and an optional
-third, built by one of these two functions. `output` is `str`ed on the way in — the model reads
+There is **no ToolResult type** in this port. A result is a plain map with two keys and two optional
+ones, built by one of these two functions. `output` is `str`ed on the way in — the model reads
 text, so `(success 42)` yields `"42"` rather than a number that each host would print differently.
 `metadata` is omitted from the map entirely when it is `nil`, so `(success "hi")` is exactly
 `{:output "hi" :isError false}` and nothing else.
@@ -42,6 +45,8 @@ whatever the exception happened to say. Call `failure` when you have a message w
   normalize return values; the map you hand back is the map the loop sees.
 - **Telling the model it went wrong, in words you chose** — a validation failure, a missing
   argument, a 404 from an upstream service.
+- **Returning an image, a PDF or an audio clip** — `with-parts` puts it under `:parts`, while
+  `:output` stays the text the transcript sees.
 - **Attaching out-of-band data** via `metadata`. The loop never shows metadata to the model; it is
   read by the port itself (suspension) and by your own observability code.
 
@@ -61,6 +66,7 @@ explicitly when you want an **error** result, or metadata, or when you are const
 |---|---|---|---|
 | `:output` | string | yes | The text the model sees. Non-strings are `str`ed. |
 | `:isError` | boolean | yes | `false` from `success`, `true` from `failure`. |
+| `:parts` | vector | no | Non-text output — §1B [ContentParts](/api/clojure/types/content-part/). Present only when `with-parts` was given a non-empty list. |
 | `:metadata` | map | no | Present only when you passed one. `{:pending Request}` is the reserved §10 use. |
 
 ## Examples
@@ -128,8 +134,56 @@ The client loop branches on `metadata.pending` alone and never on `:isError`, so
 error — the `tool` observability event carries `isError:false` plus a pending marker so error-rate
 metrics and circuit breakers do not fire.
 
+### 4. Non-text output goes in `:parts` — and `:output` stays required
+
+`:output` is **not** optional when a part is present: it is what the transcript, compaction, token
+estimation and any text-only provider see. A tool returning an image sets `:output` to a
+description and `:parts` to the image. `with-parts` uses `cond->`, so a part-free result is
+byte-identical to what `success` / `failure` produced before `:parts` existed — nothing in an
+existing text-only tool moves by a byte.
+
+```clojure test
+(require '[toolnexus.tool :as tool]
+         '[toolnexus.content :as content]
+         '[clojure.string :as str]
+         '[koine.fs :as fs])
+
+(defn find-up [rel]
+  (->> (iterate (fn [p] (str "../" p)) rel) (take 8) (filter fs/exists?) first))
+
+(def png (find-up "examples/media/fixture.png"))
+
+(def shot
+  (tool/tool {:name "screenshot"
+              :description "Take a screenshot"
+              :execute (fn [_]
+                         (let [p (content/image-file png)]
+                           ;; :output describes it; :parts carries it
+                           (tool/with-parts (tool/success (content/summarize-part p)) [p])))}))
+
+(def r ((:execute shot) {}))
+(println "output:" (:output r))
+(assert (= "image (image/png, 82 bytes)" (:output r)))
+(assert (false? (:isError r)))
+(assert (= 1 (count (:parts r))))
+(assert (= "image/png" (:mimeType (first (:parts r)))))
+
+;; An empty or absent parts list changes NOTHING — the compatibility story in one line.
+(assert (= {:output "hi" :isError false} (tool/with-parts (tool/success "hi") [])))
+(assert (= {:output "hi" :isError false} (tool/with-parts (tool/success "hi") nil)))
+(assert (false? (contains? (tool/with-parts (tool/success "hi") []) :parts)))
+
+;; A failure carries parts too — a rendering tool that failed halfway still has the frame.
+(def bad (tool/with-parts (tool/failure "render timed out") [(content/text-part "partial")]))
+(assert (true? (:isError bad)))
+(assert (= 1 (count (:parts bad))))
+
+(println "OK")
+```
+
 ## See also
 
+- [`toolnexus.content/attach`](/api/clojure/types/content-part/) — build the parts `:parts` carries
 - [`toolnexus.tool/tool`](/api/clojure/types/tool/) — the Tool whose `:execute` returns this map
 - [The context argument](/api/clojure/types/context/) — the optional third argument to `execute`
 - [`toolnexus.client/suspend`](/api/clojure/suspension/pending/) — build the suspension result for you

@@ -401,8 +401,10 @@ public class TranslateTests
     }
 
     [Fact]
-    public async Task ContentParts_AreFlattened()
+    public async Task TextContentParts_AreConcatenated()
     {
+        // §11: text parts concatenate (unchanged). Non-text parts are NO LONGER flattened away —
+        // see NonTextContentParts_SurviveTranslation below.
         const string reply = """{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}""";
         using var up = new Upstream(reply);
         await Client(up.BaseUrl, "anthropic").TranslateAsync(Req(new List<object?>
@@ -418,6 +420,36 @@ public class TranslateTests
             },
         }));
         Assert.Contains("part one part two", up.SentJson());
+    }
+
+    [Fact]
+    public async Task NonTextContentParts_SurviveTranslation()
+    {
+        // The previous behaviour passed a text-empty parts array through to the provider raw and
+        // undocumented, in six ports. §11 now specifies one mapping: text parts concatenate, and
+        // non-text parts become the provider's native block — nothing is dropped.
+        const string reply = """{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}""";
+        using var up = new Upstream(reply);
+        await Client(up.BaseUrl, "anthropic").TranslateAsync(Req(new List<object?>
+        {
+            new Dictionary<string, object?>
+            {
+                ["role"] = "user",
+                ["content"] = new List<object?>
+                {
+                    new Dictionary<string, object?> { ["type"] = "text", ["text"] = "look" },
+                    new Dictionary<string, object?>
+                    {
+                        ["type"] = "image", ["mimeType"] = "image/png", ["data"] = "QUJD",
+                    },
+                },
+            },
+        }));
+        var sent = up.SentJson();
+        Assert.Contains("\"type\":\"image\"", sent);
+        Assert.Contains("\"media_type\":\"image/png\"", sent); // the Anthropic-native shape
+        Assert.Contains("\"data\":\"QUJD\"", sent);
+        Assert.Contains("\"text\":\"look\"", sent);            // and the text, in order
     }
 
     [Fact]

@@ -15,6 +15,7 @@ import asyncio
 import http.server
 import json
 import threading
+import time
 
 
 from toolnexus import agent, create_toolkit, parse_agents_config
@@ -74,7 +75,17 @@ def _start_stub():
             if method == "SendMessage":
                 seen["sendMessageCalls"] += 1
                 text = "".join(p.get("text", "") for p in rpc["params"]["message"]["parts"])
-                mode = "failed" if "fail" in text else "slow" if "slow" in text else "completed"
+                if "hangsend" in text:
+                    # Hang, then 500 — a deterministic mid-SendMessage window: the
+                    # client aborts while this request is in flight, then the RPC
+                    # fails. §7A: still a cancel, not a transport error.
+                    time.sleep(0.3)
+                    self.send_response(500)
+                    self.send_header("Content-Length", "4")
+                    self.end_headers()
+                    self.wfile.write(b"nope")
+                    return
+                mode = "failed" if "fail" in text else "slow" if "slow" in text else "hangpoll" if "hangpoll" in text else "completed"
                 counter["n"] += 1
                 tid = f"t{counter['n']}"
                 tasks[tid] = {"polls": 0, "mode": mode}
@@ -84,6 +95,14 @@ def _start_stub():
                 tid = rpc["params"]["id"]
                 t = tasks[tid]
                 t["polls"] += 1
+                if t["mode"] == "hangpoll" and t["polls"] >= 2:
+                    # Hang, then 500 — the mid-GetTask cancel window (§7A).
+                    time.sleep(0.3)
+                    self.send_response(500)
+                    self.send_header("Content-Length", "4")
+                    self.end_headers()
+                    self.wfile.write(b"nope")
+                    return
                 if t["mode"] == "slow" or t["polls"] < 2:
                     result = {"id": tid, "status": {"state": "working"}}
                 elif t["mode"] == "failed":
@@ -173,6 +192,61 @@ async def test_a2a_cancel_mid_poll_stops_further_gettask():
         after_abort = seen["getTaskCalls"]
         await asyncio.sleep(0.06)
         assert seen["getTaskCalls"] == after_abort  # no GetTask calls after abort
+        await tk.close()
+    finally:
+        server.shutdown()
+
+
+async def _wait_for_calls(seen, key, want):
+    """Block until the stub's counter reaches `want` — aborts land while a
+    request is DEMONSTRABLY in flight, not on a wall-clock race."""
+    deadline = time.monotonic() + 2.0
+    while seen[key] < want and time.monotonic() < deadline:
+        await asyncio.sleep(0.002)
+    assert seen[key] >= want, f"{key} never reached {want} — cannot test mid-request cancel"
+
+
+async def test_a2a_cancel_mid_gettask_is_a_cancel_not_transport_error():
+    """§7A (issue #64): an abort landing while a GetTask RPC is in flight is a
+    cancel, not a transport error."""
+    server, card_url, seen = _start_stub()
+    try:
+        tk = await create_toolkit(builtins=False, agents=[agent(card_url, poll_every=5)])
+        cancel = asyncio.Event()
+        ctx = ToolContext(signal=cancel)
+        task = asyncio.create_task(tk.execute("reviewer_review", {"task": "hangpoll"}, ctx))
+
+        await _wait_for_calls(seen, "getTaskCalls", 2)  # GetTask #2 hangs ~300ms stub-side
+        cancel.set()
+        r = await task
+        assert r.is_error is True
+        assert r.output == "A2A task t1 canceled"
+        assert r.metadata["state"] == "canceled"
+        after_abort = seen["getTaskCalls"]
+        await asyncio.sleep(0.45)  # let the stub's hung handler finish
+        assert seen["getTaskCalls"] == after_abort  # no GetTask calls after abort
+        await tk.close()
+    finally:
+        server.shutdown()
+
+
+async def test_a2a_cancel_mid_sendmessage_is_a_cancel_not_transport_error():
+    """§7A (issue #64): an abort landing while the SendMessage RPC is in flight
+    is a cancel — the task id is empty because SendMessage never completed."""
+    server, card_url, seen = _start_stub()
+    try:
+        tk = await create_toolkit(builtins=False, agents=[agent(card_url, poll_every=5)])
+        cancel = asyncio.Event()
+        ctx = ToolContext(signal=cancel)
+        task = asyncio.create_task(tk.execute("reviewer_review", {"task": "hangsend"}, ctx))
+
+        await _wait_for_calls(seen, "sendMessageCalls", 1)  # SendMessage hangs ~300ms stub-side
+        cancel.set()
+        r = await task
+        assert r.is_error is True
+        assert r.output == "A2A task  canceled"  # empty task id — js parity
+        assert r.metadata["state"] == "canceled"
+        assert seen["getTaskCalls"] == 0  # SendMessage never completed
         await tk.close()
     finally:
         server.shutdown()

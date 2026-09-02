@@ -300,6 +300,54 @@ tk.Register(toolnexus.HTTPTool(toolnexus.HTTPToolOptions{
 You can also seed tools at construction time with `Options.ExtraTools`. `Register` (and
 `ExtraTools`) are first-name-wins: a duplicate name is skipped with a warning.
 
+## Images, PDFs and audio (content parts)
+
+`RunParts` is `Run` with a content-part prompt — parts sit next to your text, in your order,
+because the order of text and image is semantic to a model:
+
+```go
+res, err := agent.RunParts(ctx, []toolnexus.ContentPart{
+	toolnexus.Text("What is broken in this screenshot?"),
+	toolnexus.File("./shot.png"),
+}, tk)
+```
+
+`File` carries any read error on the part itself until `RunParts` surfaces it, so attaching a
+file adds no second `err` to handle. The other constructors take what a Go program already holds:
+
+| constructor | source |
+|---|---|
+| `File(path)` | a filesystem path — read now, mime from the fixed extension table |
+| `Bytes(raw []byte, mimeType)` | bytes in hand; `mimeType` required — bytes carry no extension |
+| `Reader(r io.Reader, mimeType)` | any reader, drained now |
+| `FileHandle(f fs.File)` | an `*os.File` or any `fs.File`; mime from the file's own name |
+| `FSFile(fsys fs.FS, name)` | a name inside an `fs.FS` — so an `embed.FS` fixture works |
+| `URLPart(u, mimeType)` | a `data:` URL (parsed) or an `https:` URL (kept as a URL) |
+
+Mime types come from a fixed extension table (`png jpg jpeg gif webp pdf mp3 wav`) — never
+sniffed, never read from the machine's mime database, so every port agrees. `Run` with a plain
+string is unchanged and byte-identical.
+
+A tool can answer with media too: `ToolResult.Parts`, alongside the still-required `Output`,
+which is what the transcript, compaction and any text-only provider keep seeing.
+
+```go
+return toolnexus.ToolResult{
+	Output: "screenshot, 1280x720 png",
+	Parts:  []toolnexus.ContentPart{toolnexus.File("./shot.png")},
+}, nil
+```
+
+**MCP tools' images now survive.** Non-text content from an MCP server — image, audio, embedded
+resource, `resource_link` — used to be filtered out silently; it is preserved as `Parts` and
+emitted per provider style (Anthropic inside `tool_result`; OpenAI, whose `tool` message rejects
+an image, in a synthetic user message that never enters your transcript).
+
+Whatever you pass in, a part stores **bytes plus a `MimeType`** — never a handle, never a path —
+so a persisted transcript replays without the original file. A reader or file handle is drained
+**eagerly** at construction, and a handle you supply is read, **not** closed; closing it stays
+yours.
+
 ## Built-in tools
 
 toolnexus ships **10 built-in tools** so an agent can act with zero wiring — names + input schemas

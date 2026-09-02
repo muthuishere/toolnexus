@@ -204,7 +204,11 @@
                          :configuration {:blocking false}}
                         headers timeout-ms)]
     (if (:error sent)
-      (tool/failure (:error sent) (meta-for "" "submitted" 0))
+      ;; An abort observed on the SendMessage error path is still a cancel, not
+      ;; a transport error (§7A: ctx abort ⇒ "A2A task <id> canceled").
+      (if (aborted? ctx)
+        (tool/failure "A2A task  canceled" (meta-for "" "canceled" 0))
+        (tool/failure (:error sent) (meta-for "" "submitted" 0)))
       (loop [task  (:result sent)
              polls 0]
         (let [task-id (or (:id task) "")
@@ -241,8 +245,13 @@
                           (meta-for task-id "canceled" polls))
                 (let [got (rpc! endpoint "GetTask" {:id task-id} headers timeout-ms)]
                   (if (:error got)
-                    ;; transport / JSON-RPC error mid-poll — see `transport-error`
-                    (tool/failure (:error got) (meta-for task-id state polls))
+                    ;; An abort observed on the mid-poll error path is still a
+                    ;; cancel, not a transport error (§7A). Otherwise: transport
+                    ;; / JSON-RPC error mid-poll — see `transport-error`.
+                    (if (aborted? ctx)
+                      (tool/failure (str "A2A task " task-id " canceled")
+                                (meta-for task-id "canceled" polls))
+                      (tool/failure (:error got) (meta-for task-id state polls)))
                     (recur (:result got) (inc polls))))))))))))
 
 ;; ---------------------------------------------------------------------------

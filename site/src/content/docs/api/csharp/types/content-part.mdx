@@ -1,0 +1,281 @@
+---
+title: "ContentPart"
+description: "The non-text half of a message: text | image | file | audio, carrying base64 bytes or a URL plus a mimeType — never a path. — C#."
+sidebar:
+  label: "ContentPart"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/ContentPart.cs">ContentPart.cs</a>
+</p>
+
+```csharp
+public sealed record ContentPart
+{
+    public string  Type     { get; init; }   // "text" | "image" | "file" | "audio"
+    public string? Text     { get; init; }   // text parts only
+    public string? MimeType { get; init; }   // spelled mimeType everywhere, never media_type
+    public string? Data     { get; init; }   // standard base64, padded, no line breaks
+    public string? Url      { get; init; }   // an https: URL — exactly one of Data / Url
+    public string? Name     { get; init; }   // optional filename for a file part
+
+    // Edge constructors — they read and base64 NOW, so no path or handle enters the part.
+    public static ContentPart FromText(string text);
+    public static implicit operator ContentPart(string text);
+
+    public static ContentPart FromFile(string path,   string? mimeType = null, long? maxPartBytes = null);
+    public static ContentPart FromFile(FileInfo file, string? mimeType = null, long? maxPartBytes = null);
+    public static Task<ContentPart> FromFileAsync(string path,   string? mimeType = null, long? maxPartBytes = null, CancellationToken ct = default);
+    public static Task<ContentPart> FromFileAsync(FileInfo file, string? mimeType = null, long? maxPartBytes = null, CancellationToken ct = default);
+
+    public static ContentPart FromStream(Stream stream, string? mimeType = null, string? name = null, long? maxPartBytes = null);
+    public static Task<ContentPart> FromStreamAsync(Stream stream, string? mimeType = null, string? name = null, long? maxPartBytes = null, CancellationToken ct = default);
+
+    public static ContentPart FromBytes(byte[] bytes,              string mimeType, string? name = null, long? maxPartBytes = null);
+    public static ContentPart FromBytes(ReadOnlySpan<byte> bytes,  string mimeType, string? name = null, long? maxPartBytes = null);
+    public static ContentPart FromBytes(ReadOnlyMemory<byte> bytes,string mimeType, string? name = null, long? maxPartBytes = null);
+
+    public static ContentPart FromUrl(string url, string? mimeType = null, string? name = null, long? maxPartBytes = null);
+
+    public ContentPart Validate();                 // throws InvalidPartException
+    public long   ByteLength       { get; }        // DECODED bytes; 0 for a url/text part
+    public int    EstimatedTokens  { get; }        // max(85, bytes / 750) — byte-derived
+    public string Describe();                      // {type, mimeType, bytes} — data is never logged
+    public string DescribeInText();                // "image (image/png, 82 bytes)"
+    public string UnsupportedPlaceholderText();    // "[unsupported audio part (audio/wav, 41984 bytes)]"
+
+    public static readonly IReadOnlyDictionary<string, (string MimeType, string Type)> MediaTable;
+    public static (string MimeType, string Type)? MediaFor(string path);
+    public static string TypeForMime(string mimeType);
+
+    public sealed class InvalidPartException : Exception { }
+}
+```
+
+The non-text half of a message: `text | image | file | audio`, carrying base64 bytes or a URL plus
+a `mimeType` — never a path. It is a `record`, so it is immutable and has value equality.
+
+## When to use it
+
+Two directions, both of them the same type:
+
+- **Going in** — attaching an image, a PDF or an audio clip to a run. `RunAsync`, `AskAsync` and
+  `StreamAsync` each take an `IReadOnlyList<ContentPart>` in the same first position the `string`
+  prompt occupies, and the implicit `string → ContentPart` lift means a collection expression can
+  mix plain text with attachments.
+- **Coming out** — returning one from a tool. [`ToolResult.Parts`](/api/csharp/types/tool-result/)
+  carries non-text output (a screenshot, a rendered chart, a generated PDF) alongside the `Output`
+  text that describes it.
+
+The [`read`](/api/csharp/builtins/create/) built-in already produces one for a recognised media
+file, and an MCP server's image result arrives as one too — so a part you never constructed still
+behaves exactly like one you did.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="A part holds bytes, not a path — and not your Stream either">
+The obvious design is a part that keeps the *path* and reads it later. It does not survive the
+places a part actually goes. A transcript is persisted by a
+[`ConversationStore`](/api/csharp/client/store/) and replayed later — possibly on another machine,
+certainly after the temp file is gone. The same part crosses into a subagent, out through a served
+toolkit, and on to an A2A peer, none of which share your filesystem. So the edge constructors read
+and base64 **at construction**: what lands in the part is a `mimeType` and `Data`, which travel.
+
+Two .NET-specific choices follow from the same rule:
+
+**A caller-supplied `Stream` is read, never disposed.** `FromStream` consumes it eagerly — a part
+holding a half-read stream is exactly as unportable as one holding a path — but disposal stays the
+owner's, because the edge cannot know whether your `Stream` is a throwaway `FileStream` or a
+long-lived pipe you are still reading. Your `using` keeps meaning what it says.
+
+**A non-seekable stream is read forward.** `Seek` and `Length` are touched only when `CanSeek` is
+true (they are used purely to fail fast on `maxPartBytes` with a better message), so a pipe, a
+`NetworkStream` or a decompressor works. The `maxPartBytes` *guarantee* is the check at request
+assembly, not the one at the edge — a part that arrived from an MCP server never passed through a
+constructor at all.
+</Aside>
+
+Mime types come from the fixed §6 extension table (`png jpg jpeg gif webp pdf mp3 wav`) and are
+**never** sniffed from content or resolved through a platform mime database — `/etc/mime.types`
+varies per machine, which would break cross-port parity. An unknown extension with no explicit
+`mimeType` is a typed error **naming the extension**.
+
+## Examples
+
+### 1. A text part and an image part
+
+```csharp test
+using Toolnexus;
+
+// TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+var repo = Environment.GetEnvironmentVariable("TOOLNEXUS_REPO") ?? ".";
+var png = Path.Combine(repo, "examples/media/fixture.png");
+
+var image = ContentPart.FromFile(png);
+if (image.Type != "image") throw new Exception(image.Type);
+if (image.MimeType != "image/png") throw new Exception(image.MimeType!);
+if (image.Url is not null) throw new Exception("a path becomes bytes, never a url");
+if (image.Name != "fixture.png") throw new Exception("the display name survives");
+
+// The committed golden base64 — read from disk, never re-encoded by the example itself.
+var golden = File.ReadAllText(Path.Combine(repo, "examples/media/fixture.png.base64")).Trim();
+if (image.Data != golden) throw new Exception("base64 drifted from the golden");
+
+// A prompt is a list of parts. The implicit string lift keeps plain text plain:
+// client.RunAsync(prompt, toolkit) takes this list where a string would go.
+List<ContentPart> prompt = ["What is in this image?", image];
+if (prompt.Count != 2) throw new Exception("two parts");
+if (prompt[0].Type != "text" || prompt[0].Text != "What is in this image?") throw new Exception("string lift");
+
+Console.WriteLine($"ok: {prompt.Count} parts | {image.Describe()}");
+```
+
+### 2. The native sources a .NET caller already holds
+
+`FileInfo`, a `Stream`, `byte[]`, `ReadOnlySpan<byte>`, `ReadOnlyMemory<byte>` — accept broadly,
+store narrowly. Every one of them lands as the same `{mimeType, data}` pair.
+
+```csharp test
+using Toolnexus;
+
+var repo = Environment.GetEnvironmentVariable("TOOLNEXUS_REPO") ?? ".";
+var png = Path.Combine(repo, "examples/media/fixture.png");
+var golden = File.ReadAllText(Path.Combine(repo, "examples/media/fixture.png.base64")).Trim();
+var bytes = File.ReadAllBytes(png);
+
+// 1. FileInfo — mime type from .Extension, via the §6 media table.
+var fromInfo = ContentPart.FromFile(new FileInfo(png));
+
+// 2. A FileStream — read forward, eagerly, at construction.
+ContentPart fromFileStream;
+using (var fs = File.OpenRead(png)) fromFileStream = ContentPart.FromStream(fs, name: "fixture.png");
+
+// 3. A MemoryStream the CALLER owns — deliberately no `using`; we close it ourselves below.
+var ms = new MemoryStream(bytes);
+var fromMemoryStream = ContentPart.FromStream(ms, "image/png");
+
+// 4 + 5. Native bytes, array and ReadOnlyMemory. mimeType is required — there is nothing to infer from.
+var fromArray = ContentPart.FromBytes(bytes, "image/png");
+var fromMemory = ContentPart.FromBytes(new ReadOnlyMemory<byte>(bytes), "image/png");
+
+foreach (var p in new[] { fromInfo, fromFileStream, fromMemoryStream, fromArray, fromMemory })
+{
+    if (p.Data != golden) throw new Exception($"a source disagreed: {p.Describe()}");
+    if (p.MimeType != "image/png" || p.Type != "image") throw new Exception(p.Describe());
+}
+
+// The edge READ the stream; it did not dispose it. Disposal stays the owner's job.
+if (!ms.CanRead) throw new Exception("the edge closed a stream it does not own");
+ms.Position = 0;
+if (ms.Read(new byte[82], 0, 82) != 82) throw new Exception("and it is still usable");
+ms.Dispose();
+
+// Nothing that cannot cross a process boundary survives into the part.
+var json = System.Text.Json.JsonSerializer.Serialize(fromFileStream);
+if (json.Contains(png)) throw new Exception("a path leaked into the part");
+if (json.Contains("Stream")) throw new Exception("a handle leaked into the part");
+if (!json.Contains("\"mimeType\":\"image/png\"")) throw new Exception(json);
+
+Console.WriteLine($"ok: 5 native sources, one shape — {fromInfo.Describe()}");
+```
+
+### 3. The failure modes, and what a part costs
+
+```csharp test
+using Toolnexus;
+
+var repo = Environment.GetEnvironmentVariable("TOOLNEXUS_REPO") ?? ".";
+var bytes = File.ReadAllBytes(Path.Combine(repo, "examples/media/fixture.png"));
+
+// (a) EXACTLY ONE of Data / Url. Both is a typed construction error...
+var both = new ContentPart
+{
+    Type = "image",
+    MimeType = "image/png",
+    Data = Convert.ToBase64String(bytes),
+    Url = "https://example.com/shot.png",
+};
+try { both.Validate(); throw new Exception("both data and url should be refused"); }
+catch (ContentPart.InvalidPartException e) { if (!e.Message.Contains("both data and url")) throw; }
+
+// ...and so is neither.
+try
+{
+    new ContentPart { Type = "image", MimeType = "image/png" }.Validate();
+    throw new Exception("neither data nor url should be refused");
+}
+catch (ContentPart.InvalidPartException e) { if (!e.Message.Contains("neither data nor url")) throw; }
+
+// (b) An unknown extension is refused BY NAME — mime type is never sniffed from content.
+var odd = Path.Combine(Path.GetTempPath(), $"toolnexus-{Guid.NewGuid():N}.xyz");
+File.WriteAllBytes(odd, bytes);
+try
+{
+    try { ContentPart.FromFile(odd); throw new Exception("an unknown extension should be refused"); }
+    catch (ContentPart.InvalidPartException e) { if (!e.Message.Contains(".xyz")) throw new Exception(e.Message); }
+
+    // Say what it is and it is accepted.
+    if (ContentPart.FromFile(odd, "image/png").Type != "image") throw new Exception("explicit mimeType");
+}
+finally { File.Delete(odd); }
+
+// (c) maxPartBytes fails fast at the edge, in DECODED bytes.
+// (The normative check is at request assembly — an MCP-supplied part never passed through here.)
+try
+{
+    ContentPart.FromBytes(bytes, "image/png", maxPartBytes: 32);
+    throw new Exception("an oversize part should be refused");
+}
+catch (ContentPart.InvalidPartException e) { if (!e.Message.Contains("32")) throw new Exception(e.Message); }
+
+// (d) The token charge is BYTE-derived: max(85, bytes / 750). Never the mimeType string's
+// length, which would score a 5 MB image at ~3 tokens and make it uncompactable.
+var image = ContentPart.FromBytes(bytes, "image/png");
+if (image.ByteLength != 82) throw new Exception($"bytes: {image.ByteLength}");
+if (image.EstimatedTokens != 85) throw new Exception($"tokens: {image.EstimatedTokens}");
+if (ContentPart.FromText("four characters!").EstimatedTokens != 4) throw new Exception("text tokens");
+
+// The three user-visible strings are byte-identical in all seven ports.
+if (image.DescribeInText() != "image (image/png, 82 bytes)") throw new Exception(image.DescribeInText());
+if (image.UnsupportedPlaceholderText() != "[unsupported image part (image/png, 82 bytes)]")
+    throw new Exception(image.UnsupportedPlaceholderText());
+// A url part renders <bytes> as 0 — there are no local bytes to count.
+if (ContentPart.FromUrl("https://example.com/shot.png").DescribeInText() != "image (image/png, 0 bytes)")
+    throw new Exception("url part");
+
+Console.WriteLine($"ok: {image.EstimatedTokens} tokens for {image.ByteLength} bytes | {image.DescribeInText()}");
+```
+
+## Members
+
+| Member | Type | What it is |
+|---|---|---|
+| `Type` | `string` | `"text"` \| `"image"` \| `"file"` \| `"audio"`. |
+| `Text` | `string?` | Present only on a `text` part. |
+| `MimeType` | `string?` | Spelled `mimeType` in every port and on the wire. |
+| `Data` | `string?` | Standard base64 (RFC 4648 §4), padded, no line breaks. **Never logged.** |
+| `Url` | `string?` | An `https:` URL. A `data:` URL is normalised into `MimeType` + `Data`. |
+| `Name` | `string?` | Optional filename for a `file` part. |
+| `ByteLength` | `long` | Decoded byte count; `0` for a url or text part. |
+| `EstimatedTokens` | `int` | `max(85, bytes / 750)` for a non-text part; `ceil(chars/4)` for text. |
+
+## Static factories
+
+| Method | What it does |
+|---|---|
+| `FromText(text)` | A `text` part. A bare `string` lifts to one implicitly. |
+| `FromFile(path \| FileInfo, mimeType?, maxPartBytes?)` | Reads and base64s now; mime from the §6 table. |
+| `FromFileAsync(…)` | Async sibling, with a `CancellationToken`. |
+| `FromStream(stream, mimeType?, name?, maxPartBytes?)` | Reads forward, eagerly. **Does not dispose.** |
+| `FromStreamAsync(…)` | Async sibling, same contract. |
+| `FromBytes(byte[] \| ReadOnlySpan<byte> \| ReadOnlyMemory<byte>, mimeType, name?, maxPartBytes?)` | Base64s native bytes; `mimeType` required. |
+| `FromUrl(url, mimeType?, name?, maxPartBytes?)` | Keeps an `https:` URL; parses a `data:` URL into bytes. |
+| `MediaFor(path)` / `TypeForMime(mime)` / `MediaTable` | The fixed §6 extension table and its lookups. |
+
+## See also
+
+- [`ITool`](/api/csharp/types/tool/) — The uniform shape every tool source collapses to: name, description, JSON-Schema parameters, execute.
+- [`ToolResult`](/api/csharp/types/tool-result/) — The result envelope: output text, optional error flag, optional non-text parts, and optional metadata that can carry a suspension.
+- [`ToolContext`](/api/csharp/types/context/) — Optional per-call context handed to execute: cancellation, identity, and host-supplied state.

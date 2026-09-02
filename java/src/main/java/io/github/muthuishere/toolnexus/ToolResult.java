@@ -1,5 +1,6 @@
 package io.github.muthuishere.toolnexus;
 
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -9,18 +10,31 @@ import java.util.concurrent.atomic.AtomicLong;
  * <ul>
  *   <li>{@code output} — text handed back to the model.</li>
  *   <li>{@code isError} — whether the call failed.</li>
+ *   <li>{@code parts} — §1B non-text output (image/file/audio); may be null. Absent ⇒
+ *       byte-identical to a pre-multimodal result.</li>
  *   <li>{@code metadata} — free-form (title, server, skill name, ...); may be null.</li>
  * </ul>
+ *
+ * <p>{@code output} stays required even when {@code parts} is present: it is what the transcript,
+ * compaction, token estimation and any text-only provider see. A tool returning an image sets
+ * {@code output} to a description ("screenshot, 1280x720 png") and {@code parts} to the image.
  */
 public final class ToolResult {
     private final String output;
     private final boolean isError;
     private final Map<String, Object> metadata;
+    private final List<ContentPart> parts;
 
     public ToolResult(String output, boolean isError, Map<String, Object> metadata) {
+        this(output, isError, metadata, null);
+    }
+
+    /** §1B: a result that also carries non-text content parts. */
+    public ToolResult(String output, boolean isError, Map<String, Object> metadata, List<ContentPart> parts) {
         this.output = output == null ? "" : output;
         this.isError = isError;
         this.metadata = metadata;
+        this.parts = parts == null || parts.isEmpty() ? null : List.copyOf(parts);
     }
 
     public String output() {
@@ -33,6 +47,11 @@ public final class ToolResult {
 
     public Map<String, Object> metadata() {
         return metadata;
+    }
+
+    /** §1B non-text content parts, or {@code null} when the result is text-only. */
+    public List<ContentPart> parts() {
+        return parts;
     }
 
     public static ToolResult ok(String output) {
@@ -49,6 +68,11 @@ public final class ToolResult {
 
     public static ToolResult error(String output, Map<String, Object> metadata) {
         return new ToolResult(output, true, metadata);
+    }
+
+    /** §1B: a successful result carrying non-text content parts alongside its describing text. */
+    public static ToolResult ok(String output, List<ContentPart> parts) {
+        return new ToolResult(output, false, null, parts);
     }
 
     // ------------------------------------------------------------------
@@ -94,6 +118,8 @@ public final class ToolResult {
 
     @Override
     public String toString() {
-        return "ToolResult{isError=" + isError + ", output=" + output + "}";
+        // parts render as {type, mimeType, bytes} — a part's `data` never enters a log line.
+        return "ToolResult{isError=" + isError + ", output=" + output
+                + (parts == null ? "" : ", parts=" + ContentPart.describeAll(parts)) + "}";
     }
 }

@@ -1,6 +1,6 @@
 ---
 title: ToolResult
-description: The result envelope every tool returns — output text, an error flag, and optional metadata that can carry a suspension. Python.
+description: The result envelope every tool returns — output text, an error flag, optional non-text parts, and optional metadata that can carry a suspension. Python.
 sidebar:
   label: ToolResult
 ---
@@ -17,11 +17,14 @@ class ToolResult:
     output: str
     is_error: bool
     metadata: Optional[dict[str, Any]] = None
+    parts: Optional[list[dict[str, Any]]] = None
 ```
 
-What every `execute` returns. Three fields, and the whole tool-calling loop is built on them:
-`output` is the text handed back to the model, `is_error` says whether the call failed, and
-`metadata` is free-form — except for one reserved key that turns a result into a suspension.
+What every `execute` returns. Four fields, and the whole tool-calling loop is built on them:
+`output` is the text handed back to the model, `is_error` says whether the call failed,
+`metadata` is free-form — except for one reserved key that turns a result into a suspension —
+and `parts` carries non-text output (§1B [`ContentPart`](/api/python/types/content-part/))
+for a tool that returns an image, a document or an audio clip.
 
 ## When to use it
 
@@ -38,6 +41,22 @@ flag for anything the model could plausibly recover from; let genuine programmin
 
 `output` is always a `str` — it is what the model reads. Serialize structured data yourself
 (`json.dumps`) rather than expecting the loop to do it, so you control exactly what the model sees.
+
+## Why `output` stays required when there are `parts`
+
+<Aside type="tip" title="parts are for the model of the moment; output is for everything else">
+`parts` is optional and additive — a result without it is byte-identical to a pre-0.17 one. But
+`output` stays **required** even when `parts` is present, because `output` is what the canonical
+transcript stores, what compaction and token estimation read, and what a text-only provider
+receives when the image cannot be emitted at all. A tool returning a screenshot sets
+`output="screenshot, 1280x720 png"` and puts the image in `parts` — so the run still reads
+sensibly three turns later, when the bytes have been compacted away.
+</Aside>
+
+Each entry in `parts` is a canonical part dict (`{"type": …, "mimeType": …, "data": …}`) — build
+them with [`image`/`file`/`audio`](/api/python/types/content-part/) and `to_dict`, or write the
+dict directly. Where the provider defines no shape for a part, a **tool-derived** part degrades to
+a text placeholder with a warn-once rather than failing your run (§8A).
 
 ## Examples
 
@@ -97,7 +116,42 @@ assert "Advanced usage" in res.output
 print("ok:", res.metadata["title"])
 ```
 
-### 3. The reserved key — `metadata["pending"]` is a suspension
+### 3. Non-text output — `parts` alongside `output`
+
+```python test
+from toolnexus import ToolResult, image
+from toolnexus.content import to_dict
+
+GOLDEN = open("examples/media/fixture.png.base64").read().strip()
+
+
+def screenshot() -> ToolResult:
+    part = image("examples/media/fixture.png")
+    return ToolResult(
+        # What the transcript, compaction and a text-only provider see.
+        output=f"screenshot ({part.mimeType}, 82 bytes)",
+        is_error=False,
+        # What a vision model sees this turn.
+        parts=[to_dict(part)],
+    )
+
+
+res = screenshot()
+assert res.output == "screenshot (image/png, 82 bytes)"
+assert res.is_error is False
+assert len(res.parts) == 1
+assert res.parts[0]["type"] == "image"
+assert res.parts[0]["mimeType"] == "image/png"
+assert res.parts[0]["data"] == GOLDEN
+assert "path" not in res.parts[0]  # a part never carries a path
+
+# parts is optional: absent means a plain, pre-0.17-identical result.
+assert ToolResult(output="done", is_error=False).parts is None
+
+print("ok:", res.output, "|", len(res.parts), "part")
+```
+
+### 4. The reserved key — `metadata["pending"]` is a suspension
 
 `metadata` is free-form with one exception. A `pending` key holding a `Request` means "this tool
 cannot finish until something out-of-band happens" — the loop parks the run instead of returning.
@@ -141,6 +195,7 @@ Do not treat `is_error` alone as "the tool broke"; check
 | `output` | `str` | The text handed to the model. Always a string — serialize structured data yourself. |
 | `is_error` | `bool` | Whether the call failed. Fed back to the model, not raised. |
 | `metadata` | `dict[str, Any] \| None` | Free-form, for your code. **Reserved:** `pending` holds a §10 `Request`. |
+| `parts` | `list[dict[str, Any]] \| None` | Non-text output — §1B [`ContentPart`](/api/python/types/content-part/) dicts. Absent ⇒ identical to a pre-0.17 result. |
 
 ## See also
 
@@ -148,3 +203,4 @@ Do not treat `is_error` alone as "the tool broke"; check
 - [`ToolContext`](/api/python/types/context/) — what `execute` receives
 - [`pending`](/api/python/suspension/pending/) — build a suspending result
 - [`pending_of`](/api/python/suspension/pending-of/) — read a suspension back off a result
+- [`ContentPart`](/api/python/types/content-part/) — what goes in `parts`

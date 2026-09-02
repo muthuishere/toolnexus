@@ -92,7 +92,16 @@ class A2ATest {
                         StringBuilder text = new StringBuilder();
                         for (Object p : parts) text.append(String.valueOf(((Map<String, Object>) p).get("text")));
                         String t = text.toString();
-                        String mode = t.contains("fail") ? "failed" : t.contains("slow") ? "slow" : "completed";
+                        if (t.contains("hangsend")) {
+                            // Hang, then 500 — a deterministic mid-SendMessage window:
+                            // the client aborts while this request is in flight, then
+                            // the RPC fails. §7A: still a cancel, not a transport error.
+                            Thread.sleep(300);
+                            respond(exchange, 500, "stub: hangsend");
+                            return;
+                        }
+                        String mode = t.contains("fail") ? "failed" : t.contains("slow") ? "slow"
+                                : t.contains("hangpoll") ? "hangpoll" : "completed";
                         String taskId = "t" + counter.incrementAndGet();
                         tasks.put(taskId, new TaskState(new AtomicInteger(0), mode));
                         respond(exchange, 200, rpcResult(id, Map.of("id", taskId, "status", Map.of("state", "submitted"))));
@@ -101,6 +110,12 @@ class A2ATest {
                         String taskId = String.valueOf(params.get("id"));
                         TaskState st = tasks.get(taskId);
                         int polls = st.polls().incrementAndGet();
+                        if ("hangpoll".equals(st.mode()) && polls >= 2) {
+                            // Hang, then 500 — the mid-GetTask cancel window (§7A).
+                            Thread.sleep(300);
+                            respond(exchange, 500, "stub: hangpoll");
+                            return;
+                        }
                         Map<String, Object> result;
                         if ("slow".equals(st.mode()) || polls < 2) {
                             result = Map.of("id", taskId, "status", Map.of("state", "working"));
@@ -229,6 +244,64 @@ class A2ATest {
             int afterAbort = getTaskCalls.get();
             Thread.sleep(60);
             assertEquals(afterAbort, getTaskCalls.get(), "no GetTask calls after abort");
+        }
+    }
+
+    /** Block until the stub's counter reaches {@code want} — aborts land while a
+     * request is DEMONSTRABLY in flight, not on a wall-clock race. */
+    private static void waitForCalls(AtomicInteger counter, int want) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 2000;
+        while (counter.get() < want && System.currentTimeMillis() < deadline) Thread.sleep(2);
+        assertTrue(counter.get() >= want, "stub call count never reached " + want + " — cannot test mid-request cancel");
+    }
+
+    /** §7A (issue #64): an abort landing while a GetTask RPC is in flight is a
+     * cancel, not a transport error. */
+    @Test
+    void ctxCancelMidGetTaskIsACancelNotTransportError() throws Exception {
+        Toolkit.Options opts = new Toolkit.Options().builtins(false).agents(A2A.agent(cardUrl, null, null, 5L));
+        try (Toolkit tk = Toolkit.create(opts)) {
+            Tool review = tk.get("reviewer_review");
+            assertNotNull(review);
+            ToolContext ctx = new ToolContext();
+            AtomicReference<ToolResult> holder = new AtomicReference<>();
+            Thread runner = new Thread(() -> holder.set(review.execute(Map.of("task", "hangpoll"), ctx)));
+            runner.start();
+            waitForCalls(getTaskCalls, 2); // GetTask #2 hangs ~300ms stub-side
+            ctx.cancel();
+            runner.join(3000);
+            ToolResult r = holder.get();
+            assertNotNull(r, "execute returned");
+            assertTrue(r.isError());
+            assertEquals("A2A task t1 canceled", r.output());
+            assertEquals("canceled", r.metadata().get("state"));
+            int afterAbort = getTaskCalls.get();
+            Thread.sleep(450); // let the stub's hung handler finish
+            assertEquals(afterAbort, getTaskCalls.get(), "no GetTask calls after abort");
+        }
+    }
+
+    /** §7A (issue #64): an abort landing while the SendMessage RPC is in flight is
+     * a cancel — the task id is empty because SendMessage never completed. */
+    @Test
+    void ctxCancelMidSendMessageIsACancelNotTransportError() throws Exception {
+        Toolkit.Options opts = new Toolkit.Options().builtins(false).agents(A2A.agent(cardUrl, null, null, 5L));
+        try (Toolkit tk = Toolkit.create(opts)) {
+            Tool review = tk.get("reviewer_review");
+            assertNotNull(review);
+            ToolContext ctx = new ToolContext();
+            AtomicReference<ToolResult> holder = new AtomicReference<>();
+            Thread runner = new Thread(() -> holder.set(review.execute(Map.of("task", "hangsend"), ctx)));
+            runner.start();
+            waitForCalls(sendMessageCalls, 1); // SendMessage hangs ~300ms stub-side
+            ctx.cancel();
+            runner.join(3000);
+            ToolResult r = holder.get();
+            assertNotNull(r, "execute returned");
+            assertTrue(r.isError());
+            assertEquals("A2A task  canceled", r.output()); // empty task id — js parity
+            assertEquals("canceled", r.metadata().get("state"));
+            assertEquals(0, getTaskCalls.get(), "SendMessage never completed — no GetTask");
         }
     }
 

@@ -96,12 +96,19 @@ defmodule Toolnexus.Tool do
 end
 
 defmodule Toolnexus.ToolResult do
-  @moduledoc "Uniform tool result (SPEC §1). `metadata.pending` carrying a Request = suspension (§10)."
-  defstruct output: "", is_error: false, metadata: nil
+  @moduledoc """
+  Uniform tool result (SPEC §1). `metadata.pending` carrying a Request = suspension (§10).
+
+  `parts` carries non-text output (SPEC §1B) — an image, a PDF, an audio clip. `output`
+  stays required and remains what the transcript, compaction, token estimation and any
+  text-only provider see; a result setting no `parts` is byte-identical to pre-0.17.
+  """
+  defstruct output: "", is_error: false, parts: nil, metadata: nil
 
   @type t :: %__MODULE__{
           output: String.t(),
           is_error: boolean(),
+          parts: [Toolnexus.ContentPart.t()] | nil,
           metadata: map() | nil
         }
 
@@ -124,6 +131,10 @@ defmodule Toolnexus.Context do
   Execution context passed to every tool (SPEC §1).
 
   `answer` is set only on the §10 re-execution after a `wait_for` resolved a suspension.
+
+  `signal` is the cooperative cancellation token: a zero-arity predicate
+  (aborted when it returns true — the caller owns the backing state) or a pid
+  (aborted when the process is no longer alive). `nil` means never cancelled.
   """
   defstruct [:session_id, :message_id, :agent, :call_id, :extra, :answer, :timeout, :signal]
 
@@ -135,7 +146,7 @@ defmodule Toolnexus.Context do
           extra: map() | nil,
           answer: Toolnexus.Answer.t() | nil,
           timeout: non_neg_integer() | nil,
-          signal: reference() | pid() | nil
+          signal: (-> boolean()) | pid() | nil
         }
 end
 

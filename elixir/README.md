@@ -19,7 +19,7 @@ why this port ships the **full** elicitation bridge (form *and* URL mode).
 
 ```elixir
 def deps do
-  [{:toolnexus, "~> 0.16"}]
+  [{:toolnexus, "~> 0.17"}]
 end
 ```
 
@@ -40,6 +40,32 @@ IO.puts(result.text)
   loaded on demand through the single `skill` tool (progressive disclosure).
 - Remote MCP `headers` values expand `${ENV_VAR}` at call time and are never
   logged.
+
+## Images, PDFs and audio
+
+`run/4` takes a string **or** a list of content parts, in that same first
+position, so your text/image ordering reaches the model unchanged:
+
+```elixir
+alias Toolnexus.ContentPart
+
+Client.run(client, [ContentPart.text("What broke?"), ContentPart.image!("shot.png")], toolkit)
+```
+
+`image!/2`, `file!/2` and `audio!/2` take what you already hold: a path, a
+`data:` URL, an `https:` URL, `{:bytes, binary}` or **iodata** (a proper or
+improper iolist) with an explicit `:mime_type`, a `File.Stream` — which knows
+its own path, so it carries a mime type the way a path does — or any other
+**`Enumerable`** yielding binary chunks. Everything normalises at construction:
+a part holds bytes plus a `mime_type`, never a filesystem path and never an
+unread stream, so a saved transcript replays without the file. A stream is
+consumed **eagerly** and is not closed on your behalf. Mime types come from a
+fixed extension table — never sniffed — so every port agrees. The non-raising
+`image/2` etc. return `{:ok, part} | {:error, exception}`.
+
+A tool can answer with parts too (`%ToolResult{output: "screenshot, 8x8 png",
+parts: [part]}`), and MCP servers returning images, audio, embedded resources or
+resource links no longer have that content silently dropped.
 
 ## Why the BEAM port
 

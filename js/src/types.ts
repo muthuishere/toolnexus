@@ -10,11 +10,20 @@ export type JSONSchema = {
   [k: string]: unknown
 }
 
+import type { ContentPart } from "./content.js"
+
 export type ToolSource = "mcp" | "skill" | "builtin" | "native" | "http" | "a2a" | "custom"
 
 export interface ToolResult {
   output: string
   isError: boolean
+  /**
+   * §1B non-text output. `output` stays required and remains what the transcript,
+   * compaction, token estimation and any text-only provider see; `parts` is the extra
+   * channel a screenshot / PDF / audio clip travels on. Absent ⇒ byte-identical to a
+   * pre-0.17 result, which is why it is optional rather than a fourth required field.
+   */
+  parts?: ContentPart[]
   metadata?: Record<string, unknown>
 }
 

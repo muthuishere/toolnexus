@@ -353,6 +353,12 @@ def _skill_tool(agent_name: str, endpoint: str, skill: A2ASkill, ag: Agent) -> T
                 metadata=meta(),
             )
         except Exception as e:  # noqa: BLE001 — surfaced as a tool error
+            # A cancellation observed while an RPC is in flight (the in-flight
+            # call raised while the signal was set) is still a cancel, not a
+            # transport error (§7A: ctx abort ⇒ "A2A task <id> canceled").
+            if _aborted(signal):
+                state = "canceled"
+                return ToolResult(output=f"A2A task {task_id} canceled", is_error=True, metadata=meta())
             return ToolResult(output=str(e), is_error=True, metadata=meta())
 
     return Tool(

@@ -7,7 +7,7 @@ implementation, byte-identical on both.
 
 ```clojure
 ;; deps.edn
-net.clojars.muthuishere/toolnexus {:mvn/version "0.16.0"}   ; this port
+net.clojars.muthuishere/toolnexus {:mvn/version "0.17.0"}   ; this port
 net.clojars.muthuishere/koine     {:mvn/version "0.11.0"}    ; its only dependency
 ```
 
@@ -97,6 +97,57 @@ that side by running the AOT binary and both cljgo evaluators.
 | §0.11, §4A | builtins and the precedence rule (MCP wins a name collision) |
 | §0.12, §10 | suspension — `pending`, `wait-for`, resume |
 | §7A, §7B, §7C | A2A outbound, `serve` inbound (Agent Card + JSON-RPC), MCP server inbound |
+
+## Images, PDFs and audio (content parts)
+
+`run` takes a string **or** a vector of §1B content parts in the same first position, so your
+text/image ordering reaches the model unchanged:
+
+```clojure
+(require '[toolnexus.client :as client]
+         '[toolnexus.content :as content])
+
+(client/run agent
+            [(content/text-part "What is broken in this screenshot?")
+             (content/attach "shot.png")]
+            {:toolkit tk})
+```
+
+`attach` dispatches a string on its shape — a `data:` URL is parsed, an `http(s):` URL is kept as
+a `:url`, anything else is a filesystem path read **now**. `from-file`, `from-bytes`,
+`image-file`, `from-data-url` and `from-url` are the same thing spelled explicitly. Mime types
+come from the fixed extension table (`png jpg jpeg gif webp pdf mp3 wav`) — never sniffed, never
+read from the machine's mime database, so all seven ports agree.
+
+**The byte sources this port accepts are deliberately narrower than the other six**, and it says
+so rather than pretending otherwise. It takes a path string, a **host byte array** (JVM `byte[]`
+*and* Go `[]byte`, i.e. what `koine.fs/read-bytes` returns), or **any seq of byte values** —
+vector, list, lazy seq, signed or unsigned. It does **not** take a file or stream object:
+`java.io.File` and `InputStream` are JVM-only, and naming either in this `.cljc` would make the
+namespace unloadable on cljgo, while koine offers no host-neutral byte-stream abstraction to hide
+the difference behind. So such a source gets a **named error part** —
+`{:type "error" :code "unsupported-source"}` naming the type it was handed and telling you to
+pass a path or bytes — never a cast error, and never a throw. A shorter list that is true on both
+hosts beats a longer one that breaks on one of them.
+
+Construction failures travel as data throughout: `content/error-part?` tests one, matching the
+port's existing no-throw boundary (`toolnexus.tool/execute`, `toolnexus.mcp`).
+
+A tool can answer with media too — `:parts` alongside the still-required `:output`, which is what
+the transcript, compaction and any text-only provider keep seeing:
+
+```clojure
+{:output "screenshot, 1280x720 png"
+ :parts  [(content/image-file "shot.png")]}
+```
+
+**MCP tools' images now survive.** Non-text content from an MCP server — image, audio, embedded
+resource, `resource_link` — used to be filtered out silently; it is preserved as `:parts` and
+emitted per provider style by `content/build-wire` (Anthropic inside `tool_result`; OpenAI, whose
+`tool` message rejects an image, in a synthetic user message that never enters your transcript).
+
+Whatever goes in, a part stores **bytes plus a `:mimeType`** — never a handle, never a path — so a
+persisted transcript replays without the original file.
 
 ## Parity — tier `full`
 

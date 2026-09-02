@@ -644,19 +644,81 @@ public final class McpSource implements AutoCloseable {
                     Map<String, Object> argMap = args == null ? new LinkedHashMap<>() : args;
                     McpSchema.CallToolRequest req = new McpSchema.CallToolRequest(mcpName, argMap);
                     McpSchema.CallToolResult result = client.callTool(req);
+                    // §2: parts are collected BEFORE the isError / structuredContent
+                    // short-circuits — a server returning structured content *and* an image
+                    // must keep the image. Nothing non-text is ever dropped silently.
+                    Mapped mapped = mapContent(result.content());
                     if (Boolean.TRUE.equals(result.isError())) {
-                        return new ToolResult(formatToolErrorContent(result.content()), true, meta);
+                        return new ToolResult(formatToolErrorContent(result.content()), true, meta,
+                                mapped.parts);
                     }
                     Object structured = result.structuredContent();
                     if (structured != null) {
-                        return new ToolResult(Json.stringify(structured), false, meta);
+                        return new ToolResult(Json.stringify(structured), false, meta, mapped.parts);
                     }
-                    return new ToolResult(joinTextContent(result.content()), false, meta);
+                    String output = joinTextContent(result.content());
+                    // A `resource` carrying text is appended to output (§2), not made a part.
+                    if (!mapped.resourceText.isEmpty()) {
+                        output = output.isEmpty() ? mapped.resourceText : output + "\n" + mapped.resourceText;
+                    }
+                    // An image-only result must not be the empty string: name what came back.
+                    if (output.isEmpty() && !mapped.parts.isEmpty()) {
+                        output = ContentParts.describeForOutput(mapped.parts);
+                    }
+                    return new ToolResult(output, false, meta, mapped.parts);
                 } catch (Exception e) {
                     return new ToolResult(e.getMessage() == null ? String.valueOf(e) : e.getMessage(), true, meta);
                 }
             }
         };
+    }
+
+    /** §2: {@code content[]} split into non-text {@link ContentPart}s and appended resource text. */
+    private record Mapped(List<ContentPart> parts, String resourceText) {}
+
+    /**
+     * Map an MCP {@code content[]} onto §1B parts: {@code image}⇒image, {@code audio}⇒audio,
+     * {@code resource_link}⇒{@code file{url}}, {@code resource} with a blob⇒{@code file{data}},
+     * {@code resource} with text⇒appended to {@code output}. Base64 strings are taken from the
+     * SDK <b>verbatim</b>; no {@code McpSchema} type escapes into our transcript (the SDK ships a
+     * different Jackson major).
+     *
+     * <p>{@code McpSchema.Content} is a plain interface, not sealed — the {@code else} arm is
+     * mandatory and there is no exhaustiveness check to lean on.
+     */
+    private static Mapped mapContent(List<McpSchema.Content> content) {
+        List<ContentPart> parts = new ArrayList<>();
+        List<String> resourceText = new ArrayList<>();
+        if (content == null) return new Mapped(parts, "");
+        for (McpSchema.Content c : content) {
+            if (c instanceof McpSchema.TextContent) {
+                continue; // text is `output`, not a part
+            } else if (c instanceof McpSchema.ImageContent img) {
+                parts.add(ContentPart.ofBase64(ContentPart.IMAGE, img.mimeType(), img.data()));
+            } else if (c instanceof McpSchema.AudioContent aud) {
+                parts.add(ContentPart.ofBase64(ContentPart.AUDIO, aud.mimeType(), aud.data()));
+            } else if (c instanceof McpSchema.ResourceLink link) {
+                ContentPart p = ContentPart.ofUrl(ContentPart.FILE,
+                        link.mimeType() == null || link.mimeType().isEmpty()
+                                ? "application/octet-stream" : link.mimeType(),
+                        link.uri());
+                parts.add(link.name() == null || link.name().isEmpty() ? p : p.withName(link.name()));
+            } else if (c instanceof McpSchema.EmbeddedResource emb) {
+                McpSchema.ResourceContents res = emb.resource();
+                if (res instanceof McpSchema.BlobResourceContents blob) {
+                    ContentPart p = ContentPart.ofBase64(ContentPart.FILE,
+                            blob.mimeType() == null || blob.mimeType().isEmpty()
+                                    ? "application/octet-stream" : blob.mimeType(),
+                            blob.blob());
+                    parts.add(blob.uri() == null || blob.uri().isEmpty() ? p : p.withName(blob.uri()));
+                } else if (res instanceof McpSchema.TextResourceContents txt) {
+                    if (txt.text() != null && !txt.text().isEmpty()) resourceText.add(txt.text());
+                }
+            }
+            // else: a content kind this SDK version added and the spec has no mapping for.
+            // It is not silently discarded — it has no representation yet; §2's table is fixed.
+        }
+        return new Mapped(parts, String.join("\n", resourceText));
     }
 
     private static String joinTextContent(List<McpSchema.Content> content) {
