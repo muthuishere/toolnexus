@@ -165,6 +165,13 @@ projects compile, and nothing kept it in sync — a namespace added to `src/` an
 failed four examples with a classpath error naming the file but not the reason. A new
 `examples-mirror-check.sh` runs in CI ahead of the example suites and says why.
 
+**csharp only**: the test suite no longer runs classes in parallel. Several tests assert on
+wall-clock behaviour — a 60ms run deadline against an 800ms stub, heartbeat ticks coalescing — and
+this release's 26 blocking file reads starved the thread pool enough that the timeout fired late
+and the response won, so a *timeout* test failed with "No exception was thrown". Measured 3/3 green
+without the new tests and roughly 1 in 3 red with them. Serialising costs about three seconds on a
+suite that ran in two, and makes the result deterministic.
+
 ### Not done, and where it is tracked
 
 Tracked in `openspec/changes/add-multimodal-content`:
