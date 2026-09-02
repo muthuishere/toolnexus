@@ -153,6 +153,18 @@ proves image arrival by **prompt-token delta** rather than by reading the model'
 exactly this reason: a model asked to name colours will name colours it never received, which is
 how a dropped image hides.
 
+### Also — the A2A cancel contract is now documented, and Clojure's example mirror is guarded
+
+`SPEC.md` §7A described the abort as stopping "before the next `GetTask`" — which is exactly the
+narrow between-polls reading the fix above corrects. The contract now says an abort counts wherever
+it is observed. The docs site never described cancellation at all: `a2a.mdx` gains a "Timeouts and
+cancellation" section with the full result table and migration note.
+
+**clojure only**: `examples/src/toolnexus/` is a real copy of the library source that both example
+projects compile, and nothing kept it in sync — a namespace added to `src/` and forgotten there
+failed four examples with a classpath error naming the file but not the reason. A new
+`examples-mirror-check.sh` runs in CI ahead of the example suites and says why.
+
 ### Not done, and where it is tracked
 
 Tracked in `openspec/changes/add-multimodal-content`:

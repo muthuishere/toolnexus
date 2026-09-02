@@ -94,6 +94,32 @@ The `agents` block mirrors `mcpServers` — a config list you can also load from
 key. Each descriptor takes optional `headers` (`${ENV}` expanded at call time, never logged), a poll
 `timeout`, and `pollEvery` interval.
 
+
+### Timeouts and cancellation
+
+A remote agent is a network call inside a poll loop, so both ways it can end early are part of the
+contract (`SPEC.md` §7A) and both are reported as a **tool result**, not as an exception — the
+model reads the outcome and can decide what to do next.
+
+| what happened | `output` | `metadata.state` |
+|---|---|---|
+| the task finished in a non-completed state | `A2A task <id> <state>[: <message>]` | that state |
+| the poll `timeout` elapsed | `A2A task <id> timed out after <ms>ms (state=<state>)` | last known |
+| the `ctx` signal was aborted | `A2A task <id> canceled` | `canceled` |
+
+**A cancellation counts wherever it is observed** — between polls, or while a `SendMessage`/`GetTask`
+request is still in flight. Every error and exit path re-checks the abort signal *before* reporting a
+transport error, so an abort never reaches you wearing the transport's clothes.
+
+<Aside type="caution" title="This was wrong until 0.17.0">
+Before 0.17.0 the guarantee only held *between* polls. An abort that landed mid-request surfaced
+whatever the transport happened to raise: Java returned the literal string
+`"java.lang.InterruptedException"`, Go returned `context canceled` with the state still
+`submitted`, and Elixir had no abort semantics at all — `Context.signal` existed in the struct and
+nothing in the port read it. If you wrote code that pattern-matched on those strings, match on
+`metadata.state == "canceled"` instead.
+</Aside>
+
 ## Inbound — serve your toolkit as an agent
 
 The other direction: expose *your* toolkit as an A2A agent. The Agent Card is built from your

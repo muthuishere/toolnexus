@@ -157,6 +157,11 @@ jobs:
       - run: ./all-modes-check.sh
         env:
           TN_EXAMPLES: ${{ github.workspace }}/examples
+      # examples/src/toolnexus/ is a real COPY of the library source that both
+      # example projects compile, and nothing kept it in sync. A namespace added
+      # to src/ and forgotten here failed four examples with a classpath error
+      # that named the file but not the reason. Fail fast, and say why.
+      - run: ./examples-mirror-check.sh
       # koine must be the ONLY third-party dependency. S03 measured that 11 of 11
       # popular Clojure libraries carry Java interop and none load on cljgo, so a
       # stray dependency does not degrade the port — it ends the cljgo half.

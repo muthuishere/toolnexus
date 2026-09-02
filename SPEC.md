@@ -725,8 +725,11 @@ state. **TaskState**: `submitted|working|completed|failed|canceled` (terminal = 
 Map: `completed` ⇒ `ToolResult{isError:false, output:` all `kind:"text"` parts across `artifacts[].parts[]`
 joined by `"\n"` (fallback: last `role:"agent"` history message text) `}`; `failed`/`canceled` ⇒
 `isError:true, "A2A task <id> <state>[: <status.message text>]"`; timeout ⇒
-`isError:true, "A2A task <id> timed out after <ms>ms (state=<state>)"`; `ctx` abort ⇒ stop before the
-next `GetTask`, `"A2A task <id> canceled"`. `metadata` on every result = `{agent, taskId, state, polls, ms}`.
+`isError:true, "A2A task <id> timed out after <ms>ms (state=<state>)"`; `ctx` abort ⇒ `"A2A task <id> canceled"` with
+`metadata.state == "canceled"`, **wherever the abort is observed** — between polls, mid-`SendMessage`,
+or mid-`GetTask`. Every error and exit path re-checks the abort signal **before** reporting a
+transport error, so a cancellation that lands while a request is in flight is still a cancel and
+never leaks the transport's own wording (an `InterruptedException`, a `context canceled`). `metadata` on every result = `{agent, taskId, state, polls, ms}`.
 Reuses httpTool's `${ENV}` header expansion + timeout + non-2xx mapping. Method names are the literal
 strings `SendMessage`/`GetTask`.
 
