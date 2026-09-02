@@ -28,6 +28,7 @@ from mcp.client.streamable_http import streamablehttp_client
 from mcp.types import ElicitResult
 from mcp.types import Tool as McpToolDef
 
+from .content import describe_part
 from .types import (
     Answer,
     JSONSchema,
@@ -172,7 +173,79 @@ def _format_tool_error_content(content: Any) -> str:
 def _join_text_content(content: Any) -> str:
     if not isinstance(content, list):
         return ""
-    return "\n".join(item.text for item in content if _is_text_content(item))
+    texts = [item.text for item in content if _is_text_content(item)]
+    # An embedded resource carrying TEXT is appended to `output` (§0.4) — it is text the
+    # server meant the model to read, not a binary attachment.
+    texts.extend(_embedded_texts(content))
+    return "\n".join(texts)
+
+
+def _embedded_texts(content: list[Any]) -> list[str]:
+    out: list[str] = []
+    for item in content:
+        if getattr(item, "type", None) != "resource":
+            continue
+        res = getattr(item, "resource", None)
+        text = getattr(res, "text", None)
+        if isinstance(text, str):
+            out.append(text)
+    return out
+
+
+def _collect_parts(content: Any) -> Optional[list[dict[str, Any]]]:
+    """Map an MCP ``content[]`` to §1B parts — image⇒image, audio⇒audio,
+    ``resource_link``⇒``file{url}``, ``resource`` with a blob⇒``file{data}``. A
+    ``resource`` carrying text went to ``output`` instead, and text entries are already
+    ``output``. Nothing is ever dropped silently. ``data``/``blob`` are base64 STRINGS
+    from the SDK and are passed through verbatim, so no encoder can drift the bytes.
+
+    Called on EVERY result branch — the ``structuredContent`` short-circuit and the
+    error path included — because a short-circuit that skips it reintroduces the very
+    silent drop this mapping exists to remove.
+    """
+    if not isinstance(content, list):
+        return None
+    parts: list[dict[str, Any]] = []
+    for item in content:
+        kind = getattr(item, "type", None)
+        if kind == "image" or kind == "audio":
+            data = getattr(item, "data", None)
+            mime = getattr(item, "mimeType", None)
+            if isinstance(data, str) and isinstance(mime, str):
+                parts.append({"type": kind, "mimeType": mime, "data": data})
+        elif kind == "resource_link":
+            uri = getattr(item, "uri", None)
+            if uri is not None:
+                part: dict[str, Any] = {
+                    "type": "file",
+                    "mimeType": getattr(item, "mimeType", None) or "application/octet-stream",
+                    "url": str(uri),
+                }
+                name = getattr(item, "name", None)
+                if isinstance(name, str) and name:
+                    part["name"] = name
+                parts.append(part)
+        elif kind == "resource":
+            res = getattr(item, "resource", None)
+            blob = getattr(res, "blob", None)
+            if isinstance(blob, str):
+                part = {
+                    "type": "file",
+                    "mimeType": getattr(res, "mimeType", None) or "application/octet-stream",
+                    "data": blob,
+                }
+                uri = getattr(res, "uri", None)
+                if uri is not None:
+                    part["name"] = str(uri)
+                parts.append(part)
+    return parts or None
+
+
+def _describe_parts(parts: list[dict[str, Any]]) -> str:
+    """§8A: what `output` says when a server returned only non-text content — one line
+    per part in the canonical ``<type> (<mimeType>, <bytes> bytes)`` form, rather than
+    hand the model an empty string."""
+    return "\n".join(describe_part(p) for p in parts)
 
 
 async def _paginate_tools(session: ClientSession) -> list[McpToolDef]:
@@ -245,22 +318,31 @@ def _convert_tool(
                 arguments=args or {},
                 read_timeout_seconds=timedelta(seconds=eff_timeout),
             )
+            # Parts are collected BEFORE any branch returns — the error path and the
+            # structuredContent short-circuit both keep their non-text content (§0.4).
+            parts = _collect_parts(result.content)
             if result.isError:
                 return ToolResult(
                     output=_format_tool_error_content(result.content),
                     is_error=True,
                     metadata={"server": server},
+                    parts=parts,
                 )
             if result.structuredContent is not None:
                 return ToolResult(
                     output=json.dumps(result.structuredContent),
                     is_error=False,
                     metadata={"server": server},
+                    parts=parts,
                 )
+            output = _join_text_content(result.content)
+            if not output and parts:
+                output = _describe_parts(parts)
             return ToolResult(
-                output=_join_text_content(result.content),
+                output=output,
                 is_error=False,
                 metadata={"server": server},
+                parts=parts,
             )
         except Exception as e:  # noqa: BLE001 - failures isolated per call
             return ToolResult(output=str(e), is_error=True, metadata={"server": server})

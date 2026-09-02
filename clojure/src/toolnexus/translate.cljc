@@ -36,7 +36,8 @@
   (:require [clojure.string :as str]
             [koine.json :as json]
             [toolnexus.adapter :as adapter]
-            [toolnexus.client :as client]))
+            [toolnexus.client :as client]
+            [toolnexus.content :as content]))
 
 ;; ---------------------------------------------------------------------------
 ;; pure helpers
@@ -136,9 +137,41 @@
         (assoc :pending []))
     acc))
 
+(defn native-blocks
+  "SPEC §11 — a `content` ARRAY as Anthropic-native blocks, or nil when it holds
+  nothing but text.
+
+  This REPLACES the raw passthrough that used to live here (and, as the recon
+  found, in six ports): a parts array carrying no text was handed to the provider
+  untouched, undocumented, and only correct by accident. Now every entry is read
+  back into a §1B ContentPart — a ContentPart written literally OR the
+  OpenAI-native block the same part encodes to — and re-emitted through the same
+  `toolnexus.content` mapping the loop's adapters use. Text parts concatenate as
+  before; a non-text part is translated, never flattened away and never dropped.
+
+  Returns `{:blocks [...]}`, `{:error msg :code c}`, or nil for the text-only
+  case, which keeps its pre-0.17 string content byte-for-byte."
+  [content]
+  (when (and (sequential? content) (seq content))
+    (let [parts (mapv (fn [b]
+                        (let [t (and (map? b) (:text b))]
+                          (if (string? t)
+                            (content/text-part t)
+                            (content/inbound-part b))))
+                      content)]
+      ;; nil = an entry this port cannot read as a part. Dropping it would be the
+      ;; silent loss §11 forbids, so an unreadable entry falls back to the raw
+      ;; passthrough for THAT message rather than being discarded.
+      (when (and (every? some? parts) (some #(not= "text" (:type %)) parts))
+        (content/encode-parts parts {:style "anthropic" :provenance "attached"})))))
+
 (defn- add-assistant [acc m]
   (let [s      (content-text (:content m))
-        blocks (into (if (= "" s) [] [{:type "text" :text s}])
+        ;; §11: an assistant turn's non-text parts survive too — same mapping,
+        ;; appended after the text block and before the tool_use blocks.
+        native (:blocks (native-blocks (:content m)))
+        blocks (into (into (if (= "" s) [] [{:type "text" :text s}])
+                           (remove #(= "text" (:type %)) (or native [])))
                      (mapv (fn [tc] {:type  "tool_use"
                                      :id    (:id tc)
                                      :name  (:name tc)
@@ -151,10 +184,17 @@
 
 (defn- add-user [acc m]
   (let [content (:content m)
-        s       (content-text content)]
+        s       (content-text content)
+        native  (native-blocks content)]
     (cond
+      (and native (:blocks native))
+      (update acc :out conj {:role "user" :content (:blocks native)})
+
       (not= "" s) (update acc :out conj {:role "user" :content s})
-      ;; a parts array carrying no text (images, say) passes through untouched
+
+      ;; Either the array holds an entry this port cannot read as a part, or the
+      ;; style refused one. Passing it through is what six ports did; it stays the
+      ;; fallback so nothing is dropped, but it is no longer the RULE.
       (and (sequential? content) (seq content))
       (update acc :out conj {:role "user" :content content})
       :else acc)))

@@ -23,6 +23,11 @@ class ToolResult:
     output: str
     is_error: bool
     metadata: Optional[dict[str, Any]] = None
+    # §1B non-text output (image/file/audio parts). ``output`` stays required and stays
+    # what the transcript, compaction, token estimation and text-only providers see;
+    # ``parts`` absent ⇒ byte-identical to a pre-0.17 result. Appended AFTER ``metadata``
+    # so every existing keyword construction keeps working.
+    parts: Optional[list[dict[str, Any]]] = None
 
 
 @dataclass

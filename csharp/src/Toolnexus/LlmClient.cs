@@ -216,6 +216,25 @@ public sealed class LlmClient
         /// </summary>
         public Func<ErrorInfo, Tier>? OnError { get; set; }
 
+        /// <summary>
+        /// (§1B) Cap on a single content part, measured in <b>decoded</b> bytes (base64 is +33%).
+        /// Enforced when the client assembles a part into a request; the edge constructors take
+        /// the same limit as an argument. Null ⇒ no cap.
+        /// </summary>
+        public long? MaxPartBytes { get; set; }
+
+        /// <summary>
+        /// (§8A) Override the provenance rule for a part the provider style cannot represent.
+        /// Null ⇒ the default: a part the CALLER attached is a typed error before any HTTP call;
+        /// a part DERIVED from a tool/MCP result degrades to a text placeholder with a warning
+        /// emitted at most once. <c>"error"</c> ⇒ always error; <c>"text"</c> ⇒ always degrade.
+        /// A part is never dropped silently.
+        /// </summary>
+        public string? OnUnsupportedPart { get; set; }
+
+        public Options WithMaxPartBytes(long v) { MaxPartBytes = v; return this; }
+        public Options WithOnUnsupportedPart(string v) { OnUnsupportedPart = v; return this; }
+
         public Options WithOnError(Func<ErrorInfo, Tier> v) { OnError = v; return this; }
         public Options WithWaitFor(Func<Request, Task<Answer>> v) { WaitFor = v; return this; }
         public Options WithRequestParams(IReadOnlyDictionary<string, object?> v) { RequestParams = v; return this; }
@@ -441,6 +460,20 @@ public sealed class LlmClient
     // ---------------------------------------------------------------- public API
 
     public Task<RunResult> RunAsync(string prompt, Toolkit toolkit, List<object?>? history = null, CancellationToken cancellationToken = default)
+        => RunAsync((object)prompt, toolkit, history, cancellationToken);
+
+    /// <summary>
+    /// (§1B/§7) Multimodal entry: the prompt is a list of <see cref="ContentPart"/> in the same
+    /// first position, so the caller's text/image ordering — which is semantic to a model — is
+    /// preserved. With an implicit <c>string ⇒ ContentPart</c> lift and a collection expression
+    /// this reads as
+    /// <c>await client.RunAsync(["what's in this?", ContentPart.FromFile("shot.png")], toolkit)</c>.
+    /// A text-only list assembles byte-identically to the string path.
+    /// </summary>
+    public Task<RunResult> RunAsync(IReadOnlyList<ContentPart> prompt, Toolkit toolkit, List<object?>? history = null, CancellationToken cancellationToken = default)
+        => RunAsync((object)prompt, toolkit, history, cancellationToken);
+
+    private Task<RunResult> RunAsync(object prompt, Toolkit toolkit, List<object?>? history, CancellationToken cancellationToken)
     {
         var deadline = new Deadline(_opts.TimeoutMs);
         return _opts.Style == "anthropic"
@@ -583,8 +616,17 @@ public sealed class LlmClient
     /// each text delta is forwarded here as it arrives — the final <see cref="RunResult"/> is still
     /// returned. Memory (<paramref name="id"/> load/save) is handled by the streaming path, so there
     /// is no duplication.</param>
-    public async Task<RunResult> AskAsync(string prompt, Toolkit toolkit, string? id = null,
+    public Task<RunResult> AskAsync(string prompt, Toolkit toolkit, string? id = null,
         Action<string>? onText = null, CancellationToken cancellationToken = default)
+        => AskAsync((object)prompt, toolkit, id, onText, cancellationToken);
+
+    /// <summary>(§1B) Multimodal <see cref="AskAsync"/> — same memory semantics, parts prompt.</summary>
+    public Task<RunResult> AskAsync(IReadOnlyList<ContentPart> prompt, Toolkit toolkit, string? id = null,
+        Action<string>? onText = null, CancellationToken cancellationToken = default)
+        => AskAsync((object)prompt, toolkit, id, onText, cancellationToken);
+
+    private async Task<RunResult> AskAsync(object prompt, Toolkit toolkit, string? id,
+        Action<string>? onText, CancellationToken cancellationToken)
     {
         if (onText != null)
             return await StreamAsync(prompt, toolkit,
@@ -592,7 +634,7 @@ public sealed class LlmClient
                 id, cancellationToken).ConfigureAwait(false);
 
         if (id == null)
-            return await RunAsync(prompt, toolkit, null, cancellationToken).ConfigureAwait(false);
+            return await RunAsync(prompt, toolkit, (List<object?>?)null, cancellationToken).ConfigureAwait(false);
         var history = await _store.GetAsync(id).ConfigureAwait(false) ?? new List<object?>();
         var result = await RunAsync(prompt, toolkit, history, cancellationToken).ConfigureAwait(false);
         await _store.SaveAsync(id, result.Messages).ConfigureAwait(false);
@@ -608,8 +650,17 @@ public sealed class LlmClient
     /// loaded as history before streaming, and saved back to the <see cref="IConversationStore"/> once
     /// the run terminates. No <paramref name="id"/> ⇒ stateless.
     /// </summary>
-    public async Task<RunResult> StreamAsync(string prompt, Toolkit toolkit, Action<StreamEvent> onEvent,
+    public Task<RunResult> StreamAsync(string prompt, Toolkit toolkit, Action<StreamEvent> onEvent,
         string? id = null, CancellationToken cancellationToken = default)
+        => StreamAsync((object)prompt, toolkit, onEvent, id, cancellationToken);
+
+    /// <summary>(§1B) Multimodal <see cref="StreamAsync"/> — same events, parts prompt.</summary>
+    public Task<RunResult> StreamAsync(IReadOnlyList<ContentPart> prompt, Toolkit toolkit, Action<StreamEvent> onEvent,
+        string? id = null, CancellationToken cancellationToken = default)
+        => StreamAsync((object)prompt, toolkit, onEvent, id, cancellationToken);
+
+    private async Task<RunResult> StreamAsync(object prompt, Toolkit toolkit, Action<StreamEvent> onEvent,
+        string? id, CancellationToken cancellationToken)
     {
         var deadline = new Deadline(_opts.TimeoutMs);
         var history = id != null ? (await _store.GetAsync(id).ConfigureAwait(false) ?? new List<object?>()) : null;
@@ -652,6 +703,129 @@ public sealed class LlmClient
 
     private static Dictionary<string, object?> Msg(string role, string content)
         => new() { ["role"] = role, ["content"] = content };
+
+    /// <summary>
+    /// §8A: assemble a message from §1B parts. A text-only list collapses to the plain string
+    /// form, so <c>["hello"]</c> is byte-identical to <c>"hello"</c>; anything else becomes the
+    /// provider's block array, preserving the caller's ordering (which is semantic to a model).
+    /// </summary>
+    private Dictionary<string, object?> Msg(string role, IReadOnlyList<ContentPart> parts)
+    {
+        if (ContentEmit.AllText(parts)) return Msg(role, ContentEmit.JoinText(parts));
+        return new Dictionary<string, object?>
+        {
+            ["role"] = role,
+            ["content"] = EncodeParts(parts, ContentEmit.Provenance.Attached),
+        };
+    }
+
+    /// <summary>Seed the transcript's user turn from either prompt form (§7 <c>run</c>).</summary>
+    private void AddUser(List<object?> messages, object prompt)
+    {
+        if (prompt is IReadOnlyList<ContentPart> parts) messages.Add(Msg("user", parts));
+        else messages.Add(Msg("user", prompt as string ?? prompt?.ToString() ?? ""));
+    }
+
+    /// <summary>Emitted at most once per client for a degraded (unrepresentable) part (§8A).</summary>
+    private int _warnedUnsupportedPart;
+
+    private void WarnOncePart(string message)
+    {
+        if (Interlocked.Exchange(ref _warnedUnsupportedPart, 1) == 0) Console.Error.WriteLine(message);
+    }
+
+    /// <summary>
+    /// Encode parts to provider blocks, enforcing the §8A allowlist. <c>MaxPartBytes</c> is
+    /// enforced inside <see cref="ContentEmit.Blocks"/> itself — at assembly, over every part
+    /// regardless of provenance — so an oversize MCP-derived part cannot walk around it.
+    /// </summary>
+    private List<object?> EncodeParts(IEnumerable<ContentPart> parts, ContentEmit.Provenance provenance)
+        => ContentEmit.Blocks(parts, _opts.Style, provenance, _opts.OnUnsupportedPart, WarnOncePart, _opts.MaxPartBytes);
+
+    /// <summary>
+    /// §8A relocation: the OpenAI <c>tool</c> message rejects an image (a hard 400), so it carries
+    /// <c>output</c> plus any TEXT parts only, and every non-text part from every tool result
+    /// answering one assistant turn is relocated, in tool-call order, into a SINGLE synthetic
+    /// <c>user</c> message emitted immediately after the last tool message — each part preceded by
+    /// a text part <c>Output of tool &lt;name&gt; (&lt;tool_call_id&gt;):</c>.
+    /// <para>That synthetic message is an <b>adapter artifact only</b>: it is never appended to
+    /// <c>messages</c>, so it never reaches <c>RunResult.Messages</c>, the
+    /// <see cref="IConversationStore"/>, or <c>translate</c> output, and switching provider
+    /// mid-conversation leaves no OpenAI-shaped residue.</para>
+    /// </summary>
+    private sealed class Relocated
+    {
+        /// <summary>Insertion index in <c>messages</c> ⇒ the synthetic user message to splice there.</summary>
+        private readonly SortedDictionary<int, object?> _at = new();
+
+        public bool Any => _at.Count > 0;
+
+        public void Add(int index, object? message) => _at[index] = message;
+
+        /// <summary>The wire message list: <paramref name="messages"/> with the synthetic messages
+        /// spliced in. Returns the same list untouched when nothing was relocated.</summary>
+        public List<object?> Wire(List<object?> messages)
+        {
+            if (_at.Count == 0) return messages;
+            var wire = new List<object?>(messages.Count + _at.Count);
+            for (var i = 0; i <= messages.Count; i++)
+            {
+                if (_at.TryGetValue(i, out var synth)) wire.Add(synth);
+                if (i < messages.Count) wire.Add(messages[i]);
+            }
+            return wire;
+        }
+    }
+
+    /// <summary>The OpenAI <c>tool</c> message content: the output string alone (byte-identical
+    /// when there are no text parts), else an array of text blocks.</summary>
+    private object? ToolMessageContent(ToolResult result)
+    {
+        var textParts = ContentEmit.TextOnly(result.Parts);
+        if (textParts.Count == 0) return result.Output;
+        var blocks = new List<object?> { new Dictionary<string, object?> { ["type"] = "text", ["text"] = result.Output } };
+        foreach (var p in textParts)
+            blocks.Add(new Dictionary<string, object?> { ["type"] = "text", ["text"] = p.Text ?? "" });
+        return blocks;
+    }
+
+    /// <summary>Build the single synthetic user message for one assistant turn's relocated parts.</summary>
+    private object? SyntheticUserMessage(List<(string Name, string? Id, IReadOnlyList<ContentPart> Parts)> relocations)
+    {
+        var blocks = new List<object?>();
+        foreach (var (name, id, parts) in relocations)
+        {
+            if (parts.Count == 0) continue;
+            blocks.Add(new Dictionary<string, object?>
+            {
+                ["type"] = "text",
+                ["text"] = $"Output of tool {name} ({id}):",
+            });
+            blocks.AddRange(EncodeParts(parts, ContentEmit.Provenance.Derived));
+        }
+        return blocks.Count == 0 ? null : new Dictionary<string, object?> { ["role"] = "user", ["content"] = blocks };
+    }
+
+    /// <summary>Stage one turn's relocated parts as the synthetic user message that follows the
+    /// last tool message at <paramref name="index"/> in the wire list.</summary>
+    private void RecordRelocation(Relocated relocated,
+        List<(string Name, string? Id, IReadOnlyList<ContentPart> Parts)> relocations, int index)
+    {
+        var synth = SyntheticUserMessage(relocations);
+        if (synth != null) relocated.Add(index, synth);
+        relocations.Clear();
+    }
+
+    /// <summary>The Anthropic <c>tool_result.content</c>: blocks natively, keyed to the
+    /// <c>tool_use_id</c> — no relocation, so the association and cache breakpoints survive.</summary>
+    private object? AnthropicToolResultContent(ToolResult result)
+    {
+        var parts = result.Parts;
+        if (parts == null || parts.Count == 0) return result.Output;
+        var blocks = new List<object?> { new Dictionary<string, object?> { ["type"] = "text", ["text"] = result.Output } };
+        blocks.AddRange(EncodeParts(parts, ContentEmit.Provenance.Derived));
+        return blocks;
+    }
 
     internal static void AddUsage(Usage acc, IDictionary<string, object?>? raw, string style)
     {
@@ -715,7 +889,7 @@ public sealed class LlmClient
 
     // ---------------------------------------------------------------- OpenAI run
 
-    private async Task<RunResult> RunOpenAIAsync(string prompt, Toolkit toolkit, List<object?>? history, Deadline deadline, CancellationToken external)
+    private async Task<RunResult> RunOpenAIAsync(object prompt, Toolkit toolkit, List<object?>? history, Deadline deadline, CancellationToken external)
     {
         var key = ResolveKey();
         var messages = new List<object?>();
@@ -728,12 +902,13 @@ public sealed class LlmClient
             var system = System(toolkit);
             if (system.Length > 0) messages.Add(Msg("system", system));
         }
-        messages.Add(Msg("user", prompt));
+        AddUser(messages, prompt);
         var tools = toolkit.ToOpenAI();
         var toolCalls = new List<ToolCall>();
         var usage = new Usage();
         var turns = 0;
         var runStart = NowMs();
+        var relocated = new Relocated(); // §8A adapter artifact — never enters `messages`
 
         try
         {
@@ -745,7 +920,7 @@ public sealed class LlmClient
                 var body = new Dictionary<string, object?>
                 {
                     ["model"] = _opts.Model,
-                    ["messages"] = messages,
+                    ["messages"] = relocated.Wire(messages),
                 };
                 // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
                 if (tools.Count > 0)
@@ -791,6 +966,7 @@ public sealed class LlmClient
                 // in tool-call order; on the FIRST durable halt, surface it and stop — deterministic, and
                 // the later concurrent suspensions' placeholder results never enter the transcript (they
                 // re-suspend on resume). Mirrors the streaming path.
+                var relocations = new List<(string Name, string? Id, IReadOnlyList<ContentPart> Parts)>();
                 for (var i = 0; i < n; i++)
                 {
                     var req = ToolResult.PendingOf(runs[i].Result);
@@ -806,10 +982,16 @@ public sealed class LlmClient
                     {
                         ["role"] = "tool",
                         ["tool_call_id"] = callIds[i],
-                        ["content"] = runs[i].Result.Output,
+                        ["content"] = ToolMessageContent(runs[i].Result),
                     });
-                    if (halted != null) return PendingRun(runStart, halted, messages, toolCalls, turns, usage);
+                    relocations.Add((names[i], callIds[i], ContentEmit.NonText(runs[i].Result.Parts)));
+                    if (halted != null)
+                    {
+                        RecordRelocation(relocated, relocations, messages.Count);
+                        return PendingRun(runStart, halted, messages, toolCalls, turns, usage);
+                    }
                 }
+                RecordRelocation(relocated, relocations, messages.Count);
             }
             // MaxTurns exhausted while the model was still emitting tool calls (§8 addendum).
             return EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage, "incomplete");
@@ -823,14 +1005,14 @@ public sealed class LlmClient
 
     // ---------------------------------------------------------------- Anthropic run
 
-    private async Task<RunResult> RunAnthropicAsync(string prompt, Toolkit toolkit, List<object?>? history, Deadline deadline, CancellationToken external)
+    private async Task<RunResult> RunAnthropicAsync(object prompt, Toolkit toolkit, List<object?>? history, Deadline deadline, CancellationToken external)
     {
         var key = ResolveKey();
         var endpoint = AnthropicEndpoint();
         var system = System(toolkit);
         var messages = new List<object?>();
         if (history is { Count: > 0 }) messages.AddRange(history);
-        messages.Add(Msg("user", prompt));
+        AddUser(messages, prompt);
         var tools = toolkit.ToAnthropic();
         var toolCalls = new List<ToolCall>();
         var usage = new Usage();
@@ -904,11 +1086,14 @@ public sealed class LlmClient
                         halted = r.Halted;
                     }
                     toolCalls.Add(new ToolCall(names[i], runs[i].Args, runs[i].Result.Output, runs[i].Result.IsError, runs[i].Result.Metadata));
+                    // §8A: native — the parts are blocks inside tool_result.content, keyed to the
+                    // tool_use_id. No relocation: it would discard that association and break
+                    // cache breakpoints.
                     resultBlocks.Add(new Dictionary<string, object?>
                     {
                         ["type"] = "tool_result",
                         ["tool_use_id"] = useIds[i],
-                        ["content"] = runs[i].Result.Output,
+                        ["content"] = AnthropicToolResultContent(runs[i].Result),
                         ["is_error"] = runs[i].Result.IsError,
                     });
                     if (halted != null)
@@ -945,7 +1130,7 @@ public sealed class LlmClient
 
     // ---------------------------------------------------------------- OpenAI stream
 
-    private async Task<RunResult> StreamOpenAIAsync(string prompt, Toolkit toolkit, Action<StreamEvent> onEvent, List<object?>? history, Deadline deadline, CancellationToken external)
+    private async Task<RunResult> StreamOpenAIAsync(object prompt, Toolkit toolkit, Action<StreamEvent> onEvent, List<object?>? history, Deadline deadline, CancellationToken external)
     {
         var key = ResolveKey();
         var messages = new List<object?>();
@@ -958,12 +1143,13 @@ public sealed class LlmClient
             var system = System(toolkit);
             if (system.Length > 0) messages.Add(Msg("system", system));
         }
-        messages.Add(Msg("user", prompt));
+        AddUser(messages, prompt);
         var tools = toolkit.ToOpenAI();
         var toolCalls = new List<ToolCall>();
         var usage = new Usage();
         var turns = 0;
         var runStart = NowMs();
+        var relocated = new Relocated(); // §8A adapter artifact — never enters `messages`
 
         try
         {
@@ -974,7 +1160,7 @@ public sealed class LlmClient
                 var body = new Dictionary<string, object?>
                 {
                     ["model"] = _opts.Model,
-                    ["messages"] = messages,
+                    ["messages"] = relocated.Wire(messages),
                     ["stream"] = true,
                     ["stream_options"] = new Dictionary<string, object?> { ["include_usage"] = true },
                 };
@@ -1081,6 +1267,7 @@ public sealed class LlmClient
                 // §10: resolve any suspensions in tool-call order; on the FIRST durable halt, record that
                 // one tool result, surface the pending run and stop — later concurrent suspensions'
                 // placeholder results never enter the transcript (they re-suspend on resume). Mirrors JS.
+                var relocations = new List<(string Name, string? Id, IReadOnlyList<ContentPart> Parts)>();
                 for (var i = 0; i < n; i++)
                 {
                     var slot = acc[order[i]];
@@ -1095,15 +1282,18 @@ public sealed class LlmClient
                     }
                     var rr = runs[i];
                     toolCalls.Add(new ToolCall(slot[1], rr.Args, rr.Result.Output, rr.Result.IsError, rr.Result.Metadata));
-                    messages.Add(new Dictionary<string, object?> { ["role"] = "tool", ["tool_call_id"] = slot[0], ["content"] = rr.Result.Output });
+                    messages.Add(new Dictionary<string, object?> { ["role"] = "tool", ["tool_call_id"] = slot[0], ["content"] = ToolMessageContent(rr.Result) });
+                    relocations.Add((slot[1], slot[0], ContentEmit.NonText(rr.Result.Parts)));
                     if (halted != null)
                     {
+                        RecordRelocation(relocated, relocations, messages.Count);
                         var p = PendingRun(runStart, halted, messages, toolCalls, turns, usage);
                         onEvent(StreamEvent.DoneEvent(p));
                         return p;
                     }
                     onEvent(StreamEvent.ToolResultEvent(slot[0], slot[1], rr.Result.Output, rr.Result.IsError));
                 }
+                RecordRelocation(relocated, relocations, messages.Count);
             }
             // MaxTurns exhausted while the model was still emitting tool calls (§8 addendum).
             var done = EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage, "incomplete");
@@ -1119,14 +1309,14 @@ public sealed class LlmClient
 
     // ---------------------------------------------------------------- Anthropic stream
 
-    private async Task<RunResult> StreamAnthropicAsync(string prompt, Toolkit toolkit, Action<StreamEvent> onEvent, List<object?>? history, Deadline deadline, CancellationToken external)
+    private async Task<RunResult> StreamAnthropicAsync(object prompt, Toolkit toolkit, Action<StreamEvent> onEvent, List<object?>? history, Deadline deadline, CancellationToken external)
     {
         var key = ResolveKey();
         var endpoint = AnthropicEndpoint();
         var system = System(toolkit);
         var messages = new List<object?>();
         if (history is { Count: > 0 }) messages.AddRange(history);
-        messages.Add(Msg("user", prompt));
+        AddUser(messages, prompt);
         var tools = toolkit.ToAnthropic();
         var toolCalls = new List<ToolCall>();
         var usage = new Usage();
@@ -1293,7 +1483,7 @@ public sealed class LlmClient
                     {
                         ["type"] = "tool_result",
                         ["tool_use_id"] = id,
-                        ["content"] = r.Result.Output,
+                        ["content"] = AnthropicToolResultContent(r.Result), // §8A native
                         ["is_error"] = r.Result.IsError,
                     });
                     if (halted != null)

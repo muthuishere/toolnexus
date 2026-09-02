@@ -307,7 +307,7 @@ public static partial class BuiltinTools
 
     private static ITool ReadTool() => Builtin(
         "read",
-        "Read a UTF-8 text file. With offset/limit, return only that line window.",
+        "Read a file. A recognised media file (png/jpg/jpeg/gif/webp/pdf/mp3/wav) comes back as a content part; otherwise UTF-8 text, and with offset/limit only that line window.",
         Schema(new()
         {
             ["path"] = StrProp("Path to the file to read"),
@@ -318,9 +318,41 @@ public static partial class BuiltinTools
         {
             var p = Str(args, "path");
             if (p.Length == 0) return Task.FromResult(ToolResult.Error("read: path is required"));
+
+            // §6 media table — fixed, shared with ContentPart's edge constructors. No magic-byte
+            // sniffing and no platform mime database (both vary per machine and break parity).
+            var media = ContentPart.MediaFor(p);
+            if (media != null)
+            {
+                try
+                {
+                    var part = ContentPart.FromFile(p, media.Value.MimeType);
+                    return Task.FromResult(ToolResult.OkWithParts(
+                        $"{p} ({media.Value.MimeType}, {part.ByteLength} bytes)",
+                        new[] { part },
+                        new Dictionary<string, object?> { ["mimeType"] = media.Value.MimeType, ["bytes"] = part.ByteLength }));
+                }
+                catch (Exception e) { return Task.FromResult(ToolResult.Error($"read: {e.Message}")); }
+            }
+
             string content;
-            try { content = File.ReadAllText(p); }
+            try
+            {
+                // Decode strictly: File.ReadAllText silently substitutes U+FFFD for undecodable
+                // bytes, which would hand the model plausible garbage instead of an error. A
+                // decoding failure is an isError result, NEVER an exception escaping into the loop.
+                content = new UTF8Encoding(false, throwOnInvalidBytes: true).GetString(File.ReadAllBytes(p));
+            }
+            catch (DecoderFallbackException)
+            {
+                return Task.FromResult(ToolResult.Error($"read: {p} is not valid UTF-8 text and is not a recognised media type"));
+            }
+            catch (ArgumentException)
+            {
+                return Task.FromResult(ToolResult.Error($"read: {p} is not valid UTF-8 text and is not a recognised media type"));
+            }
             catch (Exception e) { return Task.FromResult(ToolResult.Error($"read: {e.Message}")); }
+            if (content.Length > 0 && content[0] == '\uFEFF') content = content[1..]; // File.ReadAllText strips the BOM
 
             var offsetArg = args.Get("offset");
             var limitArg = args.Get("limit");

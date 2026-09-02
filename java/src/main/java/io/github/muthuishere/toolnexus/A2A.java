@@ -239,6 +239,15 @@ public final class A2A {
                     return new ToolResult("A2A task " + taskId + " " + state + (detail.isEmpty() ? "" : ": " + detail),
                             true, meta(agentName, taskId, state, polls, start));
                 } catch (Exception e) {
+                    // A cancellation that lands mid-request is still a cancel, not a transport
+                    // error — CancelToken interrupts the run thread, so an in-flight
+                    // HttpClient.send throws InterruptedException here
+                    // (§7A: ctx abort ⇒ "A2A task <id> canceled").
+                    if (cancelled(ctx)) {
+                        state = "canceled";
+                        return new ToolResult("A2A task " + taskId + " canceled", true,
+                                meta(agentName, taskId, state, polls, start));
+                    }
                     String msg = e.getMessage() == null ? String.valueOf(e) : e.getMessage();
                     return new ToolResult(msg, true, meta(agentName, taskId, state, polls, start));
                 }

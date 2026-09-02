@@ -203,6 +203,49 @@ tk.register(http_tool(
 URL `{placeholders}` are filled from args; the rest become the JSON body. Non-2xx →
 `ToolResult(output="HTTP <status>: <body>", is_error=True)`.
 
+## Images, PDFs and audio (content parts)
+
+Attach media to a run, and let a tool hand media back, without touching provider wire formats:
+
+```python
+from toolnexus import image, text
+
+# a path is read and base64-encoded HERE — the part never carries a path, so a saved
+# transcript replays without the file
+r = await client.run(["What broke in this screenshot?", image("shot.png")], tk)
+```
+
+`image()` / `file()` / `audio()` take what you already hold: a filesystem path (a `str` or any
+`os.PathLike`, so a `pathlib.Path` goes straight in), raw `bytes` / `bytearray` / `memoryview`
+(`mime_type` required — bytes carry no extension), a **binary file-like object** with a `read()`
+returning bytes (`io.BytesIO`, an open `rb` file, a `gzip` or `tempfile` handle), a `data:` URL,
+or an `https:` URL. Mime types come from a fixed extension table
+(`png jpg jpeg gif webp pdf mp3 wav`) — never sniffed, never read from a machine's mime database —
+so every port agrees; a file-like source gets its mime from the handle's `.name` when it has one,
+and otherwise needs `mime_type` explicitly. A string prompt is untouched: the assembled user
+message is byte-identical to before.
+
+Whatever you pass in, the part stores **bytes plus a `mimeType`** — never a handle, never a path —
+so a persisted transcript replays without the original file. A file-like source is read
+**eagerly** at construction and is **not** closed; closing it stays yours.
+
+A tool returns media on `ToolResult.parts`, keeping `output` as the text the transcript sees:
+
+```python
+ToolResult(output="screenshot, 1280x720 png", is_error=False,
+           parts=[{"type": "image", "mimeType": "image/png", "data": b64}])
+```
+
+Non-text content from an **MCP** server (image, audio, resource link, embedded blob) is preserved
+the same way instead of being dropped. Emission is per provider style: Anthropic receives the
+image inside `tool_result`, OpenAI — whose `tool` message rejects an image — receives it in one
+synthetic user message emitted right after the tool messages, which never enters your transcript.
+
+A part the style cannot carry (audio on Anthropic) is a typed error when *you* attached it, and a
+text placeholder plus a one-time warning when a tool produced it; `on_unsupported_part="error"` /
+`"text"` forces one behavior. Part bytes are never logged: events render `{type, mimeType, bytes}`.
+`set_max_part_bytes(n)` caps parts in **decoded** bytes at construction.
+
 ## Built-in tools
 
 A fifth source ships **10 built-in tools** — `bash`, `read`, `write`, `edit`, `grep`, `glob`,

@@ -31,8 +31,18 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Callable, Literal, Mapping, Optional, Protocol, TypedDict
+from typing import Any, AsyncGenerator, Callable, Literal, Mapping, Optional, Protocol, TypedDict, Union
 
+from .content import (
+    ContentPartError,
+    UnsupportedPartError,
+    encode_part,
+    get_max_part_bytes,
+    is_part_dict,
+    normalize_parts,
+    placeholder_text,
+    summarize,
+)
 from .toolkit import Toolkit
 from .translate import (
     TranslatedToolCall,
@@ -265,6 +275,38 @@ class UrllibTransport:
         return _open(url, headers, payload, timeout)
 
 
+def _tool_message(call_id: Any, name: str, result: ToolResult) -> dict[str, Any]:
+    """The canonical OpenAI-shape tool message. ``parts``/``name`` ride along only when
+    the tool returned non-text content — absent ⇒ byte-identical to a pre-0.17 message."""
+    msg: dict[str, Any] = {"role": "tool", "tool_call_id": call_id, "content": result.output}
+    if result.parts:
+        msg["parts"] = list(result.parts)
+        msg["name"] = name
+    return msg
+
+
+def _tool_result_block(use_id: Any, result: ToolResult) -> dict[str, Any]:
+    """The canonical Anthropic-shape tool_result block, with ``parts`` when present."""
+    block: dict[str, Any] = {
+        "type": "tool_result",
+        "tool_use_id": use_id,
+        "content": result.output,
+        "is_error": result.is_error,
+    }
+    if result.parts:
+        block["parts"] = list(result.parts)
+    return block
+
+
+def _prompt_content(prompt: Union[str, list[Any]]) -> Any:
+    """§7 loop input: a string stays a string (the assembled user message is
+    byte-identical to a pre-0.17 port); a list of §1B parts is normalised into canonical
+    part dicts, preserving the caller's ordering — which is semantic to a model."""
+    if isinstance(prompt, str):
+        return prompt
+    return normalize_parts(prompt)
+
+
 def _safe_json(s: Any) -> dict[str, Any]:
     if isinstance(s, dict):
         return s
@@ -488,6 +530,8 @@ class Client:
         body_transform: Optional[Callable[[dict[str, Any]], Optional[dict[str, Any]]]] = None,
         http_transport: Optional[HttpTransport] = None,
         on_error: Optional[ErrorClassifier] = None,
+        on_unsupported_part: Optional[Literal["error", "text"]] = None,
+        max_part_bytes: Optional[int] = None,
     ) -> None:
         self.base_url = base_url
         self.style = style
@@ -510,6 +554,15 @@ class Client:
         # None ⇒ the default classifier (retryable ⇒ "retry", else "fail"), byte-identical
         # to prior behavior. A "retry" is always capped by ``retries`` in _llm_fetch.
         self.on_error: Optional[ErrorClassifier] = on_error
+        # §8A: how a part the provider style cannot represent is handled. None ⇒ by
+        # provenance (an ATTACHED part errors, a TOOL/MCP-DERIVED one degrades to a text
+        # placeholder + warn-once); "error"/"text" force one behavior for both.
+        self.on_unsupported_part = on_unsupported_part
+        # §1B: the per-request maxPartBytes ceiling (decoded bytes), enforced at
+        # assembly in _encode_part over EVERY part regardless of provenance. None
+        # ⇒ fall back to the process-wide default (content.set_max_part_bytes).
+        self.max_part_bytes = max_part_bytes
+        self._warned_parts: set[str] = set()
         # Conversation provider for ask() — from the `store` arg, else in-memory.
         self.store: ConversationStore = store if store is not None else InMemoryConversationStore()
         # §10 Suspension resolver — when a tool returns Pending, the client calls
@@ -533,6 +586,156 @@ class Client:
         :meth:`stream`, so no consumer needs a shadow copy. Mirrors Go
         ``Client.ConversationStore()``."""
         return self.store
+
+    # ----------------------------------------------------------------------- #
+    # §1B/§8A content parts: loop input, provider emission, relocation.
+    # ----------------------------------------------------------------------- #
+    def _enforce_max_part_bytes(self, part: Any, attached: bool, style: ClientStyle) -> Optional[dict[str, Any]]:
+        """§1B: ``maxPartBytes`` is enforced HERE, at request assembly, over every part
+        regardless of provenance — an MCP-derived part never passed through an edge
+        constructor, so a limit only checked there is not a limit. ``None`` means the
+        part is within bounds (or no limit is set); a TOOL/MCP-DERIVED part over the
+        limit returns its placeholder block (degrade + warn-once) instead of raising,
+        so a remote server still cannot fail the run. An ATTACHED part over the limit
+        raises :class:`ContentPartError` before any HTTP call. The edge-constructor
+        check (``set_max_part_bytes`` at construction) is a fast-fail convenience —
+        this is the guarantee."""
+        eff = self.max_part_bytes if self.max_part_bytes is not None else get_max_part_bytes()
+        if eff is None:
+            return None
+        info = summarize(part)
+        if info["bytes"] <= eff:
+            return None
+        message = (
+            f"content part is {info['bytes']} decoded bytes, over the maxPartBytes limit of {eff}"
+        )
+        if attached:
+            raise ContentPartError(message)
+        key = f"toolarge:{info['type']}:{info['mimeType']}"
+        if key not in self._warned_parts:
+            self._warned_parts.add(key)
+            print(f"[toolnexus] {message} — sent as a text placeholder", file=sys.stderr)
+        return encode_part({"type": "text", "text": placeholder_text(part, style)}, style)
+
+    def _encode_part(self, part: Any, style: ClientStyle, attached: bool) -> dict[str, Any]:
+        """One part -> its provider block, applying the §8A provenance rule when the
+        style has no shape for it, and the §1B ``maxPartBytes`` rule when it is over
+        size: an ATTACHED part (the caller asked for it) is a typed error before any
+        HTTP call; a TOOL/MCP-DERIVED part degrades to a text placeholder and warns
+        once, because failing a run over a part the caller never chose would be a
+        regression. ``on_unsupported_part`` overrides the shape rule for both."""
+        oversize_block = self._enforce_max_part_bytes(part, attached, style)
+        if oversize_block is not None:
+            return oversize_block
+        try:
+            return encode_part(part, style)
+        except UnsupportedPartError as e:
+            mode = self.on_unsupported_part or ("error" if attached else "text")
+            if mode == "error":
+                raise
+            key = f"{e.part_type}:{e.style}"
+            if key not in self._warned_parts:
+                self._warned_parts.add(key)
+                print(f"[toolnexus] {e} — sent as a text placeholder", file=sys.stderr)
+            return encode_part({"type": "text", "text": placeholder_text(part, style)}, style)
+
+    def _tool_result_content(
+        self, output: str, parts: list[Any], style: ClientStyle
+    ) -> list[dict[str, Any]]:
+        """A native tool-result body: the ``output`` text first, then each part."""
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": output}]
+        for part in parts:
+            blocks.append(self._encode_part(part, style, attached=False))
+        return blocks
+
+    def _wire_messages(self, messages: list[Any], style: ClientStyle) -> list[Any]:
+        """Canonical transcript -> the provider's message list (§8A).
+
+        The transcript holds §1B parts (portable across styles); this maps them to the
+        style's blocks at the last moment. For ``anthropic`` a tool result's parts are
+        emitted NATIVELY inside ``tool_result.content``, keyed to their ``tool_use_id``.
+        The ``openai`` style rejects an image in a ``tool`` message (a hard 400), so
+        there every non-text part from every tool result answering one assistant turn is
+        RELOCATED, in tool-call order, into a single synthetic ``user`` message emitted
+        immediately after the last tool message. That synthetic message is an adapter
+        artifact only: it never enters the transcript, the ConversationStore, or
+        ``translate`` output, so switching provider mid-conversation leaves no residue.
+        """
+        out: list[Any] = []
+        relocated: list[dict[str, Any]] = []
+
+        def flush() -> None:
+            if relocated:
+                out.append({"role": "user", "content": list(relocated)})
+                relocated.clear()
+
+        for m in messages:
+            if not isinstance(m, dict):
+                flush()
+                out.append(m)
+                continue
+            role = m.get("role")
+            content = m.get("content")
+            if role == "tool":
+                parts = m.get("parts") or []
+                msg = {k: v for k, v in m.items() if k not in ("parts", "name")}
+                if parts:
+                    texts = [p for p in parts if p.get("type") == "text"]
+                    if texts:
+                        msg["content"] = [
+                            {"type": "text", "text": m.get("content") or ""},
+                            *(self._encode_part(p, style, attached=False) for p in texts),
+                        ]
+                    for p in parts:
+                        if p.get("type") == "text":
+                            continue
+                        label = f"Output of tool {m.get('name')} ({m.get('tool_call_id')}):"
+                        relocated.append({"type": "text", "text": label})
+                        relocated.append(self._encode_part(p, style, attached=False))
+                out.append(msg)
+                continue
+            flush()
+            if isinstance(content, list):
+                attached = role == "user"
+                blocks: list[Any] = []
+                for b in content:
+                    if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("parts"):
+                        nb = {k: v for k, v in b.items() if k != "parts"}
+                        nb["content"] = self._tool_result_content(
+                            b.get("content") or "", b["parts"], style
+                        )
+                        blocks.append(nb)
+                    elif is_part_dict(b) and b.get("type") != "text":
+                        blocks.append(self._encode_part(b, style, attached=attached))
+                    else:
+                        blocks.append(b)
+                out.append({**m, "content": blocks})
+            else:
+                out.append(m)
+        flush()
+        return out
+
+    def _part_summaries(self, messages: list[Any]) -> list[dict[str, Any]]:
+        """Every §1B part in a transcript, rendered as ``{type, mimeType, bytes}`` for a
+        §9 event or a log line. A part's ``data`` is NEVER rendered."""
+        found: list[dict[str, Any]] = []
+
+        def scan(parts: Any) -> None:
+            for p in parts or []:
+                if isinstance(p, dict) and p.get("type") != "text":
+                    found.append(summarize(p))
+
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            scan(m.get("parts"))
+            content = m.get("content")
+            if isinstance(content, list):
+                scan([b for b in content if is_part_dict(b)])
+                for b in content:
+                    if isinstance(b, dict) and b.get("type") == "tool_result":
+                        scan(b.get("parts"))
+        return found
 
     def _finalize_body(self, body: dict[str, Any]) -> dict[str, Any]:
         """Apply the Gap 1 request-shaping contract to an assembled body: strip
@@ -903,14 +1106,19 @@ class Client:
         deadline: Optional[float],
         cancel: Optional[asyncio.Event],
         style: ClientStyle,
+        parts: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         """One non-streaming LLM call, with an ``llm`` metric event (ok/error + per-call
-        tokens + ms). Mirrors JS ``llmCallJson``."""
+        tokens + ms). Mirrors JS ``llmCallJson``. ``parts`` describes the §1B content the
+        request carries as ``{type, mimeType, bytes}`` — never the bytes themselves."""
         t0 = _now()
         try:
             data = await self._llm_fetch(self._transport.post, url, headers, payload, deadline, cancel)
             prompt, completion = _per_call(data.get("usage"), style)
-            self._emit({"event": "llm", "model": self.model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": prompt, "completion_tokens": completion})
+            ev: dict[str, Any] = {"event": "llm", "model": self.model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": prompt, "completion_tokens": completion}
+            if parts:
+                ev["parts"] = parts
+            self._emit(ev)
             return data
         except Exception:
             self._emit({"event": "llm", "model": self.model, "status": "error", "ms": _ms_since(t0), "prompt_tokens": 0, "completion_tokens": 0})
@@ -1100,7 +1308,7 @@ class Client:
 
     async def run(
         self,
-        prompt: str,
+        prompt: Union[str, list[Any]],
         toolkit: Toolkit,
         history: Optional[list[dict[str, Any]]] = None,
         cancel: Optional[asyncio.Event] = None,
@@ -1126,7 +1334,7 @@ class Client:
 
     async def ask(
         self,
-        prompt: str,
+        prompt: Union[str, list[Any]],
         toolkit: Toolkit,
         *,
         id: Optional[str] = None,  # noqa: A002 — mirrors JS `ask(prompt, { id })`
@@ -1172,7 +1380,7 @@ class Client:
 
     async def stream(
         self,
-        prompt: str,
+        prompt: Union[str, list[Any]],
         toolkit: Toolkit,
         *,
         id: Optional[str] = None,  # noqa: A002 — mirrors JS `stream(prompt, { id })`
@@ -1199,7 +1407,7 @@ class Client:
     # ----------------------------------------------------------------------- #
     async def _run_openai(
         self,
-        prompt: str,
+        prompt: Union[str, list[Any]],
         toolkit: Toolkit,
         history: Optional[list[dict[str, Any]]],
         cancel: Optional[asyncio.Event],
@@ -1217,7 +1425,7 @@ class Client:
             system = self._system(toolkit)
             if system:
                 messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
+        messages.append({"role": "user", "content": _prompt_content(prompt)})
         tools = toolkit.to_openai()
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
@@ -1240,7 +1448,7 @@ class Client:
                             tools = ov["tools"]
                 payload: dict[str, Any] = {
                     "model": self.model,
-                    "messages": messages,
+                    "messages": self._wire_messages(messages, "openai"),
                 }
                 # Gap 5: omit tools/tool_choice entirely when the effective list is empty
                 # (including after a before_llm override) — many providers 400 on [].
@@ -1248,7 +1456,7 @@ class Client:
                     payload["tools"] = tools
                     payload["tool_choice"] = "auto"
                 payload = self._finalize_body(payload)
-                data = await self._llm_call_json(url, req_headers, payload, deadline, cancel, "openai")
+                data = await self._llm_call_json(url, req_headers, payload, deadline, cancel, "openai", self._part_summaries(messages))
                 _add_usage(usage, data.get("usage"), "openai")
                 after = _get_hook(self.hooks, "after_llm")
                 if after is not None:
@@ -1294,9 +1502,7 @@ class Client:
                             "metadata": result.metadata,
                         }
                     )
-                    messages.append(
-                        {"role": "tool", "tool_call_id": call_id, "content": result.output}
-                    )
+                    messages.append(_tool_message(call_id, name, result))
                     if halted is not None:
                         return self._pending_run(run_start, halted, messages, tool_calls, turns, usage)
 
@@ -1312,7 +1518,7 @@ class Client:
     # ----------------------------------------------------------------------- #
     async def _run_anthropic(
         self,
-        prompt: str,
+        prompt: Union[str, list[Any]],
         toolkit: Toolkit,
         history: Optional[list[dict[str, Any]]],
         cancel: Optional[asyncio.Event],
@@ -1328,10 +1534,11 @@ class Client:
         }
         deadline = self._deadline()
         system = self._system(toolkit)
+        seed = _prompt_content(prompt)
         if history:
-            messages: list[dict[str, Any]] = list(history) + [{"role": "user", "content": prompt}]
+            messages: list[dict[str, Any]] = list(history) + [{"role": "user", "content": seed}]
         else:
-            messages = [{"role": "user", "content": prompt}]
+            messages = [{"role": "user", "content": seed}]
         tools = toolkit.to_anthropic()
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
@@ -1356,13 +1563,13 @@ class Client:
                     "model": self.model,
                     "max_tokens": 4096,
                     "system": system,
-                    "messages": messages,
+                    "messages": self._wire_messages(messages, "anthropic"),
                 }
                 # Gap 5: omit tools when the effective list is empty.
                 if tools:
                     payload["tools"] = tools
                 payload = self._finalize_body(payload)
-                data = await self._llm_call_json(endpoint, req_headers, payload, deadline, cancel, "anthropic")
+                data = await self._llm_call_json(endpoint, req_headers, payload, deadline, cancel, "anthropic", self._part_summaries(messages))
                 _add_usage(usage, data.get("usage"), "anthropic")
                 after = _get_hook(self.hooks, "after_llm")
                 if after is not None:
@@ -1404,14 +1611,7 @@ class Client:
                             "metadata": result.metadata,
                         }
                     )
-                    results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": use["id"],
-                            "content": result.output,
-                            "is_error": result.is_error,
-                        }
-                    )
+                    results.append(_tool_result_block(use["id"], result))
                     if halted is not None:
                         break
                 messages.append({"role": "user", "content": results})
@@ -1428,7 +1628,7 @@ class Client:
     # ----------------------------------------------------------------------- #
     async def _stream_openai(
         self,
-        prompt: str,
+        prompt: Union[str, list[Any]],
         toolkit: Toolkit,
         cancel: Optional[asyncio.Event],
         history: Optional[list[dict[str, Any]]] = None,
@@ -1446,7 +1646,7 @@ class Client:
             system = self._system(toolkit)
             if system:
                 messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
+        messages.append({"role": "user", "content": _prompt_content(prompt)})
         tools = toolkit.to_openai()
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
@@ -1469,7 +1669,7 @@ class Client:
                             tools = ov["tools"]
                 payload: dict[str, Any] = {
                     "model": self.model,
-                    "messages": messages,
+                    "messages": self._wire_messages(messages, "openai"),
                     "stream": True,
                     "stream_options": {"include_usage": True},
                 }
@@ -1515,7 +1715,11 @@ class Client:
                 except Exception:
                     self._emit({"event": "llm", "model": self.model, "status": "error", "ms": _ms_since(t0), "prompt_tokens": 0, "completion_tokens": 0})
                     raise
-                self._emit({"event": "llm", "model": self.model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": usage["prompt_tokens"] - before_p, "completion_tokens": usage["completion_tokens"] - before_c})
+                _ev: dict[str, Any] = {"event": "llm", "model": self.model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": usage["prompt_tokens"] - before_p, "completion_tokens": usage["completion_tokens"] - before_c}
+                _parts = self._part_summaries(messages)
+                if _parts:
+                    _ev["parts"] = _parts
+                self._emit(_ev)
 
                 after = _get_hook(self.hooks, "after_llm")
                 if after is not None:
@@ -1564,7 +1768,7 @@ class Client:
                                     "metadata": result.metadata,
                                 }
                             )
-                            messages.append({"role": "tool", "tool_call_id": c["id"], "content": result.output})
+                            messages.append(_tool_message(c["id"], c["name"], result))
                             yield {"type": "done", "result": self._pending_run(run_start, halted, messages, tool_calls, turns, usage)}
                             return
                     tool_calls.append(
@@ -1576,7 +1780,7 @@ class Client:
                             "metadata": result.metadata,
                         }
                     )
-                    messages.append({"role": "tool", "tool_call_id": c["id"], "content": result.output})
+                    messages.append(_tool_message(c["id"], c["name"], result))
                     yield {
                         "type": "tool_result",
                         "id": c["id"],
@@ -1595,7 +1799,7 @@ class Client:
     # ----------------------------------------------------------------------- #
     async def _stream_anthropic(
         self,
-        prompt: str,
+        prompt: Union[str, list[Any]],
         toolkit: Toolkit,
         cancel: Optional[asyncio.Event],
         history: Optional[list[dict[str, Any]]] = None,
@@ -1611,10 +1815,11 @@ class Client:
         }
         deadline = self._deadline()
         system = self._system(toolkit)
+        seed = _prompt_content(prompt)
         if history:
-            messages: list[dict[str, Any]] = list(history) + [{"role": "user", "content": prompt}]
+            messages: list[dict[str, Any]] = list(history) + [{"role": "user", "content": seed}]
         else:
-            messages = [{"role": "user", "content": prompt}]
+            messages = [{"role": "user", "content": seed}]
         tools = toolkit.to_anthropic()
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
@@ -1639,7 +1844,7 @@ class Client:
                     "model": self.model,
                     "max_tokens": 4096,
                     "system": system,
-                    "messages": messages,
+                    "messages": self._wire_messages(messages, "anthropic"),
                     "stream": True,
                 }
                 # Gap 5: omit tools when the effective list is empty.
@@ -1686,7 +1891,11 @@ class Client:
                 except Exception:
                     self._emit({"event": "llm", "model": self.model, "status": "error", "ms": _ms_since(t0), "prompt_tokens": 0, "completion_tokens": 0})
                     raise
-                self._emit({"event": "llm", "model": self.model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": usage["prompt_tokens"] - before_p, "completion_tokens": usage["completion_tokens"] - before_c})
+                _ev: dict[str, Any] = {"event": "llm", "model": self.model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": usage["prompt_tokens"] - before_p, "completion_tokens": usage["completion_tokens"] - before_c}
+                _parts = self._part_summaries(messages)
+                if _parts:
+                    _ev["parts"] = _parts
+                self._emit(_ev)
 
                 after = _get_hook(self.hooks, "after_llm")
                 if after is not None:
@@ -1729,14 +1938,7 @@ class Client:
                             "metadata": result.metadata,
                         }
                     )
-                    results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": u["id"],
-                            "content": result.output,
-                            "is_error": result.is_error,
-                        }
-                    )
+                    results.append(_tool_result_block(u["id"], result))
                     yield {
                         "type": "tool_result",
                         "id": u["id"],
@@ -1868,7 +2070,7 @@ class Conversation:
         # Full running transcript (system + user + assistant + tool messages).
         self.messages: list[dict[str, Any]] = []
 
-    async def send(self, prompt: str) -> RunResult:
+    async def send(self, prompt: Union[str, list[Any]]) -> RunResult:
         """Send the next user turn; prior history is retained automatically."""
         result = await self._client.run(
             prompt, self._toolkit, history=self.messages, cancel=self._cancel
@@ -1901,6 +2103,8 @@ def create_client(
     body_transform: Optional[Callable[[dict[str, Any]], Optional[dict[str, Any]]]] = None,
     http_transport: Optional[HttpTransport] = None,
     on_error: Optional[ErrorClassifier] = None,
+    on_unsupported_part: Optional[Literal["error", "text"]] = None,
+    max_part_bytes: Optional[int] = None,
 ) -> Client:
     return Client(
         base_url=base_url,
@@ -1921,6 +2125,8 @@ def create_client(
         body_transform=body_transform,
         http_transport=http_transport,
         on_error=on_error,
+        on_unsupported_part=on_unsupported_part,
+        max_part_bytes=max_part_bytes,
     )
 
 

@@ -29,7 +29,7 @@ official **MCP Java SDK** (`io.modelcontextprotocol.sdk:mcp`).
 
 ## Install
 
-Maven Central coordinate: **`io.github.muthuishere:toolnexus:0.16.0`**. Requires **Java 21+**.
+Maven Central coordinate: **`io.github.muthuishere:toolnexus:0.17.0`**. Requires **Java 21+**.
 
 **Gradle** (`build.gradle`):
 
@@ -37,7 +37,7 @@ Maven Central coordinate: **`io.github.muthuishere:toolnexus:0.16.0`**. Requires
 repositories { mavenCentral() }
 
 dependencies {
-    implementation 'io.github.muthuishere:toolnexus:0.16.0'
+    implementation 'io.github.muthuishere:toolnexus:0.17.0'
 }
 ```
 
@@ -47,7 +47,7 @@ dependencies {
 <dependency>
   <groupId>io.github.muthuishere</groupId>
   <artifactId>toolnexus</artifactId>
-  <version>0.16.0</version>
+  <version>0.17.0</version>
 </dependency>
 ```
 
@@ -304,6 +304,52 @@ tk.register(HttpTool.of(o));
 
 You can also seed both at construction time via
 `Options.extraTools(Tool...)`.
+
+---
+
+## Images, PDFs and audio (content parts)
+
+`run` is overloaded on `List<ContentPart>`, so parts sit next to your text, in your order —
+the order of text and image is semantic to a model:
+
+```java
+LlmClient.RunResult res = agent.run(List.of(
+        ContentPart.text("What is broken in this screenshot?"),
+        ContentPart.ofFile(Path.of("shot.png"))), tk);
+```
+
+`ContentPart` takes the file and byte objects a Java caller already holds:
+
+| constructor | source |
+|---|---|
+| `ofFile(Path)` / `ofFile(java.io.File)` | read now; mime from the fixed extension table. Throws `UncheckedIOException`; `ofFileChecked(...)` is the checked sibling |
+| `ofStream(InputStream, mimeType)` / `ofStream(InputStream, name, mimeType)` | any stream, read to the end now |
+| `ofBytes(type, mimeType, byte[])`, plus `image(...)`, `audio(...)`, `file(...)` | bytes in hand; `mimeType` required — bytes carry no extension |
+| `ofBase64(type, mimeType, base64)` | an already-encoded payload, taken verbatim |
+| `ofUrl(type, url)` | a `data:<mime>;base64,…` URL, parsed into `{mimeType, data}`; any `https:` URL is kept as a url (`mimeType` then required) |
+
+Mime types come from a fixed extension table (`png jpg jpeg gif webp pdf mp3 wav`) — never
+sniffed, never resolved through the platform mime database, so every port agrees. An extension
+outside the table with no explicit mime type is an `IllegalArgumentException` naming it, never a
+silent `application/octet-stream`. `run(String, ...)` is unchanged and byte-identical.
+
+A tool can answer with media too — `parts` is the fourth constructor argument on `ToolResult`,
+alongside the still-required `output`, which is what the transcript, compaction and any text-only
+provider keep seeing:
+
+```java
+return new ToolResult("screenshot, 1280x720 png", false, null,
+        List.of(ContentPart.ofFile(Path.of("shot.png"))));
+```
+
+**MCP tools' images now survive.** Non-text content from an MCP server — image, audio, embedded
+resource, `resource_link` — used to be filtered out silently; it is preserved as `parts` and
+emitted per provider style (Anthropic inside `tool_result`; OpenAI, whose `tool` message rejects
+an image, in a synthetic user message that never enters your transcript).
+
+Whatever you pass in, a part stores **bytes plus a `mimeType`** — never a `File`, a stream or a
+path — so a persisted transcript replays without the original file. A stream is read **eagerly**
+at construction, and a handle you supply is read, **not** closed; closing it stays yours.
 
 ---
 

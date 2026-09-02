@@ -41,12 +41,17 @@ A new language port is "correct" iff these hold. Run it against the shared
 `examples/` (same `mcp.json` + skill) and the outputs must match the others.
 
 1. **Tool** = `{ name, description, inputSchema (JSON-Schema object), source, execute(args,ctx)->ToolResult }`.
-   `ToolResult = { output: string, isError: bool, metadata? }`.
+   `ToolResult = { output: string, isError: bool, parts?: ContentPart[], metadata? }`.
+1b. **ContentPart** = `text | image | file | audio` (§1B). Non-text parts carry `mimeType` plus
+   exactly one of `data` (standard base64, padded, unwrapped) or `url`. **Never a path.**
 2. **sanitize(x)** = replace `[^a-zA-Z0-9_-]` with `_`. **MCP tool name** = `sanitize(server)_sanitize(tool)`.
 3. **MCP config**: accept top-level `mcpServers` | `servers` | `mcp`. `url`⇒remote, `command`⇒local.
    `disabled`/`enabled:false` ⇒ skip. Default timeout 30000ms. A failed server is isolated (status `failed`), never fatal.
    Remote `headers` values expand `${ENV_VAR}` from the environment (never logged).
 4. **MCP execute**: `isError`⇒error w/ joined text; `structuredContent`⇒`JSON.stringify`; else joined text parts.
+   **`content[]` non-text entries become `ToolResult.parts` on EVERY branch** — image⇒`image`,
+   audio⇒`audio`, `resource_link`⇒`file{url}`, `resource` blob⇒`file{data}`, `resource` text⇒
+   appended to `output`. Nothing is dropped silently.
 5. **Skills**: glob `**/SKILL.md`, YAML frontmatter (`name` required), body=content, first name wins.
 6. **`skill` tool** output is byte-exact:
    ```
@@ -120,11 +125,106 @@ Tool {
 
 ```
 ToolResult {
-  output:    string            // text handed back to the model
+  output:    string            // text handed back to the model — ALWAYS required
   isError:   boolean
+  parts?:    ContentPart[]     // non-text output (§1B); absent ⇒ byte-identical to pre-0.17
   metadata?: object            // free-form (title, server, skill name, ...)
 }
 ```
+
+`output` stays required even when `parts` is present: it is what the transcript, compaction,
+token estimation and any text-only provider see. A tool returning an image sets `output` to a
+description ("screenshot, 1280x720 png") and `parts` to the image.
+
+### ContentPart (§1B)
+
+```
+ContentPart =
+  | { type: "text",  text: string }
+  | { type: "image", mimeType: string, data?: base64, url?: string }
+  | { type: "file",  mimeType: string, data?: base64, url?: string, name?: string }
+  | { type: "audio", mimeType: string, data?: base64, url?: string }
+```
+
+- Exactly one of `data` / `url`. Both, or neither, is a **typed construction error**.
+- `data` is **standard base64, padded, no line breaks** (RFC 4648 §4 — not the URL-safe alphabet).
+- The mime field is spelled **`mimeType`** in every port and on the wire.
+- **A part never holds a filesystem path.** A path does not survive a persisted and replayed
+  transcript, nor the MCP / A2A process boundary.
+
+**Edge constructors** normalise at construction, so the path/bytes never enter the part:
+
+| given | becomes |
+|---|---|
+| a filesystem path | bytes read now, base64d now; `mimeType` from the fixed extension table (§6 `read`) |
+| native bytes (`[]byte`/`bytes`/`Uint8Array`/…) | base64d now; `mimeType` required |
+| **the host language's own file / stream object** | read to bytes now, base64d now (see below) |
+| a `data:<mime>;base64,<b64>` URL | parsed into `{mimeType, data}` — never stored as `url` |
+| an `https:` URL | kept as `url` |
+
+**A port accepts the file and byte objects its users already hold.** A caller who has an
+`InputStream`, a `FileInfo`, a `Blob`, or an `io.Reader` should not have to convert it by hand;
+making them do so is the same ergonomic tax as making them base64 by hand, and it is paid in
+every calling program rather than once in the library. Each port therefore accepts at least:
+
+| port | additionally accepts |
+|---|---|
+| js | `File`, `Blob`, `ArrayBuffer`, `Buffer` (a `Uint8Array` subclass, so already covered) |
+| python | `os.PathLike`, and any binary file-like object with `.read()` (`BinaryIO`) |
+| golang | `io.Reader`, `fs.File`, `*os.File`, and an `fs.FS` + name |
+| java | `java.io.File`, `InputStream` |
+| csharp | `FileInfo`, `Stream` |
+| elixir | an `iodata` / `File.Stream` |
+| clojure | a path, a host byte array (JVM `byte[]` **and** Go `[]byte`), or **any seq of byte values** (vector / list / lazy seq, signed or unsigned). No stream or handle type: `java.io.File` is **JVM-only** and naming it would make the namespace unloadable on cljgo, and koine has no byte-stream abstraction to hide the difference behind. That port says so in a **named error** rather than pretending |
+
+The rule is *accept broadly, store narrowly*: whatever comes in, what lands in the part is bytes
+and a `mimeType`. A stream is consumed **eagerly at construction** — a part holding a
+half-read stream would not survive the transcript boundary any better than a path does. Where a
+port cannot read a source without an error (a stream that throws, a missing file), it reports it
+in that port's established way for the surrounding call, never by storing a broken part.
+
+An unknown extension with no explicit `mimeType` is a typed error naming the extension. Mime type
+is **never** sniffed from content and **never** resolved through a platform mime database
+(`/etc/mime.types` varies per machine and would break cross-port parity).
+
+`maxPartBytes`, when set, is measured in **decoded** bytes and enforced **at request assembly**,
+over every part regardless of provenance. Assembly — not construction — is normative, because a
+part that arrived from an MCP server never passed through an edge constructor, and a limit a
+tool-supplied 50 MB image can walk around is not a limit. Going over follows the same provenance
+rule as an unsupported part: an **attached** part errors, a **tool-derived** one degrades to the
+placeholder with a warn-once, so a remote server still cannot fail your run.
+
+A port MAY *additionally* check the limit in its edge constructors to fail fast with a better
+message. That is a convenience; the assembly check is the guarantee.
+
+**Token estimation for a part is `max(85, floor(decodedBytes / 750))`** — identical in every port.
+Two things this is not: it is not the `mimeType` string's length (which scores a 5 MB image at ~3
+tokens and makes it uncompactable), and it is not the default `ceil(chars/4)` applied to the
+base64 (which scores that same image at ~1.7M tokens and makes it the only thing the compactor
+ever evicts). Both extremes were reached independently by different ports before this was pinned,
+which is why the formula is normative rather than advisory.
+
+It is an **estimator, not a tokenizer**, and deliberately so: real vision cost is not proportional
+to bytes at all — the 82-byte `examples/media/fixture.png` measured **8 500** prompt tokens on
+`gpt-4o-mini` and **258** on `gemini-2.5-flash-lite`. No byte-derived formula can be accurate
+across providers, so the contract optimises for the one property the compactor actually needs:
+every port agrees, and a part is never free.
+Logs and §9 events render a part as `{type, mimeType, bytes}`; `data` is **never** logged.
+
+**Three user-visible strings are byte-identical across all seven ports.** They reach a model's
+context or a user's terminal, so a port inventing its own wording is exactly the drift §0 exists
+to prevent. `<bytes>` is the **decoded** byte count, rendered as a plain integer.
+
+| where | exact form | example |
+|---|---|---|
+| a part described in text | `<type> (<mimeType>, <bytes> bytes)` | `image (image/png, 82 bytes)` |
+| `read` on a media file (`output`) | `<path> (<mimeType>, <bytes> bytes)` | `shot.png (image/png, 82 bytes)` |
+| an unsupported part's placeholder | `[unsupported <type> part (<mimeType>, <bytes> bytes)]` | `[unsupported audio part (audio/wav, 41984 bytes)]` |
+
+An MCP result whose `content[]` has **no** text entries takes the first form for `output`, one
+line per part, joined with `"\n"` — so an image-only tool result reads `image (image/png, 82
+bytes)` rather than the empty string that made this bug invisible. A part carrying a `url`
+instead of `data` renders `<bytes>` as `0`.
 
 ### Context (optional, passed to execute)
 
@@ -216,6 +316,20 @@ server.)
   - if result `isError` ⇒ `ToolResult{ isError:true, output: <joined text content> }`
   - if `structuredContent` present ⇒ output = `JSON.stringify(structuredContent)`
   - else ⇒ output = joined text of `content[]` text parts.
+  - **and on every one of those three branches**, `content[]`'s non-text entries are mapped onto
+    `ToolResult.parts`:
+
+    | MCP content | part |
+    |---|---|
+    | `image` | `{type:"image", mimeType, data}` — take the SDK's base64 string verbatim |
+    | `audio` | `{type:"audio", mimeType, data}` |
+    | `resource_link` | `{type:"file", url: <uri>, mimeType?, name?}` |
+    | `resource` w/ `blob` | `{type:"file", mimeType, data: <blob>, name?: <uri>}` |
+    | `resource` w/ `text` | appended to `output` (not a part) |
+
+    Collecting parts **before** the `structuredContent` and `isError` short-circuits is normative:
+    a server returning structured content *and* an image must keep the image. A text-only result
+    yields **no** `parts` key at all, so it stays byte-identical.
 - `close()` disconnects every client (and kills stdio child trees).
 
 ### Status (queryable)
@@ -462,12 +576,25 @@ The ten tools (`skill` is its own source, §3, and is not part of this set; the 
 | name | inputSchema (required unless `?`) | behavior |
 |------|-----------------------------------|----------|
 | `bash` | `command:string`, `workdir?:string`, `timeout?:number(ms,default 60000)`, `description?:string` | Run one shell command via the runtime's process API in `workdir` (default cwd). Output = combined stdout+stderr. Non-zero exit ⇒ `isError:true`, output includes the exit code. Timeout kills the child ⇒ `isError:true`. |
-| `read` | `path:string`, `offset?:number(1-based line)`, `limit?:number(lines)` | Read a UTF-8 text file. With `offset`/`limit`, return that line window. Missing file ⇒ `isError:true`. |
+| `read` | `path:string`, `offset?:number(1-based line)`, `limit?:number(lines)` | Read a file. If the extension is in the **media table** below, `output` = a one-line description naming the file and its mime type and `parts` = one part carrying its base64 bytes. Otherwise read as UTF-8 text; with `offset`/`limit`, return that line window. Missing file ⇒ `isError:true`. Undecodable bytes ⇒ `isError:true` naming the file — **never a raised exception escaping into the loop**. |
 | `write` | `path:string`, `content:string` | Write `content` to `path` (create/overwrite), creating parent dirs. Output = confirmation w/ byte count. |
 | `edit` | `path:string`, `oldString:string`, `newString:string`, `replaceAll?:boolean` | Exact-string replace in `path`. Default replaces the single occurrence; `oldString` absent OR (without `replaceAll`) non-unique ⇒ `isError:true`. `replaceAll:true` replaces all. |
 | `grep` | `pattern:string(regex)`, `path?:string(dir,default cwd)`, `include?:string(glob)`, `limit?:number` | Search file contents by regex under `path`, optionally filtered by `include` glob. Output = `file:line:text` matches, capped at `limit` (default 100). |
 | `glob` | `pattern:string`, `path?:string(dir,default cwd)`, `limit?:number` | List files matching the glob under `path`. Output = newline-joined relative paths, capped at `limit` (default 100). |
 | `webfetch` | `url:string`, `format?:"text"\|"markdown"\|"html"(default markdown)`, `timeout?:number(s,default 30)` | HTTP GET `url`; return body as text/markdown/html. Non-2xx ⇒ `isError:true` w/ `HTTP <status>`. |
+
+**The media extension table** — fixed, shared with §1B's edge constructors, identical in every
+port. No sniffing, no platform mime database:
+
+| ext | mimeType | part type |
+|---|---|---|
+| `png` | `image/png` | `image` |
+| `jpg`, `jpeg` | `image/jpeg` | `image` |
+| `gif` | `image/gif` | `image` |
+| `webp` | `image/webp` | `image` |
+| `pdf` | `application/pdf` | `file` |
+| `mp3` | `audio/mpeg` | `audio` |
+| `wav` | `audio/wav` | `audio` |
 | `question` | `questions:array` (each `{ question:string, header?:string, options?:string[], multiple?:boolean }`) | **Suspends** (§10) — asking the human is a `Request`, not a special case. First call returns `pending({ kind:"question", prompt:<rendered>, data:{questions} })`; the host's `waitFor` resolves it, the loop re-executes the tool with `ctx.answer`, and the tool returns `ok(<JSON of answer.data>)` (the resolution *is* the answer, as with `kind:"input"`). With no `waitFor`, the run halts durably (`RunResult.status:"pending"`). `<rendered>` = each question's text in order, `" (options: a, b, c)"` appended when it has non-empty `options`, joined by `"\n"` (no trailing newline; `header` is not rendered, it stays in `data.questions`) — **byte-identical across ports**. |
 | `apply_patch` | `patchText:string` | Apply one patch using opencode's grammar: `*** Begin Patch` / `*** Add File: p` / `*** Update File: p` / `*** Delete File: p` / `*** End Patch`, with `+`/`-`/context lines. Applies add/update/delete atomically; a hunk that doesn't match ⇒ `isError:true` and no partial write. |
 | `todowrite` | `todos:array` (each `{ id:string, text:string, completed:boolean }`) | Replace the session todo list with `todos`. Output = the rendered list. Stateless across processes in v1 (echoes back the list). |
@@ -675,7 +802,9 @@ toolkit.serve(addr, { mcp?, onCall?, ...a2a })  -> ServeHandle { url, stop() }
   When `mcp.tools` is set, the list is filtered to exactly those names; **unknown names are ignored**
   (never an error). Omit `mcp.tools` ⇒ all toolkit tools.
 - **`tools/call`** (`{ name, arguments }`) → `Tool.execute(arguments, ctx)`; map the `ToolResult` to a
-  `CallToolResult`: `output` → a single `{type:"text", text}` content part, `isError` propagates. An
+  `CallToolResult`: `output` → a `{type:"text", text}` content part, followed by one MCP content
+  block per non-text `ToolResult.parts` entry in order (`image`→image, `audio`→audio, `file` with
+  `data`→embedded resource, `file` with `url`→`resource_link`); `isError` propagates. An
   `execute` throw becomes `isError:true` with the error text — **never crashes the server**. An unknown
   tool name → the SDK's standard error (`InvalidParams`/`-32602`). `metadata` is not on the MCP wire
   (surfaced via `onCall` only). `ctx` carries the request's cancellation signal.
@@ -994,6 +1123,12 @@ client = createClient({
 client.run(prompt, { toolkit }) -> RunResult
 ```
 
+`prompt` is a **string or a list of `ContentPart`** (§1B), in that same first position so the
+caller's text/image ordering is preserved — ordering is semantic to a model. Given a string the
+assembled user message is **byte-identical** to a pre-0.17 port. Each port expresses the
+either/or in its own idiom (a widened parameter, an overload, a named sibling, or value
+dispatch); what is normative is the position and the byte-identical string path.
+
 `RunResult` carries the full outcome + telemetry:
 ```
 RunResult {
@@ -1157,6 +1292,14 @@ ports; only the Prometheus text below is:
 - `event: "run"` + `model`, `turns`, tool-calls, total-tokens, `ms`, `error?` — one per `run`/`ask`
 Forward these to statsd, logs, OTel, your own exporter — the library holds no opinion.
 
+**Content parts in events and logs.** A port MAY add a `parts` descriptor to the `llm` event; if
+it does, each entry is `{type, mimeType, bytes}`. What is **normative is prohibitive**: wherever a
+port renders a part at all — an event, a log line, an error message, debug output — it renders
+that descriptor and **never the `data`**. Base64 payloads are user content and are treated like
+`headers` values: use-only, never logged. The descriptor is deliberately not a required field,
+because the `llm` event feeds a bounded-cardinality Prometheus registry and a per-part list has no
+business becoming a label.
+
 **`client.metrics()` — built-in Prometheus text (scrape).** The client accumulates those same events
 into a tiny in-memory registry and renders the **Prometheus text exposition format** (no third-party
 dependency — the format is plain text). The host mounts it at `GET /metrics`. Metrics + labels
@@ -1247,6 +1390,55 @@ byte-identical to today.
 - **Gap 4 — conversation-store accessor.** `Client.ConversationStore()` returns the client's store
   (the instance passed in, else the default in-memory one) so a host can read/rewind the transcript
   and share state with the stateful `ask` — no shadow copy needed.
+
+---
+
+## 8A. Content-part emission and the tool-result relocation rule
+
+Emission lives in each port's **message assembly** (`client.*`), not in `adapters.*` — the
+adapter modules are tool-**schema** only in every port. Two styles exist (`ClientStyle` is
+`"openai" | "anthropic"`); **Gemini request emission is out of scope** because no port has a
+Gemini request path, only a declaration adapter.
+
+| part | `openai` (Chat Completions) | `anthropic` |
+|---|---|---|
+| `text` | `{type:"text", text}` | `{type:"text", text}` |
+| `image` + `data` | `{type:"image_url", image_url:{url:"data:<mime>;base64,<b64>"}}` | `{type:"image", source:{type:"base64", media_type, data}}` |
+| `image` + `url` | `{type:"image_url", image_url:{url}}` | `{type:"image", source:{type:"url", url}}` |
+| `file` + `data` | `{type:"file", file:{filename, file_data:"data:<mime>;base64,<b64>"}}` | `{type:"document", source:{type:"base64", media_type, data}}` |
+| `file` + `url` | **refused** — Chat Completions has no URL form for `file` | `{type:"document", source:{type:"url", url}}` |
+| `audio` | `{type:"input_audio", input_audio:{data, format}}` | **refused** — Anthropic defines no audio block |
+
+`file_data` **requires** the `data:<mime>;base64,` prefix; a bare base64 string is a 400.
+
+**Positive allowlist.** For each `(style, part.type)` there is a defined block shape or an
+explicit refusal, and the encoded block is asserted against that allowlist **before** the request
+is sent. A part producing no allowlisted block never reaches the wire. This is normative because
+map-and-hope reproduces the bug this rule exists to remove: an unknown block type sent upstream
+returns **HTTP 200 with the content silently discarded**, not an error.
+
+**Unsupported parts are handled by provenance:**
+
+- a part the caller **attached** ⇒ **typed error** at assembly, before any HTTP call;
+- a part **derived from a tool / MCP result** ⇒ text placeholder naming its type and mime type,
+  **warn once**, run continues. Failing a caller's run because a server volunteered an audio clip
+  would be a regression — that run succeeds today.
+- `onUnsupportedPart: "error" | "text"` overrides both uniformly.
+
+**The tool-result relocation rule.** Non-text parts on a tool result are emitted **natively where
+the style defines a shape for them inside its tool-result element** — for `anthropic`, blocks in
+`tool_result.content`, keyed to the `tool_use_id`. The `openai` style rejects an image in a
+`tool` message (a hard 400: *"Image URLs are only allowed for messages with role 'user'"*), so
+there the tool message carries `output` plus **text** parts only, and **all** non-text parts from
+**all** tool results answering one assistant turn are relocated, **in tool-call order**, into a
+**single synthetic `user` message emitted immediately after the last tool message**, each part
+preceded by a text part `Output of tool <name> (<tool_call_id>):`.
+
+The synthetic message is an **adapter artifact only**: it is never written to the canonical
+transcript, the `ConversationStore`, or `translate` output. Switching provider mid-conversation
+therefore leaves no OpenAI-shaped residue. Uniform relocation on every style was rejected — it
+discards the `tool_use_id` association, breaks cache breakpoints, and makes the model read tool
+output as user input.
 
 ---
 
@@ -1609,7 +1801,10 @@ To a provider that uses native content blocks:
   result-bearing turn answering the preceding assistant turn, not one turn per result;
 - `system` (and `developer`) messages are **hoisted** into the provider's separate system
   field; an explicit `request.system` overrides them;
-- a `content` given as an array of parts is flattened to text.
+- a `content` given as an array of parts has its **text parts concatenated and its non-text
+  parts translated** into the provider's block shape (§8A). Non-text parts are never flattened
+  away or dropped. (Six ports previously passed a text-empty array through raw and undocumented;
+  this one rule replaces that in all seven, so they agree by specification, not coincidence.)
 
 A port MUST also accept `arguments` supplied as an **object** rather than a string, because
 some clients send it that way.

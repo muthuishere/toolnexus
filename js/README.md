@@ -235,6 +235,52 @@ For `httpTool`: URL `{placeholders}` are filled from args; `query` arg names go 
 querystring (all args on GET); the rest become the JSON body (`body: "json" | "form" | "raw"`).
 Non-2xx → `{ isError: true, output: "HTTP <status>: <body>" }`.
 
+## Images, PDFs and audio (content parts)
+
+Parts go in the **first** argument, next to your text, because the order of text and image is
+semantic to a model:
+
+```ts
+import { attach, text } from "toolnexus"
+
+const { text: answer } = await agent.run(
+  ["What is broken in this screenshot?", await attach("./shot.png")],
+  { toolkit: tk },
+)
+```
+
+`attach(source, opts?)` takes what you already hold: a filesystem path, a `data:` URL, an
+`https:` URL, native bytes (`Uint8Array`, `Buffer`, `ArrayBuffer`, any `ArrayBufferView` —
+`mimeType` required, bytes carry no extension), or a `Blob`/`File` straight off an upload.
+`fromPath`, `fromBytes`, `fromBlob`, `fromDataUrl`, `fromUrl` are the same thing spelled
+explicitly. Mime types come from a fixed extension table (`png jpg jpeg gif webp pdf mp3 wav`) —
+never sniffed, never read from the machine's mime database, so every port agrees. A plain string
+prompt is untouched and byte-identical to before.
+
+A tool can answer with media too — `parts` alongside the still-required `output`, which is what
+the transcript, compaction and any text-only provider keep seeing:
+
+```ts
+defineTool({
+  name: "screenshot",
+  description: "Grab the screen",
+  inputSchema: { type: "object", properties: {} },
+  run: async () => ({
+    output: "screenshot, 1280x720 png",
+    parts: [await attach("./shot.png")],
+  }),
+})
+```
+
+**MCP tools' images now survive.** Non-text content from an MCP server — image, audio, embedded
+resource, `resource_link` — used to be filtered out silently; it is preserved as `parts` and
+emitted per provider style (Anthropic inside `tool_result`; OpenAI, whose `tool` message rejects
+an image, in a synthetic user message that never enters your transcript).
+
+Whatever you pass in, a part stores **bytes plus a `mimeType`** — never a handle, never a path —
+so a persisted transcript replays without the original file. A `Blob` is read **eagerly** at
+construction, and a handle you supply is read, not closed.
+
 ## Built-in tools
 
 A fifth source ships **10 built-in tools** — `bash`, `read`, `write`, `edit`, `grep`, `glob`,

@@ -233,7 +233,7 @@ defmodule Toolnexus.Client do
 
   require Logger
 
-  alias Toolnexus.{Answer, Context, Request, Tool, ToolResult}
+  alias Toolnexus.{Answer, ContentPart, Context, Request, Tool, ToolResult}
   alias Toolnexus.Client.{InMemoryConversationStore, MetricsRegistry, RunResult}
 
   @retryable [429, 500, 502, 503, 504]
@@ -257,6 +257,8 @@ defmodule Toolnexus.Client do
             http_options: [],
             transport: nil,
             on_error: nil,
+            on_unsupported_part: nil,
+            max_part_bytes: nil,
             registry: nil,
             deadline: nil
 
@@ -290,6 +292,14 @@ defmodule Toolnexus.Client do
     retries, backoff, `Retry-After`, deadline, and error classification still run around
     it, and it composes against a real `base_url` (unlike `:http_options` `:plug`, which
     is in-process only). `nil` ⇒ the default `Req` transport, byte-identical behavior.
+  - `:max_part_bytes` — cap on a content part's **decoded** bytes, enforced at request
+    assembly over every part whatever its provenance (SPEC §1B). The edge constructors
+    accept the same option as a fast-fail convenience, but assembly is the guarantee: a
+    part that arrived from an MCP server never passed through a constructor.
+  - `:on_unsupported_part` — `"error"` | `"text"`; overrides the §8A provenance rule for a
+    content part the provider style cannot represent. Absent ⇒ a part the caller attached
+    errors before any HTTP call, a part derived from a tool result degrades to a text
+    placeholder with a warn-once.
   - `:registry` — inject a shared `MetricsRegistry` (e.g. one runtime-wide registry across
     many clients); `nil` ⇒ a fresh private registry, byte-identical behavior
   """
@@ -328,10 +338,16 @@ defmodule Toolnexus.Client do
   Run the agent loop: system prompt → LLM call → execute tool calls (concurrently, results
   fed back in call order) → repeat to `:max_turns`. Returns a `%RunResult{}`.
 
+  `prompt` is a string **or** a list of `Toolnexus.ContentPart` (SPEC §7/§1B), in that same
+  first position so the caller's text/image ordering — which is semantic to a model — is
+  preserved. Given a string the assembled user message is byte-identical to pre-0.17.
+
   `opts`: `:history` — a prior transcript to continue.
   """
-  @spec run(t(), String.t(), term(), keyword()) :: RunResult.t()
-  def run(%__MODULE__{} = client, prompt, toolkit, opts \\ []) do
+  @spec run(t(), String.t() | [ContentPart.t() | map()], term(), keyword()) :: RunResult.t()
+  def run(client, prompt, toolkit, opts \\ [])
+
+  def run(%__MODULE__{} = client, prompt, toolkit, opts) when is_binary(prompt) or is_list(prompt) do
     client = arm_deadline(client)
 
     case client.style do
@@ -795,7 +811,7 @@ defmodule Toolnexus.Client do
 
   # §8 Gap 5: omit tools/tool_choice entirely when the effective tool list is empty.
   defp openai_body(client, messages, tools, stream) do
-    body = %{"model" => client.model, "messages" => messages}
+    body = %{"model" => client.model, "messages" => wire_messages(client, messages, "openai")}
 
     body =
       if tools != [],
@@ -811,7 +827,12 @@ defmodule Toolnexus.Client do
   end
 
   defp anthropic_body(client, system, messages, tools, stream) do
-    body = %{"model" => client.model, "max_tokens" => 4096, "system" => system, "messages" => messages}
+    body = %{
+      "model" => client.model,
+      "max_tokens" => 4096,
+      "system" => system,
+      "messages" => wire_messages(client, messages, "anthropic")
+    }
     body = if tools != [], do: Map.put(body, "tools", tools), else: body
     body = if stream, do: Map.put(body, "stream", true), else: body
     finalize_body(client, body)
@@ -1319,6 +1340,139 @@ defmodule Toolnexus.Client do
     |> Enum.map(fn {:ok, s} -> s end)
   end
 
+  # ---- §1B content parts: canonical transcript in, provider blocks out ----
+
+  # A string prompt yields the pre-0.17 message byte-for-byte; a parts list is stored as
+  # its wire maps, preserving the caller's ordering (SPEC §7).
+  defp user_message(prompt) when is_binary(prompt), do: %{"role" => "user", "content" => prompt}
+
+  defp user_message(parts) when is_list(parts),
+    do: %{"role" => "user", "content" => Enum.map(parts, &ContentPart.to_map/1)}
+
+  defp parts_of(%ToolResult{parts: parts}) when is_list(parts), do: parts
+  defp parts_of(_), do: []
+
+  # The canonical `tool` message. `parts`/`tool_name` are toolnexus keys, stripped before
+  # the request goes out; a result with no parts is byte-identical to pre-0.17.
+  defp tool_message(id, name, result) do
+    base = %{"role" => "tool", "tool_call_id" => id, "content" => result.output}
+
+    case parts_of(result) do
+      [] -> base
+      parts -> base |> Map.put("parts", Enum.map(parts, &ContentPart.to_map/1)) |> Map.put("tool_name", name)
+    end
+  end
+
+  defp tool_result_block(id, result) do
+    base = %{"type" => "tool_result", "tool_use_id" => id, "content" => result.output, "is_error" => result.is_error}
+
+    case parts_of(result) do
+      [] -> base
+      parts -> Map.put(base, "parts", Enum.map(parts, &ContentPart.to_map/1))
+    end
+  end
+
+  # SPEC §8A. Turn the canonical transcript into provider messages: content parts become
+  # provider blocks under a positive allowlist, and non-text tool-result parts ride
+  # natively (anthropic) or are relocated into one synthetic `user` message (openai).
+  # The synthetic message is an adapter artifact — it never enters `RunResult.messages`,
+  # the ConversationStore, or `translate` output.
+  defp wire_messages(client, messages, "anthropic"),
+    do: Enum.map(messages, &encode_anthropic_message(client, &1))
+
+  defp wire_messages(client, messages, "openai"), do: encode_openai_messages(client, messages, [], [])
+
+  defp encode_openai_messages(_client, [], acc, relocated), do: Enum.reverse(flush_relocation(relocated, acc))
+
+  defp encode_openai_messages(client, [m | rest], acc, relocated) do
+    if is_map(m) and Map.get(m, "role") == "tool" do
+      {msg, moved} = openai_tool_message(client, m)
+      encode_openai_messages(client, rest, [msg | acc], relocated ++ moved)
+    else
+      acc = flush_relocation(relocated, acc)
+      encode_openai_messages(client, rest, [encode_openai_message(client, m) | acc], [])
+    end
+  end
+
+  defp flush_relocation([], acc), do: acc
+  defp flush_relocation(blocks, acc), do: [%{"role" => "user", "content" => blocks} | acc]
+
+  defp openai_tool_message(client, m) do
+    parts = Map.get(m, "parts") || []
+    name = Map.get(m, "tool_name") || ""
+    id = Map.get(m, "tool_call_id")
+    msg = Map.drop(m, ["parts", "tool_name"])
+    {text_parts, non_text} = Enum.split_with(parts, &(is_map(&1) and Map.get(&1, "type") == "text"))
+
+    msg =
+      case text_parts do
+        [] ->
+          msg
+
+        texts ->
+          Map.put(msg, "content", [%{"type" => "text", "text" => Map.get(msg, "content") || ""}] ++ encode_parts(client, texts, :derived, "openai"))
+      end
+
+    moved =
+      Enum.flat_map(non_text, fn part ->
+        [%{"type" => "text", "text" => "Output of tool #{name} (#{id}):"}] ++ encode_parts(client, [part], :derived, "openai")
+      end)
+
+    {msg, moved}
+  end
+
+  defp encode_openai_message(client, m) when is_map(m) do
+    case Map.get(m, "content") do
+      content when is_list(content) -> Map.put(m, "content", encode_content_list(client, content, "openai"))
+      _ -> m
+    end
+  end
+
+  defp encode_openai_message(_client, m), do: m
+
+  defp encode_anthropic_message(client, m) when is_map(m) do
+    case Map.get(m, "content") do
+      content when is_list(content) -> Map.put(m, "content", encode_content_list(client, content, "anthropic"))
+      _ -> m
+    end
+  end
+
+  defp encode_anthropic_message(_client, m), do: m
+
+  defp encode_content_list(client, content, style) do
+    Enum.flat_map(content, fn entry ->
+      cond do
+        ContentPart.part?(entry) -> encode_parts(client, [entry], :attached, style)
+        is_map(entry) and Map.get(entry, "type") == "tool_result" -> [anthropic_tool_result(client, entry)]
+        true -> [entry]
+      end
+    end)
+  end
+
+  # Anthropic keeps non-text tool-result parts natively, inside `tool_result.content`,
+  # keyed to the `tool_use_id` — no relocation, no lost association (SPEC §8A).
+  defp anthropic_tool_result(client, block) do
+    case Map.get(block, "parts") do
+      parts when is_list(parts) and parts != [] ->
+        text = %{"type" => "text", "text" => Map.get(block, "content") || ""}
+
+        block
+        |> Map.delete("parts")
+        |> Map.put("content", [text] ++ encode_parts(client, parts, :derived, "anthropic"))
+
+      _ ->
+        Map.delete(block, "parts")
+    end
+  end
+
+  defp encode_parts(client, parts, provenance, style),
+    do:
+      ContentPart.encode(parts, style,
+        provenance: provenance,
+        on_unsupported: client.on_unsupported_part,
+        max_part_bytes: client.max_part_bytes
+      )
+
   defp tool_call_record(s) do
     %{
       name: s.name,
@@ -1343,7 +1497,7 @@ defmodule Toolnexus.Client do
         if sys != "", do: [%{"role" => "system", "content" => sys}], else: []
       end
 
-    messages = messages ++ [%{"role" => "user", "content" => prompt}]
+    messages = messages ++ [user_message(prompt)]
     tools = Enum.map(tools_of(toolkit), &to_openai_schema/1)
     st = %{messages: messages, tools: tools, tool_calls: [], usage: zero_usage(), turns: 0}
     loop_openai(client, toolkit, key, run_start, st, 0)
@@ -1402,7 +1556,7 @@ defmodule Toolnexus.Client do
       st = %{
         st
         | tool_calls: st.tool_calls ++ [tool_call_record(s)],
-          messages: st.messages ++ [%{"role" => "tool", "tool_call_id" => s.id, "content" => s.result.output}]
+          messages: st.messages ++ [tool_message(s.id, s.name, s.result)]
       }
 
       if s.halted, do: {:halt, {:halted, st, s.halted}}, else: {:cont, {:ok, st}}
@@ -1418,8 +1572,8 @@ defmodule Toolnexus.Client do
 
     messages =
       if history && history != [],
-        do: history ++ [%{"role" => "user", "content" => prompt}],
-        else: [%{"role" => "user", "content" => prompt}]
+        do: history ++ [user_message(prompt)],
+        else: [user_message(prompt)]
 
     tools = Enum.map(tools_of(toolkit), &to_anthropic_schema/1)
     st = %{messages: messages, tools: tools, tool_calls: [], usage: zero_usage(), turns: 0}
@@ -1463,7 +1617,7 @@ defmodule Toolnexus.Client do
         Enum.reduce_while(settled, {[], [], nil}, fn s, {blocks, records, _} ->
           blocks =
             blocks ++
-              [%{"type" => "tool_result", "tool_use_id" => s.id, "content" => s.result.output, "is_error" => s.result.is_error}]
+              [tool_result_block(s.id, s.result)]
 
           records = records ++ [tool_call_record(s)]
           if s.halted, do: {:halt, {blocks, records, s.halted}}, else: {:cont, {blocks, records, nil}}
@@ -1515,7 +1669,7 @@ defmodule Toolnexus.Client do
         if sys != "", do: [%{"role" => "system", "content" => sys}], else: []
       end
 
-    messages = messages ++ [%{"role" => "user", "content" => prompt}]
+    messages = messages ++ [user_message(prompt)]
     tools = Enum.map(tools_of(toolkit), &to_openai_schema/1)
     st = %{messages: messages, tools: tools, tool_calls: [], usage: zero_usage(), turns: 0}
     stream_loop_openai(client, toolkit, key, run_start, st, 0, emit)
@@ -1601,7 +1755,7 @@ defmodule Toolnexus.Client do
           st = %{
             st
             | tool_calls: st.tool_calls ++ [%{name: c.name, args: args, output: result.output, is_error: result.is_error, metadata: result.metadata}],
-              messages: st.messages ++ [%{"role" => "tool", "tool_call_id" => c.id, "content" => result.output}]
+              messages: st.messages ++ [tool_message(c.id, c.name, result)]
           }
 
           if halted do
@@ -1683,8 +1837,8 @@ defmodule Toolnexus.Client do
 
     messages =
       if history && history != [],
-        do: history ++ [%{"role" => "user", "content" => prompt}],
-        else: [%{"role" => "user", "content" => prompt}]
+        do: history ++ [user_message(prompt)],
+        else: [user_message(prompt)]
 
     tools = Enum.map(tools_of(toolkit), &to_anthropic_schema/1)
     st = %{messages: messages, tools: tools, tool_calls: [], usage: zero_usage(), turns: 0}
@@ -1770,7 +1924,7 @@ defmodule Toolnexus.Client do
             end
 
           st = %{st | tool_calls: st.tool_calls ++ [%{name: u["name"], args: args, output: result.output, is_error: result.is_error, metadata: result.metadata}]}
-          results = results ++ [%{"type" => "tool_result", "tool_use_id" => u["id"], "content" => result.output, "is_error" => result.is_error}]
+          results = results ++ [tool_result_block(u["id"], result)]
 
           if halted do
             {:halt, {:halted, %{st | messages: st.messages ++ [%{"role" => "user", "content" => results}]}, halted}}

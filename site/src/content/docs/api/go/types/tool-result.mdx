@@ -15,14 +15,22 @@ import { Aside } from '@astrojs/starlight/components';
 type ToolResult struct {
 	Output   string         `json:"output"`
 	IsError  bool           `json:"isError"`
+	Parts    []ContentPart  `json:"parts,omitempty"`
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 ```
 
-The first half of what every `Execute` returns. Three fields, and the whole tool-calling loop is
+The first half of what every `Execute` returns. Four fields, and the whole tool-calling loop is
 built on them: `Output` is the text handed back to the model, `IsError` says whether the call
-failed, and `Metadata` is free-form — except for one reserved key that turns a result into a
-suspension.
+failed, `Parts` carries non-text output (an image, a PDF, an audio clip), and `Metadata` is
+free-form — except for one reserved key that turns a result into a suspension.
+
+`Parts` is optional and omitted when empty, so a tool written before it existed serialises
+byte-identically. **`Output` stays required even when `Parts` is set** — it is what the
+transcript, compaction, token estimation and any text-only provider see. A tool returning an
+image sets `Output` to a description (`"screenshot, 1280x720 png"`) and `Parts` to the image;
+setting `Output` to `""` because "the picture says it" makes the call invisible to everything
+except the one provider that renders it.
 
 ## When to use it
 
@@ -44,7 +52,8 @@ genuine failure.
 </Aside>
 
 `Output` is always a `string` — it is what the model reads. Serialize structured data yourself
-(`json.Marshal`) rather than expecting the loop to do it.
+(`json.Marshal`) rather than expecting the loop to do it. Bytes go in
+[`Parts`](/api/go/types/content-part/), never base64d into `Output`.
 
 ## Examples
 
@@ -196,16 +205,83 @@ Do not treat `IsError` alone as "the tool broke"; check
 [`PendingOf`](/api/go/suspension/pending-of/) when suspension is in play.
 </Aside>
 
+### 4. Non-text output — `Parts` alongside `Output`
+
+A tool that produces an image fills both fields: `Output` describes it, `Parts` carries it. The
+built-in `read` does exactly this for a recognised media file, and is the shortest way to see the
+shape.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	// TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+	png := filepath.Join(os.Getenv("TOOLNEXUS_REPO"), "examples", "media", "fixture.png")
+
+	var read *toolnexus.Tool
+	for _, t := range toolnexus.CreateBuiltinTools() {
+		if t.Name == "read" {
+			tool := t
+			read = &tool
+		}
+	}
+
+	res, err := read.Execute(map[string]any{"path": png}, nil)
+	if err != nil || res.IsError {
+		log.Fatalf("unexpected read result: %+v %v", res, err)
+	}
+
+	// Output is REQUIRED even with parts: it is what the transcript, compaction
+	// and any text-only provider see. "<path> (<mimeType>, <bytes> bytes)".
+	if !strings.HasSuffix(res.Output, "fixture.png (image/png, 82 bytes)") {
+		log.Fatalf("unexpected output: %q", res.Output)
+	}
+	if len(res.Parts) != 1 {
+		log.Fatalf("expected one part, got %d", len(res.Parts))
+	}
+	img := res.Parts[0]
+	if img.Type != toolnexus.PartImage || img.MimeType != "image/png" || img.Bytes() != 82 {
+		log.Fatalf("unexpected part: %s", img)
+	}
+	// The bytes are in the part, never base64d into the text the model reads.
+	if strings.Contains(res.Output, img.Data) {
+		log.Fatal("Output must not carry the base64")
+	}
+
+	// A plain text file has no parts at all — byte-identical to pre-0.17 behaviour.
+	plain, err := read.Execute(map[string]any{
+		"path": filepath.Join(os.Getenv("TOOLNEXUS_REPO"), "examples", "mcp.json"),
+	}, nil)
+	if err != nil || plain.IsError || len(plain.Parts) != 0 {
+		log.Fatalf("a text read must carry no parts: %+v %v", plain, err)
+	}
+
+	fmt.Println("ok:", res.Output, "|", img.String())
+}
+```
+
 ## Fields
 
 | Field | Type | What it is |
 |---|---|---|
 | `Output` | `string` | The text handed to the model. Always a string — serialize structured data yourself. |
 | `IsError` | `bool` | Whether the call failed. Fed back to the model, distinct from a returned `error`. |
+| `Parts` | `[]ContentPart` | Optional non-text output (§1B). Omitted when empty. `Output` stays required alongside it. |
 | `Metadata` | `map[string]any` | Free-form, for your code. **Reserved:** `pending` holds a §10 `Request`. |
 
 ## See also
 
+- [`ContentPart`](/api/go/types/content-part/) — what goes in `Parts`
 - [`Tool`](/api/go/types/tool/) — what returns this
 - [`ToolContext`](/api/go/types/context/) — what `Execute` receives
 - [`Pending`](/api/go/suspension/pending/) — build a suspending result

@@ -85,6 +85,7 @@ export default defineConfig({
 										{ label: 'Native tools', slug: 'cookbook/native-tool' },
 										{ label: 'HTTP / REST tools', slug: 'cookbook/http-tool' },
 										{ label: 'Enable / disable tools', slug: 'cookbook/enable-disable-tools' },
+										{ label: 'Attachments & multimodal', slug: 'cookbook/attachments' },
 										{ label: 'Bring your own HTTP client', slug: 'cookbook/bring-your-own-http-client' },
 										{ label: 'Local & in-process models', slug: 'cookbook/local-and-in-process-models' },
 										{ label: 'Fail fast, or retry', slug: 'cookbook/fail-fast-or-retry' },

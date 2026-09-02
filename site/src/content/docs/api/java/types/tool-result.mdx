@@ -1,6 +1,6 @@
 ---
 title: ToolResult
-description: The result envelope every tool returns — output text, an error flag, and optional metadata that can carry a suspension. Java.
+description: The result envelope every tool returns — output text, an error flag, optional non-text content parts, and optional metadata that can carry a suspension. Java.
 sidebar:
   label: ToolResult
 ---
@@ -14,16 +14,25 @@ import { Aside } from '@astrojs/starlight/components';
 ```java
 public final class ToolResult {
     public ToolResult(String output, boolean isError, Map<String, Object> metadata);
+    public ToolResult(String output, boolean isError, Map<String, Object> metadata,
+                      List<ContentPart> parts);
 
     public String output();
     public boolean isError();
     public Map<String, Object> metadata();
+    public List<ContentPart> parts();   // §1B non-text output; null when text-only
 }
 ```
 
-What every `execute` returns. Three fields, and the whole tool-calling loop is built on them:
-`output` is the text handed back to the model, `isError` says whether the call failed, and
-`metadata` is free-form — except for one reserved key that turns a result into a suspension.
+What every `execute` returns. Four fields, and the whole tool-calling loop is built on them:
+`output` is the text handed back to the model, `isError` says whether the call failed, `parts`
+carries non-text output (an image, a PDF, an audio clip), and `metadata` is free-form — except for
+one reserved key that turns a result into a suspension.
+
+`ToolResult` is a **final class, not a record**: `parts` was added as a fourth constructor
+argument with the three-arg constructor delegating to it, so every existing call site — and every
+`ok` / `error` factory — kept working unchanged. A result with no parts serialises byte-identically
+to a pre-multimodal one.
 
 ## When to use it
 
@@ -44,6 +53,12 @@ Throwing escapes the loop and ends the run.
 
 `output` is always a `String`, and the constructor normalises `null` to `""` — it is what the model
 reads, so serialize structured data yourself.
+
+**`output` stays REQUIRED even when `parts` is present.** It is what the transcript, compaction,
+token estimation and any text-only provider see; `parts` is what a vision-capable provider
+additionally receives. A tool returning a screenshot sets `output` to a description
+(`"shot.png (image/png, 82 bytes)"`) and `parts` to the image — so the run still reads sensibly on
+a model that cannot see it. See [`ContentPart`](/api/java/types/content-part/).
 
 ## Examples
 
@@ -117,7 +132,42 @@ public class Example {
 }
 ```
 
-### 3. The reserved key — `metadata.pending` is a suspension
+### 3. Returning an image — `parts` alongside `output`
+
+```java test
+import io.github.muthuishere.toolnexus.ContentPart;
+import io.github.muthuishere.toolnexus.ToolResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+
+public class Example {
+    static ToolResult screenshot(Path png) {
+        ContentPart part = ContentPart.ofFile(png);
+        // output describes the part; parts carries it. Both, always.
+        return ToolResult.ok(png.getFileName() + " (" + part.mimeType() + ", " + part.bytes() + " bytes)",
+                             List.of(part));
+    }
+
+    public static void main(String[] args) throws Exception {
+        ToolResult res = screenshot(Path.of("examples/media/fixture.png"));
+
+        if (res.isError()) throw new AssertionError("expected success");
+        if (!res.output().equals("fixture.png (image/png, 82 bytes)")) throw new AssertionError(res.output());
+
+        if (res.parts().size() != 1) throw new AssertionError("one part");
+        String golden = Files.readString(Path.of("examples/media/fixture.png.base64")).trim();
+        if (!res.parts().get(0).data().equals(golden)) throw new AssertionError("base64");
+
+        // A text-only result has NO parts list at all — not an empty one.
+        if (ToolResult.ok("done").parts() != null) throw new AssertionError("absent, not empty");
+
+        System.out.println("ok: " + res.output());
+    }
+}
+```
+
+### 4. The reserved key — `metadata.pending` is a suspension
 
 `metadata` is free-form with one exception. A `pending` key holding a `Request` means "this tool
 cannot finish until something out-of-band happens" — the loop parks the run instead of returning.
@@ -169,6 +219,7 @@ suspension is in play.
 |---|---|---|
 | `output()` | `String` | The text handed to the model. Never null — `null` becomes `""`. |
 | `isError()` | `boolean` | Whether the call failed. Fed back to the model, not thrown. |
+| `parts()` | `List<ContentPart>` | §1B non-text output, or **null** when the result is text-only. |
 | `metadata()` | `Map<String, Object>` | Free-form, may be null. **Reserved:** `pending` holds a §10 `Request`. |
 
 ## Static factories
@@ -176,6 +227,7 @@ suspension is in play.
 | Method | What it does |
 |---|---|
 | `ok(output)` / `ok(output, metadata)` | A success result. |
+| `ok(output, parts)` | A success result carrying §1B content parts alongside its describing text. |
 | `error(output)` / `error(output, metadata)` | A failure result the model can recover from. |
 | `pending(request)` | A §10 suspension. Generates an `id` when the request has none. |
 | `authRequired(url)` / `authRequired(url, prompt)` | Sugar for `kind:"authorization"` at a login URL. |
@@ -185,4 +237,5 @@ suspension is in play.
 
 - [`Tool`](/api/java/types/tool/) — what returns this
 - [`ToolContext`](/api/java/types/context/) — what `execute` receives
+- [`ContentPart`](/api/java/types/content-part/) — what `parts` holds
 - [`Request.pending`](/api/java/suspension/pending/) — the suspension entry point

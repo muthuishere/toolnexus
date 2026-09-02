@@ -45,13 +45,54 @@ defmodule Toolnexus.Agents.Compaction do
   @doc """
   Cheap, deterministic token estimate: `ceil(byte_size(json)/4)` summed over messages.
 
+  A §1B content part is charged a **byte-derived** estimate instead
+  (`Toolnexus.ContentPart.estimated_tokens/1`) and contributes only its
+  `{type, mimeType, bytes}` description to the JSON — never its base64 `data`. Charging a
+  part by its `mimeType` string would score a 5 MB image at ~3 tokens, so the compactor
+  would evict text and keep every image forever.
+
   This is an estimator, not a tokenizer — override it via the `:count_tokens` option
   when exactness matters.
   """
   @spec estimate_tokens([map()]) :: non_neg_integer()
   def estimate_tokens(messages) when is_list(messages) do
-    Enum.reduce(messages, 0, fn m, acc -> acc + ceil_div(byte_size(Jason.encode!(m)), 4) end)
+    Enum.reduce(messages, 0, fn m, acc ->
+      {redacted, part_tokens} = redact_parts(m)
+      acc + ceil_div(byte_size(Jason.encode!(redacted)), 4) + part_tokens
+    end)
   end
+
+  # Replace every content part with its data-free description, and charge it separately.
+  defp redact_parts(term) do
+    cond do
+      Toolnexus.ContentPart.part?(term) and not text_part?(term) ->
+        {Toolnexus.ContentPart.describe(term), Toolnexus.ContentPart.estimated_tokens(term)}
+
+      is_list(term) ->
+        Enum.map_reduce(term, 0, fn e, acc ->
+          {r, n} = redact_parts(e)
+          {r, acc + n}
+        end)
+        |> then(fn {list, n} -> {list, n} end)
+
+      is_struct(term) ->
+        {term, 0}
+
+      is_map(term) ->
+        Enum.map_reduce(term, 0, fn {k, v}, acc ->
+          {r, n} = redact_parts(v)
+          {{k, r}, acc + n}
+        end)
+        |> then(fn {pairs, n} -> {Map.new(pairs), n} end)
+
+      true ->
+        {term, 0}
+    end
+  end
+
+  defp text_part?(%{"type" => "text"}), do: true
+  defp text_part?(%Toolnexus.ContentPart{type: "text"}), do: true
+  defp text_part?(_), do: false
 
   @doc """
   Build a `before_llm` hook that compacts the transcript when it grows too large.

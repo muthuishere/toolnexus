@@ -1,0 +1,397 @@
+---
+title: "ContentPart"
+description: "The non-text half of a message: text | image | file | audio, carrying base64 bytes or a URL plus a mimeType — never a path. — Go."
+sidebar:
+  label: "ContentPart"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/content.go">golang/content.go</a>
+</p>
+
+```go
+type ContentPart struct {
+	Type     string `json:"type"`               // "text" | "image" | "file" | "audio"
+	Text     string `json:"text,omitempty"`
+	MimeType string `json:"mimeType,omitempty"`
+	Data     string `json:"data,omitempty"`     // standard base64, padded, no line breaks
+	URL      string `json:"url,omitempty"`
+	Name     string `json:"name,omitempty"`
+
+	err error // deferred construction error — unexported, never serialised
+}
+
+// Edge constructors — they read and encode NOW, so a path or a stream
+// never enters a part.
+func Text(s string) ContentPart
+func File(path string) ContentPart                    // bytes read now; mime from the fixed extension table
+func Bytes(raw []byte, mimeType string) ContentPart   // native bytes, explicit mime
+func Reader(r io.Reader, mimeType string) ContentPart // drained eagerly, NOT closed
+func FileHandle(f fs.File) ContentPart                // *os.File & friends; mime from the file's own name
+func FSFile(fsys fs.FS, name string) ContentPart      // embed.FS / os.DirFS / fstest.MapFS
+func URLPart(u, mimeType string) ContentPart          // data: URL is parsed into {mimeType, data}
+
+func (p ContentPart) Err() error              // the deferred construction error, or nil
+func (p ContentPart) Bytes() int              // DECODED byte length
+func (p ContentPart) EstimatedTokens() int    // max(85, floor(decodedBytes/750)) for a non-text part
+func (p ContentPart) Validate(maxBytes int) error
+func (p ContentPart) String() string          // {type, mimeType, bytes} — Data is NEVER printed
+```
+
+The non-text half of a message: `text | image | file | audio`, carrying base64 bytes or a URL plus
+a `mimeType` — never a path. Exactly one of `Data` / `URL`; both, or neither, is a typed
+[`*PartError`](https://github.com/muthuishere/toolnexus/blob/main/golang/content.go).
+
+## When to use it
+
+Two places, and only two:
+
+- **Attaching media to a run.** [`Client.RunParts`](/api/go/client/create/) takes
+  `[]ContentPart` where `Run` takes a string, so a screenshot, a PDF or an audio clip goes into
+  the same first argument the prompt does: `c.RunParts(ctx, []ContentPart{Text("what is this?"),
+  File("shot.png")}, tk)`.
+- **Returning media from a tool.** [`ToolResult.Parts`](/api/go/types/tool-result/) is
+  `[]ContentPart`. A screenshot tool sets `Output` to a description and `Parts` to the image; the
+  built-in `read` already does exactly this for a recognised media file.
+
+Everything else — how the part becomes an OpenAI `image_url` block or an Anthropic `image`
+block, where a tool result's parts get relocated for a style that refuses images in a `tool`
+message — is the client's job (SPEC §8A), not yours.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="A part never holds a path — and the constructor error is deferred">
+**No paths.** The obvious design is `{path: "shot.png"}` and read it later. It does not survive
+the places a part actually goes: a transcript is **persisted and replayed** (the file may be gone,
+or changed), and a part crosses into **subagents**, a **served toolkit**, and an **A2A peer** —
+different processes, often different machines, where `shot.png` means nothing or, worse, means
+something else. So the edge constructors read and base64 the bytes **at construction**, and a
+stream is drained eagerly for the same reason: a half-read `io.Reader` survives the transcript
+boundary no better than a path does.
+
+**The deferred error.** Go has no overloading, and reading a file returns an `(bytes, error)`
+pair — so the honest signature would be `File(path) (ContentPart, error)`, which makes the common
+call site a three-line dance and gives you *two* places a bad attachment can blow up. Instead
+`File`, `Reader`, `FileHandle` and `FSFile` return **only** a `ContentPart`, carrying the failure
+in an unexported `err` (the `text/template` and `sql.Rows` idiom).
+[`RunParts`](/api/go/client/create/) validates every part and returns the first `*PartError`
+**before any HTTP call** — one `err` for the caller, at the point they were already checking one.
+The field is unexported, so it never marshals and never crosses a process boundary; reach for
+`p.Err()` if you want to check early.
+
+The alternative — `must`-style panics, or an `error` on every constructor — was rejected because
+it either crashes a server on a user-supplied file or taxes every call site to catch a failure the
+run already has to report.
+</Aside>
+
+## Examples
+
+### 1. A text part and an image part
+
+The smallest useful call: a question plus the picture it is about. `File` reads and base64s the
+bytes now, and takes the mime type from the fixed extension table — never sniffed, never from a
+platform mime database.
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	// TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+	media := filepath.Join(os.Getenv("TOOLNEXUS_REPO"), "examples", "media")
+	pngPath := filepath.Join(media, "fixture.png")
+
+	parts := []toolnexus.ContentPart{
+		toolnexus.Text("What is in this image?"),
+		toolnexus.File(pngPath),
+	}
+
+	text, image := parts[0], parts[1]
+	if text.Type != "text" || text.Text != "What is in this image?" {
+		log.Fatalf("unexpected text part: %+v", text)
+	}
+	if err := image.Err(); err != nil {
+		log.Fatalf("File: %v", err)
+	}
+	if image.Type != toolnexus.PartImage || image.MimeType != "image/png" {
+		log.Fatalf("got %s/%s, want image/image/png", image.Type, image.MimeType)
+	}
+
+	// The committed golden — assert against it, never against a re-encoding.
+	golden, err := os.ReadFile(pngPath + ".base64")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if image.Data != strings.TrimSpace(string(golden)) {
+		log.Fatal("base64 does not match examples/media/fixture.png.base64")
+	}
+
+	// The path is gone: the part carries bytes, not a filename.
+	if image.URL != "" || strings.Contains(image.Data, "fixture") {
+		log.Fatal("a part must never carry a path")
+	}
+
+	// String() is what logs and §9 events show — Data is never printed.
+	if image.String() != "{type:image, mimeType:image/png, bytes:82}" {
+		log.Fatalf("unexpected rendering: %s", image.String())
+	}
+
+	fmt.Println("ok:", image.String())
+}
+```
+
+### 2. The sources Go programs actually hold
+
+You rarely have a path. You have `[]byte` from an HTTP body, an `io.Reader` from a pipe, an
+`*os.File` you already opened, or an `embed.FS` with the asset baked into the binary. All four are
+first-class, and all four land as the same bytes-plus-mime part.
+
+```go test
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"io/fs"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing/fstest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	media := filepath.Join(os.Getenv("TOOLNEXUS_REPO"), "examples", "media")
+	pngPath := filepath.Join(media, "fixture.png")
+
+	raw, err := os.ReadFile(pngPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	goldenB, err := os.ReadFile(pngPath + ".base64")
+	if err != nil {
+		log.Fatal(err)
+	}
+	golden := strings.TrimSpace(string(goldenB))
+
+	// (a) native bytes — an HTTP body, a database blob. Mime is explicit.
+	fromBytes := toolnexus.Bytes(raw, "image/png")
+
+	// (b) any io.Reader — drained EAGERLY, because a part must not hold a stream.
+	fromReader := toolnexus.Reader(bytes.NewReader(raw), "image/png")
+
+	// (c) an open file the caller already holds. *os.File is an fs.File, and the
+	//     mime comes from the file's own name, so no mimeType argument is needed.
+	f, err := os.Open(pngPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+	fromHandle := toolnexus.FileHandle(f)
+
+	// (d) an fs.FS + name — the shape embed.FS has. os.DirFS and fstest.MapFS
+	//     stand in for it here.
+	var fsys fs.FS = os.DirFS(media)
+	fromDirFS := toolnexus.FSFile(fsys, "fixture.png")
+	fromMapFS := toolnexus.FSFile(fstest.MapFS{"assets/fixture.png": &fstest.MapFile{Data: raw}}, "assets/fixture.png")
+
+	for name, p := range map[string]toolnexus.ContentPart{
+		"Bytes": fromBytes, "Reader": fromReader,
+		"FileHandle": fromHandle, "FSFile(os.DirFS)": fromDirFS, "FSFile(fstest.MapFS)": fromMapFS,
+	} {
+		if err := p.Err(); err != nil {
+			log.Fatalf("%s: %v", name, err)
+		}
+		if p.Type != toolnexus.PartImage || p.MimeType != "image/png" {
+			log.Fatalf("%s: got %s/%s", name, p.Type, p.MimeType)
+		}
+		if p.Data != golden {
+			log.Fatalf("%s: base64 does not match the committed golden", name)
+		}
+		if p.Bytes() != 82 {
+			log.Fatalf("%s: decoded %d bytes, want 82", name, p.Bytes())
+		}
+
+		// No source ever leaks into the part: not the directory, not the name,
+		// not the deferred error field.
+		blob, err := json.Marshal(p)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if strings.Contains(string(blob), media) || strings.Contains(string(blob), "fixture.png") {
+			log.Fatalf("%s: the part serialised a path: %s", name, blob)
+		}
+		if strings.Contains(string(blob), "err") {
+			log.Fatalf("%s: the deferred error must never serialise: %s", name, blob)
+		}
+	}
+
+	// The constructor does NOT close a handle it did not open — a closed *os.File
+	// fails Stat, and rewinding still works.
+	if _, err := f.Stat(); err != nil {
+		log.Fatalf("the caller's file was closed by the constructor: %v", err)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		log.Fatal(err)
+	}
+	again, err := io.ReadAll(f)
+	if err != nil || len(again) != 82 {
+		log.Fatalf("re-read of the caller's file: %d bytes, %v", len(again), err)
+	}
+
+	fmt.Println("ok: five sources, one part shape,", fromBytes.Bytes(), "bytes each")
+}
+```
+
+### 3. Every way a part can be refused
+
+Each failure is a typed `*PartError` with a stable `Kind` — `"both"`, `"neither"`, `"mime"`,
+`"extension"`, `"size"`, `"read"`, `"dataurl"` — so you can branch on the reason instead of
+matching on message text. The last one is the interesting one: a read that failed at construction
+is surfaced by `RunParts`, before a single byte goes on the wire.
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/base64"
+	"fmt"
+	"log"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+// A reader that fails. Its error has to reach the caller somehow — the part
+// carries it in an unexported field rather than a second return value.
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, fmt.Errorf("disk went away") }
+
+func kindOf(err error) string {
+	pe, ok := err.(*toolnexus.PartError)
+	if !ok {
+		log.Fatalf("want a *PartError, got %#v", err)
+	}
+	return pe.Kind
+}
+
+func main() {
+	// (1) Data AND URL — exactly one is allowed. Checked by Validate, which is
+	//     what the client runs over every part regardless of provenance.
+	both := toolnexus.ContentPart{
+		Type: toolnexus.PartImage, MimeType: "image/png",
+		Data: "aGk=", URL: "https://example.com/a.png",
+	}
+	if k := kindOf(both.Validate(0)); k != "both" {
+		log.Fatalf("want kind \"both\", got %q", k)
+	}
+	neither := toolnexus.ContentPart{Type: toolnexus.PartImage, MimeType: "image/png"}
+	if k := kindOf(neither.Validate(0)); k != "neither" {
+		log.Fatalf("want kind \"neither\", got %q", k)
+	}
+
+	// (2) An unknown extension is refused BY NAME — mime is never sniffed.
+	unknown := toolnexus.File("/tmp/notes.xyz")
+	if k := kindOf(unknown.Err()); k != "extension" {
+		log.Fatalf("want kind \"extension\", got %q", k)
+	}
+	if !strings.Contains(unknown.Err().Error(), "xyz") {
+		log.Fatalf("the error must name the extension: %v", unknown.Err())
+	}
+
+	// (3) MaxPartBytes. Validate(maxBytes) is the guarantee — it runs at request
+	//     assembly over every part, including ones from an MCP server that never
+	//     touched a constructor. DefaultMaxPartBytes additionally fast-fails at
+	//     the edge with a better message; that is a convenience, not the guarantee.
+	big := toolnexus.Bytes(make([]byte, 4096), "image/png")
+	if k := kindOf(big.Validate(1024)); k != "size" {
+		log.Fatalf("want kind \"size\", got %q", k)
+	}
+	old := toolnexus.DefaultMaxPartBytes
+	toolnexus.DefaultMaxPartBytes = 8
+	tooBig := toolnexus.Bytes(make([]byte, 4096), "image/png")
+	toolnexus.DefaultMaxPartBytes = old
+	if k := kindOf(tooBig.Err()); k != "size" {
+		log.Fatalf("want an edge \"size\" failure, got %q", k)
+	}
+
+	// (4) EstimatedTokens is byte-derived: max(85, floor(decodedBytes/750)).
+	//     Not the mimeType string's length (a 5 MB image would score ~3 tokens
+	//     and be uncompactable), not chars/4 of the base64 (~1.7M tokens).
+	tiny := toolnexus.Bytes(make([]byte, 82), "image/png")
+	if tiny.EstimatedTokens() != 85 {
+		log.Fatalf("floor is 85, got %d", tiny.EstimatedTokens())
+	}
+	large := toolnexus.ContentPart{
+		Type: toolnexus.PartImage, MimeType: "image/png",
+		Data: base64.StdEncoding.EncodeToString(make([]byte, 750000)),
+	}
+	if large.EstimatedTokens() != 1000 {
+		log.Fatalf("750000/750 = 1000, got %d", large.EstimatedTokens())
+	}
+
+	// (5) The deferred error, surfaced where it belongs. The failed read built no
+	//     half-part, and RunParts returns the *PartError before any HTTP call —
+	//     which is why the unreachable BaseURL below is never dialled.
+	bad := toolnexus.Reader(errReader{}, "image/png")
+	if k := kindOf(bad.Err()); k != "read" {
+		log.Fatalf("want kind \"read\", got %q", k)
+	}
+	if bad.Data != "" || bad.MimeType != "" {
+		log.Fatalf("a failed read must not build a part: %+v", bad)
+	}
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	c := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: "http://127.0.0.1:1", // never reached
+		Style:   toolnexus.StyleOpenAI,
+		Model:   "m",
+		APIKey:  "unused",
+	})
+	_, runErr := c.RunParts(context.Background(), []toolnexus.ContentPart{toolnexus.Text("hi"), bad}, tk)
+	if k := kindOf(runErr); k != "read" {
+		log.Fatalf("RunParts should surface the deferred error, got %q", k)
+	}
+
+	fmt.Println("ok: both, neither, extension, size, and a deferred read error")
+}
+```
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `Type` | `string` | `PartText` / `PartImage` / `PartFile` / `PartAudio`. The union is exactly these four. |
+| `Text` | `string` | Set only on a text part. |
+| `MimeType` | `string` | Required on every non-text part. From the fixed extension table, or explicit. |
+| `Data` | `string` | Standard base64 (RFC 4648 §4), padded, no line breaks. Never logged. |
+| `URL` | `string` | An `https:` URL kept as-is. A `data:` URL is parsed into `{MimeType, Data}` instead. |
+| `Name` | `string` | Filename, set by `File` / `FileHandle` / `FSFile` on a `file` part only. |
+
+## See also
+
+- [`Tool`](/api/go/types/tool/) — The uniform shape every tool source collapses to: name, description, JSON-Schema parameters, execute.
+- [`ToolResult`](/api/go/types/tool-result/) — The result envelope: output text, optional error flag, optional non-text parts, and optional metadata that can carry a suspension.
+- [`ToolContext`](/api/go/types/context/) — Optional per-call context handed to execute: cancellation, identity, and host-supplied state.

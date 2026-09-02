@@ -7,6 +7,7 @@
  * API's `extraTools`; `run()` executes one-shot against a private runtime.
  * Everything compiles down to the six host verbs in runtime.ts.
  */
+import type { PromptInput } from "../content.js"
 import fs from "node:fs"
 import { defineTool } from "../native.js"
 import type { Answer, Request, Tool } from "../types.js"
@@ -113,7 +114,7 @@ export class Agent {
    * the tree down — unless the run suspends durably (`status:"pending"`), in which
    * case the tree stays parked and `result.runtime.resume(answer)` continues it.
    */
-  async run(prompt: string, opts: AgentRunOptions = {}): Promise<AgentRunResult> {
+  async run(prompt: PromptInput, opts: AgentRunOptions = {}): Promise<AgentRunResult> {
     const runtime = this.createRuntime(opts)
     const h = runtime.spawn(runtime.root, this.name)
     if (isVerbError(h)) {

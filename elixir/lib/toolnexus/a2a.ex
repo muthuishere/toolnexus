@@ -126,7 +126,7 @@ defmodule Toolnexus.A2a do
     }
   end
 
-  # One SendMessage then poll GetTask until terminal / timeout (SPEC §7A).
+  # One SendMessage then poll GetTask until terminal / timeout / cancel (SPEC §7A).
   defp execute(agent_name, endpoint, ag, args, ctx, timeout, poll_every) do
     start = now_ms()
     budget = (ctx && ctx.timeout) || timeout
@@ -159,43 +159,114 @@ defmodule Toolnexus.A2a do
           state: get_in(task, ["status", "state"]) || "submitted"
       }
 
-      # 2. Poll GetTask until terminal / timeout.
-      poll(endpoint, headers, budget, poll_every, task, state)
+      # 2. Poll GetTask until terminal / timeout / cancel.
+      poll(endpoint, headers, budget, poll_every, task, state, ctx)
     rescue
-      e -> %ToolResult{output: Exception.message(e), is_error: true, metadata: meta(state)}
+      e ->
+        # A cancellation observed while the SendMessage RPC was in flight is
+        # still a cancel, not a transport error (§7A: ctx abort ⇒
+        # "A2A task <id> canceled"). Note: `state` here is the pre-try binding —
+        # js parity for a mid-SendMessage abort is an empty task id.
+        if aborted?(ctx) do
+          cancel_result(state)
+        else
+          %ToolResult{output: Exception.message(e), is_error: true, metadata: meta(state)}
+        end
     end
   end
 
-  defp poll(endpoint, headers, budget, poll_every, task, state) do
-    if MapSet.member?(@terminal, state.state) do
-      # 3. Map the terminal Task → ToolResult.
-      if state.state == "completed" do
-        %ToolResult{output: extract_output(task), is_error: false, metadata: meta(state)}
-      else
-        detail = status_message_text(task)
-        suffix = if detail == "", do: "", else: ": #{detail}"
+  defp poll(endpoint, headers, budget, poll_every, task, state, ctx) do
+    cond do
+      MapSet.member?(@terminal, state.state) ->
+        # 3. Map the terminal Task → ToolResult.
+        if state.state == "completed" do
+          %ToolResult{output: extract_output(task), is_error: false, metadata: meta(state)}
+        else
+          detail = status_message_text(task)
+          suffix = if detail == "", do: "", else: ": #{detail}"
 
-        %ToolResult{
-          output: "A2A task #{state.task_id} #{state.state}#{suffix}",
-          is_error: true,
-          metadata: meta(state)
-        }
-      end
-    else
-      if now_ms() - state.start >= budget do
+          %ToolResult{
+            output: "A2A task #{state.task_id} #{state.state}#{suffix}",
+            is_error: true,
+            metadata: meta(state)
+          }
+        end
+
+      aborted?(ctx) ->
+        cancel_result(state)
+
+      now_ms() - state.start >= budget ->
         %ToolResult{
           output: "A2A task #{state.task_id} timed out after #{budget}ms (state=#{state.state})",
           is_error: true,
           metadata: meta(state)
         }
-      else
-        Process.sleep(poll_every)
-        task = json_rpc(endpoint, "GetTask", %{"id" => state.task_id}, headers, budget)
-        state = %{state | polls: state.polls + 1}
-        state = %{state | state: get_in(task, ["status", "state"]) || state.state}
-        poll(endpoint, headers, budget, poll_every, task, state)
-      end
+
+      true ->
+        sleep_abortable(poll_every, ctx)
+
+        # Cancelled during the wait → stop before another GetTask.
+        if aborted?(ctx) do
+          cancel_result(state)
+        else
+          # A GetTask that raises while the signal is set is a cancel, not a
+          # transport error — re-check on the error path with the task id in
+          # scope (§7A).
+          case try_rpc(endpoint, "GetTask", %{"id" => state.task_id}, headers, budget) do
+            {:ok, task} ->
+              state = %{state | polls: state.polls + 1}
+              state = %{state | state: get_in(task, ["status", "state"]) || state.state}
+              poll(endpoint, headers, budget, poll_every, task, state, ctx)
+
+            {:error, e} ->
+              if aborted?(ctx) do
+                cancel_result(state)
+              else
+                %ToolResult{output: Exception.message(e), is_error: true, metadata: meta(state)}
+              end
+          end
+        end
     end
+  end
+
+  # The canceled ToolResult, with `metadata.state` reporting "canceled" — the
+  # LOCAL verdict, not the remote Task's state (matches the js reference).
+  defp cancel_result(state) do
+    state = %{state | state: "canceled"}
+    %ToolResult{output: "A2A task #{state.task_id} canceled", is_error: true, metadata: meta(state)}
+  end
+
+  # §7A ctx abort. `signal` is a zero-arity predicate (aborted when it returns
+  # true) or a pid (aborted when the process is no longer alive).
+  defp aborted?(ctx) do
+    case ctx && ctx.signal do
+      nil -> false
+      f when is_function(f, 0) -> !!f.()
+      pid when is_pid(pid) -> not Process.alive?(pid)
+      _ -> false
+    end
+  end
+
+  # Abortable sleep — returns early (without error) if the ctx signal fires.
+  defp sleep_abortable(ms, ctx) do
+    do_sleep(now_ms() + ms, ctx)
+  end
+
+  defp do_sleep(deadline, ctx) do
+    remaining = deadline - now_ms()
+
+    if remaining > 0 and not aborted?(ctx) do
+      Process.sleep(min(remaining, 20))
+      do_sleep(deadline, ctx)
+    end
+  end
+
+  # json_rpc as a {:ok, result} | {:error, exception} pair, so error paths can
+  # re-check the abort signal before reporting a transport error.
+  defp try_rpc(endpoint, method, params, headers, timeout) do
+    {:ok, json_rpc(endpoint, method, params, headers, timeout)}
+  rescue
+    e -> {:error, e}
   end
 
   defp meta(state) do

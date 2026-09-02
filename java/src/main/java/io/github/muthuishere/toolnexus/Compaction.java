@@ -39,9 +39,63 @@ public final class Compaction {
     public static int estimateTokens(List<Object> messages) {
         int n = 0;
         for (Object m : messages) {
-            n += (int) Math.ceil(Json.stringify(m).length() / 4.0);
+            n += (int) Math.ceil(Json.stringify(redactParts(m)).length() / 4.0);
+            n += partTokens(m);
         }
         return n;
+    }
+
+    /**
+     * §1B: a part is charged a <b>byte-derived</b> estimate ({@code bytes/750}, floored at
+     * {@link #MIN_PART_TOKENS}) — never the length of its {@code mimeType} string, which would
+     * score a 5 MB image at ~3 tokens and make it uncompactable. Its base64 is excluded from the
+     * character estimate ({@link #redactParts}) so it is not charged twice.
+     */
+    public static int estimatePartTokens(ContentPart part) {
+        if (part == null || ContentPart.TEXT.equals(part.type())) return 0;
+        return (int) Math.max(MIN_PART_TOKENS, part.bytes() / 750);
+    }
+
+    /** Floor for a non-text part, so a URL-only part is not free either. */
+    private static final int MIN_PART_TOKENS = 85;
+
+    private static int partTokens(Object message) {
+        int n = 0;
+        for (ContentPart p : partsOf(message)) n += estimatePartTokens(p);
+        return n;
+    }
+
+    private static List<ContentPart> partsOf(Object message) {
+        List<ContentPart> out = new ArrayList<>();
+        if (message instanceof ContentPart p) {
+            out.add(p);
+        } else if (message instanceof List<?> list) {
+            for (Object o : list) out.addAll(partsOf(o));
+        } else if (message instanceof Map<?, ?> m) {
+            for (Object v : m.values()) out.addAll(partsOf(v));
+        }
+        return out;
+    }
+
+    /**
+     * A copy of {@code message} with every {@link ContentPart}'s base64 replaced by its
+     * descriptor — parts are charged by {@link #estimatePartTokens}, and a part's {@code data}
+     * never reaches a log line or an estimate string. A transcript holding no parts is untouched,
+     * so the estimate is byte-identical to a pre-multimodal port.
+     */
+    private static Object redactParts(Object message) {
+        if (message instanceof ContentPart p) return p.describe();
+        if (message instanceof List<?> list) {
+            List<Object> out = new ArrayList<>(list.size());
+            for (Object o : list) out.add(redactParts(o));
+            return out;
+        }
+        if (message instanceof Map<?, ?> m) {
+            Map<Object, Object> out = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> e : m.entrySet()) out.put(e.getKey(), redactParts(e.getValue()));
+            return out;
+        }
+        return message;
     }
 
     /** Options for {@link #compactor(Options)}. Fluent setters; {@link #summarize} is required. */

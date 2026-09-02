@@ -13,6 +13,7 @@ import { existsSync, readdirSync } from "node:fs"
 import path from "node:path"
 import type { JSONSchema, Tool, ToolContext, ToolResult } from "./types.js"
 import { pending } from "./types.js"
+import { mediaTypeFor } from "./content.js"
 
 /** Config for the single global builtin toggle (mirrors MCP isEnabled precedence). */
 export type BuiltinsConfig =
@@ -184,7 +185,7 @@ function bashTool(): Tool {
 function readTool(): Tool {
   return builtin(
     "read",
-    "Read a UTF-8 text file. With offset/limit, return only that line window.",
+    "Read a file. Recognised media (png/jpg/jpeg/gif/webp/pdf/mp3/wav) comes back as a content part; anything else is read as UTF-8 text, with offset/limit returning that line window.",
     {
       type: "object",
       properties: {
@@ -198,11 +199,30 @@ function readTool(): Tool {
     async (args) => {
       const p = String(args.path ?? "")
       if (!p) return err("read: path is required")
-      let content: string
+      let bytes: Buffer
       try {
-        content = await fs.readFile(p, "utf8")
+        bytes = await fs.readFile(p)
       } catch (e) {
         return err(`read: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      // §6: a recognised media extension comes back as a part. The table is fixed — no magic-byte
+      // sniffing and no platform mime database, whose contents vary per machine.
+      const media = mediaTypeFor(p)
+      if (media) {
+        return {
+          output: `${p} (${media.mimeType}, ${bytes.length} bytes)`,
+          isError: false,
+          parts: [{ type: media.type, mimeType: media.mimeType, data: bytes.toString("base64"), ...(media.type === "file" ? { name: path.basename(p) } : {}) } as any],
+        }
+      }
+      let content: string
+      try {
+        // `fatal` so undecodable bytes are an isError RESULT, not U+FFFD soup — and never a
+        // raised exception escaping execute() into the loop. `ignoreBOM` keeps a leading BOM,
+        // as readFile(…, "utf8") does, so text reads stay byte-identical.
+        content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes)
+      } catch {
+        return err(`read: ${p} is not valid UTF-8 text and has no recognised media extension`)
       }
       if (args.offset === undefined && args.limit === undefined) return ok(content)
       const lines = content.split("\n")

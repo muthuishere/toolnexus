@@ -119,6 +119,16 @@
                  :capabilities       {:streaming         false
                                       :pushNotifications false}
                  :defaultInputModes  ["text"]
+                 ;; §1B DECISION: these stay "text", and §1B content parts are
+                 ;; scoped OUT of the A2A profile rather than the card being
+                 ;; widened. The card describes THIS profile only — §7B, whose
+                 ;; `fulfil!` builds artifacts from `(:text r)`, a run's final
+                 ;; text, which is text and nothing else. §7C `tools/call` (which
+                 ;; DOES now emit image/audio/resource blocks) is a separate,
+                 ;; separately-mounted profile that no Agent Card describes. A2A
+                 ;; message parts are a NAMED deferral in the change's design, so
+                 ;; advertising an output mode nothing produces would be the lie,
+                 ;; not the reverse.
                  :defaultOutputModes ["text"]
                  :skills             (mapv (fn [s] {:id          (tool/sanitize (:name s))
                                                     :name        (:name s)
@@ -127,6 +137,38 @@
                  ;; §7B: url = base + "/" — the JSON-RPC POST endpoint.
                  :url                (str base "/")}]
     (if (:provider cfg) (assoc card :provider (:provider cfg)) card)))
+
+(defn part->content-block
+  "SPEC §7C + §1B — one ContentPart as its MCP content block.
+
+  `image`/`audio` carrying bytes map to the SDK's own image/audio content;
+  anything URL-backed becomes a `resource_link` (an MCP link is a uri, and a part
+  that is already a url has no bytes to embed); a `file` carrying bytes becomes an
+  embedded resource with the blob. Nothing is dropped — the reverse of
+  `toolnexus.mcp/collect-parts`, so a toolkit served over MCP and consumed over
+  MCP round-trips."
+  [part]
+  (let [mime (or (:mimeType part) "application/octet-stream")
+        link (fn [] (when (:url part)
+                      {:type "resource_link" :uri (str (:url part))
+                       :name (str (or (:name part) "")) :mimeType mime}))]
+    (cond
+      (= "text" (:type part))  {:type "text" :text (str (:text part))}
+
+      (contains? #{"image" "audio"} (:type part))
+      (if (:data part)
+        {:type (:type part) :data (:data part) :mimeType mime}
+        (link))
+
+      (= "file" (:type part))
+      (if (:data part)
+        {:type "resource"
+         :resource {:uri (str (or (:name part) "file://part"))
+                    :mimeType mime
+                    :blob (:data part)}}
+        (link))
+
+      :else nil)))
 
 ;; ---------------------------------------------------------------------------
 ;; JSON-RPC plumbing shared by both profiles
@@ -302,8 +344,11 @@
                        (catch Throwable _ nil)))
                 {:jsonrpc "2.0" :id id
                  ;; §7C: output -> one {type:"text"} part; isError propagates.
-                 ;; `metadata` is NOT on the MCP wire (on-call only).
-                 :result  {:content [{:type "text" :text (str (:output r))}]
+                 ;; §1B: each non-text ContentPart follows it as the matching MCP
+                 ;; content block, in order. `metadata` is NOT on the MCP wire
+                 ;; (on-call only).
+                 :result  {:content (into [{:type "text" :text (str (:output r))}]
+                                          (keep part->content-block (:parts r)))
                            :isError (boolean (:isError r))}})))
 
           (rpc-error id -32601 "Method not found"))))))

@@ -33,7 +33,7 @@
 			"member": "tool-result",
 			"title": "ToolResult — what execute returns",
 			"spec": "§1",
-			"summary": "The result envelope: output text, optional error flag, optional Pending for suspension.",
+			"summary": "The result envelope: output text, optional error flag, optional non-text parts, and optional metadata that can carry a suspension.",
 			"symbols": {
 				"javascript": "ToolResult",
 				"python": "ToolResult",
@@ -42,6 +42,23 @@
 				"csharp": "ToolResult",
 				"elixir": "Toolnexus.ToolResult",
 				"clojure": "toolnexus.tool/success"
+			}
+		},
+		{
+			"id": "types/content-part",
+			"group": "types",
+			"member": "content-part",
+			"title": "ContentPart — images, PDFs and audio",
+			"spec": "§1B",
+			"summary": "The non-text half of a message: text | image | file | audio, carrying base64 bytes or a URL plus a mimeType — never a path.",
+			"symbols": {
+				"javascript": "ContentPart",
+				"python": "ContentPart",
+				"golang": "ContentPart",
+				"java": "ContentPart",
+				"csharp": "ContentPart",
+				"elixir": "Toolnexus.ContentPart",
+				"clojure": "toolnexus.content/attach"
 			}
 		},
 		{

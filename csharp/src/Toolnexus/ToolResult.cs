@@ -6,9 +6,22 @@ namespace Toolnexus;
 ///   <item><c>Output</c> — text handed back to the model.</item>
 ///   <item><c>IsError</c> — whether the call failed.</item>
 ///   <item><c>Metadata</c> — free-form (title, server, skill name, ...); may be null.</item>
+///   <item><c>Parts</c> — §1B non-text output (image/file/audio); absent ⇒ byte-identical to
+///   pre-multimodal behaviour.</item>
 /// </list>
+/// <para><c>Output</c> stays required even when <c>Parts</c> is present: it is what the
+/// transcript, compaction, token estimation and any text-only provider see. A tool returning an
+/// image sets <c>Output</c> to a description ("screenshot, 1280x720 png") and <c>Parts</c> to the
+/// image.</para>
+/// <para><c>Parts</c> is the <b>fourth</b> positional parameter, after <c>Metadata</c> — a
+/// deliberate append, so every existing <c>new ToolResult(output, isError, meta)</c> site is
+/// untouched.</para>
 /// </summary>
-public sealed record ToolResult(string Output, bool IsError, IDictionary<string, object?>? Metadata = null)
+public sealed record ToolResult(
+    string Output,
+    bool IsError,
+    IDictionary<string, object?>? Metadata = null,
+    IReadOnlyList<ContentPart>? Parts = null)
 {
     public string Output { get; init; } = Output ?? "";
 
@@ -17,6 +30,11 @@ public sealed record ToolResult(string Output, bool IsError, IDictionary<string,
 
     public static ToolResult Error(string output, IDictionary<string, object?>? metadata = null)
         => new(output, true, metadata);
+
+    /// <summary>A success carrying §1B non-text content alongside its describing text.</summary>
+    public static ToolResult OkWithParts(string output, IReadOnlyList<ContentPart> parts,
+        IDictionary<string, object?>? metadata = null)
+        => new(output, false, metadata, parts);
 
     // ---------------------------------------------------------------- §10 Suspension
 

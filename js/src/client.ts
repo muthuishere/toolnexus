@@ -6,6 +6,8 @@
 import type { Toolkit } from "./toolkit.js"
 import type { ToolResult, Request, Answer } from "./types.js"
 import { pendingOf } from "./types.js"
+import type { ContentPart, PromptInput, UnsupportedPartMode } from "./content.js"
+import { toOpenAIWire, toAnthropicWire, checkPromptParts, type WireOptions } from "./wire.js"
 import type { TranslateRequest, TranslateResult, TranslatedToolCall } from "./translate.js"
 import {
   finishReasonFor,
@@ -62,6 +64,13 @@ export interface ClientOptions {
    * today. A "retry" is always bounded by `retries`; the classifier cannot loop unbounded.
    * There is no "suspend" tier — suspension (§10) stays a user-action pause, not an error path. */
   onError?: (info: ErrorInfo) => ErrorTier
+  /** §1B. Reject a content part carrying more than this many **decoded** bytes (never the
+   * +33% base64 string). Unset ⇒ no limit, as today. */
+  maxPartBytes?: number
+  /** §8A. Overrides the provenance rule uniformly: `"error"` fails on any part the style
+   * cannot represent (attached or tool-derived), `"text"` degrades every one of them to a
+   * text placeholder. Unset ⇒ attached parts error, derived parts degrade. */
+  onUnsupportedPart?: UnsupportedPartMode
 }
 
 /** §8 Resilience. What to do with a failed LLM call. */
@@ -384,7 +393,7 @@ export class Client {
   /** §8 Gap 5. OpenAI-style body; omits tools/tool_choice when the tool list is empty. Key order
    * matches the pre-change body so a no-options call is byte-identical. */
   private openaiBody(messages: any[], tools: any[], stream: boolean): Record<string, any> {
-    const b: Record<string, any> = { model: this.opts.model, messages }
+    const b: Record<string, any> = { model: this.opts.model, messages: toOpenAIWire(messages, this.wireOpts()) }
     if (tools.length) {
       b.tools = tools
       b.tool_choice = "auto"
@@ -398,10 +407,15 @@ export class Client {
 
   /** §8 Gap 5. Anthropic-style body; omits tools when the tool list is empty. */
   private anthropicBody(system: string, messages: any[], tools: any[], stream: boolean): Record<string, any> {
-    const b: Record<string, any> = { model: this.opts.model, max_tokens: 4096, system, messages }
+    const b: Record<string, any> = { model: this.opts.model, max_tokens: 4096, system, messages: toAnthropicWire(messages, this.wireOpts()) }
     if (tools.length) b.tools = tools
     if (stream) b.stream = true
     return this.finalizeBody(b)
+  }
+
+  /** The §8A/§1B shaping options every wire build shares. */
+  private wireOpts(): WireOptions {
+    return { onUnsupportedPart: this.opts.onUnsupportedPart, maxPartBytes: this.opts.maxPartBytes }
   }
 
   /** Prometheus text exposition of cumulative metrics (§8). Always valid, empty-but-valid before activity. */
@@ -427,7 +441,8 @@ export class Client {
     this.emit({ event: "run", model: this.opts.model, turns, toolCalls: toolCalls.length, totalTokens: usage.totalTokens, ms: Date.now() - runStart, error: e instanceof Error ? e.message : String(e) })
   }
 
-  async run(prompt: string, ctx: { toolkit: Toolkit; signal?: AbortSignal; history?: any[] }): Promise<RunResult> {
+  async run(prompt: PromptInput, ctx: { toolkit: Toolkit; signal?: AbortSignal; history?: any[] }): Promise<RunResult> {
+    checkPromptParts(prompt, this.wireOpts())
     return this.opts.style === "anthropic"
       ? this.runAnthropic(prompt, ctx.toolkit, ctx.signal, ctx.history)
       : this.runOpenAI(prompt, ctx.toolkit, ctx.signal, ctx.history)
@@ -592,7 +607,7 @@ export class Client {
    * the answer — so the next `ask` with the same `id` continues it. Without an
    * `id` it is a stateless one-shot (identical to `run`).
    */
-  async ask(prompt: string, ctx: { toolkit: Toolkit; id?: string; on_text?: (delta: string) => void; signal?: AbortSignal }): Promise<RunResult> {
+  async ask(prompt: PromptInput, ctx: { toolkit: Toolkit; id?: string; on_text?: (delta: string) => void; signal?: AbortSignal }): Promise<RunResult> {
     // Block-style streaming: run the streaming loop, forward text deltas, still return the
     // final RunResult. Memory (id load/save) is handled by stream() itself, so no duplication.
     if (ctx.on_text) {
@@ -620,7 +635,8 @@ export class Client {
    * With an `id`, it is stateful (like `ask`): the thread's transcript is loaded as history before
    * streaming, and saved back to the ConversationStore on the terminal `done` event. No `id` ⇒ stateless.
    */
-  async *stream(prompt: string, ctx: { toolkit: Toolkit; id?: string; signal?: AbortSignal }): AsyncGenerator<StreamEvent, void, unknown> {
+  async *stream(prompt: PromptInput, ctx: { toolkit: Toolkit; id?: string; signal?: AbortSignal }): AsyncGenerator<StreamEvent, void, unknown> {
+    checkPromptParts(prompt, this.wireOpts())
     const history = ctx.id ? (await this.store.get(ctx.id)) ?? [] : undefined
     const gen = this.opts.style === "anthropic"
       ? this.streamAnthropic(prompt, ctx.toolkit, ctx.signal, history)
@@ -730,7 +746,7 @@ export class Client {
   }
 
   // ---- OpenAI-style: POST {baseUrl}/chat/completions ----
-  private async runOpenAI(prompt: string, toolkit: Toolkit, external?: AbortSignal, history?: any[]): Promise<RunResult> {
+  private async runOpenAI(prompt: PromptInput, toolkit: Toolkit, external?: AbortSignal, history?: any[]): Promise<RunResult> {
     const key = resolveKey(this.opts)
     const signal = this.makeSignal(external)
     const runStart = Date.now()
@@ -783,7 +799,7 @@ export class Client {
         // on resume). Mirrors the streaming path.
         for (const s of settled) {
           toolCalls.push({ name: s.call.function.name, args: s.args, output: s.result.output, isError: s.result.isError, metadata: s.result.metadata })
-          messages.push({ role: "tool", tool_call_id: s.call.id, content: s.result.output })
+          messages.push(toolMessage(s.call.id, s.call.function.name, s.result))
           if (s.halted) return this.pendingRun(runStart, s.halted, messages, toolCalls, turns, usage)
         }
       }
@@ -830,7 +846,7 @@ export class Client {
   }
 
   // ---- Anthropic-style: POST {baseUrl}/messages ----
-  private async runAnthropic(prompt: string, toolkit: Toolkit, external?: AbortSignal, history?: any[]): Promise<RunResult> {
+  private async runAnthropic(prompt: PromptInput, toolkit: Toolkit, external?: AbortSignal, history?: any[]): Promise<RunResult> {
     const key = resolveKey(this.opts)
     const signal = this.makeSignal(external)
     const base = this.opts.baseUrl.replace(/\/$/, "")
@@ -890,7 +906,7 @@ export class Client {
         let halted: Request | undefined
         for (const s of settled) {
           toolCalls.push({ name: s.use.name, args: s.args, output: s.result.output, isError: s.result.isError, metadata: s.result.metadata })
-          content.push({ type: "tool_result", tool_use_id: s.use.id, content: s.result.output, is_error: s.result.isError })
+          content.push(toolResultBlock(s.use.id, s.result))
           if (s.halted) { halted = s.halted; break }
         }
         messages.push({ role: "user", content })
@@ -904,7 +920,7 @@ export class Client {
   }
 
   // ---- Streaming: OpenAI-style ----
-  private async *streamOpenAI(prompt: string, toolkit: Toolkit, external?: AbortSignal, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
+  private async *streamOpenAI(prompt: PromptInput, toolkit: Toolkit, external?: AbortSignal, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
     const key = resolveKey(this.opts)
     const signal = this.makeSignal(external)
     const runStart = Date.now()
@@ -982,13 +998,13 @@ export class Client {
             result = r.result
             if (r.halted) {
               toolCalls.push({ name: c.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
-              messages.push({ role: "tool", tool_call_id: c.id, content: result.output })
+              messages.push(toolMessage(c.id, c.name, result))
               yield { type: "done", result: this.pendingRun(runStart, r.halted, messages, toolCalls, turns, usage) }
               return
             }
           }
           toolCalls.push({ name: c.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
-          messages.push({ role: "tool", tool_call_id: c.id, content: result.output })
+          messages.push(toolMessage(c.id, c.name, result))
           yield { type: "tool_result", id: c.id, name: c.name, output: result.output, isError: result.isError }
         }
       }
@@ -1000,7 +1016,7 @@ export class Client {
   }
 
   // ---- Streaming: Anthropic-style ----
-  private async *streamAnthropic(prompt: string, toolkit: Toolkit, external?: AbortSignal, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
+  private async *streamAnthropic(prompt: PromptInput, toolkit: Toolkit, external?: AbortSignal, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
     const key = resolveKey(this.opts)
     const signal = this.makeSignal(external)
     const runStart = Date.now()
@@ -1073,14 +1089,14 @@ export class Client {
             result = r.result
             if (r.halted) {
               toolCalls.push({ name: u.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
-              results.push({ type: "tool_result", tool_use_id: u.id, content: result.output, is_error: result.isError })
+              results.push(toolResultBlock(u.id, result))
               messages.push({ role: "user", content: results })
               yield { type: "done", result: this.pendingRun(runStart, r.halted, messages, toolCalls, turns, usage) }
               return
             }
           }
           toolCalls.push({ name: u.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
-          results.push({ type: "tool_result", tool_use_id: u.id, content: result.output, is_error: result.isError })
+          results.push(toolResultBlock(u.id, result))
           yield { type: "tool_result", id: u.id, name: u.name, output: result.output, isError: result.isError }
         }
         messages.push({ role: "user", content: results })
@@ -1233,7 +1249,7 @@ export class Conversation {
   constructor(private readonly client: Client, private readonly toolkit: Toolkit, private readonly signal?: AbortSignal) {}
 
   /** Send the next user turn; prior history is retained automatically. */
-  async send(prompt: string): Promise<RunResult> {
+  async send(prompt: PromptInput): Promise<RunResult> {
     const result = await this.client.run(prompt, { toolkit: this.toolkit, signal: this.signal, history: this.messages })
     this.messages = result.messages
     return result
@@ -1277,6 +1293,27 @@ function safeJson(s: string): Record<string, unknown> {
   } catch {
     return {}
   }
+}
+
+/**
+ * A canonical `tool` turn. With no parts this is byte-identical to the pre-0.17 message;
+ * with parts it also carries them (and the tool `name` the §8A relocation header needs) —
+ * both consumed and stripped by the wire build, so neither reaches OpenAI.
+ */
+function toolMessage(id: string | undefined, name: string, result: ToolResult): any {
+  const m: any = { role: "tool", tool_call_id: id, content: result.output }
+  if (result.parts?.length) {
+    m.name = name
+    m.parts = result.parts
+  }
+  return m
+}
+
+/** A canonical Anthropic `tool_result` block; parts ride along and are emitted natively. */
+function toolResultBlock(id: string | undefined, result: ToolResult): any {
+  const b: any = { type: "tool_result", tool_use_id: id, content: result.output, is_error: result.isError }
+  if (result.parts?.length) b.parts = result.parts
+  return b
 }
 
 function lastText(messages: any[]): string {

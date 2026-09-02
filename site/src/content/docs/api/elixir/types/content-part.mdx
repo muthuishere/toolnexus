@@ -1,0 +1,269 @@
+---
+title: "Toolnexus.ContentPart"
+description: "The non-text half of a message: text | image | file | audio, carrying base64 bytes or a URL plus a mimeType — never a path. — Elixir."
+sidebar:
+  label: "Toolnexus.ContentPart"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/content_part.ex">elixir/lib/toolnexus/content_part.ex</a>
+</p>
+
+```elixir
+defmodule Toolnexus.ContentPart do
+  defstruct [:type, :text, :mime_type, :data, :url, :name]
+end
+
+# Edge constructors — each has a {:ok, part} | {:error, exception} form and a raising ! form.
+ContentPart.text("what is in this image?")
+ContentPart.image!("shot.png")                                 # path   → bytes, base64d now
+ContentPart.image!({:bytes, bin}, mime_type: "image/png")      # bytes  → base64d now
+ContentPart.image!(["chunk", [?a | "bc"]], mime_type: "image/png")   # iodata
+ContentPart.image!(File.stream!("shot.png", 2048))             # stream → consumed eagerly
+ContentPart.image!("data:image/png;base64,iVBOR…")             # data:  → {mime_type, data}
+ContentPart.image!("https://example.com/a.png")                # https  → kept as a url
+ContentPart.file!("report.pdf")
+ContentPart.audio!("clip.mp3")
+```
+
+The non-text half of a message: `text | image | file | audio`. A non-text part carries a
+`mime_type` (spelled `mimeType` on the wire) plus **exactly one** of `data` — standard base64,
+padded, no line breaks — or `url`. Both, or neither, is a typed construction error.
+
+You attach parts to a run (`Toolnexus.Client.run/3` takes a list of parts in the prompt position),
+and tools return them on [`Toolnexus.ToolResult`](/api/elixir/types/tool-result/)`.parts`.
+
+## When to use it
+
+- **Sending an image, a PDF or an audio clip to the model** — build the part, pass a list of parts
+  instead of a prompt string. `Toolnexus.ContentPart.encode/3` maps each part onto the provider's
+  block shape (`openai` or `anthropic`) under a positive allowlist, so a part that has no shape on
+  that provider never silently vanishes into an HTTP 200.
+- **Returning one from a tool** — a screenshot tool sets `output` to a description and `parts` to
+  the image. The built-in `read` already does exactly this for a recognised media file.
+- **Reading one back** — `describe/1` and `summary/1` render a part as `{type, mimeType, bytes}`
+  without ever touching `data`, and `estimated_tokens/1` prices it for the compactor.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="A part never holds a path — that is the whole design">
+The obvious shape is `%{path: "shot.png"}`, and it works right up until the transcript leaves the
+process. A transcript is persisted by a `ConversationStore`, replayed hours later, handed to a
+subagent, served over `toolkit.serve/2`, or forwarded to an A2A peer — and on the far side of any
+of those, `"shot.png"` resolves to nothing, or worse, to a different file. So the edge constructors
+read and base64-encode **at construction**: the path is used, then discarded. A `File.Stream` is
+consumed eagerly for the same reason — a part holding a half-read stream survives the transcript
+boundary no better than a path does.
+</Aside>
+
+<Aside type="note" title="Two deliberately Elixir-shaped decisions">
+**`x/1` and `x!/1` come as a pair**, mirroring `Toolnexus.create_toolkit/1` and
+`create_toolkit!/1`. The bang form is what you write inline — `ContentPart.image!("shot.png")` in
+the middle of a list literal, where an unreadable file is a bug and should crash. The non-bang form
+is what a *tool implementation* uses: it is inside `execute`, where the error is an outcome the
+model can recover from, so `{:error, e}` becomes `ToolResult.error(Exception.message(e))` rather
+than a raise that ends the run.
+
+**Raw bytes stay explicitly tagged as `{:bytes, bin}`.** In Elixir a bare binary is genuinely
+ambiguous — `"abc"` is both a plausible filename and plausible file content — and there is no type
+to tell them apart. A bare binary is therefore *always* a path (or a `data:`/`https:` URL), never
+content: guessing wrong would silently turn a caller's file into its own filename, and send the
+model the string `"shot.png"` where it expected a picture. An iolist has no such ambiguity (a path
+is never a list), so iodata is accepted unwrapped.
+</Aside>
+
+## Examples
+
+### 1. A text part and an image part
+
+The smallest useful pair: what you would hand a vision model. The image's `data` is asserted
+against the committed golden in `examples/media/` — the same fixture every port checks against.
+
+```elixir test
+alias Toolnexus.ContentPart
+
+# TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+repo = System.get_env("TOOLNEXUS_REPO") || "."
+fixture = Path.join(repo, "examples/media/fixture.png")
+golden = repo |> Path.join("examples/media/fixture.png.base64") |> File.read!() |> String.trim()
+
+question = ContentPart.text("What is in this image?")
+image = ContentPart.image!(fixture)
+
+true = question.type == "text"
+true = image.type == "image"
+# The extension decided the mime type, from a fixed table — never sniffed from content.
+true = image.mime_type == "image/png"
+# The bytes were read and base64d at construction, matching the committed golden.
+true = image.data == golden
+true = image.url == nil
+
+# And the path is gone: nothing in the wire shape points back at the filesystem.
+wire = ContentPart.to_map(image)
+true = Enum.sort(Map.keys(wire)) == ["data", "mimeType", "type"]
+
+# The data-free rendering — this exact string is byte-identical in all seven ports.
+true = ContentPart.summary(image) == "image (image/png, 82 bytes)"
+
+IO.puts("ok: #{ContentPart.summary(image)}")
+```
+
+### 2. Every source Elixir users already hold
+
+*Accept broadly, store narrowly.* A path, tagged bytes, an iolist (nested or improper), a
+`File.Stream`, a `data:` URL — six ways in, one shape out.
+
+```elixir test
+alias Toolnexus.ContentPart
+
+repo = System.get_env("TOOLNEXUS_REPO") || "."
+fixture = Path.join(repo, "examples/media/fixture.png")
+golden = repo |> Path.join("examples/media/fixture.png.base64") |> File.read!() |> String.trim()
+
+bin = File.read!(fixture)
+<<head::binary-size(40), tail::binary>> = bin
+<<first_byte, rest::binary>> = bin
+
+parts = [
+  # a filesystem path — mime from the fixed extension table
+  ContentPart.image!(fixture),
+  # raw bytes, explicitly tagged so they can never be mistaken for a filename
+  ContentPart.image!({:bytes, bin}, mime_type: "image/png"),
+  # a nested iolist, exactly as it fell out of whatever produced it
+  ContentPart.image!([head, [tail]], mime_type: "image/png"),
+  # an improper iolist — Enum cannot even walk this one; IO.iodata_to_binary/1 can
+  ContentPart.image!([first_byte | rest], mime_type: "image/png"),
+  # a File.Stream: consumed eagerly, mime taken from the stream's own path
+  ContentPart.image!(File.stream!(fixture, 16)),
+  # a data: URL normalises into {mime_type, data} — it is never kept as a url
+  ContentPart.image!("data:image/png;base64," <> golden)
+]
+
+true = Enum.all?(parts, &(&1.data == golden))
+true = Enum.all?(parts, &(&1.mime_type == "image/png"))
+true = Enum.all?(parts, &(&1.url == nil))
+
+# No part carries a stream, a path, or anything else that would not survive being
+# persisted by a ConversationStore and replayed in another process.
+true =
+  Enum.all?(parts, fn p ->
+    Enum.sort(Map.keys(ContentPart.to_map(p))) == ["data", "mimeType", "type"]
+  end)
+
+# A remote asset is the one case that stays a reference rather than becoming bytes.
+remote = ContentPart.image!("https://example.com/a.png", mime_type: "image/png")
+true = remote.url == "https://example.com/a.png"
+true = remote.data == nil
+
+IO.puts("ok: #{length(parts)} sources → one shape (#{ContentPart.summary(hd(parts))})")
+```
+
+### 3. The failure modes, and both call forms
+
+Everything that is refused, and why each refusal is better than the guess it replaces.
+
+```elixir test
+alias Toolnexus.ContentPart
+alias Toolnexus.ContentPart.Error
+
+repo = System.get_env("TOOLNEXUS_REPO") || "."
+fixture = Path.join(repo, "examples/media/fixture.png")
+bin = File.read!(fixture)
+
+# 1. Exactly one of :data / :url. Both — or neither — is a typed error, not a coin flip.
+both = %ContentPart{type: "image", mime_type: "image/png", data: "x", url: "https://example.com/a.png"}
+{:error, %Error{message: both_msg}} = ContentPart.validate(both)
+true = String.contains?(both_msg, "both")
+{:error, %Error{message: neither_msg}} = ContentPart.validate(%ContentPart{type: "image"})
+true = String.contains?(neither_msg, "neither")
+
+# 2. An unknown extension is refused BY NAME. Mime is never sniffed and never read from a
+#    platform mime database — /etc/mime.types varies per machine and would break parity.
+odd = Path.join(System.tmp_dir!(), "note-#{System.unique_integer([:positive])}.xyz")
+File.write!(odd, "hello")
+{:error, %Error{message: ext_msg}} = ContentPart.file(odd)
+true = String.contains?(ext_msg, ".xyz")
+# ...and saying the type out loud is the way through.
+named = ContentPart.file!(odd, mime_type: "text/plain")
+true = named.mime_type == "text/plain"
+true = named.name == Path.basename(odd)
+File.rm!(odd)
+
+# 3. Bytes carry no extension, so they always need an explicit :mime_type.
+{:error, %Error{message: mime_msg}} = ContentPart.image({:bytes, bin})
+true = String.contains?(mime_msg, ":mime_type")
+
+# 4. max_part_bytes measures DECODED bytes and fast-fails here at the edge. The same cap is
+#    enforced again at request assembly, which is where the guarantee actually lives — a part
+#    that arrived from an MCP server never passed through a constructor.
+{:error, %Error{}} = ContentPart.image(fixture, max_part_bytes: 10)
+{:ok, image} = ContentPart.image(fixture, max_part_bytes: 1024)
+
+# 5. The bang form is the same call, raising instead of returning.
+true = ContentPart.image!(fixture) == image
+
+raised =
+  try do
+    ContentPart.image!(fixture, max_part_bytes: 10)
+    nil
+  rescue
+    e in Error -> Exception.message(e)
+  end
+
+true = String.contains?(raised, "max_part_bytes")
+
+# 6. Token cost is byte-derived: max(85, decoded_bytes / 750). Never the mimeType string's
+#    length, which would price a 5 MB image at ~3 tokens and make it uncompactable.
+true = ContentPart.estimated_tokens(image) == 85
+true = ContentPart.estimated_tokens(ContentPart.text("hello world")) == 3
+
+# 7. Logs and §9 events see {type, mimeType, bytes}. `data` is never rendered.
+true = ContentPart.describe(image) == %{"type" => "image", "mimeType" => "image/png", "bytes" => 82}
+
+IO.puts("ok: every refusal named, #{ContentPart.estimated_tokens(image)} estimated tokens")
+```
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `type` | `String.t()` | `"text"` \| `"image"` \| `"file"` \| `"audio"`. A **string**, never an atom, so `from_map/1` round-trips an unknown wire type without `String.to_atom/1` on untrusted input. |
+| `text` | `String.t() \| nil` | The text of a `text` part. |
+| `mime_type` | `String.t() \| nil` | Spelled `mimeType` on the wire. Required alongside `data`. |
+| `data` | `String.t() \| nil` | Standard base64 (RFC 4648 §4), padded, no line breaks. Exactly one of `data` / `url`. |
+| `url` | `String.t() \| nil` | An `http:`/`https:` reference. A `data:` URL is normalised into `{mime_type, data}` instead. |
+| `name` | `String.t() \| nil` | Filename, mostly for `file` parts; defaulted from a path's basename. |
+
+## Functions
+
+| Function | What it does |
+|---|---|
+| `ContentPart.text/1` | A text part. |
+| `ContentPart.image/2` · `image!/2` | An `image` part from any accepted source. |
+| `ContentPart.file/2` · `file!/2` | A `file` part from any accepted source. |
+| `ContentPart.audio/2` · `audio!/2` | An `audio` part from any accepted source. |
+| `ContentPart.new/3` · `new!/3` | The generic constructor the four above delegate to. |
+| `ContentPart.validate/1` | Check a hand-built part: exactly one of `data`/`url`, plus a `mime_type`. |
+| `ContentPart.from_map/1` · `to_map/1` | Wire map (string keys, `mimeType`) in and out. |
+| `ContentPart.part?/1` | True for a part or its wire map — false for a provider block. |
+| `ContentPart.byte_size_of/1` | Decoded byte length; `0` for a URL-backed part. |
+| `ContentPart.describe/1` | `{type, mimeType, bytes}` for logs and §9 events — never `data`. |
+| `ContentPart.summary/1` | `image (image/png, 82 bytes)` — the byte-identical one-liner used as `output` when a result has parts but no text. |
+| `ContentPart.estimated_tokens/1` | `max(85, decoded_bytes / 750)`, identical in every port. |
+| `ContentPart.to_block/2` | One part → one provider block, or `{:unsupported, reason}`. |
+| `ContentPart.encode/3` | A list of parts → provider blocks, applying the §8A provenance rule and the allowlist. |
+| `ContentPart.allowlist/1` | The positive block-type allowlist for a client style. |
+| `ContentPart.media_table/0` · `media_for_path/1` | The fixed extension → `{mimeType, type}` table (§6). |
+
+Options accepted by the constructors: `:mime_type` (required for bytes / iodata / enumerables,
+overrides the table for a path or a `File.Stream`), `:name`, and `:max_part_bytes` (a fast-fail cap
+on **decoded** bytes).
+
+## See also
+
+- [`Toolnexus.ToolResult`](/api/elixir/types/tool-result/) — where a tool's parts ride back
+- [`Toolnexus.Tool`](/api/elixir/types/tool/) — The uniform shape every tool source collapses to: name, description, JSON-Schema parameters, execute.
+- [`Toolnexus.Context`](/api/elixir/types/context/) — Optional per-call context handed to execute: cancellation, identity, and host-supplied state.
+- [`Toolnexus.Builtin.tools`](/api/elixir/builtins/create/) — `read` returns a content part for a recognised media file

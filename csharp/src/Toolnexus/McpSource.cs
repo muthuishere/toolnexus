@@ -465,6 +465,67 @@ public sealed partial class McpSource : IAsyncDisposable
     }
 
     /// <summary>A single MCP tool wrapped as a uniform <see cref="ITool"/>.</summary>
+    /// <summary>
+    /// §0.4: map every non-text <c>content[]</c> entry to a <see cref="ContentPart"/> —
+    /// image ⇒ <c>image</c>, audio ⇒ <c>audio</c>, <c>resource_link</c> ⇒ <c>file{url}</c>,
+    /// an embedded resource carrying a blob ⇒ <c>file{data}</c>; an embedded resource
+    /// carrying text is appended to <c>output</c> instead. Nothing is dropped silently.
+    /// <para>Base64 is taken <b>verbatim</b> from the SDK: <c>.Data</c>/<c>.Blob</c> already
+    /// hold the server's base64 (as UTF-8 bytes, in this SDK), so we only widen them back to a
+    /// string. We never round-trip through <c>.DecodedData</c> — .NET's encoder must not drift
+    /// the seven-port byte parity.</para>
+    /// </summary>
+    internal static IReadOnlyList<ContentPart>? MapParts(IList<ContentBlock>? content, out List<string> resourceText)
+    {
+        resourceText = new List<string>();
+        if (content == null) return null;
+        var parts = new List<ContentPart>();
+        foreach (var block in content)
+        {
+            switch (block)
+            {
+                case TextContentBlock:
+                    break;
+                case ImageContentBlock img:
+                    parts.Add(new ContentPart { Type = "image", MimeType = img.MimeType, Data = B64(img.Data) });
+                    break;
+                case AudioContentBlock aud:
+                    parts.Add(new ContentPart { Type = "audio", MimeType = aud.MimeType, Data = B64(aud.Data) });
+                    break;
+                case ResourceLinkBlock link:
+                    parts.Add(new ContentPart
+                    {
+                        Type = "file",
+                        MimeType = link.MimeType ?? "application/octet-stream",
+                        Url = link.Uri,
+                        Name = link.Name,
+                    });
+                    break;
+                case EmbeddedResourceBlock res:
+                    switch (res.Resource)
+                    {
+                        case BlobResourceContents blob:
+                            parts.Add(new ContentPart
+                            {
+                                Type = ContentPart.TypeForMime(blob.MimeType ?? ""),
+                                MimeType = blob.MimeType ?? "application/octet-stream",
+                                Data = B64(blob.Blob),
+                                Name = blob.Uri,
+                            });
+                            break;
+                        case TextResourceContents txt:
+                            if (!string.IsNullOrEmpty(txt.Text)) resourceText.Add(txt.Text!);
+                            break;
+                    }
+                    break;
+            }
+        }
+        return parts.Count == 0 ? null : parts;
+    }
+
+    /// <summary>The SDK holds base64 as UTF-8 bytes; widen it to the string verbatim.</summary>
+    internal static string B64(ReadOnlyMemory<byte> b64) => System.Text.Encoding.UTF8.GetString(b64.Span);
+
     private sealed class McpTool : ITool
     {
         private readonly string _server;
@@ -496,13 +557,24 @@ public sealed partial class McpSource : IAsyncDisposable
                 var result = await _def.CallAsync(argMap, cancellationToken: ctx?.CancellationToken ?? default)
                     .ConfigureAwait(false);
 
+                // §0.4 / D5: collect the non-text content parts BEFORE any branch returns —
+                // the structuredContent short-circuit and the error path would otherwise each
+                // reintroduce a silent drop.
+                var parts = McpSource.MapParts(result.Content, out var resourceText);
+
                 if (result.IsError == true)
-                    return new ToolResult(FormatToolError(result.Content), true, meta);
+                    return new ToolResult(FormatToolError(result.Content), true, meta, parts);
 
                 if (result.StructuredContent is { ValueKind: not JsonValueKind.Null and not JsonValueKind.Undefined } sc)
-                    return new ToolResult(Json.Stringify(Json.FromElement(sc)), false, meta);
+                    return new ToolResult(Json.Stringify(Json.FromElement(sc)), false, meta, parts);
 
-                return new ToolResult(JoinTextContent(result.Content), false, meta);
+                var text = JoinTextContent(result.Content);
+                if (resourceText.Count > 0)
+                    text = text.Length == 0 ? string.Join("\n", resourceText) : text + "\n" + string.Join("\n", resourceText);
+                // An image-only result is not the empty string: name what came back (§0.4).
+                if (text.Length == 0 && parts != null)
+                    text = string.Join("\n", parts.Select(p => p.DescribeInText()));
+                return new ToolResult(text, false, meta, parts);
             }
             catch (Exception e)
             {

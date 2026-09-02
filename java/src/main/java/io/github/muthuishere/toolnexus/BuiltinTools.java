@@ -6,6 +6,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -286,14 +287,33 @@ public final class BuiltinTools {
         props.put("limit", prop("number", "Maximum number of lines to read"));
         return builtin(
                 "read",
-                "Read a UTF-8 text file. With offset/limit, return only that line window.",
+                "Read a file. A recognised media file (png/jpg/jpeg/gif/webp/pdf/mp3/wav) comes "
+                        + "back as a content part; anything else as UTF-8 text, windowed by "
+                        + "offset/limit.",
                 schema(props, List.of("path")),
                 (args, ctx) -> {
                     String p = str(args.get("path"));
                     if (p.isEmpty()) return err("read: path is required");
+                    // §6 media table — fixed, never sniffed, never a platform mime database.
+                    String[] media = ContentPart.mediaFor(p);
+                    if (media != null) {
+                        byte[] bytes;
+                        try {
+                            bytes = Files.readAllBytes(Path.of(p));
+                        } catch (IOException e) {
+                            return err("read: " + e.getMessage());
+                        }
+                        ContentPart part = ContentPart.ofBytes(media[1], media[0], bytes);
+                        return ToolResult.ok(p + " (" + media[0] + ", " + bytes.length + " bytes)",
+                                List.of(part));
+                    }
                     String content;
                     try {
                         content = Files.readString(Path.of(p));
+                    } catch (CharacterCodingException e) {
+                        // Undecodable bytes are an ERROR RESULT, never an exception escaping
+                        // into the loop (§6).
+                        return err("read: " + p + ": not valid UTF-8 text");
                     } catch (IOException e) {
                         return err("read: " + e.getMessage());
                     }

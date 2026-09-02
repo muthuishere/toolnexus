@@ -795,7 +795,7 @@ wheels = [
 
 [[package]]
 name = "toolnexus"
-version = "0.6.0"
+version = "0.16.0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
@@ -810,7 +810,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", specifier = ">=1.0.0" },
+    { name = "mcp", specifier = ">=1.0.0,<2.0.0" },
     { name = "pytest", marker = "extra == 'test'" },
     { name = "pytest-asyncio", marker = "extra == 'test'" },
     { name = "pyyaml", specifier = ">=6.0" },

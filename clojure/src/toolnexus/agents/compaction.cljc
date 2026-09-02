@@ -25,7 +25,8 @@
       (client/create {:hooks {:before-llm (compaction/compactor
                                             {:max-tokens 120000
                                              :summarize  my-summarizer})}})"
-  (:require [koine.json :as json]))
+  (:require [koine.json :as json]
+            [toolnexus.content :as content]))
 
 ;; The system reminder injected when `:flush-to-memory` is set. Byte-identical to
 ;; the other ports — a host that greps its transcripts must find the same string.
@@ -35,6 +36,53 @@
 ;; Prefix on the summary system message; hosts and tests key off this to detect
 ;; that a compaction happened.
 (def ^:private summary-prefix "[Summary of earlier conversation]\n")
+
+(def ^:private min-part-tokens
+  "SPEC §1B pins the floor at 85 — a part is never free, because a small image
+  still costs a provider far more than its bytes suggest (the 82-byte shared
+  fixture measured ~8 500 prompt tokens on gpt-4o-mini)."
+  85)
+
+(defn part-charge
+  "SPEC §1B — a BYTE-DERIVED per-part token estimate.
+
+  `max(85, floor(decodedBytes / 750))`, NORMATIVE in §1B rather than advisory,
+  because both extremes were reached independently by different ports: the
+  `mimeType` string's length scores a 5 MB image at ~3 tokens (so the compactor
+  evicts TEXT and keeps every image forever), and the default `ceil(chars/4)` over
+  the base64 scores it at ~1.7M (so the image is the only thing ever evicted)."
+  [part]
+  (max min-part-tokens (quot (content/part-bytes part) 750)))
+
+(defn- parts-in
+  "Every §1B part hanging off one message — a parts-array `:content`, a tool
+  turn's `:parts`, and the `:parts` on an anthropic `tool_result` block."
+  [m]
+  (concat (when (content/part-array? (:content m)) (:content m))
+          (:parts m)
+          (when (sequential? (:content m))
+            (mapcat :parts (filter map? (:content m))))))
+
+(defn- all-parts [messages]
+  (mapcat parts-in (filter map? messages)))
+
+(defn- strip-parts
+  "The message with every part payload replaced by its `{type, mimeType, bytes}`
+  rendering, so the JSON half of the estimate never counts base64 twice — and so
+  nothing here can put a payload where a payload must not go."
+  [m]
+  (if-not (map? m)
+    m
+    (let [strip (fn [ps] (mapv content/describe-part ps))]
+      (cond-> m
+        (content/part-array? (:content m)) (assoc :content (strip (:content m)))
+        (seq (:parts m))                   (assoc :parts (strip (:parts m)))
+        (and (sequential? (:content m)) (not (content/part-array? (:content m))))
+        (assoc :content (mapv (fn [b]
+                                (if (and (map? b) (seq (:parts b)))
+                                  (assoc b :parts (strip (:parts b)))
+                                  b))
+                              (:content m)))))))
 
 (defn estimate-tokens
   "Cheap, deterministic token estimate: `ceil(chars/4)` over each message's JSON
@@ -47,8 +95,8 @@
   [messages]
   ;; `(quot (+ n 3) 4)` is ceil(n/4) on integers — `Math/ceil` is Java interop and
   ;; would end the cljgo half of this port.
-  (reduce (fn [total m] (+ total (quot (+ (count (json/write-str m)) 3) 4)))
-          0
+  (reduce (fn [total m] (+ total (quot (+ (count (json/write-str (strip-parts m))) 3) 4)))
+          (reduce + 0 (map part-charge (all-parts messages)))
           messages))
 
 (defn- carries-tool-result?

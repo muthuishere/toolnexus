@@ -150,10 +150,51 @@ public final class McpServe {
                 // Host callback errors are isolated.
             }
         }
-        return McpSchema.CallToolResult.builder()
+        McpSchema.CallToolResult.Builder out = McpSchema.CallToolResult.builder()
                 .addTextContent(result.output())
-                .isError(result.isError())
-                .build();
+                .isError(result.isError());
+        // §1B parts ride back out as native MCP content blocks, appended after the text part in
+        // order: image ⇒ image content, audio ⇒ audio content, file ⇒ an embedded resource.
+        if (result.parts() != null) {
+            for (ContentPart part : result.parts()) {
+                McpSchema.Content block = toMcpContent(part);
+                if (block != null) out.addContent(block);
+            }
+        }
+        return out.build();
+    }
+
+    /** One §1B part as an MCP content block, or {@code null} when it has no MCP representation. */
+    private static McpSchema.Content toMcpContent(ContentPart part) {
+        switch (part.type()) {
+            case ContentPart.TEXT -> {
+                return new McpSchema.TextContent(part.text());
+            }
+            case ContentPart.IMAGE -> {
+                if (part.data() == null) return null;
+                return new McpSchema.ImageContent(null, part.data(), part.mimeType());
+            }
+            case ContentPart.AUDIO -> {
+                if (part.data() == null) return null;
+                return new McpSchema.AudioContent(null, part.data(), part.mimeType());
+            }
+            case ContentPart.FILE -> {
+                String uri = part.url() != null ? part.url()
+                        : (part.name() != null ? part.name() : "resource");
+                if (part.data() != null) {
+                    return new McpSchema.EmbeddedResource(null,
+                            new McpSchema.BlobResourceContents(uri, part.mimeType(), part.data()));
+                }
+                return McpSchema.ResourceLink.builder()
+                        .name(part.name() != null ? part.name() : uri)
+                        .uri(uri)
+                        .mimeType(part.mimeType())
+                        .build();
+            }
+            default -> {
+                return null;
+            }
+        }
     }
 
     private static McpSchema.ServerCapabilities capabilities() {

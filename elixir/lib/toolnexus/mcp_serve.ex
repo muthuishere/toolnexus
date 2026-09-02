@@ -16,7 +16,7 @@ defmodule Toolnexus.McpServe do
 
   import Plug.Conn
 
-  alias Toolnexus.{Context, Tool, ToolResult}
+  alias Toolnexus.{ContentPart, Context, Tool, ToolResult}
 
   @default_name "toolnexus"
   @default_version "0.1.0"
@@ -131,7 +131,7 @@ defmodule Toolnexus.McpServe do
         end
 
         rpc_result(id, %{
-          "content" => [%{"type" => "text", "text" => result.output}],
+          "content" => [%{"type" => "text", "text" => result.output}] ++ mcp_blocks(result),
           "isError" => result.is_error
         })
     end
@@ -139,6 +139,37 @@ defmodule Toolnexus.McpServe do
 
   defp handle_rpc(id, method, _params, _tools, _cfg, _on_call),
     do: rpc_error(id, -32601, "Method not found: #{method}")
+
+  # SPEC §7B: a tool's non-text parts follow the text block as MCP content blocks —
+  # image ⇒ image, audio ⇒ audio, file with data ⇒ embedded resource, file with url ⇒
+  # resource_link. A result with no parts emits exactly the one text block it always did.
+  defp mcp_blocks(%ToolResult{parts: parts}) when is_list(parts),
+    do: parts |> Enum.map(&ContentPart.from_map/1) |> Enum.flat_map(&mcp_block/1)
+
+  defp mcp_blocks(_), do: []
+
+  defp mcp_block(%ContentPart{type: "text"}), do: []
+
+  defp mcp_block(%ContentPart{type: type, data: data} = p) when type in ["image", "audio"] and is_binary(data),
+    do: [%{"type" => type, "data" => data, "mimeType" => p.mime_type}]
+
+  defp mcp_block(%ContentPart{type: "file", data: data} = p) when is_binary(data) do
+    resource =
+      %{"uri" => p.name || "resource", "blob" => data}
+      |> then(fn r -> if p.mime_type, do: Map.put(r, "mimeType", p.mime_type), else: r end)
+
+    [%{"type" => "resource", "resource" => resource}]
+  end
+
+  defp mcp_block(%ContentPart{type: "file", url: url} = p) when is_binary(url) do
+    [
+      %{"type" => "resource_link", "uri" => url}
+      |> then(fn b -> if p.mime_type, do: Map.put(b, "mimeType", p.mime_type), else: b end)
+      |> then(fn b -> if p.name, do: Map.put(b, "name", p.name), else: b end)
+    ]
+  end
+
+  defp mcp_block(_), do: []
 
   # --- plumbing ----------------------------------------------------------------
 

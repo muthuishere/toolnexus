@@ -14,6 +14,7 @@
  * the ConversationStore. SPEC pins transitions, never scheduling — conformance is
  * identical per-handle transition traces against `examples/subagent-*` fixtures.
  */
+import type { PromptInput } from "../content.js"
 import { createClient, InMemoryConversationStore, type ClientStyle, type ConversationStore, type Hooks, type MetricEvent } from "../client.js"
 import { runGated, type Completion } from "./loop.js"
 import { createToolkit, type Toolkit } from "../toolkit.js"
@@ -176,12 +177,12 @@ interface Pools {
  */
 interface Checkpoint {
   /** The exact turn input (prompt + rendered inbox drain) to replay. */
-  input: string
+  input: PromptInput
 }
 
 interface QueuedWake {
   h: Handle
-  prompt?: string
+  prompt?: PromptInput
 }
 
 /**
@@ -387,7 +388,7 @@ export class AgentRuntime {
    * the wake queues FIFO and a completing sibling transfers its slot. Waking a
    * suspended handle is a no-op (items buffer; only the Answer wakes it).
    */
-  wake(h: Handle, prompt?: string): { ok: true } | ({ ok: false } & VerbError) {
+  wake(h: Handle, prompt?: PromptInput): { ok: true } | ({ ok: false } & VerbError) {
     if (h.state === "closed") return { ok: false, error: `closed: ${h.id}` }
     if (h.state === "suspended") return { ok: true } // buffers; suspended→running ONLY via the Answer
     if (h.state === "running") return { ok: true } // already awake; inbox drains next turn
@@ -750,8 +751,15 @@ export class AgentRuntime {
    * When the Run halts pending, the stored transcript is REWOUND to the pre-turn
    * snapshot and the input is checkpointed — resume replays the whole turn.
    */
-  private async executeTurn(h: Handle, prompt?: string, oneShotWaitFor?: (req: Request) => Promise<Answer>): Promise<TaskResult> {
-    const input = (prompt ?? "") + this.drainInbox(h)
+  private async executeTurn(h: Handle, prompt?: PromptInput, oneShotWaitFor?: (req: Request) => Promise<Answer>): Promise<TaskResult> {
+    // A parts prompt keeps its ordering; the drained inbox joins it as a trailing text part,
+    // which is the same append the string path does.
+    const drained = this.drainInbox(h)
+    const input: PromptInput = typeof prompt === "string" || prompt === undefined
+      ? (prompt ?? "") + drained
+      : drained
+        ? [...prompt, { type: "text" as const, text: drained }]
+        : prompt
     let result: TaskResult
     try {
       await h.ready

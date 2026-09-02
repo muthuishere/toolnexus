@@ -14,6 +14,7 @@
  */
 
 import type { Toolkit } from "./toolkit.js"
+import { encodeParts, inboundPart, type ContentPart } from "./content.js"
 import type { Usage } from "./client.js"
 
 /** An OpenAI-shaped chat request, handed over verbatim (§11). */
@@ -187,14 +188,37 @@ export function openAIMessagesToAnthropic(messages: any[]): { messages: any[]; s
       }
       default: {
         flush()
+        // A `content` array has its text parts concatenated and its NON-text parts translated
+        // into Anthropic's block shape (§11). Six ports used to pass a text-empty array through
+        // raw and undocumented; one specified mapping replaces that, so nothing is flattened
+        // away and nothing is dropped.
+        const blocks = contentPartBlocks(m.content)
+        if (blocks) { out.push({ role: "user", content: blocks }); break }
         const s = contentText(m.content)
         if (s) out.push({ role: "user", content: s })
-        else if (Array.isArray(m.content) && m.content.length) out.push({ role: "user", content: m.content })
       }
     }
   }
   flush()
   return { messages: out, system: systemParts.join("\n\n") }
+}
+
+/**
+ * Translate an OpenAI-shaped `content` array into Anthropic blocks — but ONLY when it
+ * actually carries something non-text; an all-text array still concatenates, so the
+ * common case is byte-identical. Both spellings are accepted: a literal `ContentPart`
+ * and the provider-native block that same part encodes to.
+ */
+function contentPartBlocks(content: unknown): any[] | undefined {
+  if (!Array.isArray(content) || content.length === 0) return undefined
+  const parts: ContentPart[] = []
+  for (const raw of content) {
+    const p = inboundPart(raw)
+    if (!p) return undefined // an array we do not understand is left to contentText, as before
+    parts.push(p)
+  }
+  if (parts.every((p) => p.type === "text")) return undefined
+  return encodeParts(parts, { style: "anthropic", provenance: "attached" })
 }
 
 /**

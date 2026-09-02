@@ -1,0 +1,209 @@
+---
+title: "ContentPart"
+description: "The non-text half of a message: text | image | file | audio, carrying base64 bytes or a URL plus a mimeType — never a path. — Python."
+sidebar:
+  label: "ContentPart"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/content.py">python/src/toolnexus/content.py</a>
+</p>
+
+```python
+@dataclass
+class ContentPart:
+    type: PartType                   # "text" | "image" | "file" | "audio"
+    text: Optional[str] = None       # text parts only
+    mimeType: Optional[str] = None   # wire key — camelCase in every port
+    data: Optional[str] = None       # standard base64, padded, no line breaks
+    url: Optional[str] = None        # exactly one of data / url
+    name: Optional[str] = None
+
+
+# Edge constructors — they read and base64 at construction.
+def text(value: str) -> ContentPart: ...
+def image(source, *, mime_type=None, name=None, max_part_bytes=None) -> ContentPart: ...
+def file(source,  *, mime_type=None, name=None, max_part_bytes=None) -> ContentPart: ...
+def audio(source, *, mime_type=None, name=None, max_part_bytes=None) -> ContentPart: ...
+```
+
+The non-text half of a message: `text | image | file | audio`, carrying base64 bytes or a URL
+plus a `mimeType` — never a path. A flat dataclass with an open `type` discriminator, not a
+class hierarchy, mirroring [`Request`](/api/python/types/request/).
+
+## When to use it
+
+Two moments, and they are the same shape:
+
+- **Attaching** an image, a PDF or an audio clip to a run — `prompt` accepts a list of parts
+  wherever it accepts a string, so `[text("what is this?"), image("./shot.png")]` is a prompt.
+- **Returning** one from a tool — a screenshot tool, a chart renderer, a document fetcher sets
+  [`ToolResult.parts`](/api/python/types/tool-result/) and leaves `output` as the description.
+
+## Why bytes and not a path
+
+<Aside type="tip" title="A part never holds a filesystem path">
+A path is only meaningful to one process on one machine at one moment. A part is not: the
+transcript is persisted by a `ConversationStore`, replayed on the next turn, handed to
+subagents, sent over a served toolkit and across an A2A peer. A path survives none of that —
+it arrives as a string pointing at nothing.
+
+So the convenience lives at the **edge**, not in the part. `image("./shot.png")` reads the file
+and base64-encodes it *right there*, and what lands in the part is `mimeType` + `data`. Accept
+broadly, store narrowly. The same rule is why a file-like source is consumed **eagerly**: a part
+holding a half-read stream would not cross the transcript boundary any better than a path.
+</Aside>
+
+Mime types come from the fixed §6 extension table (`png jpg jpeg gif webp pdf mp3 wav`). They are
+**never** sniffed from content and **never** resolved through `mimetypes` — a platform mime
+database varies per machine and would break cross-port parity. An extension not in the table is a
+`ContentPartError` naming it; pass `mime_type=` to override.
+
+## Examples
+
+### 1. A text part and an image part
+
+`image()` takes the path, reads it now, and keeps only the bytes. The base64 is standard
+(padded, no line breaks), so it matches the committed cross-language golden byte for byte.
+
+```python test
+from toolnexus import ContentPart, image, text
+
+GOLDEN = open("examples/media/fixture.png.base64").read().strip()
+
+prompt = [text("What is in this image?"), image("examples/media/fixture.png")]
+
+hello, shot = prompt
+assert hello.type == "text" and hello.text == "What is in this image?"
+
+assert isinstance(shot, ContentPart)
+assert shot.type == "image"
+assert shot.mimeType == "image/png"          # from the fixed extension table
+assert shot.data == GOLDEN                   # bytes, encoded at construction
+assert shot.url is None                      # exactly one of data / url
+assert shot.name == "fixture.png"            # a label, not a path you can open
+
+print("ok:", shot.type, shot.mimeType, len(shot.data), "b64 chars")
+```
+
+### 2. The sources a Python caller already holds
+
+A path string, a `pathlib.Path`, any `os.PathLike`, native bytes, and any **binary file-like**
+object with a `read()` returning bytes. A handle's `.name` supplies the mime type when it has
+one; `io.BytesIO` has none, so pass `mime_type=`. The handle is read eagerly and **not** closed —
+closing it stays yours.
+
+```python test
+import io
+import os
+import pathlib
+
+from toolnexus import ContentPart, image
+from toolnexus.content import to_dict
+
+PATH = "examples/media/fixture.png"
+RAW = open(PATH, "rb").read()
+
+
+class Attachment(os.PathLike):
+    """Anything with __fspath__ is a path."""
+
+    def __init__(self, p: str) -> None:
+        self.p = p
+
+    def __fspath__(self) -> str:
+        return self.p
+
+
+handle = open(PATH, "rb")
+parts = {
+    "str path": image(PATH),
+    "pathlib.Path": image(pathlib.Path(PATH)),
+    "os.PathLike": image(Attachment(PATH)),
+    "bytes": image(RAW, mime_type="image/png"),
+    "bytearray": image(bytearray(RAW), mime_type="image/png"),
+    "memoryview": image(memoryview(RAW), mime_type="image/png"),
+    "io.BytesIO": image(io.BytesIO(RAW), mime_type="image/png"),
+    "open rb handle": image(handle),  # mime comes from handle.name
+}
+
+# The constructor consumed the handle eagerly — and left it to you to close.
+assert handle.closed is False, "the constructor must not close a caller's handle"
+handle.close()
+
+data = {p.data for p in parts.values()}
+assert len(data) == 1, "every source yields the identical bytes"
+
+for label, p in parts.items():
+    assert isinstance(p, ContentPart), label
+    assert p.mimeType == "image/png", label
+    # Nothing but bytes survives: no handle, no path, no stream.
+    assert set(to_dict(p)) <= {"type", "mimeType", "data", "name"}, label
+    assert p.name in (None, "fixture.png"), label
+
+print("ok:", len(parts), "sources ->", len(data), "byte string")
+```
+
+### 3. Failure modes and the token estimate
+
+Every §1B rule is a typed `ContentPartError`, raised at the edge rather than discovered on the
+wire. `max_part_bytes` is a per-call fast-fail; `set_max_part_bytes` sets the process-wide
+ceiling (both in **decoded** bytes — the assembly-time check is the actual guarantee).
+
+```python test
+from toolnexus import ContentPartError, estimate_tokens, image, part, set_max_part_bytes, text
+
+PATH = "examples/media/fixture.png"
+
+
+def fails(fn) -> str:
+    try:
+        fn()
+    except ContentPartError as e:
+        return str(e)
+    raise AssertionError("expected a ContentPartError")
+
+
+# Exactly one of data / url. Both is an error; so is neither.
+assert "both data and url" in fails(
+    lambda: part(type="image", mimeType="image/png", data="AAAA", url="https://e.example/x.png")
+)
+assert "neither data nor url" in fails(lambda: part(type="image", mimeType="image/png"))
+
+# An unknown extension is refused BY NAME — never sniffed, never via `mimetypes`
+# (a platform mime database is machine-dependent and would break cross-port parity).
+assert '".heic"' in fails(lambda: image("holiday.heic"))
+assert image(b"\x00\x01", mime_type="image/heic").mimeType == "image/heic"
+
+# maxPartBytes, in decoded bytes: per-call, then process-wide.
+assert "over the maxPartBytes limit of 10" in fails(lambda: image(PATH, max_part_bytes=10))
+set_max_part_bytes(10)
+assert "over the maxPartBytes limit of 10" in fails(lambda: image(PATH))
+set_max_part_bytes(None)  # process-wide state — put it back
+
+# The estimate is byte-derived: max(85, decoded_bytes // 750). Never the mimeType's
+# length (which makes a 5 MB image uncompactable) and never base64 chars / 4.
+assert estimate_tokens(image(PATH)) == 85          # 82 bytes, floored at 85
+assert estimate_tokens(text("a" * 400)) == 100     # text is chars / 4
+
+print("ok:", estimate_tokens(image(PATH)), "tokens for an 82-byte png")
+```
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `type` | `str` | `"text"`, `"image"`, `"file"` or `"audio"`. |
+| `text` | `str \| None` | The text. Text parts only. |
+| `mimeType` | `str \| None` | Wire key — camelCase in every port. Required on a non-text part. |
+| `data` | `str \| None` | Standard base64 (RFC 4648 §4), padded, no line breaks. Never logged. |
+| `url` | `str \| None` | An `https:` URL kept as-is. Exactly one of `data` / `url`. |
+| `name` | `str \| None` | A display label (e.g. `fixture.png`) — not something you can open. |
+
+## See also
+
+- [`ToolResult`](/api/python/types/tool-result/) — carries `parts` alongside the required `output`
+- [`Tool`](/api/python/types/tool/) — The uniform shape every tool source collapses to: name, description, JSON-Schema parameters, execute.
+- [`ToolContext`](/api/python/types/context/) — Optional per-call context handed to execute: cancellation, identity, and host-supplied state.

@@ -285,7 +285,11 @@ defmodule Toolnexus.McpEdgeTest do
     assert result.output == "MCP tool returned an error"
 
     assert find_tool(source, "q_bad_ok").execute.(%{}, %Context{}).output == ""
-    assert find_tool(source, "q_img").execute.(%{}, %Context{}).output == ""
+    # §2: a non-text entry is never dropped — an image-only result names what came back
+    # and carries the part, rather than the empty string it used to return.
+    img = find_tool(source, "q_img").execute.(%{}, %Context{})
+    assert img.output == "image (unknown, 0 bytes)"
+    assert [%Toolnexus.ContentPart{type: "image", data: "x"}] = img.parts
 
     # HTTP 500 on a call maps to an error result, not a crash
     result = find_tool(source, "q_boom500").execute.(%{}, %Context{})

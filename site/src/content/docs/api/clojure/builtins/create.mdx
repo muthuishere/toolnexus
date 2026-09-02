@@ -17,7 +17,7 @@ builtin-names    ; ["bash" "read" "write" "edit" "grep" "glob"
                  ;  "webfetch" "question" "apply_patch" "todowrite"]
 
 ;; each element is an ordinary Tool map
-{:name "read" :description "Read a UTF-8 text file."
+{:name "read" :description "Read a file. A known media file (png/jpg/…) comes back as a content part; …"
  :input-schema {:type "object" :properties {…} :required ["path"]}
  :source "builtin" :execute (fn ([args]) ([args ctx]))}
 
@@ -148,7 +148,7 @@ builtin/builtin-names
 | Tool | What it does | Notes |
 |---|---|---|
 | `bash` | Runs a shell command, combined stdout+stderr. | `timeout` in **milliseconds**, default 60000. A timeout and a non-zero exit are both `isError`. |
-| `read` | Reads a UTF-8 text file. | Optional 1-based `offset` and `limit`. |
+| `read` | Reads a file. A known media file (`png jpg jpeg gif webp pdf mp3 wav`) comes back as a [content part](/api/clojure/types/content-part/) under `:parts`; anything else is read as UTF-8 text. | Optional 1-based `offset` and `limit` on the text path. Bytes that are not decodable UTF-8 give an `isError` result rather than mojibake. |
 | `write` | Writes a file, creating parent directories. | Returns the UTF-8 byte count written. |
 | `edit` | Exact-string replace. | Refuses a non-unique `oldString` unless `replaceAll` is true. |
 | `grep` | Regex search over file contents. | Dialect differs per host — `java.util.regex` versus Go RE2 — so only the common subset is portable. |

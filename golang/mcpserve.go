@@ -142,6 +142,43 @@ func mcpHandlerFor(t Tool, onCall OnCall) server.ToolHandlerFunc {
 
 		out := mcp.NewToolResultText(res.Output)
 		out.IsError = res.IsError
+		// §1B parts leave as native MCP content blocks, appended after the text
+		// part, in order — image⇒image, audio⇒audio, file⇒embedded resource.
+		out.Content = append(out.Content, partsToMcpContent(res.Parts)...)
 		return out, nil
 	}
+}
+
+// partsToMcpContent maps §1B content parts to MCP content blocks for an inbound
+// tools/call response. Base64 passes through verbatim — it is already the shape
+// MCP wants — so nothing is re-encoded and nothing is dropped.
+func partsToMcpContent(parts []ContentPart) []mcp.Content {
+	out := make([]mcp.Content, 0, len(parts))
+	for _, p := range parts {
+		switch p.Type {
+		case PartText:
+			out = append(out, mcp.NewTextContent(p.Text))
+		case PartImage:
+			if p.Data != "" {
+				out = append(out, mcp.NewImageContent(p.Data, p.MimeType))
+			} else {
+				out = append(out, mcp.NewResourceLink(p.URL, p.Name, "", p.MimeType))
+			}
+		case PartAudio:
+			if p.Data != "" {
+				out = append(out, mcp.NewAudioContent(p.Data, p.MimeType))
+			} else {
+				out = append(out, mcp.NewResourceLink(p.URL, p.Name, "", p.MimeType))
+			}
+		case PartFile:
+			if p.Data != "" {
+				out = append(out, mcp.NewEmbeddedResource(mcp.BlobResourceContents{
+					URI: p.Name, MIMEType: p.MimeType, Blob: p.Data,
+				}))
+			} else {
+				out = append(out, mcp.NewResourceLink(p.URL, p.Name, "", p.MimeType))
+			}
+		}
+	}
+	return out
 }

@@ -1,4 +1,4 @@
-<!-- ctx-optimize:instructions:begin v0.11.0-13-gc2ae906 -->
+<!-- ctx-optimize:instructions:begin v0.14.0-64-g7381927-dirty -->
 # ctx-optimize — the usage card for this repo's knowledge store
 
 **ctx-optimize is a SHELL COMMAND (a CLI on PATH), not a callable tool: run
@@ -34,10 +34,12 @@ CI gate: `up && fresh`.
 | **Blast radius** — is it safe to change | `ctx-optimize affected <symbol> --depth 2 --json` |
 | **Connection** — how are A and B related | `ctx-optimize path "A" "B" --json` |
 | **Orient** — where do I start | `ctx-optimize hubs --top 10 --json` |
-| **List / filter** — every node of a kind, edges of a relation, deps by scope ("all k8s services", "which files use react", "our dev deps") | `ctx-optimize nodes --kind K` / `edges --relation R` / `deps --scope dev [--importers]` — native, portable, **never `export \| jq`** |
+| **List / filter** — every node of a kind, edges of a relation, deps by scope ("all k8s services", "which files use react", "our dev deps") | `ctx-optimize nodes --kind K` / `edges --relation R` / `deps --scope dev [--importers]` — native, portable, **never `export \| jq`**. **An empty result that CANNOT match says so**: `nodes --kind route` prints `(0 nodes)  — no node in this store has kind "route"; kinds present: …` and still exits 0 (there is no `route` kind — served routes are `port` nodes with `direction=provides`). A real kind filtered to nothing is NOT decorated. `--json`/`--ndjson` put it on stderr as `{"filter_disclosure":{…}}` |
+| **Boundaries** — what does this call out to / expose, which env vars are secrets, what does it shell out to, is that call http or a queue | `ctx-optimize boundaries [--sensitive] [--transport T] [--direction consumes\|provides] [--json]` — CONSUMES/PROVIDES split with `file:line`. **`query` cannot reach these** (a hostname scores as prose); this verb or `nodes --kind port` are the ways in |
 | **Need the actual code body inline** — not just the pointer | add `--include-content` to `query`/`card` — verbatim source hydrated from the file at answer time (nothing stored) |
 | **The answer looks short — where are the rest of the callers?** | add `--include-ambiguous` to `card`/`explain`/`affected`/`path`/`hubs`/`change-plan`. These verbs answer with FACTS ONLY by default, so a **method's blast radius is a floor**: call sites the store refused to attribute are held back as a shortlist. The flag walks them, and marks every widened row (`?`, or a `MAYBE` heading) — candidates to verify, never callers |
-| **Code changed** — bring the store current | `ctx-optimize sync` — incremental resync of THIS repo (0-change ≈ ms); `--adapters` adds adapter scripts, `--all` adds native sources (dials), `--no-wiki` graph-only. Opt-in autosync: `"autosync": "lazy"` in config.json (stale reads resync themselves in the background) |
+| **Code changed** — bring the store current | `ctx-optimize sync` — incremental resync of THIS repo (0-change ≈ ms); `--adapters` adds adapter scripts, `--all` adds native sources (dials). Opt-in autosync: `"autosync": "lazy"` in config.json (stale reads resync themselves in the background) |
+| **Want a browsable markdown wiki** | `ctx-optimize wiki` — OPT-IN, no gather builds one (it was 89% of a linux gather and no verb reads it). Per run: `add --wiki`. Per repo: `"wiki": true` in config.json. Remove a stale one: `ctx-optimize wiki --delete` (the graph is untouched — never use `store delete` for this) |
 
 Query with 2–4 terms, not sentences; `card` wants the exact label (query the
 short name first if unsure). Output is parsed fact with exact `file:line` —
@@ -74,12 +76,55 @@ candidates to verify, never callers. Flat list: `edges --relation calls
 
 Never present `called by` as the complete caller set while that line is printed.
 
+## Settling an abstention for good
+
+If the same method keeps coming back as `unattributed callers` and you know the
+name belongs to a type this repo does NOT own (`Error`, `String`, `Close` on
+stdlib or dependency types), write it down instead of re-deriving it —
+`.ctxoptimize/resolutions.json`, committed, inherited by everyone's agents:
+
+```json
+{ "external_methods": ["Error", "String", "Close"] }
+```
+
+It only ever RETIRES a shortlist: it never creates a call edge and never deletes
+a resolved one, so a wrong entry costs recall and cannot make the graph wrong. A
+declared name matching no call site is reported on every gather. Malformed is a
+hard error — a silently ignored declaration is worse than none.
+
+## Rebuilding and deleting (both permanent)
+
+```sh
+ctx-optimize add . --rebuild   # drop the store(s), gather into an empty one
+ctx-optimize store delete      # delete this repo's stores; asks [y/N]
+```
+
+`--rebuild` exists because a **retired** producer's nodes survive incremental
+gathers: `Replace` is producer-scoped, so deleting an adapter script leaves its
+nodes in the graph. A normal `add` reports those; `--rebuild` is the certain fix.
+
+`store delete` takes the root store **and** every module store — always the whole
+repo, whichever directory you run it from. `.ctxoptimize/` is never touched; it is
+committed config, not a cache. Re-gather with `add .`.
+
+## Is the store trustworthy right now?
+
+```sh
+ctx-optimize fresh   # exit 0 fresh / 1 stale / 2 unknown / 3 PARTIAL
+```
+
+**Exit 3 is the one to notice**: the last gather had producer lanes FAIL, so a
+producer (code, docs, manifests, an adapter) is *missing* from the graph — not
+merely out of date. `status` and `fresh --json` name which lanes failed. Never
+answer from a partial store without saying so.
+
 ## Tool choice — store vs grep (two-sided; wrong in either direction is the failure)
 
 | Question shape | Tool |
 |---|---|
 | symbols, structure, callers, impact, architecture, "how does X work" | store verbs (table above) |
-| exact literal strings, every occurrence, config VALUES, comments, member fields, build files | **grep directly — the store does not index these; say so and grep** |
+| exact literal strings, every occurrence, config VALUES, comments, member fields, build files | **grep directly — the store does not index these; say so and grep.** No `grep`/`rg` (Windows, bare container)? `ctx-optimize search '<literal>' [--ext .go] [--count]` sweeps the extractor's own file set — same gitignore, same skip-dirs, so counts match what the store saw |
+| external hosts, env-var NAMES, spawned binaries, exposed routes | `ctx-optimize boundaries` — these look like "config values" but the store DOES index them as `port` nodes with `file:line`. Grep finds the string; this tells you the direction, transport and whether it is a credential |
 
 The ladder: right-tool store verb first → verify before a human acts → READ
 the cited range when behavior matters (that is the point of the location, not
@@ -149,6 +194,68 @@ lane reads YAML specs only.
 Ruby/PHP are not covered (adapter door) and pip-compile locks are skipped on
 purpose (transitive pins, not declarations) — so `(0 dependencies)` means
 "nothing recognized", never "none declared".
+
+## Teaching it a boundary it does not know
+
+The shipped rules cover env vars, HTTP routes and clients, websockets, spawned
+processes, and browser storage (local / session / cookie). Anything else this
+codebase talks to — a queue, a cache, IndexedDB, an in-house SDK — is not
+missing because it could not be found. It is missing because nobody has written
+the rule, and the store never invents one.
+
+Add it in `.ctxoptimize/boundaries.json` and commit it. Rules merge over the
+shipped set BY ID, so a new id adds a rule and a shipped id overrides one:
+
+```json
+{
+  "version": 1,
+  "boundaries": [
+    {
+      "id": "house-idb",
+      "transport": "storage.browser.indexeddb",
+      "direction": "consumes",
+      "when": { "ext": [".ts", ".tsx", ".js"] },
+      "tier": "INFERRED",
+      "verified": {
+        "at": "2026-08-16",
+        "ground_truth": {
+          "tool": "ctx-optimize search",
+          "cmd": "search 'indexedDB\\.open\\(' --ext .ts,.js --count",
+          "re": "indexedDB\\.open\\(",
+          "ext": [".ts", ".js"],
+          "corpora": ["local"]
+        },
+        "expected": 1, "matched": 1, "sampled": 1, "confirmed": 1,
+        "known_misses": []
+      },
+      "ast": [{ "shape": "call", "name": "open", "receiver": "indexedDB", "arg": 0 }]
+    }
+  ]
+}
+```
+
+`transport` is free text and is read as `family.kind` — an unknown family is
+drawn and described honestly rather than guessed at, so inventing
+`queue.internal` is safe. Shapes available: `call` (with `receiver`,
+`arg`), `member` (a `path` like `["process","env"]`, naming the property AFTER
+it), `subscript`, `literal`, `new`, `annotation`.
+
+Two rules that are not negotiable, because they are what makes the answer worth
+citing:
+
+- **`verified` is required.** A rule with no recorded ground truth is reported
+  UNEXERCISED, never passed. `boundaries verify` re-runs each rule's own
+  evidence against this repo, and `--strict` exits nonzero when recall drops —
+  so a rule that quietly stops matching fails CI instead of quietly shrinking
+  the picture.
+- **Unmeasured never claims EXTRACTED.** Cap the tier at `INFERRED` unless the
+  ground truth was actually sampled and confirmed.
+
+A rule file that does not parse fails the gather loudly. A silently dropped
+rule would make every later count a lie.
+
+Machine-wide rules (every repo on this box) go in
+`~/.config/ctx-optimize/boundaries/*.json`, merged before the repo's own.
 
 ## Sharing — remote push/pull
 

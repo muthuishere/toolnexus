@@ -1,6 +1,6 @@
 ---
 title: Toolnexus.ToolResult
-description: The result envelope every tool returns — output text, an error flag, and optional metadata that can carry a suspension. Elixir.
+description: The result envelope every tool returns — output text, an error flag, optional non-text parts, and optional metadata that can carry a suspension. Elixir.
 sidebar:
   label: Toolnexus.ToolResult
 ---
@@ -13,13 +13,19 @@ import { Aside } from '@astrojs/starlight/components';
 
 ```elixir
 defmodule Toolnexus.ToolResult do
-  defstruct output: "", is_error: false, metadata: nil
+  defstruct output: "", is_error: false, parts: nil, metadata: nil
 end
 ```
 
-What every `execute` returns. Three fields, and the whole tool-calling loop is built on them:
-`output` is the text handed back to the model, `is_error` says whether the call failed, and
-`metadata` is free-form — except for one reserved key that turns a result into a suspension.
+What every `execute` returns. Four fields, and the whole tool-calling loop is built on them:
+`output` is the text handed back to the model, `is_error` says whether the call failed, `parts`
+carries non-text output (an image, a PDF, an audio clip), and `metadata` is free-form — except for
+one reserved key that turns a result into a suspension.
+
+**`output` stays required even when `parts` is present.** It is what the transcript, compaction,
+token estimation and any text-only provider see, so a tool returning an image sets `output` to a
+description (`"screenshot, 1280x720 png"`) and `parts` to the image. A result that sets no `parts`
+is byte-identical to one from before parts existed.
 
 Unlike `Toolnexus.Tool`, nothing here is enforced: every field has a default, so `%ToolResult{}` is
 valid and means "empty success".
@@ -140,12 +146,48 @@ correlation key the host echoes back in the `Answer`. The wire shape is identica
 port; only the convenience constructors are missing.
 </Aside>
 
+### 4. Non-text output — `parts` alongside `output`
+
+A tool that produces an image still owes the model a sentence. `output` is what the transcript and
+the compactor read; `parts` is what a vision-capable provider actually gets.
+
+```elixir test
+alias Toolnexus.{ContentPart, ToolResult}
+
+repo = System.get_env("TOOLNEXUS_REPO") || "."
+fixture = Path.join(repo, "examples/media/fixture.png")
+
+screenshot = fn ->
+  case ContentPart.image(fixture) do
+    # The non-bang form inside execute: an unreadable file is an outcome the model can
+    # recover from, not a crash that ends the run.
+    {:error, e} -> ToolResult.error("screenshot: #{Exception.message(e)}")
+    {:ok, part} -> %ToolResult{output: ContentPart.summary(part), is_error: false, parts: [part]}
+  end
+end
+
+res = screenshot.()
+false = res.is_error
+# output is never empty just because the payload is binary.
+true = res.output == "image (image/png, 82 bytes)"
+true = length(res.parts) == 1
+true = hd(res.parts).mime_type == "image/png"
+
+# parts cannot collide with a §10 suspension: pending?/1 matches on metadata only,
+# so a result carrying an image is still an ordinary, finished result.
+false = ToolResult.pending?(res)
+true = res.metadata == nil
+
+IO.puts("ok: #{res.output}")
+```
+
 ## Fields
 
 | Field | Type | Default | What it is |
 |---|---|---|---|
 | `output` | `String.t()` | `""` | The text handed to the model. Serialize structured data yourself. |
 | `is_error` | `boolean()` | `false` | Whether the call failed. Fed back to the model, not raised. |
+| `parts` | `[ContentPart.t()] \| nil` | `nil` | Non-text output — see [`Toolnexus.ContentPart`](/api/elixir/types/content-part/). `nil` ⇒ byte-identical to a pre-parts result. |
 | `metadata` | `map() \| nil` | `nil` | Free-form, for your code. **Reserved:** `:pending` holds a §10 `Request`. |
 
 ## Functions
@@ -161,3 +203,4 @@ port; only the convenience constructors are missing.
 - [`Toolnexus.Tool`](/api/elixir/types/tool/) — what returns this
 - [`Toolnexus.Context`](/api/elixir/types/context/) — what `execute` receives
 - [`Toolnexus.Request`](/api/elixir/suspension/pending/) — the suspension request shape
+- [`Toolnexus.ContentPart`](/api/elixir/types/content-part/) — what `parts` holds

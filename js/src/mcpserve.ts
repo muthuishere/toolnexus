@@ -14,7 +14,8 @@
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { ListToolsRequestSchema, CallToolRequestSchema, McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js"
-import type { Tool, ToolSource } from "./types.js"
+import type { Tool, ToolSource, ToolResult } from "./types.js"
+import type { ContentPart } from "./content.js"
 
 const DEFAULT_NAME = "toolnexus"
 const DEFAULT_VERSION = "0.1.0"
@@ -75,7 +76,7 @@ export function buildMcpServer(tools: Tool[], cfg?: MCPServeConfig, onCall?: OnC
     // The call is a single synchronous tool invocation honoring the MCP
     // request's cancellation. An execute() throw becomes an isError result —
     // never a crash.
-    let result
+    let result: ToolResult
     try {
       result = await tool.execute(req.params.arguments ?? {}, { signal: extra.signal })
     } catch (e) {
@@ -88,8 +89,30 @@ export function buildMcpServer(tools: Tool[], cfg?: MCPServeConfig, onCall?: OnC
         // Host callback errors are isolated.
       }
     }
-    return { content: [{ type: "text", text: result.output }], isError: result.isError }
+    return { content: [{ type: "text", text: result.output }, ...partBlocks(result.parts)], isError: result.isError }
   })
 
   return server
+}
+
+/**
+ * §7C. A served tool's `ToolResult.parts` become MCP content blocks appended after the
+ * text part, in order — image ⇒ image content, audio ⇒ audio content, file ⇒ an embedded
+ * resource (a url-backed file keeps its uri, a byte-backed one carries the blob).
+ */
+function partBlocks(parts: ContentPart[] | undefined): any[] {
+  if (!parts?.length) return []
+  const out: any[] = []
+  for (const p of parts) {
+    if (p.type === "text") out.push({ type: "text", text: p.text })
+    else if (p.type === "image" && p.data) out.push({ type: "image", data: p.data, mimeType: p.mimeType })
+    else if (p.type === "audio" && p.data) out.push({ type: "audio", data: p.data, mimeType: p.mimeType })
+    else {
+      const uri = p.url ?? `file:///${(p as any).name ?? "resource"}`
+      const resource: any = { uri, mimeType: p.mimeType }
+      if (p.data) resource.blob = p.data
+      out.push({ type: "resource", resource })
+    }
+  }
+  return out
 }

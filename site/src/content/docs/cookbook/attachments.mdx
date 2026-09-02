@@ -1,0 +1,355 @@
+---
+title: Attachments & multimodal
+description: Hand the loop an image, a PDF or an audio clip — and let a tool hand one back — in all seven languages.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+Half the useful questions are about something you can *see*: a screenshot of a broken
+page, a scanned invoice, a chart. Until now toolnexus could not carry one — and worse,
+an MCP tool that **returned** an image had it silently dropped, so a screenshot tool
+handed you the empty string with no error and no log line. Both directions work now:
+you attach content going in, tools return content coming out, and every provider style
+gets a shape it actually accepts.
+</Aside>
+
+## Send an image
+
+Parts go in the **first** argument, alongside your text — the order of text and image is
+semantic to a model, and an `{attachments}` option throws it away. A plain string prompt is
+unchanged and byte-identical, so no existing call site moves.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+import { attach } from "toolnexus"
+
+const res = await client.run(
+  ["What is broken in this screenshot?", await attach("./shot.png")],
+  toolkit,
+)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import image, text
+
+res = await client.run(
+    [text("What is broken in this screenshot?"), image("./shot.png")],
+    toolkit,
+)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+res, err := client.RunParts(ctx, []toolnexus.ContentPart{
+    toolnexus.Text("What is broken in this screenshot?"),
+    toolnexus.File("./shot.png"),          // read now; its read error surfaces from RunParts
+}, tk)
+```
+</TabItem>
+<TabItem label="Java">
+```java
+var res = client.run(List.of(
+        ContentPart.text("What is broken in this screenshot?"),
+        ContentPart.ofFile(Path.of("./shot.png"))), tk);
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var res = await client.RunAsync(new[] {
+    ContentPart.FromText("What is broken in this screenshot?"),
+    ContentPart.FromFile("./shot.png"),
+}, tk);
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.ContentPart
+
+{:ok, res} = Toolnexus.Client.run(client, [
+  ContentPart.text("What is broken in this screenshot?"),
+  ContentPart.image!("./shot.png")
+], tk)
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.content :as content])
+
+(client/run c [(content/text-part "What is broken in this screenshot?")
+               (content/attach "./shot.png")]
+            {:toolkit tk})
+```
+</TabItem>
+</Tabs>
+
+A `ContentPart` is `text`, `image`, `file` or `audio`, carrying base64 `data` **or** a `url`
+plus a `mimeType` — exactly one of the two. The mime type comes from a fixed extension table
+shared with the built-in `read` tool; it is never sniffed from content and never resolved
+through the machine's mime database, whose contents differ per box and would quietly break
+cross-port parity. An unknown extension with no explicit mime type is a typed error naming
+the extension.
+
+## Use what you already have
+
+You are rarely holding a path. You are holding an `InputStream`, a `FileInfo`, a `Blob`, an
+`io.Reader`, an open file handle — and converting it by hand is the same ergonomic tax as
+base64-ing by hand, paid in every calling program instead of once in the library. So each
+port's edge constructors take that port's own native sources:
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+await attach("./invoice.pdf")                       // a path
+await attach(blob)                                  // a Blob / File (mime from blob.type)
+await attach(buf, { mimeType: "image/png" })        // Uint8Array / Buffer / ArrayBuffer
+await attach("data:image/png;base64,iVBORw0K…")     // parsed, never stored as a url
+await attach("https://example.com/chart.png")       // kept as a url
+```
+</TabItem>
+<TabItem label="Python">
+```python
+image(pathlib.Path("./shot.png"))                   # str or any os.PathLike
+image(open("./shot.png", "rb"))                     # any binary file-like with .read()
+image(io.BytesIO(raw), mime_type="image/png")       # bytes / bytearray / memoryview
+file("./invoice.pdf")                               # a document part
+audio("./clip.wav")
+```
+</TabItem>
+<TabItem label="Go">
+```go
+toolnexus.File("./shot.png")                        // a path
+toolnexus.FileHandle(f)                             // an fs.File / *os.File
+toolnexus.Reader(r, "image/png")                    // any io.Reader
+toolnexus.FSFile(assets, "shot.png")                // an fs.FS — an embed.FS works
+toolnexus.Bytes(raw, "image/png")
+toolnexus.URLPart("https://example.com/chart.png", "image/png")
+```
+</TabItem>
+<TabItem label="Java">
+```java
+ContentPart.ofFile(Path.of("./shot.png"));          // a Path
+ContentPart.ofFile(new File("./shot.png"));         // a java.io.File
+ContentPart.ofStream(in, "image/png");              // any InputStream
+ContentPart.image("image/png", bytes);
+ContentPart.ofUrl("image", "https://example.com/chart.png");
+// ofFileChecked / ofStreamChecked are the same calls with a checked IOException
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+ContentPart.FromFile("./shot.png");                 // a path
+ContentPart.FromFile(new FileInfo("./shot.png"));   // a FileInfo
+ContentPart.FromStream(stream, "image/png");        // any Stream
+ContentPart.FromBytes(raw, "image/png");            // byte[] / Span / Memory
+ContentPart.FromUrl("https://example.com/chart.png");
+// FromFileAsync / FromStreamAsync are the async spellings
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+ContentPart.image!("./shot.png")                          # a path
+ContentPart.image!(File.stream!("./shot.png", [], 2048))  # a File.Stream — mime from .path
+ContentPart.image!({:bytes, raw}, mime_type: "image/png") # tagged bytes
+ContentPart.image!(iolist, mime_type: "image/png")        # iodata
+ContentPart.file!("./invoice.pdf")
+# new/3 returns {:ok, part} | {:error, e}; the bang variants raise
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(content/attach "./shot.png")                        ; a path
+(content/attach "data:image/png;base64,iVBORw0K…")   ; a data: URL
+(content/attach "https://example.com/chart.png")     ; kept as a :url
+(content/from-bytes ba "image/png")                  ; byte[] (JVM) / []byte (Go) / any byte seq
+(content/image-file "./shot.png")                    ; from-file pinned to an image part
+```
+</TabItem>
+</Tabs>
+
+The rule is **accept broadly, store narrowly**. Whatever goes in, what lands in the part —
+and therefore in your transcript — is bytes and a `mimeType`, never a handle and never a
+path. A stream is read **eagerly at construction**, because a part holding a half-read stream
+would survive a replay no better than a path does; a handle you pass is read, **not closed**
+— disposing it stays yours.
+
+<Aside type="note" title="Why a path is never stored">
+A transcript is persisted, replayed, compacted, handed to a sub-agent, served over A2A and
+sent across a process boundary. `./shot.png` means nothing on the other side of any of
+those. So the convenience lives at the edge and normalises immediately: the disk touch is
+one legible call, and the part that reaches your transcript is portable.
+</Aside>
+
+<Aside type="caution" title="Clojure takes a shorter list, and says so">
+`java.io.File` is JVM-only and cannot appear in a dual-host `.cljc` source without making the
+namespace unloadable on cljgo, and there is no host-neutral stream abstraction to hide the
+difference behind. Rather than fake it, that port accepts a path, a host byte array or any
+seq of byte values, and hands a **named error part** back for a file or stream object —
+telling you exactly what to pass instead.
+</Aside>
+
+## Tools that return images
+
+`ToolResult` gains an optional `parts` alongside its still-required `output`, so the
+transcript, compaction and any text-only provider keep seeing text — a screenshot tool sets
+`output` to a description and `parts` to the image. MCP tools get this for free: `image`,
+`audio`, `resource_link` and blob `resource` blocks now map onto `parts` on **every** branch,
+including the `structuredContent` and `isError` short-circuits. A text-only result has no
+`parts` key at all and is byte-identical to before.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+defineTool({
+  name: "screenshot",
+  description: "Capture the page",
+  execute: async () => ({
+    output: "screenshot, 1280x720 png",
+    parts: [await attach("./shot.png")],
+  }),
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+async def execute(args, ctx=None):
+    return ToolResult(
+        output="screenshot, 1280x720 png",
+        is_error=False,
+        parts=[image("./shot.png")],
+    )
+```
+</TabItem>
+<TabItem label="Go">
+```go
+return toolnexus.ToolResult{
+    Output: "screenshot, 1280x720 png",
+    Parts:  []toolnexus.ContentPart{toolnexus.File("./shot.png")},
+}, nil
+```
+</TabItem>
+<TabItem label="Java">
+```java
+return new ToolResult("screenshot, 1280x720 png", false, null,
+        List.of(ContentPart.ofFile(Path.of("./shot.png"))));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+return new ToolResult("screenshot, 1280x720 png",
+    Parts: new[] { ContentPart.FromFile("./shot.png") });
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+%Toolnexus.ToolResult{
+  output: "screenshot, 1280x720 png",
+  parts: [ContentPart.image!("./shot.png")]
+}
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+{:output "screenshot, 1280x720 png"
+ :parts  [(content/attach "./shot.png")]}
+```
+</TabItem>
+</Tabs>
+
+### The relocation rule
+
+The two provider styles disagree about where a tool's image may live, and the disagreement
+is load-bearing:
+
+- **`anthropic`** accepts image blocks inside `tool_result.content`, keyed to the
+  `tool_use_id`. Parts ride there natively.
+- **`openai`** rejects an image in a `tool` message outright — *"Image URLs are only allowed
+  for messages with role 'user'"*, a hard 400, verified live rather than assumed. So the
+  tool message carries `output` plus text parts only, and **all** non-text parts from **all**
+  tool results answering one assistant turn are relocated, in tool-call order, into a
+  **single synthetic `user` message** emitted immediately after the last tool message — each
+  part preceded by `Output of tool <name> (<tool_call_id>):`.
+
+That synthetic message is an adapter artifact. It is **never** written to `RunResult.messages`,
+the conversation store, or `translate` output, so switching provider mid-conversation leaves
+no OpenAI-shaped residue. Relocating on *every* style would have been simpler to describe and
+worse to use: it discards the `tool_use_id` association, breaks cache breakpoints, and makes
+the model read tool output as user input.
+
+## When a provider can't take it
+
+Nothing is dropped quietly — silence is the bug this whole capability exists to remove. But
+erroring on everything would be its own regression, so the rule follows **provenance**:
+
+| the part | what happens |
+|---|---|
+| **you attached it** | a typed error at assembly, **before any HTTP call** — you asked for something specific, and silently changing it is the betrayal |
+| **it arrived from a tool** | a named text placeholder (`[unsupported audio part (audio/wav, 41984 bytes)]`) and a **warn-once**; the run continues |
+
+Set `onUnsupportedPart` to `"error"` or `"text"` to override both uniformly — `onUnsupportedPart`
+in js/java, `on_unsupported_part` in python/elixir, `OnUnsupportedPart` in Go/C#,
+`:on-unsupported-part` in Clojure.
+
+The guard is a **positive allowlist** over the encoded block, not a mapping that hopes for the
+best. That is not caution for its own sake: sending an unrecognised block type upstream returns
+**HTTP 200 with the content silently discarded** — the same failure this release fixes, one
+layer up. `anthropic` names `audio` as a refusal, because the provider defines no audio block;
+`openai` refuses a `file` part carrying a `url`, because Chat Completions has no URL form for
+one.
+
+Gemini **request** emission is out of scope — `ClientStyle` is `openai | anthropic`, and
+`toGemini` emits tool declarations only. Attachments work on both implemented styles.
+
+<Aside type="caution" title="Clojure returns the error, it does not throw">
+That port's rule is that nothing crosses a source boundary as an exception. An unsendable
+part comes back as a `RunResult` with `:status "incomplete"`, `:limit "contentPart"` and an
+`:error {:code :message}`, and **no HTTP request is made**. Its edge constructors follow the
+same rule, returning an error part carrying the reason — the way Go's `File(path)` defers its
+read error to `RunParts`.
+</Aside>
+
+## Limits, and what the token estimate is for
+
+`maxPartBytes` caps a part's **decoded** byte length — never the +33% base64 string — and is
+enforced **at request assembly**, over every part regardless of provenance. Assembly, not
+construction, is the guarantee: a part that arrived from an MCP server never passed through
+an edge constructor, and a limit that a tool-supplied 50 MB image can walk around is not a
+limit. Going over follows the same provenance rule as an unsupported part, so a remote server
+still cannot fail your run.
+
+Spelling per port: `maxPartBytes` (js, java), `max_part_bytes` (python, Elixir),
+`MaxPartBytes` (Go, C#), `:max-part-bytes` (Clojure). Every port takes it as a client option
+enforced at assembly, and every port also accepts it per part at construction as a fast-fail
+convenience — `ContentPart.image!("./shot.png", max_part_bytes: 5_000_000)`.
+
+A part is charged to the compactor at **`max(85, floor(decodedBytes / 750))`** tokens,
+identical in every port. Two things it is deliberately not: the length of the `mimeType`
+string (which scores a 5 MB image at ~3 tokens and makes it uncompactable), and the default
+`ceil(chars/4)` over the base64 (which scores that same image at ~1.7M tokens and makes it
+the only thing the compactor ever evicts). Both extremes were reached independently by
+different ports before the formula was pinned.
+
+It is an **estimator, not a tokenizer**, and cannot be otherwise: real vision cost is not
+proportional to bytes at all. The same 82-byte `examples/media/fixture.png` measured **8 500**
+prompt tokens on `gpt-4o-mini` and **258** on `gemini-2.5-flash-lite`. No byte-derived formula
+is accurate across providers, so the contract optimises for the one property the compactor
+needs — every port agrees, and a part is never free.
+
+Logs and events render a part as `{type, mimeType, bytes}`. `data` is **never** logged.
+
+<Aside type="danger" title="OpenRouter → an Anthropic model silently eats your image">
+Verified live, and worth knowing before it wastes your afternoon: a **correct** openai-style
+image block sent to `openrouter.ai` for an **Anthropic** model returns **HTTP 200 with the
+image discarded**. On `anthropic/claude-haiku-4.5` the prompt grew by **4 tokens**, where the
+identical request grew by 8 500 on `gpt-4o-mini` and 258 on `gemini-2.5-flash-lite` — and the
+model cheerfully described colours it had never seen.
+
+Use `style: "anthropic"` for Anthropic models. Nothing in toolnexus can fix this; the block we
+emit is the documented one. It is also why our live check proves image arrival by
+**prompt-token delta** rather than by reading the answer: a model asked to name colours will
+name colours it never received, which is exactly how a dropped image hides.
+</Aside>
+
+Next: [Multi-turn memory](/toolnexus/cookbook/memory/).

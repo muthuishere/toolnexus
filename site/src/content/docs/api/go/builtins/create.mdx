@@ -124,6 +124,19 @@ func main() {
 }
 ```
 
+`read` is not text-only. When the path's extension is in the fixed media table — `png` `jpg`
+`jpeg` `gif` `webp` `pdf` `mp3` `wav` — it returns `Output` as a one-line description
+(`shot.png (image/png, 82 bytes)`) and one [`ContentPart`](/api/go/types/content-part/) in
+[`ToolResult.Parts`](/api/go/types/tool-result/) carrying the base64 bytes. Any other extension is
+read as UTF-8 text, and bytes that are not valid UTF-8 come back as an `IsError` result naming the
+file — never a panic escaping into the loop.
+
+<Aside type="note" title="Nothing consumes the token estimate yet in Go">
+`ContentPart.EstimatedTokens()` implements the SPEC §1B formula and is tested, but the Go
+compactor does not yet read it: a part still costs whatever the compactor's text estimate makes of
+it. That is a gap, not a design decision.
+</Aside>
+
 ### 3. Hand-assembling a custom set on top of the full list
 
 `CreateBuiltinTools` always returns all ten — filtering to a custom subset is your own slice logic,

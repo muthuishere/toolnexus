@@ -1,0 +1,248 @@
+---
+title: "ContentPart"
+description: "The non-text half of a message: text | image | file | audio, carrying base64 bytes or a URL plus a mimeType — never a path. — JavaScript."
+sidebar:
+  label: "ContentPart"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/content.ts">js/src/content.ts</a>
+</p>
+
+```ts
+type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image"; mimeType: string; data?: string; url?: string }
+  | { type: "file"; mimeType: string; data?: string; url?: string; name?: string }
+  | { type: "audio"; mimeType: string; data?: string; url?: string }
+```
+
+The non-text half of a message: text | image | file | audio, carrying base64 bytes or a URL plus a
+mimeType — never a path. Four invariants make it portable:
+
+- **Exactly one of `data` / `url`.** Both, or neither, is a typed `ContentPartError`.
+- `data` is **standard base64** — padded, no line breaks (RFC 4648 §4, not the URL-safe alphabet).
+- The mime field is spelled `mimeType` in every port and on the wire.
+- **A part never holds a filesystem path.**
+
+## When to use it
+
+Two directions, one type.
+
+**Into a run** — a `prompt` is a `string` *or* a `ContentPart[]`, so attaching a screenshot, a PDF
+or an audio clip to a turn is a list rather than a second API. Build the parts with
+[`attach`](/api/javascript/content/attach/) and the loop translates them into each provider's
+block shape (§8A) on the way out.
+
+**Out of a tool** — [`ToolResult.parts`](/api/javascript/types/tool-result/) is how a tool hands
+back something that is not text: a rendered chart, a page screenshot, a fetched PDF. The built-in
+`read` already does this for a recognised media file.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Why a part never holds a path">
+A path is the obvious design and it fails in four places at once. A transcript is persisted by a
+`ConversationStore` and **replayed later**, when the temp file is gone; it crosses into a
+**subagent**, into a **served toolkit**, and out to an **A2A peer** — three different processes,
+often three different machines, none of which can open your `/tmp/shot.png`. Bytes survive all
+four; a path survives none.
+
+So the convenience lives at the *edge* instead. [`attach`](/api/javascript/content/attach/) reads
+the file and base64s it **immediately**, which keeps the disk touch to one legible call at the
+place you actually have the file — rather than a lazy read that fires somewhere unknowable, or
+does not fire at all.
+</Aside>
+
+The same rule is why a `Blob`, a `File` and a stream are consumed **eagerly**: a part holding a
+half-read stream would not survive the transcript boundary any better than a path does. Accept
+broadly, store narrowly — whatever goes in, what lands in the part is a `mimeType` plus bytes.
+
+## Examples
+
+### 1. A text part and an image part
+
+The committed fixture (`examples/media/fixture.png`, 82 bytes) with its committed golden base64.
+Assert against the golden on disk — never a re-encoding, and never a hardcoded literal.
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import { attach, text, partBytes, type ContentPart } from "toolnexus"
+
+// The committed golden — the source of truth for these bytes in all seven ports.
+const golden = fs.readFileSync("examples/media/fixture.png.base64", "utf8").trim()
+
+type ImagePart = Extract<ContentPart, { type: "image" }>
+
+const caption: ContentPart = text("What colour is the top-left quadrant?")
+const image = (await attach("examples/media/fixture.png")) as ImagePart
+
+assert.equal(caption.type, "text")
+assert.equal(image.type, "image")
+assert.equal(image.mimeType, "image/png") // from the fixed extension table, never sniffed
+assert.equal(image.data, golden)
+assert.equal(image.url, undefined) // exactly one of data / url
+assert.equal(partBytes(image), 82) // decoded bytes, not the +33% base64 string
+
+// A prompt is a string OR an ordered list of parts; ordering is semantic to a model.
+const prompt: ContentPart[] = [caption, image]
+console.log("ok:", prompt.length, "parts |", image.mimeType, partBytes(image), "bytes")
+```
+
+### 2. The native sources you already hold
+
+`attach` takes whatever spelling of the bytes you have — a `Blob`/`File`, an `ArrayBuffer`, a
+`Buffer`, a `data:` URL — and every one of them normalises to the same `{mimeType, data}`.
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import { attach, type ContentPart } from "toolnexus"
+
+const bytes = fs.readFileSync("examples/media/fixture.png")
+const golden = fs.readFileSync("examples/media/fixture.png.base64", "utf8").trim()
+
+// A File carries its own type and name — both are read at construction.
+const file = new File([bytes], "fixture.png", { type: "image/png" })
+// A bare Blob has a type but no name.
+const blob = new Blob([bytes], { type: "image/png" })
+// Raw bytes carry no extension, so mimeType is REQUIRED for these two.
+const buffer = await attach(bytes, { mimeType: "image/png" })
+const arrayBuffer = await attach(
+  bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+  { mimeType: "image/png" },
+)
+// Two spellings of the same bytes must not diverge: a data: URL is parsed, not stored.
+const dataUrl = await attach(`data:image/png;base64,${golden}`)
+
+const parts: ContentPart[] = [await attach(file), await attach(blob), buffer, arrayBuffer, dataUrl]
+
+for (const p of parts) {
+  assert.equal(p.type, "image")
+  assert.equal((p as any).mimeType, "image/png")
+  assert.equal((p as any).data, golden, "every native source normalises to the same base64")
+  // No handle, no path, no stream survives into the part.
+  for (const leak of ["path", "url", "blob", "stream", "file"]) {
+    assert.equal(leak in (p as any), false, `a part must not carry a ${leak}`)
+  }
+  // And it round-trips through a persisted transcript with the file gone.
+  assert.equal(JSON.parse(JSON.stringify(p)).data, golden)
+}
+
+console.log("ok:", parts.length, "native sources → one shape")
+```
+
+### 3. The refusals, and the token estimate
+
+Every failure mode is a typed `ContentPartError` with a machine-readable `code`. Nothing is
+guessed: mime is never sniffed, and an over-limit payload never reaches a provider.
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import {
+  attach,
+  validatePart,
+  partBytes,
+  partTokens,
+  ContentPartError,
+  type ContentPart,
+} from "toolnexus"
+
+const caught = async (fn: () => unknown): Promise<any> => {
+  try {
+    await fn()
+    return undefined
+  } catch (e) {
+    return e
+  }
+}
+
+// (a) Both data and url — the §1B invariant, checked at construction and again at assembly.
+const conflict = await caught(() =>
+  validatePart({ type: "image", mimeType: "image/png", data: "abcd", url: "https://e/x.png" } as ContentPart),
+)
+assert.ok(conflict instanceof ContentPartError)
+assert.equal(conflict.code, "source-conflict")
+
+// Neither is equally an error — silence is not a source.
+const missing = await caught(() => validatePart({ type: "image", mimeType: "image/png" } as ContentPart))
+assert.equal(missing.code, "source-missing")
+
+// (b) An unknown extension is refused BY NAME, with the fix in the message.
+const unknown = await caught(() => attach("/tmp/thing.xyz"))
+assert.equal(unknown.code, "unknown-extension")
+assert.match(unknown.message, /"xyz"/)
+assert.match(unknown.message, /mimeType/)
+// Raw bytes have no extension to read at all, so mimeType is not optional there.
+assert.equal((await caught(() => attach(new Uint8Array([1, 2, 3])))).code, "unknown-extension")
+
+// (c) maxPartBytes is measured in DECODED bytes, and fails fast at the edge.
+const big = await caught(() => attach("examples/media/fixture.png", { maxPartBytes: 10 }))
+assert.equal(big.code, "too-large")
+assert.match(big.message, /82 decoded bytes/) // the real size, not the base64 length
+assert.ok(await attach("examples/media/fixture.png", { maxPartBytes: 82 })) // the limit is inclusive
+
+// (d) partTokens is byte-derived and normative: max(85, floor(bytes / 750)).
+const golden = fs.readFileSync("examples/media/fixture.png.base64", "utf8").trim()
+const small = (await attach("examples/media/fixture.png")) as Extract<ContentPart, { type: "image" }>
+assert.equal(partBytes(small), 82)
+assert.equal(partTokens(partBytes(small)), 85) // the floor — a part is never free
+assert.equal(partTokens(750 * 200), 200)
+assert.equal(partTokens(1_000_000), 1333)
+assert.equal(small.data, golden)
+
+console.log("ok:", conflict.code, missing.code, unknown.code, big.code, "| tokens", partTokens(partBytes(small)))
+```
+
+## Fields
+
+| Field | On | Type | What it is |
+|---|---|---|---|
+| `type` | all | `"text" \| "image" \| "file" \| "audio"` | Which arm of the union this is. |
+| `text` | `text` | `string` | The text itself. |
+| `mimeType` | non-text | `string` | Spelled `mimeType` in every port and on the wire. Never sniffed. |
+| `data` | non-text | `string` | Standard base64, padded, no line breaks. **Exactly one of `data`/`url`.** |
+| `url` | non-text | `string` | An `http(s):` URL kept as a reference. A `data:` URL is parsed into `data` instead. |
+| `name` | `file` | `string` | Filename carried on a file part (OpenAI's `file.filename`). |
+
+## The media extension table
+
+Fixed, shared with `read` (§6), identical in every port — no magic-byte sniffing and no platform
+mime database, whose contents vary per machine and would break cross-port parity.
+
+| ext | mimeType | part type |
+|---|---|---|
+| `png` | `image/png` | `image` |
+| `jpg`, `jpeg` | `image/jpeg` | `image` |
+| `gif` | `image/gif` | `image` |
+| `webp` | `image/webp` | `image` |
+| `pdf` | `application/pdf` | `file` |
+| `mp3` | `audio/mpeg` | `audio` |
+| `wav` | `audio/wav` | `audio` |
+
+Anything else needs an explicit `mimeType`; without one it is an `unknown-extension` error naming
+the extension.
+
+## Errors
+
+| `code` | When |
+|---|---|
+| `source-conflict` | The part carries both `data` and `url`. |
+| `source-missing` | It carries neither — or a malformed `data:` URL. |
+| `unknown-extension` | No `mimeType`, and the extension is not in the table (or there is no extension: raw bytes). |
+| `too-large` | Decoded bytes exceed `maxPartBytes`. |
+| `unsupported` | The provider style defines no block for this part type (§8A). |
+
+<Aside type="caution" title="`data` is never logged">
+Logs and §9 events render a part as `{type, mimeType, bytes}`. Part payloads are user content —
+the same rule as never logging headers.
+</Aside>
+
+## See also
+
+- [`Tool`](/api/javascript/types/tool/) — The uniform shape every tool source collapses to: name, description, JSON-Schema parameters, execute.
+- [`ToolResult`](/api/javascript/types/tool-result/) — The result envelope: output text, optional error flag, optional non-text parts, and optional metadata that can carry a suspension.
+- [`ToolContext`](/api/javascript/types/context/) — Optional per-call context handed to execute: cancellation, identity, and host-supplied state.

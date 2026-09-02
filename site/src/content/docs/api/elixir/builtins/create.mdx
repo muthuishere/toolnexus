@@ -31,7 +31,11 @@ internally before applying the on/off and per-tool toggles.
 - **You want the full set, unconditionally** — no `enabled`/`disabled` check, no `tools` allowlist
   to reason about, just the ten tools.
 - **Testing or inspecting a single builtin** — `tools/0` is the shortest path to a real `bash` or
-  `read` tool struct you can call `execute.(args, ctx)` on directly.
+  `read` tool struct you can call `execute.(args, ctx)` on directly. `read` is not text-only: for a
+  recognised media extension (`png jpg jpeg gif webp pdf mp3 wav`) it returns
+  `<path> (<mimeType>, <bytes> bytes)` as `output` plus one
+  [`Toolnexus.ContentPart`](/api/elixir/types/content-part/) in `parts`; bytes that are neither
+  valid UTF-8 nor a recognised media file come back as an `is_error: true` result.
 - **Building your own selection logic** — if `Builtin.load/1`'s toggle shape doesn't fit your
   config format, call `tools/0` and filter the list yourself.
 

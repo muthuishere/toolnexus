@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // BuiltinsConfig is the object form of the single global builtin toggle. It
@@ -351,7 +352,7 @@ func bashTool() Tool {
 func readTool() Tool {
 	return builtin(
 		"read",
-		"Read a UTF-8 text file. With offset/limit, return only that line window.",
+		"Read a file. A recognised media file (png/jpg/jpeg/gif/webp/pdf/mp3/wav) comes back as a content part; anything else is read as UTF-8 text, and with offset/limit only that line window.",
 		JSONSchema{
 			"type": "object",
 			"properties": map[string]any{
@@ -370,6 +371,24 @@ func readTool() Tool {
 			raw, err := os.ReadFile(p)
 			if err != nil {
 				return bErr(fmt.Sprintf("read: %v", err), nil)
+			}
+			// §6 media table: a recognised media extension comes back as a §1B part,
+			// with output describing it. Fixed table — never sniffed, never resolved
+			// through a platform mime database (which varies per machine).
+			if e, ok := lookupMedia(p); ok {
+				part := encodeBytes(raw, e.mime, e.partType)
+				if part.Err() != nil {
+					return bErr(fmt.Sprintf("read: %v", part.Err()), nil)
+				}
+				if part.Type == PartFile {
+					part.Name = filepath.Base(p)
+				}
+				res, _ := bOk(fmt.Sprintf("%s (%s, %d bytes)", p, e.mime, len(raw)), nil)
+				res.Parts = []ContentPart{part}
+				return res, nil
+			}
+			if !utf8.Valid(raw) {
+				return bErr(fmt.Sprintf("read: %s is not valid UTF-8 text and its extension is not a recognised media type", p), nil)
 			}
 			content := string(raw)
 			_, hasOffset := args["offset"]

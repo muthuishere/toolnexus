@@ -1,3 +1,3 @@
 ;; The whole dependency story. koine (the portability seam) comes with it.
 {:paths ["src"]
- :deps  {net.clojars.muthuishere/toolnexus {:mvn/version "0.16.0"}}}
+ :deps  {net.clojars.muthuishere/toolnexus {:mvn/version "0.17.0"}}}

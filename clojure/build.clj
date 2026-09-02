@@ -29,7 +29,7 @@
 ;; 'io.github.muthuishere' doesn't exist" on deploy, 2026-07-30). Same group as
 ;; koine, and the artifact name `toolnexus` matches every other port.
 (def lib 'net.clojars.muthuishere/toolnexus)
-(def version "0.16.0")            ; kept in lockstep with the other six ports
+(def version "0.17.0")            ; kept in lockstep with the other six ports
 (def class-dir "target/classes")
 (def jar-file (format "target/%s-%s.jar" (name lib) version))
 
