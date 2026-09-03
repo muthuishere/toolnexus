@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# The five examples on Clojure (JVM). Each must print OK on its last line.
+# The six examples on Clojure (JVM). Each must print OK on its last line.
 set -uo pipefail
 cd "$(dirname "$0")"
 export TN_EXAMPLES="${TN_EXAMPLES:-$(cd ../../../examples && pwd)}"
 
 EXAMPLES=(toolnexus.demo examples.native-and-http examples.skills
-          examples.persona-memory examples.compaction)
+          examples.persona-memory examples.compaction examples.multimodal)
 fail=0
 for ns in "${EXAMPLES[@]}"; do
   out=$(clojure -M -m "$ns" 2>&1)

@@ -33,8 +33,12 @@ An A2A agent tool's `execute` SHALL call the agent's JSON-RPC endpoint with meth
 until the Task reaches a terminal state (`completed`/`failed`/`canceled`) or the `timeout` (default
 300000ms) elapses. It SHALL map a `completed` Task's artifact/message text to
 `ToolResult{isError:false}`, and a `failed`/`canceled` Task or a poll timeout to
-`ToolResult{isError:true}`. A `ctx` cancellation/timeout SHALL abort the poll. The result metadata
-SHALL include `{agent, taskId, state, polls, ms}`.
+`ToolResult{isError:true}`. A `ctx` cancellation/timeout SHALL abort the poll. **A `ctx`
+cancellation SHALL be reported as a cancel no matter where it lands: between polls, or while a
+`SendMessage`/`GetTask` request is in flight. On every error or exit path of `execute`, an aborted
+`ctx` SHALL yield `ToolResult{isError:true}` with output `"A2A task <id> canceled"` and
+`metadata.state == "canceled"` — never a raw transport error.** The result metadata SHALL include
+`{agent, taskId, state, polls, ms}`.
 
 #### Scenario: Successful task round-trip
 
@@ -51,4 +55,17 @@ SHALL include `{agent, taskId, state, polls, ms}`.
 
 - **WHEN** the `ctx` signal is aborted mid-poll
 - **THEN** polling stops and the call returns without further `GetTask` requests
+
+#### Scenario: Cancellation mid-GetTask is a cancel, not a transport error
+
+- **WHEN** the `ctx` signal is aborted while a `GetTask` request is in flight
+- **THEN** the ToolResult has `isError:true`, output `"A2A task <id> canceled"`, and
+  `metadata.state == "canceled"`
+- **AND** no further `GetTask` request is made
+
+#### Scenario: Cancellation mid-SendMessage is a cancel, not a transport error
+
+- **WHEN** the `ctx` signal is aborted while the `SendMessage` request is in flight
+- **THEN** the ToolResult has `isError:true`, output `"A2A task <id> canceled"`, and
+  `metadata.state == "canceled"`
 

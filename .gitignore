@@ -44,3 +44,9 @@ site/tests/.work/
 site/tests/snippets/
 erl_crash.dump
 clojure/examples/cljgo-ex1/chat
+
+# cljgo example binaries. `clojure/examples/cljgo/run.sh` rebuilds these on every
+# run, so they are build output, not source. Five of them (~90MB) were committed
+# before this rule existed; ignoring the pattern stops new ones landing without
+# rewriting history for the old ones — untracking those is a separate decision.
+clojure/examples/cljgo/ex-*

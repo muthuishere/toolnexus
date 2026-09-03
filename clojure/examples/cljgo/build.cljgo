@@ -1,6 +1,6 @@
-;; The same five examples, compiled to native Go binaries by cljgo.
+;; The same six examples, compiled to native Go binaries by cljgo.
 ;;
-;;   ./run.sh                          build all five and run them
+;;   ./run.sh                          build all six and run them
 ;;   cljgo run src/examples/skills.cljc  interpreted, no build step
 ;;
 ;; `src` is a SYMLINK to ../src — literally the same files the clj/ project
@@ -9,7 +9,7 @@
 ;; rejects any namespace in that jar that reaches for Java interop.
 (defn build [b]
   (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.11.0"})
-  (doseq [n ["demo" "native_and_http" "skills" "persona_memory" "compaction"]]
+  (doseq [n ["demo" "native_and_http" "skills" "persona_memory" "compaction" "multimodal"]]
     (install b (exe b {:name (str "ex-" n)
                        :main (if (= n "demo")
                                "src/toolnexus/demo.cljc"

@@ -346,7 +346,11 @@ image discarded**. On `anthropic/claude-haiku-4.5` the prompt grew by **4 tokens
 identical request grew by 8 500 on `gpt-4o-mini` and 258 on `gemini-2.5-flash-lite` — and the
 model cheerfully described colours it had never seen.
 
-Use `style: "anthropic"` for Anthropic models. Nothing in toolnexus can fix this; the block we
+**Switching to `style: "anthropic"` does not help** — OpenRouter's Anthropic-compatible
+`/v1/messages` drops it the same way (measured +4 on both `x-api-key` and `Authorization: Bearer`,
+with a hand-written native `source{}` block and no toolnexus in the path). The route is the
+problem, not the block shape; to send images to an Anthropic model, point `baseUrl` at
+`api.anthropic.com` directly. Nothing in toolnexus can fix this; the block we
 emit is the documented one. It is also why our live check proves image arrival by
 **prompt-token delta** rather than by reading the answer: a model asked to name colours will
 name colours it never received, which is exactly how a dropped image hides.

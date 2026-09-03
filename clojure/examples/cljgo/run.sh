@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The same five examples on cljgo — AOT binary AND interpreted, because a port
+# The same six examples on cljgo — AOT binary AND interpreted, because a port
 # proven only through its compiled path is proven in the mode developers use least.
 set -uo pipefail
 cd "$(dirname "$0")"
@@ -9,13 +9,13 @@ command -v cljgo >/dev/null || { echo "cljgo not on PATH — install it or run c
 
 cljgo build >/dev/null || { echo "cljgo build FAILED"; cljgo build 2>&1 | tail -15; exit 1; }
 
-declare -a NAMES=(demo native_and_http skills persona_memory compaction)
+declare -a NAMES=(demo native_and_http skills persona_memory compaction multimodal)
 # The INTERPRETED entries, not the namespace files: `cljgo run` evaluates
 # top-level forms and never calls -main, so pointing it at the ns file would
 # print the dependency banner, exit 0, and prove nothing.
 declare -a SRCS=(src/run_interpreted.cljc src/run_native_and_http.cljc
                  src/run_skills.cljc src/run_persona_memory.cljc
-                 src/run_compaction.cljc)
+                 src/run_compaction.cljc src/run_multimodal.cljc)
 fail=0
 for i in "${!NAMES[@]}"; do
   n=${NAMES[$i]}

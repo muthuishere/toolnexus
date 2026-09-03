@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Live conformance check for SPEC.md §7F — content-part emission and the
+"""Live conformance check for SPEC.md §8A — content-part emission and the
 tool-result relocation rule.
 
-§7F exists because assumptions about provider wire shapes turned out to be
+§8A exists because assumptions about provider wire shapes turned out to be
 wrong, so it is checked against real endpoints rather than trusted. This is a
 contract test for the spec itself, not for any one port: if a check here fails,
-§7F is wrong and all seven ports built on it are wrong too.
+§8A is wrong and all seven ports built on it are wrong too.
 
     python3 scripts/live-multimodal-check.py
 
@@ -72,7 +72,7 @@ def openrouter(body):
 
 def record(name, ok, detail, skipped=False, upstream=False):
     """`upstream=True` marks a real defect that is NOT ours: a router or
-    provider mis-handling a shape §7F emits correctly. It is reported loudly
+    provider mis-handling a shape §8A emits correctly. It is reported loudly
     and never hidden, but it does not fail our contract, because no change to
     this repo can fix it."""
     results.append((name, ok, skipped, upstream))
@@ -107,7 +107,7 @@ record("fixture bytes encode to the committed golden", ok,
        f"{len(B64)} chars; committed golden and committed bytes agree" if ok
        else "MISMATCH — committed golden disagrees with committed bytes")
 
-print("\n§7F — openai-shaped wire (OpenRouter): image_url + data: URL")
+print("\n§8A — openai-shaped wire (OpenRouter): image_url + data: URL")
 print("      arrival proven by prompt-token delta, not by the model's answer")
 for model in (OPENAI, GEMINI, CLAUDE_OR):
     s1, p1 = openrouter({"model": model, "max_tokens": 40, "messages": user_msg([TXT])})
@@ -119,22 +119,22 @@ for model in (OPENAI, GEMINI, CLAUDE_OR):
     base_t, img_t = or_ptok(p1), or_ptok(p2)
     delta = img_t - base_t
     arrived = delta >= MIN_IMAGE_TOKENS
-    # A drop here is the router's, not ours: §7F emitted the documented
+    # A drop here is the router's, not ours: §8A emitted the documented
     # openai-style block and got a 200 with the image gone.
     record(f"{model} receives the image", arrived,
            f"ptok {base_t} → {img_t} (delta {delta:+}) · reply {or_text(p2)[:52]!r}"
            + ("" if arrived else
               "  ← image DROPPED IN TRANSIT; the reply is a guess. The openai-shaped "
-              "block is correct per §7F; the router discarded it converting to this "
-              "provider. Use the anthropic style for anthropic models."),
+              "block is correct per §8A; the router discarded it converting to this "
+              "provider. Switching to the anthropic style does NOT help: OpenRouter's /v1/messages drops it too (+4 on both auth headers). Point baseUrl at api.anthropic.com instead."),
            upstream=not arrived)
 
-print("\n§7F — anthropic NATIVE source{} blocks")
+print("\n§8A — anthropic NATIVE source{} blocks")
 if not ANTHROPIC_KEY:
     record("anthropic native image block", True,
            "SKIPPED — needs ANTHROPIC_API_KEY. OpenRouter's endpoint is "
            "OpenAI-compatible and CANNOT exercise source{type:\"base64\"}; "
-           "§7F's anthropic column is unverified live.", skipped=True)
+           "§8A's anthropic column is unverified live.", skipped=True)
 else:
     s, p = post(ANTHROPIC_URL,
                 {"model": CLAUDE_NATIVE, "max_tokens": 40, "messages": [
@@ -148,22 +148,22 @@ else:
     record("anthropic native image block", s == 200,
            f"HTTP {s} · {str(p)[:160]}")
 
-print("\n§7F — the relocation rule")
+print("\n§8A — the relocation rule")
 TOOL_TURN = [
     {"role": "user", "content": "Take a screenshot and tell me its quadrant colours."},
     {"role": "assistant", "content": None, "tool_calls": [
         {"id": "call_1", "type": "function",
          "function": {"name": "screenshot", "arguments": "{}"}}]},
 ]
-# §7F's premise: openai MUST refuse an image in a `tool` message. A 200 here
+# §8A's premise: openai MUST refuse an image in a `tool` message. A 200 here
 # would mean the relocation rule is unnecessary complexity.
 s, p = openrouter({"model": OPENAI, "max_tokens": 40, "messages": TOOL_TURN + [
     {"role": "tool", "tool_call_id": "call_1",
      "content": [{"type": "text", "text": "done"}, IMG]}]})
 refused = s != 200
-record("openai refuses an image in a `tool` message (§7F's premise)", refused,
+record("openai refuses an image in a `tool` message (§8A's premise)", refused,
        f"HTTP {s} · {str(p)[:150]}" if refused
-       else "HTTP 200 — §7F's premise is WRONG; the relocation rule is unnecessary")
+       else "HTTP 200 — §8A's premise is WRONG; the relocation rule is unnecessary")
 
 # ...and the relocated form must work, or the rule is unimplementable.
 s1, p1 = openrouter({"model": OPENAI, "max_tokens": 40, "messages": TOOL_TURN + [
@@ -183,7 +183,7 @@ else:
     record("openai accepts the relocated part, and the image arrives", False,
            f"HTTP {s1}/{s2} · {str(p2)[:140]}")
 
-print("\n§7F — the silent-drop hazard the positive allowlist exists for")
+print("\n§8A — the silent-drop hazard the positive allowlist exists for")
 s, p = openrouter({"model": GEMINI, "max_tokens": 40, "messages": user_msg([
     {"type": "input_text", "text": ASK},
     {"type": "input_image", "image_url": DATA_URL}])})

@@ -1,8 +1,8 @@
-# Five examples, two hosts, one source tree
+# Six examples, two hosts, one source tree
 
 ```sh
-./clj/run.sh      # all five on Clojure (JVM)
-./cljgo/run.sh    # all five on cljgo — AOT binary AND interpreted
+./clj/run.sh      # all six on Clojure (JVM)
+./cljgo/run.sh    # all six on cljgo — AOT binary AND interpreted
 ```
 
 Both scripts fail loudly if any example does not finish. Each example prints `OK`
@@ -29,7 +29,7 @@ each example has a two-line `src/run_<name>.cljc` entry. Point `cljgo run` at th
 namespace file instead and it prints the dependency banner, exits 0, and proves
 nothing — a trap worth knowing about before you write your own.
 
-## The five
+## The six
 
 | # | example | what it shows |
 |---|---------|---------------|
@@ -38,15 +38,27 @@ nothing — a trap worth knowing about before you write your own.
 | 3 | `examples.skills` | **Progressive disclosure** (§3): a folder of `SKILL.md` files becomes ONE `skill` tool; the catalog goes in the prompt, the instructions load on demand. Asserts the byte-exact output every port shares. |
 | 4 | `examples.persona-memory` | **A persona that remembers** (§7E): the directory is the agent, and the `memory` tool edits its own notes on disk — including the frozen-snapshot rule that a write loads *next* session. |
 | 5 | `examples.compaction` | **Keeping a long run under budget** (§7F): the `:before-llm` compactor, with the system prompt preserved and a tool-pair never split across the summary boundary. |
+| 6 | `examples.multimodal` | **Sending an image, and a tool returning one** (§1B / §8A). The only example that talks to a real model — and the only one whose claim cannot be checked by reading the model's answer, so it is checked by prompt-token delta instead. |
 
 Examples 4 and 5 exercise the two subsystems this port has that are newest; 1–3
 are the ones to read first if you have never used the library.
 
 ## What these do NOT need
 
-No API key, no network beyond loopback, and no live model. Example 1 needs `npx`
-because it launches a real MCP server — that is a genuine dependency of talking
-MCP, not a shortcut being taken.
+No API key, no network beyond loopback, and no live model — with ONE named
+exception. Example 1 needs `npx` because it launches a real MCP server; that is a
+genuine dependency of talking MCP, not a shortcut being taken.
+
+**Example 6 is the exception, and it is opt-in by environment.** With no
+`OPENROUTER_API_KEY` it still runs and still proves the part shapes and both
+provider block shapes offline, then prints `OK`. With the key set it makes six
+cheap live calls (tiny models, `max_tokens` 40, an 82-byte fixture) — because
+the thing it exists to prove, that an attached image actually ARRIVED, is not
+provable against a mock. It is proven by the **prompt-token delta** between the
+identical request without and with the image, never by the model's answer: a
+model asked to name colours will name colours it never received, which is
+exactly how a dropped image hides. The key is read from the environment and
+never printed.
 
 `TN_EXAMPLES` points at the repo's shared fixtures (`examples/mcp.json`,
 `examples/skills/`) and defaults correctly from either project directory. The

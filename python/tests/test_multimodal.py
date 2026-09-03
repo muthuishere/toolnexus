@@ -1,4 +1,4 @@
-"""Multimodal content tests (§1B ContentPart, §7F emission, §2 MCP mapping, §6 read,
+"""Multimodal content tests (§1B ContentPart, §8A emission, §2 MCP mapping, §6 read,
 §11 translate, §7C serve).
 
 All hermetic: a mock LLM runs in-process on an ephemeral port, and the MCP inbound path
@@ -288,7 +288,7 @@ def test_token_estimate_is_byte_derived_not_mime_derived():
 
 
 # --------------------------------------------------------------------------- #
-# §7F — the positive allowlist
+# §8A — the positive allowlist
 # --------------------------------------------------------------------------- #
 def test_allowlist_block_shapes():
     img = toolnexus.image(FIXTURE)
@@ -369,7 +369,7 @@ async def test_attached_audio_to_anthropic_errors_before_any_http_call():
 
 
 # --------------------------------------------------------------------------- #
-# §7F — tool-result emission: native (anthropic) vs relocation (openai)
+# §8A — tool-result emission: native (anthropic) vs relocation (openai)
 # --------------------------------------------------------------------------- #
 async def test_openai_relocates_tool_result_parts_into_one_synthetic_user_message():
     seen = []

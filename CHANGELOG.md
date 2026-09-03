@@ -139,38 +139,30 @@ text-empty array through raw and undocumented — one of them with a comment exp
 the spec and the code now carry one rule: text parts concatenate, non-text parts translate. The
 seven ports agree by specification rather than by coincidence.
 
-### Known upstream hazard — routing an image through OpenRouter to an Anthropic model
+### Known upstream hazard — OpenRouter drops images to Anthropic models
 
-Verified live while building this release, and worth knowing before it wastes your afternoon: a
-correct openai-style image block, sent to `openrouter.ai` for an **Anthropic** model, returns
-**HTTP 200 with the image silently discarded**. Measured on `anthropic/claude-haiku-4.5`: the
-prompt grew by **4 tokens** where the same request to `gpt-4o-mini` grew by 8 500 and to
-`gemini-2.5-flash-lite` by 258 — and the model cheerfully described colours it had never seen.
+Verified live, and worth knowing before it wastes your afternoon: an image sent to
+`openrouter.ai` for an **Anthropic** model arrives as **HTTP 200 with the image silently
+discarded**. Measured with the 82-byte `examples/media/fixture.png`, as a prompt-token delta:
 
-Nothing in toolnexus can fix that; the block we emit is the documented one. Use
-`style: "anthropic"` for Anthropic models, and note that `scripts/live-multimodal-check.py`
-proves image arrival by **prompt-token delta** rather than by reading the model's answer, for
-exactly this reason: a model asked to name colours will name colours it never received, which is
-how a dropped image hides.
+| model, via OpenRouter | delta | |
+|---|---|---|
+| `anthropic/claude-haiku-4.5` | **+4** | dropped (5/5 trials) |
+| `anthropic/claude-sonnet-4.5` | **+4** | dropped |
+| `openai/gpt-4o-mini` | +8500 | delivered |
+| `google/gemini-2.5-flash-lite` | +258 | delivered |
 
-### Also — the A2A cancel contract is now documented, and Clojure's example mirror is guarded
+**Switching to `style: "anthropic"` does not help** — OpenRouter's Anthropic-compatible
+`/v1/messages` drops it the same way (14 → 18 input tokens for a hand-written native
+`source{}` block with no toolnexus in the path). The route is the problem, not the block
+shape. To send images to an Anthropic model, point `baseUrl` at `api.anthropic.com`
+directly.
 
-`SPEC.md` §7A described the abort as stopping "before the next `GetTask`" — which is exactly the
-narrow between-polls reading the fix above corrects. The contract now says an abort counts wherever
-it is observed. The docs site never described cancellation at all: `a2a.mdx` gains a "Timeouts and
-cancellation" section with the full result table and migration note.
-
-**clojure only**: `examples/src/toolnexus/` is a real copy of the library source that both example
-projects compile, and nothing kept it in sync — a namespace added to `src/` and forgotten there
-failed four examples with a classpath error naming the file but not the reason. A new
-`examples-mirror-check.sh` runs in CI ahead of the example suites and says why.
-
-**csharp only**: the test suite no longer runs classes in parallel. Several tests assert on
-wall-clock behaviour — a 60ms run deadline against an 800ms stub, heartbeat ticks coalescing — and
-this release's 26 blocking file reads starved the thread pool enough that the timeout fired late
-and the response won, so a *timeout* test failed with "No exception was thrown". Measured 3/3 green
-without the new tests and roughly 1 in 3 red with them. Serialising costs about three seconds on a
-suite that ran in two, and makes the result deterministic.
+Nothing in toolnexus can fix this; the block we emit is the documented one, and the loop
+completes correctly. The danger is that the model then *answers anyway* — ours replied
+"Blue, Red, Yellow, Green" about an image it never received. That is why
+`scripts/live-multimodal-check.py` and every port's `examples/multimodal.*` prove arrival by
+**prompt-token delta** and never by reading the reply.
 
 ### Not done, and where it is tracked
 

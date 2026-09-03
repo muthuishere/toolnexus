@@ -144,17 +144,44 @@ Lands in `client.*` message assembly — **not** `adapters.*`, which is schema-o
 
 ## 12. Live verification against OpenRouter
 
+**RESULT — seven ports, live against OpenRouter, 2026-09-03.** Each port ships
+`examples/multimodal.*` that sends `examples/media/fixture.png` and proves arrival by
+**prompt-token delta**, never by reading the model's answer. Builtins are disabled on every
+toolkit: their schemas cost ~2000 prompt tokens per turn and a turn-count difference swamps
+the measurement (two ports produced nonsense deltas before this was found).
+
+| port | openai attach | openai reloc | anthropic attach | anthropic reloc |
+|---|---|---|---|---|
+| js | +8500 · 4/4 | ok | +4 dropped | ok |
+| python | +8500 · 4/4 | +8360 | +4 dropped | +7 |
+| golang | +8500 · 4/4 | +8530 | +4 dropped | +22 |
+| java | +8500 · 4/4 | +8528 | +4 dropped | +36 |
+| csharp | +8500 · 4/4 | +8529 | +4 dropped | +22 |
+| elixir | +8500 · 4/4 | ok 4/4 | +4 dropped | ok |
+| clojure | +8500 · 4/4 | ok 4/4 | +4 dropped | ok |
+
+The openai legs agree **to the token**. The §8A relocation rule is confirmed end to end: an image
+returned in `ToolResult.parts` reaches the model, measured against a byte-identical text-only twin
+tool so the delta is the image and nothing else.
+
+The anthropic column is an **upstream OpenRouter defect, not a toolnexus failure** — measured +4 on
+`/chat/completions` (5/5 trials, haiku and sonnet) AND on the Anthropic-compatible `/v1/messages`
+with a hand-written native `source{}` block, both auth headers, no toolnexus in the path. Switching
+to `style:"anthropic"` does not rescue it; `baseUrl: api.anthropic.com` does. Every port's model
+still answered confidently and wrongly about the image it never received — which is the whole
+argument for the token-delta method.
+
 > `scripts/live-multimodal-check.py` verifies the **contract** (SPEC §8A) live: 6/7 checks pass,
 > 1 skipped (anthropic-native `source{}` needs `ANTHROPIC_API_KEY`; OpenRouter's endpoint is
 > OpenAI-compatible and structurally cannot exercise it), 1 upstream WARN (OpenRouter drops an
 > openai-shaped image en route to an Anthropic model — +4 prompt tokens vs +8500, not fixable
 > here). Per-**port** live runs (12.1-12.3) are still outstanding.
 
-- [ ] 12.1 Extend `examples/agent.*` (or a sibling runner) per port to send the fixture image and
+- [x] 12.1 Extend `examples/agent.*` (or a sibling runner) per port to send the fixture image and
       assert the model names the quadrant colours — proof the image arrived, not that it guessed
-- [ ] 12.2 Run it for all seven ports and record prompt-token counts per style (the fixture cost
+- [x] 12.2 Run it for all seven ports and record prompt-token counts per style (the fixture cost
       8 512 ptok on gpt-4o-mini vs 263 on gemini-2.5-flash-lite — the asymmetry is worth recording)
-- [ ] 12.3 Live-verify the relocation rule end to end: a tool returning an image, on both styles
+- [x] 12.3 Live-verify the relocation rule end to end: a tool returning an image, on both styles
 - [x] 12.4 Never echo `OPENROUTER_API_KEY`; reference it only where curl/the client consumes it
 
 ## 13. Docs and release hygiene

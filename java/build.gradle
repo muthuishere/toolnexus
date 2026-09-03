@@ -118,6 +118,16 @@ tasks.register('runOpenrouter', JavaExec) {
     environment 'OPENROUTER_MODEL', System.getenv('OPENROUTER_MODEL') ?: ''
 }
 
+tasks.register('runMultimodal', JavaExec) {
+    group = 'application'
+    description = 'Run the Multimodal example (image attachment + §8A relocation, both styles, live).'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'io.github.muthuishere.toolnexus.examples.Multimodal'
+    // forward OPENROUTER_API_KEY / OPENROUTER_MODEL from the environment
+    environment 'OPENROUTER_API_KEY', System.getenv('OPENROUTER_API_KEY') ?: ''
+    environment 'OPENROUTER_MODEL', System.getenv('OPENROUTER_MODEL') ?: ''
+}
+
 mavenPublishing {
     publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL)
     signAllPublications()

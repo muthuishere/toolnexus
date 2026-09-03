@@ -29,8 +29,8 @@ seven ports agree by specification rather than by coincidence.
 - **THEN** the provider receives one assistant turn with three tool-use blocks and exactly
   **one** user turn carrying all three tool-result blocks
 
-#### Scenario: Content supplied as text parts is concatenated
-- **WHEN** a message's `content` is an array containing only text parts
+#### Scenario: Content supplied as parts is flattened to text
+- **WHEN** a message's `content` is an array of text parts
 - **THEN** the parts are concatenated into the translated message's text
 
 #### Scenario: An image part in content survives translation
