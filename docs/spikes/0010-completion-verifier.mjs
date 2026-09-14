@@ -1,7 +1,7 @@
 // SPIKE — completion verifier: "the agent cannot claim done until a check passes".
 // Q1: can a host build it today, in userland?
 // Q2: if yes, what does a built-in version give that userland cannot?
-const J = "/Users/muthuishere/muthu/gitworkspace/nexus-workspace/toolnexus/js/dist"
+import { DIST as J, check, report } from "./_harness.mjs"
 const { agents, createClient, createToolkit, defineTool } = await import(`${J}/index.js`)
 const { AgentRuntime } = agents
 
@@ -56,6 +56,7 @@ console.log("=== Q2: does the userland version survive DELEGATION? ===")
   console.log("  child run status:", res.status, "| text:", JSON.stringify(res.text))
   console.log("  did ANY verification happen inside the delegated run?", attempts > 0 ? "yes" : "NO")
   console.log("  => the host's retry loop is at the CALL SITE. Delegation bypasses it entirely.")
+  check("a host-side retry loop does NOT survive delegation", attempts === 0)
   rt.close(h)
 }
 
@@ -90,4 +91,10 @@ async function runWithCompletion(client, prompt, { toolkit, completion }) {
   console.log(`  failing case : status=${bad.status} attempts=${bad.attempts}`)
   console.log(`                 stoppedBy="${bad.stoppedBy}"`)
   console.log("  => bounded, and the stop is NAMED — never a silent done (§7D).")
+  check("the gate lets a verifying run through", ok.status === "done")
+  check("a failing gate stops as incomplete, never done", bad.status === "incomplete")
+  check("the stop is bounded by maxAttempts", bad.attempts === 3)
+  check("and it NAMES why", String(bad.stoppedBy).includes("completion.verify failed"))
 }
+
+report("0010 completion verifier")

@@ -1,6 +1,17 @@
 # ADR 0016 — Harness as an option, and a loop with verifiable properties (revised)
 
-- **Status:** **SUPERSEDED IN PART by the owner (2026-08-16)** — and the correction is on me,
+- **Status:** **SUPERSEDED IN PART by the owner (2026-08-16), and its open question CLOSED by
+  ADR 0020 (2026-09-14).** The harness option, guardrails and loop invariants were built and
+  shipped in 0.15.0 across all seven ports. The remaining live thread was this ADR's own "What I
+  might be wrong about" — that the real want behind `Harness` might be a **serializable,
+  transportable agent definition**, which "would be genuinely new… and would be worth its own
+  ADR." That reading was correct, and ADR 0020 D3/D4 is that ADR: an agent spec as data,
+  resolved against host-supplied bindings, under a new `capability narrows, never widens` rule.
+  This ADR's two rejections still stand and still govern: `LoopState` as a parallel status enum
+  (ADR 0020's `until` reuses `incomplete` + a structured `limit` for exactly this reason), and
+  `Harness` as a rename of `AgentDef`. The three-overlapping-designs problem is on ADR 0020's
+  sequencing list as step 0 and is still unresolved.
+- **Original status note (2026-08-16):** SUPERSEDED IN PART by the owner — and the correction is on me,
   not on the proposal. This ADR argued Harness/AgentLoop should not be built because they
   duplicate `AgentDef` and the shipped status vocabularies. The owner's actual ask is narrower and
   survives that argument: **`harness` as an ADDITIVE OPTION on `agent`, and a loop with VERIFIABLE

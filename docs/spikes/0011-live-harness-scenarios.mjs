@@ -2,7 +2,7 @@
 //
 // The API key is read from the environment at the point of use and is never
 // printed, logged, or written to the report.
-const J = "/Users/muthuishere/muthu/gitworkspace/nexus-workspace/toolnexus/js/dist"
+const J = new URL("../../js/dist", import.meta.url).href
 const { agents, createClient, createToolkit, defineTool } = await import(`${J}/index.js`)
 const { AgentRuntime } = agents
 

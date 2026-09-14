@@ -4,7 +4,7 @@
 //
 // (b) is the real test. If suspension does not survive, Graph genuinely needs
 // library support and cannot be a pure host layer.
-const J = "/Users/muthuishere/muthu/gitworkspace/nexus-workspace/toolnexus/js/dist"
+import { DIST as J, check, report } from "./_harness.mjs"
 const { agents, defineTool, pending } = await import(`${J}/index.js`)
 const { AgentRuntime } = agents
 
@@ -69,7 +69,9 @@ console.log("=== (a) dynamic fan-out + join ===")
   const results = await Promise.all(handles.map((h) => rt.wait(h))) // <- the JOIN
   console.log("  fanned out to:", decidedAtRuntime.join(", "))
   console.log("  joined results:", results.map((r) => r.text).join(" | "))
-  console.log("  all done:", results.every((r) => r.status === "done"))
+  check("dynamic fan-out: all branches done", results.every((r) => r.status === "done"))
+  check("the coordinator picked the workers at RUNTIME", decidedAtRuntime.length === 3)
+  check("results joined, one per worker", results.length === decidedAtRuntime.length)
   handles.forEach((h) => rt.close(h))
 }
 
@@ -92,8 +94,11 @@ console.log("=== (b) suspension through a host-side graph node ===")
     const out = await rt.wait(h)
     console.log("  after resume → status:", out.status, "text:", JSON.stringify(out.text))
     console.log("  handle state:", rt.inspect(h).state)
-    console.log("  SUSPENSION SURVIVES a host-driven graph node:", out.status === "done")
+    check("SUSPENSION SURVIVES a host-driven graph node", out.status === "done")
+    check("the handle returns to idle after the answer", rt.inspect(h).state === "idle")
   } else {
-    console.log("  !! no suspension surfaced — cannot conclude")
+    check("a pending surfaced at all (nothing to conclude otherwise)", false)
   }
 }
+
+report("0005 graph fan-out and suspension")

@@ -1,5 +1,5 @@
 // S4 (corrected): budget belongs on AgentDef / spawn, not RuntimeOptions.
-const J = "/Users/muthuishere/muthu/gitworkspace/nexus-workspace/toolnexus/js/dist"
+import { DIST as J, check, report } from "./_harness.mjs"
 const { agents } = await import(`${J}/index.js`)
 const { AgentRuntime } = agents
 const mockFetch = async () => new Response(
@@ -20,8 +20,8 @@ for (let i = 0; i < 5; i++) {
 console.log("=== S4 corrected: budget on AgentDef, repeated turns on ONE handle ===")
 console.log("  statuses:", seen.join(" → "))
 const stopped = seen.some((s) => s.startsWith("incomplete"))
-console.log("  stopped LOUDLY with 'incomplete':", stopped)
-console.log("  never silently 'done' past budget:", stopped || seen.length < 5)
+check("stopped LOUDLY with 'incomplete'", stopped === true)
+check("never silently 'done' past budget", (stopped || seen.length < 5) === true)
 
 // and the maxChildren cap
 console.log("")
@@ -32,4 +32,7 @@ const p = rt2.spawn(rt2.root, "p")
 const kids = [0, 1, 2, 3].map(() => rt2.spawn(p, "c"))
 const errs = kids.filter((k) => agents.isVerbError(k))
 console.log(`  spawned=${kids.length - errs.length} rejected=${errs.length}`)
-if (errs.length) console.log(`  rejection is loud and named: "${errs[0].error}"`)
+check("excess children are rejected", errs.length > 0)
+check("rejection is loud and names the limit", errs[0]?.error?.includes("maxChildren") === true)
+
+report("0007 graph budget caps")

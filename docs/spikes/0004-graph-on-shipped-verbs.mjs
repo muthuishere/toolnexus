@@ -3,7 +3,7 @@
 //
 // If yes, "Graph" is a thin host-side layer over spawn/wake/wait/close, not a second
 // agent runtime — which is exactly what the proposal's design rule 9 demands.
-const J = "/Users/muthuishere/muthu/gitworkspace/nexus-workspace/toolnexus/js/dist"
+import { DIST as J, check, report } from "./_harness.mjs"
 const { agents } = await import(`${J}/index.js`)
 const { AgentRuntime } = agents
 
@@ -83,7 +83,11 @@ console.log("")
 for (const [k, v] of Object.entries(outputs)) console.log(`  ${k.padEnd(9)} ${v}`)
 console.log("")
 const looped = trace.filter((t) => t.startsWith("code:")).length === 2
-console.log("conditional retry edge fired (code ran twice):", looped)
-console.log("terminated at review:", trace[trace.length - 1].startsWith("review:"))
+check("conditional retry edge fired (code ran twice)", looped === true)
+check("terminated at review", trace[trace.length - 1].startsWith("review:"))
+check("every node completed done", trace.every((t) => t.endsWith(":done")))
+check("the graph ran more nodes than it has (a cycle really fired)", trace.length > 4)
 console.log("")
 console.log("engine size: the runGraph function above — no library change, shipped verbs only.")
+
+report("0004 graph on shipped verbs")

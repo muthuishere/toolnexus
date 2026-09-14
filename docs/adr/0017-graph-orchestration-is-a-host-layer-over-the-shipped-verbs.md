@@ -1,6 +1,25 @@
 # ADR 0017 — Graph orchestration: **the runtime already carries it**; ship a recipe, not a subsystem
 
-- **Status:** **Proposed** (2026-08-15) — spike-and-stress-backed. Runnable evidence:
+- **Status:** **SUPERSEDED IN PART by ADR 0020 (2026-09-14).** Decisions 2 and 3 stand unchanged
+  — `waitAll`/`waitAny` is still the one real gap in the verb set, and the cookbook recipe is
+  still owed. Decision 1's *deferral of a `graph()` API* does not survive: ADR 0020 proposes a
+  **bounded** grammar (`sequence`/`parallel`/`until`), on new evidence rather than a change of
+  taste. This ADR set the revival bar at "a consumer produces a real case where the host-side
+  version failed them," and the case arrived — once a MODEL authors the graph, the limitation
+  named in this ADR's own Consequences ("the host owns hop limits and cycle detection… an
+  undocumented graph will livelock on a back-edge whose condition never flips") stops being an
+  acceptable footnote. A hop counter a reviewer must remember is fine; a hop counter the JSON
+  from a poisoned web page must respect is not. The original argument is kept intact below
+  because it still governs what must NOT be built: a free-form node/edge DSL, and a second
+  scheduler.
+- **Correction to the evidence (2026-09-14):** the four spikes this ADR cites hardcoded an
+  absolute home directory and carried no assertions, so nobody else could run them and they
+  exited 0 regardless of outcome. `0006`'s S4 had in fact been printing
+  `stopped LOUDLY: false` ever since — it put `budget` on `RuntimeOptions`, which has no such
+  field, the very mistake this ADR records as corrected. All of them now resolve `js/dist`
+  relatively and assert; `node docs/spikes/run-all.mjs` runs the suite. The stress table below
+  is accurate against the fixed files.
+- **Original status:** Proposed (2026-08-15) — spike-and-stress-backed. Runnable evidence:
   `docs/spikes/0004-graph-on-shipped-verbs.mjs`, `0005-graph-fanout-and-suspension.mjs`,
   `0006-graph-stress.mjs`, `0007-graph-budget-caps.mjs` (all run against the built `js/dist`). Four runnable spikes built the
   proposal's own graph examples on the **shipped** §7D verbs with **zero library changes**, and a

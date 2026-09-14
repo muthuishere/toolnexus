@@ -8,7 +8,7 @@
 //     streams or mutable data, never service or method presence"; failures are
 //     attributed; and `verify-package-invariants` REJECTS an unexplained empty
 //     installer — absence must carry a reason.
-const J = "/Users/muthuishere/muthu/gitworkspace/nexus-workspace/toolnexus/js/dist"
+import { DIST as J, check, report } from "./_harness.mjs"
 const { agents, defineTool } = await import(`${J}/index.js`)
 const { AgentRuntime } = agents
 
@@ -113,18 +113,27 @@ const h = rt.spawn(rt.root, "guarded")
 rt.wake(h, "deploy to prod")
 const res = await rt.wait(h)
 console.log("  run status:", res.status, "| text:", JSON.stringify(res.text.slice(0, 60)))
-console.log("  guardrail DENIED the tool (never executed):", !res.text.includes("DEPLOYED"))
+check("guardrail DENIED the tool (never executed)", !res.text.includes("DEPLOYED"))
+check("guardrail compiled into a single beforeTool hook", typeof guarded.hooks?.beforeTool === "function")
 rt.close(h)
 
 console.log("")
 console.log("=== (B) verifiable loop properties, over the shipped trace ===")
-for (const r of verifyLoop(rt.trace, [res])) {
+const verdicts = verifyLoop(rt.trace, [res])
+for (const r of verdicts) {
   const mark = r.status === "held" ? "✓" : r.status === "not-applicable" ? "—" : "✗"
   console.log(`  ${mark} ${r.name}  [${r.status}]`)
   if (r.status !== "held") console.log(`      ${r.why}`)
 }
 console.log("")
 console.log("  trace lines asserted over:", rt.trace.length)
+check("the trace had lines to assert over", rt.trace.length > 0)
+check(
+  "every declared invariant HELD on the real run",
+  verdicts.filter((r) => r.status !== "not-applicable").every((r) => r.status === "held"),
+  `${verdicts.filter((r) => r.status === "held").length} held, ${verdicts.filter((r) => r.status === "not-applicable").length} n/a`,
+)
+check("at least one absence is NAMED rather than silently missing", verdicts.some((r) => r.status === "not-applicable"))
 
 // ---------------------------------------------------------------------------
 // NEGATIVE TEST — an invariant that cannot fail is decoration. Feed traces that
@@ -149,3 +158,6 @@ const ok4 = r4.status === "VIOLATED"
 if (ok4) caught++
 console.log(`  ${ok4 ? "✓ caught" : "✗ MISSED"}  budget-stops-are-named (silent incomplete)`)
 console.log(`\n  ${caught}/4 violations detected — the invariants are not vacuous.`)
+check("all 4 seeded violations were detected (invariants are not vacuous)", caught === 4)
+
+report("0009 harness option and loop invariants")
