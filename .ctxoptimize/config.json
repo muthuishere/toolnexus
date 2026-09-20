@@ -1,41 +1,30 @@
 {
   "name": "toolnexus",
+  "scan": {
+    "markers": ["mix.exs", "deps.edn", "Toolnexus.slnx"],
+    "include": ["csharp", "benchmarks/run_*"],
+    "exclude": ["clojure/toolnexus-test", "clojure/spikes"]
+  },
   "modules": [
-    {
-      "path": "benchmarks/resilience/run_go"
-    },
-    {
-      "path": "benchmarks/run_eino"
-    },
-    {
-      "path": "benchmarks/run_langchain4j"
-    },
-    {
-      "path": "benchmarks/run_langchaingo"
-    },
-    {
-      "path": "benchmarks/run_springai"
-    },
-    {
-      "path": "benchmarks/run_toolnexus_go"
-    },
-    {
-      "path": "benchmarks/run_toolnexus_java"
-    },
-    {
-      "path": "golang"
-    },
-    {
-      "path": "java"
-    },
-    {
-      "path": "js"
-    },
-    {
-      "path": "python"
-    },
-    {
-      "path": "site"
-    }
+    { "path": "js" },
+    { "path": "python" },
+    { "path": "golang" },
+    { "path": "java" },
+    { "path": "csharp" },
+    { "path": "elixir" },
+    { "path": "clojure" },
+    { "path": "site" },
+    { "path": "benchmarks/run_toolnexus_go" },
+    { "path": "benchmarks/run_toolnexus_java" },
+    { "path": "benchmarks/run_toolnexus_csharp" },
+    { "path": "benchmarks/run_toolnexus_clojure" },
+    { "path": "benchmarks/run_eino" },
+    { "path": "benchmarks/run_langchaingo" },
+    { "path": "benchmarks/run_langchain4j" },
+    { "path": "benchmarks/run_langchain_elixir" },
+    { "path": "benchmarks/run_springai" },
+    { "path": "benchmarks/run_semantic_kernel" },
+    { "path": "benchmarks/run_ms_extensions_ai" },
+    { "path": "benchmarks/resilience/run_go" }
   ]
 }
