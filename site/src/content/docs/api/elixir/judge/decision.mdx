@@ -75,8 +75,11 @@ while `Decision.score(decision, "urgency")` returns
 ## `calibrated` and `near_uniform?` — advisory, and that word is load-bearing
 
 `:calibrated` travels with every decision. The `systemone` style reports **true**; the `llm` style
-reports **false** unless it derived its probabilities from provider token probabilities. It is the
-flag that tells you whether a threshold you tuned is meaningful — and **a threshold tuned against
+reports **false** unless it derived its probabilities from provider token probabilities. **A
+response that omits `calibrated`, or sends `null`, decodes as `true`** — only the literal `false`
+is false, because the systemone wire reports calibration by being itself and a backend that is not
+calibrated says so explicitly. It is the flag that tells you whether a threshold you tuned is
+meaningful — and **a threshold tuned against
 one backend does not transfer to another**.
 
 `:near_uniform` is on every choice answer, **derived from the response and never read from the

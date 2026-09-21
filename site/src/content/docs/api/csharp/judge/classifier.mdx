@@ -300,7 +300,10 @@ sense, so a host that has configured one has configured the other.
 | Option | Type | What it does |
 |---|---|---|
 | `HttpHandler` | `HttpMessageHandler?` | A handler to build the classifier's `HttpClient` from. Ignored when `HttpClient` is set. |
-| `Decisions` | `IReadOnlyList<RecordedDecision>?` | The recorded corpus for `Style = Static`. Other ports carry the same corpus under their own spelling. |
+
+`Decisions` (`IReadOnlyList<RecordedDecision>?`) — the recorded corpus for `Style = Static` — is
+**not** port-local: it is named in §8B and gated at **core** tier by the cross-language options
+manifest, since it is the backend CI runs on. Each port spells it idiomatically.
 
 Every option also has a fluent `With…` setter (`new ClassifierOptions().WithStyle(…).WithModel(…)`).
 

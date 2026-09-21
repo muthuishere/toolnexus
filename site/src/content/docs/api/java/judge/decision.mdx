@@ -245,7 +245,9 @@ whether they are right.
 
 And a threshold tuned against one backend **does not transfer** to another. `systemone` reports
 `calibrated: true`; `llm` reports `false` unless it derived the numbers from provider token
-probabilities. Re-tune when you change backend or unpin the model.
+probabilities. A response that omits `calibrated`, or sends `null`, decodes as **true** — only the
+literal `false` is false, because the systemone wire reports calibration by being itself. Re-tune
+when you change backend or unpin the model.
 </Aside>
 
 ## Members

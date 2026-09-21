@@ -101,7 +101,7 @@ host that has configured one has configured the other.
 | `on_metric` | — | Receives `classifier.evaluate` events (latency, tokens, model, status) in the **same** §8 sink, plus `classifier.warning` for degenerate criteria — whose text is in `warning`, never `error`. |
 | `client` | — | `style="llm"` only: the §8 `Client` to emulate over. Missing ⇒ `ClassifierError` at construction. |
 | `evaluate` | — | `style="custom"` only: your own function (sync or async). Every wire option is ignored. Missing ⇒ `ClassifierError` at construction. |
-| `decisions` | — | **Port-local, `style="static"` only** (§8B describes the static backend but does not name this option): a list of `RecordedDecision(state, questions, response)`, keyed by the canonical request **and** the state. |
+| `decisions` | — | `style="static"` only: a list of `RecordedDecision(state, questions, response)`, keyed by the canonical request **and** the state. Named in §8B and gated at **core** tier by the options manifest — it is the backend CI runs on, so a port without it cannot run the shared fixtures. |
 
 ### Retries and `Retry-After`
 

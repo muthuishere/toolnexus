@@ -242,9 +242,9 @@ sense, so a host that has configured one has configured the other.
 | `client` | `Client` | — | `style: "llm"` only — the §8 client to emulate over. |
 | `evaluate` | `EvaluateFn` | — | `style: "custom"` only — your own function. |
 | `retryBaseMs` | `number` | `500` | Base of the exponential backoff, in milliseconds: the delay is `base * 2 ** attempt`, no jitter, and a `Retry-After` header still wins. |
-| `decisions` | `RecordedDecision[]` | — | **JavaScript-local naming.** `style: "static"` only — the recorded corpus. |
+| `decisions` | `RecordedDecision[]` | — | `style: "static"` only — the recorded corpus. |
 
-`decisions` is not in the cross-port options manifest; everything above it is.
+`decisions` is in the cross-port options manifest at **core** tier, like everything above it: it is the backend CI runs on, so a port without it cannot run the shared fixtures.
 
 ## Retries, and what `retryableStatuses` can and cannot do
 

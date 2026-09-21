@@ -107,7 +107,7 @@ configured one has configured the other.
 | `:on-metric` | — | Receives `"classifier.evaluate"` events (latency, tokens, model, status) in the **same** §8 sink, plus `"classifier.warning"` for degenerate criteria — whose text is in `:warning`, never `:error`. |
 | `:client` | — | `:style "llm"` only: the §8 client to emulate over. Missing ⇒ throws at construction. |
 | `:evaluate` | — | `:style "custom"` only: `(fn [state questions] decision)`. Every wire option is ignored. Missing ⇒ throws at construction. |
-| `:decisions` | — | **Port-local**, `:style "static"` only (§8B describes the static backend but does not name this option; every port spells it for itself): a vector of `{:state … :questions … :response <parsed body>}`, keyed by the canonical request **and** the state. |
+| `:decisions` | — | `:style "static"` only: a vector of `{:state … :questions … :response <parsed body>}`, keyed by the canonical request **and** the state. Named in §8B and gated at **core** tier by the options manifest — it is the backend CI runs on, so a port without it cannot run the shared fixtures. |
 
 ### Retries and `Retry-After`
 

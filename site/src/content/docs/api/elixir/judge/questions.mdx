@@ -44,7 +44,9 @@ questions in one call cost one state ingest instead of several.
   `%{"true" => "", "false" => ""}` are **different values**: `nil` omits the field from the wire
   entirely, an empty map sends empty strings. Both survive intact.
 - **`%Choice{}`** — the answer is always one of the options you offered, and the probability map
-  names exactly those options. `choice_over/2` builds one from any (name, description) pairs.
+  names exactly those options. `choice_over/2` builds one from any (name, description) pairs —
+  an atom key travels as its plain name, so `:billing` sends `billing`, never `":billing"`, and an
+  atom roster and its string equivalent are the same request.
 - **`%Score{}`** — the list order **is** the numbering; level 0 is the first string you passed.
   Nothing sorts it, and no canonicaliser in the library reorders an array for exactly this reason.
 

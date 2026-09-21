@@ -86,7 +86,10 @@ not", and the bug is a silent wrong routing decision rather than a stack trace. 
 
 **`calibrated`** travels on every decision. The `systemone` style reports `true`. The `llm` style
 reports `false` unless it derived its probabilities from provider token probabilities — the
-JavaScript `llm` backend never does, so it is always `false` there. The consequence that matters:
+JavaScript `llm` backend never does, so it is always `false` there. **A response that omits
+`calibrated`, or sends `null`, decodes as `true`** — only the literal `false` is false. The
+systemone wire reports calibration by being itself, and a backend that is not calibrated says so
+explicitly, so a missing field is not a missing guarantee. The consequence that matters:
 **a threshold tuned against one backend does not transfer to another.** If you retune nothing when
 you switch styles, you have shipped a different policy.
 

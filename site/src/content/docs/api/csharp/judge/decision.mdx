@@ -258,6 +258,10 @@ Every decision reports it. The `SystemOne` backend reports **true**. The `Llm` b
 **false** unless it derived its probabilities from provider token probabilities. A backend that
 cannot guarantee the questions were answered independently also reports false.
 
+**A response that omits `calibrated`, or sends `null`, decodes as `true`** — only the literal
+`false` is false. The systemone wire reports calibration by being itself, and a backend that is
+not calibrated says so explicitly, so a missing field is not a missing guarantee.
+
 <Aside type="caution" title="Neither flag is a correctness signal">
 `NearUniform` detects an encoding that gave the model **nothing to rank on** — the one encoding
 health check available with no ground truth, cheap enough to run on live traffic. It **cannot

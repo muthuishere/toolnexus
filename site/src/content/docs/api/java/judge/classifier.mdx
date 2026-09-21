@@ -249,7 +249,7 @@ sense, so a host that has configured one has configured the other.
 | `onMetric(Consumer<MetricEvent>)` | — | `classifier.evaluate` and `classifier.warning` events into the same §8 sink. |
 | `client(LlmClient)` | — | `style: "llm"` only — the §8 client to emulate over. Required for that style. |
 | `evaluate(BiFunction<Object, Map, Decision>)` | — | `style: "custom"` only — the host's own function. Required for that style. |
-| `decisions(List<RecordedDecision>)` | — | `style: "static"` only — the recorded corpus. **Port-local naming:** the cross-port options manifest does not register this field, because each port spells the recorded corpus its own way. |
+| `decisions(List<RecordedDecision>)` | — | `style: "static"` only — the recorded corpus. Named in §8B and gated at **core** tier by the cross-port options manifest: it is the backend CI runs on, so a port without it cannot run the shared fixtures. Each port spells it idiomatically. |
 
 `RecordedDecision(Object state, Map<String, Question> questions, String response)` keys an entry on
 the canonical request **and** the state — several recordings legitimately share one questions

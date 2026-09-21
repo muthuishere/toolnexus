@@ -81,12 +81,11 @@ snake_case spelling of `ClassifierOptions` (SPEC §8B), which mirrors
 | `:on_metric` | — | receives `"classifier.evaluate"` events into the **same** sink as the client, and the degenerate-criteria advisory as `"classifier.warning"` |
 | `:client` | — | `style: "llm"` only — the `Toolnexus.Client` to emulate over |
 | `:evaluate` | — | `style: "custom"` only — your own `(state, questions) -> {:ok, Decision.t()} \| {:error, term}`. Every wire option is ignored |
-| `:decisions` | `[]` | **port-local spelling** of the `static` corpus: a list of `%{state: …, questions: …, response: map_or_binary}`. `style: "static"` only |
+| `:decisions` | `[]` | the `static` corpus: a list of `%{state: …, questions: …, response: map_or_binary}`. `style: "static"` only. Gated at **core** tier by the options manifest |
 
-Two port-local notes against the options manifest. The injectable transport is split in two
+One port-local note against the options manifest: the injectable transport is split in two
 here — `:http_options` (pass-through to `Req`) and `:transport` (replace the call entirely) —
-where other ports carry one `httpClient`. And `:decisions` is the Elixir name for the recorded
-`static` corpus.
+where other ports carry one `httpClient`.
 
 ### Retries
 
