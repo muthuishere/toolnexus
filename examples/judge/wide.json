@@ -1,0 +1,124 @@
+{
+  "name": "wide",
+  "why": "40 options: both the request's criteria map and the response's probability map exceed 32 keys. Without this a runtime whose small maps iterate in term order only up to 32 entries passes by accident and goes arbitrary at 33 (spikes/classifier/reports/99-verdict.md §3). The keys span digit-leading, uppercase, lowercase and non-ASCII so ASCII ordering is exercised at width, and they are declared in reverse order so insertion order cannot be mistaken for sorted order.",
+  "request": {
+    "model": "typesafe/jev-1.13",
+    "state": "pull the numbers out of last quarter's board deck and chart them for Thursday.",
+    "questions": {
+      "skill": {
+        "criteria": {
+          "skill_39": "handles the skill_39 family of requests",
+          "skill_38": "handles the skill_38 family of requests",
+          "skill_37": "handles the skill_37 family of requests",
+          "skill_36": "handles the skill_36 family of requests",
+          "skill_35": "handles the skill_35 family of requests",
+          "skill_34": "handles the skill_34 family of requests",
+          "skill_33": "handles the skill_33 family of requests",
+          "skill_32": "handles the skill_32 family of requests",
+          "skill_31": "handles the skill_31 family of requests",
+          "skill_30": "handles the skill_30 family of requests",
+          "skill_29": "handles the skill_29 family of requests",
+          "skill_28": "handles the skill_28 family of requests",
+          "skill_27": "handles the skill_27 family of requests",
+          "skill_26": "handles the skill_26 family of requests",
+          "skill_25": "handles the skill_25 family of requests",
+          "skill_24": "handles the skill_24 family of requests",
+          "skill_23": "handles the skill_23 family of requests",
+          "skill_22": "handles the skill_22 family of requests",
+          "skill_21": "handles the skill_21 family of requests",
+          "skill_20": "handles the skill_20 family of requests",
+          "skill_19": "handles the skill_19 family of requests",
+          "skill_18": "handles the skill_18 family of requests",
+          "skill_17": "handles the skill_17 family of requests",
+          "skill_16": "handles the skill_16 family of requests",
+          "skill_15": "handles the skill_15 family of requests",
+          "skill_14": "handles the skill_14 family of requests",
+          "skill_13": "handles the skill_13 family of requests",
+          "skill_12": "handles the skill_12 family of requests",
+          "skill_11": "handles the skill_11 family of requests",
+          "skill_10": "handles the skill_10 family of requests",
+          "skill_09": "handles the skill_09 family of requests",
+          "skill_08": "handles the skill_08 family of requests",
+          "skill_07": "handles the skill_07 family of requests",
+          "skill_06": "handles the skill_06 family of requests",
+          "skill_05": "handles the skill_05 family of requests",
+          "skill_04": "handles the skill_04 family of requests",
+          "skill_03": "handles the skill_03 family of requests",
+          "café_nonascii": "handles the café_nonascii family of requests",
+          "09_digit_lead": "handles the 09_digit_lead family of requests",
+          "Zebra_upper": "handles the Zebra_upper family of requests"
+        },
+        "instructions": "Which skill should handle this request?",
+        "type": "choice"
+      }
+    }
+  },
+  "response": {
+    "model": "typesafe/jev-1.13-20260917",
+    "answers": {
+      "skill": {
+        "choice": "skill_07",
+        "confidence": 0.61,
+        "probabilities": {
+          "skill_39": 0.01,
+          "skill_38": 0.01,
+          "skill_37": 0.01,
+          "skill_36": 0.01,
+          "skill_35": 0.01,
+          "skill_34": 0.01,
+          "skill_33": 0.01,
+          "skill_32": 0.01,
+          "skill_31": 0.01,
+          "skill_30": 0.01,
+          "skill_29": 0.01,
+          "skill_28": 0.01,
+          "skill_27": 0.01,
+          "skill_26": 0.01,
+          "skill_25": 0.01,
+          "skill_24": 0.01,
+          "skill_23": 0.01,
+          "skill_22": 0.01,
+          "skill_21": 0.01,
+          "skill_20": 0.01,
+          "skill_19": 0.01,
+          "skill_18": 0.01,
+          "skill_17": 0.01,
+          "skill_16": 0.01,
+          "skill_15": 0.01,
+          "skill_14": 0.01,
+          "skill_13": 0.01,
+          "skill_12": 0.01,
+          "skill_11": 0.01,
+          "skill_10": 0.01,
+          "skill_09": 0.01,
+          "skill_08": 0.01,
+          "skill_07": 0.61,
+          "skill_06": 0.01,
+          "skill_05": 0.01,
+          "skill_04": 0.01,
+          "skill_03": 0.01,
+          "café_nonascii": 0.01,
+          "09_digit_lead": 0.01,
+          "Zebra_upper": 0.01
+        },
+        "type": "choice"
+      }
+    },
+    "usage": {
+      "input_tokens": 2015,
+      "output_tokens": 36
+    }
+  },
+  "expect": {
+    "answers": {
+      "skill": {
+        "choice": "skill_07",
+        "probabilityCount": 40,
+        "nearUniform": false
+      }
+    }
+  },
+  "canonical": "{\"model\":\"typesafe/jev-1.13\",\"questions\":{\"skill\":{\"criteria\":{\"09_digit_lead\":\"handles the 09_digit_lead family of requests\",\"Zebra_upper\":\"handles the Zebra_upper family of requests\",\"café_nonascii\":\"handles the café_nonascii family of requests\",\"skill_03\":\"handles the skill_03 family of requests\",\"skill_04\":\"handles the skill_04 family of requests\",\"skill_05\":\"handles the skill_05 family of requests\",\"skill_06\":\"handles the skill_06 family of requests\",\"skill_07\":\"handles the skill_07 family of requests\",\"skill_08\":\"handles the skill_08 family of requests\",\"skill_09\":\"handles the skill_09 family of requests\",\"skill_10\":\"handles the skill_10 family of requests\",\"skill_11\":\"handles the skill_11 family of requests\",\"skill_12\":\"handles the skill_12 family of requests\",\"skill_13\":\"handles the skill_13 family of requests\",\"skill_14\":\"handles the skill_14 family of requests\",\"skill_15\":\"handles the skill_15 family of requests\",\"skill_16\":\"handles the skill_16 family of requests\",\"skill_17\":\"handles the skill_17 family of requests\",\"skill_18\":\"handles the skill_18 family of requests\",\"skill_19\":\"handles the skill_19 family of requests\",\"skill_20\":\"handles the skill_20 family of requests\",\"skill_21\":\"handles the skill_21 family of requests\",\"skill_22\":\"handles the skill_22 family of requests\",\"skill_23\":\"handles the skill_23 family of requests\",\"skill_24\":\"handles the skill_24 family of requests\",\"skill_25\":\"handles the skill_25 family of requests\",\"skill_26\":\"handles the skill_26 family of requests\",\"skill_27\":\"handles the skill_27 family of requests\",\"skill_28\":\"handles the skill_28 family of requests\",\"skill_29\":\"handles the skill_29 family of requests\",\"skill_30\":\"handles the skill_30 family of requests\",\"skill_31\":\"handles the skill_31 family of requests\",\"skill_32\":\"handles the skill_32 family of requests\",\"skill_33\":\"handles the skill_33 family of requests\",\"skill_34\":\"handles the skill_34 family of requests\",\"skill_35\":\"handles the skill_35 family of requests\",\"skill_36\":\"handles the skill_36 family of requests\",\"skill_37\":\"handles the skill_37 family of requests\",\"skill_38\":\"handles the skill_38 family of requests\",\"skill_39\":\"handles the skill_39 family of requests\"},\"instructions\":\"Which skill should handle this request?\",\"type\":\"choice\"}}}",
+  "canonicalSha256": "c68e7ad642beda1a6b488516ed013def1570af337505a23a7141a788f4aaf0dd",
+  "canonicalBytes": 2287
+}

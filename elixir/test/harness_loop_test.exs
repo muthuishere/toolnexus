@@ -192,6 +192,28 @@ defmodule Toolnexus.HarnessLoopTest do
     assert Agent.get(prior, & &1) == 1, "allowed => the prior hook runs"
   end
 
+  test "a non-string guardrail verdict fails loudly instead of silently allowing" do
+    # `is_binary` used to send anything non-string to the `_ -> nil` clause, i.e.
+    # a silent ALLOW — a policy check failing OPEN, the one direction a guardrail
+    # must never fail. (JS/Python had the mirror bug and failed closed. Three
+    # behaviours for one mistake is exactly the drift the ports exist to prevent.)
+    hooks = Loop.guarded_hooks([fn _ -> Task.async(fn -> "allow" end) end], nil)
+
+    assert_raise ArgumentError, ~r/must return a/, fn ->
+      hooks[:before_tool].(%{name: "safe", args: %{}, turn: 1})
+    end
+
+    other = Loop.guarded_hooks([fn _ -> 42 end], nil)
+
+    assert_raise ArgumentError, ~r/42/, fn ->
+      other[:before_tool].(%{name: "safe", args: %{}, turn: 1})
+    end
+
+    # nil and "" still permit — unchanged.
+    ok = Loop.guarded_hooks([fn _ -> nil end, fn _ -> "" end], nil)
+    assert ok[:before_tool].(%{name: "safe", args: %{}, turn: 1}) == nil
+  end
+
   test "guardrails and the gate survive the registry projection" do
     child =
       Agents.agent("child",

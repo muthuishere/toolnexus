@@ -9,6 +9,7 @@ import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -30,8 +31,35 @@ import java.util.stream.Stream;
 public final class LlmClient {
     private static final HttpClient HTTP = HttpClient.newHttpClient();
 
-    /** HTTP statuses that are retried (alongside IOExceptions). Mirrors JS {@code RETRYABLE}. */
-    private static final Set<Integer> RETRYABLE = Set.of(429, 500, 502, 503, 504);
+    /**
+     * The default retryable set: {@code 429} plus the 5xx worth another try — and
+     * {@code 529 Overloaded}, which TypeSafe documents as "retry with backoff" and which an
+     * enumeration made terminal on the first attempt.
+     *
+     * <p>It is an ENUMERATION on purpose. "Any 5xx" would sweep in permanently-broken statuses
+     * ({@code 501 Not Implemented}, {@code 505 HTTP Version Not Supported}) and change the retry
+     * behaviour of every existing host without asking. A backend with its own transient status —
+     * a Cloudflare origin answering {@code 520}–{@code 527}, say — opts in declaratively through
+     * {@link Options#retryableStatuses}, which ADDS to this set and cannot remove from it.
+     *
+     * <p>Shared with §8B's classifier, which adds {@code 408} to it rather than inventing a
+     * second policy.
+     */
+    private static final Set<Integer> RETRYABLE = Set.of(429, 500, 502, 503, 504, 529);
+
+    /**
+     * Whether a status is retryable by default, optionally widened by a host's
+     * {@code retryableStatuses}.
+     *
+     * <p>{@code extra} is ADDITIVE: it can only make more statuses retryable, never fewer, so a
+     * host cannot accidentally drop {@code 429} and lose {@code Retry-After} handling with it. It
+     * decides the DEFAULT classification only — {@code onError} still runs afterwards and has the
+     * final say on every attempt, so {@code onError} returning {@link Tier#FAIL} overrides a
+     * status the host itself listed here.
+     */
+    static boolean isRetryableStatus(int status, Collection<Integer> extra) {
+        return RETRYABLE.contains(status) || (extra != null && extra.contains(status));
+    }
 
     /** §8 Resilience. What to do with a failed LLM call. Mirrors JS {@code ErrorTier}. */
     public enum Tier { RETRY, FAIL }
@@ -45,7 +73,8 @@ public final class LlmClient {
      * @param status     the HTTP status on a non-ok response, or {@code 0} on a transport throw
      * @param attempt    zero-based attempt index (0 = first try)
      * @param retryable  whether {@code status}/the error is in the default retryable set
-     *                   ({@code 429}/{@code 5xx}/network)
+     *                   ({@code 429}/{@code 500}/{@code 502}/{@code 503}/{@code 504}/{@code 529}
+     *                   /network, plus any {@code retryableStatuses})
      */
     public record ErrorInfo(Throwable error, int status, int attempt, boolean retryable) {}
 
@@ -58,10 +87,19 @@ public final class LlmClient {
         public String systemPrompt;
         public Integer maxTurns;       // default 10
         public Hooks hooks;            // optional lifecycle middleware; null = no hooks
-        /** Retries on transient LLM errors (429/5xx/network). Default 2. */
+        /** Retries on transient LLM errors (429/500/502/503/504/529 + network). Default 2.
+         * Widen the status set with {@link #retryableStatuses}. */
         public Integer retries;        // default 2
         /** Base backoff in ms (exponential + jitter). Default 500. */
         public Integer retryBaseMs;    // default 500
+        /** Extra HTTP statuses to treat as retryable, ADDED to the default set
+         * ({@code 429}/{@code 500}/{@code 502}/{@code 503}/{@code 504}/{@code 529}). It can only
+         * widen: a host cannot remove {@code 429} and lose {@code Retry-After} handling with it.
+         * This sets the DEFAULT classification; {@link #onError} still runs per attempt and has
+         * the final say, so an {@code onError} returning {@link Tier#FAIL} overrides a status
+         * listed here. Example: a Cloudflare-fronted origin that answers {@code 520}–{@code 527}.
+         * Null ⇒ the defaults alone. {@code Retry-After} handling is untouched. */
+        public List<Integer> retryableStatuses; // optional; null = defaults only
         /** Whole-run deadline in ms; aborts the run (and its in-flight request) when exceeded. */
         public Long timeoutMs;         // optional; null = no deadline
         /** Conversation provider for {@link LlmClient#ask}. Default: in-memory (process lifetime).
@@ -123,6 +161,7 @@ public final class LlmClient {
         public Options hooks(Hooks v) { this.hooks = v; return this; }
         public Options retries(int v) { this.retries = v; return this; }
         public Options retryBaseMs(int v) { this.retryBaseMs = v; return this; }
+        public Options retryableStatuses(List<Integer> v) { this.retryableStatuses = v; return this; }
         public Options timeoutMs(long v) { this.timeoutMs = v; return this; }
         public Options store(ConversationStore v) { this.store = v; return this; }
         public Options onMetric(Consumer<MetricEvent> v) { this.onMetric = v; return this; }
@@ -149,8 +188,10 @@ public final class LlmClient {
      * ({@link #metrics()}). Modeled as a sealed interface (the type is the discriminator; the
      * {@link #event()} string mirrors the JS {@code event} field for convenience).
      */
-    public sealed interface MetricEvent permits MetricEvent.Llm, MetricEvent.Tool, MetricEvent.Run {
-        /** The event kind: {@code "llm"}, {@code "tool"}, or {@code "run"}. */
+    public sealed interface MetricEvent permits MetricEvent.Llm, MetricEvent.Tool, MetricEvent.Run,
+            MetricEvent.ClassifierEvaluate, MetricEvent.ClassifierWarning {
+        /** The event kind: {@code "llm"}, {@code "tool"}, {@code "run"},
+         * {@code "classifier.evaluate"} or {@code "classifier.warning"}. */
         String event();
 
         /** One LLM round trip. */
@@ -172,6 +213,23 @@ public final class LlmClient {
         record Run(String model, int turns, int toolCalls, long totalTokens, long ms, String error)
                 implements MetricEvent {
             @Override public String event() { return "run"; }
+        }
+
+        /** §8B: one {@link Classifier#evaluate} call. {@code status} is {@code "ok"} or
+         * {@code "error"}; {@code error} is null on success. NOT folded into the Prometheus
+         * registry, so {@link LlmClient#metrics()} text stays byte-identical. */
+        record ClassifierEvaluate(String model, String status, long ms,
+                                  long promptTokens, long completionTokens, String error)
+                implements MetricEvent {
+            @Override public String event() { return "classifier.evaluate"; }
+        }
+
+        /** §8B: a degenerate-criteria warning, naming the question KEY. Emitted once per key per
+         * classifier; the request goes out byte-unchanged (detection, never repair). The advisory
+         * text is {@code warning}, NOT an {@code error}: this event is not a failure, and no
+         * consumer counting failures may count it as one. */
+        record ClassifierWarning(String question, String warning) implements MetricEvent {
+            @Override public String event() { return "classifier.warning"; }
         }
     }
 
@@ -2101,7 +2159,7 @@ public final class LlmClient {
 
     // ------------------------------------------------------------------
     // Resilience: a whole-run monotonic deadline (from timeoutMs) + retry on
-    // 429/5xx/IOException with exponential backoff + jitter, honoring Retry-After.
+    // 429/500/502/503/504/529/IOException with exponential backoff + jitter, honoring Retry-After.
     // Mirrors the JS makeSignal / llmFetch. Timeouts/aborts are never retried.
     // ------------------------------------------------------------------
 
@@ -2162,7 +2220,7 @@ public final class LlmClient {
     }
 
     /**
-     * Send with retry on 429/5xx + IOException, exponential backoff + jitter, honoring Retry-After.
+     * Send with retry on the default retryable statuses + IOException, exponential backoff + jitter, honoring Retry-After.
      * The whole-run {@code deadline} is enforced before/after each attempt; timeouts are not retried.
      */
     private <T> HttpResponse<T> llmSend(String url, Map<String, String> headers,
@@ -2180,7 +2238,7 @@ public final class LlmClient {
                 if (status >= 200 && status < 300) return res;
                 // §8 Resilience: classify EVERY non-2xx (the host may retry a normally-terminal
                 // status, or fail a retryable one). A RETRY is still bounded by the budget below.
-                boolean retryable = RETRYABLE.contains(status);
+                boolean retryable = isRetryableStatus(status, opts.retryableStatuses);
                 Tier tier = classify(new ErrorInfo(null, status, attempt, retryable));
                 if (tier == Tier.FAIL || attempt == retries) return res; // caller handles non-2xx
                 long wait = retryAfterMs(res).orElse((long) (base * Math.pow(2, attempt) + Math.random() * 100));
@@ -2220,7 +2278,13 @@ public final class LlmClient {
      * is off here, so it matches ASCII digits exactly as the other six ports do.
      */
     private static java.util.OptionalLong retryAfterMs(HttpResponse<?> res) {
-        return res.headers().firstValue("retry-after")
+        return retryAfterDelayMs(res.headers().firstValue("retry-after").orElse(null));
+    }
+
+    /** The same rule, applied to a raw header value — so §8B's classifier path reuses this
+     * verbatim rather than growing a second retry policy. */
+    static java.util.OptionalLong retryAfterDelayMs(String header) {
+        return java.util.Optional.ofNullable(header)
                 .map(String::trim)
                 .filter(s -> s.matches("\\d+"))
                 .map(java.math.BigInteger::new) // never throws once the shape is digits-only

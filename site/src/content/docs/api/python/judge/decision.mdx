@@ -1,0 +1,355 @@
+---
+title: "Decision"
+description: "One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero. — Python."
+sidebar:
+  label: "Decision"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/classifier.py">python/src/toolnexus/classifier.py</a>
+</p>
+
+```python
+@dataclass
+class Decision:
+    model: str = ""                                   # what actually answered
+    answers: dict[str, DecisionAnswer] = ...          # keyed by YOUR question keys
+    usage: ClassifierUsage = ...
+    calibrated: bool = True
+
+    def noul(self, key: str) -> NoulAnswer            # raises ClassifierError on absent/wrong type
+    def choice(self, key: str) -> ChoiceAnswer
+    def score(self, key: str) -> ScoreAnswer
+
+@dataclass
+class NoulAnswer:
+    noul: float                                       # 0..1 — NO confidence
+
+@dataclass
+class ChoiceAnswer:
+    choice: str
+    probabilities: dict[str, float]                   # every offered option
+    confidence: float
+    near_uniform: bool = False                        # DERIVED on decode, never read from the wire
+
+@dataclass
+class ScoreAnswer:
+    score: float                                      # MAY fall between levels
+    legend: dict[str, str]
+    probabilities: dict[str, float]
+    confidence: float
+    def levels(self) -> list[str]                     # the legend in LEVEL order
+
+@dataclass
+class ClassifierUsage:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost: float | None = None                         # absent on some backends; absent is NOT zero
+
+def near_uniform(probabilities: Mapping[str, float]) -> bool
+```
+
+One answer per question, keyed by **your** keys. `DecisionAnswer` is the closed union of the
+three answer shapes, discriminated by the wire's `type`. It is named `DecisionAnswer` because §10
+already owns `Answer` (the suspension resolution) — same idea, different seam.
+
+## When to use it
+
+Read an answer through the **typed accessor**, not through `answers[key]`. The accessors are the
+whole reason the union is typed: a wrong-type or absent read should stop the program, not hand
+back something that looks like a number.
+
+In Python they **raise `ClassifierError`**:
+
+| read | result |
+|---|---|
+| `d.noul("k")` where `k` is absent | `ClassifierError: classifier: no answer 'k' in this decision` |
+| `d.choice("k")` where `k` answered a `score` question | `ClassifierError: classifier: answer 'k' is a score answer, not choice` |
+| `d.score("k")` where `k` answered a `score` question | the `ScoreAnswer` |
+
+(Go returns an `error`, C# and Java throw, Elixir returns an error tuple — the failure is loud in
+every port; only the spelling differs.)
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Don't reach into `answers` directly">
+`d.answers["department"]` gives you a `DecisionAnswer` you then have to `isinstance` by hand, and
+the tempting shortcut — `getattr(a, "choice", None)` — turns a question that was answered as a
+different type into a silent `None` that flows downstream as "no route". The accessor turns the
+same mistake into a traceback naming the key. Reach into `answers` only when you are iterating
+over keys you did not write, such as a generic dashboard.
+</Aside>
+
+A malformed answer is never repaired: an invalid distribution means **no** action, not a patched
+one. Decoding raises rather than guessing, and the `static` backend raises on a miss rather than
+falling back to the nearest recorded answer, which would make every test a lie.
+
+## `near_uniform` — the exact rule
+
+Every `ChoiceAnswer` carries a derived `near_uniform`. It is computed from the response on decode
+and **never read from the wire**: no wire change, no request change, no fixture change.
+
+Let `n` be the number of entries in the answer's `probabilities` map and `p_i` their values **as
+returned**. Then:
+
+```
+near_uniform  ⇔  max over i of |p_i − 1/n|  ≤  0.05
+```
+
+- The tolerance is **absolute**, `NEAR_UNIFORM_TOLERANCE = 0.05`, and the comparison is
+  **inclusive** — a maximum deviation of exactly 0.05 *is* near-uniform.
+- `n` is the number of entries **in the map**; an offered option absent from the map counts as
+  `0` by not being an entry.
+- The probabilities are never sorted, renormalised or rounded before the comparison.
+- `n == 1` ⇒ `True` (a single option is trivially uniform). An **empty map** ⇒ `False` — it has
+  no distribution at all.
+
+The 0.05 is measured, not felt: wire rounding is two decimals (±0.005 of deviation is
+quantisation alone), backend non-determinism is σ ≈ 0.015 across twelve identical calls, and on a
+four-option choice the undescribed-options encoding returned a median top probability of 0.29
+(deviation 0.04, inside the band) against the described one's 0.80 (deviation 0.55, far outside).
+It is absolute rather than relative because at 255 options `1/n` is 0.0039 and any relative band
+is finer than the rounding the wire already applies.
+
+`near_uniform(probabilities)` is exported, so you can apply the same rule to a distribution you
+obtained some other way.
+
+## `calibrated` — and what neither flag detects
+
+Every `Decision` reports `calibrated`. `systemone` reports `True`. `llm` reports `False` unless it
+derived its probabilities from provider token probabilities. An absent `calibrated` on the wire
+decodes as `True`: the System One wire reports calibration by being itself, and a backend that is
+not calibrated says so explicitly.
+
+<Aside type="caution" title="Both flags are advisory. Neither is a correctness signal.">
+`near_uniform` detects an encoding that gave the model **nothing to rank on** — the one encoding
+health check available with no ground truth, cheap enough to run on live traffic. It **cannot
+distinguish a good encoding from a subtly wrong one**: a wrong-but-answerable question still
+reads as answerable, and comes back sharply peaked on the wrong option. `calibrated` carries the
+same caveat — it says where the numbers came from, not whether they are right.
+
+And **a threshold tuned against one backend does not transfer to another**. Confidence reports on
+the *question*, not on the answer: the worst working encoding measured carried the *highest*
+median confidence (0.82). Re-tune when you change `model`, `style` or backend.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — read all three answer shapes
+
+```python test
+import asyncio
+
+from toolnexus import (
+    ChoiceQuestion,
+    NoulQuestion,
+    RecordedDecision,
+    ScoreQuestion,
+    create_classifier,
+)
+
+TICKET = "Charged twice for the annual plan; I am not blocked but I want the money back this week."
+
+QUESTIONS = {
+    "wants_money_back": NoulQuestion("Is the customer asking for money to be returned?"),
+    "department": ChoiceQuestion(
+        "Which desk should own this ticket?",
+        {
+            "billing": "own it here when the problem is money that moved: a duplicate charge, a refund owed",
+            "technical": "own it here when the problem is the product itself: a login that fails",
+        },
+    ),
+    "urgency": ScoreQuestion(
+        "How fast does this ticket need a human?",
+        ["waiting on an answer", "will chase today", "blocked right now"],
+    ),
+}
+
+RECORDED = RecordedDecision(
+    state=TICKET,
+    questions=QUESTIONS,
+    response={
+        "model": "typesafe/jev-1.13-20260917",
+        "answers": {
+            "wants_money_back": {"type": "noul", "noul": 0.99},
+            "department": {
+                "type": "choice",
+                "choice": "billing",
+                "probabilities": {"billing": 0.96, "technical": 0.04},
+                "confidence": 0.93,
+            },
+            "urgency": {
+                "type": "score",
+                "score": 1.21,
+                "legend": {"0": "waiting on an answer", "1": "will chase today", "2": "blocked right now"},
+                "probabilities": {"0": 0.12, "1": 0.55, "2": 0.33},
+                "confidence": 0.58,
+            },
+        },
+        "usage": {"input_tokens": 516, "output_tokens": 72, "cost": 0.000021672},
+    },
+)
+
+
+async def main():
+    judge = create_classifier(style="static", model="typesafe/jev-1.13", decisions=[RECORDED])
+    d = await judge.evaluate(TICKET, QUESTIONS)
+
+    want = d.noul("wants_money_back")
+    dept = d.choice("department")
+    urg = d.score("urgency")
+
+    assert want.noul == 0.99                 # a noul carries no confidence: the number IS the answer
+    assert dept.choice in dept.probabilities  # the pick is always one of the offered options
+    assert dept.near_uniform is False         # 0.96 is nowhere near 1/2
+    assert urg.score == 1.21                  # a score MAY fall between levels
+    assert urg.levels()[1] == "will chase today"   # the legend, back in LEVEL order
+
+    level = round(urg.score)
+    print("ok:", dept.choice, "| level", level, "—", urg.legend[str(level)])
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — the accessors fail loudly
+
+```python test
+import asyncio
+
+from toolnexus import (
+    ClassifierError,
+    ClassifierUsage,
+    Decision,
+    NoulAnswer,
+    NoulQuestion,
+    ScoreAnswer,
+    create_classifier,
+)
+
+
+def stub(state, questions):
+    return Decision(
+        model="stub",
+        answers={
+            "resolved": NoulAnswer(noul=0.2),
+            "urgency": ScoreAnswer(
+                score=1.0,
+                legend={"0": "can wait", "1": "chase today"},
+                probabilities={"0": 0.3, "1": 0.7},
+                confidence=0.7,
+            ),
+        },
+        usage=ClassifierUsage(input_tokens=90, output_tokens=12),
+        calibrated=False,
+    )
+
+
+async def main():
+    judge = create_classifier(style="custom", evaluate=stub)
+    d = await judge.evaluate("s", {"resolved": NoulQuestion("solved already?")})
+
+    # Absent key ⇒ raises, naming the key. It never hands back a zero.
+    try:
+        d.noul("department")
+        raise AssertionError("expected a ClassifierError")
+    except ClassifierError as e:
+        assert "'department'" in str(e)
+
+    # Wrong type ⇒ raises, naming BOTH the key and the type it actually is.
+    try:
+        d.choice("urgency")
+        raise AssertionError("expected a ClassifierError")
+    except ClassifierError as e:
+        assert "'urgency'" in str(e) and "score" in str(e)
+
+    assert d.noul("resolved").noul == 0.2
+    # `cost` is a gateway field. Absent is NOT zero — report "not reported", never $0.00.
+    assert d.usage.cost is None
+
+    print("ok: both misreads raised; resolved =", d.noul("resolved").noul)
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — `near_uniform` at the boundary, and `calibrated`
+
+The tolerance is inclusive and the map is taken as returned. Both sides of the boundary are
+pinned by the shared fixture `examples/judge/near-uniform.json`.
+
+```python test
+import asyncio
+
+from toolnexus import (
+    ChoiceQuestion,
+    RecordedDecision,
+    create_classifier,
+    near_uniform,
+)
+
+# The rule, applied directly to a distribution.
+assert near_uniform({"a": 0.25, "b": 0.25, "c": 0.25, "d": 0.25}) is True
+assert near_uniform({"a": 0.30, "b": 0.25, "c": 0.25, "d": 0.20}) is True    # max dev 0.05, INCLUSIVE
+assert near_uniform({"a": 0.31, "b": 0.25, "c": 0.25, "d": 0.19}) is False   # 0.06 is outside
+assert near_uniform({"only": 0.99}) is True     # n == 1 is trivially uniform
+assert near_uniform({}) is False                # an empty map has no distribution at all
+assert near_uniform({"a": 0.5, "b": 0.5}) is True   # values are taken AS RETURNED, never renormalised
+
+QUESTIONS = {
+    # Degenerate on purpose: every description is just its own id. Schema-valid, HTTP 200 —
+    # and the model has nothing to rank on, which is exactly what near_uniform catches.
+    "department": ChoiceQuestion("Which desk?", {"billing": "billing", "shipping": "shipping",
+                                                 "technical": "technical", "legal": "legal"}),
+}
+
+RECORDED = RecordedDecision(
+    state="charged twice",
+    questions=QUESTIONS,
+    response={
+        "model": "some-chat-model",
+        "answers": {
+            "department": {
+                "type": "choice",
+                "choice": "billing",
+                "probabilities": {"billing": 0.29, "shipping": 0.24, "technical": 0.24, "legal": 0.23},
+                "confidence": 0.82,          # HIGH confidence on an answer with no signal
+            }
+        },
+        "usage": {"input_tokens": 140, "output_tokens": 18},
+        "calibrated": False,
+    },
+)
+
+
+async def main():
+    warnings = []
+    judge = create_classifier(
+        style="static",
+        model="m",
+        decisions=[RECORDED],
+        on_metric=lambda ev: warnings.append(ev) if ev["event"] == "classifier.warning" else None,
+    )
+    d = await judge.evaluate("charged twice", QUESTIONS)
+    a = d.choice("department")
+
+    assert a.near_uniform is True        # max|p - 0.25| = 0.04 ≤ 0.05
+    assert a.confidence == 0.82          # confidence reports on the QUESTION, not the answer
+    assert d.calibrated is False         # a threshold tuned elsewhere does NOT transfer here
+    assert warnings[0]["question"] == "department"   # the encoding was flagged before the call
+
+    print("ok: near_uniform =", a.near_uniform, "at confidence", a.confidence)
+
+
+asyncio.run(main())
+```
+
+## See also
+
+- [`create_classifier`](/api/python/judge/classifier/) — A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop.
+- [`NoulQuestion`](/api/python/judge/questions/) — The three question types, the criteria each one needs, and the limits enforced client-side before the request.
+- [The encoding obligation](/judge/encoding/) — what a near-uniform answer usually means, and the measurement behind it.
+- [Backends](/judge/backends/) — which backends report `calibrated: true`, and what they cost.
+- [Cookbook: a classifier in the loop](/cookbook/judge/) — the end-to-end recipe.

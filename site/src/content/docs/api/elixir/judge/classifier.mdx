@@ -1,0 +1,268 @@
+---
+title: "Toolnexus.Classifier.create"
+description: "A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop. — Elixir."
+sidebar:
+  label: "Toolnexus.Classifier.create"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/classifier.ex">elixir/lib/toolnexus/classifier.ex</a>
+</p>
+
+```elixir
+Toolnexus.Classifier.create(keyword() | map()) :: {:ok, Classifier.t()} | {:error, String.t()}
+
+Toolnexus.Classifier.evaluate(Classifier.t(), state :: term(), %{String.t() => question()}) ::
+  {:ok, Toolnexus.Classifier.Decision.t()} | {:error, String.t()}
+
+Toolnexus.Classifier.canonical_request(model :: String.t(), questions :: map()) :: binary()
+Toolnexus.Classifier.near_uniform?(probabilities :: map()) :: boolean()
+Toolnexus.Classifier.choice_over(instructions :: String.t(), items :: map()) :: Choice.t()
+```
+
+A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages,
+no tool calling, no loop. `Toolnexus.Tool` is the contract for an **action**;
+`Toolnexus.Classifier` is the contract for a **judgment**. It is never selected as a model for
+`Client.run/4` or `Client.ask/3`, and constructing one alters no request the client loop makes.
+
+Every function returns `{:ok, _}` or `{:error, reason}` — the Elixir port never raises where the
+JS, Python, Java and C# ports throw, and the reason is a plain sentence naming what went wrong.
+
+<Aside type="caution" title="A classifier interprets; it never authorises">
+A decision is a reading of intent inside a boundary, never the boundary. Numeric limits,
+permission checks and allowlists stay in your `if` statements. Schema validity is not correctness:
+a decision can be confidently wrong, and "cannot hallucinate" means only that the returned value
+is inside the declared schema. Nothing here is a security control.
+</Aside>
+
+## When to use it
+
+- **A judgment that steers an action, not the action itself** — is this shell command risky, does
+  this turn need the billing skill, which desk owns this ticket, how urgent is it. See
+  [Typed decisions](/judge/) for why this is a third tier next to an `if` and a frontier turn.
+- **You want a number you can threshold**, not prose you have to parse. There is no parsing step
+  afterwards, because there is nothing to parse.
+- **You are already holding the state** — a string, a map or a list. It is transmitted verbatim.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use Client.run/4 when the decision must also DO something">
+A classifier has no messages, no tool calling and no streaming. If the thing you want is an
+action — call a tool, write a file, answer a user — that is
+[`Toolnexus.Client.run/4`](/api/elixir/client/run/). Reach for a classifier only when the output
+is a judgment that your own code then acts on. Running both is normal: a cheap classifier routes,
+the client loop executes.
+</Aside>
+
+## Options
+
+Every option below is a keyword on `create/1` (a map works too). Names are the port-local
+snake_case spelling of `ClassifierOptions` (SPEC §8B), which mirrors
+[`ClientOptions`](/api/elixir/client/create/) field-for-field wherever a field makes sense.
+
+| option | default | what it does |
+|---|---|---|
+| `:style` | `"systemone"` | `"systemone"` \| `"llm"` \| `"custom"` \| `"static"`. An unknown style is rejected by `create/1`, not at call time |
+| `:base_url` | `"https://api.typesafe.ai/v1"` | the System One endpoint base. OpenRouter serves the same wire at `"https://openrouter.ai/api/v1"` |
+| `:model` | `"jev-latest"` | pin it (e.g. `"jev-1.13.0"`) once thresholds are tuned. `Decision.model` echoes what actually answered, which may be more specific |
+| `:api_key_env` | `"TYPESAFE_API_KEY"` | the **name** of an env var, never the value. Read at call time, never logged. §8's `:api_key` takes a value; this option deliberately does not |
+| `:headers` | `%{}` | extra headers; values expand `${ENV_VAR}` from the environment **at call time** and are never logged, identically to remote-MCP headers |
+| `:timeout` | `10_000` | milliseconds **per request**, not per run — a classifier has no loop to bound |
+| `:http_options` | `[]` | extra `Req` options for the classifier path only (`plug:`, `retry:`, proxying) |
+| `:transport` | — | the injectable HTTP transport: a 1-arity function over a request map returning `{:ok, %{status:, headers:, body:}}` or `{:error, exception}`. `body` is the canonical request **binary**. This is the port's spelling of `httpClient` |
+| `:retries` | `2` | retry budget per evaluate. The backoff is `retry_base_ms * 2^attempt`, no jitter, and a `Retry-After` header still wins |
+| `:retry_base_ms` | `500` | base of that backoff, in ms. The classifier's half of the §8 `:retry_base_ms` it mirrors — set it to `1` to take a retry test off the clock |
+| `:on_error` | — | the §8 classifier verbatim: a map with `:attempt`, `:retryable` and one of `:status` / `:error` in, `:retry` or `:fail` out. There is no `:suspend` tier here |
+| `:retryable_statuses` | — | extra HTTP statuses to treat as retryable. **Adds only, never removes** — a host cannot drop `429` and lose `Retry-After` with it — and `:on_error` still decides each attempt, so `:fail` overrides a status listed here |
+| `:request_params` | — | merged into the base body before marshalling; a caller key wins |
+| `:body_transform` | — | a 1-arity function run **after** the `:request_params` merge and before marshalling. Order is base body → `:request_params` → `:body_transform` → marshal |
+| `:on_metric` | — | receives `"classifier.evaluate"` events into the **same** sink as the client, and the degenerate-criteria advisory as `"classifier.warning"` |
+| `:client` | — | `style: "llm"` only — the `Toolnexus.Client` to emulate over |
+| `:evaluate` | — | `style: "custom"` only — your own `(state, questions) -> {:ok, Decision.t()} \| {:error, term}`. Every wire option is ignored |
+| `:decisions` | `[]` | the `static` corpus: a list of `%{state: …, questions: …, response: map_or_binary}`. `style: "static"` only. Gated at **core** tier by the options manifest |
+
+One port-local note against the options manifest: the injectable transport is split in two
+here — `:http_options` (pass-through to `Req`) and `:transport` (replace the call entirely) —
+where other ports carry one `httpClient`.
+
+### Retries
+
+The default retryable set is `408`, `429`, `500`, `502`, `503`, `504`, `529`, plus network errors.
+`408` is the classifier's addition over the §8 client set; `529` is there because TypeSafe
+documents it as retry-with-backoff. It is an enumeration on purpose — "any 5xx" would sweep in
+`501` and `505`, which never become healthy. `Retry-After` is honoured with the §8
+`delay-seconds` rule, and a `401`/`403` body is never echoed into the error, because gateways
+reflect the credential they were sent.
+
+### Backends
+
+- **`systemone`** — one `POST {base_url}/systemone` with the canonical body. Chunking under the
+  token budget and the 255-option cap is the backend's business and invisible to you.
+- **`llm`** — the three question types rendered as one structured-output call on any §8 client, so
+  a host with no System One credential runs the same questions on a cheap chat model. It reports
+  `calibrated: false`.
+- **`custom`** — your own `:evaluate`: a fine-tuned encoder, a rules engine, or a cache.
+- **`static`** — recorded decisions keyed by the canonical request **and** the state. This is what
+  CI runs: no network, no credential, and the only backend a test may assert a number against.
+
+Full comparison, including what `llm` costs you, in [Backends](/judge/backends/).
+
+## Examples
+
+### 1. The smallest useful call — one `noul`, recorded, no network
+
+```elixir test
+alias Toolnexus.Classifier
+alias Toolnexus.Classifier.{Decision, Noul}
+
+state = "Order 4021 arrived smashed and I would like my money back."
+questions = %{"wants_refund" => %Noul{instructions: "Is the customer asking for a refund?"}}
+
+{:ok, judge} =
+  Classifier.create(
+    style: "static",
+    model: "jev-1.13.0",
+    decisions: [
+      %{
+        state: state,
+        questions: questions,
+        response: %{
+          "model" => "typesafe/jev-1.13-20260917",
+          "answers" => %{"wants_refund" => %{"type" => "noul", "noul" => 0.97}},
+          "usage" => %{"input_tokens" => 112, "output_tokens" => 9}
+        }
+      }
+    ]
+  )
+
+{:ok, decision} = Classifier.evaluate(judge, state, questions)
+{:ok, answer} = Decision.noul(decision, "wants_refund")
+
+true = answer.noul > 0.9
+true = decision.calibrated
+true = decision.model == "typesafe/jev-1.13-20260917"
+
+IO.puts("ok: wants_refund = #{answer.noul} answered by #{decision.model}")
+```
+
+### 2. The realistic case — a `custom` backend, with the metric sink wired
+
+`style: "custom"` hands the whole evaluation to your function, so a cache, a rules engine or a
+local model drops straight in. The `:on_metric` sink is the same one the client uses.
+
+```elixir test
+alias Toolnexus.Classifier
+alias Toolnexus.Classifier.{ChoiceAnswer, Decision, Usage}
+
+{:ok, events} = Agent.start_link(fn -> [] end)
+
+rules = fn state, _questions ->
+  desk = if String.contains?(state, "charged"), do: "billing", else: "technical"
+
+  {:ok,
+   %Decision{
+     model: "rules-v1",
+     answers: %{
+       "department" => %ChoiceAnswer{
+         choice: desk,
+         probabilities: %{"billing" => 1.0, "technical" => 0.0},
+         confidence: 1.0,
+         near_uniform: false
+       }
+     },
+     usage: %Usage{input_tokens: 0, output_tokens: 0},
+     # A rules engine derives nothing from token probabilities, so it says so.
+     calibrated: false
+   }}
+end
+
+{:ok, judge} =
+  Classifier.create(
+    style: "custom",
+    evaluate: rules,
+    on_metric: fn ev -> Agent.update(events, &[ev | &1]) end
+  )
+
+{:ok, decision} =
+  Classifier.evaluate(
+    judge,
+    "I was charged twice for the annual plan",
+    %{
+      "department" =>
+        Classifier.choice_over("Which desk should own this ticket?", %{
+          "billing" => "own it here when the problem is money that moved: a duplicate charge, a refund owed",
+          "technical" => "own it here when the problem is the product itself: a login that fails"
+        })
+    }
+  )
+
+{:ok, choice} = Decision.choice(decision, "department")
+true = choice.choice == "billing"
+false = decision.calibrated
+
+[ev] = Agent.get(events, & &1)
+true = ev.event == "classifier.evaluate"
+true = ev.status == "ok"
+
+IO.puts("ok: routed to #{choice.choice}; one #{ev.event} event, calibrated=#{decision.calibrated}")
+```
+
+### 3. The full surface — defaults, the additive retry set, and a rejected style
+
+`:retryable_statuses` widens the default set and can never narrow it, and `create/1` rejects a
+style whose required option is missing **before** any call is made.
+
+```elixir test
+alias Toolnexus.Classifier
+
+{:ok, default} = Classifier.create()
+
+true = default.style == "systemone"
+true = default.base_url == "https://api.typesafe.ai/v1"
+true = default.model == "jev-latest"
+true = default.api_key_env == "TYPESAFE_API_KEY"
+true = default.timeout == 10_000
+true = default.retries == 2
+
+# Same values, read off the module rather than a literal.
+true = Classifier.default_base_url() == default.base_url
+true = Classifier.default_model() == default.model
+true = Classifier.default_api_key_env() == default.api_key_env
+true = Classifier.default_timeout() == default.timeout
+
+{:ok, tuned} =
+  Classifier.create(
+    base_url: "https://openrouter.ai/api/v1",
+    model: "typesafe/jev-1.13",
+    api_key_env: "OPENROUTER_API_KEY",
+    headers: %{"x-tenant" => "acme", "x-token" => "${SOME_TENANT_TOKEN}"},
+    timeout: 3_000,
+    retries: 4,
+    # Cloudflare-fronted origins answer 520..527. ADDED to 408/429/500/502/503/504/529.
+    retryable_statuses: [520, 521],
+    request_params: %{"metadata" => %{"job" => "ticket-routing"}},
+    body_transform: fn body -> Map.put(body, "trace_id", "t-1") end
+  )
+
+true = tuned.retryable_statuses == [520, 521]
+true = tuned.api_key_env == "OPENROUTER_API_KEY"
+
+# A missing required option is an error from create/1, not a surprise at call time.
+{:error, why} = Classifier.create(style: "llm")
+true = String.contains?(why, ~s(style "llm" requires :client))
+{:error, _} = Classifier.create(style: "custom")
+{:error, _} = Classifier.create(style: "telepathy")
+
+IO.puts("ok: defaults intact, retryable widened to #{inspect(tuned.retryable_statuses)}, #{why}")
+```
+
+## See also
+
+- [`Toolnexus.Classifier.Noul`](/api/elixir/judge/questions/) — The three question types, the criteria each one needs, and the limits enforced client-side before the request.
+- [`Toolnexus.Classifier.Decision`](/api/elixir/judge/decision/) — One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero.
+- [Typed decisions](/judge/) — why a judgment is its own contract, and where it sits next to code and a frontier turn.
+- [Backends](/judge/backends/) — `systemone` / `llm` / `custom` / `static`, with the measured cost of each.
+- [The encoding obligation](/judge/encoding/) — the one thing that decides whether your answers mean anything.
+- [Cookbook: a typed decision](/cookbook/judge/) — the runnable end-to-end version of this page.

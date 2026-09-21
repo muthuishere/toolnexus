@@ -154,8 +154,23 @@ defmodule Toolnexus.Agents.Loop do
       denial =
         Enum.find_value(guardrails, fn rail ->
           case rail.(ev) do
-            verdict when is_binary(verdict) and verdict != "" and verdict != "allow" -> verdict
-            _ -> nil
+            nil ->
+              nil
+
+            verdict when is_binary(verdict) and verdict != "" and verdict != "allow" ->
+              verdict
+
+            verdict when is_binary(verdict) ->
+              nil
+
+            # A guardrail is SYNCHRONOUS and returns a string by contract. Anything
+            # else used to fall through as an ALLOW, silently widening a policy
+            # check — the one direction a guardrail must never fail. Fail loudly.
+            other ->
+              raise ArgumentError,
+                    "guardrail returned #{inspect(other)}: a guardrail must return a " <>
+                      ~s(string synchronously \("" or "allow" to permit, any other string ) <>
+                      "to deny). Do asynchronous work in the :before_tool hook, which is awaited."
           end
         end)
 

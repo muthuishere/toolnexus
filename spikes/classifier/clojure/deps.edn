@@ -1,0 +1,7 @@
+;; Spike S-classifier (throwaway). koine from Clojars; nothing else third-party
+;; — the same dependency the real port already has (clojure/deps.edn).
+;;
+;;   clojure -M -m toolnexus.classifier
+{:paths ["src"]
+ :deps  {org.clojure/clojure           {:mvn/version "1.12.5"}
+         net.clojars.muthuishere/koine {:mvn/version "0.11.0"}}}

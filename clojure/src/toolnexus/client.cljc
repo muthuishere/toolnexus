@@ -134,6 +134,22 @@
     :headers        extra request headers
     :system-prompt  prepended to the toolkit's skills prompt
     :max-turns      default 10
+    :retries        transient-failure budget (default 0); retries on
+                    `429`/`500`/`502`/`503`/`504`/`529` + network. Widen the
+                    status set with `:retryable-statuses`.
+    :retry-base-ms  base of the exponential backoff in ms (default 500, as in
+                    the other six ports). The wait is
+                    `base * 2^attempt + jitter[0,100)ms`, and a usable
+                    `Retry-After` still wins over it.
+    :retryable-statuses
+                    extra HTTP statuses to treat as retryable, ADDED to the
+                    default set (`429`/`500`/`502`/`503`/`504`/`529`). It can
+                    only widen: a host cannot remove `429` and lose
+                    `Retry-After` handling with it. This sets the DEFAULT
+                    classification; `:on-error` still runs per attempt and has
+                    the final say, so `:on-error` returning `:fail` overrides a
+                    status listed here. Example: a Cloudflare-fronted origin
+                    that answers `520`–`527`.
     :hooks          §8 lifecycle middleware — a map of any of
                     {:before-llm :after-llm :before-tool :after-tool}; see
                     `before-llm!` / `execute-tool`. Absent => nothing changes.
@@ -389,17 +405,54 @@
      (cond-> {:model (:model client) :messages messages}
        (seq tools) (assoc :tools tools :tool_choice "auto")))))
 
-(def ^:private retryable-statuses
-  "§resilience-policy — the retryable set. Everything else is terminal unless a
-  host `:on-error` says otherwise."
-  #{429 500 502 503 504})
+(def ^:private default-retryable-statuses
+  "The default retryable set: `429` plus the 5xx worth another try — and `529
+  Overloaded`, which TypeSafe documents as \"retry with backoff\" and which the
+  older five-status set made terminal on the first attempt.
+
+  It is an ENUMERATION on purpose. \"Any 5xx\" would sweep in permanently-broken
+  statuses (`501 Not Implemented`, `505 HTTP Version Not Supported`) and change
+  the retry behaviour of every existing host without asking. A backend with its
+  own transient status — a Cloudflare origin answering `520`–`527`, say — opts
+  in declaratively through `:retryable-statuses`, which ADDS to this set and
+  cannot remove from it.
+
+  Shared with §8B's classifier, which adds `408` to it rather than inventing a
+  second policy."
+  #{429 500 502 503 504 529})
+
+(defn ^:no-doc retryable-status?
+  "§resilience-policy — whether a status is retryable by default, optionally
+  widened by a host's `:retryable-statuses`.
+
+  `extra` is ADDITIVE: it can only make more statuses retryable, never fewer, so
+  a host cannot accidentally drop `429` and lose `Retry-After` handling with it.
+  It decides the DEFAULT classification only — `:on-error` still runs afterwards
+  and has the final say on every attempt, so `:on-error` returning `:fail`
+  overrides a status the host itself listed here.
+
+  INTERNAL. A Clojure var has no package-private tier, so `^:no-doc` is the
+  marker: this is not API, it is not in the parity-checked option surface, and
+  it is public only because SPEC §8B's `toolnexus.classifier` reuses this policy
+  verbatim rather than shipping a second one."
+  ([status] (retryable-status? status nil))
+  ([status extra]
+   (boolean (and status
+                 (or (contains? default-retryable-statuses status)
+                     (and extra (some #(= % status) extra)))))))
 
 (def ^:private retry-after-max-seconds
   "~68 years; the widest whole-second count all seven ports represent exactly."
   2147483647)
 
-(defn- retry-after-ms
-  "Honour a `Retry-After` header when the server sends one. Seconds only: the
+(defn ^:no-doc retry-after-ms
+  "Honour a `Retry-After` header when the server sends one.
+
+  INTERNAL (`^:no-doc`), not API. It is a var rather than a private fn only
+  because SPEC §8B's `toolnexus.classifier` honours the SAME rule and calls this
+  instead of carrying its own copy: §8B says the classifier reuses the §8
+  Retry-After delay-seconds rule verbatim, and two implementations of
+  \"verbatim\" is how they stop being the same. Seconds only: the
   HTTP-date form needs date parsing, which is not portable across these two
   hosts without reaching past koine, and a server that sends it gets our
   backoff instead of a wrong answer.
@@ -436,8 +489,14 @@
     (http/request (cond-> {:method :post :url url :headers headers :body body}
                     (:timeout-ms client) (assoc :timeout-ms (:timeout-ms client))))))
 
-(defn- classify
-  "§resilience-policy — retry | fail, and NOTHING ELSE. The archived spec is
+(defn ^:no-doc classify
+  "§resilience-policy — retry | fail, and NOTHING ELSE.
+
+  INTERNAL (`^:no-doc`), not API, for the same reason as `retry-after-ms`: SPEC
+  §8B's classifier reuses this `ErrorInfo -> verdict` policy rather than
+  shipping a second one. It reads
+  only `:on-error` off its first argument, so a classifier options map answers
+  it exactly as a client does. The archived spec is
   explicit that this capability does not add a failure-originated suspend tier:
   §10 suspension stays a user-action pause, so an LLM failure can never become
   one here.
@@ -459,7 +518,7 @@
   retry. `body` is the already-marshalled request string."
   [client url headers body]
   (let [budget  (or (:retries client) 0)
-        base-ms (or (:retry-base-ms client) 250)]
+        base-ms (or (:retry-base-ms client) 500)]
     (loop [attempt 0]
       (let [t0      (ktime/now-ms)
             res     (post-llm client url headers body)
@@ -477,7 +536,9 @@
                          :status    status
                          :attempt   attempt
                          ;; a transport failure has no status and is retryable
-                         :retryable? (boolean (or failed? (contains? retryable-statuses status)))}
+                         :retryable? (boolean (or failed?
+                                                   (retryable-status?
+                                                    status (:retryable-statuses client))))}
                 verdict (classify client info)
                 throw!  (fn []
                           (if failed?
@@ -487,8 +548,12 @@
                                             {:status status}))))]
             (if (and (= :retry verdict) (< attempt budget))
               (do (ktime/sleep! (or (retry-after-ms res)
-                                    ;; exponential backoff: base * 2^attempt
-                                    (* base-ms (bit-shift-left 1 attempt))))
+                                    ;; exponential backoff + jitter, identical to
+                                    ;; the other six ports: base * 2^attempt plus
+                                    ;; a uniform 0..99ms so a fleet retrying the
+                                    ;; same upstream does not re-collide in lockstep.
+                                    (+ (* base-ms (bit-shift-left 1 attempt))
+                                       (rand-int 100))))
                   (recur (inc attempt)))
               (throw!))))))))
 

@@ -207,3 +207,27 @@ test("loop: turns accumulate across runs and status is observed", async () => {
   assert.equal(l.status, "idle")
   await tk.close()
 })
+
+test("guardrails: an async guardrail fails loudly instead of silently denying everything", async () => {
+  // A Promise is truthy and !== "allow", so before this fix an async guardrail
+  // denied EVERY tool call with `denied: [object Promise]` — fail-closed, silent,
+  // and with a garbage reason. The contract is synchronous; say so out loud.
+  const hooks = guardedHooks([async (_ev: any) => "allow"], undefined)
+  await assert.rejects(
+    () => hooks!.beforeTool!({ name: "safe", args: {}, turn: 1 } as any),
+    (err: any) => {
+      assert.ok(err instanceof TypeError)
+      assert.match(err.message, /a Promise/)
+      assert.match(err.message, /hooks\.beforeTool/)
+      return true
+    },
+  )
+
+  // Any other non-string is refused the same way.
+  const bad = guardedHooks([(_ev: any) => 42 as any], undefined)
+  await assert.rejects(() => bad!.beforeTool!({ name: "safe", args: {}, turn: 1 } as any), /number/)
+
+  // A sync guardrail returning undefined still permits — unchanged.
+  const ok = guardedHooks([(_ev: any) => undefined], undefined)
+  assert.equal(await ok!.beforeTool!({ name: "safe", args: {}, turn: 1 } as any), undefined)
+})

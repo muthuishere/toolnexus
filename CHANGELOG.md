@@ -8,6 +8,262 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### Fixed — a classifier retry backoff no longer lets Node exit out from under it (javascript)
+
+`Classifier`'s backoff timer was created and then `unref`'d. An unref'd timer does not keep
+Node's event loop alive, so when a retry backoff was the only pending work, the loop could
+resolve before the retry ever happened — the process exiting mid-retry rather than completing it.
+The timer is awaited, so it is real pending work and must hold the loop open; the §8 `Client`'s
+own `delay` has never unref'd, for exactly this reason. The request timeout watchdog still
+unrefs, which is correct: a watchdog should never be the reason a process stays alive.
+
+JavaScript only — the other six ports use blocking sleeps with no equivalent notion.
+
+Found by CI rather than by reading: Node 22 cancelled every test after the first one to exercise
+a classifier retry ("Promise resolution is still pending but the event loop has already
+resolved"), reporting `237 passed, 0 failed, 8 cancelled` and exiting 1. Node 24, which the work
+was written on, hid it completely. The suite is now 245/245 on both.
+
+### Four quiet disagreements between the ports, closed
+
+Each of these produced a green build and a valid-looking request, which is why they went
+unnoticed. Two are contract that was never written down; two are Clojure behaving unlike the
+other six.
+
+**`decisions` is now gated.** The `static` backend's recorded corpus is what CI runs on — no
+network, no credential, and the only backend a test may assert a number against. Every port had
+it; the options manifest had no row for it and `SPEC.md §8B` named the `"static"` style without
+naming the field that feeds it. The single option the whole test strategy rests on was the one
+option parity could not see. It is now a **core**-tier row (classifier options: 16 → 17), so a
+port that drops it fails the check rather than losing the ability to run the shared fixtures
+quietly. No port code changed.
+
+**An absent `calibrated` means `true`, and now says so.** All seven ports already decoded a
+missing or `null` `calibrated` as `true`, treating only the literal `false` as false — seven
+ports agreeing by inspection rather than by contract. `SPEC.md §8B` states it and each port pins
+all four cases in a test. Nothing changes today; what changes is that a port cannot later default
+it to `false` and silently invert every threshold you tuned, on a field your backend never sent.
+
+**Clojure: `choice-over` no longer ships the colon.** A keyword key reached the wire as
+`":billing"` rather than `billing`, because the port stringified ids with `str` instead of their
+name. That is schema-valid, returns HTTP 200 and a well-formed distribution — with option ids
+that differ from every other port (Elixir's atom `:billing` has always sent `billing`) and from
+the string you then compare `(:choice answer)` against. Keys may now be strings, keywords or
+symbols, and each travels as its plain name; a qualifier is kept (`:desk/billing` ⇒
+`desk/billing`) so two distinct options cannot collide into one id. **If you keyed a downstream
+branch on the `":billing"` form, drop the colon.** If you passed strings — which the port's own
+docs told you to — nothing changes.
+
+**Clojure: the client's retry backoff matches the other six.** `:retry-base-ms` defaulted to
+`250` where every other port defaults to `500`, and the backoff omitted the `+ jitter(0–99 ms)`
+term the others add. The jitter is not cosmetic: without it, a fleet of hosts that failed against
+the same upstream at the same moment retries against it at the same moment, so the retry turns one
+spike into several. Clojure now waits `base * 2^attempt + jitter(0–99 ms)` from a default of
+`500`, and a usable `Retry-After` still wins outright. **A Clojure host that never set
+`:retry-base-ms` now waits ~500 ms before its first retry instead of ~250 ms.**
+
+Tracked in `openspec/changes/close-typed-decision-parity-gaps`.
+
+**Clojure's `Classifier` example now runs on both hosts.** `examples.judge` was in the JVM
+runner and nowhere in the cljgo one — no `run_judge.cljc` entry, no `ex-judge` build target — so
+the port's whole claim, one source tree behaving identically on two hosts, went unchecked for its
+newest subsystem. It is now the seventh example in both runners, AOT and interpreted, and CI runs
+both. All seven pass on both hosts.
+
+### The classifier's retry backoff is yours to set, in every port
+
+`Classifier` retried a transient failure on a backoff base nobody could change: a hardcoded
+`500 ms`, so two retries cost `1.5 s` of real waiting. Only JavaScript exposed a
+`retryBaseMs` for it — one port with an option the other six lacked, on a seam `SPEC.md §8B`
+says mirrors `ClientOptions` field-for-field.
+
+`ClassifierOptions` now carries it everywhere, spelled natively: `retryBaseMs` (JavaScript, Java),
+`RetryBaseMs` (Go, C#), `retry_base_ms` (Python, Elixir), `:retry-base-ms` (Clojure). The default
+is `500`, the delay is still `base * 2^attempt` with no jitter, and a `Retry-After` header still
+wins over it — so if you do not set the option, nothing about your timing changes. Set it to `1`
+and a test that exercises the retry path stops sleeping: our own classifier retry tests dropped
+from 1.51 s to 0.01 s (Go) and 2.56 s to 0.05 s (Java), and the C#, Elixir and Clojure suites no
+longer fake a `Retry-After: 0` header to stay off the clock.
+
+The option is registered in `conformance/options_manifest.json` (classifier options: 15 → 16), so
+a port that forgets it now fails the parity check instead of drifting quietly.
+
+**Follow-up, now shipped:** this entry originally reported two unfixed differences in the
+*client's* backoff on Clojure. Both are closed below, under "Four quiet disagreements".
+
+### TypeSafe's own API is a documented way to run a `Classifier` — and two defects it exposed
+
+`style: "systemone"` already reached TypeSafe's first-party API by default
+(`https://api.typesafe.ai/v1`, model `jev-latest`, `TYPESAFE_API_KEY`), but everything written down
+pointed at OpenRouter's gateway. Both are now documented side by side on
+[Backends & configuration](https://muthuishere.github.io/toolnexus/judge/backends/), and every
+port's `examples/judge.*` picks its backend from the environment: `TYPESAFE_API_KEY` first,
+`OPENROUTER_API_KEY` second, and with no key at all the existing offline `static` replay, exactly
+as before. No default changed, and no new API was needed — `baseUrl`, `model` and `apiKeyEnv` were
+already enough.
+
+They are **equivalent in latency** (339 ms / 449 ms p50 / p95 against 351 ms / 400 ms, warm and
+interleaved — a tie). The reason to use the first-party key is one fewer party in the path, not
+speed. The one functional difference: **TypeSafe returns no `usage.cost`**, so a cost-based budget
+only works through the gateway.
+
+Pointing at it turned up two real defects, fixed in all seven ports:
+
+- **`529 Overloaded` was not retryable, anywhere.** The default retryable set was
+  `429/500/502/503/504`, so TypeSafe's documented "retry with backoff" status failed hard on the
+  first attempt. `529` is now in the set — on the client path and the classifier path alike — and
+  that is the whole behaviour change: **no status other than `529` changed classification.** The
+  set stays an exhaustive enumeration rather than "any 5xx", because sweeping in permanently-broken
+  statuses like `501 Not Implemented` would change the retry behaviour of every existing host
+  without asking.
+- **`retryableStatuses`, a new option on both `ClientOptions` and `ClassifierOptions`** (named per
+  port: `RetryableStatuses`, `retryable_statuses`, `:retryable-statuses`). It is how a backend with
+  its own transient status opts in — the case it exists for is a Cloudflare-fronted origin
+  answering `520`–`527`:
+
+  ```js
+  createClient({ retryableStatuses: [520, 521, 522, 523, 524, 525, 526, 527] })
+  ```
+
+  It is **additive and cannot subtract**: listing statuses never removes `429` from the set, so you
+  cannot accidentally lose `Retry-After` handling by using it. It decides the *default*
+  classification only — `onError` still runs on every failed attempt and has the final say, so
+  `onError` returning `"fail"` overrides a status you listed yourself. Registered in
+  `conformance/options_manifest.json`, so the parity check covers it in all seven ports.
+- **The docs were wrong about the retry set, and had been all along.** `SPEC.md` §8, §8B's option
+  table and every port's `retries` doc comment said "429/5xx/network" while the code enumerated
+  five statuses. The prose now states the real set (`429`/`500`/`502`/`503`/`504`/`529`, plus `408`
+  on the classifier path) and points at `retryableStatuses` for anything beyond it. **No behaviour
+  changed to make that true** — the documentation was corrected to the code, not the reverse.
+- **"cost absent" was not representable in Go or C#.** `ClassifierUsage.Cost` was a bare `float64`
+  / `double`, so against a backend that reports no cost both said **$0.00, as though the call were
+  free**, when the truth was "unknown". Go now exposes `*float64` and C# `double?`, matching
+  js/python/java/elixir/clojure, and a real `0` is still a real `0`. **This is a source-breaking
+  change for Go and C# hosts that read `Usage.Cost`** — dereference or null-check it.
+
+### Typed decisions — a `Classifier`, in all seven ports
+
+Half the decisions in an agent are not actions, they are **judgments**: is this command risky, does
+this turn need the billing skill, how urgent is this ticket. Until now you asked a chat model and
+parsed prose back, with a round self-reported confidence and no distribution. `Tool` is the
+contract for an action; `Classifier` is the contract for a judgment.
+
+You declare typed questions once and get calibrated numbers back — no free text, no tool calling,
+no loop:
+
+- **`noul`** — one probability in `0..1`. It reports no confidence; the number *is* the answer.
+- **`choice`** — one of your named options (up to 255), with a probability for **every** offered
+  option and a confidence.
+- **`score`** — a rating against an ordered rubric of 2–10 levels, and `1.21` is a real answer.
+
+The keys you address the questions by are never transmitted, so a key may be a tool, skill or agent
+name verbatim. Limits are enforced client-side before the request, and the error names the question
+key rather than making you read the backend's 400. Four backends: `systemone` (the wire),
+`llm` (the same questions as one structured-output call on the §8 client you already have — the
+exit for a host with no System One credential), `custom`, and `static`, which is what CI runs: no
+network, no credential. `ClassifierOptions` mirrors `ClientOptions` field-for-field, reusing the §8
+`onError`/`Retry-After` policy verbatim rather than growing a second one — with two deliberate
+differences: `apiKeyEnv` takes the **name** of an environment variable rather than a value, and
+`timeout` bounds one request rather than a run.
+
+**Two things in it exist because they were measured, not designed.** Describing your options is not
+style advice: options described by consequence scored 17, 17, 17 apples, and the identical state
+with each option replaced by its own id scored 0, 1, 0 — the floor of a shuffle control. That shape
+is schema-valid and returns HTTP 200, so nothing would have told you. Now something does: a `choice`
+whose criteria are all empty, all equal to their own keys, or all identical emits **one** warning
+per question key through your existing metric sink, naming the key, and sends the request
+byte-unchanged — detection, never repair. That warning arrives as a `classifier.warning` event
+carrying its text in a **`warning`** field, never in `error`: it is advisory, not a failure, so a
+consumer already counting failures off the same sink does not start counting warnings as outages. And every choice answer carries a derived `nearUniform`
+(`max|p − 1/n| ≤ 0.05`), the one encoding health check that needs no ground truth and can run on
+live traffic.
+
+Both are **advisory, and neither is a correctness signal**. `nearUniform` cannot separate a good
+encoding from a subtly wrong one, and confidence is no help either — the worst *working* encoding
+measured carried the highest median confidence. More bluntly: a classifier **interprets, it never
+authorises**. "Cannot hallucinate" means only that the value is inside the declared schema. Numeric
+limits, permission checks and allowlists stay in your code, and a threshold tuned against one
+backend does not transfer to another — which is what `Decision.calibrated` is for, and why you read
+it before you compare a number to a threshold.
+
+Same behaviour in js, python, golang, java, csharp, elixir and clojure, pinned by seven shared
+fixtures in `examples/judge/` that every port asserts byte-for-byte. A host that constructs no
+`Classifier` behaves byte-identically to a build without any of this, proven by a test rather than
+asserted. New docs: **Cookbook → Typed decisions (judge)** and **Harness → Judge, measured live**.
+Contract: `SPEC.md` §8B; encoding decisions: `docs/adr/0021`.
+
+**What is NOT done**, and where it is tracked:
+
+- **No adapters and no batteries.** There is no `SkillRelevance`, `ToolGuard` or `Verified` built on
+  this seam yet, and no model routing — you write the questions yourself. Tracked in
+  `openspec/changes/add-judge` as the follow-up `add-judge-adapters`.
+- **The live measurements on the judge page are recorded, not regenerated.** There is no
+  `judge-live` harness runner wired into the suite the way `harness/live` has one, so re-running
+  them is a manual step. The page says so, per table, with its source named.
+- **The `llm` backend is a compatibility exit, not an equivalent.** It reports
+  `calibrated: false`, returns no real distribution, and on one measured fixture disagreed outright
+  with the calibrated backend.
+- The parity gate's temporary `landing` flag — which let `conformance/check_options_parity.py`
+  report a not-yet-written port file as something other than a failure while these seven ports were
+  being written — **is deleted with this change**, along with the code path that honoured it. A
+  missing options file is a failure again, for every group.
+
+### Spec — a `beforeTool` hook can raise a suspension, and now the contract says so
+
+`SPEC.md` §10 defined a suspension by the *result* — a `ToolResult` whose `metadata.pending` is a
+`Request` — but only ever described a tool producing one. A `beforeTool` hook short-circuiting
+with that same result suspends the run identically, and the guarded tool never executes. Five
+ports already implemented and tested it; it was simply never written down, so nothing said it was
+guaranteed rather than incidental.
+
+§10 now names both paths (A: the tool returns it, B: a hook short-circuits with it) and requires
+every port to resolve a hook-raised suspension through `waitFor` exactly as it resolves a
+tool-raised one, and to halt with the hook's own `Request` when no `waitFor` is set. This is what
+a three-state policy gate needs: a guardrail returns a string and has only allow and deny, so
+"ask a human first" belongs on `beforeTool`. Two coverage gaps closed with it — Go lacked the
+hook-raised-plus-no-`waitFor` corner (the one a durable approval queue actually ships on), and
+Elixir had no path-B test at all.
+
+### Fixed — a guardrail that is not a plain string is refused, loudly, in every port
+
+A `Guardrail` returns a verdict string synchronously: `""` or `"allow"` to permit, any other
+string to deny. Handing it something else — most naturally an `async` function — did not report
+an error anywhere. It silently did the wrong thing, and it did **three different wrong things**
+depending on the port:
+
+- **JS and Python** took the deny branch on every call. A `Promise`/coroutine is truthy and is not
+  `"allow"`, so an async guardrail **denied every tool call in the run**, with the reason rendered
+  as `denied: [object Promise]` / `denied: <coroutine object …>` (Python additionally leaked an
+  un-awaited coroutine). An agent wired this way could not call a single tool, and nothing said why.
+- **Elixir and Clojure** did the opposite: a non-string verdict failed the `is_binary` / `string?`
+  test and fell through as an **allow**, so a policy check silently widened — the one direction a
+  guardrail must never fail.
+- **Go, Java and C#** were never reachable; their `Guardrail` type returns a `string`.
+
+All four dynamic ports now raise immediately, naming what came back and where asynchronous work
+belongs (a `beforeTool` hook, which is awaited). The contract is unchanged and stays synchronous
+in all seven ports, so every guardrail that was already correct keeps its exact behaviour; only
+the previously-silent mistake is now loud. If you need a judgement that takes I/O — a policy
+service, a classifier — put it in `beforeTool` rather than in a guardrail.
+
+### Fixed — `Run`/`Ask` accept a nil toolkit as "no tools" (golang)
+
+`client.Run(ctx, prompt, nil)` panicked with a nil-pointer dereference, although §8 already
+defines what an empty tool list does (the `tools` key, and `tool_choice` on the openai style, are
+omitted from the request entirely). Passing `nil` is the obvious way to say "this call needs no
+tools", so it now means exactly that: `Tools`, `ToOpenAI`, `ToAnthropic`, `ToGemini`,
+`SkillsPrompt`, `Get`, `Execute` and `McpStatus` are all nil-safe on the receiver. Building an
+empty `Toolkit` still works and is unchanged.
+
+### Docs — the coding-agent scenario no longer says the agent runtime hides the hooks
+
+The page claimed the runtime "does not surface" `beforeTool`/`afterTool`, and listed that under
+its honest limits. That stopped being true when the harness and loop shipped: an agent spec takes
+`hooks`, which the runtime forwards verbatim, and `guardrails`, which compile into one
+`beforeTool`. The page now explains when to wrap a tool and when to use a hook — wrap when the
+rule belongs to one tool and should travel with it, hook when the policy spans many — and the
+limits list carries the guardrail's synchronous contract instead.
+
 ## 0.17.0 — 2026-09-02
 
 ### Fixed — an aborted A2A call reports a cancel, not a transport error (all ports)

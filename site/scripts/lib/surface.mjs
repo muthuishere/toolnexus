@@ -44,6 +44,7 @@ export const SPEC_GROUPS = [
 	{ spec: "§7E", label: "Persona agents", groups: ["persona"] },
 	{ spec: "§7F", label: "Compaction", groups: ["compaction"] },
 	{ spec: "§8", label: "The client & loop", groups: ["client"] },
+	{ spec: "§8B", label: "Typed decisions", groups: ["judge"] },
 	{ spec: "§10", label: "Suspension", groups: ["suspension"] },
 	{ spec: "§11", label: "Translation", groups: ["translate"] },
 ]

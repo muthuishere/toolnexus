@@ -59,6 +59,85 @@ public class LlmClientResilienceTests
         Assert.Matches("(?i).*(timeout|abort).*", ex.Message);
     }
 
+    /// <summary>The default retryable set is an enumeration including 529; an unlisted 5xx (520)
+    /// and a permanent one (501) are terminal until a host opts in with <c>RetryableStatuses</c>,
+    /// which ADDS to the defaults (429 keeps retrying) and never replaces them.</summary>
+    [Theory]
+    [InlineData(529, false, true)]
+    [InlineData(520, false, false)]
+    [InlineData(501, false, false)]
+    [InlineData(520, true, true)]
+    [InlineData(429, true, true)]
+    [InlineData(501, true, false)]
+    [InlineData(422, false, false)]
+    public async Task RetryableStatusMatrix(int status, bool widen, bool retried)
+    {
+        var hits = 0;
+        using var server = new StubServer(ctx =>
+        {
+            var n = Interlocked.Increment(ref hits);
+            if (n < 2)
+            {
+                StubServer.Respond(ctx, status, "nope");
+                return;
+            }
+            StubServer.Respond(ctx, 200, "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}");
+        });
+
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+        var client = LlmClient.Create(new LlmClient.Options
+        {
+            BaseUrl = server.BaseUrl,
+            Style = "openai",
+            Model = "x",
+            ApiKey = "k",
+            Retries = 2,
+            RetryBaseMs = 5,
+            RetryableStatuses = widen ? new[] { 520, 521, 522, 523, 524, 525, 526, 527 } : null,
+        });
+
+        if (retried)
+        {
+            var res = await client.RunAsync("hi", tk);
+            Assert.Equal("ok", res.Text);
+            Assert.Equal(2, hits);
+        }
+        else
+        {
+            await Assert.ThrowsAnyAsync<Exception>(() => client.RunAsync("hi", tk));
+            Assert.Equal(1, hits);
+        }
+    }
+
+    /// <summary><c>RetryableStatuses</c> sets the DEFAULT classification only — <c>OnError</c> runs
+    /// per attempt and has the final say over a status the host itself listed.</summary>
+    [Fact]
+    public async Task OnErrorFailOverridesAListedStatus()
+    {
+        var hits = 0;
+        using var server = new StubServer(ctx =>
+        {
+            Interlocked.Increment(ref hits);
+            StubServer.Respond(ctx, 520, "origin down");
+        });
+
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+        var client = LlmClient.Create(new LlmClient.Options
+        {
+            BaseUrl = server.BaseUrl,
+            Style = "openai",
+            Model = "x",
+            ApiKey = "k",
+            Retries = 3,
+            RetryBaseMs = 5,
+            RetryableStatuses = new[] { 520, 521, 522, 523, 524, 525, 526, 527 },
+            OnError = info => { Assert.True(info.Retryable); return LlmClient.Tier.Fail; },
+        });
+
+        await Assert.ThrowsAnyAsync<Exception>(() => client.RunAsync("hi", tk));
+        Assert.Equal(1, hits);
+    }
+
     // ---- §8 OnError resilience classifier ----
 
     [Fact]

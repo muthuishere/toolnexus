@@ -11,6 +11,7 @@
 ;; both trees — that is a different mechanism. Measured 2026-07-31.)
 (ns toolnexus.test-main
   (:require [clojure.test :as t]
+            [koine.env :as env]
             [koine.json :as json]
             [koine.host :as host]
             [toolnexus.tool-test]
@@ -25,6 +26,7 @@
             [toolnexus.builtin-test]
             [toolnexus.content-test]
             [toolnexus.client-test]
+            [toolnexus.classifier-test]
             [toolnexus.translate-test]
             [toolnexus.a2a-test]
             [toolnexus.serve-test]
@@ -48,6 +50,7 @@
     toolnexus.builtin-test
     toolnexus.content-test
     toolnexus.client-test
+    toolnexus.classifier-test
     toolnexus.translate-test
     toolnexus.a2a-test
     toolnexus.serve-test
@@ -70,7 +73,7 @@
 ;; and the count stays above any floor. Comparing `suites` against a constant is
 ;; the only check that can see the vector shrink, because every count derived
 ;; FROM the vector shrinks with it. Adding a suite is meant to be a two-line diff.
-(def expected-suite-count 21)
+(def expected-suite-count 22)
 
 (defn- declared-tests
   "How many deftests a namespace actually holds, read off its interns rather than
@@ -138,6 +141,16 @@
                    :else "OK")}))
 
 (defn -main [& _]
+  ;; Four suites read the shared fixture tree through TN_EXAMPLES. Unset, it
+  ;; concatenates into "/subagent-lifecycle/fixture.json" and the run reports ten
+  ;; FileInputStream errors and six golden-byte failures — sixteen symptoms of one
+  ;; missing variable, none of which name it. Say it once, before anything runs.
+  ;; `./all-modes-check.sh` exports it; running the entry point by hand does not.
+  (when (empty? (env/get-env "TN_EXAMPLES"))
+    (throw (ex-info (str "TN_EXAMPLES is not set: it must point at the repo's shared "
+                         "examples/ directory, which four suites read fixtures from. "
+                         "Run ./all-modes-check.sh, or set it explicitly.")
+                    {:gate "FAILED: TN_EXAMPLES is not set"})))
   (let [r (run)]
     (println (json/write-str r))
     ;; The suite uses `future` for parallel tool calls. On the JVM the agent

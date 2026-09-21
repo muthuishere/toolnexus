@@ -1,0 +1,285 @@
+---
+title: "Classifier.create"
+description: "A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop. — Java."
+sidebar:
+  label: "Classifier.create"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/Classifier.java">Classifier.java</a>
+</p>
+
+```java
+public final class Classifier {
+    public static Classifier create(Classifier.Options opts);
+
+    public Decision evaluate(Object state, Map<String, Question> questions);
+
+    public static byte[] canonicalRequest(String model, Map<String, Question> questions);
+    public static boolean nearUniform(Map<String, Double> probabilities);
+
+    public static final class ClassifierException extends RuntimeException { }
+}
+```
+
+A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no
+tool calling, no loop. `Tool` is the contract for an **action**; `Classifier` is the contract for a
+**judgment**.
+
+<Aside type="caution" title="A classifier interprets; it never authorises">
+A `Decision` is a reading of intent inside a boundary — never the boundary. Numeric limits,
+permission checks and allowlists stay in your `if` statements. Schema validity is not correctness:
+a decision can be confidently wrong, and "cannot hallucinate" means only that the returned value is
+inside the declared schema. Nothing here is a security control.
+</Aside>
+
+## When to use it
+
+When the thing you need is a **number you can threshold**, not an action: *is this shell command
+risky, does this turn need the billing skill, which desk owns this ticket, how urgent is it.* Those
+questions do not need a model that can call tools and write prose; they need one calibrated value,
+in ~0.3–0.5 s, for fractions of a cent. The argument and the measurements live on
+[Typed decisions](/judge/).
+
+A `Classifier` is never selected as a model for `run`/`ask` and never enters the client loop. A
+host that constructs no `Classifier` observes byte-identical behaviour to a build without §8B.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="When NOT to use it">
+Use [`LlmClient.run`](/api/java/client/run/) when the decision has to **do** something — call a
+tool, write a reply, hold a conversation. Use plain Java when the rule is a rule: a price cap, a
+role check, an allowlist. A classifier is for the middle, where the input is meaning and the output
+is a number.
+</Aside>
+
+`evaluate` is one round trip for the **whole** question set. The questions are independent — one
+answer is never context for another — so asking five things costs one state ingest, not five calls.
+The caller's map keys are addressing, not content: they are never transmitted, so a key may be a
+tool, skill or agent name verbatim, and two evaluations differing only in their keys send identical
+bytes.
+
+Failures are **unchecked** `Classifier.ClassifierException`s — there is nothing to declare and
+nothing to catch by obligation. That is a Java-local shape; the other ports raise their own
+idiomatic error.
+
+## Backends
+
+Picked by `style`. The details, and the measured case for each, are on
+[Backends](/judge/backends/).
+
+| `style` | requires | what it does |
+|---|---|---|
+| `"systemone"` *(default)* | `apiKeyEnv` at call time | one `POST {baseUrl}/systemone` with the canonical body. Reports `calibrated: true`. |
+| `"llm"` | `client` | the three question types rendered as **one** JSON-schema structured-output call on any §8 client. `calibrated: false` unless it read provider token probabilities. |
+| `"custom"` | `evaluate` | your own function — a fine-tuned encoder, a rules engine, a cache. Every wire option is ignored. |
+| `"static"` | `decisions` | recorded decisions, keyed by the canonical request **and** the state. **This is what CI runs**: no network, no credential. |
+
+An unknown style, or a style whose required option is missing, throws from `create` — before any
+call is made.
+
+## Examples
+
+### 1. The smallest useful call
+
+`static` replays one recorded response, so this runs offline and uncredentialed.
+
+```java test
+import io.github.muthuishere.toolnexus.Classifier;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        String state = "The customer was charged twice and wants the money back.";
+        Map<String, Classifier.Question> questions = Map.of(
+            "wants_refund", new Classifier.NoulQuestion("Is the customer asking for money back?"));
+
+        String recorded = """
+            {"model":"typesafe/jev-1.13-20260917",
+             "answers":{"wants_refund":{"type":"noul","noul":0.99}},
+             "usage":{"input_tokens":96,"output_tokens":8}}
+            """;
+
+        Classifier judge = Classifier.create(new Classifier.Options()
+            .style(Classifier.STYLE_STATIC)
+            .model("typesafe/jev-1.13")
+            .decisions(List.of(new Classifier.RecordedDecision(state, questions, recorded))));
+
+        Classifier.Decision d = judge.evaluate(state, questions);
+        double p = d.noul("wants_refund").noul();
+
+        if (p < 0.9) throw new AssertionError("expected a high noul, got " + p);
+        System.out.println("ok: wants_refund=" + p + " calibrated=" + d.calibrated());
+    }
+}
+```
+
+A `noul` carries **no** confidence: the number *is* the answer.
+
+### 2. A `custom` backend, and the metric sink
+
+`custom` takes the host's own function and ignores every wire option — useful for a cache, a rules
+engine, or a test double. `onMetric` feeds the **same** §8 sink the client uses.
+
+```java test
+import io.github.muthuishere.toolnexus.Classifier;
+import io.github.muthuishere.toolnexus.LlmClient;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        List<String> events = new ArrayList<>();
+
+        Classifier judge = Classifier.create(new Classifier.Options()
+            .style(Classifier.STYLE_CUSTOM)
+            .onMetric(ev -> events.add(ev.event()))
+            // The host decides everything. Reporting calibrated=false is honest here: these
+            // probabilities did not come from a calibrated backend.
+            .evaluate((state, questions) -> new Classifier.Decision(
+                "rules-engine/v1",
+                Map.of("risky", new Classifier.NoulAnswer(
+                    String.valueOf(state).contains("rm -rf") ? 1.0 : 0.0)),
+                new Classifier.Usage(0, 0, null),
+                false)));
+
+        Map<String, Classifier.Question> questions = Map.of(
+            "risky", new Classifier.NoulQuestion("Would running this command destroy data?"));
+
+        Classifier.Decision safe = judge.evaluate("ls -la", questions);
+        Classifier.Decision bad = judge.evaluate("rm -rf /", questions);
+
+        if (safe.noul("risky").noul() != 0.0 || bad.noul("risky").noul() != 1.0) {
+            throw new AssertionError("unexpected: " + safe + " / " + bad);
+        }
+        if (!events.equals(List.of("classifier.evaluate", "classifier.evaluate"))) {
+            throw new AssertionError("events: " + events);
+        }
+        System.out.println("ok: " + events.size() + " classifier.evaluate events, calibrated="
+            + bad.calibrated());
+    }
+}
+```
+
+A `classifier.warning` (degenerate choice criteria) arrives on the same sink with its text in
+`warning()` and **no** error — a consumer filtering the sink on "has an error" must not count one.
+See [The library tells you when you got this wrong](/judge/encoding/#the-library-tells-you-when-you-got-this-wrong--once).
+
+### 3. The full options surface
+
+Every option spelled out, still hermetic: `style("static")` means no socket is opened, so the wire
+options below are inert here and shown for shape.
+
+```java test
+import io.github.muthuishere.toolnexus.Classifier;
+import io.github.muthuishere.toolnexus.LlmClient;
+import java.net.http.HttpClient;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        String state = "annual plan, charged twice on Tuesday";
+        Map<String, Classifier.Question> questions = Map.of(
+            "department", new Classifier.ChoiceQuestion("Which desk should own this ticket?", Map.of(
+                "billing", "own it here when the problem is money that moved: a duplicate charge, a refund owed",
+                "technical", "own it here when the problem is the product itself: a login that fails")));
+
+        String recorded = """
+            {"model":"typesafe/jev-1.13-20260917",
+             "answers":{"department":{"type":"choice","choice":"billing",
+               "probabilities":{"billing":0.97,"technical":0.03},"confidence":0.91}},
+             "usage":{"input_tokens":212,"output_tokens":21,"cost":0.0000119}}
+            """;
+
+        Classifier.Options opts = new Classifier.Options()
+            .style(Classifier.STYLE_STATIC)                      // systemone | llm | custom | static
+            .baseUrl("https://api.typesafe.ai/v1")               // the default, spelled out
+            .model("typesafe/jev-1.13")                          // pin it once thresholds are tuned
+            .apiKeyEnv("TYPESAFE_API_KEY")                       // the NAME of an env var, never a value
+            .headers(Map.of("X-Tenant", "${TENANT_ID}"))         // ${VAR} expands at call time, never logged
+            .timeoutMs(10_000)                                   // per request; there is no loop to bound
+            .httpClient(HttpClient.newBuilder()                  // the injectable transport
+                .connectTimeout(Duration.ofSeconds(2)).build())
+            .retries(2)
+            .retryableStatuses(List.of(520, 522))                // ADDS to the default set, never removes
+            .onError(info -> info.status() == 402                // the §8 ErrorInfo -> Tier classifier
+                ? LlmClient.Tier.FAIL : LlmClient.Tier.RETRY)
+            .requestParams(Map.of("provider", Map.of("sort", "latency")))  // merged in; a key here WINS
+            .bodyTransform(body -> body)                         // last look before marshalling
+            .onMetric(ev -> { })                                 // the same §8 sink as the client
+            .decisions(List.of(new Classifier.RecordedDecision(state, questions, recorded)));
+
+        Classifier.Decision d = Classifier.create(opts).evaluate(state, questions);
+        Classifier.ChoiceAnswer dept = d.choice("department");
+
+        if (!dept.choice().equals("billing")) throw new AssertionError(dept.choice());
+        System.out.println("ok: " + dept.choice() + " p=" + dept.probabilities()
+            + " nearUniform=" + dept.nearUniform());
+    }
+}
+```
+
+## `Classifier.Options`
+
+A fluent builder whose setters return `this`; the public fields are settable directly too. It
+mirrors §8 [`LlmClient.Options`](/api/java/client/create/) field-for-field wherever a field makes
+sense, so a host that has configured one has configured the other.
+
+| Option | Default | What it does |
+|---|---|---|
+| `style(String)` | `"systemone"` | `"systemone"`, `"llm"`, `"custom"` or `"static"`. Constants: `Classifier.STYLE_SYSTEMONE` and friends. |
+| `baseUrl(String)` | `https://api.typesafe.ai/v1` | The API base. OpenRouter (`https://openrouter.ai/api/v1`) serves the same wire. |
+| `model(String)` | `"jev-latest"` | **Pin it** (e.g. `jev-1.13.0`) once thresholds are tuned. `Decision.model()` echoes what actually answered. |
+| `apiKeyEnv(String)` | `"TYPESAFE_API_KEY"` | The **name** of the env var, not the value — read at call time, never logged. §8's `apiKey` takes a value; this deliberately does not. |
+| `headers(Map<String,String>)` | — | Extra request headers. Values expand `${ENV_VAR}` at call time and are never logged, identically to remote-MCP headers. |
+| `timeoutMs(long)` | `10_000` (10 s) | Bounds **one** request. A classifier has no loop to bound. |
+| `httpClient(HttpClient)` | a default `HttpClient` | The injectable transport. Scope is the classifier path only. |
+| `retries(int)` | `2` | Retry budget on transient errors. `null` or `<= 0` falls back to the default. |
+| `retryBaseMs(int)` | `500` | Base of the retry backoff, in ms: the delay is `base * 2^attempt`, no jitter, and a `Retry-After` header still wins. `null` or `<= 0` falls back to the default. The classifier's half of the §8 `Options.retryBaseMs` it mirrors. |
+| `retryableStatuses(List<Integer>)` | — | Extra statuses **added** to the default set. It can only widen. |
+| `onError(Function<ErrorInfo, Tier>)` | — | The §8 classifier, reused verbatim: `RETRY` or `FAIL`, per attempt, final say. There is no `"suspend"` tier here. |
+| `requestParams(Map<String,Object>)` | — | Top-level keys shallow-merged into the body after the classifier builds its own. A key here **wins** on collision. |
+| `bodyTransform(Function<Map,Map>)` | — | Receives the assembled body *after* the `requestParams` merge; returning `null` leaves it unchanged. |
+| `onMetric(Consumer<MetricEvent>)` | — | `classifier.evaluate` and `classifier.warning` events into the same §8 sink. |
+| `client(LlmClient)` | — | `style: "llm"` only — the §8 client to emulate over. Required for that style. |
+| `evaluate(BiFunction<Object, Map, Decision>)` | — | `style: "custom"` only — the host's own function. Required for that style. |
+| `decisions(List<RecordedDecision>)` | — | `style: "static"` only — the recorded corpus. Named in §8B and gated at **core** tier by the cross-port options manifest: it is the backend CI runs on, so a port without it cannot run the shared fixtures. Each port spells it idiomatically. |
+
+`RecordedDecision(Object state, Map<String, Question> questions, String response)` keys an entry on
+the canonical request **and** the state — several recordings legitimately share one questions
+payload and differ only in state. A miss throws; it never falls back to a neighbouring band.
+
+## Retries, and the one status the classifier adds
+
+The default retryable set is `408`, `429`, `500`, `502`, `503`, `504`, `529`, plus every network
+fault. **`408` is the classifier's addition** over the §8 client set: a single bounded request has
+no partial progress to lose, so a request timeout is worth one more attempt here.
+
+`retryableStatuses` **adds** to that set and can never remove from it — a host cannot drop `429` and
+lose `Retry-After` handling with it. `onError` still runs on every failed attempt and has the final
+say, so returning `Tier.FAIL` overrides a status listed as retryable. A `Retry-After` header's
+`delay-seconds` value wins over the computed backoff, exactly as in §8.
+
+## Secrets and failures
+
+The credential resolves at call time from the **named** environment variable, and `${ENV_VAR}`
+header references expand at call time. No credential value and no expanded header value appears in
+any log, metric, error message or returned value: an authentication failure names the status and
+the endpoint and nothing else, and a `401`/`403` body is never echoed back — a gateway happily
+reflects a bad `Authorization` header into its own error text. Other statuses surface the backend's
+reported cause intact, so a caller can tell a limit error from a transport fault.
+
+## See also
+
+- [`Classifier.NoulQuestion`](/api/java/judge/questions/) — the three question types and the limits enforced before the request
+- [`Classifier.Decision`](/api/java/judge/decision/) — the answers, the typed accessors, `calibrated` and `nearUniform`
+- [Typed decisions](/judge/) — why this tier exists, with the measurements
+- [Backends](/judge/backends/) — `systemone` vs `llm` vs `custom` vs `static`, and the canonical request
+- [Writing options a model can rank](/judge/encoding/) — the caller's encoding obligation
+- [Cookbook: a judgment in one call](/cookbook/judge/) — the runnable end-to-end example

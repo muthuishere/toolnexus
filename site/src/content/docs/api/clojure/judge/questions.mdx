@@ -1,0 +1,287 @@
+---
+title: "toolnexus.classifier/noul-question"
+description: "The three question types, the criteria each one needs, and the limits enforced client-side before the request. — Clojure."
+sidebar:
+  label: "toolnexus.classifier/noul-question"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/classifier.cljc">clojure/src/toolnexus/classifier.cljc</a>
+</p>
+
+```clojure
+(noul-question instructions)                ; => {:type "noul"   :instructions …}
+(noul-question instructions criteria)       ; => {:type "noul"   :instructions … :criteria {"true" … "false" …}}
+(choice-question instructions criteria)     ; => {:type "choice" :instructions … :criteria {"id" "what picking it MEANS"}}
+(score-question instructions criteria)      ; => {:type "score"  :instructions … :criteria ["level 0" "level 1" …]}
+(choice-over instructions items)            ; => a choice built from (name, description) pairs
+
+(canonical-request model questions)         ; => the exact bytes the byte-identity claim covers
+(degenerate-criteria criteria)              ; => a reason string, or nil
+```
+
+A question is a **plain map**, and the map *is* the wire form — there is no record, no builder and
+no conversion step. The constructors exist so the shell keys are right and so the docstring that
+explains the encoding obligation sits where you type the call; `(assoc q :instructions "…")` is a
+perfectly ordinary thing to do to one afterwards.
+
+You pass them as `{caller-key question}` to
+[`evaluate`](/api/clojure/judge/classifier/). **The keys are addressing, not content**: they are
+never transmitted to the model, so a key may be a tool, skill or agent name verbatim, and two
+evaluations differing only in their keys send identical bytes. Questions are **independent** —
+one answer is never context for another.
+
+<Aside type="caution" title="A classifier interprets; it never authorises">
+A question is a request for a reading of intent inside a boundary, never the boundary itself.
+Schema validity is not correctness. Numeric limits, permission checks and allowlists stay in
+code; nothing on this page is a security control.
+</Aside>
+
+## The three types
+
+| Constructor | `:criteria` | You get back |
+|---|---|---|
+| `noul-question` | *optional* `{"true" desc "false" desc}` | one number in `0..1` — **no confidence; the number is the answer** |
+| `choice-question` | *required* `{"id" desc}`, **1–255** options | one of **your** ids, a probability for **every** offered id, and a confidence |
+| `score-question` | *required* an **ordered** vector, **2–10** levels | a number against the rubric (`1.21` is a real answer), plus a probability per level and the rubric echoed back as a legend |
+
+Two shapes matter inside `:criteria`, and the port is deliberate about both:
+
+- **The shell keys are keywords** (`:type`, `:instructions`, `:criteria`) because the JSON encoder
+  renders a keyword key as its name, so they land as `"type"`, `"instructions"`, `"criteria"` with
+  nothing in between.
+- **The keys inside `:criteria` are strings, and must stay strings.** An option id is
+  caller-chosen and may be digit-leading (`"09_digit_lead"`), upper-case (`"Zebra_upper"`) or
+  non-ASCII (`"café"`); a score answer's legend is keyed `"0"`, `"1"`, … Keywordizing any of
+  those mangles them.
+
+A `score`'s criteria is a **vector and its order is the level numbering**. `score-question` calls
+`vec` on what you hand it, and nothing anywhere sorts it — a "sort everything" canonicaliser
+would silently renumber your rubric.
+
+### `criteria` absent is not `criteria` empty
+
+For a `noul` the two arities are two different values, and the wire carries the difference:
+
+```clojure
+(noul-question "Is this a refund request?")
+;; => {:type "noul" :instructions "Is this a refund request?"}      — no `criteria` key at all
+
+(noul-question "Is this a refund request?" {"true" "" "false" ""})
+;; => …:criteria {"true" "" "false" ""}                             — "criteria":{"false":"","true":""}
+```
+
+Omit the arity rather than passing `nil` or `{}`. Absent, empty and populated are three values,
+all three survive the wire intact, and the byte-identity claim is pinned on exactly that
+distinction.
+
+## When to use it
+
+- **`noul`** for *is this true* — is this text from an untrusted source, has the problem already
+  been solved, is the customer asking for money back. One number you threshold.
+- **`choice`** for routing — to a skill, a tool, an agent, a move. Use `choice-over` when the
+  options already exist as `(name, description)` pairs; it stringifies each key with `str`, so
+  a map, a vector of pairs or a sequence of tool records all work.
+- **`score`** for a magnitude you already have words for — risk, urgency, severity. The rubric is
+  the definition of the scale, and a score between levels is usually the interesting part.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="A choice with two options is not a noul">
+They look interchangeable and they are not. A `noul` returns a calibrated probability and *no*
+confidence — the number is the whole answer. A two-option `choice` returns a pick, a distribution
+over both ids, **and** a self-reported confidence, and it needs you to describe what each option
+means. Reach for `noul` when the question genuinely has a true and a false case; reach for
+`choice` the moment the options are not each other's negation.
+</Aside>
+
+## The encoding obligation — yours, and it is not advice
+
+For a `choice`, **`criteria[id]` is the only thing that differentiates one option from another to
+the model.** The instructions describe the *question*; the state describes the *situation*;
+neither tells the model what picking `left` rather than `right` would mean. Passing the id itself,
+an empty string, or one value repeated is schema-valid, passes validation, returns HTTP 200 and a
+well-formed distribution — and **ranks at chance**: options described by consequence scored 17,
+17, 17 apples; the same state with each description replaced by its own id scored 0, 1, 0, at the
+floor of a shuffle control (1, 0, 1).
+
+The measurements, the rewrite that moved agreement from 50% to 100%, and why confidence reports on
+the *question* rather than the answer are all on [The encoding rules](/judge/encoding/). Read that
+page before you write your first `choice`.
+
+### Degenerate criteria are detected and reported, never repaired
+
+`degenerate-criteria` returns a reason string when **any** of these holds, and `nil` otherwise:
+
+1. every description is empty (empty string or absent), or
+2. every description equals its own option id, or
+3. every description is identical to every other (`n ≥ 2`).
+
+A single-option choice (`n = 1`) is never reported — there is nothing to differentiate. On
+detection `evaluate` emits **one** `"classifier.warning"` event into your `:on-metric` sink,
+**naming the question key**, and sends the request **byte-unchanged**. The text is in `:warning`,
+never `:error`, so a consumer filtering the §8 sink on "has an error" must not count one.
+Detection is once per question key per classifier, so a per-turn judge does not flood the sink.
+
+This is detection, not repair: repairing would invent option descriptions you did not write, and
+the library has no way to know what your options mean.
+
+## The limits are enforced before the request
+
+`evaluate` validates every question **client-side, before any socket opens**. A `choice` needs
+1–255 options; a `score` needs 2–10 ordered levels, and its criteria must be a sequence. The
+thrown `ex-info` **names the offending question key** and the limit, its `ex-data` carries
+`{:question <key> :limit :choice-options|:score-levels :count n}`, and **no request is sent** —
+you find out faster and more legibly than from the backend's own
+`400 "Too many choices. Must have at most 255 choices."`, which is still surfaced intact if it
+arrives. Keys are walked in sorted order, so the same malformed set always names the same key
+first.
+
+Failures in this port are thrown `ex-info`s — the same shape as the JS, Python, Java and C#
+ports' exceptions, unlike Go's `(T, error)` and Elixir's tuples.
+
+## Examples
+
+### 1. The smallest useful call — one question, and the limit that fires before the wire
+
+```clojure test
+(require '[toolnexus.classifier :as jev]
+         '[clojure.string :as str])
+
+(def q (jev/noul-question "Is the customer asking for money to be returned?"))
+(assert (= {:type "noul" :instructions "Is the customer asking for money to be returned?"} q))
+;; absent is NOT empty — the one-arity form emits no `criteria` key at all
+(assert (false? (contains? q :criteria)))
+(assert (contains? (jev/noul-question "?" {"true" "" "false" ""}) :criteria))
+
+;; the limits are client-side: this never opens a socket
+(def calls (atom 0))
+(def judge (jev/create-classifier {:http-client (fn [_ _ _] (swap! calls inc)
+                                                 {:status 200 :body "{}"})}))
+
+(def too-many
+  (reduce (fn [m i] (assoc m (str "opt_" i) (str "description " i)))
+          {} (range (inc jev/max-choice-options))))     ; 256 options
+
+(def err (try (jev/evaluate judge "s" {"department" (jev/choice-question "?" too-many)})
+              nil
+              (catch Throwable t t)))
+
+(assert (some? err))
+(assert (str/includes? (ex-message err) "department"))   ; names the KEY
+(assert (str/includes? (ex-message err) "1..255 options"))
+(assert (= :choice-options (:limit (ex-data err))))
+(assert (zero? @calls))                                              ; and sends NOTHING
+
+;; a score needs 2..10 ORDERED levels, and the same rule applies
+(def score-err (try (jev/evaluate judge "s" {"urgency" (jev/score-question "?" ["only one"])})
+                    nil
+                    (catch Throwable t t)))
+(assert (str/includes? (ex-message score-err) "2..10 ordered levels"))
+(assert (= :score-levels (:limit (ex-data score-err))))
+
+(println "both limits refused pre-flight, requests sent:" @calls)
+(println "OK")
+```
+
+### 2. The realistic case — all three types in one call
+
+Many questions, one round trip, one state ingest. Every `choice` option carries a real sentence
+saying what picking it would *mean*, all three use the same template, and no arithmetic is pushed
+onto the model — the host does the counting and hands over the conclusion.
+
+```clojure
+(def questions
+  {"wants_money_back"
+   (jev/noul-question "Is the customer asking for money to be returned?")
+
+   "department"
+   (jev/choice-question
+    "Which desk should own this ticket?"
+    {"billing"   "own it here when the problem is money that moved: a duplicate charge, a wrong invoice, a refund owed"
+     "shipping"  "own it here when the problem is a physical parcel: a late delivery, a package damaged in transit"
+     "technical" "own it here when the problem is the product itself: a login that fails, a feature that errors"})
+
+   "urgency"
+   (jev/score-question
+    "How fast does this ticket need a human?"
+    ;; the ORDER is the numbering: level 0 first
+    ["the customer is working normally and is waiting on an answer"
+     "the customer is inconvenienced and will chase if nobody replies today"
+     "the customer is blocked from working right now and every hour costs them"])})
+```
+
+### 3. The full surface — `choice-over`, and the degenerate warning
+
+`choice-over` builds a `choice` from any `(name, description)` pairs — a toolkit's tools, a skill
+roster, an A2A card's skills. Keys may be strings, keywords or symbols; each reaches the wire as
+its **plain name**, so `:billing` sends `billing`, not `":billing"`. The descriptions are still
+yours, and still the whole ball game: a roster whose descriptions are just the names is exactly
+what `degenerate-criteria` catches.
+
+```clojure test
+(require '[toolnexus.classifier :as jev]
+         '[clojure.string :as str])
+
+;; the routing roster you already have. Option ids are caller-chosen and travel verbatim —
+;; a keyword key sends its name, so {:billing "..."} and {"billing" "..."} are the same request.
+(def skills {"billing"   "route here when money moved: a duplicate charge, a refund owed"
+             "shipping"  "route here when a physical parcel is late or damaged"
+             "technical" "route here when the product itself fails: a login error, a broken feature"})
+
+(def routing (jev/choice-over "Which skill should handle this turn?" skills))
+(assert (= "choice" (:type routing)))
+(assert (= #{"billing" "shipping" "technical"} (set (keys (:criteria routing)))))
+
+;; keywords are welcome, and lose the colon on the way out
+(assert (= #{"billing" "shipping"}
+           (set (keys (:criteria (jev/choice-over "Which desk?"
+                                                  {:billing  "route here when money moved"
+                                                   :shipping "route here when a parcel is late"}))))))
+(assert (nil? (jev/degenerate-criteria (:criteria routing))))     ; described by consequence
+
+;; the three degenerate shapes, and the one that is never reported
+(assert (some? (jev/degenerate-criteria {"a" "" "b" ""})))          ; all empty
+(assert (some? (jev/degenerate-criteria {"a" "a" "b" "b"})))        ; each is its own id
+(assert (some? (jev/degenerate-criteria {"a" "same" "b" "same"}))) ; all identical
+(assert (nil?  (jev/degenerate-criteria {"only" "only"})))         ; n = 1: nothing to differentiate
+
+;; evaluate WARNS, naming the key, and sends the request byte-unchanged
+(def events (atom []))
+(def sent (atom []))
+(def judge
+  (jev/create-classifier
+   {:style      "static"
+    :model      "m"
+    :on-metric  (fn [ev] (swap! events conj ev))
+    :decisions  [{:state "s"
+                  :questions {"department" (jev/choice-question "?" {"a" "a" "b" "b"})}
+                  :response {"model" "m"
+                             "answers" {"department" {"type" "choice" "choice" "a"
+                                                      "probabilities" {"a" 0.5 "b" 0.5}
+                                                      "confidence" 0.5}}}}]}))
+
+(def qs {"department" (jev/choice-question "?" {"a" "a" "b" "b"})})
+(jev/evaluate judge "s" qs)
+(jev/evaluate judge "s" qs)   ; a second call does NOT warn again — once per key per classifier
+
+(def warnings (filterv (fn [ev] (= jev/metric-warning (:event ev))) @events))
+(assert (= 1 (count warnings)))                                  ; once per question key
+(assert (= "department" (:question (first warnings))))           ; NAMING the key
+(assert (str/includes? (:warning (first warnings)) "degenerate criteria"))
+(assert (nil? (:error (first warnings))))                        ; a warning is NOT a failure
+
+(println "warned once about:" (:question (first warnings)))
+(println "OK")
+```
+
+## See also
+
+- [`toolnexus.classifier/create-classifier`](/api/clojure/judge/classifier/) — A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop.
+- [`toolnexus.classifier/parse-decision`](/api/clojure/judge/decision/) — One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero.
+- [The encoding rules](/judge/encoding/) — the measured reason option descriptions decide whether a `choice` works at all.
+- [Typed decisions](/judge/) — why a judgment is a different contract from an action.
+- [Backends & configuration](/judge/backends/) — `systemone`, `llm`, `custom`, `static`.
+- [Cookbook: a classifier in the loop](/cookbook/judge/) — the end-to-end recipe.

@@ -1,0 +1,335 @@
+---
+title: "Decision"
+description: "One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero. — Go."
+sidebar:
+  label: "Decision"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/classifier.go">golang/classifier.go</a>
+</p>
+
+```go
+type Decision struct {
+	Model      string
+	Answers    map[string]DecisionAnswer
+	Usage      ClassifierUsage
+	Calibrated bool
+}
+
+func (d Decision) Noul(key string) (NoulAnswer, error)
+func (d Decision) Choice(key string) (ChoiceAnswer, error)
+func (d Decision) Score(key string) (ScoreAnswer, error)
+
+func NearUniform(probabilities map[string]float64) bool
+```
+
+One answer per question under the caller's own keys, read through typed accessors that fail loudly
+rather than hand back a zero. `Model` echoes what actually answered, which may be more specific
+than the model you asked for (`jev-latest` → `typesafe/jev-1.13-20260917`).
+
+`DecisionAnswer` is a sealed interface with three implementations, and `AnswerType()` is the wire
+discriminator (`"noul" | "choice" | "score"`). It is named `DecisionAnswer` rather than `Answer`
+because §10 already owns [`Answer`](/api/go/suspension/wait-for/) — same idea, different seam.
+
+## The three answer shapes
+
+```go
+type NoulAnswer struct {
+	Noul float64 // 0..1. NO confidence: the number IS the answer.
+}
+
+type ChoiceAnswer struct {
+	Choice        string
+	Probabilities map[string]float64 // one entry per OFFERED option
+	Confidence    float64
+	NearUniform   bool // DERIVED on decode, never read from the wire
+}
+
+type ScoreAnswer struct {
+	Score         float64            // MAY fall between levels; always within the rubric
+	Legend        map[string]string  // the rubric echoed back, keyed by level index
+	Probabilities map[string]float64 // one entry per level index
+	Confidence    float64
+}
+
+func (a ScoreAnswer) Levels() []string // the legend in level order, which the map loses
+```
+
+`Confidence` reports on the **question**, not on the answer. The worst working encoding measured
+carried the **highest** median confidence (0.82) — see [The encoding
+obligation](/toolnexus/judge/encoding/).
+
+## When to use it
+
+Read a `Decision` through the typed accessors, not by type-asserting `Answers[key]` by hand. The
+accessor is how a wrong-type read becomes a legible error instead of a silent zero value.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Go returns an error where the other ports throw">
+`Noul`/`Choice`/`Score` return `(T, error)`. A bare map lookup plus a type assertion would hand you
+a zero-valued `NoulAnswer` — `Noul: 0`, which reads as "definitely false" — for a key that was
+never asked, or asked as a `choice`. The accessors distinguish the two cases by name:
+
+- `classifier: no answer "urgency" in this decision`
+- `classifier: answer "urgency" is a choice answer, not score`
+
+Do **not** discard that error with `_`. It is the only thing standing between a typo in a question
+key and a threshold that silently always passes.
+</Aside>
+
+## `Usage`, and why cost may be absent
+
+```go
+type ClassifierUsage struct {
+	InputTokens  int
+	OutputTokens int
+	Cost         *float64 // nil = this backend does not report one
+}
+```
+
+`Cost` is a **pointer** because absent is not zero. TypeSafe's own API never reports a cost; a
+gateway such as OpenRouter does. Printing `$0.00` for a backend that simply does not say would be
+a lie about money — print "not reported" instead.
+
+## `Calibrated` and `NearUniform`
+
+`Calibrated` travels with every decision. `StyleSystemOne` reports **true**; `StyleLLM` reports
+**false** unless it derived its probabilities from provider token probabilities. On the wire, an
+absent `calibrated` field decodes as `true` — the System One wire reports calibration by being
+itself, and a backend that is not calibrated says so explicitly.
+
+`NearUniform` is derived from the response on decode and never read from the wire — no wire change,
+no request change, no fixture change. With `n` the number of **entries in the probability map** and
+`p_i` their values **as returned**:
+
+```
+NearUniform  ⇔  max over i of |p_i − 1/n|  ≤  0.05
+```
+
+- the tolerance is **0.05 absolute** and the comparison is **inclusive** — a maximum deviation of
+  exactly 0.05 **is** near-uniform (`NearUniformTolerance`, computed in `float64`);
+- the probabilities are **never sorted, renormalised or rounded** before the comparison, and an
+  offered option absent from the map counts as `0` by not being an entry;
+- `n == 1` ⇒ **true** (a single option is trivially uniform); an **empty map** ⇒ **false** (there
+  is no distribution at all).
+
+Shared fixtures pin the boundary from both sides and never place a deviation within `1e-9` of the
+tolerance, so the rule is decidable in `float64` without a port-specific epsilon — but note that a
+*literal* `0.55` is `0.05000000000000004` away from `0.5`, so do not build your own boundary test
+out of decimals that do not represent exactly.
+
+It is absolute rather than relative because a relative band collapses below the noise floor: at 255
+options `1/n` is 0.0039, finer than the two-decimal rounding the wire already applies. 0.05 is
+roughly 3σ of measured backend non-determinism, and it is the separation that matters — an
+undescribed-options encoding returned a median top probability of 0.29 on a four-option choice
+(deviation 0.04, inside), the described one 0.80 (deviation 0.55, far outside).
+
+<Aside type="caution" title="What neither flag detects">
+Both are **advisory**, and neither is a correctness signal. `NearUniform` detects an encoding that
+gave the model nothing to rank on — the one encoding health check available with no ground truth,
+cheap enough to run on live traffic. It **cannot** distinguish a good encoding from a subtly wrong
+one: a wrong-but-answerable question still reads as answerable, and comes back sharply peaked on
+the wrong option. `Calibrated` carries the same caveat — calibrated is not correct.
+
+And **a threshold tuned against one backend does not transfer to another**. Re-tune every threshold
+when you change `Style`, `BaseURL` or `Model`. A classifier interprets; it never authorises — the
+`if` that enforces the boundary stays in your code.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — typed accessors, and how they fail
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	state := "rm -rf ./build"
+	questions := map[string]toolnexus.Question{
+		"risk": toolnexus.ScoreQuestion{
+			Instructions: "How destructive is this shell command?",
+			Criteria:     []string{"harmless", "reversible", "destructive"},
+		},
+	}
+	recorded := `{"model":"typesafe/jev-1.13-20260917","calibrated":true,
+		"answers":{"risk":{"type":"score","score":1.21,
+			"legend":{"0":"harmless","1":"reversible","2":"destructive"},
+			"probabilities":{"0":0.10,"1":0.59,"2":0.31},"confidence":0.71}},
+		"usage":{"input_tokens":210,"output_tokens":24}}`
+
+	judge, err := toolnexus.CreateClassifier(toolnexus.ClassifierOptions{
+		Style:     toolnexus.StyleStatic,
+		Model:     "typesafe/jev-1.13",
+		Decisions: []toolnexus.RecordedDecision{{State: state, Questions: questions, Response: []byte(recorded)}},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	d, err := judge.Evaluate(context.Background(), state, questions)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	risk, err := d.Score("risk")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Wrong type: named, not a silent zero.
+	if _, err := d.Noul("risk"); err == nil || !strings.Contains(err.Error(), "is a score answer, not noul") {
+		log.Fatalf("expected a typed read failure, got %v", err)
+	}
+	// Absent key: a different message, on purpose.
+	if _, err := d.Score("urgency"); err == nil || !strings.Contains(err.Error(), "no answer") {
+		log.Fatalf("expected an absent-key failure, got %v", err)
+	}
+
+	// The AUTHORITY stays here, in code — the decision only informs it.
+	if risk.Score >= 1.5 {
+		fmt.Println("would require approval")
+	}
+
+	fmt.Printf("ok: score=%v confidence=%v levels=%v\n", risk.Score, risk.Confidence, risk.Levels())
+}
+```
+
+### 2. The realistic case — `NearUniform` at the boundary
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	cases := []struct {
+		name string
+		p    map[string]float64
+		want bool
+	}{
+		// Deviation of exactly 0.05 from 1/n = 0.25: the comparison is INCLUSIVE,
+		// so this IS near-uniform.
+		{"at the tolerance", map[string]float64{"a": 0.30, "b": 0.25, "c": 0.25, "d": 0.20}, true},
+		// Past it.
+		{"just outside", map[string]float64{"a": 0.56, "b": 0.44}, false},
+		// A real answer: the model had something to rank on.
+		{"decisive", map[string]float64{"a": 0.97, "b": 0.03}, false},
+		// Never renormalised: these sum to 0.5 and are still flat around 1/n.
+		{"n == 1 is trivially uniform", map[string]float64{"only": 0.02}, true},
+		// No distribution at all.
+		{"empty", map[string]float64{}, false},
+	}
+
+	for _, c := range cases {
+		if got := toolnexus.NearUniform(c.p); got != c.want {
+			log.Fatalf("%s: NearUniform = %v, want %v", c.name, got, c.want)
+		}
+	}
+
+	// The same rule is applied on decode, so ChoiceAnswer.NearUniform is already set.
+	fmt.Println("ok: tolerance", toolnexus.NearUniformTolerance, "inclusive, five cases agree")
+}
+```
+
+### 3. The full surface — a flat decision, `Calibrated`, and an unreported cost
+
+A `custom` backend lets the whole `Decision` be written by hand, which is the clearest way to show
+what the two flags mean when they are *not* the happy values.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strconv"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	judge, err := toolnexus.CreateClassifier(toolnexus.ClassifierOptions{
+		Style: toolnexus.StyleCustom,
+		Evaluate: func(_ context.Context, _ any, _ map[string]toolnexus.Question) (toolnexus.Decision, error) {
+			return toolnexus.Decision{
+				Model: "gpt-4o-mini",
+				Answers: map[string]toolnexus.DecisionAnswer{
+					"desk": toolnexus.ChoiceAnswer{
+						Choice:        "billing",
+						Probabilities: map[string]float64{"billing": 0.34, "shipping": 0.33, "technical": 0.33},
+						Confidence:    0.95, // round self-reported numbers are an llm-style tell
+						NearUniform:   toolnexus.NearUniform(map[string]float64{"billing": 0.34, "shipping": 0.33, "technical": 0.33}),
+					},
+				},
+				// An llm-style backend self-reports; the numbers are not token
+				// probabilities, so no threshold tuned elsewhere transfers here.
+				Calibrated: false,
+				Usage:      toolnexus.ClassifierUsage{InputTokens: 516, OutputTokens: 72}, // Cost nil
+			}, nil
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	d, err := judge.Evaluate(context.Background(), "charged twice", map[string]toolnexus.Question{
+		"desk": toolnexus.ChoiceOver("Which desk owns this?", map[string]string{
+			"billing":   "own it here when money moved: a duplicate charge, a refund owed",
+			"shipping":  "own it here when a physical parcel is late or damaged",
+			"technical": "own it here when the product itself errors",
+		}),
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	desk, err := d.Choice("desk")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if !desk.NearUniform {
+		log.Fatal("this distribution is flat within 0.05 of 1/3")
+	}
+	if d.Calibrated {
+		log.Fatal("an llm-style decision reports Calibrated: false")
+	}
+
+	// Absent is NOT zero: printing $0.00 here would be a lie about money.
+	cost := "not reported by this backend"
+	if d.Usage.Cost != nil {
+		cost = "$" + strconv.FormatFloat(*d.Usage.Cost, 'f', -1, 64)
+	}
+
+	fmt.Printf("ok: choice=%s nearUniform=%v calibrated=%v cost=%s\n",
+		desk.Choice, desk.NearUniform, d.Calibrated, cost)
+}
+```
+
+A flat distribution with a high self-reported confidence is the signature this page exists to make
+legible: the model had nothing to rank on, and said so with numbers that look decisive.
+
+## See also
+
+- [`CreateClassifier`](/api/go/judge/classifier/) — A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop.
+- [`NoulQuestion`](/api/go/judge/questions/) — The three question types, the criteria each one needs, and the limits enforced client-side before the request.
+- [The encoding obligation](/toolnexus/judge/encoding/) — why a flat distribution is usually your criteria, not the model.
+- [Typed decisions](/toolnexus/judge/) · [Backends](/toolnexus/judge/backends/) · [Cookbook](/toolnexus/cookbook/judge/)

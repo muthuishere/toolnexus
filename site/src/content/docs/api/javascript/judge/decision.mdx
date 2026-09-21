@@ -1,0 +1,246 @@
+---
+title: "Decision"
+description: "One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero. — JavaScript."
+sidebar:
+  label: "Decision"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/classifier.ts">js/src/classifier.ts</a>
+</p>
+
+```ts
+class Decision {
+  readonly model: string
+  readonly answers: Record<string, DecisionAnswer>
+  readonly usage: ClassifierUsage
+  readonly calibrated: boolean
+
+  noul(key: string): NoulAnswer
+  choice(key: string): ChoiceAnswer
+  score(key: string): ScoreAnswer
+}
+
+function nearUniform(probabilities: Record<string, number>): boolean
+function levels(answer: ScoreAnswer): string[]
+```
+
+One answer per question under the caller's own keys, read through typed accessors that fail loudly
+rather than hand back a zero. What [`evaluate`](/api/javascript/judge/classifier/) returns.
+
+## When to use it
+
+Every call gives you one. Read an answer through the accessor that matches the question you asked —
+`noul("k")`, `choice("k")`, `score("k")` — and threshold the number.
+
+`answers` is there for the generic case: iterating every key, logging a whole decision, or writing
+a consumer that does not know the question set at compile time. `DecisionAnswer` is a union
+discriminated by `type`, so a `switch` over it is exhaustive.
+
+## The answer shapes
+
+```ts
+interface NoulAnswer   { type: "noul"; noul: number }
+interface ChoiceAnswer {
+  type: "choice"
+  choice: string
+  probabilities: Record<string, number>
+  confidence: number
+  nearUniform: boolean
+}
+interface ScoreAnswer  {
+  type: "score"
+  score: number
+  legend: Record<string, string>
+  probabilities: Record<string, number>
+  confidence: number
+}
+
+interface ClassifierUsage { inputTokens: number; outputTokens: number; cost?: number }
+```
+
+- **`noul`** carries **no confidence**. The number *is* the answer; there is nothing else to read.
+- **`choice`** names one of the offered options and carries a probability for **every** offered
+  option. A zero probability stays an entry — the map is copied key-for-key, never filtered.
+- **`score`** may fall **between** levels: `1.21` is a real answer, not a rounding artefact. It is
+  always within the rubric's bounds, and `legend` echoes your rubric back keyed by level index.
+- **`usage.cost`** is absent on some backends, and **absent is not zero**. TypeSafe's own API does
+  not report one; OpenRouter does. Print "not reported" rather than a `$0.00` that reads as a free
+  call.
+
+`levels(answer)` returns the legend in **level order**, which `Object.keys` alone loses — `"2"`
+sorts before `"10"` as a string but is level 2, not level 10.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach into answers only when you don't know the questions">
+The accessors **throw** on an absent key or a type mismatch — `classifier: no answer "x" in this
+decision`, `classifier: answer "x" is a noul answer, not choice`. Reading `answers["x"]` by hand
+and coercing hands you `undefined`, which becomes a `0`, which threshold-compares as "definitely
+not", and the bug is a silent wrong routing decision rather than a stack trace. Take the throw.
+</Aside>
+
+## `calibrated` and `nearUniform` — what they mean, and what neither detects
+
+**`calibrated`** travels on every decision. The `systemone` style reports `true`. The `llm` style
+reports `false` unless it derived its probabilities from provider token probabilities — the
+JavaScript `llm` backend never does, so it is always `false` there. **A response that omits
+`calibrated`, or sends `null`, decodes as `true`** — only the literal `false` is false. The
+systemone wire reports calibration by being itself, and a backend that is not calibrated says so
+explicitly, so a missing field is not a missing guarantee. The consequence that matters:
+**a threshold tuned against one backend does not transfer to another.** If you retune nothing when
+you switch styles, you have shipped a different policy.
+
+**`nearUniform`** is a derived boolean on every `choice` answer. It is **computed from the response
+and never read from the wire** — no wire change, no request change, no fixture change. Let `n` be
+the number of entries in the `probabilities` map and `p_i` their values **as returned**:
+
+```
+nearUniform  ⇔  max over i of |p_i − 1/n|  ≤  0.05
+```
+
+The tolerance is **absolute** (`NEAR_UNIFORM_TOLERANCE`) and the comparison is **inclusive**, so a
+maximum deviation of exactly `0.05` *is* near-uniform. The probabilities are never sorted,
+renormalised or rounded first; an offered option absent from the map counts as `0` by not being an
+entry. `n = 1` is trivially uniform and reports `true`. An **empty map** has no distribution at all
+and reports `false`.
+
+You can call `nearUniform(probabilities)` directly — that is the same function the decode uses, and
+it is what a `custom` backend should use so consumers read one flag everywhere.
+
+<Aside type="caution" title="Both flags are advisory, and neither is a correctness signal">
+`nearUniform` detects an encoding that gave the model **nothing to rank on** — the one encoding
+health check available with no ground truth, cheap enough to run on live traffic. It **cannot**
+distinguish a good encoding from a subtly wrong one: a wrong-but-answerable question still reads as
+answerable, and the worst working encoding measured carried the **highest** median confidence
+(0.82). `calibrated` carries the same caveat. Neither flag tells you the answer is right, and
+neither is a security control. The [measurements](/toolnexus/judge/encoding/) are on the encoding
+page.
+</Aside>
+
+## Examples
+
+### 1. Reading all three answer types
+
+```ts test
+import assert from "node:assert"
+import { createClassifier, noul, choice, score, levels, type RecordedDecision } from "toolnexus"
+
+const STATE = "charged twice for the annual plan; not blocked, but wants the money back this week"
+const QUESTIONS = {
+  wants_money_back: noul("Is the customer asking for money to be returned?"),
+  department: choice("Which desk should own this ticket?", {
+    billing: "own it here when the problem is money that moved: a duplicate charge, a refund owed",
+    technical: "own it here when the problem is the product itself: a login that fails",
+  }),
+  urgency: score("How fast does this ticket need a human?", [
+    "the customer is working normally and is waiting on an answer",
+    "the customer is inconvenienced and will chase if nobody replies today",
+    "the customer is blocked from working right now and every hour costs them",
+  ]),
+}
+
+const RECORDED: RecordedDecision = {
+  state: STATE,
+  questions: QUESTIONS,
+  response: {
+    model: "typesafe/jev-1.13-20260917",
+    answers: {
+      wants_money_back: { type: "noul", noul: 0.99 },
+      department: { type: "choice", choice: "billing", probabilities: { billing: 0.97, technical: 0.03 }, confidence: 0.95 },
+      urgency: {
+        type: "score",
+        score: 1.21,
+        legend: { "0": "working normally", "1": "inconvenienced", "2": "blocked right now" },
+        probabilities: { "0": 0.2, "1": 0.6, "2": 0.2 },
+        confidence: 0.61,
+      },
+    },
+    usage: { input_tokens: 516, output_tokens: 72 },
+  },
+}
+
+const judge = createClassifier({ style: "static", model: "typesafe/jev-1.13", decisions: [RECORDED] })
+const d = await judge.evaluate(STATE, QUESTIONS)
+
+// `model` echoes what ACTUALLY answered, which may be more specific than what you asked for.
+assert.equal(d.model, "typesafe/jev-1.13-20260917")
+assert.equal(d.noul("wants_money_back").noul, 0.99) // no confidence: the number IS the answer
+assert.equal(d.choice("department").choice, "billing")
+assert.equal(d.score("urgency").score, 1.21) // a score may fall BETWEEN levels
+assert.deepEqual(levels(d.score("urgency")), ["working normally", "inconvenienced", "blocked right now"])
+// Absent is not zero: this backend reports no cost at all.
+assert.equal(d.usage.cost, undefined)
+console.log("ok:", d.choice("department").choice, "| urgency", d.score("urgency").score)
+```
+
+### 2. The accessors fail loudly
+
+```ts test
+import assert from "node:assert"
+import { createClassifier, noul, Decision } from "toolnexus"
+
+const judge = createClassifier({
+  style: "custom",
+  evaluate: () =>
+    new Decision("stub", { refund: { type: "noul", noul: 0.42 } }, { inputTokens: 0, outputTokens: 0 }, false),
+})
+
+const d = await judge.evaluate("s", { refund: noul("Is a refund wanted?") })
+
+// A key that is not there is an error, never an undefined that thresholds as 0.
+assert.throws(() => d.noul("nope"), /no answer "nope" in this decision/)
+// And so is asking for the wrong type.
+assert.throws(() => d.choice("refund"), /answer "refund" is a noul answer, not choice/)
+assert.equal(d.noul("refund").noul, 0.42)
+console.log("ok: both misreads threw")
+```
+
+### 3. `nearUniform` at the boundary
+
+The rule is pinned from both sides by the shared fixture `examples/judge/near-uniform.json`, and no
+fixture ever places a deviation within `1e-9` of the tolerance — so the comparison is decidable in
+double precision with no port-specific epsilon.
+
+```ts test
+import assert from "node:assert"
+import { nearUniform, NEAR_UNIFORM_TOLERANCE } from "toolnexus"
+
+assert.equal(NEAR_UNIFORM_TOLERANCE, 0.05)
+
+// Flat: the model had nothing to rank on. Usually undescribed options.
+assert.equal(nearUniform({ a: 0.25, b: 0.25, c: 0.25, d: 0.25 }), true)
+// A real answer is nowhere near flat.
+assert.equal(nearUniform({ a: 0.8, b: 0.1, c: 0.06, d: 0.04 }), false)
+
+// INCLUSIVE: exactly the tolerance still counts as near-uniform.
+assert.equal(nearUniform({ a: 0.5499, b: 0.4501 }), true)
+assert.equal(nearUniform({ a: 0.5501, b: 0.4499 }), false)
+
+// n === 1 is trivially uniform; an EMPTY map has no distribution at all and is false.
+assert.equal(nearUniform({ only: 1 }), true)
+assert.equal(nearUniform({}), false)
+
+// Taken AS RETURNED — never renormalised. These sum to 0.8 and are still judged against 1/n.
+assert.equal(nearUniform({ a: 0.4, b: 0.4 }), false)
+console.log("ok: tolerance", NEAR_UNIFORM_TOLERANCE, "inclusive, absolute, on the map as returned")
+```
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `model` | `string` | What actually answered. May be more specific than the model you asked for. |
+| `answers` | `Record<string, DecisionAnswer>` | One answer per question, under **your** keys. |
+| `usage` | `ClassifierUsage` | `inputTokens`, `outputTokens`, and `cost` when the backend reports one. |
+| `calibrated` | `boolean` | Whether the probabilities are calibrated. A threshold tuned on one backend does not transfer to another. |
+
+## See also
+
+- [`createClassifier`](/api/javascript/judge/classifier/) — A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop.
+- [`noul`](/api/javascript/judge/questions/) — The three question types, the criteria each one needs, and the limits enforced client-side before the request.
+- [Encoding](/toolnexus/judge/encoding/) — what `nearUniform` is really detecting, with the measurements
+- [Backends](/toolnexus/judge/backends/) — which backend reports `calibrated`, and which reports `cost`
+- [Cookbook: a classifier end to end](/toolnexus/cookbook/judge/)

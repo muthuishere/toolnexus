@@ -344,12 +344,18 @@ with `ctx.answer` carrying the verdict.
 This is [suspension](/toolnexus/suspension/) with nothing special-cased — the same primitive
 that handles OAuth and structured questions.
 
-<Aside type="note" title="Why wrap the tool instead of using a `beforeTool` hook">
-The classic client loop exposes hooks, and a `beforeTool` hook **can** raise a suspension
-without the tool running. The **agent runtime does not surface those hooks** — it owns the
-per-turn client. So inside an agent, the gate belongs in the tool. This is a real constraint, not
-a style preference: if you need hook-level interception, run that stage through
-`client.run(...)` with a toolkit instead of through `agent().run(...)`.
+<Aside type="note" title="Wrap the tool, or use a hook — both work">
+A `beforeTool` hook **can** raise a suspension without the tool running, and the agent runtime
+**does** surface the hooks: pass `hooks` on the agent spec and the runtime forwards them verbatim
+into the client it builds, or pass `guardrails`, which compile into one `beforeTool` with
+first-deny-wins. (An earlier version of this page said the runtime did not expose them; that
+stopped being true when the harness and loop shipped.)
+
+Wrapping the tool is still the better choice *here*, for a reason that is about placement rather
+than capability: the gate belongs next to the thing it guards, so a `bash` tool carries its own
+approval rule wherever it is mounted — inside an agent, on a bare client, or behind `serve`. Reach
+for a hook instead when the policy spans many tools, since a hook sees every call and a wrapper
+sees one.
 </Aside>
 
 <Tabs syncKey="lang">
@@ -958,8 +964,10 @@ that are genuinely hard to build correctly and that behave identically in seven 
   message — an estimator, not a tokenizer. Pass your own for exactness, and leave headroom.
 - **Budgets are eventually consistent between turn boundaries.** Enforcement happens before each
   turn and each spawn, so a single in-flight turn can overshoot its ceiling before being stopped.
-- **The agent runtime does not expose client-loop hooks.** No `beforeTool`/`afterTool` inside `agent()`.
-  Gate in the tool (above), or run that stage on the client loop.
+- **A guardrail is synchronous.** `guardrails` take a function that returns a string *now* —
+  `""`/`"allow"` to permit, any other string to deny. Returning a promise or coroutine is refused
+  with a `TypeError`, because a guardrail that resolves later cannot be read as a verdict. Do
+  asynchronous policy work in a `beforeTool` hook, which is awaited.
 - **Cancellation latency differs by port.** JS/Go/C#/Elixir abort mid-request; Python and Java
   cancel cooperatively between attempts. The observable *outcome* is identical everywhere — an
   interrupted result and a restored inbox — only the latency differs.

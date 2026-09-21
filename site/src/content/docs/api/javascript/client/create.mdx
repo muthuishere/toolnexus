@@ -44,8 +44,9 @@ Prefer `createClient` when you would otherwise have to hand-write:
 - **Suspension (§10).** A tool returning `Pending` parks the run. With `waitFor` set, the client
   resolves and retries. Without it, `run()` returns `{ status: "pending" }` so a durable host can
   resume later — same contract either way.
-- **Retries and deadlines.** Transient 429/5xx handling, exponential backoff with jitter, and a
-  whole-run timeout that aborts the in-flight request.
+- **Retries and deadlines.** Transient-error handling for `429`, `500`, `502`, `503`, `504` and
+  `529` (widen it with `retryableStatuses`), exponential backoff with jitter, and a whole-run
+  timeout that aborts the in-flight request.
 - **Memory.** `ask(prompt, { id })` keeps a transcript across turns.
 - **Hooks and metrics.** Lifecycle interception and one metric event per model and tool call.
 

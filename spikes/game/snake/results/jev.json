@@ -1,0 +1,588 @@
+{
+  "arm": "jev",
+  "tickMs": 1000,
+  "model": "typesafe/jev-1.13",
+  "games": [
+    {
+      "seed": 4,
+      "apples": 2,
+      "moves": 30,
+      "died": "hit the move cap"
+    }
+  ],
+  "apples": {
+    "median": 2,
+    "best": 2
+  },
+  "moves": {
+    "median": 30,
+    "best": 30
+  },
+  "decisions": {
+    "total": 30,
+    "judged": 30,
+    "forced": 0
+  },
+  "outcomes": {
+    "applied": 30,
+    "late": 0,
+    "error": 0
+  },
+  "agreesWithCode": 0.567,
+  "selfTrappingMoves": 0,
+  "latencyMs": {
+    "p50": 367,
+    "p90": 422,
+    "p95": 427,
+    "max": 471
+  },
+  "budgetUsed": 0.427,
+  "confidence": {
+    "p50": 0.81
+  },
+  "cost": {
+    "total": 0.000729
+  },
+  "ticks": [
+    {
+      "seed": 4,
+      "move": 0,
+      "length": 3,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "down",
+      "codePick": "down",
+      "roomAfter": 142,
+      "latencyMs": 366,
+      "confidence": 0.84,
+      "nouls": {
+        "is_cornered": 0.06,
+        "should_chase": 0.52
+      },
+      "cost": 0.000024486,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 1,
+      "length": 3,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "left",
+      "codePick": "down",
+      "roomAfter": 142,
+      "latencyMs": 343,
+      "confidence": 0.23,
+      "nouls": {
+        "is_cornered": 0.05,
+        "should_chase": 0.67
+      },
+      "cost": 0.000024486,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 2,
+      "length": 3,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "left",
+      "codePick": "down",
+      "roomAfter": 142,
+      "latencyMs": 340,
+      "confidence": 0.44,
+      "nouls": {
+        "is_cornered": 0.04,
+        "should_chase": 0.65
+      },
+      "cost": 0.000024486,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 3,
+      "length": 3,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "left",
+      "codePick": "down",
+      "roomAfter": 142,
+      "latencyMs": 397,
+      "confidence": 0.44,
+      "nouls": {
+        "is_cornered": 0.04,
+        "should_chase": 0.66
+      },
+      "cost": 0.000024486,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 4,
+      "length": 3,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "left",
+      "codePick": "down",
+      "roomAfter": 142,
+      "latencyMs": 329,
+      "confidence": 0.58,
+      "nouls": {
+        "is_cornered": 0.04,
+        "should_chase": 0.64
+      },
+      "cost": 0.000024486,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 5,
+      "length": 3,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "down",
+      "codePick": "down",
+      "roomAfter": 142,
+      "latencyMs": 344,
+      "confidence": 0.62,
+      "nouls": {
+        "is_cornered": 0.05,
+        "should_chase": 0.64
+      },
+      "cost": 0.000024528,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 6,
+      "length": 3,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "down",
+      "codePick": "down",
+      "roomAfter": 142,
+      "latencyMs": 375,
+      "confidence": 0.98,
+      "nouls": {
+        "is_cornered": 0.05,
+        "should_chase": 0.74
+      },
+      "cost": 0.000024402,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 7,
+      "length": 3,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "down",
+      "codePick": "down",
+      "roomAfter": 142,
+      "latencyMs": 319,
+      "confidence": 0.98,
+      "nouls": {
+        "is_cornered": 0.05,
+        "should_chase": 0.74
+      },
+      "cost": 0.000024402,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 8,
+      "length": 3,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "down",
+      "codePick": "down",
+      "roomAfter": 142,
+      "latencyMs": 367,
+      "confidence": 0.93,
+      "nouls": {
+        "is_cornered": 0.06,
+        "should_chase": 0.66
+      },
+      "cost": 0.000024402,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 9,
+      "length": 4,
+      "legal": 2,
+      "outcome": "applied",
+      "chosen": "right",
+      "codePick": "right",
+      "roomAfter": 141,
+      "latencyMs": 422,
+      "confidence": 0.79,
+      "nouls": {
+        "is_cornered": 0.06,
+        "should_chase": 0.53
+      },
+      "cost": 0.000022932,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 10,
+      "length": 4,
+      "legal": 2,
+      "outcome": "applied",
+      "chosen": "up",
+      "codePick": "up",
+      "roomAfter": 141,
+      "latencyMs": 343,
+      "confidence": 0.79,
+      "nouls": {
+        "is_cornered": 0.05,
+        "should_chase": 0.65
+      },
+      "cost": 0.00002289,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 11,
+      "length": 4,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "right",
+      "codePick": "up",
+      "roomAfter": 141,
+      "latencyMs": 387,
+      "confidence": 0.8,
+      "nouls": {
+        "is_cornered": 0.05,
+        "should_chase": 0.64
+      },
+      "cost": 0.000024486,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 12,
+      "length": 4,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "up",
+      "codePick": "up",
+      "roomAfter": 141,
+      "latencyMs": 413,
+      "confidence": 0.78,
+      "nouls": {
+        "is_cornered": 0.05,
+        "should_chase": 0.67
+      },
+      "cost": 0.000024486,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 13,
+      "length": 4,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "right",
+      "codePick": "up",
+      "roomAfter": 141,
+      "latencyMs": 407,
+      "confidence": 0.8,
+      "nouls": {
+        "is_cornered": 0.05,
+        "should_chase": 0.68
+      },
+      "cost": 0.000024486,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 14,
+      "length": 4,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "up",
+      "codePick": "up",
+      "roomAfter": 141,
+      "latencyMs": 471,
+      "confidence": 0.84,
+      "nouls": {
+        "is_cornered": 0.05,
+        "should_chase": 0.64
+      },
+      "cost": 0.000024486,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 15,
+      "length": 4,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "right",
+      "codePick": "up",
+      "roomAfter": 141,
+      "latencyMs": 400,
+      "confidence": 0.78,
+      "nouls": {
+        "is_cornered": 0.05,
+        "should_chase": 0.66
+      },
+      "cost": 0.000024486,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 16,
+      "length": 4,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "up",
+      "codePick": "up",
+      "roomAfter": 141,
+      "latencyMs": 377,
+      "confidence": 0.83,
+      "nouls": {
+        "is_cornered": 0.05,
+        "should_chase": 0.63
+      },
+      "cost": 0.000024486,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 17,
+      "length": 4,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "right",
+      "codePick": "up",
+      "roomAfter": 141,
+      "latencyMs": 390,
+      "confidence": 0.77,
+      "nouls": {
+        "is_cornered": 0.05,
+        "should_chase": 0.66
+      },
+      "cost": 0.000024486,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 18,
+      "length": 4,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "up",
+      "codePick": "up",
+      "roomAfter": 141,
+      "latencyMs": 360,
+      "confidence": 0.81,
+      "nouls": {
+        "is_cornered": 0.05,
+        "should_chase": 0.65
+      },
+      "cost": 0.000024486,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 19,
+      "length": 4,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "right",
+      "codePick": "up",
+      "roomAfter": 141,
+      "latencyMs": 355,
+      "confidence": 0.92,
+      "nouls": {
+        "is_cornered": 0.04,
+        "should_chase": 0.66
+      },
+      "cost": 0.000024486,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 20,
+      "length": 4,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "up",
+      "codePick": "up",
+      "roomAfter": 141,
+      "latencyMs": 346,
+      "confidence": 0.87,
+      "nouls": {
+        "is_cornered": 0.04,
+        "should_chase": 0.66
+      },
+      "cost": 0.000024486,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 21,
+      "length": 4,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "right",
+      "codePick": "up",
+      "roomAfter": 141,
+      "latencyMs": 427,
+      "confidence": 0.94,
+      "nouls": {
+        "is_cornered": 0.04,
+        "should_chase": 0.66
+      },
+      "cost": 0.000024486,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 22,
+      "length": 4,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "up",
+      "codePick": "up",
+      "roomAfter": 141,
+      "latencyMs": 360,
+      "confidence": 0.87,
+      "nouls": {
+        "is_cornered": 0.04,
+        "should_chase": 0.64
+      },
+      "cost": 0.000024486,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 23,
+      "length": 4,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "right",
+      "codePick": "up",
+      "roomAfter": 141,
+      "latencyMs": 344,
+      "confidence": 0.94,
+      "nouls": {
+        "is_cornered": 0.05,
+        "should_chase": 0.62
+      },
+      "cost": 0.000024402,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 24,
+      "length": 4,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "right",
+      "codePick": "up",
+      "roomAfter": 141,
+      "latencyMs": 332,
+      "confidence": 0.7,
+      "nouls": {
+        "is_cornered": 0.06,
+        "should_chase": 0.63
+      },
+      "cost": 0.00002436,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 25,
+      "length": 4,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "up",
+      "codePick": "up",
+      "roomAfter": 141,
+      "latencyMs": 367,
+      "confidence": 0.6,
+      "nouls": {
+        "is_cornered": 0.06,
+        "should_chase": 0.63
+      },
+      "cost": 0.000024402,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 26,
+      "length": 5,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "left",
+      "codePick": "up",
+      "roomAfter": 140,
+      "latencyMs": 311,
+      "confidence": 0.94,
+      "nouls": {
+        "is_cornered": 0.04,
+        "should_chase": 0.66
+      },
+      "cost": 0.000024486,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 27,
+      "length": 5,
+      "legal": 2,
+      "outcome": "applied",
+      "chosen": "up",
+      "codePick": "up",
+      "roomAfter": 140,
+      "latencyMs": 376,
+      "confidence": 0.05,
+      "nouls": {
+        "is_cornered": 0.05,
+        "should_chase": 0.7
+      },
+      "cost": 0.000022848,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 28,
+      "length": 5,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "left",
+      "codePick": "left",
+      "roomAfter": 140,
+      "latencyMs": 396,
+      "confidence": 0.96,
+      "nouls": {
+        "is_cornered": 0.05,
+        "should_chase": 0.6
+      },
+      "cost": 0.000024444,
+      "error": null
+    },
+    {
+      "seed": 4,
+      "move": 29,
+      "length": 5,
+      "legal": 3,
+      "outcome": "applied",
+      "chosen": "left",
+      "codePick": "left",
+      "roomAfter": 140,
+      "latencyMs": 398,
+      "confidence": 0.98,
+      "nouls": {
+        "is_cornered": 0.05,
+        "should_chase": 0.73
+      },
+      "cost": 0.000024402,
+      "error": null
+    }
+  ]
+}

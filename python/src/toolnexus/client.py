@@ -10,7 +10,8 @@ worker thread that feeds an :class:`asyncio.Queue`, and the async generator yiel
 from that queue (no third-party deps). The API key is read from the ``api_key`` arg
 or the environment and is NEVER printed.
 
-Resilience: the LLM request retries on 429/5xx + network errors with exponential
+Resilience: the LLM request retries on 429/500/502/503/504/529 + network errors (widen the set
+with ``retryable_statuses``) with exponential
 backoff + jitter (honoring ``Retry-After``); a whole-run ``timeout_ms`` deadline
 (and an optional external :class:`asyncio.Event` cancel token) aborts the run.
 Aborts/timeouts are not retried.
@@ -31,7 +32,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Callable, Literal, Mapping, Optional, Protocol, TypedDict, Union
+from typing import Any, AsyncGenerator, Callable, Iterable, Literal, Mapping, Optional, Protocol, TypedDict, Union
 
 from .content import (
     ContentPartError,
@@ -71,7 +72,8 @@ class ErrorInfo(TypedDict, total=False):
 
     ``status`` is present on a non-ok HTTP response; ``error`` on a transport/network
     throw. ``attempt`` is the zero-based try index. ``retryable`` is whether the
-    status/error is in the default retryable set (429/5xx/network).
+    status/error is in the default retryable set (429/500/502/503/504/529 + network,
+    widened by ``retryable_statuses``).
     """
 
     error: Any
@@ -85,8 +87,28 @@ class ErrorInfo(TypedDict, total=False):
 # today. A "retry" is always bounded by ``retries``; the classifier cannot loop unbounded.
 ErrorClassifier = Callable[[ErrorInfo], ErrorTier]
 
-# HTTP statuses worth retrying (transient).
-_RETRYABLE = frozenset({429, 500, 502, 503, 504})
+#: The default retryable set: ``429`` plus the 5xx worth another try — and ``529 Overloaded``,
+#: which TypeSafe documents as "retry with backoff" and which an enumeration made terminal.
+#:
+#: It is an ENUMERATION on purpose. "Any 5xx" would sweep in permanently-broken statuses
+#: (``501 Not Implemented``, ``505 HTTP Version Not Supported``) and change the retry behaviour
+#: of every existing host without asking. A backend with its own transient status — a Cloudflare
+#: origin answering ``520``–``527``, say — opts in declaratively through ``retryable_statuses``,
+#: which ADDS to this set and cannot remove from it.
+_RETRYABLE = frozenset({429, 500, 502, 503, 504, 529})
+
+
+def _is_retryable_status(status: int, extra: Optional[Iterable[int]] = None) -> bool:
+    """Whether a status is retryable by default, optionally widened by ``retryable_statuses``.
+
+    ``extra`` is ADDITIVE: it can only make more statuses retryable, never fewer, so a host
+    cannot accidentally drop ``429`` and lose ``Retry-After`` handling with it. It decides the
+    DEFAULT classification only — ``on_error`` still runs afterwards and has the final say on
+    every attempt, so ``on_error`` returning ``"fail"`` overrides a status the host listed here.
+
+    Shared with §8B's classifier, which adds ``408`` to it rather than inventing a second policy.
+    """
+    return status in _RETRYABLE or (extra is not None and status in extra)
 
 # Lifecycle hooks (see ../../SPEC.md §8 "Hooks"). ``hooks`` is any object/mapping
 # carrying optional callables under snake_case keys — each async-OR-sync:
@@ -522,6 +544,7 @@ class Client:
         hooks: Hooks = None,
         retries: int = 2,
         retry_base_ms: int = 500,
+        retryable_statuses: Optional[Iterable[int]] = None,
         timeout_ms: Optional[int] = None,
         store: Optional[ConversationStore] = None,
         on_metric: Optional[OnMetric] = None,
@@ -543,6 +566,12 @@ class Client:
         self.hooks = hooks
         self.retries = retries
         self.retry_base_ms = retry_base_ms
+        # Extra HTTP statuses to treat as retryable, ADDED to the default set
+        # (429/500/502/503/504/529). It can only widen: a host cannot remove 429 and lose
+        # ``Retry-After`` handling with it. This sets the DEFAULT classification; ``on_error``
+        # still runs per attempt and has the final say, so ``on_error`` returning "fail"
+        # overrides a status listed here. Example: a Cloudflare-fronted origin answering 520–527.
+        self.retryable_statuses = frozenset(retryable_statuses) if retryable_statuses is not None else None
         self.timeout_ms = timeout_ms
         # Gap 1: extra top-level body keys shallow-merged into EVERY LLM body (caller
         # wins); messages/tools/stream forbidden here. body_transform runs LAST.
@@ -997,7 +1026,8 @@ class Client:
         cancel: Optional[asyncio.Event],
     ):
         """Run ``worker(url, headers, payload, per_request_timeout)`` in a thread with
-        retry + exponential backoff on 429/5xx + network errors, honoring
+        retry + exponential backoff on 429/500/502/503/504/529 + network errors and
+        anything ``retryable_statuses`` added, honoring
         ``Retry-After``. Aborts (timeout/cancel) are not retried.
 
         ``worker`` returns whatever it produces (a parsed dict for non-streaming, or
@@ -1016,7 +1046,7 @@ class Client:
                 return await self._fetch_once(worker, url, headers, payload, per_req, cancel)
             except _HttpError as e:
                 last_err = e
-                retryable = e.status in _RETRYABLE
+                retryable = _is_retryable_status(e.status, self.retryable_statuses)
                 tier = classify({"status": e.status, "attempt": attempt, "retryable": retryable})
                 if tier == "fail" or attempt == self.retries:
                     raise
@@ -2095,6 +2125,7 @@ def create_client(
     hooks: Hooks = None,
     retries: int = 2,
     retry_base_ms: int = 500,
+    retryable_statuses: Optional[Iterable[int]] = None,
     timeout_ms: Optional[int] = None,
     store: Optional[ConversationStore] = None,
     on_metric: Optional[OnMetric] = None,
@@ -2117,6 +2148,7 @@ def create_client(
         hooks=hooks,
         retries=retries,
         retry_base_ms=retry_base_ms,
+        retryable_statuses=retryable_statuses,
         timeout_ms=timeout_ms,
         store=store,
         on_metric=on_metric,

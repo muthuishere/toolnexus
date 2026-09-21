@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Toolnexus.Spike</RootNamespace>
+    <AssemblyName>Toolnexus.Spike</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- reads the real port for Guardrail / BeforeToolEvent / GuardedHooks; never modifies it -->
+    <ProjectReference Include="../../../../csharp/src/Toolnexus/Toolnexus.csproj" />
+  </ItemGroup>
+</Project>

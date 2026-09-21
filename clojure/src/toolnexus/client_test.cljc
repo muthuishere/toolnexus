@@ -737,6 +737,36 @@
         (is (= 3 @hits)
             "the classifier may force retry, but :retries still bounds it")))))
 
+(deftest the-retryable-status-matrix-on-the-client-path
+  ;; Same policy as the classifier, one var away — the default set is an
+  ;; ENUMERATION, and a host widens it declaratively rather than by returning
+  ;; :retry from :on-error for every status it has ever seen.
+  (letfn [(attempts [status opts]
+            (flaky-llm [status]
+              (fn [{:keys [base hits]}]
+                (let [c (client/create-client
+                         (merge {:base-url base :model "m" :api-key "k"
+                                 :retries 2 :retry-base-ms 1}
+                                opts))]
+                  (try (client/run c "hi" {:toolkit (tool/toolkit tools)})
+                       (catch Throwable _ nil))
+                  @hits))))]
+    (testing "529 retries by default"
+      (is (= 2 (attempts 529 {}))))
+    (testing "an unlisted 5xx and a permanent one are terminal by default"
+      (is (= 1 (attempts 520 {})))
+      (is (= 1 (attempts 501 {}))))
+    (testing ":retryable-statuses adds to the default set without replacing it"
+      (let [cf {:retryable-statuses [520 521 522 523 524 525 526 527]}]
+        (is (= 2 (attempts 520 cf)))
+        (is (= 2 (attempts 429 cf)) "429 STILL retries")
+        (is (= 1 (attempts 501 cf)))))
+    (testing "a non-429 4xx stays terminal"
+      (is (= 1 (attempts 422 {}))))
+    (testing ":on-error :fail wins over a host-listed status"
+      (is (= 1 (attempts 520 {:retryable-statuses [520]
+                              :on-error (fn [_info] :fail)}))))))
+
 (deftest on-error-receives-the-failure-context
   (flaky-llm [503]
     (fn [{:keys [base]}]
@@ -1169,3 +1199,38 @@
     (is (nil? (ra "")))
     (is (nil? (ra "Wed, 21 Oct 2015 07:28:00 GMT")))
     (is (nil? (ra "abc")))))
+
+(deftest client-retry-backoff-matches-the-other-six-ports
+  ;; This port defaulted :retry-base-ms to 250 and added no jitter, where the
+  ;; other six default to 500 and wait `base * 2^attempt + jitter[0,100)ms`.
+  ;; The default is asserted as a LOWER bound on a real wait, because an unset
+  ;; option that silently became 1ms would pass every other retry test faster.
+  (letfn [(waited [opts]
+            (flaky-llm [503]
+              (fn [{:keys [base hits]}]
+                (let [c  (client/create-client
+                          (merge {:base-url base :model "m" :api-key "k" :retries 2} opts))
+                      t0 (ktime/now-ms)]
+                  (client/run c "hi" {:toolkit (tool/toolkit tools)})
+                  (is (= 2 @hits) "the retry must actually have happened")
+                  (- (ktime/now-ms) t0)))))]
+    (testing "an unset base backs off ~500ms, not ~250ms"
+      (is (>= (waited {}) 480)))
+    (testing "a short base shortens the wait, not the behaviour"
+      (is (< (waited {:retry-base-ms 1}) 300)))))
+
+(deftest client-backoff-adds-jitter
+  ;; Jitter is what keeps a fleet that failed together from retrying together.
+  ;; Sampling the wait: with base 200 and no jitter every sample is identical,
+  ;; so more than one distinct value across samples proves the term is there.
+  ;; (Uniform 0..99 collides on all 6 samples with probability ~1e-10.)
+  (let [samples (for [_ (range 6)]
+                  (flaky-llm [503]
+                    (fn [{:keys [base]}]
+                      (let [c  (client/create-client {:base-url base :model "m" :api-key "k"
+                                                      :retries 2 :retry-base-ms 200})
+                            t0 (ktime/now-ms)]
+                        (client/run c "hi" {:toolkit (tool/toolkit tools)})
+                        (- (ktime/now-ms) t0)))))]
+    (is (> (count (set samples)) 1) "identical waits every time means no jitter term")
+    (is (every? #(>= % 200) samples) "jitter is additive — it never shortens the backoff")))

@@ -367,3 +367,79 @@ def test_retry_after_zero_is_honored_not_treated_as_absent():
     from toolnexus.client import _parse_retry_after
 
     assert _parse_retry_after("0") is not None
+
+
+# --------------------------------------------------------------------------- #
+# `retryable_statuses` — the declarative widening of the default set
+# --------------------------------------------------------------------------- #
+_CLOUDFLARE = [520, 521, 522, 523, 524, 525, 526, 527]
+
+
+async def _run_against(status: int, *, retryable_statuses=None, on_error=None, retries=3):
+    """Answer `status` once, then succeed. Returns the number of requests the server saw."""
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            _send_json(req, status, b'{"error":"nope"}', headers={"Retry-After": "0"})
+        else:
+            _send_json(req, 200, _openai_text_body("ok"))
+
+    tk = await create_toolkit()
+    try:
+        with _Server(handler) as srv:
+            client = create_client(
+                base_url=srv.base_url,
+                style="openai",
+                model="test-model",
+                api_key="sk-test",  # never a real key
+                retries=retries,
+                retry_base_ms=1,
+                retryable_statuses=retryable_statuses,
+                on_error=on_error,
+            )
+            try:
+                await client.run("hi", tk)
+            except Exception as e:  # noqa: BLE001 — terminal statuses are the point
+                assert str(status) in str(e)
+    finally:
+        await tk.close()
+    return calls["n"]
+
+
+async def test_529_overloaded_is_retryable_by_default():
+    """TypeSafe documents 529 Overloaded as "retry with backoff"; the five-status set
+    (429/500/502/503/504) made it terminal on the first attempt."""
+    assert await _run_against(529) == 2
+
+
+@pytest.mark.parametrize("status", [520, 501])
+async def test_an_unlisted_5xx_is_terminal_by_default(status: int):
+    """The set is an ENUMERATION on purpose: "any 5xx" would sweep in permanently-broken
+    statuses (501, 505) and change every existing host's retry behaviour without asking."""
+    assert await _run_against(status) == 1
+
+
+@pytest.mark.parametrize("status", [520, 429])
+async def test_retryable_statuses_is_additive(status: int):
+    """520 now retries; 429 STILL retries — the option can only widen, so a host cannot
+    accidentally drop 429 and lose `Retry-After` handling with it."""
+    assert await _run_against(status, retryable_statuses=_CLOUDFLARE) == 2
+
+
+async def test_retryable_statuses_does_not_make_a_permanent_5xx_retryable():
+    assert await _run_against(501, retryable_statuses=_CLOUDFLARE) == 1
+
+
+async def test_422_stays_terminal():
+    assert await _run_against(422) == 1
+
+
+async def test_on_error_fail_overrides_a_status_the_host_listed():
+    """`retryable_statuses` sets the DEFAULT classification only; `on_error` runs per attempt
+    and has the final say."""
+    n = await _run_against(
+        520, retryable_statuses=_CLOUDFLARE, retries=5, on_error=lambda info: "fail"
+    )
+    assert n == 1

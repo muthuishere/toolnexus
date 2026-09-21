@@ -1,0 +1,170 @@
+---
+title: Judge — measured on a live backend
+description: Latency (p50 and p95), cost, calibration and non-determinism for the Classifier seam, measured by a runner against a live System One backend and a chat model — including the control that can fail.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="caution" title="Read this before you read a number">
+A decision is **advisory**. Calibration is **not** correctness. "Cannot hallucinate" means only
+that the returned value is inside the declared schema — a decision can be confidently wrong, and
+`nearUniform` cannot tell a good encoding from a subtly wrong one. **Authority is enforced in
+code**: numeric limits, permission checks and allowlists stay in your `if` statements. A classifier
+interprets; it never authorises. Nothing on this page is a security control.
+</Aside>
+
+<Aside type="tip" title="This page is generated output, not prose">
+Every number below was produced by **`node site/scripts/generate-judge-live.mjs`** on **2026-09-21T01:33:39Z**, in 37 live
+calls costing **$0.001623** in total. The runner drives the shipped JavaScript
+`Classifier` against the shared fixture [`examples/judge/base.json`](https://github.com/muthuishere/toolnexus/blob/main/examples/judge/base.json)
+— the same bytes every port is tested against — and writes this file. Re-running it replaces the
+tables; it does not edit them. The raw record is
+[`site/src/data/judge-live.json`](https://github.com/muthuishere/toolnexus/blob/main/site/src/data/judge-live.json).
+
+**CI never runs it.** It needs the network and a credential, and the test suites have neither by
+design: the `static` backend is the whole CI path. The credential is read from the environment by
+the library at the point of use and appears in no output, here or in the raw record.
+
+Backends measured: `systemone` = `typesafe/jev-1.13` and `llm` = `openai/gpt-4o-mini`, both over
+`https://openrouter.ai/api/v1`. Percentiles are **nearest-rank over the samples shown** — no interpolation, so each
+figure is a call that actually happened.
+</Aside>
+
+## The headline: it is not deterministic, so no test may assert a live number
+
+The same fixture, 12 times through the `systemone` backend:
+
+| run | `is_refund_request` (noul) | `department` P(shipping) | `urgency` (score) | latency |
+|---|---|---|---|---|
+| 1 | 0.98 | 0.64 | 1.25 | 0.43 s |
+| 2 | 0.98 | 0.60 | 1.24 | 0.35 s |
+| 3 | 0.99 | 0.64 | 1.19 | 0.34 s |
+| 4 | 0.98 | 0.58 | 1.26 | 0.32 s |
+| 5 | 0.98 | 0.65 | 1.23 | 0.33 s |
+| 6 | 0.98 | 0.67 | 1.23 | 0.39 s |
+| 7 | 0.98 | 0.66 | 1.26 | 0.44 s |
+| 8 | 0.98 | 0.68 | 1.23 | 0.44 s |
+| 9 | 0.98 | 0.67 | 1.21 | 0.32 s |
+| 10 | 0.98 | 0.68 | 1.27 | 0.36 s |
+| 11 | 0.98 | 0.65 | 1.26 | 0.40 s |
+| 12 | 0.98 | 0.67 | 1.19 | 0.33 s |
+
+Across those 12 identical requests the `urgency` score moved over a **spread of
+0.08** with **σ = 0.027** on a 0–3
+scale; `P(shipping)` moved 0.10 and the `noul` moved
+0.01. The pick was `shipping`
+on every run.
+
+The jitter concentrates in `score` and in `choice` probabilities, which is why **a binary gate is
+the most reproducible primitive you can build** on this seam.
+
+Two consequences you inherit:
+
+1. **CI runs the `static` backend.** Recorded decisions, no network, no credential. It is not a
+   convenience — it is the only backend a test may assert a number against. No test in this repo
+   asserts a live numeric answer; a live call, if run at all, asserts shape only.
+2. **A threshold needs clearance.** A band boundary sitting within ~0.1 of a typical value will
+   flip between runs. Give it room, or add hysteresis.
+
+## Latency, cost, and why `style: "llm"` is an exit rather than an equal
+
+The identical fixture on both backends. Latency is reported at **p50 and p95** because the median
+alone hides the tail you will actually be paged about:
+
+| backend | samples | p50 | p95 | cost / call | `calibrated` | distribution returned |
+|---|---|---|---|---|---|---|
+| **`systemone`** `typesafe/jev-1.13` | 12 | **0.35 s** | 0.44 s | **$0.000017** | `true` | **3 probabilities** |
+| `llm` `openai/gpt-4o-mini` | 6 | 2.13 s | 2.47 s | $0.000113 (6.7×) | `false` | 3 probabilities (self-reported) |
+
+On this run the `llm` backend was **6.1× the latency** and **6.7× the cost** at
+p50. Its `department` picks were `shipping` against
+`shipping` from `systemone`, at a median self-reported confidence of
+**1.00** — round, self-reported confidence is the
+textbook overconfidence signature, and it is a *report about the question*, not evidence about the
+answer. On the shared `urgency` rubric the two backends did not agree either: a median of
+**1.23** from `systemone` against **0.80** from the chat
+model, on the same 0–3 scale.
+
+<Aside type="danger" title="A threshold tuned on one backend does not transfer to another">
+This is exactly what `Decision.calibrated` is for, and it is why you read it. The `systemone`
+style reported `true` above; the `llm` style reported
+`false` — it derives nothing from token probabilities, so its
+numbers are the model's self-report. Read it at the point you compare a number to a threshold. If
+it is `false`, your thresholds were tuned against a different instrument: re-tune, or refuse.
+
+```go
+d, err := classifier.Evaluate(ctx, state, questions)
+if err != nil { return err }
+if !d.Calibrated {
+    // The numbers are self-reported, not calibrated. Either re-tune for THIS
+    // backend or decline to threshold on them.
+    return errUncalibratedBackend
+}
+risk, err := d.Score("risk")
+```
+
+`style: "llm"` exists so a host with **no** System One credential can run the same questions on a
+cheap chat model. It is a compatibility exit, not an equivalent.
+</Aside>
+
+## Latency is flat in roster size
+
+One `choice` over a synthetic skill roster, same query at every size:
+
+| options | input tokens | latency | pick | confidence |
+|---|---|---|---|---|
+| 20 | 788 | 0.34 s | `dataviz` | 1.00 |
+| 64 | 1868 | 0.58 s | `dataviz` | 1.00 |
+| 128 | 3443 | 0.37 s | `dataviz` | 1.00 |
+| 255 | 6569 | 0.42 s | `dataviz` | 1.00 |
+| 300 | — | — | `classifier: question "skill": a choice needs 1..255 options, got 300` | — |
+
+Latency does not grow with the roster across that range: a per-turn judge over 255 skills costs
+about the same wall-clock as one over 20, which is what makes a judge-per-turn affordable at all.
+Above 255 the request is refused **before it leaves the process**, by the library's own pre-flight
+limit check naming the offending question — loud and legible enough for a caller to detect and
+chunk, and it costs nothing to hit.
+
+## The control that can fail
+
+Most "is my prompt good" checks cannot fail: they measure the thing they are made of. The
+**shuffle control** (<a href="https://github.com/muthuishere/toolnexus/blob/main/docs/adr/0021-the-encoding-carries-the-judgment.md">ADR 0021 D5</a>)
+can. Keep the probabilities, permute which option each belongs to, re-run: if the score does not
+collapse, the distribution was never carrying information about the options and you were reading
+noise with two decimal places on it. Measured on snake, three games per encoding, identical seeds:
+**prose 17, 17, 17 apples; the shuffle control 1, 0, 1.** *17 apples → 1.* That number is cited
+from the ADR — it needs a game loop, not one call.
+
+This runner runs the same control at the level of a single decision: it **moves each description
+to a different option id** and re-asks. The shipping-damage sentence
+("delivery, damage in transit") moves from `shipping` onto `billing`. If the answer follows the
+sentence, the encoding is what is being judged. If it stays on the id, the encoding never was.
+
+| encoding | 5 picks | median top probability | `nearUniform` |
+|---|---|---|---|
+| **described** — each option described by consequence | `shipping` | **0.65** | 0/5 |
+| **permuted** — the same descriptions, moved between ids | `billing` | 0.62 | 0/5 |
+| **undescribed** — the id repeated as its own description | `shipping`, `billing` | 0.52 | 0/5 |
+
+**Verdict on this run:** the control PASSED — the answer moved with the description (`shipping` → `billing`, 5/5 runs landing on `billing`, the id that inherited the shipping-damage sentence).
+
+It costs one function, and it is the only check in this space that can come back negative. Run
+it before you trust an encoding, and again when you change one.
+
+Note where **undescribed** lands, while keeping the full state: describing the situation buys
+nothing if the options are not described. That is the
+[encoding obligation](/toolnexus/cookbook/judge/#the-encoding-obligation), and why the library
+detects degenerate criteria and warns, naming the question.
+
+## `nearUniform`, and the limit of every signal on this page
+
+A choice answer whose probabilities sit at the uniform floor (`1/n`) is a **detectable** symptom
+of an encoding that gave the model nothing to rank on — visible from responses alone, with no
+baseline, no labels and no outcomes, so it runs on live traffic. In the table above the described
+encoding returned a median top probability of **0.65** and the undescribed
+one **0.52** on a three-option choice (`1/n` = 0.33).
+
+That separation is the whole of what it buys. `nearUniform` **cannot** distinguish a good encoding
+from a subtly wrong one: a wrong-but-answerable question still reads as answerable — which is
+precisely the case the permuted row above is, and it is why the shuffle control exists and
+`nearUniform` is advisory.

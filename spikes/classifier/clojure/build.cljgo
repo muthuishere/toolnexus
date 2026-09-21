@@ -1,0 +1,9 @@
+;; Spike S-classifier — cljgo side. THE SAME src/toolnexus/classifier.cljc,
+;; the same koine artifact from Clojars. No vendored copy, no reader conditional.
+;;
+;;   cljgo build run
+(defn build [b]
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.11.0"})
+  (let [app (exe b {:name "classifier" :main "src/toolnexus/classifier.cljc"})]
+    (install b app)
+    (run b app)))

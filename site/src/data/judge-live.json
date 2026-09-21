@@ -1,0 +1,268 @@
+{
+  "generatedAt": "2026-09-21T01:33:39Z",
+  "command": "node site/scripts/generate-judge-live.mjs",
+  "fixture": "examples/judge/base.json",
+  "backends": {
+    "systemone": {
+      "model": "typesafe/jev-1.13",
+      "baseUrl": "https://openrouter.ai/api/v1"
+    },
+    "llm": {
+      "model": "openai/gpt-4o-mini",
+      "baseUrl": "https://openrouter.ai/api/v1"
+    }
+  },
+  "systemone": {
+    "ms": [
+      427.762667,
+      345.82012499999996,
+      339.787291,
+      318.56333399999994,
+      328.14595799999984,
+      385.9492090000001,
+      436.11608300000034,
+      435.0030829999996,
+      318.4694999999997,
+      361.44829100000015,
+      401.10141699999986,
+      331.48962500000016
+    ],
+    "urgency": [
+      1.25,
+      1.24,
+      1.19,
+      1.26,
+      1.23,
+      1.23,
+      1.26,
+      1.23,
+      1.21,
+      1.27,
+      1.26,
+      1.19
+    ],
+    "refund": [
+      0.98,
+      0.98,
+      0.99,
+      0.98,
+      0.98,
+      0.98,
+      0.98,
+      0.98,
+      0.98,
+      0.98,
+      0.98,
+      0.98
+    ],
+    "shipping": [
+      0.64,
+      0.6,
+      0.64,
+      0.58,
+      0.65,
+      0.67,
+      0.66,
+      0.68,
+      0.67,
+      0.68,
+      0.65,
+      0.67
+    ],
+    "pick": [
+      "shipping",
+      "shipping",
+      "shipping",
+      "shipping",
+      "shipping",
+      "shipping",
+      "shipping",
+      "shipping",
+      "shipping",
+      "shipping",
+      "shipping",
+      "shipping"
+    ],
+    "calibrated": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "distributionKeys": [
+      3,
+      3,
+      3,
+      3,
+      3,
+      3,
+      3,
+      3,
+      3,
+      3,
+      3,
+      3
+    ],
+    "p50": 345.82012499999996,
+    "p95": 436.11608300000034,
+    "urgencyStdev": 0.02713602101199875,
+    "urgencySpread": 0.08000000000000007,
+    "refundSpread": 0.010000000000000009,
+    "shippingSpread": 0.10000000000000009,
+    "cost": 0.00020059200000000006,
+    "calls": 12,
+    "costAllPhases": 0.0009474780000000002
+  },
+  "llm": {
+    "ms": [
+      2228.997708000001,
+      1716.9730839999993,
+      2470.5265830000008,
+      2141.774125,
+      2125.6684999999998,
+      1481.258125000002
+    ],
+    "urgency": [
+      0.7,
+      0.75,
+      0.8,
+      0.8,
+      0.8,
+      0.8
+    ],
+    "refund": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "pick": [
+      "shipping",
+      "shipping",
+      "shipping",
+      "shipping",
+      "shipping",
+      "shipping"
+    ],
+    "confidence": [
+      1,
+      0.95,
+      1,
+      1,
+      1,
+      0.9
+    ],
+    "calibrated": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ],
+    "distributionKeys": [
+      3,
+      3,
+      3,
+      3,
+      3,
+      3
+    ],
+    "p50": 2125.6684999999998,
+    "p95": 2470.5265830000008,
+    "urgencyStdev": 0.04183300132670381,
+    "urgencySpread": 0.10000000000000009,
+    "cost": 0.000675378,
+    "calls": 6
+  },
+  "roster": {
+    "rows": [
+      {
+        "options": 20,
+        "ms": 340.06679200000144,
+        "pick": "dataviz",
+        "confidence": 1,
+        "inputTokens": 788
+      },
+      {
+        "options": 64,
+        "ms": 578.9431670000013,
+        "pick": "dataviz",
+        "confidence": 1,
+        "inputTokens": 1868
+      },
+      {
+        "options": 128,
+        "ms": 374.49766699999964,
+        "pick": "dataviz",
+        "confidence": 1,
+        "inputTokens": 3443
+      },
+      {
+        "options": 255,
+        "ms": 417.06995800000004,
+        "pick": "dataviz",
+        "confidence": 1,
+        "inputTokens": 6569
+      }
+    ],
+    "capError": "classifier: question \"skill\": a choice needs 1..255 options, got 300"
+  },
+  "encodingControl": {
+    "described": {
+      "label": "described",
+      "picks": [
+        "shipping",
+        "shipping",
+        "shipping",
+        "shipping",
+        "shipping"
+      ],
+      "medianTop": 0.65,
+      "nearUniform": 0,
+      "n": 5
+    },
+    "permuted": {
+      "label": "permuted",
+      "picks": [
+        "billing",
+        "billing",
+        "billing",
+        "billing",
+        "billing"
+      ],
+      "medianTop": 0.62,
+      "nearUniform": 0,
+      "n": 5
+    },
+    "undescribed": {
+      "label": "undescribed",
+      "picks": [
+        "shipping",
+        "shipping",
+        "billing",
+        "shipping",
+        "shipping"
+      ],
+      "medianTop": 0.52,
+      "nearUniform": 0,
+      "n": 5
+    },
+    "describedPick": "shipping",
+    "permutedPick": "billing",
+    "controlTracked": true,
+    "permutedFollowedText": 5
+  },
+  "totalCostUsd": 0.001622856,
+  "totalCalls": 37
+}

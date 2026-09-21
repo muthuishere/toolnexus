@@ -101,6 +101,19 @@ def guarded_hooks(guardrails: Optional[list[Guardrail]], hooks: Any) -> Any:
     async def before_tool(ev: Any) -> Any:
         for rail in guardrails:
             verdict = rail(ev)
+            # A guardrail is SYNCHRONOUS by contract. An async one returns a
+            # coroutine, which is truthy and != "allow", so it would silently DENY
+            # every call with ``denied: <coroutine object ...>`` (and leak an
+            # un-awaited coroutine). Fail loudly, and say where async work belongs.
+            if verdict is not None and not isinstance(verdict, str):
+                what = "a coroutine" if inspect.isawaitable(verdict) else type(verdict).__name__
+                if inspect.isawaitable(verdict):
+                    verdict.close() if hasattr(verdict, "close") else None
+                raise TypeError(
+                    f"guardrail returned {what}: a guardrail must return a str synchronously "
+                    '("" or "allow" to permit, any other string to deny). '
+                    "Do asynchronous work in hooks.before_tool, which is awaited."
+                )
             if verdict and verdict != "allow":
                 return {"result": {"output": f"denied: {verdict}", "is_error": True}}
         if prior is None:

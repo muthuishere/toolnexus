@@ -1,0 +1,394 @@
+---
+title: Typed decisions (judge)
+description: A working judge in every language — pre-declared typed questions in, calibrated numbers out. Each tab points at a real file in the repo and the exact command that runs it, with no credential and no network.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="caution" title="Read this before your first call">
+A decision is **advisory**. Calibration is **not** correctness — a decision can be confidently
+wrong, and "cannot hallucinate" means only that the returned value is inside the declared schema.
+**Authority is enforced in code**: numeric limits, permission checks and allowlists stay in your
+`if` statements, never in a probability. A classifier interprets; it never authorises. Nothing on
+this page is a security control.
+</Aside>
+
+<Aside type="tip" title="Why you need this">
+Half the decisions in an agent are not actions, they are **judgments**: is this command risky, does
+this turn need the billing skill, is this text an injection attempt, how urgent is this ticket.
+Asking a chat model produces prose you then have to parse, a round self-reported confidence, and no
+distribution. `Tool` is the contract for an **action**; `Classifier` is the contract for a
+**judgment**. The concepts live in [Typed decisions](/toolnexus/judge/); this page is the recipe.
+</Aside>
+
+## Run it first
+
+Every tab below is an excerpt from a **real file in the repo**, and every one of these commands was
+run to produce the output at the bottom of this page. Each one picks its backend from the
+environment: `TYPESAFE_API_KEY` calls TypeSafe's own API, `OPENROUTER_API_KEY` calls the same wire
+through OpenRouter's gateway, and with **no key at all** they replay one recorded decision through
+the [`static` backend](/toolnexus/judge/backends/) — **no network, no credential, no cost**. The
+snippets below show the TypeSafe branch, which is also the library's default configuration.
+
+| language | file | command |
+|---|---|---|
+| JavaScript | [`js/examples/judge.ts`](https://github.com/muthuishere/toolnexus/blob/main/js/examples/judge.ts) | `cd js && npm run build && npm run example:judge` |
+| Python | [`python/examples/judge.py`](https://github.com/muthuishere/toolnexus/blob/main/python/examples/judge.py) | `cd python && uv run python examples/judge.py` |
+| Go | [`golang/examples/judge/main.go`](https://github.com/muthuishere/toolnexus/blob/main/golang/examples/judge/main.go) | `cd golang && go run ./examples/judge` |
+| Java | [`java/…/examples/Judge.java`](https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/examples/Judge.java) | `cd java && ./gradlew runJudge` |
+| C# | [`csharp/examples/Toolnexus.Examples/Judge.cs`](https://github.com/muthuishere/toolnexus/blob/main/csharp/examples/Toolnexus.Examples/Judge.cs) | `cd csharp/examples/Toolnexus.Examples && dotnet run -- judge` |
+| Elixir | [`elixir/examples/judge.exs`](https://github.com/muthuishere/toolnexus/blob/main/elixir/examples/judge.exs) | `cd elixir && mix run examples/judge.exs` |
+| Clojure | [`clojure/examples/src/examples/judge.cljc`](https://github.com/muthuishere/toolnexus/blob/main/clojure/examples/src/examples/judge.cljc) | `cd clojure/examples/clj && clojure -M -m examples.judge` |
+
+The state is one support ticket. The three questions ask three different *kinds* of thing about it,
+in one round trip.
+
+## The questions
+
+The map keys (`wants_money_back`, `department`, `urgency`) are **yours**, and they are **addressing,
+not content** — they are never transmitted to the model, so a key may be a tool, skill or agent name
+verbatim.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+import { createClassifier, noul, choice, score } from "toolnexus"
+
+const QUESTIONS = {
+  wants_money_back: noul("Is the customer asking for money to be returned?"),
+  department: choice("Which desk should own this ticket?", {
+    billing: "own it here when the problem is money that moved: a duplicate charge, a wrong invoice, a refund owed",
+    shipping: "own it here when the problem is a physical parcel: a late delivery, a package damaged in transit",
+    technical: "own it here when the problem is the product itself: a login that fails, a feature that errors",
+  }),
+  urgency: score("How fast does this ticket need a human?", [
+    "the customer is working normally and is waiting on an answer",
+    "the customer is inconvenienced and will chase if nobody replies today",
+    "the customer is blocked from working right now and every hour costs them",
+  ]),
+}
+
+const judge = createClassifier({
+  baseUrl: "https://api.typesafe.ai/v1", // TypeSafe's own API — also the library default
+  model: "jev-latest",
+  apiKeyEnv: "TYPESAFE_API_KEY", // the NAME of an env var, never the value
+  onMetric: (ev) => ev.event === "classifier.warning" && console.log("warning:", ev.warning),
+})
+
+const d = await judge.evaluate(TICKET, QUESTIONS)
+
+const want = d.noul("wants_money_back")
+const dept = d.choice("department")
+const urg = d.score("urgency")
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import ChoiceQuestion, NoulQuestion, ScoreQuestion, create_classifier
+
+QUESTIONS = {
+    "wants_money_back": NoulQuestion("Is the customer asking for money to be returned?"),
+    "department": ChoiceQuestion(
+        "Which desk should own this ticket?",
+        {
+            "billing": "own it here when the problem is money that moved: a duplicate charge, a wrong invoice, a refund owed",
+            "shipping": "own it here when the problem is a physical parcel: a late delivery, a package damaged in transit",
+            "technical": "own it here when the problem is the product itself: a login that fails, a feature that errors",
+        },
+    ),
+    "urgency": ScoreQuestion(
+        "How fast does this ticket need a human?",
+        [
+            "the customer is working normally and is waiting on an answer",
+            "the customer is inconvenienced and will chase if nobody replies today",
+            "the customer is blocked from working right now and every hour costs them",
+        ],
+    ),
+}
+
+judge = create_classifier(
+    base_url="https://api.typesafe.ai/v1",  # TypeSafe's own API — also the library default
+    model="jev-latest",
+    api_key_env="TYPESAFE_API_KEY",  # the NAME of an env var, never the value
+)
+
+d = await judge.evaluate(TICKET, QUESTIONS)
+
+want = d.noul("wants_money_back")
+dept = d.choice("department")
+urg = d.score("urgency")
+```
+</TabItem>
+<TabItem label="Go">
+```go
+var questions = map[string]toolnexus.Question{
+	"wants_money_back": toolnexus.NoulQuestion{
+		Instructions: "Is the customer asking for money to be returned?",
+	},
+	"department": toolnexus.ChoiceQuestion{
+		Instructions: "Which desk should own this ticket?",
+		Criteria: map[string]string{
+			"billing":   "own it here when the problem is money that moved: a duplicate charge, a wrong invoice, a refund owed",
+			"shipping":  "own it here when the problem is a physical parcel: a late delivery, a package damaged in transit",
+			"technical": "own it here when the problem is the product itself: a login that fails, a feature that errors",
+		},
+	},
+	"urgency": toolnexus.ScoreQuestion{
+		Instructions: "How fast does this ticket need a human?",
+		Criteria: []string{
+			"the customer is working normally and is waiting on an answer",
+			"the customer is inconvenienced and will chase if nobody replies today",
+			"the customer is blocked from working right now and every hour costs them",
+		},
+	},
+}
+
+judge, err := toolnexus.CreateClassifier(toolnexus.ClassifierOptions{
+	BaseURL:   "https://api.typesafe.ai/v1", // TypeSafe's own API — also the library default
+	Model:     "jev-latest",
+	APIKeyEnv: "TYPESAFE_API_KEY", // the NAME of an env var, never the value
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+d, err := judge.Evaluate(context.Background(), ticket, questions)
+if err != nil {
+	log.Fatal(err)
+}
+
+want, err := d.Noul("wants_money_back")
+dept, err := d.Choice("department")
+urg, err := d.Score("urgency")
+```
+</TabItem>
+<TabItem label="Java">
+```java
+private static final Map<String, Classifier.Question> QUESTIONS = Map.of(
+        "wants_money_back", new Classifier.NoulQuestion("Is the customer asking for money to be returned?"),
+        "department", new Classifier.ChoiceQuestion("Which desk should own this ticket?", Map.of(
+                "billing", "own it here when the problem is money that moved: a duplicate charge, a wrong invoice, a refund owed",
+                "shipping", "own it here when the problem is a physical parcel: a late delivery, a package damaged in transit",
+                "technical", "own it here when the problem is the product itself: a login that fails, a feature that errors")),
+        "urgency", new Classifier.ScoreQuestion("How fast does this ticket need a human?", List.of(
+                "the customer is working normally and is waiting on an answer",
+                "the customer is inconvenienced and will chase if nobody replies today",
+                "the customer is blocked from working right now and every hour costs them")));
+
+Classifier judge = Classifier.create(new Classifier.Options()
+        .baseUrl("https://api.typesafe.ai/v1") // TypeSafe's own API — also the library default
+        .model("jev-latest")
+        .apiKeyEnv("TYPESAFE_API_KEY"));         // the NAME of an env var, never the value
+
+Classifier.Decision d = judge.evaluate(TICKET, QUESTIONS);
+
+Classifier.NoulAnswer want = d.noul("wants_money_back");
+Classifier.ChoiceAnswer dept = d.choice("department");
+Classifier.ScoreAnswer urg = d.score("urgency");
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+private static readonly IReadOnlyDictionary<string, Question> Questions = new Dictionary<string, Question>
+{
+    ["wants_money_back"] = new NoulQuestion
+    {
+        Instructions = "Is the customer asking for money to be returned?",
+    },
+    ["department"] = new ChoiceQuestion
+    {
+        Instructions = "Which desk should own this ticket?",
+        Criteria = new Dictionary<string, string>
+        {
+            ["billing"] = "own it here when the problem is money that moved: a duplicate charge, a wrong invoice, a refund owed",
+            ["shipping"] = "own it here when the problem is a physical parcel: a late delivery, a package damaged in transit",
+            ["technical"] = "own it here when the problem is the product itself: a login that fails, a feature that errors",
+        },
+    },
+    ["urgency"] = new ScoreQuestion
+    {
+        Instructions = "How fast does this ticket need a human?",
+        Criteria = new[]
+        {
+            "the customer is working normally and is waiting on an answer",
+            "the customer is inconvenienced and will chase if nobody replies today",
+            "the customer is blocked from working right now and every hour costs them",
+        },
+    },
+};
+
+var judge = Classifier.Create(new ClassifierOptions
+{
+    BaseUrl = "https://api.typesafe.ai/v1", // TypeSafe's own API — also the library default
+    Model = "jev-latest",
+    ApiKeyEnv = "TYPESAFE_API_KEY",           // the NAME of an env var, never the value
+});
+
+var d = await judge.EvaluateAsync(Ticket, Questions);
+
+var want = d.Noul("wants_money_back");
+var dept = d.Choice("department");
+var urg = d.Score("urgency");
+```
+
+<Aside type="note" title="Object initialisers, not positional arguments">
+`NoulQuestion`, `ChoiceQuestion` and `ScoreQuestion` are records with a `required string
+Instructions` init property and **no positional parameter list**, so `new NoulQuestion("…")` does
+not compile (`CS1729`). Every question is built with an object initialiser, which is also what makes
+`Criteria` optional on a `noul` without a `null` in the call.
+</Aside>
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Classifier
+alias Toolnexus.Classifier.{Choice, Decision, Noul, Score}
+
+questions = %{
+  "wants_money_back" => %Noul{instructions: "Is the customer asking for money to be returned?"},
+  "department" => %Choice{
+    instructions: "Which desk should own this ticket?",
+    criteria: %{
+      "billing" => "own it here when the problem is money that moved: a duplicate charge, a wrong invoice, a refund owed",
+      "shipping" => "own it here when the problem is a physical parcel: a late delivery, a package damaged in transit",
+      "technical" => "own it here when the problem is the product itself: a login that fails, a feature that errors"
+    }
+  },
+  "urgency" => %Score{
+    instructions: "How fast does this ticket need a human?",
+    criteria: [
+      "the customer is working normally and is waiting on an answer",
+      "the customer is inconvenienced and will chase if nobody replies today",
+      "the customer is blocked from working right now and every hour costs them"
+    ]
+  }
+}
+
+{:ok, judge} =
+  Classifier.create(
+    base_url: "https://api.typesafe.ai/v1",
+    model: "jev-latest",
+    api_key_env: "TYPESAFE_API_KEY"
+  )
+
+{:ok, d} = Classifier.evaluate(judge, ticket, questions)
+
+{:ok, want} = Decision.noul(d, "wants_money_back")
+{:ok, dept} = Decision.choice(d, "department")
+{:ok, urg} = Decision.score(d, "urgency")
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.classifier :as jev])
+
+(def questions
+  {"wants_money_back"
+   (jev/noul-question "Is the customer asking for money to be returned?")
+
+   "department"
+   (jev/choice-question
+    "Which desk should own this ticket?"
+    {"billing"   "own it here when the problem is money that moved: a duplicate charge, a wrong invoice, a refund owed"
+     "shipping"  "own it here when the problem is a physical parcel: a late delivery, a package damaged in transit"
+     "technical" "own it here when the problem is the product itself: a login that fails, a feature that errors"})
+
+   "urgency"
+   (jev/score-question
+    "How fast does this ticket need a human?"
+    ["the customer is working normally and is waiting on an answer"
+     "the customer is inconvenienced and will chase if nobody replies today"
+     "the customer is blocked from working right now and every hour costs them"])})
+
+(def judge
+  (jev/create-classifier
+   {:base-url    "https://api.typesafe.ai/v1"
+    :model       "jev-latest"
+    :api-key-env "TYPESAFE_API_KEY"}))
+
+(let [d    (jev/evaluate judge ticket questions)
+      want (jev/noul   d "wants_money_back")
+      dept (jev/choice d "department")
+      urg  (jev/score  d "urgency")]
+  ...)
+```
+</TabItem>
+</Tabs>
+
+Reading an answer as the wrong type is an **error, not a surprise**: the typed accessors fail
+loudly (an exception, an `{:error, _}`, an `err`) rather than handing you a zero.
+
+## What it prints
+
+One live TypeSafe decision, through the JavaScript port:
+
+```
+backend: systemone via api.typesafe.ai (live)
+
+model answering: jev-1.13.0
+wants_money_back: 0.99   (a noul carries NO confidence — the number IS the answer)
+department:       billing  p={"technical":0,"billing":1,"shipping":0} confidence=1
+urgency:          0.48  of 0..2  p={"0":0.52,"1":0.48,"2":0}
+  level 0: the customer is working normally and is waiting on an answer   (a score MAY fall between levels)
+
+calibrated: true
+nearUniform(department): false
+
+usage: 516 in / 72 out / cost: not reported by this backend
+```
+
+### Which key you set changes one line, and one field
+
+`TYPESAFE_API_KEY` goes to TypeSafe's own API; `OPENROUTER_API_KEY` goes to the same wire through
+OpenRouter's gateway. They are **equivalent in latency** — 339 ms / 449 ms (p50 / p95) against
+351 ms / 400 ms, warm and interleaved, which is a tie — so pick on dependencies, not speed: a
+gateway in the path versus a first-party key. The one functional difference is `usage.cost`, a
+gateway field that TypeSafe does not return; that is why the line above says
+`cost: not reported by this backend` rather than `$0`, and why a **cost-based budget only works
+through the gateway**. The
+[backends page](/toolnexus/judge/backends/) has the full comparison.
+
+With no key at all the first line reads
+`backend: static (recorded — set TYPESAFE_API_KEY or OPENROUTER_API_KEY to go live)`, the model
+answering is the recorded `typesafe/jev-1.13-20260917`, and the usage line carries the gateway's
+`$0.000021672` — the same decision, replayed.
+
+
+Three things in that output are worth a second look.
+
+- **`urgency` is `0.48`.** Not 0 and not 1: the model is genuinely split between "waiting on an
+  answer" and "will chase today", and the number says so. `p={"0":0.52,"1":0.48}` says it again,
+  with the disagreement visible instead of averaged away. It was `0.49` on the recording and `0.48`
+  live — the backend is non-deterministic, which is why only `static` may be asserted against.
+- **`calibrated: true`** — these probabilities came from a calibrated backend, so a threshold tuned
+  here transfers. An [`llm`-style backend](/toolnexus/judge/backends/) reports `false`, and your
+  thresholds do not carry over.
+- **`nearUniform(department): false`** — the model had something to rank on. `true` would be the
+  symptom of an encoding that told it nothing.
+
+## The encoding obligation
+
+<Aside type="danger" title="This one is yours, and it is not advice">
+For a `choice`, **`criteria[id]` is the only thing that differentiates one option from another to
+the model.** The instructions describe the *question*; the state describes the *situation*; neither
+tells the model what picking `billing` rather than `technical` would mean. Passing the id itself, an
+empty string, or one value repeated is schema-valid, returns HTTP 200 and a well-formed distribution
+— and ranks at chance: **17 apples described by consequence, 0/1/0 described by id**, against a
+shuffle control's 1/0/1.
+</Aside>
+
+That is why every option in the example above carries a real sentence, why all three use the **same
+template** (*"own it here when the problem is X: a, b, c"*), and why the host does the counting and
+hands over the conclusion rather than shipping raw numbers.
+
+**[The encoding rules](/toolnexus/judge/encoding/)** has the four rules with the measurement behind
+each, the degenerate-criteria warning the library emits when you get this wrong, and the precise
+limits of `nearUniform`, confidence and `calibrated` as health signals.
+
+## Where to go next
+
+| page | what it answers |
+|---|---|
+| [Typed decisions](/toolnexus/judge/) | what a `Classifier` is, the three question types, the `Decision` shape |
+| [The encoding rules](/toolnexus/judge/encoding/) | what to write inside a question, with the measurements |
+| [Backends & configuration](/toolnexus/judge/backends/) | `systemone`, `llm`, `custom`, `static`, and every option |
+| [Measured on a live backend](/toolnexus/harness/judge-live/) | latency, cost, non-determinism, and the one control that **can** fail |

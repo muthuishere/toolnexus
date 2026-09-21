@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -272,6 +273,84 @@ class LlmClientResilienceTest {
     @Test
     void integerRetryAfterIsHonoredOverBackoff() throws IOException {
         assertTrue(retryDelayMs("1", 5) >= 900);
+    }
+
+
+    // ------------------------------------------------------------------ the retryable set
+
+    /** One server that answers {@code status} once, then succeeds; returns the attempt count. */
+    private int attemptsFor(int status, List<Integer> retryableStatuses) throws IOException {
+        AtomicInteger hits = new AtomicInteger(0);
+        int port = start(ex -> {
+            if (hits.incrementAndGet() < 2) {
+                respond(ex, status, "transient");
+                return;
+            }
+            respond(ex, 200, "{\"choices\":[{\"message\":{\"content\":\"ok\"}}],\"usage\":{}}");
+        });
+        Toolkit tk = Toolkit.create(new Toolkit.Options());
+        LlmClient client = LlmClient.create(new LlmClient.Options()
+                .baseUrl("http://127.0.0.1:" + port)
+                .style("openai")
+                .model("x")
+                .apiKey("k")
+                .retries(2)
+                .retryBaseMs(5)
+                .retryableStatuses(retryableStatuses));
+        try {
+            client.run("hi", tk);
+        } catch (RuntimeException ignored) {
+            // a terminal status surfaces; the attempt count is what this asserts
+        }
+        tk.close();
+        stopServer();
+        server = null;
+        return hits.get();
+    }
+
+    /**
+     * TypeSafe documents {@code 529 Overloaded} as "retry with backoff", so it is in the defaults.
+     * The set stays an ENUMERATION, so {@code 520}–{@code 527} and {@code 501} remain terminal
+     * until a host opts in — which is what {@code retryableStatuses} is for, additively.
+     */
+    @Test
+    void fiveTwentyNineRetriesByDefaultAndRetryableStatusesOnlyWidensTheSet() throws IOException {
+        assertEquals(2, attemptsFor(529, null), "529 Overloaded is retryable by default");
+        assertEquals(1, attemptsFor(520, null), "an unlisted 5xx is terminal by default");
+        assertEquals(1, attemptsFor(501, null), "a permanent 5xx is terminal by default");
+        assertEquals(1, attemptsFor(422, null), "a non-429 4xx stays terminal");
+
+        List<Integer> cloudflare = List.of(520, 521, 522, 523, 524, 525, 526, 527);
+        assertEquals(2, attemptsFor(520, cloudflare), "an opted-in status retries");
+        assertEquals(2, attemptsFor(429, cloudflare), "429 still retries, so Retry-After still applies");
+        assertEquals(1, attemptsFor(501, cloudflare), "a status in neither set stays terminal");
+    }
+
+    /** The option sets the default classification only; {@code onError} has the final say. */
+    @Test
+    void onErrorHasTheFinalSayOverRetryableStatuses() throws IOException {
+        AtomicInteger hits = new AtomicInteger(0);
+        int port = start(ex -> {
+            hits.incrementAndGet();
+            respond(ex, 520, "cloudflare");
+        });
+        Toolkit tk = Toolkit.create(new Toolkit.Options());
+        LlmClient client = LlmClient.create(new LlmClient.Options()
+                .baseUrl("http://127.0.0.1:" + port)
+                .style("openai")
+                .model("x")
+                .apiKey("k")
+                .retries(3)
+                .retryBaseMs(5)
+                .retryableStatuses(List.of(520))
+                .onError(info -> LlmClient.Tier.FAIL));
+        try {
+            client.run("hi", tk);
+        } catch (RuntimeException ignored) {
+            // terminal either way
+        }
+        assertEquals(1, hits.get(), "onError:fail overrode a status the host itself listed");
+        tk.close();
     }
 
 }

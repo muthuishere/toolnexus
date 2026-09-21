@@ -6,6 +6,7 @@
 import type { Toolkit } from "./toolkit.js"
 import type { ToolResult, Request, Answer } from "./types.js"
 import { pendingOf } from "./types.js"
+import { isRetryableStatus, retryAfterMs } from "./retry.js"
 import type { ContentPart, PromptInput, UnsupportedPartMode } from "./content.js"
 import { toOpenAIWire, toAnthropicWire, checkPromptParts, type WireOptions } from "./wire.js"
 import type { TranslateRequest, TranslateResult, TranslatedToolCall } from "./translate.js"
@@ -30,10 +31,20 @@ export interface ClientOptions {
   systemPrompt?: string
   maxTurns?: number
   hooks?: Hooks
-  /** Retries on transient LLM errors (429/5xx/network). Default 2. */
+  /** Retries on transient LLM errors (`429`/`500`/`502`/`503`/`504`/`529` + network). Default 2.
+   * Widen the status set with `retryableStatuses`. */
   retries?: number
   /** Base backoff in ms (exponential + jitter). Default 500. */
   retryBaseMs?: number
+  /**
+   * Extra HTTP statuses to treat as retryable, ADDED to the default set
+   * (`429`/`500`/`502`/`503`/`504`/`529`). It can only widen: a host cannot remove `429` and
+   * lose `Retry-After` handling with it. This sets the DEFAULT classification; `onError` still
+   * runs per attempt and has the final say, so `onError` returning `"fail"` overrides a status
+   * listed here. Example: a Cloudflare-fronted origin that answers `520`–`527`.
+   */
+  retryableStatuses?: readonly number[]
+
   /** Whole-run deadline in ms; aborts the run (and its in-flight request) when exceeded. */
   timeoutMs?: number
   /** Conversation provider for `ask(prompt, { id })`. Default: in-memory (process lifetime).
@@ -84,7 +95,8 @@ export interface ErrorInfo {
   status?: number
   /** Zero-based attempt index (0 = first try). */
   attempt: number
-  /** Whether `status`/the error is in the default retryable set (429/5xx/network). */
+  /** Whether `status`/the error is in the default retryable set
+   * (429/500/502/503/504/529/network, plus anything `retryableStatuses` added). */
   retryable: boolean
 }
 
@@ -97,6 +109,20 @@ export type MetricEvent =
   | { event: "llm"; model: string; status: "ok" | "error"; ms: number; promptTokens: number; completionTokens: number }
   | { event: "tool"; tool: string; source: string; isError: boolean; ms: number; pending?: boolean }
   | { event: "run"; model: string; turns: number; toolCalls: number; totalTokens: number; ms: number; error?: string }
+  // §8B. The classifier emits into this SAME sink. Neither event is folded into the Prometheus
+  // registry, so `client.metrics()` text stays byte-identical to a build with no classifier.
+  | {
+      event: "classifier.evaluate"
+      model: string
+      status: "ok" | "error"
+      ms: number
+      promptTokens: number
+      completionTokens: number
+      error?: string
+    }
+  // `warning`, never `error`: a degenerate-criteria report is advisory, and a consumer that
+  // counts "has an error" as a failure must not count this.
+  | { event: "classifier.warning"; question: string; warning: string }
 
 /**
  * Where `ask()` conversations are remembered — two methods. Ship the in-memory
@@ -119,30 +145,6 @@ export class InMemoryConversationStore implements ConversationStore {
   async save(id: string, messages: any[]): Promise<void> {
     this.map.set(id, [...messages])
   }
-}
-
-const RETRYABLE = new Set([429, 500, 502, 503, 504])
-
-/** ~68 years; the widest whole-second count all seven ports represent exactly. */
-const RETRY_AFTER_MAX_SECONDS = 2147483647
-
-/**
- * Honour `Retry-After` only in its delay-seconds form: a run of ASCII digits
- * (RFC 9110 §10.2.3) in 0…2147483647, returned in milliseconds.
- *
- * `Number()` is far too permissive for this — it accepts `"0.5"`, `"-5"`, `"1e3"`
- * and `" "` (as 0), which is how this port came to wait for fractional seconds
- * that five of the other six rejected outright. Fractional, signed, HTTP-date and
- * out-of-range values are not delays we can honour, so the caller falls back to
- * backoff rather than guessing. `0` is a real answer, so it returns `0`, not
- * `null`, and callers must use `??` rather than `||`.
- */
-function retryAfterMs(raw: string | null | undefined): number | null {
-  if (raw == null) return null
-  const s = raw.trim()
-  if (!/^[0-9]+$/.test(s)) return null
-  const secs = Number(s)
-  return secs <= RETRY_AFTER_MAX_SECONDS ? secs * 1000 : null
 }
 
 function delay(ms: number, signal: AbortSignal): Promise<void> {
@@ -665,7 +667,8 @@ export class Client {
     return ctrl.signal
   }
 
-  /** fetch with retry + exponential backoff on 429/5xx/network, honoring Retry-After; aborts via signal.
+  /** fetch with retry + exponential backoff on the default retryable set (429/500/502/503/504/529)
+   * plus network errors and anything `retryableStatuses` added, honoring Retry-After; aborts via signal.
    * The retry-vs-fail decision is the host's `onError` (default: retryable-within-budget ⇒ retry). */
   private async llmFetch(url: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
     const retries = this.opts.retries ?? 2
@@ -678,7 +681,7 @@ export class Client {
       try {
         const res = await (this.opts.fetch ?? fetch)(url, { ...init, signal })
         if (res.ok) return res
-        const retryable = RETRYABLE.has(res.status)
+        const retryable = isRetryableStatus(res.status, this.opts.retryableStatuses)
         const tier = classify({ status: res.status, attempt, retryable })
         if (tier === "fail" || attempt === retries) return res // caller surfaces the non-ok status
         const ra = retryAfterMs(res.headers.get("retry-after"))

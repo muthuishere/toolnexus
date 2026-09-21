@@ -791,7 +791,7 @@ Anyone can open a ticket, so the blast radius of one conversation must be capped
 | `maxTurns` (default 10) | client option | An unbounded tool-calling loop. Exhausting it returns `status: "incomplete"` with `limit: "maxTurns"` — **loud, never a silent `"done"`**, and the partial transcript is preserved. |
 | `Budget { maxTurns, maxTokens, maxToolCalls, maxWallMs, maxChildren, maxConcurrent, maxDepth }` | agent runtime | Token/wall/tool-call spend across a whole agent tree. Enforced by a live ancestor-chain walk before every turn and spawn, so sibling spend counts. |
 | `onBudget(info) → "stop" \| "extend" \| "suspend"` | agent runtime | Lets you escalate instead of dying — `"suspend"` routes the overrun through the human-in-the-loop layer as an approval ("this ticket wants another 20k tokens, OK?"). |
-| `timeoutMs` + `retries` | client options | A wedged provider. Whole-run deadline; retries on `429`/`5xx` with backoff and `Retry-After`. |
+| `timeoutMs` + `retries` | client options | A wedged provider. Whole-run deadline; retries on `429`/`500`/`502`/`503`/`504`/`529` with backoff and `Retry-After`; `retryableStatuses` adds more. |
 
 Run the support agent as an **agent** rather than a bare client when you want the token budget:
 

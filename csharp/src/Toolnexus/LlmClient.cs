@@ -41,7 +41,35 @@ public sealed class InMemoryConversationStore : IConversationStore
 public sealed class LlmClient
 {
     private static readonly HttpClient DefaultHttp = new() { Timeout = Timeout.InfiniteTimeSpan };
-    private static readonly HashSet<int> Retryable = new() { 429, 500, 502, 503, 504 };
+    /// <summary>
+    /// The default retryable set (§8 Resilience): <c>429</c> plus the 5xx worth another try — and
+    /// <c>529 Overloaded</c>, which TypeSafe documents as "retry with backoff" and which this
+    /// enumeration made terminal.
+    /// <para>
+    /// It is an ENUMERATION on purpose. "Any 5xx" would sweep in permanently-broken statuses
+    /// (<c>501 Not Implemented</c>, <c>505 HTTP Version Not Supported</c>) and change the retry
+    /// behaviour of every existing host without asking. A backend with its own transient status — a
+    /// Cloudflare origin answering <c>520</c>–<c>527</c>, say — opts in declaratively through
+    /// <c>RetryableStatuses</c>, which ADDS to this set and cannot remove from it.
+    /// </para>
+    /// Shared with the §8B <see cref="Classifier"/> (which adds <c>408</c>), so there is never a
+    /// second copy of this policy.
+    /// </summary>
+    private static readonly HashSet<int> RetryableDefaults = new() { 429, 500, 502, 503, 504, 529 };
+
+    /// <summary>
+    /// Whether a status is retryable by default, optionally widened by a host's
+    /// <c>RetryableStatuses</c>.
+    /// <para>
+    /// <paramref name="extra"/> is ADDITIVE: it can only make more statuses retryable, never fewer,
+    /// so a host cannot accidentally drop <c>429</c> and lose <c>Retry-After</c> handling with it.
+    /// It decides the DEFAULT classification only — <c>OnError</c> still runs afterwards and has the
+    /// final say on every attempt, so <c>OnError</c> returning <see cref="Tier.Fail"/> overrides a
+    /// status the host itself listed here.
+    /// </para>
+    /// </summary>
+    internal static bool IsRetryableStatus(int status, IReadOnlyCollection<int>? extra = null) =>
+        RetryableDefaults.Contains(status) || (extra is not null && extra.Contains(status));
 
     private readonly Options _opts;
 
@@ -154,6 +182,17 @@ public sealed class LlmClient
         public int? MaxTurns { get; set; }             // default 10
         public Hooks? Hooks { get; set; }
         public int? Retries { get; set; }              // default 2
+
+        /// <summary>
+        /// Extra HTTP statuses to treat as retryable, ADDED to the default set
+        /// (<c>429</c>/<c>500</c>/<c>502</c>/<c>503</c>/<c>504</c>/<c>529</c>). It can only widen: a
+        /// host cannot remove <c>429</c> and lose <c>Retry-After</c> handling with it. This sets the
+        /// DEFAULT classification; <c>OnError</c> still runs per attempt and has the final say, so
+        /// <c>OnError</c> returning <see cref="Tier.Fail"/> overrides a status listed here.
+        /// Example: a Cloudflare-fronted origin that answers <c>520</c>–<c>527</c>.
+        /// <c>Retry-After</c> handling is untouched. Null ⇒ the defaults alone.
+        /// </summary>
+        public IReadOnlyCollection<int>? RetryableStatuses { get; set; }
         public int? RetryBaseMs { get; set; }          // default 500
         public long? TimeoutMs { get; set; }           // whole-run deadline; null = none
 
@@ -251,6 +290,7 @@ public sealed class LlmClient
         public Options WithMaxTurns(int v) { MaxTurns = v; return this; }
         public Options WithHooks(Hooks v) { Hooks = v; return this; }
         public Options WithRetries(int v) { Retries = v; return this; }
+        public Options WithRetryableStatuses(IReadOnlyCollection<int> v) { RetryableStatuses = v; return this; }
         public Options WithRetryBaseMs(int v) { RetryBaseMs = v; return this; }
         public Options WithTimeoutMs(long v) { TimeoutMs = v; return this; }
         public Options WithStore(IConversationStore v) { Store = v; return this; }
@@ -282,7 +322,7 @@ public sealed class LlmClient
     /// (§8 Resilience) Context passed to <see cref="Options.OnError"/> for each failed LLM attempt.
     /// <see cref="Status"/> is set on a non-ok HTTP response; <see cref="Error"/> on a transport/network
     /// throw; <see cref="Attempt"/> is zero-based; <see cref="Retryable"/> = whether the status/error is in
-    /// the default retryable set (429/5xx/network).
+    /// the default retryable set (429/500/502/503/504/529/network, plus anything RetryableStatuses added).
     /// </summary>
     public sealed record ErrorInfo(Exception? Error, int? Status, int Attempt, bool Retryable);
 
@@ -1577,7 +1617,7 @@ public sealed class LlmClient
                 var res = await _http.SendAsync(req, completion, cts.Token).ConfigureAwait(false);
                 var status = (int)res.StatusCode;
                 if (status is >= 200 and < 300) return res;
-                var retryable = Retryable.Contains(status);
+                var retryable = IsRetryableStatus(status, _opts.RetryableStatuses);
                 var tier = classify(new ErrorInfo(null, status, attempt, retryable));
                 if (tier == Tier.Fail || attempt == retries) return res; // caller handles non-2xx
                 var wait = RetryAfterMs(res) ?? (long)(baseMs * Math.Pow(2, attempt) + Random.Shared.Next(0, 100));
@@ -1616,7 +1656,7 @@ public sealed class LlmClient
     /// backoff rather than guessing. Zero is a real answer — "retry now" — so it is
     /// returned as 0 rather than null.
     /// </summary>
-    private static long? RetryAfterMs(HttpResponseMessage res)
+    internal static long? RetryAfterMs(HttpResponseMessage res)
     {
         if (!res.Headers.TryGetValues("retry-after", out var values)) return null;
         var v = values.FirstOrDefault()?.Trim();

@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "dgSpecHash": "bdLIOW++hP4=",
+  "success": true,
+  "projectFilePath": "/Users/muthuishere/.herdr/worktrees/toolnexus/jev/spikes/classifier/csharp/Spike/Spike.csproj",
+  "expectedPackageFiles": [
+    "/Users/muthuishere/.nuget/packages/microsoft.extensions.ai.abstractions/10.5.2/microsoft.extensions.ai.abstractions.10.5.2.nupkg.sha512",
+    "/Users/muthuishere/.nuget/packages/microsoft.extensions.caching.abstractions/10.0.7/microsoft.extensions.caching.abstractions.10.0.7.nupkg.sha512",
+    "/Users/muthuishere/.nuget/packages/microsoft.extensions.configuration.abstractions/10.0.7/microsoft.extensions.configuration.abstractions.10.0.7.nupkg.sha512",
+    "/Users/muthuishere/.nuget/packages/microsoft.extensions.dependencyinjection.abstractions/10.0.7/microsoft.extensions.dependencyinjection.abstractions.10.0.7.nupkg.sha512",
+    "/Users/muthuishere/.nuget/packages/microsoft.extensions.diagnostics.abstractions/10.0.7/microsoft.extensions.diagnostics.abstractions.10.0.7.nupkg.sha512",
+    "/Users/muthuishere/.nuget/packages/microsoft.extensions.fileproviders.abstractions/10.0.7/microsoft.extensions.fileproviders.abstractions.10.0.7.nupkg.sha512",
+    "/Users/muthuishere/.nuget/packages/microsoft.extensions.hosting.abstractions/10.0.7/microsoft.extensions.hosting.abstractions.10.0.7.nupkg.sha512",
+    "/Users/muthuishere/.nuget/packages/microsoft.extensions.logging.abstractions/10.0.7/microsoft.extensions.logging.abstractions.10.0.7.nupkg.sha512",
+    "/Users/muthuishere/.nuget/packages/microsoft.extensions.options/10.0.7/microsoft.extensions.options.10.0.7.nupkg.sha512",
+    "/Users/muthuishere/.nuget/packages/microsoft.extensions.primitives/10.0.7/microsoft.extensions.primitives.10.0.7.nupkg.sha512",
+    "/Users/muthuishere/.nuget/packages/modelcontextprotocol/1.4.0/modelcontextprotocol.1.4.0.nupkg.sha512",
+    "/Users/muthuishere/.nuget/packages/modelcontextprotocol.core/1.4.0/modelcontextprotocol.core.1.4.0.nupkg.sha512",
+    "/Users/muthuishere/.nuget/packages/yamldotnet/16.3.0/yamldotnet.16.3.0.nupkg.sha512"
+  ],
+  "logs": []
+}

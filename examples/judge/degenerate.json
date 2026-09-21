@@ -1,0 +1,61 @@
+{
+  "name": "degenerate",
+  "why": "Three degenerate choices and one correctly described one, in a single evaluation. The WARNING is the assertion: exactly three warnings, naming keys_as_criteria, all_identical and all_empty, and none naming described. Emitted once per question key however many times the classifier is called. The request bytes must equal canonicalSha256 — the same bytes the same questions produce with detection switched off. Detection, never repair (docs/adr/0021 D2).",
+  "request": {
+    "model": "typesafe/jev-1.13",
+    "state": "the snake is 4 long; the apple is two cells north; the wall is one cell east",
+    "questions": {
+      "described": {
+        "criteria": {
+          "east": "runs into the wall one cell away and ends the game",
+          "north": "closes the gap to the apple without passing a wall",
+          "west": "opens space but moves away from the apple"
+        },
+        "instructions": "Which move is best?",
+        "type": "choice"
+      },
+      "keys_as_criteria": {
+        "criteria": {
+          "east": "east",
+          "north": "north",
+          "west": "west"
+        },
+        "instructions": "Which move is best?",
+        "type": "choice"
+      },
+      "all_identical": {
+        "criteria": {
+          "east": "a legal move",
+          "north": "a legal move",
+          "west": "a legal move"
+        },
+        "instructions": "Which move is best?",
+        "type": "choice"
+      },
+      "all_empty": {
+        "criteria": {
+          "east": "",
+          "north": "",
+          "west": ""
+        },
+        "instructions": "Which move is best?",
+        "type": "choice"
+      }
+    }
+  },
+  "expect": {
+    "warnings": [
+      "all_empty",
+      "all_identical",
+      "keys_as_criteria"
+    ],
+    "noWarning": [
+      "described"
+    ],
+    "warningsAreOncePerKey": true,
+    "requestUnchanged": true
+  },
+  "canonical": "{\"model\":\"typesafe/jev-1.13\",\"questions\":{\"all_empty\":{\"criteria\":{\"east\":\"\",\"north\":\"\",\"west\":\"\"},\"instructions\":\"Which move is best?\",\"type\":\"choice\"},\"all_identical\":{\"criteria\":{\"east\":\"a legal move\",\"north\":\"a legal move\",\"west\":\"a legal move\"},\"instructions\":\"Which move is best?\",\"type\":\"choice\"},\"described\":{\"criteria\":{\"east\":\"runs into the wall one cell away and ends the game\",\"north\":\"closes the gap to the apple without passing a wall\",\"west\":\"opens space but moves away from the apple\"},\"instructions\":\"Which move is best?\",\"type\":\"choice\"},\"keys_as_criteria\":{\"criteria\":{\"east\":\"east\",\"north\":\"north\",\"west\":\"west\"},\"instructions\":\"Which move is best?\",\"type\":\"choice\"}}}",
+  "canonicalSha256": "d2134d6b8e99cbb86b83c318bff3f63dbb22fff64f33b7090d30af52b4c59955",
+  "canonicalBytes": 688
+}

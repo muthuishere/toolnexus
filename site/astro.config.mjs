@@ -77,6 +77,15 @@ export default defineConfig({
 									],
 								},
 								{
+									label: 'Typed decisions',
+									items: [
+										{ label: 'What a Classifier is', slug: 'judge' },
+										{ label: 'The encoding rules', slug: 'judge/encoding' },
+										{ label: 'Backends & configuration', slug: 'judge/backends' },
+										{ label: 'Judge — measured live', slug: 'harness/judge-live' },
+									],
+								},
+								{
 									label: 'Cookbook',
 									items: [
 										{ label: 'Zero to agent', slug: 'cookbook/zero-to-agent' },
@@ -91,6 +100,7 @@ export default defineConfig({
 										{ label: 'Fail fast, or retry', slug: 'cookbook/fail-fast-or-retry' },
 										{ label: 'Multi-turn memory', slug: 'cookbook/memory' },
 										{ label: 'Sub-agents & teams', slug: 'cookbook/subagents' },
+										{ label: 'Typed decisions (judge)', slug: 'cookbook/judge' },
 									],
 								},
 								{

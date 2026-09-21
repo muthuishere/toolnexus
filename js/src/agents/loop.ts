@@ -72,6 +72,18 @@ export function guardedHooks(guardrails: Guardrail[] | undefined, hooks: Hooks |
     beforeTool: async (ev) => {
       for (const g of guardrails) {
         const verdict = g(ev)
+        // A guardrail is SYNCHRONOUS by contract. An async one returns a Promise,
+        // which is truthy and !== "allow", so it would silently DENY every call
+        // with `denied: [object Promise]`. Fail loudly instead, and say where
+        // asynchronous work belongs.
+        if (verdict != null && typeof verdict !== "string") {
+          const what = typeof (verdict as { then?: unknown }).then === "function" ? "a Promise" : typeof verdict
+          throw new TypeError(
+            `guardrail returned ${what}: a guardrail must return a string synchronously ` +
+              `("" or "allow" to permit, any other string to deny). ` +
+              `Do asynchronous work in hooks.beforeTool, which is awaited.`,
+          )
+        }
         if (verdict && verdict !== "allow") {
           return { result: { output: `denied: ${verdict}`, isError: true } }
         }

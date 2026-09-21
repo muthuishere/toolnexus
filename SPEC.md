@@ -1225,9 +1225,16 @@ record-replay — this is a second constructor over it, not a second seam.
 
 ### Resilience (retries + timeout/cancel)
 
-`ClientOptions`: `retries` (default 2), `retryBaseMs` (default 500), `timeoutMs` (whole-run
-deadline, optional). The LLM request retries on `429`/`500`/`502`/`503`/`504` and network errors
-with exponential backoff + jitter, honoring `Retry-After`. **`Retry-After` is honored only in its
+`ClientOptions`: `retries` (default 2), `retryBaseMs` (default 500), `retryableStatuses` (optional,
+additive — see below), `timeoutMs` (whole-run
+deadline, optional). The LLM request retries on the **enumerated set
+`429`/`500`/`502`/`503`/`504`/`529`** and network errors, with exponential backoff + jitter,
+honoring `Retry-After`. That set is exhaustive, not shorthand for "5xx": every other status,
+including `501`, `505` and the Cloudflare `520`–`527` family, is terminal by default. `529
+Overloaded` is in it because TypeSafe documents it as retry-with-backoff. **`retryableStatuses`
+(optional) ADDS statuses to that set** and can never remove from it, so a host cannot drop `429`
+and lose `Retry-After` handling with it; it sets the default classification only, and `onError`
+still runs per attempt and has the final say. **`Retry-After` is honored only in its
 `delay-seconds` form** — a run of ASCII digits (RFC 9110 §10.2.3) in `0 … 2147483647`, waited as
 exactly that many whole seconds, **including `0`** ("retry now"). Every other value — fractional,
 signed, the HTTP-date form, out of range, empty, unparseable — falls back to backoff, and never
@@ -1240,7 +1247,8 @@ HTTP request, so a timeout or external cancel aborts the in-flight call. Aborts 
 failed LLM attempt is host-configurable via `onError(info) -> "retry" | "fail"` (idiomatic name +
 return per port). `info = { error?, status?, attempt, retryable }` — `status` on a non-ok HTTP
 response, `error` on a transport/network throw, `attempt` zero-based, `retryable` = whether the
-status/error is in the default set (`429`/`5xx`/network). A `"retry"` is always **bounded by
+status/error is in the default set (`429`/`500`/`502`/`503`/`504`/`529`/network, plus anything
+`retryableStatuses` added). A `"retry"` is always **bounded by
 `retries`** (the classifier cannot loop unbounded); `"fail"` surfaces the error immediately,
 skipping remaining retries. **Absent `onError` ⇒ the default classifier `retryable ? "retry" :
 "fail"`, i.e. byte-identical to the paragraph above.** There is **no `"suspend"` tier** — a failure
@@ -1445,6 +1453,266 @@ output as user input.
 
 ---
 
+## 8B. Typed decisions — `Classifier`
+
+A sibling of the §8 client, not a style inside it. A **System One** model takes a state plus
+pre-declared, typed questions and returns calibrated answers with no free text; it has no
+messages, no tool calling and no streaming, so it is never selected as a model for `run`/`ask`
+and never enters the client loop. `Tool` is the contract for an **action**; `Classifier` is the
+contract for a **judgment**.
+
+```
+classifier = createClassifier({
+  style,              // "systemone" | "llm" | "custom" | "static"   (default "systemone")
+  baseUrl,            // default "https://api.typesafe.ai/v1"; OpenRouter: "https://openrouter.ai/api/v1"
+  model,              // default "jev-latest"
+  apiKeyEnv?,         // the NAME of an env var; default "TYPESAFE_API_KEY"
+  headers?,           // values expand ${ENV_VAR} at call time; never logged
+  …                   // full table below
+})
+
+classifier.evaluate(state, questions) -> Decision
+```
+
+`state` is a string, an object, or an array — whatever the host already has. `questions` is a map
+from **caller-chosen keys** to question definitions. The keys are addressing, not content: they
+are never transmitted to the model, so a key MAY be a tool, skill or agent name verbatim, and two
+evaluations differing only in their keys send identical content.
+
+Questions are **independent**. One answer is never context for another. A backend that cannot
+guarantee that reports `calibrated: false`, which carries both caveats.
+
+A `Decision` carries one answer per question, keyed by the caller's keys.
+
+**A classifier interprets; it never authorises.** Its output is a reading of intent inside a
+boundary, never the boundary. Numeric limits, permission checks and allowlists stay in code.
+Schema validity is not correctness: a decision can be confidently wrong, and "cannot hallucinate"
+means only that the returned value is in the declared schema. Nothing in this section may be
+described as a security control.
+
+### The three question types
+
+```
+Question =
+  | Noul   { instructions, criteria?: { true: desc, false: desc } }
+  | Choice { instructions, criteria: { name: desc } }      // 1..255 named options
+  | Score  { instructions, criteria: [desc, …] }           // 2..10 ordered levels, order IS the numbering
+
+Answer =
+  | NoulAnswer   { noul: 0..1 }                                            // no confidence
+  | ChoiceAnswer { choice, probabilities: {name: p}, confidence, nearUniform }
+  | ScoreAnswer  { score, probabilities: {"0": p, …}, legend: {"0": desc, …}, confidence }
+
+Decision { model, answers: {key: Answer}, usage, calibrated }
+```
+
+- **noul** — the probability that a statement holds, one number in `0..1`. It reports **no**
+  confidence: the number *is* the answer. Its optional `criteria` describes the true and false
+  cases; absent and empty are different values and both are preserved on the wire.
+- **choice** — one option from a named set, with a probability for **every** offered option and a
+  confidence. The selected option is always one of the offered options, and the probability map
+  names exactly the offered options.
+- **score** — a rating against an **ordered** rubric of 2–10 levels. The answer's score is a number
+  that MAY fall between levels (`1.21` is a real answer), always within the rubric's bounds, with a
+  probability per level index and the rubric echoed back as a `legend`.
+
+**Limits are enforced client-side, before the request** (≤255 options; 2–10 rubric levels). The
+error names the offending **question key** and the limit, and no request is sent — a caller finds
+out faster and more legibly than from the backend's own `400 "Too many choices. Must have at most
+255 choices."`, which is still surfaced intact if it arrives (a backend may chunk above 255, which
+is the backend's business and invisible to the caller).
+
+### The encoding obligation on a `choice` — the caller's, and it is not advice
+
+For a `choice`, **`criteria[id]` is the only thing that differentiates one option from another to
+the model.** The instructions describe the question and the state describes the situation; neither
+tells the model what picking `left` rather than `right` would mean. Passing the id itself, an empty
+string, or a value identical to every other value is **schema-valid**, passes validation, returns
+HTTP 200 and a well-formed distribution — and ranks at chance.
+
+Measured (ADR 0021, snake, three games per encoding, identical seeds): options described by
+consequence scored **17, 17, 17** apples; the same state with each option's description replaced by
+its own id scored **0, 1, 0**, on the floor of a shuffle control that permutes the returned
+probabilities onto the wrong options (**1, 0, 1**). Describing the situation buys nothing if the
+options are not described.
+
+Two further consequences of the same measurement, stated here because they are properties of the
+contract rather than of a style guide: a clause that is **uniformly** wrong on every option costs
+little (it carries no signal and no lie); a clause that is wrong about **one** option in **one**
+situation is the expensive failure (50% → 100% agreement from a single rewrite). And confidence
+reports on the **question**, not on the answer — the worst working encoding measured carried the
+**highest** median confidence (0.82).
+
+**Option ids are the caller's strings, and a convenience constructor must not decorate them.**
+Where a port offers a `choiceOver`-style constructor over `(name, description)` pairs, a key that
+is not already a string SHALL be coerced to its **plain name** — the identifier a host would
+write — never to its host's printed form. An Elixir atom `:billing` and a Clojure keyword
+`:billing` both reach the wire as `billing`. A printed form that keeps a sigil (`":billing"`)
+yields a schema-valid request whose option ids silently differ from every other port's, and from
+the string the caller then compares `answer.choice` against.
+
+### Degenerate criteria — detect and report, never repair
+
+A port SHALL detect a `choice` whose criteria are degenerate, defined as **any** of:
+
+1. every value is empty (empty string or absent), or
+2. every value equals its own key, or
+3. every value is identical to every other value (`n ≥ 2`).
+
+On detection the port emits **one** `classifier.warning` event through the configured `onMetric` /
+log sink, **naming the question key**, and sends the request **byte-unchanged**. The advisory text
+travels in the event's **warning** field, never in its **error** field, which stays absent: a
+warning is not a failure, and a consumer filtering the §8 sink on "has an error" MUST NOT count one.
+(The field name follows each port's local casing, as the rest of the §8 event does.) Detection is **once per question
+key** per classifier, so a per-turn judge does not flood the sink. The request a caller gets is
+identical with and without detection; the warning is the entire observable effect.
+
+This is detection, not repair: repairing would invent option descriptions the caller did not write,
+and the library has no way to know what the options mean. A single-option choice (`n = 1`) is never
+reported — there is nothing to differentiate.
+
+### `nearUniform` — derived, advisory, and pinned to one tolerance
+
+Every **choice** answer carries a derived boolean `nearUniform`. It is **computed from the
+response and never read from the wire**: no wire change, no request change, no fixture change.
+
+Let `n` be the number of entries in the answer's `probabilities` map and `p_i` their values **as
+returned** — not renormalised, and an offered option absent from the map counts as `0`. Then:
+
+```
+nearUniform  ⇔  max over i of |p_i − 1/n|  ≤  0.05
+```
+
+**The tolerance is 0.05 absolute and the comparison is inclusive** (`≤`, so a maximum deviation of
+exactly the tolerance is near-uniform). Computed in double precision. It is absolute rather than
+relative to `1/n` because a relative tolerance collapses below the noise floor on a large roster:
+at 255 options `1/n` is 0.0039, and any relative band is finer than the two-decimal rounding the
+wire already applies.
+
+The value 0.05 is chosen against three measured floors, not by feel:
+
+- **wire rounding** — probabilities arrive at two decimals, so ±0.005 of deviation is quantisation
+  alone (every recorded fixture);
+- **backend non-determinism** — σ ≈ 0.015, spread 0.05 across twelve identical calls
+  (`spikes/classifier/reports/00-live-backend.md` F2), so 0.05 is roughly 3σ;
+- **the separation it must make** — on a four-option choice (`1/n = 0.25`) the undescribed-options
+  encoding returned a median top probability of **0.29** (deviation 0.04, inside) and the described
+  one **0.80** (deviation 0.55, far outside) (ADR 0021 §5).
+
+`n = 1` ⇒ `nearUniform` is true (a single option is trivially uniform). Ports MUST NOT sort,
+renormalise or round the probabilities before the comparison. Shared fixtures pin the boundary from
+both sides (`examples/judge/near-uniform.json`); fixtures never place a deviation within `1e-9` of
+the tolerance, so the rule is decidable in double precision without a port-specific epsilon.
+
+**`nearUniform` is advisory and is not a correctness signal.** It detects an encoding that gave the
+model nothing to rank on — the one encoding health check available with no ground truth, cheap
+enough to run on live traffic. It cannot distinguish a good encoding from a subtly wrong one: a
+wrong-but-answerable question still reads as answerable. `calibrated` carries the same caveat.
+
+### Calibration travels with the decision
+
+Every `Decision` reports `calibrated`. **An absent or `null` `calibrated` on the wire decodes as
+`true`**, in every port: the systemone wire reports calibration by being itself, and a backend that
+is not calibrated says so explicitly. Only the literal `false` yields `false`. This is stated
+because seven ports already agree on it and agreement that is never written down is luck rather
+than contract — a port that later defaults it to `false` would flip every threshold a host has
+tuned, on a field the host never set. The `systemone` style reports **true**. The `llm` style
+reports **false** unless it derived its probabilities from provider token probabilities. Measured
+on one routing job, the `llm` backend was 3.3–4.4× slower, 2.5–3.4× costlier, returned no
+distribution, emitted round self-reported confidence (0.95, 1.00), and on one fixture disagreed
+outright (ADR 0020 correction 6). **A threshold tuned against one backend does not transfer to
+another**, and the documentation says so wherever a threshold appears.
+
+### The canonical request — what the byte-identity claim covers, and what it does not
+
+For identical `questions` and `model`, **every port emits byte-identical `questions` + `model`
+bytes**:
+
+- object keys sorted **recursively** in **ASCII** order (not culture-sensitive order — `10_alpha`
+  < `Alpha` < `beta` < `café`);
+- **arrays are NEVER reordered** — a `score` rubric's order *is* its level numbering, so a
+  "sort everything" canonicaliser silently renumbers the rubric;
+- compact separators, no spaces;
+- `<`, `>`, `&`, `'`, quotation marks and non-ASCII characters transmitted **raw**, never escaped
+  into entities or `\uXXXX`;
+- absent and empty are **different**: an absent `criteria` is absent, not `null` and not `{}`.
+
+**`state` is transmitted verbatim as the host supplied it and is explicitly outside the claim.**
+Not a caveat — a measured fact. Numbers do not canonicalise across languages: `-0.0` renders four
+ways (`-0.0` / `0` / `-0` / `-0.0`), `1e-5` three ways and `1e21` three ways across our own seven
+runtimes, and only simple decimals agree everywhere (`spikes/classifier/reports/99-verdict.md` §4).
+A claim that covered `state` would be false the first time a caller put a float in it. The claim is
+about the structure **the library generates**; `state` is the caller's. Do not re-widen it: the
+correct fix for a caller who needs their state pinned is to canonicalise it themselves before
+handing it over.
+
+The claim is pinned by shared fixtures at `examples/judge/`, and each fixture records the sha256 of
+its canonical `model` + `questions` bytes so a port compares bytes rather than re-deriving what it
+believes correct looks like. Four of them exist because one would pass a broken port: **base**;
+**hardened** (unescaped `<>&`, a quotation mark and a backslash, unicode text and a non-ASCII key,
+ASCII ordering across digit/upper/lower, a rubric in non-alphabetical order, absent-vs-empty
+criteria); **numbers** (integer `0`, `1.21`, `0.000016716` — without it an encoder that round-trips
+the base fixture byte-perfectly while emitting `0.0` for `0` passes); and **wide** (a criteria map
+and a probability map above 32 keys — without it a runtime whose small maps iterate in term order
+only up to 32 entries passes by accident). Three more pin behaviour rather than bytes:
+**decisions** (the recorded `static` corpus), **degenerate** and **near-uniform**.
+
+### `ClassifierOptions`
+
+Mirrors §8 `ClientOptions` field-for-field wherever a field makes sense, so a host that has
+configured one client has configured the other. Idiomatic names per port, as everywhere else.
+
+| option | default | notes / §8 counterpart |
+|---|---|---|
+| `style` | `"systemone"` | `"systemone" \| "llm" \| "custom" \| "static"`. Same slot as the client's `style`; the values differ because the wires differ |
+| `baseUrl` | `https://api.typesafe.ai/v1` | same as §8. OpenRouter (`https://openrouter.ai/api/v1`) serves this wire today; self-hosted and open-weights implementations speak it too |
+| `model` | `"jev-latest"` | **pin it** (e.g. `jev-1.13.0`) once thresholds are tuned. `Decision.model` echoes what actually answered, which may be more specific |
+| `apiKeyEnv` | `"TYPESAFE_API_KEY"` | the **name** of the env var, not the value — read at call time and never logged. §8's `apiKey` takes a value; this option deliberately does not |
+| `headers` | — | extra headers; values expand `${ENV_VAR}` from the environment at call time and are **never logged**, identically to remote-MCP headers (§2) |
+| `httpClient` / `transport` | default | the §8 Gap 2 injectable transport. Scope is the classifier path only |
+| `timeout` | 10 s | per request, not per run — a classifier has no loop to bound |
+| `retries` / `onError` / `retryableStatuses` | retry `408`/`429`/`500`/`502`/`503`/`504`/`529` + network, honour `Retry-After`; `retryableStatuses` adds to that set (never removes), `onError` still decides each attempt | **reuses** the §8 `ErrorInfo → "retry" \| "fail"` classifier and the `Retry-After` `delay-seconds` rule verbatim. There is no second retry policy, and no `"suspend"` tier here either |
+| `retryBaseMs` | 500 ms | base of the retry backoff: the delay is `base * 2^attempt`, no jitter, and a `Retry-After` header still wins. Same name, same units and same default as §8's `retryBaseMs`; absent, zero or negative ⇒ 500 |
+| `requestParams` / `bodyTransform` | — | the §8 Gap 1 shape, same ordering: base body → `requestParams` merge → `bodyTransform` → marshal. How a gateway's wrapper or extra fields land without a proxy |
+| `onMetric` | — | emits `classifier.evaluate` events (latency, tokens, model, status) into the **same** §8 sink — its `error` set only on a failed evaluate — and carries the degenerate-criteria warning as a `classifier.warning` whose text is in `warning`, not `error` |
+| `client` | — | `style: "llm"` only — the §8 `Client` to emulate over |
+| `evaluate` | — | `style: "custom"` only — the host's own function. Every wire option is ignored |
+| `decisions` | — | `style: "static"` only — the recorded corpus, keyed by the canonical request. **This is the option CI runs on**, so it is a core option, not a convenience: a port without it cannot run the shared `examples/judge/decisions.json` fixture. An unmatched request is an error naming the key, never a silent live call |
+
+### Backends
+
+- **`systemone`** — the wire above: one `POST {baseUrl}/systemone` with the canonical body. Chunking
+  under the request-token budget and the 255-option cap is the backend's business and is invisible
+  to the caller.
+- **`llm`** — the three question types rendered as **one** JSON-schema structured-output call on any
+  §8 client (`noul` → boolean + probability, `choice` → enum, `score` → bounded integer). Where the
+  provider exposes token probabilities the backend reads them; otherwise the model's self-reported
+  number passes through with `calibrated: false`. This is what makes the seam vendor-neutral: a host
+  with no System One credential runs the same questions on a cheap chat model.
+- **`custom`** — the host's `evaluate`: a fine-tuned encoder, a rules engine, or a cache in front of
+  either.
+- **`static`** — recorded decisions, keyed by the canonical request. **This is what CI runs**: no
+  network, no credential. It is not a convenience — the live backend is non-deterministic, so it is
+  the only backend a test may assert a number against. No test asserts a live numeric answer; a live
+  call, if run at all, asserts shape only.
+
+No port depends on a vendor SDK for any backend. The wire is one POST.
+
+### Secrets, failures, and absence
+
+Credentials resolve at call time from the **named** environment variable, and `${ENV_VAR}` header
+references expand at call time. **No credential value and no expanded header value appears in any
+log, metric, error message or returned value** — an authentication failure names the status and the
+endpoint and nothing else. Transport and HTTP failures are classified through the §8 error tiers;
+a backend's own limit error is surfaced with its reported cause intact, so a caller can tell a
+limit from a transport fault.
+
+**A host that constructs no `Classifier` observes byte-identical behaviour to a build without this
+section**, and constructing one alters no request the client loop makes. This is proven by a test,
+not asserted.
+
+---
+
 ## 9. Go CLI (`toolnexus`)
 
 A single binary that wraps the library into a continuous interactive agent loop —
@@ -1507,6 +1775,37 @@ signature. A convenience producer helper MAY exist —
 `authRequired(url, prompt?)` → a `ToolResult` with `metadata.pending =
 { kind:"authorization", url, prompt }` and a generated `id` — but it is sugar, not
 required.
+
+### Two ways to raise one — a tool, or a `beforeTool` hook (path A / path B)
+
+A suspension is produced by the **result**, never by who produced the result. So there
+are exactly two paths, and the loop cannot tell them apart:
+
+- **Path A** — the tool's own `execute` returns the pending-carrying `ToolResult`.
+- **Path B** — a `beforeTool` hook (§8) short-circuits with `{ result }` whose
+  `metadata.pending` is a `Request`. The tool never runs.
+
+Both are detected by the same check on the result the tool step produced, so path B gets
+the whole of §10 for free: resolved inline by `waitFor` → the loop re-enters the tool
+step with the `Answer` in `ctx`; no `waitFor` → `Status "pending"` carrying that
+`Request`, resumable durably. The `AfterTool` skip and the pending-not-error metric
+classification apply identically.
+
+Path B is what lets a policy gate ask a human **without the guarded tool being reached
+at all** — the tool is not executed, not even to be denied. A `Guardrail` (§7D) cannot
+express this, because it returns a string: allow or deny, two states. A gate needing a
+third (ask) belongs on `beforeTool`.
+
+```
+hooks.beforeTool = (ev) =>
+  needsApproval(ev) ? { result: { output: "...", isError: true,
+                                  metadata: { pending: { id, kind: "approval", prompt } } } }
+                    : undefined
+```
+
+**Conformance:** every port MUST resolve a hook-raised suspension through `waitFor`
+exactly as it resolves a tool-raised one, and MUST halt with `Status "pending"` carrying
+the hook's own `Request` when no `waitFor` is configured.
 
 ### `Request` — byte-identical wire data
 

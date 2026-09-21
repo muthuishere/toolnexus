@@ -15,8 +15,9 @@ import { Aside } from '@astrojs/starlight/components';
 (create-client {:base-url      "…"
                 :model         "…"
                 :retries       3        ; extra attempts after the first (default 0)
-                :retry-base-ms 250      ; backoff base; delay = base * 2^attempt
+                :retry-base-ms 500      ; backoff base; delay = base * 2^attempt + jitter
                 :timeout-ms    30000    ; per HTTP call, passed to the transport
+                :retryable-statuses [520 521 522]  ; ADDED to the default set, never replacing it
                 :on-error      (fn [info] :retry)})  ; or :fail
 
 ;; :on-error receives, per failed attempt:
@@ -26,11 +27,28 @@ import { Aside } from '@astrojs/starlight/components';
 ;;  :retryable? true}          ; the default verdict, for you to accept or override
 ```
 
-The default policy retries 429, 500, 502, 503 and 504 plus any transport failure, and treats
-everything else as terminal. Backoff is exponential from `:retry-base-ms` — 250ms, 500ms, 1s — and
+The default policy retries 429, 500, 502, 503, 504 and 529 plus any transport failure, and treats
+everything else as terminal. That is the whole list, not "429 plus any 5xx" — a 501, a 507 and the
+Cloudflare 520–527 family are terminal until you say otherwise. Backoff is exponential from `:retry-base-ms` — 500ms, 1s, 2s, each plus 0–99ms of jitter — and
 a numeric `Retry-After` header, in seconds, overrides it. The HTTP-date form of `Retry-After` is
 deliberately not parsed: date parsing is not portable across these two hosts without reaching past
 koine, and a server that sends it gets our backoff instead of a wrong answer.
+
+`:retryable-statuses` says otherwise. It is a collection of statuses **added** to the default set
+and never replacing it, so it can only make more statuses retryable, never fewer — a host cannot
+accidentally drop 429 and lose `Retry-After` handling with it. The case it exists for is a
+Cloudflare-fronted origin:
+
+```clojure
+(create-client {:base-url base-url
+                :model model
+                :retries 3
+                :retryable-statuses [520 521 522 523 524 525 526 527]})
+```
+
+It sets the **default verdict** only. `:on-error` still runs on every failed attempt and has the
+last word, so an `:on-error` returning `:fail` overrides a status the host itself listed.
+`Retry-After` handling is unchanged either way.
 
 `:retries` counts **extra** attempts, so the default of 0 means one try. A budget of 3 means up to
 four calls.
@@ -89,7 +107,7 @@ job, not the client's.
      :style         "anthropic"
      :model         "claude-sonnet-4-5"
      :retries       3        ; up to four attempts per LLM call
-     :retry-base-ms 250      ; 250ms, 500ms, 1s — unless Retry-After says otherwise
+     :retry-base-ms 500      ; 500ms, 1s, 2s (+jitter) — unless Retry-After says otherwise
      :timeout-ms    60000}))
 
 (client/run llm "Summarise the incident" {:toolkit toolkit})
@@ -156,8 +174,9 @@ continues, which is why the `try` here is narrow rather than a blanket around ev
 | Option | Default | What it does |
 |---|---|---|
 | `:retries` | `0` | Extra attempts after the first. Bounds `:on-error` too. |
-| `:retry-base-ms` | `250` | Backoff base; the delay for attempt *n* is `base * 2^n`. |
+| `:retry-base-ms` | `500` | Backoff base; the delay for attempt *n* is `base * 2^n` plus 0–99ms of jitter. |
 | `:timeout-ms` | none | Per HTTP call, passed to `koine.http/request`. See the host caveat above. |
+| `:retryable-statuses` | none | Extra statuses added to the default retryable set. Widens it only — never shrinks it — and `:on-error` still has the last word. |
 | `:on-error` | none | `(fn [info] :retry-or-:fail)`. Overrides the default verdict in either direction. |
 
 ### The default verdict
@@ -165,8 +184,13 @@ continues, which is why the `try` here is narrow rather than a blanket around ev
 | Condition | Default |
 |---|---|
 | Transport failure (no status) | `:retry` — `:retryable?` is true, `:status` is nil |
-| 429, 500, 502, 503, 504 | `:retry` |
+| 429, 500, 502, 503, 504, 529 | `:retry` |
+| Anything in `:retryable-statuses` | `:retry` |
 | Any other non-2xx | `:fail` |
+
+### The classifier has the same backoff base
+
+`Classifier` carries the same knob under the same name, the same default of `500`, and the same `base * 2^attempt` shape — minus the jitter, which the classifier path does not add. See [`create-classifier`](/api/clojure/judge/classifier/).
 
 ## See also
 

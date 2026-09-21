@@ -8,7 +8,8 @@ import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 <Aside type="tip" title="Why you need this">
 The model endpoint fails in the middle: `429` past its patience, a flaky `500`, a provider that
 returns `400` on a prompt you know is fine, a `402` when credits run out. By default toolnexus
-retries the transient set (`429`/`5xx`/network) with backoff and fails the rest — sensible, but it
+retries the transient set (`429`/`500`/`502`/`503`/`504`/`529`/network) with backoff and fails the
+rest — sensible, but it
 is *your* provider and *your* budget. `onError` hands you that one decision: **retry** (bounded by
 your `retries` budget) or **fail fast**. Absent, behavior is exactly today's.
 </Aside>

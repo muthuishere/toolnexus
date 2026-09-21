@@ -19,6 +19,13 @@ that stops being mentioned is indistinguishable from one that was implemented.
 Missing a CORE option fails for every port regardless of tier (verified: forcing
 `hooks` to core made the core-tier port fail, exit 1).
 
+GROUPS are discovered from the manifest: every top-level key ending in
+`Options` is checked, so registering a new option set is a manifest edit rather
+than a code edit. A missing options file is a FAILURE for every group — there is
+no grace flag for a port still being written. One existed while §8B was landing
+across the seven ports and it was deleted with the last of them, because a gate
+that reports an absent file as anything but a failure reports a hole as a pass.
+
 Exit 0 = parity holds; exit 1 = a port is missing an option (printed).
 Run from the repo root: `python3 conformance/check_options_parity.py`.
 """
@@ -86,7 +93,8 @@ def main() -> int:
     tiers = {k: v for k, v in manifest.get("portTiers", {}).items() if not k.startswith("_")}
     failures: list[str] = []
     debt: list[str] = []
-    for group_name in ("clientOptions", "toolkitOptions"):
+    group_names = [k for k in manifest if k.endswith("Options")]
+    for group_name in group_names:
         f, d = check_group(group_name, manifest[group_name], tiers)
         failures += f
         debt += d
@@ -110,12 +118,11 @@ def main() -> int:
         print(f"\n{len(failures)} problem(s). Add the option to the port, or fix the manifest.")
         return 1
 
-    n_client = len(manifest["clientOptions"]["options"])
-    n_toolkit = len(manifest["toolkitOptions"]["options"])
+    counts = ", ".join(f"{len(manifest[g]['options'])} {g[:-7]}" for g in group_names)
     n_ports = len(manifest["clientOptions"]["files"])
     full = sorted(p for p, t in tiers.items() if t == "full")
     core = sorted(p for p, t in tiers.items() if t == "core")
-    print(f"Option parity OK: {n_client} client + {n_toolkit} toolkit options "
+    print(f"Option parity OK: {counts} options "
           f"across {n_ports} ports "
           f"({len(full)} at tier full, {len(core)} at tier core: {', '.join(core) or 'none'}).")
     return 0

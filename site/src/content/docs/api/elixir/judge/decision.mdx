@@ -1,0 +1,294 @@
+---
+title: "Toolnexus.Classifier.Decision"
+description: "One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero. — Elixir."
+sidebar:
+  label: "Toolnexus.Classifier.Decision"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/classifier.ex">elixir/lib/toolnexus/classifier.ex</a>
+</p>
+
+```elixir
+%Toolnexus.Classifier.Decision{
+  model: String.t() | nil,
+  answers: %{String.t() => NoulAnswer.t() | ChoiceAnswer.t() | ScoreAnswer.t()},
+  usage: Toolnexus.Classifier.Usage.t(),
+  calibrated: boolean()
+}
+
+Decision.noul(Decision.t(), key)   :: {:ok, NoulAnswer.t()}   | {:error, String.t()}
+Decision.choice(Decision.t(), key) :: {:ok, ChoiceAnswer.t()} | {:error, String.t()}
+Decision.score(Decision.t(), key)  :: {:ok, ScoreAnswer.t()}  | {:error, String.t()}
+
+%NoulAnswer{noul: number()}
+%ChoiceAnswer{choice: String.t() | nil, probabilities: map(), confidence: number(), near_uniform: boolean()}
+%ScoreAnswer{score: number(), legend: map(), probabilities: map(), confidence: number()}
+%Usage{input_tokens: integer(), output_tokens: integer(), cost: number() | nil}
+
+Toolnexus.Classifier.ScoreAnswer.levels(ScoreAnswer.t()) :: [String.t()]
+Toolnexus.Classifier.near_uniform?(probabilities :: map()) :: boolean()
+```
+
+One answer per question under the caller's own keys, read through typed accessors that fail
+loudly rather than hand back a zero. The keys are yours: they are addressing, not content, and are
+never transmitted, so a key may be a tool, skill or agent name verbatim.
+
+## When to use it
+
+- **Read one answer by key and type** — `Decision.noul/2`, `Decision.choice/2`,
+  `Decision.score/2`. A missing key or a wrong type comes back as `{:error, reason}` naming the
+  key and what it actually is; in the JS, Python, Java and C# ports the same mistake throws, and
+  in Go it is the second return value. It is never a silent `0.0` and never a `MatchError` from
+  inside the library.
+- **Read the two health flags** — `:calibrated` on the decision, `:near_uniform` on every choice
+  answer. Both are advisory; see below.
+- **Read `:usage`** — `:cost` is a gateway field. TypeSafe's own API does not return one, and
+  **absent is not zero**: print "not reported" rather than a `$0.00` that reads as a free call.
+
+The three answer shapes differ on purpose:
+
+| answer | what it carries |
+|---|---|
+| `%NoulAnswer{}` | `:noul`, one number in `0..1`, and **no confidence** — the number *is* the answer |
+| `%ChoiceAnswer{}` | the selected `:choice` (always one you offered), a `:probabilities` entry for **every** offered option, a `:confidence`, and the derived `:near_uniform` |
+| `%ScoreAnswer{}` | a `:score` that **may fall between levels** (`1.21` is a real answer) within the rubric's bounds, a `:probabilities` entry per level index, and the rubric echoed back as `:legend` |
+
+`:legend` and `:probabilities` are keyed by **string** level indices (`"0"`, `"1"`, …) and stay
+strings throughout: atomising keys a remote backend controls is unbounded atom growth, and map
+order would lose the numbering anyway. `ScoreAnswer.levels/1` gives the legend back in level
+order, which sorting the map's keys as strings would not (`"2"` before `"10"`).
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Pattern-match the struct only once you know the type">
+`decision.answers["urgency"]` gives you the struct directly, which is fine when the question type
+is obvious at the call site. The accessors exist for the case where it is not: a renamed key, a
+question type changed in a config, a recorded corpus that drifted. Then a bare
+`%ScoreAnswer{score: s} = decision.answers["urgency"]` raises a `MatchError` that says nothing,
+while `Decision.score(decision, "urgency")` returns
+`classifier: answer "urgency" is a choice answer, not score`.
+</Aside>
+
+## `calibrated` and `near_uniform?` — advisory, and that word is load-bearing
+
+`:calibrated` travels with every decision. The `systemone` style reports **true**; the `llm` style
+reports **false** unless it derived its probabilities from provider token probabilities. **A
+response that omits `calibrated`, or sends `null`, decodes as `true`** — only the literal `false`
+is false, because the systemone wire reports calibration by being itself and a backend that is not
+calibrated says so explicitly. It is the flag that tells you whether a threshold you tuned is
+meaningful — and **a threshold tuned against
+one backend does not transfer to another**.
+
+`:near_uniform` is on every choice answer, **derived from the response and never read from the
+wire**. With `n` the number of entries in the `:probabilities` map and `p_i` their values **as
+returned**:
+
+```
+near_uniform  ⇔  max over i of |p_i − 1/n|  ≤  0.05
+```
+
+- the tolerance is **0.05 absolute** and the comparison is **inclusive** — a maximum deviation of
+  exactly 0.05 *is* near-uniform;
+- the probabilities are never sorted, renormalised or rounded first, and an offered option absent
+  from the map counts as `0` by not being an entry;
+- `n == 1` is trivially uniform, so `true`; an **empty** map has no distribution at all and is
+  `false`.
+
+`Toolnexus.Classifier.near_uniform?/1` is public, so you can run the same rule over a probability
+map you got from somewhere else. Why 0.05 and not something else — wire rounding, backend
+non-determinism, and the separation it has to make — is in
+[The encoding obligation](/judge/encoding/).
+
+<Aside type="caution" title="What neither flag detects">
+`near_uniform` detects an encoding that gave the model **nothing to rank on** — usually options
+that were never described. That is all it detects. It cannot distinguish a good encoding from a
+subtly wrong one: a wrong-but-answerable question still reads as answerable, and confidence
+reports on the **question**, not on the answer (the worst working encoding measured carried the
+*highest* median confidence). `calibrated` carries the same caveat: calibration is not
+correctness. Neither flag is a correctness signal, and neither is a security control — a decision
+interprets, it never authorises.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — reading all three answer shapes
+
+```elixir test
+alias Toolnexus.Classifier
+alias Toolnexus.Classifier.{Choice, Decision, Noul, Score, ScoreAnswer}
+
+state = "Ticket 4021: charged twice; not blocked, but I want the money back this week."
+
+questions = %{
+  "wants_money_back" => %Noul{instructions: "Is the customer asking for money to be returned?"},
+  "department" => %Choice{
+    instructions: "Which desk should own this ticket?",
+    criteria: %{
+      "billing" => "own it here when the problem is money that moved: a duplicate charge, a refund owed",
+      "technical" => "own it here when the problem is the product itself: a login that fails"
+    }
+  },
+  "urgency" => %Score{
+    instructions: "How fast does this ticket need a human?",
+    criteria: [
+      "the customer is working normally and is waiting on an answer",
+      "the customer is inconvenienced and will chase if nobody replies today",
+      "the customer is blocked from working right now and every hour costs them"
+    ]
+  }
+}
+
+response = %{
+  "model" => "typesafe/jev-1.13-20260917",
+  "answers" => %{
+    "wants_money_back" => %{"type" => "noul", "noul" => 0.99},
+    "department" => %{
+      "type" => "choice",
+      "choice" => "billing",
+      "probabilities" => %{"billing" => 0.94, "technical" => 0.06},
+      "confidence" => 0.94
+    },
+    "urgency" => %{
+      "type" => "score",
+      "score" => 0.49,
+      "legend" => %{
+        "0" => "the customer is working normally and is waiting on an answer",
+        "1" => "the customer is inconvenienced and will chase if nobody replies today",
+        "2" => "the customer is blocked from working right now and every hour costs them"
+      },
+      "probabilities" => %{"0" => 0.52, "1" => 0.48, "2" => 0},
+      "confidence" => 0.27
+    }
+  },
+  "usage" => %{"input_tokens" => 516, "output_tokens" => 72}
+}
+
+{:ok, judge} =
+  Classifier.create(
+    style: "static",
+    model: "jev-1.13.0",
+    decisions: [%{state: state, questions: questions, response: response}]
+  )
+
+{:ok, decision} = Classifier.evaluate(judge, state, questions)
+
+{:ok, refund} = Decision.noul(decision, "wants_money_back")
+{:ok, desk} = Decision.choice(decision, "department")
+{:ok, urgency} = Decision.score(decision, "urgency")
+
+# A noul carries NO confidence — the number IS the answer.
+true = refund.noul == 0.99
+true = desk.choice == "billing"
+false = desk.near_uniform
+
+# A score may land BETWEEN levels: 0.49 is a genuine split between level 0 and level 1.
+true = urgency.score == 0.49
+level = round(urgency.score)
+true = Map.fetch!(urgency.legend, to_string(level)) == Enum.at(ScoreAnswer.levels(urgency), level)
+
+# :cost is a gateway field. Absent is NOT zero.
+true = decision.usage.cost == nil
+true = decision.usage.input_tokens == 516
+
+IO.puts("ok: refund=#{refund.noul} desk=#{desk.choice} urgency=#{urgency.score} cost=not reported")
+```
+
+### 2. The realistic case — the accessors fail, they do not lie
+
+```elixir test
+alias Toolnexus.Classifier.{ChoiceAnswer, Decision, NoulAnswer, Usage}
+
+decision = %Decision{
+  model: "typesafe/jev-1.13-20260917",
+  answers: %{
+    "is_injection" => %NoulAnswer{noul: 0.04},
+    "route" => %ChoiceAnswer{
+      choice: "billing",
+      probabilities: %{"billing" => 0.88, "technical" => 0.12},
+      confidence: 0.88,
+      near_uniform: false
+    }
+  },
+  usage: %Usage{input_tokens: 90, output_tokens: 11},
+  calibrated: true
+}
+
+{:ok, injection} = Decision.noul(decision, "is_injection")
+true = injection.noul < 0.1
+
+# Wrong TYPE: named, not coerced, and not a MatchError from inside the library.
+{:error, wrong_type} = Decision.score(decision, "route")
+true = String.contains?(wrong_type, ~s("route"))
+true = String.contains?(wrong_type, "is a choice answer, not score")
+
+# Missing KEY: named too. A typo does not read back as 0.0.
+{:error, missing} = Decision.choice(decision, "departement")
+true = String.contains?(missing, ~s("departement"))
+true = String.contains?(missing, "no answer")
+
+# Thresholding is YOUR if statement. The decision advises; the code decides.
+{:ok, route} = Decision.choice(decision, "route")
+desk = if route.confidence >= 0.7 and not route.near_uniform, do: route.choice, else: "human_triage"
+true = desk == "billing"
+
+IO.puts("ok: #{wrong_type} / #{missing}")
+```
+
+### 3. The full surface — the `near_uniform?` rule, both sides of the boundary
+
+```elixir test
+alias Toolnexus.Classifier
+alias Toolnexus.Classifier.Decision
+
+# Four options, 1/n = 0.25. The rule is |p - 1/n| <= 0.05, ABSOLUTE and INCLUSIVE.
+true = Classifier.near_uniform?(%{"a" => 0.25, "b" => 0.25, "c" => 0.25, "d" => 0.25})
+# Deviation exactly 0.05 on the extremes: inclusive, so still near-uniform.
+true = Classifier.near_uniform?(%{"a" => 0.30, "b" => 0.20, "c" => 0.25, "d" => 0.25})
+# One point past it.
+false = Classifier.near_uniform?(%{"a" => 0.31, "b" => 0.19, "c" => 0.25, "d" => 0.25})
+# A decided answer is nowhere near.
+false = Classifier.near_uniform?(%{"a" => 0.80, "b" => 0.10, "c" => 0.05, "d" => 0.05})
+
+# n == 1 is trivially uniform; an empty map has no distribution at all.
+true = Classifier.near_uniform?(%{"only" => 1.0})
+false = Classifier.near_uniform?(%{})
+
+# The flag is DERIVED on decode, never read from the wire — no "near_uniform" field is sent.
+flat = %{
+  "model" => "chat/gpt-x",
+  "answers" => %{
+    "route" => %{
+      "type" => "choice",
+      "choice" => "billing",
+      "probabilities" => %{"billing" => 0.26, "shipping" => 0.25, "technical" => 0.25, "other" => 0.24},
+      "confidence" => 0.26
+    }
+  },
+  "usage" => %{"input_tokens" => 40, "output_tokens" => 8},
+  # An llm-style backend that derived nothing from token probabilities says so.
+  "calibrated" => false
+}
+
+{:ok, decision} = Classifier.decode_decision(flat)
+{:ok, route} = Decision.choice(decision, "route")
+
+true = route.near_uniform
+false = decision.calibrated
+
+# Advisory, not correctness: this decision is well-formed, schema-valid and picked an option.
+# What it tells you is that the model had nothing to rank on — go describe the options.
+true = route.choice == "billing"
+
+IO.puts("ok: near_uniform=#{route.near_uniform} calibrated=#{decision.calibrated} — both advisory")
+```
+
+## See also
+
+- [`Toolnexus.Classifier.create`](/api/elixir/judge/classifier/) — A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop.
+- [`Toolnexus.Classifier.Noul`](/api/elixir/judge/questions/) — The three question types, the criteria each one needs, and the limits enforced client-side before the request.
+- [The encoding obligation](/judge/encoding/) — where the 0.05 comes from, and what neither flag detects.
+- [Backends](/judge/backends/) — which backends report `calibrated: true`, and what `llm` costs.
+- [Cookbook: a typed decision](/cookbook/judge/) — the same decision, printed end to end.
