@@ -46,8 +46,20 @@
 - [x] 5.4 Docs: `site/.../clojure/client/resilience.mdx` (four places stating 250) and
       `.../clojure/judge/classifier.mdx` (the note that the client differs).
 
-## 6. Verify
+## 6. The Clojure `Classifier` example was JVM-only
 
-- [x] 6.1 `./openspec/changes/add-judge/verify-all.sh` — all ports green.
-- [x] 6.2 `openspec validate close-typed-decision-parity-gaps --strict`.
-- [x] 6.3 `CHANGELOG.md` under `## Unreleased`, including the two Clojure behaviour changes.
+- [x] 6.1 `examples.judge` was listed in `examples/clj/run.sh` but absent from
+      `examples/cljgo/run.sh` and from `cljgo/build.cljgo` — no `ex-judge` target, no
+      `run_judge.cljc` entry. The newest subsystem was the one the two-host claim never covered.
+- [x] 6.2 Added `examples/src/run_judge.cljc` (the two-line interpreted entry — `cljgo run` never
+      calls `-main`), the `judge` build target, and the runner entries.
+- [x] 6.3 `EXAMPLES.md` and `examples/README.md` corrected: six → seven (the README was already
+      stale at "five", omitting multimodal).
+- [x] 6.4 Verified: `./examples/clj/run.sh` 7/7, `./examples/cljgo/run.sh` 7/7 AOT AND
+      interpreted. CI already runs both scripts, so it now covers this too.
+
+## 7. Verify
+
+- [x] 7.1 `./openspec/changes/add-judge/verify-all.sh` — all ports green.
+- [x] 7.2 `openspec validate close-typed-decision-parity-gaps --strict`.
+- [x] 7.3 `CHANGELOG.md` under `## Unreleased`, including the two Clojure behaviour changes.

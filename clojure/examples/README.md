@@ -10,7 +10,7 @@ There are four things in this directory, in the order you probably want them.
 | | what | live LLM? | how to run |
 |---|---|---|---|
 | **`clj-ex1` / `cljgo-ex1`** | an interactive agent: HTTP tool + filesystem MCP server + agent skill, answering your questions in a loop | yes | `task clj-ex1` · `task cljgo-ex1` |
-| **`clj` / `cljgo`** (+ `src/examples`) | five focused examples — skills, native+HTTP tools, persona/memory, compaction, and the parity demo | no | `./clj/run.sh` · `./cljgo/run.sh` — see [EXAMPLES.md](EXAMPLES.md) |
+| **`clj` / `cljgo`** (+ `src/examples`) | seven focused examples — the parity demo, native+HTTP tools, skills, persona/memory, compaction, multimodal, and a typed judgment | no | `./clj/run.sh` · `./cljgo/run.sh` — see [EXAMPLES.md](EXAMPLES.md) |
 | **`clojure-app` / `cljgo-app`** (+ `src/toolnexus`) | the parity demo: three tool sources, three execution modes, byte-identical output | no | `./run-both.sh` |
 | **`minimal`** | the smallest honest demonstration of the premise | no | see [minimal/README.md](minimal/README.md) |
 
@@ -47,10 +47,11 @@ about 15 MB with the tools and MCP client included — but nothing here requires
 
 **This is the only example that needs an API key and the internet.** Everything below is hermetic.
 
-## 2. Five focused examples — `clj/` and `cljgo/`
+## 2. Seven focused examples — `clj/` and `cljgo/`
 
-Skills, native + HTTP tools, persona/memory, compaction, and the parity demo below — each isolated,
-each run on both hosts. `./clj/run.sh` and `./cljgo/run.sh` run all five and fail loudly if any of
+The parity demo below, native + HTTP tools, skills, persona/memory, compaction, multimodal, and a
+typed judgment (§8B) — each isolated, each run on both hosts, AOT and interpreted.
+`./clj/run.sh` and `./cljgo/run.sh` run all seven and fail loudly if any of
 them does not finish; every example prints `OK` as its last line and is judged on that marker, not
 on the exit status. [EXAMPLES.md](EXAMPLES.md) is the detail.
 

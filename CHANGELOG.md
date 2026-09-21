@@ -48,6 +48,12 @@ spike into several. Clojure now waits `base * 2^attempt + jitter(0–99 ms)` fro
 
 Tracked in `openspec/changes/close-typed-decision-parity-gaps`.
 
+**Clojure's `Classifier` example now runs on both hosts.** `examples.judge` was in the JVM
+runner and nowhere in the cljgo one — no `run_judge.cljc` entry, no `ex-judge` build target — so
+the port's whole claim, one source tree behaving identically on two hosts, went unchecked for its
+newest subsystem. It is now the seventh example in both runners, AOT and interpreted, and CI runs
+both. All seven pass on both hosts.
+
 ### The classifier's retry backoff is yours to set, in every port
 
 `Classifier` retried a transient failure on a backoff base nobody could change: a hardcoded
