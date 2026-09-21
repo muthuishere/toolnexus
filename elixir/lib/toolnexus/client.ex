@@ -58,7 +58,11 @@ defmodule Toolnexus.Client.RunResult do
           tool_calls: [map()],
           tool_call_count: non_neg_integer(),
           turns: non_neg_integer(),
-          usage: %{prompt_tokens: integer(), completion_tokens: integer(), total_tokens: integer()},
+          usage: %{
+            prompt_tokens: integer(),
+            completion_tokens: integer(),
+            total_tokens: integer()
+          },
           model: String.t() | nil,
           status: String.t(),
           limit: String.t() | nil,
@@ -97,7 +101,11 @@ defmodule Toolnexus.Client.MetricsRegistry do
   def render(pid), do: Agent.get(pid, &do_render/1)
 
   defp do_record(st, %{event: "llm"} = ev) do
-    st = %{st | llm_requests: inc(st.llm_requests, label_str([{"model", ev.model}, {"status", ev.status}]), 1)}
+    st = %{
+      st
+      | llm_requests:
+          inc(st.llm_requests, label_str([{"model", ev.model}, {"status", ev.status}]), 1)
+    }
 
     st =
       if ev.status == "ok" do
@@ -143,7 +151,8 @@ defmodule Toolnexus.Client.MetricsRegistry do
   defp inc(m, key, by), do: Map.update(m, key, by, &(&1 + by))
 
   defp observe(m, key, seconds) do
-    h = Map.get(m, key, %{counts: List.duplicate(0, length(@duration_buckets)), sum: 0.0, count: 0})
+    h =
+      Map.get(m, key, %{counts: List.duplicate(0, length(@duration_buckets)), sum: 0.0, count: 0})
 
     counts =
       @duration_buckets
@@ -169,9 +178,17 @@ defmodule Toolnexus.Client.MetricsRegistry do
       []
       |> render_counter("toolnexus_llm_requests_total", "Total LLM requests.", st.llm_requests)
       |> render_counter("toolnexus_llm_tokens_total", "Total tokens, by type.", st.llm_tokens)
-      |> render_histogram("toolnexus_llm_request_duration_seconds", "LLM request duration in seconds.", st.llm_duration)
+      |> render_histogram(
+        "toolnexus_llm_request_duration_seconds",
+        "LLM request duration in seconds.",
+        st.llm_duration
+      )
       |> render_counter("toolnexus_tool_calls_total", "Total tool calls.", st.tool_calls)
-      |> render_histogram("toolnexus_tool_duration_seconds", "Tool execution duration in seconds.", st.tool_duration)
+      |> render_histogram(
+        "toolnexus_tool_duration_seconds",
+        "Tool execution duration in seconds.",
+        st.tool_duration
+      )
       |> render_counter("toolnexus_run_errors_total", "Total run errors.", st.run_errors)
 
     Enum.join(out, "\n") <> "\n"
@@ -201,7 +218,10 @@ defmodule Toolnexus.Client.MetricsRegistry do
         buckets ++
         [
           "#{name}_bucket{#{with_le(key, "+Inf")}} #{h.count}",
-          if(key == "", do: "#{name}_sum #{fmt(h.sum)}", else: "#{name}_sum{#{key}} #{fmt(h.sum)}"),
+          if(key == "",
+            do: "#{name}_sum #{fmt(h.sum)}",
+            else: "#{name}_sum{#{key}} #{fmt(h.sum)}"
+          ),
           if(key == "", do: "#{name}_count #{h.count}", else: "#{name}_count{#{key}} #{h.count}")
         ]
     end)
@@ -347,7 +367,8 @@ defmodule Toolnexus.Client do
   @spec run(t(), String.t() | [ContentPart.t() | map()], term(), keyword()) :: RunResult.t()
   def run(client, prompt, toolkit, opts \\ [])
 
-  def run(%__MODULE__{} = client, prompt, toolkit, opts) when is_binary(prompt) or is_list(prompt) do
+  def run(%__MODULE__{} = client, prompt, toolkit, opts)
+      when is_binary(prompt) or is_list(prompt) do
     client = arm_deadline(client)
 
     case client.style do
@@ -425,7 +446,14 @@ defmodule Toolnexus.Client do
         _ -> body
       end
 
-    data = llm_call_json(client, openai_url(client), headers_for(client, key), finalize_body(client, body))
+    data =
+      llm_call_json(
+        client,
+        openai_url(client),
+        headers_for(client, key),
+        finalize_body(client, body)
+      )
+
     after_llm(client, data, 0)
 
     usage = add_usage(zero_usage(), data["usage"], "openai")
@@ -458,7 +486,10 @@ defmodule Toolnexus.Client do
 
     sys =
       opts[:system] ||
-        if(client.system_prompt not in [nil, ""], do: client.system_prompt, else: extracted_system)
+        if(client.system_prompt not in [nil, ""],
+          do: client.system_prompt,
+          else: extracted_system
+        )
 
     declared =
       case opts[:toolkit] do
@@ -484,7 +515,14 @@ defmodule Toolnexus.Client do
         tc -> Map.put(body, "tool_choice", tc)
       end
 
-    data = llm_call_json(client, anthropic_url(client), headers_for(client, key), finalize_body(client, body))
+    data =
+      llm_call_json(
+        client,
+        anthropic_url(client),
+        headers_for(client, key),
+        finalize_body(client, body)
+      )
+
     after_llm(client, data, 0)
 
     usage = add_usage(zero_usage(), data["usage"], "anthropic")
@@ -645,7 +683,8 @@ defmodule Toolnexus.Client do
     generate = Keyword.get(opts, :generate)
 
     unless is_function(generate, 1) do
-      raise ArgumentError, "toolnexus: create_in_process requires a `:generate` function of arity 1"
+      raise ArgumentError,
+            "toolnexus: create_in_process requires a `:generate` function of arity 1"
     end
 
     for reserved <- [:base_url, :api_key, :style, :transport] do
@@ -710,13 +749,18 @@ defmodule Toolnexus.Client do
               end)
           }
         else
-          %{"role" => "assistant", "content" => Map.get(answer, :content) || Map.get(answer, "content") || ""}
+          %{
+            "role" => "assistant",
+            "content" => Map.get(answer, :content) || Map.get(answer, "content") || ""
+          }
         end
 
       usage = Map.get(answer, :usage) || %{}
       prompt = Map.get(usage, :prompt_tokens) || Map.get(usage, "prompt_tokens") || 0
       completion = Map.get(usage, :completion_tokens) || Map.get(usage, "completion_tokens") || 0
-      total = Map.get(usage, :total_tokens) || Map.get(usage, "total_tokens") || prompt + completion
+
+      total =
+        Map.get(usage, :total_tokens) || Map.get(usage, "total_tokens") || prompt + completion
 
       {:ok,
        %{
@@ -727,7 +771,8 @@ defmodule Toolnexus.Client do
              %{
                "index" => 0,
                "message" => message,
-               "finish_reason" => if(Map.has_key?(message, "tool_calls"), do: "tool_calls", else: "stop")
+               "finish_reason" =>
+                 if(Map.has_key?(message, "tool_calls"), do: "tool_calls", else: "stop")
              }
            ],
            "usage" => %{
@@ -763,7 +808,11 @@ defmodule Toolnexus.Client do
   defp to_openai_schema(%Tool{} = t) do
     %{
       "type" => "function",
-      "function" => %{"name" => t.name, "description" => t.description, "parameters" => t.input_schema}
+      "function" => %{
+        "name" => t.name,
+        "description" => t.description,
+        "parameters" => t.input_schema
+      }
     }
   end
 
@@ -787,7 +836,10 @@ defmodule Toolnexus.Client do
           k = to_string(k)
 
           if k in ["messages", "tools", "stream"] do
-            Logger.warning(~s{[toolnexus] request_params key "#{k}" is not allowed — ignored (use body_transform)})
+            Logger.warning(
+              ~s{[toolnexus] request_params key "#{k}" is not allowed — ignored (use body_transform)}
+            )
+
             acc
           else
             Map.put(acc, k, v)
@@ -820,7 +872,8 @@ defmodule Toolnexus.Client do
 
     body =
       if stream,
-        do: body |> Map.put("stream", true) |> Map.put("stream_options", %{"include_usage" => true}),
+        do:
+          body |> Map.put("stream", true) |> Map.put("stream_options", %{"include_usage" => true}),
         else: body
 
     finalize_body(client, body)
@@ -833,6 +886,7 @@ defmodule Toolnexus.Client do
       "system" => system,
       "messages" => wire_messages(client, messages, "anthropic")
     }
+
     body = if tools != [], do: Map.put(body, "tools", tools), else: body
     body = if stream, do: Map.put(body, "stream", true), else: body
     finalize_body(client, body)
@@ -864,9 +918,10 @@ defmodule Toolnexus.Client do
   defp resolve_key(client) do
     key =
       System.get_env("OPENROUTER_API_KEY") ||
-        (if client.style == "anthropic",
-           do: System.get_env("ANTHROPIC_API_KEY"),
-           else: System.get_env("OPENAI_API_KEY")) ||
+        if(client.style == "anthropic",
+          do: System.get_env("ANTHROPIC_API_KEY"),
+          else: System.get_env("OPENAI_API_KEY")
+        ) ||
         System.get_env("OPENAI_API_KEY") || System.get_env("ANTHROPIC_API_KEY")
 
     key ||
@@ -1052,7 +1107,13 @@ defmodule Toolnexus.Client do
   # the default Req pipeline (plus `:http_options`) — byte-identical to before.
   defp wire_call(%{transport: transport}, url, headers, body, receive_timeout)
        when is_function(transport, 1) do
-    request = %{method: :post, url: url, headers: headers, body: body, receive_timeout: receive_timeout}
+    request = %{
+      method: :post,
+      url: url,
+      headers: headers,
+      body: body,
+      receive_timeout: receive_timeout
+    }
 
     case transport.(request) do
       {:ok, %{status: status} = resp} ->
@@ -1082,7 +1143,9 @@ defmodule Toolnexus.Client do
   # §8 Resilience. Host-classified retry-vs-fail. Absent on_error ⇒ the default classifier
   # (retryable ⇒ retry, else fail), byte-identical to the prior hardcoded rule. No :suspend tier —
   # a failure never becomes a §10 Pending (suspension stays a user-action pause).
-  defp classify_error(%{on_error: nil}, %{retryable: retryable}), do: if(retryable, do: :retry, else: :fail)
+  defp classify_error(%{on_error: nil}, %{retryable: retryable}),
+    do: if(retryable, do: :retry, else: :fail)
+
   defp classify_error(%{on_error: fun}, info) when is_function(fun, 1), do: fun.(info)
 
   # Honour `Retry-After` only in its delay-seconds form: a run of ASCII digits
@@ -1320,7 +1383,9 @@ defmodule Toolnexus.Client do
   end
 
   defp as_answer(%Answer{} = a), do: a
-  defp as_answer(%{ok: ok} = m), do: %Answer{id: Map.get(m, :id), ok: ok, data: Map.get(m, :data), reason: Map.get(m, :reason)}
+
+  defp as_answer(%{ok: ok} = m),
+    do: %Answer{id: Map.get(m, :id), ok: ok, data: Map.get(m, :data), reason: Map.get(m, :reason)}
 
   # Execute all tool calls of a turn concurrently; results come back in original call order.
   defp exec_calls(client, toolkit, calls, turn) do
@@ -1362,13 +1427,23 @@ defmodule Toolnexus.Client do
     base = %{"role" => "tool", "tool_call_id" => id, "content" => result.output}
 
     case parts_of(result) do
-      [] -> base
-      parts -> base |> Map.put("parts", Enum.map(parts, &ContentPart.to_map/1)) |> Map.put("tool_name", name)
+      [] ->
+        base
+
+      parts ->
+        base
+        |> Map.put("parts", Enum.map(parts, &ContentPart.to_map/1))
+        |> Map.put("tool_name", name)
     end
   end
 
   defp tool_result_block(id, result) do
-    base = %{"type" => "tool_result", "tool_use_id" => id, "content" => result.output, "is_error" => result.is_error}
+    base = %{
+      "type" => "tool_result",
+      "tool_use_id" => id,
+      "content" => result.output,
+      "is_error" => result.is_error
+    }
 
     case parts_of(result) do
       [] -> base
@@ -1384,9 +1459,11 @@ defmodule Toolnexus.Client do
   defp wire_messages(client, messages, "anthropic"),
     do: Enum.map(messages, &encode_anthropic_message(client, &1))
 
-  defp wire_messages(client, messages, "openai"), do: encode_openai_messages(client, messages, [], [])
+  defp wire_messages(client, messages, "openai"),
+    do: encode_openai_messages(client, messages, [], [])
 
-  defp encode_openai_messages(_client, [], acc, relocated), do: Enum.reverse(flush_relocation(relocated, acc))
+  defp encode_openai_messages(_client, [], acc, relocated),
+    do: Enum.reverse(flush_relocation(relocated, acc))
 
   defp encode_openai_messages(client, [m | rest], acc, relocated) do
     if is_map(m) and Map.get(m, "role") == "tool" do
@@ -1406,7 +1483,9 @@ defmodule Toolnexus.Client do
     name = Map.get(m, "tool_name") || ""
     id = Map.get(m, "tool_call_id")
     msg = Map.drop(m, ["parts", "tool_name"])
-    {text_parts, non_text} = Enum.split_with(parts, &(is_map(&1) and Map.get(&1, "type") == "text"))
+
+    {text_parts, non_text} =
+      Enum.split_with(parts, &(is_map(&1) and Map.get(&1, "type") == "text"))
 
     msg =
       case text_parts do
@@ -1414,12 +1493,18 @@ defmodule Toolnexus.Client do
           msg
 
         texts ->
-          Map.put(msg, "content", [%{"type" => "text", "text" => Map.get(msg, "content") || ""}] ++ encode_parts(client, texts, :derived, "openai"))
+          Map.put(
+            msg,
+            "content",
+            [%{"type" => "text", "text" => Map.get(msg, "content") || ""}] ++
+              encode_parts(client, texts, :derived, "openai")
+          )
       end
 
     moved =
       Enum.flat_map(non_text, fn part ->
-        [%{"type" => "text", "text" => "Output of tool #{name} (#{id}):"}] ++ encode_parts(client, [part], :derived, "openai")
+        [%{"type" => "text", "text" => "Output of tool #{name} (#{id}):"}] ++
+          encode_parts(client, [part], :derived, "openai")
       end)
 
     {msg, moved}
@@ -1427,8 +1512,11 @@ defmodule Toolnexus.Client do
 
   defp encode_openai_message(client, m) when is_map(m) do
     case Map.get(m, "content") do
-      content when is_list(content) -> Map.put(m, "content", encode_content_list(client, content, "openai"))
-      _ -> m
+      content when is_list(content) ->
+        Map.put(m, "content", encode_content_list(client, content, "openai"))
+
+      _ ->
+        m
     end
   end
 
@@ -1436,8 +1524,11 @@ defmodule Toolnexus.Client do
 
   defp encode_anthropic_message(client, m) when is_map(m) do
     case Map.get(m, "content") do
-      content when is_list(content) -> Map.put(m, "content", encode_content_list(client, content, "anthropic"))
-      _ -> m
+      content when is_list(content) ->
+        Map.put(m, "content", encode_content_list(client, content, "anthropic"))
+
+      _ ->
+        m
     end
   end
 
@@ -1446,9 +1537,14 @@ defmodule Toolnexus.Client do
   defp encode_content_list(client, content, style) do
     Enum.flat_map(content, fn entry ->
       cond do
-        ContentPart.part?(entry) -> encode_parts(client, [entry], :attached, style)
-        is_map(entry) and Map.get(entry, "type") == "tool_result" -> [anthropic_tool_result(client, entry)]
-        true -> [entry]
+        ContentPart.part?(entry) ->
+          encode_parts(client, [entry], :attached, style)
+
+        is_map(entry) and Map.get(entry, "type") == "tool_result" ->
+          [anthropic_tool_result(client, entry)]
+
+        true ->
+          [entry]
       end
     end)
   end
@@ -1510,7 +1606,16 @@ defmodule Toolnexus.Client do
   # §10 addendum / §7D: a maxTurns stop with the model still emitting tool calls is a
   # LIMIT stop — status "incomplete", never a silent "done".
   defp loop_openai(client, _toolkit, _key, run_start, st, turn) when turn >= client.max_turns do
-    end_run(client, run_start, last_text(st.messages), st.messages, st.tool_calls, st.turns, st.usage, "incomplete")
+    end_run(
+      client,
+      run_start,
+      last_text(st.messages),
+      st.messages,
+      st.tool_calls,
+      st.turns,
+      st.usage,
+      "incomplete"
+    )
   end
 
   defp loop_openai(client, toolkit, key, run_start, st, turn) do
@@ -1520,7 +1625,12 @@ defmodule Toolnexus.Client do
 
     data =
       try do
-        llm_call_json(client, openai_url(client), headers_for(client, key), openai_body(client, messages, tools, false))
+        llm_call_json(
+          client,
+          openai_url(client),
+          headers_for(client, key),
+          openai_body(client, messages, tools, false)
+        )
       rescue
         e ->
           emit_run_error(client, run_start, st.tool_calls, st.turns, st.usage, e)
@@ -1534,7 +1644,15 @@ defmodule Toolnexus.Client do
     calls = msg["tool_calls"] || []
 
     if calls == [] do
-      end_run(client, run_start, msg["content"] || "", st.messages, st.tool_calls, st.turns, st.usage)
+      end_run(
+        client,
+        run_start,
+        msg["content"] || "",
+        st.messages,
+        st.tool_calls,
+        st.turns,
+        st.usage
+      )
     else
       call_specs =
         Enum.map(calls, fn call ->
@@ -1584,7 +1702,8 @@ defmodule Toolnexus.Client do
     loop_anthropic(client, toolkit, key, sys, run_start, st, 0)
   end
 
-  defp loop_anthropic(client, _toolkit, _key, _sys, run_start, st, turn) when turn >= client.max_turns do
+  defp loop_anthropic(client, _toolkit, _key, _sys, run_start, st, turn)
+       when turn >= client.max_turns do
     end_run(client, run_start, "", st.messages, st.tool_calls, st.turns, st.usage, "incomplete")
   end
 
@@ -1595,7 +1714,12 @@ defmodule Toolnexus.Client do
 
     data =
       try do
-        llm_call_json(client, anthropic_url(client), headers_for(client, key), anthropic_body(client, sys, messages, tools, false))
+        llm_call_json(
+          client,
+          anthropic_url(client),
+          headers_for(client, key),
+          anthropic_body(client, sys, messages, tools, false)
+        )
       rescue
         e ->
           emit_run_error(client, run_start, st.tool_calls, st.turns, st.usage, e)
@@ -1624,10 +1748,17 @@ defmodule Toolnexus.Client do
               [tool_result_block(s.id, s.result)]
 
           records = records ++ [tool_call_record(s)]
-          if s.halted, do: {:halt, {blocks, records, s.halted}}, else: {:cont, {blocks, records, nil}}
+
+          if s.halted,
+            do: {:halt, {blocks, records, s.halted}},
+            else: {:cont, {blocks, records, nil}}
         end)
 
-      st = %{st | tool_calls: st.tool_calls ++ records, messages: st.messages ++ [%{"role" => "user", "content" => blocks}]}
+      st = %{
+        st
+        | tool_calls: st.tool_calls ++ records,
+          messages: st.messages ++ [%{"role" => "user", "content" => blocks}]
+      }
 
       if halted do
         pending_run(client, run_start, halted, st.messages, st.tool_calls, st.turns, st.usage)
@@ -1679,8 +1810,22 @@ defmodule Toolnexus.Client do
     stream_loop_openai(client, toolkit, key, run_start, st, 0, emit)
   end
 
-  defp stream_loop_openai(client, _toolkit, _key, run_start, st, turn, emit) when turn >= client.max_turns do
-    emit.(%{type: "done", result: end_run(client, run_start, last_text(st.messages), st.messages, st.tool_calls, st.turns, st.usage, "incomplete")})
+  defp stream_loop_openai(client, _toolkit, _key, run_start, st, turn, emit)
+       when turn >= client.max_turns do
+    emit.(%{
+      type: "done",
+      result:
+        end_run(
+          client,
+          run_start,
+          last_text(st.messages),
+          st.messages,
+          st.tool_calls,
+          st.turns,
+          st.usage,
+          "incomplete"
+        )
+    })
   end
 
   defp stream_loop_openai(client, toolkit, key, run_start, st, turn, emit) do
@@ -1692,11 +1837,26 @@ defmodule Toolnexus.Client do
 
     {content, calls, usage} =
       try do
-        sse = llm_call_sse(client, openai_url(client), headers_for(client, key), openai_body(client, messages, tools, true))
+        sse =
+          llm_call_sse(
+            client,
+            openai_url(client),
+            headers_for(client, key),
+            openai_body(client, messages, tools, true)
+          )
+
         parse_openai_sse(sse, st.usage, emit)
       rescue
         e ->
-          emit(client, %{event: "llm", model: client.model, status: "error", ms: now_ms() - t0, prompt_tokens: 0, completion_tokens: 0})
+          emit(client, %{
+            event: "llm",
+            model: client.model,
+            status: "error",
+            ms: now_ms() - t0,
+            prompt_tokens: 0,
+            completion_tokens: 0
+          })
+
           emit_run_error(client, run_start, st.tool_calls, st.turns, st.usage, e)
           reraise e, __STACKTRACE__
       end
@@ -1717,19 +1877,31 @@ defmodule Toolnexus.Client do
     if calls == [] do
       st = %{st | messages: st.messages ++ [%{"role" => "assistant", "content" => content}]}
       emit.(%{type: "usage", usage: st.usage})
-      emit.(%{type: "done", result: end_run(client, run_start, content, st.messages, st.tool_calls, st.turns, st.usage)})
+
+      emit.(%{
+        type: "done",
+        result:
+          end_run(client, run_start, content, st.messages, st.tool_calls, st.turns, st.usage)
+      })
     else
       assistant = %{
         "role" => "assistant",
         "content" => if(content == "", do: nil, else: content),
         "tool_calls" =>
           Enum.map(calls, fn c ->
-            %{"id" => c.id, "type" => "function", "function" => %{"name" => c.name, "arguments" => c.args}}
+            %{
+              "id" => c.id,
+              "type" => "function",
+              "function" => %{"name" => c.name, "arguments" => c.args}
+            }
           end)
       }
 
       st = %{st | messages: st.messages ++ [assistant]}
-      Enum.each(calls, fn c -> emit.(%{type: "tool_call", id: c.id, name: c.name, args: safe_json(c.args)}) end)
+
+      Enum.each(calls, fn c ->
+        emit.(%{type: "tool_call", id: c.id, name: c.name, args: safe_json(c.args)})
+      end)
 
       settled =
         calls
@@ -1758,21 +1930,50 @@ defmodule Toolnexus.Client do
 
           st = %{
             st
-            | tool_calls: st.tool_calls ++ [%{name: c.name, args: args, output: result.output, is_error: result.is_error, metadata: result.metadata}],
+            | tool_calls:
+                st.tool_calls ++
+                  [
+                    %{
+                      name: c.name,
+                      args: args,
+                      output: result.output,
+                      is_error: result.is_error,
+                      metadata: result.metadata
+                    }
+                  ],
               messages: st.messages ++ [tool_message(c.id, c.name, result)]
           }
 
           if halted do
             {:halt, {:halted, st, halted}}
           else
-            emit.(%{type: "tool_result", id: c.id, name: c.name, output: result.output, is_error: result.is_error})
+            emit.(%{
+              type: "tool_result",
+              id: c.id,
+              name: c.name,
+              output: result.output,
+              is_error: result.is_error
+            })
+
             {:cont, {:ok, st}}
           end
         end)
 
       case outcome do
         {:halted, st, request} ->
-          emit.(%{type: "done", result: pending_run(client, run_start, request, st.messages, st.tool_calls, st.turns, st.usage)})
+          emit.(%{
+            type: "done",
+            result:
+              pending_run(
+                client,
+                run_start,
+                request,
+                st.messages,
+                st.tool_calls,
+                st.turns,
+                st.usage
+              )
+          })
 
         {:ok, st} ->
           stream_loop_openai(client, toolkit, key, run_start, st, turn + 1, emit)
@@ -1849,8 +2050,22 @@ defmodule Toolnexus.Client do
     stream_loop_anthropic(client, toolkit, key, sys, run_start, st, 0, emit)
   end
 
-  defp stream_loop_anthropic(client, _toolkit, _key, _sys, run_start, st, turn, emit) when turn >= client.max_turns do
-    emit.(%{type: "done", result: end_run(client, run_start, "", st.messages, st.tool_calls, st.turns, st.usage, "incomplete")})
+  defp stream_loop_anthropic(client, _toolkit, _key, _sys, run_start, st, turn, emit)
+       when turn >= client.max_turns do
+    emit.(%{
+      type: "done",
+      result:
+        end_run(
+          client,
+          run_start,
+          "",
+          st.messages,
+          st.tool_calls,
+          st.turns,
+          st.usage,
+          "incomplete"
+        )
+    })
   end
 
   defp stream_loop_anthropic(client, toolkit, key, sys, run_start, st, turn, emit) do
@@ -1862,11 +2077,26 @@ defmodule Toolnexus.Client do
 
     {blocks, stop_reason, usage} =
       try do
-        sse = llm_call_sse(client, anthropic_url(client), headers_for(client, key), anthropic_body(client, sys, messages, tools, true))
+        sse =
+          llm_call_sse(
+            client,
+            anthropic_url(client),
+            headers_for(client, key),
+            anthropic_body(client, sys, messages, tools, true)
+          )
+
         parse_anthropic_sse(sse, st.usage, emit)
       rescue
         e ->
-          emit(client, %{event: "llm", model: client.model, status: "error", ms: now_ms() - t0, prompt_tokens: 0, completion_tokens: 0})
+          emit(client, %{
+            event: "llm",
+            model: client.model,
+            status: "error",
+            ms: now_ms() - t0,
+            prompt_tokens: 0,
+            completion_tokens: 0
+          })
+
           emit_run_error(client, run_start, st.tool_calls, st.turns, st.usage, e)
           reraise e, __STACKTRACE__
       end
@@ -1887,7 +2117,12 @@ defmodule Toolnexus.Client do
     content =
       Enum.map(blocks, fn b ->
         if b.type == "tool_use" do
-          %{"type" => "tool_use", "id" => b.id, "name" => b.name, "input" => safe_json(if(b.json == "", do: "{}", else: b.json))}
+          %{
+            "type" => "tool_use",
+            "id" => b.id,
+            "name" => b.name,
+            "input" => safe_json(if(b.json == "", do: "{}", else: b.json))
+          }
         else
           %{"type" => "text", "text" => b.text}
         end
@@ -1899,9 +2134,15 @@ defmodule Toolnexus.Client do
     if stop_reason != "tool_use" or uses == [] do
       text = content |> Enum.filter(&(&1["type"] == "text")) |> Enum.map_join("", & &1["text"])
       emit.(%{type: "usage", usage: st.usage})
-      emit.(%{type: "done", result: end_run(client, run_start, text, st.messages, st.tool_calls, st.turns, st.usage)})
+
+      emit.(%{
+        type: "done",
+        result: end_run(client, run_start, text, st.messages, st.tool_calls, st.turns, st.usage)
+      })
     else
-      Enum.each(uses, fn u -> emit.(%{type: "tool_call", id: u["id"], name: u["name"], args: u["input"]}) end)
+      Enum.each(uses, fn u ->
+        emit.(%{type: "tool_call", id: u["id"], name: u["name"], args: u["input"]})
+      end)
 
       settled =
         uses
@@ -1927,20 +2168,56 @@ defmodule Toolnexus.Client do
                 resolve_pending(client, toolkit, u["name"], args, req, u["id"], turn)
             end
 
-          st = %{st | tool_calls: st.tool_calls ++ [%{name: u["name"], args: args, output: result.output, is_error: result.is_error, metadata: result.metadata}]}
+          st = %{
+            st
+            | tool_calls:
+                st.tool_calls ++
+                  [
+                    %{
+                      name: u["name"],
+                      args: args,
+                      output: result.output,
+                      is_error: result.is_error,
+                      metadata: result.metadata
+                    }
+                  ]
+          }
+
           results = results ++ [tool_result_block(u["id"], result)]
 
           if halted do
-            {:halt, {:halted, %{st | messages: st.messages ++ [%{"role" => "user", "content" => results}]}, halted}}
+            {:halt,
+             {:halted,
+              %{st | messages: st.messages ++ [%{"role" => "user", "content" => results}]},
+              halted}}
           else
-            emit.(%{type: "tool_result", id: u["id"], name: u["name"], output: result.output, is_error: result.is_error})
+            emit.(%{
+              type: "tool_result",
+              id: u["id"],
+              name: u["name"],
+              output: result.output,
+              is_error: result.is_error
+            })
+
             {:cont, {:ok, st, results}}
           end
         end)
 
       case outcome do
         {:halted, st, request} ->
-          emit.(%{type: "done", result: pending_run(client, run_start, request, st.messages, st.tool_calls, st.turns, st.usage)})
+          emit.(%{
+            type: "done",
+            result:
+              pending_run(
+                client,
+                run_start,
+                request,
+                st.messages,
+                st.tool_calls,
+                st.turns,
+                st.usage
+              )
+          })
 
         {:ok, st, results} ->
           st = %{st | messages: st.messages ++ [%{"role" => "user", "content" => results}]}
@@ -1957,7 +2234,11 @@ defmodule Toolnexus.Client do
       |> sse_lines()
       |> Enum.reduce(acc0, fn line, acc ->
         if String.starts_with?(line, "data:") do
-          apply_anthropic_chunk(acc, safe_parse(line |> String.slice(5..-1//1) |> String.trim()), emit)
+          apply_anthropic_chunk(
+            acc,
+            safe_parse(line |> String.slice(5..-1//1) |> String.trim()),
+            emit
+          )
         else
           acc
         end
@@ -1971,12 +2252,20 @@ defmodule Toolnexus.Client do
   defp apply_anthropic_chunk(acc, %{"type" => "message_start"} = j, _emit),
     do: %{acc | usage: add_usage(acc.usage, get_in(j, ["message", "usage"]), "anthropic")}
 
-  defp apply_anthropic_chunk(acc, %{"type" => "content_block_start", "index" => i, "content_block" => cb}, _emit) do
+  defp apply_anthropic_chunk(
+         acc,
+         %{"type" => "content_block_start", "index" => i, "content_block" => cb},
+         _emit
+       ) do
     block = %{type: cb["type"], id: cb["id"], name: cb["name"], text: "", json: ""}
     %{acc | blocks: Map.put(acc.blocks, i, block), order: acc.order ++ [i]}
   end
 
-  defp apply_anthropic_chunk(acc, %{"type" => "content_block_delta", "index" => i, "delta" => delta}, emit) do
+  defp apply_anthropic_chunk(
+         acc,
+         %{"type" => "content_block_delta", "index" => i, "delta" => delta},
+         emit
+       ) do
     block = acc.blocks[i]
 
     block =
