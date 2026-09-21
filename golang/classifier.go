@@ -20,6 +20,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -37,6 +38,16 @@ const (
 	DefaultClassifierAPIKeyEnv = "TYPESAFE_API_KEY"
 	// DefaultClassifierTimeout bounds one request (a classifier has no loop to bound).
 	DefaultClassifierTimeout = 10 * time.Second
+
+	// OpenRouterClassifierBaseURL, OpenRouterClassifierModel and
+	// OpenRouterClassifierAPIKeyEnv are the OpenRouter pairing. Note the MODEL ID
+	// differs: `jev-latest` is TypeSafe's own spelling and `typesafe/jev-1.13` is
+	// the gateway's. The three values are only jointly valid, which is why
+	// ClassifierBackend exists — assembling them by hand is how a caller ends up
+	// sending TypeSafe's model id to a gateway that has never heard of it.
+	OpenRouterClassifierBaseURL   = "https://openrouter.ai/api/v1"
+	OpenRouterClassifierModel     = "typesafe/jev-1.13"
+	OpenRouterClassifierAPIKeyEnv = "OPENROUTER_API_KEY"
 
 	// MaxChoiceOptions is the client-side cap on a choice's named options (§8B).
 	MaxChoiceOptions = 255
@@ -446,11 +457,34 @@ type RecordedDecision struct {
 	Response []byte
 }
 
+// ClassifierBackend names WHOSE ENDPOINT ANSWERS, and sets BaseURL, Model and
+// APIKeyEnv together as a unit. It exists because those three options are only
+// jointly valid in two specific combinations and nothing in the type, the
+// defaults or the error used to say so (ADR 0027 D1).
+//
+//	c, err := tn.CreateClassifier(tn.ClassifierOptions{Backend: tn.BackendOpenRouter})
+//
+// Individual options still win over the preset, so a self-hosted origin remains
+// configurable.
+type ClassifierBackend string
+
+const (
+	// BackendTypeSafe is TypeSafe's own API: jev-latest, TYPESAFE_API_KEY.
+	BackendTypeSafe ClassifierBackend = "typesafe"
+	// BackendOpenRouter is the openrouter.ai gateway: typesafe/jev-1.13,
+	// OPENROUTER_API_KEY.
+	BackendOpenRouter ClassifierBackend = "openrouter"
+)
+
 // ClassifierOptions mirrors §8 ClientOptions field-for-field wherever a field
 // makes sense, so a host that has configured one has configured the other.
 type ClassifierOptions struct {
 	// Style selects the backend. "" ⇒ StyleSystemOne.
 	Style ClassifierStyle
+	// Backend sets BaseURL + Model + APIKeyEnv AS A UNIT (see ClassifierBackend).
+	// "" ⇒ the TypeSafe defaults. An explicitly-set BaseURL/Model/APIKeyEnv
+	// still wins over the preset.
+	Backend ClassifierBackend
 	// BaseURL is the API base. "" ⇒ DefaultClassifierBaseURL. OpenRouter
 	// (https://openrouter.ai/api/v1) serves this wire today.
 	BaseURL string
@@ -528,14 +562,29 @@ func CreateClassifier(opts ClassifierOptions) (*Classifier, error) {
 	if opts.Style == "" {
 		opts.Style = StyleSystemOne
 	}
+	base, model, keyEnv := DefaultClassifierBaseURL, DefaultClassifierModel, DefaultClassifierAPIKeyEnv
+	switch opts.Backend {
+	case "", BackendTypeSafe:
+	case BackendOpenRouter:
+		base, model, keyEnv = OpenRouterClassifierBaseURL, OpenRouterClassifierModel, OpenRouterClassifierAPIKeyEnv
+	default:
+		return nil, fmt.Errorf("classifier: unknown backend %q (want %q or %q)", opts.Backend, BackendTypeSafe, BackendOpenRouter)
+	}
 	if opts.BaseURL == "" {
-		opts.BaseURL = DefaultClassifierBaseURL
+		opts.BaseURL = base
 	}
 	if opts.Model == "" {
-		opts.Model = DefaultClassifierModel
+		opts.Model = model
 	}
 	if opts.APIKeyEnv == "" {
-		opts.APIKeyEnv = DefaultClassifierAPIKeyEnv
+		opts.APIKeyEnv = keyEnv
+	}
+	// Fail BEFORE the wire on the one mismatch the defaults invite: keeping
+	// TypeSafe's model id while pointing BaseURL at the gateway. A wrong-endpoint
+	// 400 that arrives 700ms later as "Unknown model" — carrying an account id in
+	// its body — is the worst possible form of this news (ADR 0027 D1).
+	if err := checkClassifierPairing(opts.BaseURL, opts.Model); err != nil {
+		return nil, err
 	}
 	if opts.Timeout == 0 {
 		opts.Timeout = DefaultClassifierTimeout
@@ -842,15 +891,12 @@ func (c *Classifier) post(ctx context.Context, raw []byte) ([]byte, error) {
 // status: a 401/403 body routinely reflects the credential or the header that
 // was sent, so it never reaches a log, a metric, an error or a return value.
 func cause(status int, body []byte) string {
-	if status == 401 || status == 403 {
-		return ""
-	}
-	s := strings.TrimSpace(string(body))
+	// ONE policy, shared with the §8 client path (providererror.go): drop an auth
+	// body, redact account identifiers, cap the rendered text. It used to be
+	// written here alone, seven times over; the §8 path had none of it.
+	s := capBody(RedactProviderBody(status, string(body)))
 	if s == "" {
 		return ""
-	}
-	if len(s) > 200 {
-		s = s[:200] + "…"
 	}
 	return ": " + s
 }
@@ -959,4 +1005,22 @@ func (c *Classifier) emitError(start time.Time, err error) {
 		Ms:     time.Since(start).Milliseconds(),
 		Error:  err.Error(),
 	})
+}
+
+// unqualifiedJevRe matches TypeSafe's own model spelling — a bare `jev-*` with
+// no vendor prefix, which only TypeSafe's API serves.
+var unqualifiedJevRe = regexp.MustCompile(`^jev-`)
+
+// checkClassifierPairing rejects the known cross-base mismatch. It is
+// deliberately narrow: it fires only on the gateway host with an unqualified
+// TypeSafe model id, so a self-hosted origin and any future model id pass
+// untouched.
+func checkClassifierPairing(baseURL, model string) error {
+	if !strings.Contains(baseURL, "openrouter.ai") {
+		return nil
+	}
+	if !unqualifiedJevRe.MatchString(model) {
+		return nil
+	}
+	return fmt.Errorf("model %q is TypeSafe's spelling; on openrouter.ai use %q", model, OpenRouterClassifierModel)
 }

@@ -19,7 +19,7 @@ This is the whole mental model. Everything else follows from it.
 | The answer arrives… | Give the client… | What `run()` does |
 |---------------------|------------------|-------------------|
 | **Now** — a person is right there, or a service resolves it inside the same request (seconds) | a **`waitFor`** host | Blocks on `waitFor`, feeds the answer back, runs on to `status: "done"`. The pause is invisible. |
-| **Later** — minutes to days later, maybe in another process, after the web request already returned | **no `waitFor`** | Returns `status: "pending"` with the `Request`. You persist it, resume when the world changes. A durable halt. |
+| **Later** — minutes to days later, maybe in another process, after the web request already returned | **no `waitFor`** | Returns `status: "pending"` with the `Request`. You persist it and come back through the answer-carrying entry point — which is **`golang`-only today**, so read [Scenario 3](#scenario-3--answer-later-in-chat-the-durable-halt) before you build on it. |
 
 Same primitive, two postures. Pick by *when the human answers*, not by what you're asking.
 
@@ -211,9 +211,24 @@ only the surface syntax differs. Nothing here is special-cased for auth.
 This is the one most frameworks can't do. The agent asks a question your user **won't answer for
 hours** — it posts to a Slack thread, or an email, and the web request that started the run has to
 return *now*. There's no thread to block. So you give the client **no `waitFor`**: `run()` halts and
-hands you the `Request`. You persist it, post it, and let the HTTP request finish. When the human
-replies — maybe in a different process, the next day — you **resume by running the same conversation
-again**, this time with a `waitFor` that returns the answer you now hold.
+hands you the `Request`. You persist it, post it, and let the HTTP request finish.
+
+**Getting back in is where you have to choose a posture, and the two are not equally portable:**
+
+| posture | how the answer gets back in | ports |
+|---|---|---|
+| **A — deferred `waitFor`** | the run stays alive; its `waitFor` awaits a promise/future/channel that your reply handler resolves | **all seven** |
+| **B — durable halt + answer-carrying resume** | the process may exit; you come back through `runWithAnswer` / `askWithAnswer` carrying the `Answer` | **`golang` only today** — a preview, outside the conformance contract |
+
+<Aside type="caution" title="Replaying the conversation is NOT a resume">
+Calling `ask` again on the same conversation id after a halt **does not resume anything**. The
+stored transcript already contains the halted call's placeholder result, so the tool is never
+re-invoked, your `waitFor` is never called, and the run returns `status: "done"` with the model
+answering off the placeholder — a healthy-looking log and a dropped human reply. (An earlier
+version of this page documented exactly that flow. It was wrong; see
+[ADR 0026](https://github.com/muthuishere/toolnexus/blob/main/docs/adr/0026-the-answer-payload-contract.md).)
+The only durable way back in is the answer-carrying entry point, posture B.
+</Aside>
 
 **Phase 1 — halt and hand back the request:**
 
@@ -300,101 +315,233 @@ end                                              # the caller returns; nothing i
 </TabItem>
 </Tabs>
 
-**Phase 2 — hours later, the reply arrives; resume the same conversation:**
+**Phase 2, posture A — a `waitFor` that *waits* (works in all seven ports):**
+
+The run never ended. Its `waitFor` parks on a promise / future / channel / process mailbox, and your
+chat webhook resolves it whenever the reply lands. Because this is the inline path, the **whole
+`Answer` reaches the tool** as `ctx.answer` — no key is reserved, so `answers`, `value` or `text`
+all work, and the suspended tool re-runs exactly once with the answer in hand.
 
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">
 ```ts
-// A different request handler, maybe a different process. You now hold the human's answer.
-const resumeClient = createClient({
+const parked = new Map<string, (a: Answer) => void>()
+
+const client = createClient({
   baseUrl, style: "openai", model,
-  waitFor: async (req) => ({ id: req.id, ok: true, data: { answers: [reply] } }),
+  waitFor: (req: Request) => new Promise<Answer>((resolve) => {
+    slack.post(channel, req.prompt)          // ask, out of band
+    parked.set(req.id, resolve)               // …and park the run on the reply
+  }),
 })
-// Same conversation id → memory replays the thread; the suspended tool re-runs and resolves.
-const done = await resumeClient.ask(prompt, { toolkit, id: conversationId })
-// done.status === "done"
+
+// your Slack webhook, minutes or hours later — a different handler, same process:
+export function onSlackReply(requestId: string, reply: string) {
+  parked.get(requestId)?.({ id: requestId, ok: true, data: { answers: [reply] } })
+  parked.delete(requestId)
+}
+
+const done = await client.run(prompt, { toolkit })   // settles when the human answers
+// done.status === "done" — the tool re-ran with ctx.answer.data = { answers: [reply] }
 ```
 </TabItem>
 <TabItem label="Python">
 ```python
-resume_client = create_client(
-    base_url=base, style="openai", model=model,
-    wait_for=lambda req: Answer(id=req.id, ok=True, data={"answers": [reply]}),
-)
-done = await resume_client.ask(prompt, toolkit, id=conversation_id)
-# done.status == "done"
+parked: dict[str, asyncio.Future] = {}
+
+async def wait_for(req):
+    fut = asyncio.get_running_loop().create_future()
+    parked[req.id] = fut
+    await slack.post(channel, req.prompt)     # ask, out of band
+    return await fut                           # park the run on the reply
+
+def on_slack_reply(request_id: str, reply: str):   # your webhook handler
+    parked.pop(request_id).set_result(
+        Answer(id=request_id, ok=True, data={"answers": [reply]}))
+
+client = create_client(base_url=base, style="openai", model=model, wait_for=wait_for)
+done = await client.run(prompt, toolkit)
+# done.status == "done" — the tool re-ran with ctx.answer.data == {"answers": [reply]}
 ```
 </TabItem>
 <TabItem label="Go">
 ```go
-resume := toolnexus.CreateClient(toolnexus.ClientOptions{
+var parked sync.Map   // request id -> chan toolnexus.Answer
+
+c := toolnexus.CreateClient(toolnexus.ClientOptions{
     BaseURL: baseURL, Style: toolnexus.StyleOpenAI, Model: model,
     WaitFor: func(req toolnexus.Request) (toolnexus.Answer, error) {
-        return toolnexus.Answer{ID: req.ID, Ok: true,
-            Data: map[string]any{"answers": []string{reply}}}, nil
+        ch := make(chan toolnexus.Answer, 1)
+        parked.Store(req.ID, ch)
+        slack.Post(channel, req.Prompt)        // ask, out of band
+        return <-ch, nil                       // park the run on the reply
     },
 })
-done, _ := resume.Ask(ctx, prompt, tk, conversationID)
-// done.Status == "done"
+
+// your Slack webhook, minutes or hours later:
+func onSlackReply(requestID, reply string) {
+    if ch, ok := parked.LoadAndDelete(requestID); ok {
+        ch.(chan toolnexus.Answer) <- toolnexus.Answer{ID: requestID, Ok: true,
+            Data: map[string]any{"answers": []string{reply}}}
+    }
+}
+
+done, _ := c.Run(ctx, prompt, tk)
+// done.Status == "done" — the tool re-ran with ctx.Answer.Data
 ```
 </TabItem>
 <TabItem label="Java">
 ```java
-LlmClient resume = LlmClient.create(new LlmClient.Options()
+Map<String, CompletableFuture<Answer>> parked = new ConcurrentHashMap<>();
+
+LlmClient client = LlmClient.create(new LlmClient.Options()
         .baseUrl(base).style("openai").model(model)
-        .waitFor(req -> new Answer(req.id(), true, Map.of("answers", List.of(reply)))));
-LlmClient.RunResult done = resume.ask(prompt, tk, conversationId);
-// done.status.equals("done")
+        .waitFor(req -> {
+            CompletableFuture<Answer> f = new CompletableFuture<>();
+            parked.put(req.id(), f);
+            slack.post(channel, req.prompt());          // ask, out of band
+            return f.join();                             // park the run on the reply
+        }));
+
+// your Slack webhook, minutes or hours later:
+void onSlackReply(String requestId, String reply) {
+    parked.remove(requestId)
+          .complete(new Answer(requestId, true, Map.of("answers", List.of(reply))));
+}
+
+LlmClient.RunResult done = client.run(prompt, tk);
+// done.status.equals("done") — the tool re-ran with ctx.answer().data()
 ```
 </TabItem>
 <TabItem label="C#">
 ```csharp
-var resume = LlmClient.Create(new LlmClient.Options
+var parked = new ConcurrentDictionary<string, TaskCompletionSource<Answer>>();
+
+var client = LlmClient.Create(new LlmClient.Options
 {
     BaseUrl = baseUrl, Style = "openai", Model = model,
-    WaitFor = req => Task.FromResult(new Answer
+    WaitFor = async req =>
     {
-        Id = req.Id, Ok = true,
-        Data = new Dictionary<string, object?> { ["answers"] = new[] { reply } },
-    }),
+        var tcs = new TaskCompletionSource<Answer>();
+        parked[req.Id] = tcs;
+        await slack.PostAsync(channel, req.Prompt);      // ask, out of band
+        return await tcs.Task;                            // park the run on the reply
+    },
 });
-var done = await resume.AskAsync(prompt, tk, conversationId);
-// done.Status == "done"
+
+// your Slack webhook, minutes or hours later:
+void OnSlackReply(string requestId, string reply) =>
+    parked[requestId].SetResult(new Answer
+    {
+        Id = requestId, Ok = true,
+        Data = new Dictionary<string, object?> { ["answers"] = new[] { reply } },
+    });
+
+var done = await client.RunAsync(prompt, tk);
+// done.Status == "done" — the tool re-ran with ctx.Answer.Data
 ```
 </TabItem>
 <TabItem label="Elixir">
 ```elixir
-resume =
-  Toolnexus.Client.create(
-    base_url: base, style: "openai", model: model,
-    wait_for: fn req -> %Toolnexus.Answer{id: req.id, ok: true, data: %{"answers" => [reply]}} end
-  )
+# The run is a process; park it on its own mailbox and let the webhook send to it.
+wait_for = fn req ->
+  Registry.register(MyApp.Parked, req.id, nil)
+  Slack.post(channel, req.prompt)                  # ask, out of band
+  receive do: ({:reply, reply} -> %Toolnexus.Answer{
+    id: req.id, ok: true, data: %{"answers" => [reply]}})
+end
 
-done = Toolnexus.Client.ask(resume, prompt, tk, conversation_id)
-# done.status == "done"
+# your Slack webhook, minutes or hours later:
+def on_slack_reply(request_id, reply) do
+  Registry.dispatch(MyApp.Parked, request_id, fn entries ->
+    for {pid, _} <- entries, do: send(pid, {:reply, reply})
+  end)
+end
+
+client = Toolnexus.Client.create(base_url: base, style: "openai", model: model, wait_for: wait_for)
+done = Toolnexus.Client.run(client, prompt, tk)
+# done.status == "done" — the tool re-ran with ctx.answer.data
 ```
 </TabItem>
 <TabItem label="Clojure">
 ```clojure
-;; A different handler, maybe a different process. You now hold the human's answer.
-(def resumed
+(def parked (atom {}))                              ; request id -> promise
+
+(def llm
   (client/create-client
     {:base-url base-url :style "openai" :model model
-     :wait-for (fn [req] (client/make-answer (:id req) true {:answers [reply]}))}))
+     :wait-for (fn [req]
+                 (let [p (promise)]
+                   (swap! parked assoc (:id req) p)
+                   (slack-post! channel (:prompt req))   ; ask, out of band
+                   @p))}))                               ; park the run on the reply
 
-;; Same :conversation-id → memory replays the thread; the suspended tool re-runs and resolves.
-(def done (client/run resumed prompt {:toolkit toolkit :conversation-id conversation-id}))
-;; (:status done) => "done"
+;; your Slack webhook, minutes or hours later:
+(defn on-slack-reply [request-id reply]
+  (when-let [p (get @parked request-id)]
+    (swap! parked dissoc request-id)
+    (deliver p (client/make-answer request-id true {:answers [reply]}))))
+
+(def done (client/run llm prompt {:toolkit toolkit}))
+;; (:status done) => "done" — the tool re-ran with ctx :answer
 ```
 </TabItem>
 </Tabs>
 
-<Aside type="note" title="Why this survives restarts">
-`Request` and `Answer` are **plain serializable data** — no live handle, no open socket. Phase 1
-can run on one machine and Phase 2 on another, a day apart. The durable halt and the in-process
-`waitFor` are the *same contract*; the only difference is whether you bridge the time gap with
-persistence. Resuming replays the conversation by `id` — the suspended tool call re-issues and the
-`waitFor` you supply at resume time resolves it.
+<Aside type="note" title="What posture A costs you">
+The process has to stay up. A parked `waitFor` is cheap — no thread is spinning, and in every port
+it is the ordinary idiom for "await a callback" — but a deploy or a crash loses the parked run.
+Give your `waitFor` a timeout and return `ok: false` when it expires; the loop feeds the model a
+`declined/expired: <prompt>` result and carries on rather than hanging.
+</Aside>
+
+**Phase 2, posture B — the answer-carrying entry point (`golang` only, a preview):**
+
+Survives a restart: phase 1 can run on one machine and phase 2 on another, a day later, because
+`Request` and `Answer` are plain serializable data. This entry point exists **only in `golang`
+today** and is explicitly outside the §0 conformance contract — `js`, `python`, `java`, `csharp`,
+`elixir` and `clojure` can raise the durable halt but have no way back in yet, which is why posture
+A is the portable answer.
+
+```go
+// A different process, the next day. You hold the persisted Request and the human's reply.
+req := db.LoadRequest(conversationID)
+
+done, err := c.AskWithAnswer(ctx, tk, conversationID, req,
+    toolnexus.AnswerOutput(req.ID, reply))   // the typed constructor — do not hand-build the map
+if err != nil {
+    // e.g. the answer echoed the wrong id, or carried no determinable result:
+    // an ERROR TO YOU, never a fabricated tool result handed to the model.
+}
+// done.Status == "done"
+```
+
+<Aside type="caution" title="`Answer.data` has reserved keys on this path — and only this path">
+Posture B reads exactly two keys: **`results`** (`[{ id, output, isError }]`, one entry per
+outstanding call) and, as a single-call shorthand, **`output`** (a string) with optional
+`isError`. They are **string-keyed and identical in every port** — not atoms, not keywords, not
+idiomatic-cased. Any other shape (`{"answers": […]}`, `{"value": "staging"}`) is **not** a
+recognised payload, and `ok: true` with no determinable result is an error returned to you.
+Use the `AnswerOutput` / `RelayAnswer` constructors and you never have to know this — and
+`AnswerDeclined(id, reason)` when the human said no, which is a resolution (`ok: false` plus a
+reason), not an error. All three ship in every port, including the six without a durable resume.
+
+One more asymmetry worth knowing before you build on it: posture B splices your `output` into the
+transcript as the call's result — the tool is **not** re-executed and never sees `ctx.answer`,
+unlike posture A. Making a non-relay durable resume re-execute the tool is deferred to its own
+change; until then, do not assume a tool's post-resume branch runs on this path.
+</Aside>
+
+<Aside type="note" title="One contract, two postures">
+`Request` and `Answer` are **plain serializable data** — no live handle, no open socket — which is
+what lets posture B cross a process boundary at all. The durable halt and the in-process `waitFor`
+are the *same contract*; the difference is who is still holding the run when the answer arrives.
+Posture A keeps the run; posture B persists the request and comes back through the answer-carrying
+entry point, which today exists only in `golang`.
+
+Whichever you pick: **a resumed turn replays from its pre-turn checkpoint, so every tool that ran
+in that turn runs again** — and on the inline path the suspended tool is re-executed by design.
+Tools reachable in a suspendable turn must be idempotent, or guarded by you.
 </Aside>
 
 ## The `question` tool

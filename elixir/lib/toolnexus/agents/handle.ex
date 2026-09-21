@@ -33,6 +33,8 @@ defmodule Toolnexus.Agents.Handle do
 
   alias Toolnexus.{Client, Request}
   alias Toolnexus.Agents.{Runtime, Trace}
+  alias Toolnexus.Status
+  alias Toolnexus.Status.Limit
 
   # ---- client API (pids; the Runtime module wraps these) -------------------
 
@@ -109,6 +111,7 @@ defmodule Toolnexus.Agents.Handle do
       pool_children: b[:max_children] || :infinity,
       eff: eff,
       usage_total: 0,
+      usage_own: 0,
       turns_total: 0,
       tool_calls_total: 0,
       spawned_at: ctx.clock.now.(),
@@ -183,7 +186,7 @@ defmodule Toolnexus.Agents.Handle do
         {:reply, {:error, "parent closed"}, st}
 
       st.depth + 1 > st.eff.max_depth ->
-        {:reply, {:error, "maxDepth #{st.eff.max_depth} exceeded"}, st}
+        {:reply, {:error, "#{Limit.max_depth()} #{st.eff.max_depth} exceeded"}, st}
 
       exceeds?(length(st.children) + 1, st.pool_children) ->
         {:reply, {:error, "maxChildren #{st.pool_children} exceeded"}, st}
@@ -279,14 +282,15 @@ defmodule Toolnexus.Agents.Handle do
     cond do
       is_binary(as) and as != st.parent_id ->
         {:reply,
-         %{
+         task_result(%{
            text: "wait refused: #{st.id} was not spawned by #{as} (wait is spawner-only)",
            is_error: true,
-           status: "error",
+           status: Status.error(),
            pending: nil,
            turns: st.turns_total,
-           total_tokens: st.usage_total
-         }, st}
+           total_tokens: st.usage_total,
+           own_tokens: st.usage_own
+         }), st}
 
       st.status == :closed ->
         {:reply, closed_result(st), st}
@@ -310,14 +314,15 @@ defmodule Toolnexus.Agents.Handle do
 
       st.status == :running ->
         {:reply,
-         %{
+         task_result(%{
            text: "already running",
            is_error: true,
-           status: "error",
+           status: Status.error(),
            pending: nil,
            turns: st.turns_total,
-           total_tokens: st.usage_total
-         }, st}
+           total_tokens: st.usage_total,
+           own_tokens: st.usage_own
+         }), st}
 
       (refusal = budget_refusal(st)) != nil ->
         {limit, reason} = refusal
@@ -364,10 +369,11 @@ defmodule Toolnexus.Agents.Handle do
         flush_waiters(st, %{
           text: "closed",
           is_error: true,
-          status: "closed",
+          status: Status.closed(),
           pending: nil,
           turns: st.turns_total,
-          total_tokens: st.usage_total
+          total_tokens: st.usage_total,
+          own_tokens: st.usage_own
         })
 
       trace(st, "#{st.id}: #{st.status}→closed (#{reason})")
@@ -418,7 +424,11 @@ defmodule Toolnexus.Agents.Handle do
     end
   end
 
-  # Usage roll-up IS the budget ledger (§7D budgets)
+  # Usage roll-up IS the budget ledger (§7D budgets).
+  # A13a: the roll-up walks the ancestor chain for TOKENS only. `turns` is the
+  # handle's OWN cumulative round trips in every port — reported identically on
+  # every status, which is the whole fix, and no `own_turns` is needed because
+  # with no roll-up `turns` already IS the own figure.
   def handle_call({:rollup, n}, _from, st),
     do: {:reply, :ok, %{st | usage_total: st.usage_total + n, pool_tokens: t_sub(st.pool_tokens, n)}}
 
@@ -487,6 +497,7 @@ defmodule Toolnexus.Agents.Handle do
             | turns_total: st.turns_total + r.turns,
               tool_calls_total: st.tool_calls_total + r.tool_call_count,
               usage_total: st.usage_total + total,
+              usage_own: st.usage_own + total,
               pool_tokens: t_sub(st.pool_tokens, total)
           }
 
@@ -501,10 +512,11 @@ defmodule Toolnexus.Agents.Handle do
               finish(%{st | status: :suspended, pending_req: req, drained: []}, %{
                 text: r.text,
                 is_error: false,
-                status: "pending",
+                status: Status.pending(),
                 pending: req,
-                turns: r.turns,
-                total_tokens: total
+                turns: st.turns_total,
+                total_tokens: st.usage_total,
+                own_tokens: st.usage_own
               })
 
             "incomplete" ->
@@ -513,11 +525,12 @@ defmodule Toolnexus.Agents.Handle do
               finish(%{st | status: :idle, drained: []}, %{
                 text: "hit maxTurns without a final answer",
                 is_error: true,
-                status: "incomplete",
-                limit: r.limit || "maxTurns",
+                status: Status.incomplete(),
+                limit: canonical_limit(r.limit),
                 pending: nil,
-                turns: r.turns,
-                total_tokens: total
+                turns: st.turns_total,
+                total_tokens: st.usage_total,
+                own_tokens: st.usage_own
               })
 
             _ ->
@@ -526,10 +539,11 @@ defmodule Toolnexus.Agents.Handle do
               finish(%{st | status: :idle, drained: []}, %{
                 text: r.text,
                 is_error: false,
-                status: "done",
+                status: Status.done(),
                 pending: nil,
-                turns: r.turns,
-                total_tokens: total
+                turns: st.turns_total,
+                total_tokens: st.usage_total,
+                own_tokens: st.usage_own
               })
           end
 
@@ -540,10 +554,11 @@ defmodule Toolnexus.Agents.Handle do
           finish(%{st | status: :idle, inbox: st.drained ++ st.inbox, drained: []}, %{
             text: msg,
             is_error: true,
-            status: "error",
+            status: Status.error(),
             pending: nil,
             turns: st.turns_total,
-            total_tokens: st.usage_total
+            total_tokens: st.usage_total,
+            own_tokens: st.usage_own
           })
       end
 
@@ -560,14 +575,19 @@ defmodule Toolnexus.Agents.Handle do
 
   def handle_info({:wait_timeout, from, ms}, st) do
     if from in st.waiters do
-      GenServer.reply(from, %{
+      GenServer.reply(from, task_result(%{
         text: "wait timeout after #{ms}ms (child still #{st.status})",
         is_error: true,
-        status: "timeout",
+        status: Status.timeout(),
+        # A17: the status and the `limit` field must AGREE. A settle that says
+        # "timeout" while leaving `limit` nil makes the two fields contradict each
+        # other, which is exactly what the field was added to prevent.
+        limit: Limit.timeout(),
         pending: nil,
         turns: st.turns_total,
-        total_tokens: st.usage_total
-      })
+        total_tokens: st.usage_total,
+        own_tokens: st.usage_own
+      }))
 
       {:noreply, %{st | waiters: List.delete(st.waiters, from)}}
     else
@@ -593,10 +613,11 @@ defmodule Toolnexus.Agents.Handle do
           finish(%{st | status: abort_status(st), inbox: st.drained ++ st.inbox, drained: []}, %{
             text: "interrupted",
             is_error: true,
-            status: "interrupted",
+            status: Status.interrupted(),
             pending: nil,
             turns: st.turns_total,
-            total_tokens: st.usage_total
+            total_tokens: st.usage_total,
+            own_tokens: st.usage_own
           })
 
         :close ->
@@ -605,10 +626,11 @@ defmodule Toolnexus.Agents.Handle do
           finish(%{st | status: abort_status(st), inbox: st.drained ++ st.inbox, drained: []}, %{
             text: "closed",
             is_error: true,
-            status: "closed",
+            status: Status.closed(),
             pending: nil,
             turns: st.turns_total,
-            total_tokens: st.usage_total
+            total_tokens: st.usage_total,
+            own_tokens: st.usage_own
           })
 
         nil ->
@@ -618,10 +640,11 @@ defmodule Toolnexus.Agents.Handle do
           finish(%{st | status: abort_status(st), inbox: st.drained ++ st.inbox, drained: []}, %{
             text: "run crashed: #{inspect(reason)}",
             is_error: true,
-            status: "error",
+            status: Status.error(),
             pending: nil,
             turns: st.turns_total,
-            total_tokens: st.usage_total
+            total_tokens: st.usage_total,
+            own_tokens: st.usage_own
           })
       end
 
@@ -682,21 +705,33 @@ defmodule Toolnexus.Agents.Handle do
     end
   end
 
+  # Map any internal dimension name onto the canonical `limit` vocabulary (A14/A18).
+  # This is also where the LATENT second instance of the A17 contradiction is closed:
+  # a branch forwarding the client's `limit` straight through would reproduce a
+  # `status: "incomplete"` carrying an EMPTY limit. Everything settling `incomplete`
+  # goes through here, so an empty or off-vocabulary value becomes `maxTurns` — the
+  # client's only incomplete stop — and the two fields can never contradict.
+  defp canonical_limit(limit) when is_binary(limit) do
+    if Status.limit?(limit), do: limit, else: Limit.max_turns()
+  end
+
+  defp canonical_limit(_), do: Limit.max_turns()
+
   # Live ancestor-chain enforcement before each turn: carve-at-spawn alone misses
   # sibling spend (§7D budgets). Named limit reasons keep the stop loud.
   defp budget_refusal(st) do
     cond do
       not t_pos?(st.pool_tokens) ->
-        {"maxTokens", "budget exhausted (tokens); partial work preserved"}
+        {Limit.max_tokens(), "budget exhausted (tokens); partial work preserved"}
 
       Enum.any?(st.ancestors, fn a -> not t_pos?(GenServer.call(a, :get_tokens)) end) ->
-        {"maxTokens", "budget exhausted (tokens); partial work preserved"}
+        {Limit.max_tokens(), "budget exhausted (tokens); partial work preserved"}
 
       st.eff.max_tool_calls != nil and st.tool_calls_total >= st.eff.max_tool_calls ->
-        {"maxToolCalls", "budget exhausted (maxToolCalls #{st.eff.max_tool_calls}); partial work preserved"}
+        {Limit.max_tool_calls(), "budget exhausted (maxToolCalls #{st.eff.max_tool_calls}); partial work preserved"}
 
       st.eff.max_wall_ms != nil and st.ctx.clock.now.() - st.spawned_at >= st.eff.max_wall_ms ->
-        {"maxWallMs", "budget exhausted (maxWallMs #{st.eff.max_wall_ms}); partial work preserved"}
+        {Limit.max_wall_ms(), "budget exhausted (maxWallMs #{st.eff.max_wall_ms}); partial work preserved"}
 
       true ->
         nil
@@ -704,16 +739,20 @@ defmodule Toolnexus.Agents.Handle do
   end
 
   # A limit stop is LOUD: status "incomplete" with the limit NAMED in `limit` (§8 pin).
+  # A14: `limit` is the CLOSED canonical vocabulary (`Toolnexus.Status.limits/0`) —
+  # the Budget field that stopped the run, spelled as SPEC spells it. The guard is the
+  # boundary: an internal dimension name can never leak into the field hosts branch on.
   defp incomplete_result(st, limit, reason) do
-    %{
+    task_result(%{
       text: reason,
       is_error: true,
-      status: "incomplete",
+      status: Status.incomplete(),
       limit: limit,
       pending: nil,
       turns: st.turns_total,
-      total_tokens: st.usage_total
-    }
+      total_tokens: st.usage_total,
+      own_tokens: st.usage_own
+    })
   end
 
   defp spawn_run(st, input, one_shot) do
@@ -806,25 +845,45 @@ defmodule Toolnexus.Agents.Handle do
     do: %Request{req | data: Map.put(req.data || %{}, "path", String.split(id, "/"))}
 
   defp finish(st, result) do
+    result = task_result(result)
     if st.parent, do: GenServer.cast(st.parent, :child_finished)
     st = flush_waiters(st, result)
     %{st | last_result: result}
   end
 
   defp flush_waiters(st, result) do
+    result = task_result(result)
     Enum.each(st.waiters, &GenServer.reply(&1, result))
     %{st | waiters: []}
   end
 
+  # A18/A19: the status/limit invariant made STRUCTURAL rather than per-site. Every
+  # TaskResult leaving a handle passes through here, so a fourteenth construction
+  # site cannot reintroduce the contradiction:
+  #
+  #   * a LIMIT stop (`incomplete` / `timeout`) always NAMES its limit, canonicalised;
+  #   * every other status carries an EXPLICITLY EMPTY limit — never a value forwarded
+  #     from the client. csharp found `done`/`pending` sites passing `r.Limit ?? ""`,
+  #     benign only for as long as the client populates `limit` on `incomplete` alone.
+  defp task_result(%{status: status} = result) do
+    if status in [Status.incomplete(), Status.timeout()],
+      do: Map.put(result, :limit, canonical_limit(Map.get(result, :limit))),
+      else: Map.put(result, :limit, nil)
+  end
+
+  defp task_result(result), do: result
+
   defp closed_result(st),
-    do: %{
-      text: "closed",
-      is_error: true,
-      status: "closed",
-      pending: nil,
-      turns: st.turns_total,
-      total_tokens: st.usage_total
-    }
+    do:
+      task_result(%{
+        text: "closed",
+        is_error: true,
+        status: Status.closed(),
+        pending: nil,
+        turns: st.turns_total,
+        total_tokens: st.usage_total,
+        own_tokens: st.usage_own
+      })
 
   defp trace(st, line), do: Trace.add(st.ctx.trace, line)
 

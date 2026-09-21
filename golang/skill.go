@@ -72,6 +72,11 @@ const (
 type SkillSkip struct {
 	Location string
 	Reason   SkillSkipReason
+	// Detail carries the NATIVE parser error behind the skip, when there is one
+	// (malformed-frontmatter). It is diagnostic only: the message is whatever the
+	// port's YAML library said and is deliberately NOT compared across ports —
+	// `Reason` stays byte-identical, `Detail` stays native (SPEC.md §3, ADR 0028).
+	Detail string
 }
 
 // SkillInventory is the result of a list-only validate pass (S3).
@@ -90,34 +95,140 @@ type LoadSkillsOptions struct {
 
 var frontmatterRe = regexp.MustCompile(`(?s)^---\r?\n(.*?)\r?\n---\r?\n?(.*)$`)
 
+// lenientKeyRe matches ONE top-level `key: rest-of-line` at COLUMN 0. It is the
+// fallback rescue read (ADR 0028) and never runs before the YAML parser.
+var lenientKeyRe = regexp.MustCompile(`^([A-Za-z0-9_][A-Za-z0-9_.-]*):[ \t]*(.*)$`)
+
+// lenientOpeners are the YAML constructs the rescue read does NOT implement:
+// block scalars, anchors, aliases, flow collections and tags. A value opening
+// with one of these is taken as NOTHING rather than as garbage — a half-broken
+// block scalar degrades to "no description", never to an invented one.
+const lenientOpeners = "|>&*[{!"
+
+// lenientKeys are the only two keys the rescue read will take. Everything else
+// in a frontmatter YAML has already refused is left alone.
+var lenientKeys = map[string]bool{"name": true, "description": true}
+
 type frontmatter struct {
 	Name        string
 	Description string
 }
 
-// parseFrontmatter parses the `---`-fenced YAML header with a real YAML parser.
-// `malformed` is true only when fences are present but the YAML fails to parse —
-// distinguishing a malformed header from a body with no frontmatter, so the
-// inventory (S3) reports the right skip reason. LoadSkills' behavior is
-// unchanged. See SPEC.md §3.
-func parseFrontmatter(text string) (data frontmatter, content string, malformed bool) {
+// parseFrontmatter parses the `---`-fenced YAML header with a REAL YAML parser,
+// and only when that parser refuses falls back to a line-wise `key: rest-of-line`
+// rescue for `name`/`description` (ADR 0028).
+//
+// The order is the whole point. A line-wise read that ran FIRST would misparse
+// legitimate YAML the six other ports handle today — `description: |`,
+// `description: >`, a plain scalar continued on the next line, `name: !!str x` —
+// because rest-of-line is empty or a block marker there. Running it only over a
+// block a real parser has ALREADY refused means it can never see a file whose
+// YAML semantics matter: by construction such a file has none to preserve.
+//
+// `malformed` is true only when fences are present, the YAML failed to parse AND
+// the rescue read could not recover a name — so a genuinely malformed file is
+// still refused, and the inventory (S3) reports the right skip reason.
+// `detail` carries the native parser error for a skip record; it is empty
+// whenever the frontmatter parsed.
+func parseFrontmatter(text string) (data frontmatter, content string, malformed bool, detail string) {
 	m := frontmatterRe.FindStringSubmatch(text)
 	if m == nil {
-		return frontmatter{}, text, false
+		return frontmatter{}, text, false, ""
 	}
 	var raw map[string]any
-	if err := yaml.Unmarshal([]byte(m[1]), &raw); err != nil {
-		raw = nil
-		malformed = true
+	err := yaml.Unmarshal([]byte(m[1]), &raw)
+	if err == nil && raw != nil {
+		fm := frontmatter{}
+		wrong := ""
+		for _, key := range []string{"name", "description"} {
+			v, present := raw[key]
+			if !present {
+				continue
+			}
+			s, ok := scalarString(v)
+			if !ok {
+				// Present but STRUCTURALLY WRONG (a sequence, a mapping, null).
+				// YAML libraries disagree about inputs like `description:
+				// [unterminated` — some throw, some error-recover it into a
+				// sequence — so the rescue must trigger on the recovered shape
+				// too, or the seven ports' skip tables diverge on the same file
+				// (DECISIONS A10).
+				wrong = key
+				break
+			}
+			if key == "name" {
+				fm.Name = s
+			} else {
+				fm.Description = s
+			}
+		}
+		if wrong == "" {
+			return fm, m[2], false, ""
+		}
+		detail = fmt.Sprintf("frontmatter key %q is %T, want a scalar", wrong, raw[wrong])
+	} else if err != nil {
+		detail = err.Error()
+	} else {
+		detail = "frontmatter is not a YAML mapping"
 	}
-	fm := frontmatter{}
-	if s, ok := scalarString(raw["name"]); ok {
-		fm.Name = s
+	fm := lenientFrontmatter(m[1])
+	if fm.Name == "" {
+		return fm, m[2], true, detail
 	}
-	if s, ok := scalarString(raw["description"]); ok {
-		fm.Description = s
+	return fm, m[2], false, ""
+}
+
+// lenientFrontmatter rescues `name`/`description` from a frontmatter block YAML
+// has already refused (ADR 0028). Guards, all three load-bearing:
+//
+//   - COLUMN 0 only — an indented line is a continuation or a nested mapping,
+//     never a top-level key;
+//   - FIRST WINS — a repeated key keeps the first value, matching YAML's own
+//     document order for the keys that survive;
+//   - REFUSE an opener — a value starting `| > & * [ { !` (or empty) is a
+//     construct this read does not implement, so it takes nothing.
+func lenientFrontmatter(block string) frontmatter {
+	var fm frontmatter
+	seen := map[string]bool{}
+	for _, raw := range strings.Split(block, "\n") {
+		raw = strings.TrimSuffix(raw, "\r")
+		if raw == "" {
+			continue
+		}
+		if c := raw[0]; c == ' ' || c == '\t' || c == '#' {
+			continue // indented continuation, or a comment — not a top-level key
+		}
+		m := lenientKeyRe.FindStringSubmatch(raw)
+		if m == nil {
+			continue
+		}
+		key, value := m[1], strings.TrimSpace(m[2])
+		if !lenientKeys[key] || seen[key] {
+			continue
+		}
+		if value == "" || strings.ContainsRune(lenientOpeners, rune(value[0])) {
+			continue
+		}
+		seen[key] = true
+		value = unquoteScalar(value)
+		switch key {
+		case "name":
+			fm.Name = value
+		case "description":
+			fm.Description = value
+		}
 	}
-	return fm, m[2], malformed
+	return fm
+}
+
+// unquoteScalar strips one matching pair of surrounding quotes. It is NOT a YAML
+// unescape: the rescue read never claims to implement YAML, only to hand back the
+// obvious literal.
+func unquoteScalar(v string) string {
+	if len(v) > 1 && v[0] == v[len(v)-1] && (v[0] == '"' || v[0] == '\'') {
+		return v[1 : len(v)-1]
+	}
+	return v
 }
 
 // scalarString returns a trimmed string for scalar YAML values (string, number,
@@ -143,13 +254,67 @@ func resolveEntry(full string, entry fs.DirEntry) (isDir, isFile, ok bool) {
 	return entry.IsDir(), entry.Type().IsRegular(), true
 }
 
+// walkSkillFiles returns every SKILL.md under root in a DETERMINISTIC order:
+// by DEPTH ascending (how many path segments the file sits under), then by
+// Unicode CODE POINT within a depth. Discovery order is part of the contract,
+// not a property of the filesystem — first-wins dedupe is meaningless if
+// "first" depends on the order a directory happened to be read in.
+//
+// Depth comes FIRST, and that is the correction that matters (DECISIONS A15).
+// A pure code-point sort does not implement "a top-level copy beats a nested
+// one": it makes the winner depend on the skill's first letter relative to a
+// sibling DIRECTORY's name. On the real corpus `docx/SKILL.md` beats
+// `synced/<uuid>/docx/SKILL.md` because `d` < `s` — but `xlsx/SKILL.md` LOSES to
+// `synced/<uuid>/xlsx/SKILL.md` because `x` > `s`. Same shape, opposite winner,
+// decided by an unrelated directory's name. Ordering by depth first makes the
+// shallower copy win every time, and leaves code point as the tie-break WITHIN
+// a depth, which is what it was always for.
+//
+// NOTE for anyone tempted to "improve" the tie-break: Go's `<` on strings is a
+// BYTE-WISE comparison of the UTF-8 bytes, which orders identically to Unicode
+// CODE POINTS. That is the normative order (DECISIONS A1c) — do not replace it
+// with a locale collator, a case-folding compare, or a segment-aware one.
+// (UTF-16 hosts need an explicit code-point comparer here because code-UNIT
+// order disagrees above U+FFFF; Go does not.) A symlink sorts at its DISCOVERED
+// path, never its target.
 func walkSkillFiles(root string) []string {
+	out := walkSkillFilesUnordered(root)
+	rel := make(map[string]string, len(out))
+	depth := make(map[string]int, len(out))
+	for _, p := range out {
+		r, err := filepath.Rel(root, p)
+		if err != nil {
+			r = p
+		}
+		r = filepath.ToSlash(r)
+		rel[p] = r
+		depth[p] = strings.Count(r, "/")
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if depth[a] != depth[b] {
+			return depth[a] < depth[b]
+		}
+		if rel[a] != rel[b] {
+			return rel[a] < rel[b]
+		}
+		return a < b
+	})
+	return out
+}
+
+func walkSkillFilesUnordered(root string) []string {
 	var out []string
 	stack := []string{root}
 	seen := map[string]bool{}
 	for len(stack) > 0 {
 		dir := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
+		// os.ReadDir IS sorted by filename (code point, since Go compares
+		// strings byte-wise over UTF-8). That does NOT make this walk ordered —
+		// the stack is LIFO — which is why walkSkillFiles re-sorts its whole
+		// result explicitly above. Recorded so the guarantee and its limits are
+		// written down rather than rediscovered (DECISIONS A24).
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -181,11 +346,42 @@ func walkSkillFiles(root string) []string {
 	return out
 }
 
+// sampleSiblingFiles returns the skill's sibling resources for the
+// `<skill_files>` sample list, in CODE-POINT order of each file's path relative
+// to the skill directory, SORTED BEFORE the cap is applied.
+//
+// The ordering is load-bearing TWICE, which is why it is computed rather than
+// inherited from the walk (DECISIONS A22/A24/A25):
+//
+//   - it is the order of SHIPPED, MODEL-VISIBLE TEXT — `<skill_files>` goes
+//     straight into the tool result, so two ports that disagree here emit
+//     different bytes for the same skill;
+//   - and because the list is CAPPED, the order also decides WHICH files are
+//     sampled at all. Sorting must therefore happen BEFORE the cap. This is a
+//     CONTENT bug, not a cosmetic one (ADR-0004 K1).
+//
+// The rule is a GLOBAL sort over relative paths, with plain code point — not
+// depth-then-code-point, and not a per-directory sort during traversal (A25):
+//
+//   - A15's depth rule exists to resolve duplicate NAMES in discovery, i.e. to
+//     decide WHICH file a name resolves to. It has no business ordering a flat
+//     file listing, where it would interleave `a-root.txt, z-root.txt,
+//     alpha/f.txt` instead of `a-root.txt, alpha/f.txt, z-root.txt`.
+//   - A global sort is a function of the FILE SET and the cap alone. A
+//     per-directory sort during traversal is a function of the TRAVERSAL, and
+//     would require every port to reproduce the same stack discipline to emit
+//     the same bytes.
+//
+// os.ReadDir IS sorted by filename, so this looked correct by construction —
+// the same shape as the §0.10 prompt sort. It was not: the walk pushed
+// subdirectories onto a LIFO stack and emitted them in REVERSE code-point order
+// (alpha/ beta/ zeta/ came back zeta, beta, alpha) while files within a single
+// directory were sorted. Correct in the small, wrong in the whole.
 func sampleSiblingFiles(dir string, limit int) []string {
-	var out []string
+	var all []string
 	stack := []string{dir}
 	seen := map[string]bool{}
-	for len(stack) > 0 && len(out) < limit {
+	for len(stack) > 0 {
 		cur := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		entries, err := os.ReadDir(cur)
@@ -193,9 +389,6 @@ func sampleSiblingFiles(dir string, limit int) []string {
 			continue
 		}
 		for _, entry := range entries {
-			if len(out) >= limit {
-				break
-			}
 			full := filepath.Join(cur, entry.Name())
 			isDir, isFile, ok := resolveEntry(full, entry)
 			if !ok {
@@ -215,11 +408,33 @@ func sampleSiblingFiles(dir string, limit int) []string {
 				seen[real] = true
 				stack = append(stack, full)
 			} else if isFile && entry.Name() != "SKILL.md" {
-				out = append(out, full)
+				all = append(all, full)
 			}
 		}
 	}
-	return out
+	// Code point by construction: Go's `<` on strings is byte-wise over UTF-8,
+	// which orders identically to Unicode code points. Do NOT replace this with a
+	// locale collator or a UTF-16 code-unit compare (see Prompt()). The walk
+	// above is deliberately NOT relied on for order — it is a LIFO stack.
+	rel := make(map[string]string, len(all))
+	for _, p := range all {
+		r, err := filepath.Rel(dir, p)
+		if err != nil {
+			r = p
+		}
+		rel[p] = filepath.ToSlash(r)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if rel[all[i]] != rel[all[j]] {
+			return rel[all[i]] < rel[all[j]]
+		}
+		return all[i] < all[j]
+	})
+	// Cap AFTER the sort: the two together decide the CONTENT of the sample.
+	if limit >= 0 && len(all) > limit {
+		all = all[:limit]
+	}
+	return all
 }
 
 // rawCandidate is one candidate before cross-source dedupe.
@@ -241,9 +456,9 @@ func candidatesFromDir(root string) []rawCandidate {
 			out = append(out, rawCandidate{skip: &SkillSkip{Location: file, Reason: SkipUnreadable}})
 			continue
 		}
-		data, content, malformed := parseFrontmatter(string(raw))
+		data, content, malformed, detail := parseFrontmatter(string(raw))
 		if malformed {
-			out = append(out, rawCandidate{skip: &SkillSkip{Location: file, Reason: SkipMalformed}})
+			out = append(out, rawCandidate{skip: &SkillSkip{Location: file, Reason: SkipMalformed, Detail: detail}})
 			continue
 		}
 		if data.Name == "" {
@@ -361,6 +576,12 @@ func applySkillsFilter(skills map[string]SkillInfo, filter map[string]bool) map[
 type SkillSource struct {
 	Skills map[string]SkillInfo
 	Tool   Tool
+	// Skipped is every candidate that did NOT become a skill, with its typed
+	// reason (and the native parser error in Detail). A host must not need a
+	// second ListSkills pass to learn that 6 of 87 SKILL.md files vanished —
+	// the loading path reports its own losses (ADR 0028). Unfiltered, like
+	// ListSkills' inventory: the S2 allowlist removes skills, not candidates.
+	Skipped []SkillSkip
 }
 
 // Prompt returns the markdown catalog for the system prompt.
@@ -374,6 +595,13 @@ func (s *SkillSource) Prompt() string {
 	if len(described) == 0 {
 		return "No skills are currently available."
 	}
+	// SPEC §0.10 pins this prompt BYTE-IDENTICAL across ports, so its order is
+	// part of the contract, not a presentation detail. Go's `<` on strings is a
+	// BYTE-WISE comparison of the UTF-8 bytes, which orders identically to
+	// Unicode CODE POINTS — the normative rule (DECISIONS A22, same note as the
+	// discovery sort). Do NOT "improve" this into a locale collator
+	// (locale-dependent, so not even stable across machines) or a UTF-16
+	// code-unit compare (disagrees above U+FFFF).
 	sort.Slice(described, func(i, j int) bool { return described[i].Name < described[j].Name })
 	lines := []string{SkillsPromptPreamble, "", "## Available Skills"}
 	for _, s := range described {
@@ -403,7 +631,7 @@ func LoadSkills(dirs ...string) *SkillSource {
 
 // LoadSkillsWith discovers skills (dirs and/or data) and builds the `skill` tool.
 func LoadSkillsWith(opts LoadSkillsOptions) *SkillSource {
-	merged, _ := mergeCandidates(collectCandidates(opts))
+	merged, skipped := mergeCandidates(collectCandidates(opts))
 	skills := applySkillsFilter(merged, opts.Filter)
 	sampleLimit := opts.SampleLimit
 
@@ -430,6 +658,10 @@ func LoadSkillsWith(opts LoadSkillsOptions) *SkillSource {
 				for n := range skills {
 					names = append(names, n)
 				}
+				// Code point again, by construction: sort.Strings compares with
+				// `<`, i.e. byte-wise over UTF-8. This list is user-visible (it
+				// goes to the model in an error result), so it follows the same
+				// rule as the §0.10 prompt.
 				sort.Strings(names)
 				avail := "none"
 				if len(names) > 0 {
@@ -501,7 +733,7 @@ func LoadSkillsWith(opts LoadSkillsOptions) *SkillSource {
 		},
 	}
 
-	return &SkillSource{Skills: skills, Tool: tool}
+	return &SkillSource{Skills: skills, Tool: tool, Skipped: skipped}
 }
 
 // fileURL renders an absolute directory path as a file:// URL (mirrors Node's

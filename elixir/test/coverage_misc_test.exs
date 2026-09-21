@@ -183,7 +183,8 @@ defmodule Toolnexus.CoverageMiscTest do
     on_exit(fn -> File.chmod(locked, 0o644) end)
 
     result = run_builtin("grep", %{"pattern" => "needle", "path" => dir})
-    assert result.output == "#{Path.join(dir, "ok.txt")}:1:needle"
+    # A28: grep emits the RELATIVE `/`-path it sorts on (was the absolute path)
+    assert result.output == "ok.txt:1:needle"
   end
 
   test "webfetch: a connection error is a webfetch-prefixed error" do

@@ -168,6 +168,11 @@ task key** (agent + prompt): settled ⇒ its recorded result, suspended ⇒ its 
 await. **The other three workers are not re-run.** Reattachment, not transcript inspection, is the
 required idempotency mechanism in every port.
 
+What reattachment does **not** cover is a worker's own tools. "Continues from its checkpoint" means
+the suspended turn is rewound and replayed, so every tool the *suspended* agent ran in that turn
+runs again — its siblings are safe, its own `git push` is not. Tools reachable in a suspendable
+turn must be idempotent, or guarded by you.
+
 ```ts
 const r = await coordinator.run(question, { llm })
 if (r.status === "pending") {

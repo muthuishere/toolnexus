@@ -102,9 +102,31 @@ func relayResultFromAnswer(name string, a *Answer) ToolResult {
 		}
 		return ToolResult{Output: "relay declined for " + name + ": " + reason, IsError: true}
 	}
-	out, _ := a.Data[RelayOutputKey].(string)
+	raw, present := a.Data[RelayOutputKey]
+	if !present {
+		return ToolResult{Output: "relay answer for " + name + ` carries no "output" — build it with AnswerOutput(id, output)`, IsError: true}
+	}
+	out, ok := raw.(string)
+	if !ok {
+		// Never degrade to "": a non-string output is a CALLER mistake, and a
+		// silent empty tool result teaches the model the tool returned nothing.
+		return ToolResult{Output: fmt.Sprintf("relay answer for %s has a non-string %q (%T) — it must be a string", name, RelayOutputKey, raw), IsError: true}
+	}
 	isErr, _ := a.Data[RelayIsErrorKey].(bool)
 	return ToolResult{Output: out, IsError: isErr}
+}
+
+// AnswerOutput builds the Answer a host returns for a SINGLE outstanding call:
+// the tool's output as a plain string, under the one key the engine reads. It
+// exists so the durable resume stops being the only place in the surface where a
+// caller hand-builds a free-form map with an unwritten required key (ADR 0026).
+//
+//	ans := tn.AnswerOutput(req.ID, "us-east-1")
+//
+// For a multi-call relay turn, or to mark the host's tool as failed, use
+// RelayAnswer with one RelayResult per call.
+func AnswerOutput(id, output string) Answer {
+	return Answer{ID: id, Ok: true, Data: map[string]any{RelayOutputKey: output}}
 }
 
 // IsRelayRequest reports whether a Request is a relayed tool call (§10).
@@ -245,32 +267,56 @@ func RelayAnswer(requestID string, results []RelayResult) Answer {
 	return Answer{ID: requestID, Ok: true, Data: map[string]any{relayResultsKey: arr}}
 }
 
+// AnswerDeclined builds the Answer a host returns when the human (or the host
+// itself) REFUSED the request: no payload, and a reason the loop can report. It
+// is the natural pair of AnswerOutput, and shipping only one of the two is the
+// drift these constructors exist to end (DECISIONS A9).
+//
+// A declined relay is an error tool_result, not an aborted run: the model sees
+// the refusal and recovers (§10, ADR-0010 D6).
+func AnswerDeclined(id, reason string) Answer {
+	if reason == "" {
+		reason = "declined"
+	}
+	return Answer{ID: id, Ok: false, Reason: reason}
+}
+
 // relayResultsOf reads the host's per-call results off an Answer, indexed by call id.
 // Falls back to the single-call shape (data.output / data.isError), which applies to the
 // first outstanding call — so a one-call relay needs no array.
-func relayResultsOf(a Answer) (byID map[string]RelayResult, single *RelayResult) {
+// Every type assertion here is CHECKED. The failure-silent forms this replaced
+// turned a non-string output into "", which reached the model as a tool that
+// returned nothing — a caller mistake laundered into a plausible transcript.
+func relayResultsOf(a Answer) (byID map[string]RelayResult, single *RelayResult, err error) {
 	byID = map[string]RelayResult{}
 	if a.Data == nil {
-		return byID, nil
+		return byID, nil, nil
 	}
 	if arr, ok := a.Data[relayResultsKey].([]any); ok {
-		for _, e := range arr {
+		for i, e := range arr {
 			m, ok := e.(map[string]any)
 			if !ok {
-				continue
+				return nil, nil, fmt.Errorf("toolnexus: cannot resume — answer data[%q][%d] is %T, want an object {id, output, isError}", relayResultsKey, i, e)
 			}
 			id, _ := m["id"].(string)
-			out, _ := m["output"].(string)
+			out, ok := m["output"].(string)
+			if !ok {
+				return nil, nil, fmt.Errorf("toolnexus: cannot resume — answer data[%q][%d].output is %T, want a string", relayResultsKey, i, m["output"])
+			}
 			isErr, _ := m["isError"].(bool)
 			byID[id] = RelayResult{ID: id, Output: out, IsError: isErr}
 		}
-		return byID, nil
+		return byID, nil, nil
 	}
-	if out, ok := a.Data[RelayOutputKey].(string); ok {
+	if raw, present := a.Data[RelayOutputKey]; present {
+		out, ok := raw.(string)
+		if !ok {
+			return nil, nil, fmt.Errorf("toolnexus: cannot resume — answer data[%q] is %T, want a string (build it with AnswerOutput(id, output))", RelayOutputKey, raw)
+		}
 		isErr, _ := a.Data[RelayIsErrorKey].(bool)
-		return byID, &RelayResult{Output: out, IsError: isErr}
+		return byID, &RelayResult{Output: out, IsError: isErr}, nil
 	}
-	return byID, nil
+	return byID, nil, nil
 }
 
 // haltedTurn locates the last assistant turn that issued tool calls in a halted
@@ -319,7 +365,25 @@ func repairHaltedTurn(history []any, pending Request, answer Answer) ([]any, err
 	if idx < 0 {
 		return nil, fmt.Errorf("toolnexus: cannot resume — the transcript has no halted assistant turn with tool calls")
 	}
-	byID, single := relayResultsOf(answer)
+	byID, single, err := relayResultsOf(answer)
+	if err != nil {
+		return nil, err
+	}
+	// A satisfied answer that names NO result the engine can read is a caller
+	// mistake, and it used to become a fabricated tool error handed to the model
+	// while the host was told "done". RunWithAnswer already refuses a mismatched
+	// id for exactly this reason; the asymmetry was the bug (ADR 0026).
+	//
+	// The fabricated filler below survives ONLY for the case it was written for:
+	// a multi-call relay turn where the host deliberately answered some calls and
+	// not others and the transcript must stay balanced. That requires SOME
+	// recognised payload to be present.
+	if answer.Ok && len(byID) == 0 && single == nil {
+		return nil, fmt.Errorf("toolnexus: cannot resume — answer.Ok is true but its data carries no result the engine can read "+
+			"(expected data[%q] as a string, or data[%q] as an array of {id, output, isError}); "+
+			"build it with AnswerOutput(id, output) or RelayAnswer(id, results). Keys seen: %v",
+			RelayOutputKey, relayResultsKey, answerKeys(answer.Data))
+	}
 
 	// Map relayed calls by id so an unsupplied result can name the tool it belongs to.
 	relayNames := map[string]string{}
@@ -410,4 +474,16 @@ func (c *Client) AskWithAnswer(ctx context.Context, tk *Toolkit, id string, pend
 		return res, err
 	}
 	return res, nil
+}
+
+// answerKeys names the keys a caller actually sent, so the error can say what was
+// wrong rather than only what was expected. Values are NEVER included — an
+// Answer's payload may carry a credential a human just typed.
+func answerKeys(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

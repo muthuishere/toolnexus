@@ -118,6 +118,63 @@ export interface InboxItem {
 
 export type HandleState = "idle" | "running" | "suspended" | "closed"
 
+/**
+ * The §7D AGENT status vocabulary, as a value. It is a DIFFERENT, larger closed set than the
+ * §8 CLIENT vocabulary (`RUN_STATUSES` = done/pending/incomplete): only this one contains
+ * `"timeout"`, and `"timeout"` here means a `wait()` DEADLINE expired while the child keeps
+ * running — never that an LLM call timed out. Two fields are called `status`; they are not
+ * interchangeable (ADR 0027 D2.1).
+ */
+export const TASK_STATUSES = [
+  "done", "pending", "incomplete", "interrupted", "closed", "timeout", "error",
+] as const
+
+/**
+ * The CLOSED `limit` vocabulary (addendum A14). A value NAMES THE BUDGET FIELD that stopped the
+ * run, spelled exactly as `Budget` spells it, plus the two non-budget stops `completion` and
+ * `timeout`. Identical in all seven ports, like the `loopUnsupported` strings — "which limit
+ * stopped me" is only answerable if the answer is the same word everywhere.
+ *
+ * A port's INTERNAL pool/dimension name is an implementation detail and must never leak into
+ * the field; `canonicalLimit` is the boundary that enforces that here.
+ */
+export const TASK_LIMITS = [
+  "maxTurns", "maxTokens", "maxToolCalls", "maxWallMs", "maxChildren", "maxConcurrent", "maxDepth",
+  "completion", "timeout",
+] as const
+
+export type TaskLimit = (typeof TASK_LIMITS)[number]
+
+/** Map anything the internals produce onto the closed vocabulary; unknown ⇒ undefined, never a
+ *  leaked internal name. */
+export function canonicalLimit(limit: string | undefined): TaskLimit | undefined {
+  return limit && (TASK_LIMITS as readonly string[]).includes(limit) ? (limit as TaskLimit) : undefined
+}
+
+/**
+ * NAMED CONSTANTS for the two closed vocabularies. Every `TaskResult` construction site in this
+ * file spells its status and limit through these, never as a string literal, so a rename cannot
+ * silently desync the two fields — which is exactly how `status:"timeout"` came to ship with an
+ * empty `limit` in three of the seven ports (addendum A18).
+ */
+export const S: Readonly<Record<TaskStatus, TaskStatus>> = Object.freeze({
+  done: "done", pending: "pending", incomplete: "incomplete", interrupted: "interrupted",
+  closed: "closed", timeout: "timeout", error: "error",
+})
+
+export const L: Readonly<Record<TaskLimit, TaskLimit>> = Object.freeze({
+  maxTurns: "maxTurns", maxTokens: "maxTokens", maxToolCalls: "maxToolCalls", maxWallMs: "maxWallMs",
+  maxChildren: "maxChildren", maxConcurrent: "maxConcurrent", maxDepth: "maxDepth",
+  completion: "completion", timeout: "timeout",
+})
+
+/**
+ * THE INVARIANT `S`/`L` exist to protect (addendum A18): a LIMIT stop (`incomplete`, `timeout`)
+ * names its limit; every other status carries none. It is asserted by the suite, not exported —
+ * a predicate that exists so our own tests can state a rule is not public API (A19b, ADR 0019).
+ * Ports copy the PREDICATE, not an export.
+ */
+
 export type TaskStatus =
   | "done"
   | "pending"      // §10 durable suspension — resume via runtime.resume(answer)
@@ -135,8 +192,23 @@ export interface TaskResult {
   /** Present iff status === "pending". `data.path` carries the suspended handle's
    * id path (§10 agent-escalation addendum) — never a field grafted on Request. */
   pending?: Request
+  /** Cumulative LLM round trips for this handle's SUBTREE — never per-run, never reset. */
   turns: number
+  /**
+   * Cumulative TREE total: this handle's own spend plus every descendant's, on EVERY status
+   * (ADR 0025 D1). It was already the tree total on four of the seven status branches; this
+   * gives the field one meaning. `parent.totalTokens >= child.totalTokens` always holds.
+   */
   totalTokens: number
+  /** This handle's OWN accumulated spend, excluding children. */
+  ownTokens: number
+  /**
+   * WHICH limit stopped the run, as a value to branch on rather than prose to match. Drawn from
+   * the CLOSED, cross-port `TASK_LIMITS` vocabulary (addendum A14) — it names the `Budget` field,
+   * or `completion` / `timeout`. Absent otherwise. A stop you cannot explain to a user is a bug,
+   * not a state.
+   */
+  limit?: TaskLimit
 }
 
 /** Uniform verb failure — returned, never thrown (only the root throws to the host). */
@@ -206,6 +278,8 @@ export class Handle {
   readonly deadline?: number
   /** Total tokens attributed to this handle (own turns + descendant roll-up). */
   usageTotal = 0
+  /** Tokens spent by THIS handle's own turns, excluding descendants (ADR 0025 D1). */
+  ownTokens = 0
   /** Total tool calls attributed to this handle (own + descendant roll-up). */
   toolCallsTotal = 0
   /** LLM round trips run by this handle itself (never reset — resume grows it). */
@@ -418,11 +492,11 @@ export class AgentRuntime {
     if (opts?.by && h.parent !== opts.by) {
       return Promise.resolve({
         text: `wait refused: only the spawner may wait on ${h.id}`,
-        isError: true, status: "error", turns: h.turnsTotal, totalTokens: h.usageTotal,
+        isError: true, status: S.error, turns: h.turnsTotal, totalTokens: h.usageTotal, ownTokens: h.ownTokens,
       })
     }
     if (h.state === "closed") {
-      return Promise.resolve(h.lastResult ?? { text: "closed", isError: true, status: "closed", turns: h.turnsTotal, totalTokens: h.usageTotal })
+      return Promise.resolve(h.lastResult ?? { text: "closed", isError: true, status: S.closed, turns: h.turnsTotal, totalTokens: h.usageTotal, ownTokens: h.ownTokens })
     }
     if (h.state === "suspended") return Promise.resolve(this.pendingResult(h))
     if (h.state === "idle" && h.lastResult && !this.isQueued(h)) return Promise.resolve(h.lastResult)
@@ -440,7 +514,7 @@ export class AgentRuntime {
         cancel = this.clock.setTimeout(() => {
           const i = h.waiters.indexOf(finish)
           if (i >= 0) h.waiters.splice(i, 1)
-          finish({ text: `wait timeout after ${opts.timeoutMs}ms (child still ${h.state})`, isError: true, status: "timeout", turns: h.turnsTotal, totalTokens: h.usageTotal })
+          finish({ text: `wait timeout after ${opts.timeoutMs}ms (child still ${h.state})`, isError: true, status: S.timeout, limit: L.timeout, turns: h.turnsTotal, totalTokens: h.usageTotal, ownTokens: h.ownTokens })
         }, opts.timeoutMs)
       }
     })
@@ -496,7 +570,7 @@ export class AgentRuntime {
     await h.def.onClose?.(h, reason)
     const prev = h.state
     h.state = "closed"
-    const final: TaskResult = { text: "closed", isError: true, status: "closed", turns: h.turnsTotal, totalTokens: h.usageTotal }
+    const final: TaskResult = { text: "closed", isError: true, status: S.closed, turns: h.turnsTotal, totalTokens: h.usageTotal, ownTokens: h.ownTokens }
     for (const w of h.waiters.splice(0)) w(final)
     this.t(`${h.id}: ${prev}→closed (${reason})`)
   }
@@ -527,16 +601,19 @@ export class AgentRuntime {
    * REATTACHES to the existing child by task key — never spawns a duplicate.
    * The root alone may throw to the host.
    */
-  async resume(answer: Answer): Promise<void> {
+  async resume(answer: Answer): Promise<TaskResult> {
     const leaf = this.deepestSuspended(this.root)
     if (!leaf) throw new Error("no suspended handle to resume")
     this.t(`${leaf.id}: resume with Answer(ok=${answer.ok}) at checkpoint (turns so far: ${leaf.turnsTotal})`)
-    await this.resumeSuspended(leaf, answer, { inline: false })
+    // The value is the settled result of the TOPMOST handle the cascade re-ran — what the host
+    // would have got from `Agent.run` had the suspension never happened (ADR 0025 D3).
+    let topmost = await this.resumeSuspended(leaf, answer, { inline: false })
     for (let p = leaf.parent; p && p !== this.root; p = p.parent) {
       if (p.state !== "suspended") break
       this.t(`${p.id}: cascade resume (reattaching delegated work)`)
-      await this.resumeSuspended(p, undefined, { inline: false })
+      topmost = await this.resumeSuspended(p, undefined, { inline: false })
     }
+    return topmost
   }
 
   private deepestSuspended(h: Handle): Handle | null {
@@ -580,25 +657,28 @@ export class AgentRuntime {
   // ---- budgets (live ancestor-chain enforcement + roll-up ledger) --------
 
   /** Walk the LIVE ancestor chain; name the first exhausted pool, if any. */
-  private poolLimit(h: Handle): string | undefined {
+  private poolLimit(h: Handle): TaskLimit | undefined {
     const now = this.clock.now()
     for (let a: Handle | null = h; a; a = a.parent) {
-      if (a.pool.tokens <= 0) return "maxTokens"
-      if (a.pool.toolCalls <= 0) return "maxToolCalls"
-      if (a.deadline !== undefined && now >= a.deadline) return "maxWallMs"
+      if (a.pool.tokens <= 0) return L.maxTokens
+      if (a.pool.toolCalls <= 0) return L.maxToolCalls
+      if (a.deadline !== undefined && now >= a.deadline) return L.maxWallMs
     }
     return undefined
   }
 
   /** Lifetime turn cap on the handle itself (turns never reset across resumes). */
-  private turnCap(h: Handle): string | undefined {
-    return h.turnsTotal >= h.eff.maxTurns ? "maxTurns" : undefined
+  private turnCap(h: Handle): TaskLimit | undefined {
+    return h.turnsTotal >= h.eff.maxTurns ? L.maxTurns : undefined
   }
 
   /** A limit stop is LOUD: settle an incomplete result (never silent, never a throw). */
-  private settleRefused(h: Handle, limit: string): string {
+  private settleRefused(h: Handle, limit: TaskLimit): string {
+    // `limit` here is already a Budget field name (`poolLimit`/`turnCap` return them verbatim);
+    // `canonicalLimit` below is the guard that keeps it that way if either ever changes.
     const text = `budget exhausted (${limit}); partial work preserved`
-    const r: TaskResult = { text, isError: true, status: "incomplete", turns: h.turnsTotal, totalTokens: h.usageTotal }
+    // The exhausted pool is COMPUTED here and used to be discarded into prose. `limit` carries it.
+    const r: TaskResult = { text, isError: true, status: S.incomplete, turns: h.turnsTotal, totalTokens: h.usageTotal, ownTokens: h.ownTokens, limit }
     h.lastResult = r
     for (const w of h.waiters.splice(0)) w(r)
     return text
@@ -606,6 +686,7 @@ export class AgentRuntime {
 
   /** Usage roll-up IS the budget ledger: every ancestor's pool drains live. */
   private rollUp(h: Handle, tokens: number, toolCalls: number): void {
+    h.ownTokens += tokens // own figure: outside the ancestor walk, by construction
     for (let a: Handle | null = h; a; a = a.parent) {
       a.usageTotal += tokens
       a.toolCallsTotal += toolCalls
@@ -728,7 +809,7 @@ export class AgentRuntime {
 
   private pendingResult(h: Handle): TaskResult {
     const req = h.pendingRequest
-    return { text: req?.prompt ?? "", isError: false, status: "pending", pending: req, turns: h.turnsTotal, totalTokens: h.usageTotal }
+    return { text: req?.prompt ?? "", isError: false, status: S.pending, pending: req, turns: h.turnsTotal, totalTokens: h.usageTotal, ownTokens: h.ownTokens }
   }
 
   /** The escalation seam: this handle's §10 interpreter authority, with the
@@ -801,7 +882,7 @@ export class AgentRuntime {
         h.checkpoint = { input }
         h.drained = [] // drained items ride the checkpointed input, not the inbox
         this.t(`${h.id}: running→suspended (pending "${stamped.kind}")`)
-        result = { text: r.text, isError: false, status: "pending", pending: stamped, turns: r.turns, totalTokens: r.usage.totalTokens }
+        result = { text: r.text, isError: false, status: S.pending, pending: stamped, turns: h.turnsTotal, totalTokens: h.usageTotal, ownTokens: h.ownTokens }
       } else if (r.status === "incomplete") {
         h.state = "idle"
         h.drained = []
@@ -810,13 +891,17 @@ export class AgentRuntime {
         // generic sentence. Reading `limit` is how the runtime tells them apart.
         result = {
           text: r.limit === "completion" ? r.text : "hit maxTurns without a final answer",
-          isError: true, status: "incomplete", turns: r.turns, totalTokens: r.usage.totalTokens,
+          isError: true, status: S.incomplete, turns: h.turnsTotal, totalTokens: h.usageTotal, ownTokens: h.ownTokens,
+          // The LATENT instance golang found: forwarding the client's `limit` straight through
+          // would hand a host `incomplete` with an empty limit whenever the client omits it.
+          // The `?? L.maxTurns` is what makes the invariant hold by construction, not by luck.
+          limit: canonicalLimit(r.limit) ?? L.maxTurns,
         }
       } else {
         h.state = "idle"
         h.drained = []
         this.t(`${h.id}: running→idle (done, turns=${r.turns}, tokens=${r.usage.totalTokens})`)
-        result = { text: r.text, isError: false, status: "done", turns: r.turns, totalTokens: r.usage.totalTokens }
+        result = { text: r.text, isError: false, status: S.done, turns: h.turnsTotal, totalTokens: h.usageTotal, ownTokens: h.ownTokens }
       }
     } catch (e) {
       const aborted = h.abort?.signal.aborted ?? false
@@ -828,8 +913,9 @@ export class AgentRuntime {
       this.t(`${h.id}: running→idle (${aborted ? "interrupted; inbox intact" : `error: ${msg}`})`)
       result = {
         text: msg, isError: true,
-        status: closing ? "closed" : aborted ? "interrupted" : "error",
-        turns: h.turnsTotal, totalTokens: h.usageTotal,
+        // None of these three is a limit stop, so none carries a `limit` (A18).
+        status: closing ? S.closed : aborted ? S.interrupted : S.error,
+        turns: h.turnsTotal, totalTokens: h.usageTotal, ownTokens: h.ownTokens,
       }
     } finally {
       this.releaseChildSlot(h)
@@ -904,7 +990,7 @@ export class AgentRuntime {
           } else if (existing.state === "running") {
             r = await rt.wait(existing, { by: parent })
           } else {
-            r = existing.lastResult ?? { text: `no recorded result for ${existing.id}`, isError: true, status: "error", turns: existing.turnsTotal, totalTokens: existing.usageTotal }
+            r = existing.lastResult ?? { text: `no recorded result for ${existing.id}`, isError: true, status: S.error, turns: existing.turnsTotal, totalTokens: existing.usageTotal, ownTokens: existing.ownTokens }
           }
         } else {
           const spawned = rt.spawn(parent, name)

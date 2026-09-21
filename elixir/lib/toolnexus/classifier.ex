@@ -108,6 +108,27 @@ defmodule Toolnexus.Classifier do
 
   @doc "The System One endpoint base (§8B default)."
   def default_base_url, do: @default_base_url
+
+  # ── Backends (ADR 0027 / D5) ──────────────────────────────────────────────
+  # `base_url`, `model` and `api_key_env` are only JOINTLY valid. Two combinations
+  # work; nothing in three independent options said so. A `:backend` sets all three
+  # as a unit; the individual options stay available for a self-hosted origin.
+  @backends %{
+    "typesafe" => %{
+      base_url: "https://api.typesafe.ai/v1",
+      model: "jev-latest",
+      api_key_env: "TYPESAFE_API_KEY"
+    },
+    "openrouter" => %{
+      base_url: "https://openrouter.ai/api/v1",
+      model: "typesafe/jev-1.13",
+      api_key_env: "OPENROUTER_API_KEY"
+    }
+  }
+
+  @doc "The named backend presets: `\"typesafe\"` | `\"openrouter\"`."
+  @spec backends() :: map()
+  def backends, do: @backends
   @doc "The floating model alias. Pin it once thresholds are tuned."
   def default_model, do: @default_model
   @doc "The NAME of the env var holding the credential (§8B default)."
@@ -352,6 +373,7 @@ defmodule Toolnexus.Classifier do
   # ---------------------------------------------------------------- options
 
   defstruct style: "systemone",
+            backend: nil,
             base_url: @default_base_url,
             model: @default_model,
             api_key_env: @default_api_key_env,
@@ -425,6 +447,22 @@ defmodule Toolnexus.Classifier do
         Keyword.take(opts, Map.keys(%__MODULE__{}) -- [:__struct__, :static, :warned])
       )
 
+    # A `:backend` sets base_url + model + api_key_env AS A UNIT. The struct already
+    # carries the TypeSafe defaults, so "did the caller pass it?" is read off `opts`,
+    # never off the struct — an explicit option still wins over the preset.
+    c =
+      case c.backend && Map.get(@backends, to_string(c.backend)) do
+        nil ->
+          c
+
+        p ->
+          Enum.reduce([:base_url, :model, :api_key_env], c, fn key, acc ->
+            if Keyword.has_key?(opts, key),
+              do: acc,
+              else: Map.put(acc, key, Map.fetch!(p, key))
+          end)
+      end
+
     c = %{
       c
       | style: to_string(c.style || "systemone"),
@@ -439,8 +477,30 @@ defmodule Toolnexus.Classifier do
         decisions: c.decisions || []
     }
 
-    with {:ok, c} <- validate_style(c) do
+    with :ok <- validate_backend(c),
+         {:ok, c} <- validate_style(c) do
       {:ok, %{c | warned: start_warned()}}
+    end
+  end
+
+  # An unknown preset name, and the ONE mismatch that costs a 700ms "Unknown model"
+  # round trip: TypeSafe's floating alias pointed at the OpenRouter gateway.
+  defp validate_backend(c) do
+    name = c.backend && to_string(c.backend)
+
+    cond do
+      name != nil and not Map.has_key?(@backends, name) ->
+        {:error,
+         "classifier: unknown backend #{inspect(name)} (expected " <>
+           Enum.map_join(Enum.sort(Map.keys(@backends)), " | ", &inspect/1) <> ")"}
+
+      String.contains?(c.base_url, "openrouter.ai") and
+        is_binary(c.model) and String.starts_with?(c.model, "jev-") ->
+        {:error,
+         ~s(classifier: model "#{c.model}" is TypeSafe's spelling; on openrouter.ai use "typesafe/jev-1.13")}
+
+      true ->
+        :ok
     end
   end
 
@@ -779,20 +839,9 @@ defmodule Toolnexus.Classifier do
   # A backend's reported cause is surfaced INTACT so a caller can tell a limit
   # error from a transport fault — EXCEPT on an authentication status, whose body
   # routinely reflects the credential or the header that was sent.
-  defp cause(status, _body) when status in [401, 403], do: ""
-
-  defp cause(_status, body) do
-    case String.trim(to_text(body)) do
-      "" -> ""
-      s when byte_size(s) > 200 -> ": " <> binary_part(s, 0, 200) <> "…"
-      s -> ": " <> s
-    end
-  end
-
-  defp to_text(body) when is_binary(body), do: body
-  defp to_text(body) when is_list(body), do: IO.iodata_to_binary(body)
-  defp to_text(nil), do: ""
-  defp to_text(body), do: Jason.encode!(body)
+  # ONE implementation, shared with the §8 client path (ADR 0027 / D5): blank on
+  # 401/403, account identifiers redacted, then capped at 200 bytes.
+  defp cause(status, body), do: Toolnexus.ProviderError.cause(status, body)
 
   defp exception_message(e) when is_exception(e), do: Exception.message(e)
   defp exception_message(e), do: inspect(e)

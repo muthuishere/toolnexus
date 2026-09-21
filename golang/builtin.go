@@ -267,6 +267,13 @@ func matchGlob(rel, glob string) bool {
 }
 
 // walkBuiltinFiles recursively lists files under root (skips node_modules/.git).
+//
+// Ordering is CODE POINT, by construction and documented as such: filepath.
+// WalkDir walks in LEXICAL order (it sorts each directory's entries by name),
+// and Go compares strings byte-wise over UTF-8, which is code-point order. The
+// glob builtin's results are user- and model-visible, so do not replace this
+// with an unsorted read — os.File.Readdirnames in particular is NOT sorted
+// (DECISIONS A24).
 func walkBuiltinFiles(root string) []string {
 	var out []string
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -543,11 +550,19 @@ func grepTool() Tool {
 			if l, ok := argNumber(args, "limit"); ok {
 				limit = int(l)
 			}
-			var matches []string
+			// COLLECT → SORT → TRUNCATE (DECISIONS A26). This had the worse half
+			// of the defect: the cap broke the walk mid-traversal AND there was
+			// NO sort at all, so both the content and the order of what the
+			// model saw were whatever filepath.WalkDir happened to reach first.
+			// An ABSENT sort over shipped output is invisible to a grep for
+			// comparators, which is why this survived three audits.
+			type grepHit struct {
+				rel  string
+				line int
+				text string
+			}
+			var hits []grepHit
 			for _, file := range walkBuiltinFiles(root) {
-				if len(matches) >= limit {
-					break
-				}
 				rel, relErr := filepath.Rel(root, file)
 				if relErr != nil {
 					rel = file
@@ -559,15 +574,27 @@ func grepTool() Tool {
 				if rErr != nil {
 					continue
 				}
-				lines := strings.Split(string(raw), "\n")
-				for i, line := range lines {
-					if len(matches) >= limit {
-						break
-					}
+				for i, line := range strings.Split(string(raw), "\n") {
 					if re.MatchString(line) {
-						matches = append(matches, fmt.Sprintf("%s:%d:%s", file, i+1, line))
+						hits = append(hits, grepHit{rel: filepath.ToSlash(rel), line: i + 1,
+							text: fmt.Sprintf("%s:%d:%s", file, i+1, line)})
 					}
 				}
+			}
+			// By relative path in code point, then by line number ascending — a
+			// pure function of the matches, with no traversal order left in it.
+			sort.Slice(hits, func(i, j int) bool {
+				if hits[i].rel != hits[j].rel {
+					return hits[i].rel < hits[j].rel
+				}
+				return hits[i].line < hits[j].line
+			})
+			if len(hits) > limit {
+				hits = hits[:limit]
+			}
+			matches := make([]string, 0, len(hits))
+			for _, h := range hits {
+				matches = append(matches, h.text)
 			}
 			return bOk(strings.Join(matches, "\n"), map[string]any{"count": len(matches)})
 		},
@@ -598,19 +625,26 @@ func globTool() Tool {
 			if l, ok := argNumber(args, "limit"); ok {
 				limit = int(l)
 			}
+			// COLLECT → SORT → TRUNCATE, in that order (DECISIONS A26). The cap
+			// used to break the walk BEFORE the sort, so the filesystem walk
+			// chose WHICH files the model saw and sort.Strings only ordered the
+			// survivors. filepath.WalkDir's lexical order did not save this: its
+			// order is per-directory-level, while the sort is over full relative
+			// paths, so selection and presentation used two DIFFERENT rules —
+			// they disagree wherever a directory `alpha/` sits beside a file
+			// `alpha-b.txt`. A capped listing's order decides its CONTENT.
 			var found []string
 			for _, file := range walkBuiltinFiles(root) {
-				if len(found) >= limit {
-					break
-				}
 				rel, relErr := filepath.Rel(root, file)
 				if relErr != nil {
 					rel = file
 				}
 				if matchGlob(rel, pattern) {
-					found = append(found, rel)
+					found = append(found, filepath.ToSlash(rel))
 				}
 			}
+			// Code point by construction: Go compares strings byte-wise over
+			// UTF-8. Never a locale collator or a UTF-16 code-unit compare.
 			sort.Strings(found)
 			if len(found) > limit {
 				found = found[:limit]

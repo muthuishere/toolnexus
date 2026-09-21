@@ -26,6 +26,7 @@ import inspect
 import json
 import os
 import random
+import re
 import sys
 import threading
 import time
@@ -153,6 +154,23 @@ def _empty_usage() -> dict[str, int]:
     return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 
+# --------------------------------------------------------------------------- #
+# The §8 RUN status vocabulary — THREE values. It is NOT the §7D TaskStatus
+# vocabulary (seven values, in `toolnexus.agents.runtime`), which contains
+# `timeout` while this one does not. Two distinct vocabularies that share a field
+# NAME (`status`): D5 (#92.1, ADR 0027) names both rather than renaming either.
+RUN_STATUS_DONE = "done"
+RUN_STATUS_PENDING = "pending"
+RUN_STATUS_INCOMPLETE = "incomplete"
+#: The closed set, in SPEC order.
+RUN_STATUSES = (RUN_STATUS_DONE, RUN_STATUS_PENDING, RUN_STATUS_INCOMPLETE)
+
+#: The §7D ``limit`` names a run may carry (``status == "incomplete"``).
+LIMIT_MAX_TURNS = "maxTurns"
+LIMIT_COMPLETION = "completion"
+LIMIT_TIMEOUT = "timeout"
+
+
 @dataclass
 class RunResult:
     text: str
@@ -237,14 +255,69 @@ def _parse_retry_after(value: Optional[str]) -> Optional[int]:
     return n if n <= _RETRY_AFTER_MAX else None
 
 
-class _HttpError(Exception):
-    """Carries an HTTP status + body so the retry loop can inspect ``status``."""
+#: Account identifiers a provider routinely reflects back in an error body. A CAP
+#: IS NOT REDACTION — the leaking body in issue #91 was 96 bytes, well under any
+#: cap — so the values are replaced, not truncated (D5, #91/#92, ADR 0027).
+REDACTED = "«redacted»"
+_REDACT_KEYS = ("user_id", "account_id", "org_id", "organization")
+_REDACT_RE = re.compile(
+    r'("(?:' + "|".join(_REDACT_KEYS) + r')"\s*:\s*)(".*?(?<!\\)"|[^,}\s]+)'
+)
+#: Cap on the provider body carried in an error message (the classifier's cap,
+#: lifted to the §8 client path).
+MAX_ERROR_BODY = 200
+
+
+def redact_identifiers(text: str) -> str:
+    """Replace account-identifier VALUES with :data:`REDACTED`, keys intact."""
+    return _REDACT_RE.sub(lambda m: m.group(1) + f'"{REDACTED}"', text)
+
+
+def safe_error_body(status: int, text: str) -> str:
+    """The provider body as it is allowed to be READ — redacted, never capped.
+
+    A 401/403 body is dropped entirely: a gateway happily reflects the credential
+    or the ``Authorization`` header it was sent. Every other body keeps all of its
+    bytes with account-identifier VALUES replaced. This is the classifier's policy
+    (``classifier._cause``) lifted to the §8 client path, which had neither.
+    """
+    if status in (401, 403):
+        return ""
+    return redact_identifiers(text).strip()
+
+
+def capped_error_body(status: int, text: str) -> str:
+    """:func:`safe_error_body` capped at :data:`MAX_ERROR_BODY` — the MESSAGE form.
+
+    The cap is presentational (addendum A5): the typed ``body`` field carries the
+    whole redacted body, because a host that caught a typed error asked for all of
+    it. A CAP IS NOT REDACTION — the body that leaked in issue #91 was 96 bytes.
+    """
+    body = safe_error_body(status, text)
+    return body[:MAX_ERROR_BODY] + "…" if len(body) > MAX_ERROR_BODY else body
+
+
+class ProviderError(Exception):
+    """A provider answered with an HTTP error status (§8).
+
+    Typed so a host can branch without string-matching: ``status`` (the HTTP
+    status), ``body`` (the provider's FULL text, redacted per :func:`safe_error_body`;
+    only the message form is capped — addendum A5) and ``retry_after`` (seconds parsed from the header, or None). ``text`` is a
+    deprecated alias for ``body``.
+    """
 
     def __init__(self, status: int, text: str, retry_after: Optional[float]) -> None:
-        super().__init__(f"LLM {status}: {text}")
+        body = safe_error_body(status, text)
+        shown = capped_error_body(status, text)
+        super().__init__(f"LLM {status}: {shown}" if shown else f"LLM {status}")
         self.status = status
-        self.text = text
+        self.body = body
+        self.text = body
         self.retry_after = retry_after
+
+
+#: Back-compat alias — the type was private before it was worth catching.
+_HttpError = ProviderError
 
 
 def _open(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float):
@@ -596,6 +669,16 @@ class Client:
         self.store: ConversationStore = store if store is not None else InMemoryConversationStore()
         # §10 Suspension resolver — when a tool returns Pending, the client calls
         # this then retries the tool with ctx.answer set. None ⇒ durable halt.
+        #
+        # IDEMPOTENCY CONTRACT (D3, #90.2 — read before suspending inside a
+        # side-effecting tool): resolving a suspension RE-EXECUTES the same tool, and
+        # on the §7D durable path the resumed turn is REWOUND to its checkpoint, so
+        # that leaf's own tools run again from the start of the turn. Reattachment by
+        # task key protects `task` delegations only, never a leaf's own tools. Make a
+        # tool that may suspend idempotent (an idempotency key, a read-before-write),
+        # or suspend BEFORE the irreversible step. Replaying the checkpointed
+        # transcript instead is DEFERRED to its own change: §0 pins
+        # rewind-to-checkpoint by name, so that is a spec decision, not a bugfix.
         self.wait_for = wait_for
         # Observability sink — receives semantic metric events as the loop runs (§8).
         self.on_metric = on_metric
@@ -841,8 +924,12 @@ class Client:
             }
         )
 
-    def _system(self, toolkit: Toolkit) -> str:
-        parts = [self.system_prompt or "", toolkit.skills_prompt()]
+    def _system(self, toolkit: Optional[Toolkit]) -> str:
+        # D1 (#86, ADR 0023): the §0.10 system message dereferences the toolkit for
+        # skills_prompt() BEFORE anything touches tools. Null-guard is the whole fix —
+        # a toolkit-less run is a plain completion, and its request body carries no
+        # `tools` and no `tool_choice` key (not an empty array).
+        parts = [self.system_prompt or "", toolkit.skills_prompt() if toolkit is not None else ""]
         return "\n\n".join(p for p in parts if p)
 
     def _result(
@@ -905,7 +992,7 @@ class Client:
 
     async def _resolve_pending(
         self,
-        toolkit: Toolkit,
+        toolkit: Optional[Toolkit],
         name: str,
         args: dict[str, Any],
         request: Request,
@@ -917,7 +1004,7 @@ class Client:
         ``(result, halted)`` — ``halted`` is the request when no ``wait_for`` is
         configured (the run should stop and surface it). Mirrors JS ``resolvePending``.
         """
-        if self.wait_for is None:
+        if self.wait_for is None or toolkit is None:
             return ToolResult(output=request.prompt, is_error=True), request
         r = self.wait_for(request)
         if inspect.isawaitable(r):
@@ -966,7 +1053,7 @@ class Client:
             return 120.0  # default per-request timeout when no run deadline
         left = deadline - time.monotonic()
         if left <= 0:
-            raise RunTimeout(f"run timeout after {self.timeout_ms}ms")
+            raise RunTimeout(f"run timeout after {self.timeout_ms}ms (client timeout_ms budget)")
         return left
 
     async def _sleep(self, seconds: float, deadline: Optional[float], cancel: Optional[asyncio.Event]) -> None:
@@ -978,7 +1065,7 @@ class Client:
         while True:
             self._check_cancelled(cancel)
             if deadline is not None and time.monotonic() >= deadline:
-                raise RunTimeout(f"run timeout after {self.timeout_ms}ms")
+                raise RunTimeout(f"run timeout after {self.timeout_ms}ms (client timeout_ms budget)")
             remaining = end - time.monotonic()
             if remaining <= 0:
                 return
@@ -1063,7 +1150,7 @@ class Client:
                 # urllib raises socket.timeout (subclass of OSError/TimeoutError) on
                 # the per-request timeout; treat as the deadline if one is set.
                 if deadline is not None and time.monotonic() >= deadline:
-                    raise RunTimeout(f"run timeout after {self.timeout_ms}ms") from None
+                    raise RunTimeout(f"run timeout after {self.timeout_ms}ms (client timeout_ms budget)") from None
                 self._check_cancelled(cancel)
                 last_err = e
                 tier = classify({"error": e, "attempt": attempt, "retryable": True})
@@ -1075,7 +1162,7 @@ class Client:
 
     async def _run_tool(
         self,
-        toolkit: Toolkit,
+        toolkit: Optional[Toolkit],
         name: str,
         args: dict[str, Any],
         call_id: Optional[str],
@@ -1084,6 +1171,10 @@ class Client:
         """Run one tool through before_tool/after_tool hooks: rewrite args,
         short-circuit, or transform the result. Mirrors JS ``runTool``."""
         a = args
+        if toolkit is None:
+            # D1: a toolkit-less run declares no tools; a model that calls one anyway
+            # gets a tool error, never an AttributeError.
+            return a, ToolResult(output=f"unknown tool: {name}", is_error=True)
         found = toolkit.get(name)
         source = found.source if found is not None else "custom"
         t0 = _now()
@@ -1339,12 +1430,17 @@ class Client:
     async def run(
         self,
         prompt: Union[str, list[Any]],
-        toolkit: Toolkit,
+        toolkit: Optional[Toolkit] = None,
         history: Optional[list[dict[str, Any]]] = None,
         cancel: Optional[asyncio.Event] = None,
     ) -> RunResult:
         """Run the agent loop. ``history`` continues a prior transcript (the system
         prompt is NOT re-added); ``cancel`` is an optional external abort token.
+
+        ``toolkit`` is OPTIONAL (D1, #86): omit it (or pass ``None``) for a plain
+        completion. No toolkit ⇒ no skills block in the §0.10 system message and no
+        ``tools``/``tool_choice`` key on the wire at all — absent, never an empty
+        array, which several providers reject.
 
         Cancellation contract (SPEC §7D, python row — cooperative cancel):
         ``cancel`` is an :class:`asyncio.Event`. Guaranteed observation points are
@@ -1365,7 +1461,7 @@ class Client:
     async def ask(
         self,
         prompt: Union[str, list[Any]],
-        toolkit: Toolkit,
+        toolkit: Optional[Toolkit] = None,
         *,
         id: Optional[str] = None,  # noqa: A002 — mirrors JS `ask(prompt, { id })`
         on_text: Optional[Callable[[str], Any]] = None,
@@ -1404,14 +1500,14 @@ class Client:
         await self.store.save(id, result.messages)
         return result
 
-    def conversation(self, toolkit: Toolkit, cancel: Optional[asyncio.Event] = None) -> "Conversation":
+    def conversation(self, toolkit: Optional[Toolkit] = None, cancel: Optional[asyncio.Event] = None) -> "Conversation":
         """A stateful multi-turn conversation that retains history across sends."""
         return Conversation(self, toolkit, cancel)
 
     async def stream(
         self,
         prompt: Union[str, list[Any]],
-        toolkit: Toolkit,
+        toolkit: Optional[Toolkit] = None,
         *,
         id: Optional[str] = None,  # noqa: A002 — mirrors JS `stream(prompt, { id })`
         cancel: Optional[asyncio.Event] = None,
@@ -1438,7 +1534,7 @@ class Client:
     async def _run_openai(
         self,
         prompt: Union[str, list[Any]],
-        toolkit: Toolkit,
+        toolkit: Optional[Toolkit],
         history: Optional[list[dict[str, Any]]],
         cancel: Optional[asyncio.Event],
     ) -> RunResult:
@@ -1456,7 +1552,7 @@ class Client:
             if system:
                 messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": _prompt_content(prompt)})
-        tools = toolkit.to_openai()
+        tools = toolkit.to_openai() if toolkit is not None else []
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
         turns = 0
@@ -1549,7 +1645,7 @@ class Client:
     async def _run_anthropic(
         self,
         prompt: Union[str, list[Any]],
-        toolkit: Toolkit,
+        toolkit: Optional[Toolkit],
         history: Optional[list[dict[str, Any]]],
         cancel: Optional[asyncio.Event],
     ) -> RunResult:
@@ -1569,7 +1665,7 @@ class Client:
             messages: list[dict[str, Any]] = list(history) + [{"role": "user", "content": seed}]
         else:
             messages = [{"role": "user", "content": seed}]
-        tools = toolkit.to_anthropic()
+        tools = toolkit.to_anthropic() if toolkit is not None else []
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
         turns = 0
@@ -1659,7 +1755,7 @@ class Client:
     async def _stream_openai(
         self,
         prompt: Union[str, list[Any]],
-        toolkit: Toolkit,
+        toolkit: Optional[Toolkit],
         cancel: Optional[asyncio.Event],
         history: Optional[list[dict[str, Any]]] = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
@@ -1677,7 +1773,7 @@ class Client:
             if system:
                 messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": _prompt_content(prompt)})
-        tools = toolkit.to_openai()
+        tools = toolkit.to_openai() if toolkit is not None else []
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
         turns = 0
@@ -1830,7 +1926,7 @@ class Client:
     async def _stream_anthropic(
         self,
         prompt: Union[str, list[Any]],
-        toolkit: Toolkit,
+        toolkit: Optional[Toolkit],
         cancel: Optional[asyncio.Event],
         history: Optional[list[dict[str, Any]]] = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
@@ -1850,7 +1946,7 @@ class Client:
             messages: list[dict[str, Any]] = list(history) + [{"role": "user", "content": seed}]
         else:
             messages = [{"role": "user", "content": seed}]
-        tools = toolkit.to_anthropic()
+        tools = toolkit.to_anthropic() if toolkit is not None else []
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
         turns = 0
@@ -2056,11 +2152,11 @@ class Client:
                 if deadline is not None:
                     timeout = deadline - time.monotonic()
                     if timeout <= 0:
-                        raise RunTimeout(f"run timeout after {self.timeout_ms}ms")
+                        raise RunTimeout(f"run timeout after {self.timeout_ms}ms (client timeout_ms budget)")
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=timeout)
                 except asyncio.TimeoutError:
-                    raise RunTimeout(f"run timeout after {self.timeout_ms}ms") from None
+                    raise RunTimeout(f"run timeout after {self.timeout_ms}ms (client timeout_ms budget)") from None
                 self._check_cancelled(cancel)
                 if item is _SENTINEL:
                     break
@@ -2093,7 +2189,7 @@ class Conversation:
     """Stateful multi-turn conversation: each :meth:`send` continues the same
     transcript (memory). Mirrors the JS ``Conversation``."""
 
-    def __init__(self, client: Client, toolkit: Toolkit, cancel: Optional[asyncio.Event] = None) -> None:
+    def __init__(self, client: Client, toolkit: Optional[Toolkit] = None, cancel: Optional[asyncio.Event] = None) -> None:
         self._client = client
         self._toolkit = toolkit
         self._cancel = cancel

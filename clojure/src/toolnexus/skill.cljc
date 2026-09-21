@@ -50,11 +50,18 @@
 ;; Portable path helpers — no java.io.File, no filepath
 ;; ---------------------------------------------------------------------------
 
+(defn- last-sep
+  "Index of the last `/`, via the text seam — NEVER `clojure.string/last-index-of`,
+  which returns a BYTE offset on the cljgo host while `subs` works in runes. See
+  `toolnexus.tool/last-index-of-char` for the measurement."
+  [s]
+  (tool/last-index-of-char s \/))
+
 (defn parent-dir
   "The directory part of `path`, or \".\" when there is no separator."
   [path]
   (let [p   (str path)
-        idx (str/last-index-of p "/")]
+        idx (last-sep p)]
     (if idx (subs p 0 idx) ".")))
 
 (defn file-name
@@ -62,7 +69,7 @@
   clojure.core collides, but the name is kept explicit for readability."
   [path]
   (let [p   (str path)
-        idx (str/last-index-of p "/")]
+        idx (last-sep p)]
     (if idx (subs p (inc idx)) p)))
 
 ;; ---------------------------------------------------------------------------
@@ -74,49 +81,44 @@
       (str/includes? (str path) "/.git/")))
 
 (defn- parse-skill-file
-  "Read + parse one SKILL.md into `{:info …}` or `{:skip {:location :reason}}`.
+  "Read + parse one SKILL.md into `{:info …}` or `{:skip {:location :reason :detail}}`.
 
-  `toolnexus.frontmatter/parse` THROWS on anything outside its documented
-  subset, by design. Discovery must therefore isolate it exactly the way §0.3
-  isolates a failed MCP server: a single unparseable SKILL.md is recorded as a
-  typed skip and every OTHER skill still loads. A throwing parser that takes
-  down discovery of an entire skills tree would be a far worse bug than the
-  strictness it is protecting.
+  `toolnexus.frontmatter/read-frontmatter` NEVER throws: it reads the file with
+  a real YAML parser (`toolnexus.yaml`) and, only when YAML has already refused
+  the frontmatter, rescues `name`/`description` line-wise (ADR 0028, issue #93).
+  A file neither path can name is a typed skip carrying `:detail` — the YAML
+  parser's own message, e.g. \"tabs are not allowed as indentation at line 3\" —
+  so a host can fix the file instead of guessing. `:reason` stays byte-identical
+  across ports; `:detail` is native and is never compared for parity.
 
-  DIVERGENCE, recorded not hidden: SPEC §3 mandates a *standard YAML parser*, so
-  a block scalar (`description: >`) is legal frontmatter in the five shipped
-  ports and is REJECTED here — this port skips that skill as
-  `malformed-frontmatter` where Go/JS/Python would load it. That is a real
-  parity gap for skills outside the subset; it does not move the shared
-  `examples/` fixture, which uses plain scalars only."
+  The DIVERGENCE this port used to record here — block scalars, sequences,
+  nested maps and anchors rejected by a hand-rolled subset — is GONE. Measured
+  over ~/.claude/skills it cost 42 of 87 files."
   [path]
   (let [text (try (fs/read-file path) (catch Throwable _ ::unreadable))]
     (if (= ::unreadable text)
       {:skip {:location path :reason "unreadable"}}
-      (let [parsed (try (frontmatter/parse text)
-                        (catch Throwable _ ::malformed))]
-        (if (= ::malformed parsed)
-          {:skip {:location path :reason "malformed-frontmatter"}}
-          (let [[data body] parsed]
-            (if (str/blank? (str (:name data)))
-              ;; `name` is REQUIRED. No frontmatter at all lands here too, since
-              ;; frontmatter/parse returns [{} text] for a plain body.
-              {:skip {:location path :reason "missing-name"}}
-              (let [dir (parent-dir path)]
-                {:info {:name        (:name data)
-                        ;; ABSENT description (nil) and EMPTY description ("") are
-                        ;; different: js/src/skill.ts filters the prompt catalog on
-                        ;; `description !== undefined`, golang/skill.go on
-                        ;; `!= ""`. Those two shipped ports genuinely disagree for
-                        ;; `description:` with an empty value; we follow JS.
-                        :description (:description data)
-                        :location    path
-                        :content     body
-                        :dir         dir
-                        ;; js/src/skill.ts uses pathToFileURL(dir).href, which for
-                        ;; an absolute POSIX path is exactly "file://" + dir.
-                        :base        (str "file://" dir)
-                        :origin      "fs"}}))))))))
+      (let [r    (frontmatter/read-frontmatter text)
+            data (:data r)
+            body (:body r)]
+        (if (:reason r)
+          (cond-> {:skip {:location path :reason (:reason r)}}
+            (:detail r) (assoc-in [:skip :detail] (:detail r)))
+          (let [dir (parent-dir path)]
+            {:info {:name        (:name data)
+                    ;; ABSENT description (nil) and EMPTY description ("") are
+                    ;; different: js/src/skill.ts filters the prompt catalog on
+                    ;; `description !== undefined`, golang/skill.go on
+                    ;; `!= ""`. Those two shipped ports genuinely disagree for
+                    ;; `description:` with an empty value; we follow JS.
+                    :description (:description data)
+                    :location    path
+                    :content     body
+                    :dir         dir
+                    ;; js/src/skill.ts uses pathToFileURL(dir).href, which for
+                    ;; an absolute POSIX path is exactly "file://" + dir.
+                    :base        (str "file://" dir)
+                    :origin      "fs"}}))))))
 
 ;; ---------------------------------------------------------------------------
 ;; §3 S1 — skills supplied as DATA (no filesystem) and §3 S4 — a logical base
@@ -147,25 +149,66 @@
               :origin      "logical"
               :resources   (vec (:resources d))}})))
 
+(defn- path-depth
+  "Number of segments in a relative discovery path. `/` only — `find-files`
+  hands back `/`-separated paths on both hosts, so there is nothing
+  host-specific to normalise here."
+  [rel-path]
+  (count (remove str/blank? (str/split rel-path #"/"))))
+
+(defn discovery-compare
+  "The §3 discovery order over two paths RELATIVE to a root's logical base:
+  DEPTH ascending, then Unicode CODE POINT (addendum A15, correcting A1a).
+
+  WHY DEPTH FIRST, and why A1a alone was wrong. §3 and the OpenSpec scenario
+  both say a SHALLOWER path beats a nested copy of the same name. A pure
+  code-point sort does not deliver that — it delivers it only for names that
+  happen to sort before the nested directory's first segment:
+
+      docx -> docx/            (d < s, top-level wins)
+      xlsx -> synced/…/xlsx    (x > s, the NESTED copy wins)
+
+  So the winner depended on the skill's first letter relative to a sibling
+  directory's name, which is indefensible and is not what anyone intended. The
+  external consumer found it on a real corpus. Sorting by depth first makes the
+  rule that was already written down actually true, for every name.
+
+  A1a/A1c are unchanged and remain the TIE-BREAK WITHIN a depth: code POINT,
+  via `tool/compare-strings`, never a locale collator, never case folding,
+  never `compare` (which is UTF-16 code-UNIT order on the JVM host and
+  disagrees for anything above U+FFFF)."
+  [a b]
+  (let [d (compare (path-depth a) (path-depth b))]
+    (if (zero? d) (tool/compare-strings a b) d)))
+
 (defn candidates
   "Every SKILL.md under `root`, in DISCOVERY ORDER, as a parsed skill or a typed
   skip.
 
-  Discovery order is whatever `koine.fs/find-files` returns, and find-files
-  SORTS (koine/fs.cljc: \"Every file under `root` whose path ends with `suffix`,
-  SORTED\"). Every port's first-name-wins rule is order-dependent, so that sort
-  is the only reason two hosts cannot disagree about which duplicate survives.
-  We rely on it and deliberately do not re-sort.
+  DISCOVERY ORDER is pinned, not inherited: `discovery-compare` over the path
+  RELATIVE to this root's logical base — depth, then code point (A15/A1c). A
+  symlink sorts at the path it was DISCOVERED at, not at its target, because
+  that is the only one of the two a caller can see.
+
+  It is sorted HERE rather than relied upon from `koine.fs/find-files` even
+  though find-files sorts: first-name-wins is order-dependent, a rule that
+  decides which duplicate survives may not rest on another library's promise,
+  and find-files' own order is plain lexicographic — which is precisely the
+  order A15 corrects.
 
   Note find-files takes a SUFFIX, not a glob, so the suffix is \"/SKILL.md\" —
   a bare \"SKILL.md\" would also match a file named MYSKILL.md."
   [root]
   (if-not (fs/exists? root)
     []
-    (->> (fs/find-files root "/SKILL.md")
-         (map str)
-         (remove ignored-path?)
-         (mapv parse-skill-file))))
+    (let [base (str root)
+          rel  (fn [p] (let [p (str p)]
+                         (if (str/starts-with? p base) (subs p (count base)) p)))]
+      (->> (fs/find-files root "/SKILL.md")
+           (map str)
+           (remove ignored-path?)
+           (sort-by rel discovery-compare)
+           (mapv parse-skill-file)))))
 
 (defn merge-candidates
   "Dedupe by name, FIRST WINS; later duplicates become typed skips.
@@ -309,17 +352,39 @@
   [dir limit]
   (if (neg? limit)
     nil
-    (->> (fs/list-tree dir)
-         (map str)
-         (remove ignored-path?)
-         (remove fs/directory?)
-         (remove #(= "SKILL.md" (file-name %)))
-         ;; tool/sort-strings, not `sort`: this list is the §0.6 byte-exact
-         ;; <skill_files> block, and plain sort disagrees across hosts above the
-         ;; BMP.
-         tool/sort-strings
-         (take (if (zero? limit) default-sample-limit limit))
-         vec)))
+    (let [base (str dir)
+          rel  (fn [p] (let [p (str p)]
+                         (if (str/starts-with? p base) (subs p (count base)) p)))]
+      (->> (fs/list-tree dir)
+           (map str)
+           (remove ignored-path?)
+           (remove fs/directory?)
+           (remove (fn [p] (= "SKILL.md" (file-name p))))
+           ;; A25 — the settled rule, identical in all seven ports: COLLECT
+           ;; every candidate, SORT by the path RELATIVE to the skill directory
+           ;; in PLAIN Unicode code-point order, THEN truncate to the cap.
+           ;;
+           ;; Plain code point, with no depth rule and no per-directory sorting.
+           ;; A15's depth ordering exists to resolve duplicate skill NAMES in
+           ;; discovery and has no business ordering a flat listing; and sorting
+           ;; per directory would make the result a function of the TRAVERSAL,
+           ;; so every port would have to reproduce the same stack discipline.
+           ;; A global sort makes it a function of the file set and the cap
+           ;; alone, which is the thing seven ports can actually agree on.
+           ;;
+           ;; SORT BEFORE CAPPING is the load-bearing half (ADR-0004 K1). All
+           ;; five other ports capped mid-traversal, which let the FILESYSTEM
+           ;; decide which files the model saw, not merely their order. This
+           ;; port already sorted first; the change here is that the key is the
+           ;; RELATIVE path rather than the absolute one.
+           ;;
+           ;; `tool/compare-strings`, never bare `sort`: `koine.fs/list-tree`
+           ;; promises no order on either host, so an unsorted read would let
+           ;; THIS PORT'S TWO HOSTS ship different sample CONTENTS — not merely
+           ;; a different order — for the same skill.
+           (sort-by rel tool/compare-strings)
+           (take (if (zero? limit) default-sample-limit limit))
+           vec))))
 
 (defn skill-files
   "The `<skill_files>` list for one skill, or nil when there is no block.

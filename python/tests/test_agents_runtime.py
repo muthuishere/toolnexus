@@ -38,7 +38,7 @@ async def test_fanout_isolation_parallelism_rollup():
     # 2. parent got BOTH child answers (context isolation: only final texts)
     assert all(s in r.text for s in fx["textContains"])
     assert r.text.count("found:") == fx["textOccurrences"]["found:"]
-    # 3. parent ran 2 turns only (children's turns never enter the parent)
+    # 3. parent ran 2 turns only (children's turns never enter the parent — A13b)
     assert r.turns == fx["parentTurns"]
     # 4. two children spawned with deterministic parent-scoped ids
     for cid, expected in fx["transitions"].items():

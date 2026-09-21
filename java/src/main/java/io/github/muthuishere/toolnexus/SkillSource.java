@@ -5,7 +5,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -104,11 +103,22 @@ public final class SkillSource {
         public static final String UNREADABLE = "unreadable";
 
         public final String location;
+        /** The typed reason — byte-identical across ports, and unchanged by this fix. */
         public final String reason;
+        /** The NATIVE parser's own message, when there was one. {@code reason} tells a host
+         * WHICH bucket a file fell into; without {@code detail} it could never tell WHY, so a
+         * malformed skill was indistinguishable from a missing one. Empty when there is no
+         * underlying error to report. */
+        public final String detail;
 
         SkillSkip(String location, String reason) {
+            this(location, reason, "");
+        }
+
+        SkillSkip(String location, String reason, String detail) {
             this.location = location;
             this.reason = reason;
+            this.detail = detail == null ? "" : detail;
         }
     }
 
@@ -139,10 +149,22 @@ public final class SkillSource {
 
     private final Map<String, SkillInfo> skills;
     private final Tool tool;
+    private final List<SkillSkip> skipped;
 
-    private SkillSource(Map<String, SkillInfo> skills, Tool tool) {
+    private SkillSource(Map<String, SkillInfo> skills, Tool tool, List<SkillSkip> skipped) {
         this.skills = skills;
         this.tool = tool;
+        this.skipped = skipped == null ? List.of() : List.copyOf(skipped);
+    }
+
+    /**
+     * A2: every candidate SKILL.md that did NOT become a skill, as DATA on the load result —
+     * not a hook (a hook shape differs per port and cannot be a parity gate; ADR 0014's
+     * single-slot problem applies). A host no longer has to call {@link #listSkills} a second
+     * time to learn that six of eighty-seven skills vanished.
+     */
+    public List<SkillSkip> skipped() {
+        return skipped;
     }
 
     public Map<String, SkillInfo> skills() {
@@ -157,7 +179,11 @@ public final class SkillSource {
     public String prompt() {
         List<SkillInfo> described = skills.values().stream()
                 .filter(s -> s.description != null)
-                .sorted(Comparator.comparing(s -> s.name))
+                // A22: the §0.10 skills prompt is pinned BYTE-IDENTICAL across ports, so its
+                // order is CODE POINT over the skill name — the same rule as A1c, in the second
+                // place it was needed. `Comparator.comparing(s -> s.name)` is String.compareTo,
+                // i.e. UTF-16 code UNITS, which diverges above U+FFFF.
+                .sorted((x, y) -> compareCodePoints(x.name, y.name))
                 .collect(Collectors.toList());
         if (described.isEmpty()) return "No skills are currently available.";
         StringBuilder sb = new StringBuilder(SKILLS_PROMPT_PREAMBLE);
@@ -197,12 +223,24 @@ public final class SkillSource {
             System.err.println("[toolnexus] skills dir not found: " + root);
             return out;
         }
-        for (Path file : walkSkillFiles(rootPath)) {
+        // A1 discovery order: dirs in the order the CALLER passed them; WITHIN a dir,
+        // lexicographic by path relative to that dir. Files.list order is filesystem order,
+        // which is not stable across machines — so sort explicitly and never rely on it.
+        List<Path> files = walkSkillFiles(rootPath);
+        // A15: DEPTH ascending FIRST, then A1a/A1c CODE-POINT order as the tie-break within a
+        // depth. Pure code-point order does NOT deliver "a top-level skill beats a nested copy":
+        // `docx/` beats `synced/…/docx/` only because 'd' < 's', while `xlsx/` would LOSE to
+        // `synced/…/xlsx/` because 'x' > 's'. Depth-first makes the rule true for every name.
+        // Never a Collator (locale collation), never case folding. A symlink sorts at its
+        // DISCOVERED path, not its target.
+        files.sort((x, y) -> compareDiscovery(relativeKey(rootPath, x), relativeKey(rootPath, y)));
+        for (Path file : files) {
             String text;
             try {
                 text = Files.readString(file);
             } catch (IOException e) {
-                out.add(new RawCandidate(null, new SkillSkip(file.toAbsolutePath().toString(), SkillSkip.UNREADABLE)));
+                out.add(new RawCandidate(null, new SkillSkip(file.toAbsolutePath().toString(),
+                        SkillSkip.UNREADABLE, e.getMessage() == null ? e.toString() : e.getMessage())));
                 continue;
             }
             Map<String, Object> parsed = parseFrontmatter(text);
@@ -210,14 +248,15 @@ public final class SkillSource {
             Map<String, String> data = (Map<String, String>) parsed.get("data");
             String content = (String) parsed.get("content");
             boolean malformed = Boolean.TRUE.equals(parsed.get("malformed"));
+            String detail = String.valueOf(parsed.getOrDefault("detail", ""));
             String abs = file.toAbsolutePath().toString();
             if (malformed) {
-                out.add(new RawCandidate(null, new SkillSkip(abs, SkillSkip.MALFORMED)));
+                out.add(new RawCandidate(null, new SkillSkip(abs, SkillSkip.MALFORMED, detail)));
                 continue;
             }
             String name = data.get("name");
             if (name == null || name.isEmpty()) {
-                out.add(new RawCandidate(null, new SkillSkip(abs, SkillSkip.MISSING_NAME)));
+                out.add(new RawCandidate(null, new SkillSkip(abs, SkillSkip.MISSING_NAME, detail)));
                 continue;
             }
             out.add(new RawCandidate(
@@ -319,7 +358,7 @@ public final class SkillSource {
         Merged merged = mergeCandidates(collectCandidates(opts));
         Map<String, SkillInfo> resolved = applyFilter(merged.skills, opts.filter);
         Tool tool = new SkillTool(resolved, opts.sampleLimit);
-        return new SkillSource(resolved, tool);
+        return new SkillSource(resolved, tool, merged.skipped);
     }
 
     private static final class SkillTool implements Tool {
@@ -369,7 +408,8 @@ public final class SkillSource {
             SkillInfo info = skills.get(name);
             if (info == null) {
                 List<String> avail = new ArrayList<>(skills.keySet());
-                avail.sort(Comparator.naturalOrder());
+                // A22: same rule — this list is user-visible model input.
+                avail.sort(SkillSource::compareCodePoints);
                 String list = avail.isEmpty() ? "none" : String.join(", ", avail);
                 return ToolResult.error("Skill \"" + name + "\" not found. Available skills: " + list);
             }
@@ -434,18 +474,44 @@ public final class SkillSource {
         Map<String, String> data = new LinkedHashMap<>();
         String content;
         boolean malformed = false;
+        String detail = "";
         if (!m.find()) {
             content = text;
         } else {
-            Object parsed;
+            String block = m.group(1);
+            content = m.group(2);
+            Object parsed = null;
+            boolean yamlRefused = false;
             try {
-                parsed = new Yaml().load(m.group(1));
+                parsed = new Yaml().load(block);
             } catch (RuntimeException e) {
-                // Malformed YAML must never crash discovery — fall back to empty.
-                parsed = null;
-                malformed = true;
+                // Malformed YAML must never crash discovery.
+                yamlRefused = true;
+                detail = e.getMessage() == null ? e.toString() : e.getMessage();
             }
-            if (parsed instanceof Map<?, ?> map) {
+            // A10: YAML libraries disagree about what they refuse — SnakeYAML throws on
+            // `description: [unterminated` where JS's yaml RECOVERS it into a sequence. So the
+            // rescue fires on all three shapes of "this frontmatter has no usable YAML meaning":
+            // the parse threw, it yielded a NON-MAPPING, or it yielded a mapping whose
+            // name/description is present but structurally wrong. The invariant the three
+            // protect together: a file never gains an invented description, and never silently
+            // keeps a structurally-wrong one.
+            if (!yamlRefused && !(parsed instanceof Map<?, ?>) && parsed != null) {
+                yamlRefused = true;
+                detail = "frontmatter YAML is not a mapping (" + parsed.getClass().getSimpleName() + ")";
+            }
+            if (!yamlRefused && parsed instanceof Map<?, ?> probe) {
+                for (String key : LENIENT_KEYS) {
+                    Object v = probe.get(key);
+                    if (v != null && !(v instanceof String || v instanceof Number || v instanceof Boolean)) {
+                        yamlRefused = true;
+                        detail = "frontmatter key \"" + key + "\" is not a scalar ("
+                                + v.getClass().getSimpleName() + ")";
+                        break;
+                    }
+                }
+            }
+            if (!yamlRefused && parsed instanceof Map<?, ?> map) {
                 for (Map.Entry<?, ?> entry : map.entrySet()) {
                     Object key = entry.getKey();
                     Object value = entry.getValue();
@@ -454,14 +520,114 @@ public final class SkillSource {
                         data.put(String.valueOf(key), String.valueOf(value).strip());
                     }
                 }
+            } else if (yamlRefused) {
+                // The lenient pass runs ONLY on frontmatter a real YAML parser has ALREADY
+                // refused. Order is the whole point: line-wise FIRST would misparse `description:
+                // |`, `description: >`, a plain scalar continued on the next line, and `!!str` —
+                // all of which the six YAML ports handle today. Running second means it can never
+                // see a file whose YAML semantics matter; by construction those have none.
+                data.putAll(lineWise(block));
+                if (data.get("name") == null || data.get("name").isEmpty()) malformed = true;
             }
-            content = m.group(2);
         }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("data", data);
         out.put("content", content);
         out.put("malformed", malformed);
+        out.put("detail", detail);
         return out;
+    }
+
+    /** Column 0, ordinary key characters, one {@code :}; the value is the rest of the line. */
+    private static final Pattern LENIENT_LINE =
+            Pattern.compile("^([A-Za-z0-9_][A-Za-z0-9_.-]*):[ \\t]*(.*)$");
+    /** The only two scalars the lenient pass will rescue — never an arbitrary key. */
+    private static final List<String> LENIENT_KEYS = List.of("name", "description");
+    /** A value opening with one of these starts a YAML construct the lenient pass does NOT
+     * implement, so it takes nothing rather than garbage. */
+    private static final String LENIENT_REFUSED_OPENERS = "|>&*[{!";
+
+    /** Rescue {@code name}/{@code description} from a frontmatter block YAML refused. */
+    private static Map<String, String> lineWise(String block) {
+        Map<String, String> data = new LinkedHashMap<>();
+        for (String raw : block.split("\r?\n", -1)) {
+            if (raw.isEmpty()) continue;
+            char c0 = raw.charAt(0);
+            // Indented continuation, comment, blank — not a top-level key. Column 0 only.
+            if (c0 == ' ' || c0 == '\t' || c0 == '#') continue;
+            Matcher lm = LENIENT_LINE.matcher(raw);
+            if (!lm.matches()) continue;
+            String key = lm.group(1);
+            String value = lm.group(2).strip();
+            // First wins, and only the two known scalars.
+            if (!LENIENT_KEYS.contains(key) || data.containsKey(key)) continue;
+            if (value.isEmpty() || LENIENT_REFUSED_OPENERS.indexOf(value.charAt(0)) >= 0) continue;
+            data.put(key, unquote(value));
+        }
+        return data;
+    }
+
+    private static String unquote(String v) {
+        if (v.length() > 1 && v.charAt(0) == v.charAt(v.length() - 1)
+                && (v.charAt(0) == '"' || v.charAt(0) == '\'')) {
+            return v.substring(1, v.length() - 1);
+        }
+        return v;
+    }
+
+    /**
+     * A1c: ordinal comparison by UNICODE CODE POINT. NOT {@link String#compareTo}, which orders by
+     * UTF-16 code UNIT and therefore sorts an astral-plane character (a surrogate pair, 0xD800…)
+     * BEFORE U+E000…U+FFFF instead of after — a divergence that fires only on some hosts' file
+     * names, which is exactly the kind of latent parity bug this batch exists to remove. No
+     * Collator, no case folding: ordinal and culture-invariant.
+     */
+    /**
+     * A15: the discovery comparator — DEPTH (number of path segments) ASCENDING first, then
+     * {@link #compareCodePoints} within a depth. A1a's code-point rule is unchanged; it is the
+     * TIE-BREAK, not the whole order. Without the depth term the winner of a duplicate name
+     * depends on the skill's first letter relative to a sibling directory's name, so `docx`
+     * resolves to `docx/SKILL.md` while `xlsx` resolves to `synced/&lt;uuid&gt;/xlsx/SKILL.md` —
+     * the defect the external consumer found on the real corpus.
+     */
+    static int compareDiscovery(String a, String b) {
+        int d = Integer.compare(depthOf(a), depthOf(b));
+        return d != 0 ? d : compareCodePoints(a, b);
+    }
+
+    /** Path segments in a relative key, separator-agnostic (Windows keys use {@code \}). */
+    private static int depthOf(String rel) {
+        int n = 1;
+        for (int i = 0; i < rel.length(); i++) {
+            char c = rel.charAt(i);
+            if (c == '/' || c == java.io.File.separatorChar) n++;
+        }
+        return n;
+    }
+
+    static int compareCodePoints(String a, String b) {
+        int i = 0;
+        int j = 0;
+        while (i < a.length() && j < b.length()) {
+            int ca = a.codePointAt(i);
+            int cb = b.codePointAt(j);
+            if (ca != cb) return Integer.compare(ca, cb);
+            i += Character.charCount(ca);
+            j += Character.charCount(cb);
+        }
+        return Integer.compare(a.length() - i, b.length() - j);
+    }
+
+    /** The sort key for A1: the path relative to the dir root, with a stable separator. */
+    private static String relativeKey(Path root, Path file) {
+        String rel;
+        try {
+            rel = root.toAbsolutePath().relativize(file.toAbsolutePath()).toString();
+        } catch (IllegalArgumentException e) {
+            rel = file.toAbsolutePath().toString();
+        }
+        // A28: `/` on every platform, so the key a port sorts on is the same string everywhere.
+        return rel.replace(java.io.File.separatorChar, '/');
     }
 
     private static List<Path> walkSkillFiles(Path root) {
@@ -473,6 +639,11 @@ public final class SkillSource {
             Path dir = stack.pop();
             try (Stream<Path> entries = Files.list(dir)) {
                 List<Path> list = entries.collect(Collectors.toList());
+                // A24: `Files.list` is explicitly unordered. The candidates are re-sorted below,
+                // so this is not load-bearing today — but an unsorted directory read feeding
+                // shipped output is one refactor away from mattering, and costs nothing.
+                list.sort((x, y) -> compareCodePoints(
+                        x.getFileName().toString(), y.getFileName().toString()));
                 for (Path entry : list) {
                     String fn = entry.getFileName().toString();
                     boolean isDir = Files.isDirectory(entry);
@@ -497,17 +668,35 @@ public final class SkillSource {
         return out;
     }
 
+    /**
+     * The {@code <skill_files>} sample (A25, closing ADR-0004's K1). COLLECT every candidate,
+     * SORT by the path RELATIVE to the skill directory in PLAIN Unicode code-point order, and
+     * only THEN truncate to the cap.
+     *
+     * <p>All three halves are load-bearing. This used to break at the cap MID-WALK over an
+     * unordered {@code Files.list}, so the filesystem decided WHICH files the model saw, not
+     * merely their order — a different sample on a different machine. The sort is flat over the
+     * relative path (not per-directory, which would make the result a function of the traversal
+     * that every port then has to reproduce) and carries NO depth rule (A15's depth ordering
+     * exists to resolve duplicate skill NAMES in discovery and has no business ordering a flat
+     * listing). Paths are emitted ABSOLUTE, as before — SPEC §3 pins that shape, and there is no
+     * order/display mismatch to fix here: every entry shares the skill-directory prefix, so
+     * ordering by the relative path and ordering by the emitted absolute path are the SAME order.
+     * Do not "fix" that into a divergence. (Whether the sample should emit relative paths at all
+     * is a separate seven-port follow-up, outside this batch.)
+     */
     private static List<String> sampleSiblingFiles(Path dir, int limit) {
-        List<String> out = new ArrayList<>();
+        List<Path> found = new ArrayList<>();
         Deque<Path> stack = new ArrayDeque<>();
         stack.push(dir);
         Set<String> seen = new HashSet<>();
-        while (!stack.isEmpty() && out.size() < limit) {
+        while (!stack.isEmpty()) {
             Path cur = stack.pop();
             try (Stream<Path> entries = Files.list(cur)) {
                 List<Path> list = entries.collect(Collectors.toList());
+                list.sort((x, y) -> compareCodePoints(   // A24: never the filesystem's order
+                        x.getFileName().toString(), y.getFileName().toString()));
                 for (Path entry : list) {
-                    if (out.size() >= limit) break;
                     String fn = entry.getFileName().toString();
                     boolean isDir = Files.isDirectory(entry);
                     boolean isFile = Files.isRegularFile(entry);
@@ -522,11 +711,18 @@ public final class SkillSource {
                         if (!seen.add(real)) continue;
                         stack.push(entry);
                     } else if (isFile && !fn.equals("SKILL.md")) {
-                        out.add(entry.toAbsolutePath().toString());
+                        found.add(entry);
                     }
                 }
             } catch (IOException ignored) {
             }
+        }
+        // Sort, THEN cap. A28: the sort key is the relative path with `/` on every platform.
+        found.sort((x, y) -> compareCodePoints(relativeKey(dir, x), relativeKey(dir, y)));
+        List<String> out = new ArrayList<>();
+        for (Path p : found) {
+            if (out.size() >= limit) break;
+            out.add(p.toAbsolutePath().toString());
         }
         return out;
     }

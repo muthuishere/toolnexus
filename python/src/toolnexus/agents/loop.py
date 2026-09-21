@@ -17,6 +17,8 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional, Union
 
+from ..types import ToolResult
+
 __all__ = [
     "Completion",
     "Guardrail",
@@ -26,6 +28,7 @@ __all__ = [
     "all_todos_done",
     "guarded_hooks",
     "harness",
+    "loop_unsupported",
     "run_gated",
 ]
 
@@ -85,6 +88,42 @@ def harness(**spec: Any) -> dict[str, Any]:
     return spec
 
 
+# D2 (#87, ADR 0024): the fields a driver (Loop) genuinely CANNOT honour — they
+# need the §7D runtime, not a single client. Additive and read-only: no signature
+# changed and no construction-time error, so an agent spec carrying them still
+# works, it just runs without them under a Loop.
+# The CANONICAL names, identical in all seven ports — not python's spelling of the
+# field (addendum A6), exactly as the `limit` strings are canonical.
+LOOP_UNSUPPORTED_FIELDS = (
+    ("uses", "tools"),
+    ("team", "team"),
+    ("wait_for", "waitFor"),
+    ("on_metric", "onMetric"),
+)
+
+
+def loop_unsupported(spec: Any) -> list[str]:
+    """Name the spec fields this agent sets that a :class:`Loop` cannot honour.
+
+    ``uses`` (the toolkit view) is chosen by whoever builds the Loop's toolkit;
+    ``team`` needs the runtime's ``task`` tool; ``wait_for`` and ``on_metric`` are
+    runtime-wide §8 seams. Everything else — ``soul``, ``model``, ``budget.max_turns``,
+    ``hooks``, ``guardrails``, ``completion`` — IS honoured by the Loop.
+
+    Returns the CANONICAL names ("tools", "team", "waitFor", "onMetric") in that
+    order — the same strings in every port, never python's own field spelling. An
+    empty list means nothing is lost.
+    """
+    out: list[str] = []
+    for attr, canonical in LOOP_UNSUPPORTED_FIELDS:
+        value = _field(spec, attr)
+        if attr == "uses" and isinstance(value, dict):
+            value = value.get("tools")
+        if value:
+            out.append(canonical)
+    return out
+
+
 def guarded_hooks(guardrails: Optional[list[Guardrail]], hooks: Any) -> Any:
     """Compile guardrails into one ``before_tool`` with FIRST-DENY-WINS, composed
     ahead of any hook already set. No guardrails ⇒ ``hooks`` is returned untouched,
@@ -115,7 +154,10 @@ def guarded_hooks(guardrails: Optional[list[Guardrail]], hooks: Any) -> Any:
                     "Do asynchronous work in hooks.before_tool, which is awaited."
                 )
             if verdict and verdict != "allow":
-                return {"result": {"output": f"denied: {verdict}", "is_error": True}}
+                # A ToolResult, not a dict: the §8 short-circuit path reads
+                # ``result.metadata``, so a dict here raised AttributeError and the
+                # DENIED TOOL still ran. The denial must never reach execute().
+                return {"result": ToolResult(output=f"denied: {verdict}", is_error=True)}
         if prior is None:
             return None
         out = prior(ev)
@@ -288,8 +330,23 @@ class Loop:
         the forbidden set — the client forbids only messages/tools/stream)."""
         opts = dict(self._options)
         soul = getattr(self._agent, "soul", None)
+        # CALLER WINS (D2): a system_prompt passed in the client options overrides the
+        # agent's soul. The soul is a DEFAULT, never an override.
         if soul and not opts.get("system_prompt"):
             opts["system_prompt"] = soul
+        # D2: the spec's model and budget.max_turns are Loop DEFAULTS — a Loop that
+        # ignored them ran the wrong model under the wrong ceiling and said nothing.
+        spec_model = getattr(self._agent, "model", None)
+        caller_model = opts.get("model")
+        # Addendum A8: the spec's model applies when the caller's is ABSENT **or** is
+        # the sentinel "inherit" — both spellings, so a caller passing a real model
+        # plus a spec model behaves identically in every port.
+        if spec_model and spec_model != "inherit" and (not caller_model or caller_model == "inherit"):
+            opts["model"] = spec_model
+        budget = getattr(self._agent, "budget", None)
+        max_turns = getattr(budget, "max_turns", None) if budget is not None else None
+        if max_turns and not opts.get("max_turns"):
+            opts["max_turns"] = max_turns
         opts["hooks"] = guarded_hooks(
             getattr(self._agent, "guardrails", None),
             getattr(self._agent, "hooks", None) or opts.get("hooks"),

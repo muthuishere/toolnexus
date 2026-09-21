@@ -172,7 +172,9 @@ defmodule Toolnexus.SkillTest do
     end
 
     test "malformed YAML is skipped with malformed-frontmatter", %{tmp_dir: dir} do
-      path = write_skill!(dir, "bad/SKILL.md", "name: \"unterminated", "body")
+      # genuinely malformed: YAML refuses the unterminated flow sequence, and the
+      # lenient rescue refuses a value opening `[` — so it stays refused (D6).
+      path = write_skill!(dir, "bad/SKILL.md", "name: [unterminated", "body")
       write_skill!(dir, "good/SKILL.md", "name: good", "ok")
 
       src = Skill.load(dirs: [dir])
@@ -191,9 +193,10 @@ defmodule Toolnexus.SkillTest do
       {src, warnings} = with_io(:stderr, fn -> Skill.load(dirs: [dir]) end)
 
       assert warnings =~ "duplicate skill name \"dup\""
-      # Same winner as the JS reference: sorted entries + LIFO stack means the
-      # z2/ candidate is discovered first (verified against js/dist/skill.js).
-      assert [%Info{name: "dup", content: "SECOND"}] = src.skills
+      # A1 (ADR 0028 / D6): discovery order is now SPECIFIED — lexicographic by path
+      # relative to the root, first-wins — not the JS LIFO stack order, which made
+      # `docx`/`pdf`/`pptx` resolve to DIFFERENT FILES per port. `a1/` wins.
+      assert [%Info{name: "dup", content: "FIRST"}] = src.skills
 
       {%{skills: skills, skipped: skipped}, _} =
         with_io(:stderr, fn -> Skill.list(dirs: [dir]) end)
@@ -439,7 +442,7 @@ defmodule Toolnexus.SkillTest do
     test "returns skills plus all typed skips", %{tmp_dir: dir} do
       write_skill!(dir, "ok/SKILL.md", "name: ok-skill\ndescription: fine", "body")
       write_skill!(dir, "noname/SKILL.md", "description: nope", "body")
-      write_skill!(dir, "bad/SKILL.md", "name: \"broken", "body")
+      write_skill!(dir, "bad/SKILL.md", "name: [broken", "body")
       write_skill!(dir, "dup/SKILL.md", "name: ok-skill", "clone")
 
       {%{skills: skills, skipped: skipped}, _} =
@@ -678,14 +681,18 @@ defmodule Toolnexus.SkillTest do
       assert out =~ "visible.txt"
     end
 
-    test "sampling stops with directories still on the stack once the cap is hit", %{tmp_dir: dir} do
+    test "the cap takes a PREFIX of the globally sorted sample, not of the walk", %{tmp_dir: dir} do
       write_skill!(dir, "sk/SKILL.md", "name: capped", "body")
       File.mkdir_p!(Path.join(dir, "sk/asub"))
       File.write!(Path.join(dir, "sk/asub/never.txt"), "x")
       File.write!(Path.join(dir, "sk/b.txt"), "x")
 
+      # A25: COLLECT → SORT by path relative to the skill dir → CAP. This test used to
+      # pin the opposite (a walk broken at the cap, which handed `b.txt` back because
+      # the traversal reached it first). Under one global sort `asub/never.txt` wins,
+      # and the answer no longer depends on reproducing a stack discipline.
       out = run(Skill.load(dirs: [dir], sample_limit: 1).tool, %{"name" => "capped"}).output
-      assert file_lines(out) == [Path.join(dir, "sk/b.txt")]
+      assert file_lines(out) == [Path.join(dir, "sk/asub/never.txt")]
     end
 
     test "broken symlinks are skipped", %{tmp_dir: dir} do

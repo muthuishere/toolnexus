@@ -369,7 +369,7 @@ defmodule Toolnexus.ClientTest do
     {base, _agent} = start_stub([fn _ -> {:json, 400, %{"error" => "bad"}} end])
     client = make_client(base)
 
-    assert_raise RuntimeError, ~r/^LLM 400:/, fn -> Client.run(client, "hi", []) end
+    assert_raise Toolnexus.ProviderError, ~r/^LLM 400:/, fn -> Client.run(client, "hi", []) end
   end
 
   # ---- resilience: on_error classifier (§8) ----
@@ -378,7 +378,7 @@ defmodule Toolnexus.ClientTest do
     {base, agent} = start_stub([fn _ -> {:json, 429, %{"error" => "slow"}} end])
     client = make_client(base, retries: 5, on_error: fn _ -> :fail end)
 
-    assert_raise RuntimeError, ~r/^LLM 429:/, fn -> Client.run(client, "hi", []) end
+    assert_raise Toolnexus.ProviderError, ~r/^LLM 429:/, fn -> Client.run(client, "hi", []) end
     assert length(captured(agent)) == 1
   end
 
@@ -387,7 +387,7 @@ defmodule Toolnexus.ClientTest do
     {base, agent} = start_stub([handler, handler, handler])
     client = make_client(base, retries: 2, on_error: fn _ -> :retry end)
 
-    assert_raise RuntimeError, ~r/^LLM 400:/, fn -> Client.run(client, "hi", []) end
+    assert_raise Toolnexus.ProviderError, ~r/^LLM 400:/, fn -> Client.run(client, "hi", []) end
     # 1 initial + 2 retries, bounded by the budget
     assert length(captured(agent)) == 3
   end
@@ -438,7 +438,7 @@ defmodule Toolnexus.ClientTest do
       {:ok, tries} = Agent.start_link(fn -> 0 end)
       c = make_client("http://127.0.0.1:1", retries: 3, transport: always(tries, status))
 
-      assert_raise RuntimeError, ~r/^LLM #{status}:/, fn -> Client.run(c, "hi", []) end
+      assert_raise Toolnexus.ProviderError, ~r/^LLM #{status}:/, fn -> Client.run(c, "hi", []) end
       assert Agent.get(tries, & &1) == 1, "status #{status} must not be retried by default"
     end
   end
@@ -471,7 +471,7 @@ defmodule Toolnexus.ClientTest do
         transport: always(tries, 501)
       )
 
-    assert_raise RuntimeError, ~r/^LLM 501:/, fn -> Client.run(c, "hi", []) end
+    assert_raise Toolnexus.ProviderError, ~r/^LLM 501:/, fn -> Client.run(c, "hi", []) end
     assert Agent.get(tries, & &1) == 1
   end
 
@@ -486,7 +486,7 @@ defmodule Toolnexus.ClientTest do
         transport: always(tries, 520)
       )
 
-    assert_raise RuntimeError, ~r/^LLM 520:/, fn -> Client.run(client, "hi", []) end
+    assert_raise Toolnexus.ProviderError, ~r/^LLM 520:/, fn -> Client.run(client, "hi", []) end
     assert Agent.get(tries, & &1) == 1
   end
 
@@ -498,7 +498,7 @@ defmodule Toolnexus.ClientTest do
     assert length(captured(agent)) == 2
 
     {base2, agent2} = start_stub([fn _ -> {:json, 400, %{"e" => 1}} end])
-    assert_raise RuntimeError, ~r/^LLM 400:/, fn -> Client.run(make_client(base2, retries: 3), "hi", []) end
+    assert_raise Toolnexus.ProviderError, ~r/^LLM 400:/, fn -> Client.run(make_client(base2, retries: 3), "hi", []) end
     assert length(captured(agent2)) == 1
   end
 

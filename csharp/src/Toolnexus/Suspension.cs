@@ -61,4 +61,29 @@ public sealed record Answer
     [JsonPropertyName("reason")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Reason { get; init; }
+
+    /// <summary>
+    /// (ADR 0026) The typed constructor for the single-result shape: <c>data["output"] = output</c>,
+    /// <c>ok = true</c>. Hand-building that map is the failure this removes — the key stops being
+    /// something a host can spell wrong on the way back out of a JSON column. Prefer this over
+    /// <c>new Answer { Id = …, Ok = true, Data = new Dictionary… }</c> everywhere.
+    /// </summary>
+    /// <param name="id">Echoes the <see cref="Request.Id"/> being answered.</param>
+    /// <param name="output">The tool's result. A non-string is rejected rather than silently
+    /// degraded to <c>""</c> — the type is the contract.</param>
+    public static Answer Output(string id, string output)
+    {
+        if (id is null) throw new ArgumentNullException(nameof(id));
+        if (output is null) throw new ArgumentNullException(nameof(output));
+        return new Answer
+        {
+            Id = id,
+            Ok = true,
+            Data = new Dictionary<string, object?> { ["output"] = output },
+        };
+    }
+
+    /// <summary>(ADR 0026) A refusal, carrying the advisory <see cref="Reason"/>.</summary>
+    public static Answer Declined(string id, string reason = "declined")
+        => new() { Id = id, Ok = false, Reason = reason };
 }

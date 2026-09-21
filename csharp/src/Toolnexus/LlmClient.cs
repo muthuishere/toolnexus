@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace Toolnexus;
 
@@ -309,6 +310,94 @@ public sealed class LlmClient
         public RunTimeoutException(string message) : base(message) { }
     }
 
+    /// <summary>
+    /// (ADR 0027 D3.1) A provider failure carried as a VALUE, not a sentence. Before this, the only
+    /// interface to a non-2xx was <c>InvalidOperationException.Message</c>, so a host deciding what
+    /// to log had to parse prose. It still derives from <see cref="InvalidOperationException"/>, so
+    /// existing <c>catch</c> blocks and message matching keep working.
+    ///
+    /// <para><see cref="Body"/> is the RAW provider body, unredacted, for a host that genuinely
+    /// wants it. <see cref="Exception.Message"/> is the redacted, capped rendering — that is the
+    /// one that reaches logs by default.</para>
+    /// </summary>
+    public sealed class ProviderException : InvalidOperationException
+    {
+        /// <summary>The HTTP status the provider returned.</summary>
+        public int Status { get; }
+
+        /// <summary>
+        /// The response body, REDACTED but UNCAPPED (ADR 0027 A5). Account-identifier keys are
+        /// replaced here exactly as they are in <see cref="Exception.Message"/> — a typed field is
+        /// not a hole in the guarantee — but the 200-character cap is applied to the MESSAGE ONLY,
+        /// because a host that opted into a typed error asked for the whole thing.
+        /// Empty on 401/403, where the body may reflect the credential that was sent.
+        /// </summary>
+        public string Body { get; }
+
+        /// <summary>The honoured <c>Retry-After</c> delay in ms, when the provider sent one.</summary>
+        public long? RetryAfterMs { get; }
+
+        public ProviderException(int status, string body, long? retryAfterMs, string message)
+            : base(message)
+        {
+            Status = status;
+            Body = body ?? "";
+            RetryAfterMs = retryAfterMs;
+        }
+    }
+
+    /// <summary>
+    /// (ADR 0027 D3.2) Account-identifier keys replaced with <c>«redacted»</c> — NOT dropped, so the
+    /// body's shape survives and a reader can still see that the provider named an account. Pinned
+    /// identically in every port; the value stays reachable on
+    /// <see cref="ProviderException.Body"/>.
+    /// </summary>
+    public static readonly IReadOnlyList<string> RedactedBodyKeys =
+        new[] { "user_id", "account_id", "org_id", "organization" };
+
+    /// <summary>The replacement token. Byte-identical across ports.</summary>
+    public const string RedactionToken = "«redacted»";
+
+    /// <summary>The §8 message cap, lifted verbatim from the classifier's <c>cause()</c> (ADR 0027
+    /// D3.3) so the policy is written once rather than an eighth time differently.</summary>
+    public const int ErrorBodyCap = 200;
+
+    /// <summary>
+    /// Structure first, redact second, cap third (ADR 0027 D3).
+    /// <list type="number">
+    ///   <item><description>401/403 ⇒ <c>""</c>. A gateway happily reflects a bad
+    ///   <c>Authorization</c> header into its own 401 text, so the body never reaches a message.</description></item>
+    ///   <item><description>Every <see cref="RedactedBodyKeys"/> value ⇒ <see cref="RedactionToken"/>.
+    ///   <b>A CAP IS NOT REDACTION</b> — the leaking body that motivated this is 96 bytes and sailed
+    ///   through a 200-char cap untouched.</description></item>
+    ///   <item><description>Then, and only then, cap at <see cref="ErrorBodyCap"/> — and (A5) the
+    ///   cap applies to the MESSAGE only, never to <see cref="ProviderException.Body"/>.</description></item>
+    /// </list>
+    /// </summary>
+    /// <param name="cap">False ⇒ redact without capping (the typed field).</param>
+    internal static string RedactBody(int status, string? body, bool cap = true)
+    {
+        if (status is 401 or 403) return "";
+        var s = (body ?? "").Trim();
+        if (s.Length == 0) return "";
+        foreach (var key in RedactedBodyKeys)
+        {
+            // JSON (`"user_id": "u_1"` / `"user_id":123`) and form/prose (`user_id=u_1`) spellings.
+            s = Regex.Replace(s,
+                "(\\\"?" + Regex.Escape(key) + "\\\"?\\s*[:=]\\s*)(\\\"[^\\\"]*\\\"|[^,;}\\s]+)",
+                "$1\"" + RedactionToken + "\"");
+        }
+        if (cap && s.Length > ErrorBodyCap) s = s[..ErrorBodyCap] + "…";
+        return s;
+    }
+
+    /// <summary>Builds the redacted, capped message for a provider failure.</summary>
+    internal static string ProviderMessage(int status, string? body)
+    {
+        var redacted = RedactBody(status, body);
+        return redacted.Length == 0 ? $"LLM {status}" : $"LLM {status}: {redacted}";
+    }
+
     // ---------------------------------------------------------------- resilience classifier (§8)
 
     /// <summary>(§8 Resilience) What to do with a failed LLM call: retry it (within budget) or fail now.</summary>
@@ -349,10 +438,10 @@ public sealed class LlmClient
     }
 
     private async Task<(IDictionary<string, object?> Args, ToolResult Result)> RunToolAsync(
-        Toolkit toolkit, string name, IDictionary<string, object?> args, string? id, int turn)
+        Toolkit? toolkit, string name, IDictionary<string, object?> args, string? id, int turn)
     {
         var h = _opts.Hooks;
-        var source = toolkit.Get(name)?.Source ?? "custom";
+        var source = toolkit?.Get(name)?.Source ?? "custom";
         var t0 = NowMs();
         var a = args;
         if (h?.BeforeTool != null)
@@ -367,7 +456,9 @@ public sealed class LlmClient
             }
             if (ov?.Args != null) a = ov.Args;
         }
-        var result = await toolkit.ExecuteAsync(name, a).ConfigureAwait(false);
+        var result = toolkit == null
+            ? ToolResult.Error($"tool \"{name}\" not found: this run declared no toolkit")
+            : await toolkit.ExecuteAsync(name, a).ConfigureAwait(false);
         // A suspension (§10) is not a real result: skip afterTool's failure path on it — the resolved
         // result (post-WaitFor) still flows through afterTool in ResolvePendingAsync — and never count
         // it as a tool error.
@@ -394,7 +485,7 @@ public sealed class LlmClient
     /// <c>Halted</c> when no <c>WaitFor</c> is configured (the run should stop and surface the request).
     /// </summary>
     private async Task<(ToolResult Result, Request? Halted)> ResolvePendingAsync(
-        Toolkit toolkit, string name, IDictionary<string, object?> args, Request request, string? id, int turn)
+        Toolkit? toolkit, string name, IDictionary<string, object?> args, Request request, string? id, int turn)
     {
         if (_opts.WaitFor == null)
             return (ToolResult.Error(request.Prompt), request); // halt: durable host resumes later
@@ -403,9 +494,11 @@ public sealed class LlmClient
         if (answer == null || !answer.Ok)
             return (ToolResult.Error($"declined/expired: {request.Prompt}"), null);
 
-        var source = toolkit.Get(name)?.Source ?? "custom";
+        var source = toolkit?.Get(name)?.Source ?? "custom";
         var t0 = NowMs();
-        var result = await toolkit.ExecuteAsync(name, args, new ToolContext(answer: answer)).ConfigureAwait(false);
+        var result = toolkit == null
+            ? ToolResult.Error($"tool \"{name}\" not found: this run declared no toolkit")
+            : await toolkit.ExecuteAsync(name, args, new ToolContext(answer: answer)).ConfigureAwait(false);
         if (_opts.Hooks?.AfterTool != null)
         {
             var ov = _opts.Hooks.AfterTool(new AfterToolEvent(name, args, result, id, turn));
@@ -499,7 +592,7 @@ public sealed class LlmClient
 
     // ---------------------------------------------------------------- public API
 
-    public Task<RunResult> RunAsync(string prompt, Toolkit toolkit, List<object?>? history = null, CancellationToken cancellationToken = default)
+    public Task<RunResult> RunAsync(string prompt, Toolkit? toolkit, List<object?>? history = null, CancellationToken cancellationToken = default)
         => RunAsync((object)prompt, toolkit, history, cancellationToken);
 
     /// <summary>
@@ -510,10 +603,10 @@ public sealed class LlmClient
     /// <c>await client.RunAsync(["what's in this?", ContentPart.FromFile("shot.png")], toolkit)</c>.
     /// A text-only list assembles byte-identically to the string path.
     /// </summary>
-    public Task<RunResult> RunAsync(IReadOnlyList<ContentPart> prompt, Toolkit toolkit, List<object?>? history = null, CancellationToken cancellationToken = default)
+    public Task<RunResult> RunAsync(IReadOnlyList<ContentPart> prompt, Toolkit? toolkit, List<object?>? history = null, CancellationToken cancellationToken = default)
         => RunAsync((object)prompt, toolkit, history, cancellationToken);
 
-    private Task<RunResult> RunAsync(object prompt, Toolkit toolkit, List<object?>? history, CancellationToken cancellationToken)
+    private Task<RunResult> RunAsync(object prompt, Toolkit? toolkit, List<object?>? history, CancellationToken cancellationToken)
     {
         var deadline = new Deadline(_opts.TimeoutMs);
         return _opts.Style == "anthropic"
@@ -656,16 +749,16 @@ public sealed class LlmClient
     /// each text delta is forwarded here as it arrives — the final <see cref="RunResult"/> is still
     /// returned. Memory (<paramref name="id"/> load/save) is handled by the streaming path, so there
     /// is no duplication.</param>
-    public Task<RunResult> AskAsync(string prompt, Toolkit toolkit, string? id = null,
+    public Task<RunResult> AskAsync(string prompt, Toolkit? toolkit, string? id = null,
         Action<string>? onText = null, CancellationToken cancellationToken = default)
         => AskAsync((object)prompt, toolkit, id, onText, cancellationToken);
 
     /// <summary>(§1B) Multimodal <see cref="AskAsync"/> — same memory semantics, parts prompt.</summary>
-    public Task<RunResult> AskAsync(IReadOnlyList<ContentPart> prompt, Toolkit toolkit, string? id = null,
+    public Task<RunResult> AskAsync(IReadOnlyList<ContentPart> prompt, Toolkit? toolkit, string? id = null,
         Action<string>? onText = null, CancellationToken cancellationToken = default)
         => AskAsync((object)prompt, toolkit, id, onText, cancellationToken);
 
-    private async Task<RunResult> AskAsync(object prompt, Toolkit toolkit, string? id,
+    private async Task<RunResult> AskAsync(object prompt, Toolkit? toolkit, string? id,
         Action<string>? onText, CancellationToken cancellationToken)
     {
         if (onText != null)
@@ -681,7 +774,7 @@ public sealed class LlmClient
         return result;
     }
 
-    public Conversation NewConversation(Toolkit toolkit) => new(this, toolkit);
+    public Conversation NewConversation(Toolkit? toolkit) => new(this, toolkit);
 
     /// <summary>
     /// Streaming variant: <paramref name="onEvent"/> receives live events (text deltas, tool
@@ -690,16 +783,16 @@ public sealed class LlmClient
     /// loaded as history before streaming, and saved back to the <see cref="IConversationStore"/> once
     /// the run terminates. No <paramref name="id"/> ⇒ stateless.
     /// </summary>
-    public Task<RunResult> StreamAsync(string prompt, Toolkit toolkit, Action<StreamEvent> onEvent,
+    public Task<RunResult> StreamAsync(string prompt, Toolkit? toolkit, Action<StreamEvent> onEvent,
         string? id = null, CancellationToken cancellationToken = default)
         => StreamAsync((object)prompt, toolkit, onEvent, id, cancellationToken);
 
     /// <summary>(§1B) Multimodal <see cref="StreamAsync"/> — same events, parts prompt.</summary>
-    public Task<RunResult> StreamAsync(IReadOnlyList<ContentPart> prompt, Toolkit toolkit, Action<StreamEvent> onEvent,
+    public Task<RunResult> StreamAsync(IReadOnlyList<ContentPart> prompt, Toolkit? toolkit, Action<StreamEvent> onEvent,
         string? id = null, CancellationToken cancellationToken = default)
         => StreamAsync((object)prompt, toolkit, onEvent, id, cancellationToken);
 
-    private async Task<RunResult> StreamAsync(object prompt, Toolkit toolkit, Action<StreamEvent> onEvent,
+    private async Task<RunResult> StreamAsync(object prompt, Toolkit? toolkit, Action<StreamEvent> onEvent,
         string? id, CancellationToken cancellationToken)
     {
         var deadline = new Deadline(_opts.TimeoutMs);
@@ -728,11 +821,14 @@ public sealed class LlmClient
 
     private static string? FirstNonEmpty(params string?[] vals) => vals.FirstOrDefault(v => !string.IsNullOrEmpty(v));
 
-    private string System(Toolkit toolkit)
+    private string System(Toolkit? toolkit)
     {
         var parts = new List<string>();
         if (!string.IsNullOrEmpty(_opts.SystemPrompt)) parts.Add(_opts.SystemPrompt!);
-        var sp = toolkit.SkillsPrompt();
+        // D1/#86: a toolkit-less completion is legal. The §0.10 system message is the ONE site
+        // that dereferences the toolkit before anything touches tools; null-guard it here and the
+        // whole no-tools path falls out (no `tools` key, no `tool_choice` key — not empty arrays).
+        var sp = toolkit?.SkillsPrompt();
         if (!string.IsNullOrEmpty(sp)) parts.Add(sp);
         return string.Join("\n\n", parts);
     }
@@ -929,7 +1025,7 @@ public sealed class LlmClient
 
     // ---------------------------------------------------------------- OpenAI run
 
-    private async Task<RunResult> RunOpenAIAsync(object prompt, Toolkit toolkit, List<object?>? history, Deadline deadline, CancellationToken external)
+    private async Task<RunResult> RunOpenAIAsync(object prompt, Toolkit? toolkit, List<object?>? history, Deadline deadline, CancellationToken external)
     {
         var key = ResolveKey();
         var messages = new List<object?>();
@@ -943,7 +1039,7 @@ public sealed class LlmClient
             if (system.Length > 0) messages.Add(Msg("system", system));
         }
         AddUser(messages, prompt);
-        var tools = toolkit.ToOpenAI();
+        var tools = toolkit?.ToOpenAI() ?? new List<Dictionary<string, object?>>();
         var toolCalls = new List<ToolCall>();
         var usage = new Usage();
         var turns = 0;
@@ -1045,7 +1141,7 @@ public sealed class LlmClient
 
     // ---------------------------------------------------------------- Anthropic run
 
-    private async Task<RunResult> RunAnthropicAsync(object prompt, Toolkit toolkit, List<object?>? history, Deadline deadline, CancellationToken external)
+    private async Task<RunResult> RunAnthropicAsync(object prompt, Toolkit? toolkit, List<object?>? history, Deadline deadline, CancellationToken external)
     {
         var key = ResolveKey();
         var endpoint = AnthropicEndpoint();
@@ -1053,7 +1149,7 @@ public sealed class LlmClient
         var messages = new List<object?>();
         if (history is { Count: > 0 }) messages.AddRange(history);
         AddUser(messages, prompt);
-        var tools = toolkit.ToAnthropic();
+        var tools = toolkit?.ToAnthropic() ?? new List<Dictionary<string, object?>>();
         var toolCalls = new List<ToolCall>();
         var usage = new Usage();
         var turns = 0;
@@ -1170,7 +1266,7 @@ public sealed class LlmClient
 
     // ---------------------------------------------------------------- OpenAI stream
 
-    private async Task<RunResult> StreamOpenAIAsync(object prompt, Toolkit toolkit, Action<StreamEvent> onEvent, List<object?>? history, Deadline deadline, CancellationToken external)
+    private async Task<RunResult> StreamOpenAIAsync(object prompt, Toolkit? toolkit, Action<StreamEvent> onEvent, List<object?>? history, Deadline deadline, CancellationToken external)
     {
         var key = ResolveKey();
         var messages = new List<object?>();
@@ -1184,7 +1280,7 @@ public sealed class LlmClient
             if (system.Length > 0) messages.Add(Msg("system", system));
         }
         AddUser(messages, prompt);
-        var tools = toolkit.ToOpenAI();
+        var tools = toolkit?.ToOpenAI() ?? new List<Dictionary<string, object?>>();
         var toolCalls = new List<ToolCall>();
         var usage = new Usage();
         var turns = 0;
@@ -1349,7 +1445,7 @@ public sealed class LlmClient
 
     // ---------------------------------------------------------------- Anthropic stream
 
-    private async Task<RunResult> StreamAnthropicAsync(object prompt, Toolkit toolkit, Action<StreamEvent> onEvent, List<object?>? history, Deadline deadline, CancellationToken external)
+    private async Task<RunResult> StreamAnthropicAsync(object prompt, Toolkit? toolkit, Action<StreamEvent> onEvent, List<object?>? history, Deadline deadline, CancellationToken external)
     {
         var key = ResolveKey();
         var endpoint = AnthropicEndpoint();
@@ -1357,7 +1453,7 @@ public sealed class LlmClient
         var messages = new List<object?>();
         if (history is { Count: > 0 }) messages.AddRange(history);
         AddUser(messages, prompt);
-        var tools = toolkit.ToAnthropic();
+        var tools = toolkit?.ToAnthropic() ?? new List<Dictionary<string, object?>>();
         var toolCalls = new List<ToolCall>();
         var usage = new Usage();
         var turns = 0;
@@ -1573,7 +1669,7 @@ public sealed class LlmClient
         public void Check()
         {
             if (Bounded && Now >= _endMs)
-                throw new RunTimeoutException($"run timeout after {TimeoutMs}ms");
+                throw new RunTimeoutException($"run timeout after {TimeoutMs}ms (Options.TimeoutMs budget)");
         }
     }
 
@@ -1597,7 +1693,7 @@ public sealed class LlmClient
             if (deadline.Bounded)
             {
                 var remain = deadline.RemainingMs;
-                if (remain <= 0) throw new RunTimeoutException($"run timeout after {deadline.TimeoutMs}ms");
+                if (remain <= 0) throw new RunTimeoutException($"run timeout after {deadline.TimeoutMs}ms (Options.TimeoutMs budget)");
                 cts.CancelAfter(TimeSpan.FromMilliseconds(remain));
             }
 
@@ -1630,7 +1726,7 @@ public sealed class LlmClient
             // type. Only the run-deadline expiry becomes RunTimeoutException. Neither is retried.
             catch (OperationCanceledException) when (!external.IsCancellationRequested)
             {
-                throw new RunTimeoutException($"run timeout after {deadline.TimeoutMs}ms"); // not retried
+                throw new RunTimeoutException($"run timeout after {deadline.TimeoutMs}ms (Options.TimeoutMs budget)"); // not retried
             }
             catch (HttpRequestException e)
             {
@@ -1699,7 +1795,11 @@ public sealed class LlmClient
         using var res = await LlmSendAsync(url, headers, body, deadline, false, external).ConfigureAwait(false);
         var text = await res.Content.ReadAsStringAsync(external).ConfigureAwait(false);
         if ((int)res.StatusCode is < 200 or >= 300)
-            throw new InvalidOperationException($"LLM {(int)res.StatusCode}: {text}");
+        {
+            var st = (int)res.StatusCode;
+            throw new ProviderException(st, RedactBody(st, text, cap: false), RetryAfterMs(res),
+                ProviderMessage(st, text));
+        }
         return Json.ToMap(text);
     }
 
@@ -1711,7 +1811,9 @@ public sealed class LlmClient
         if ((int)res.StatusCode is < 200 or >= 300)
         {
             var b = await res.Content.ReadAsStringAsync(external).ConfigureAwait(false);
-            throw new InvalidOperationException($"LLM {(int)res.StatusCode}: {b}");
+            var st = (int)res.StatusCode;
+            throw new ProviderException(st, RedactBody(st, b, cap: false), RetryAfterMs(res),
+                ProviderMessage(st, b));
         }
         await using var stream = await res.Content.ReadAsStreamAsync(external).ConfigureAwait(false);
         using var reader = new StreamReader(stream, Encoding.UTF8);
@@ -1729,10 +1831,10 @@ public sealed class LlmClient
     public sealed class Conversation
     {
         private readonly LlmClient _client;
-        private readonly Toolkit _toolkit;
+        private readonly Toolkit? _toolkit;
         private List<object?> _messages = new();
 
-        internal Conversation(LlmClient client, Toolkit toolkit)
+        internal Conversation(LlmClient client, Toolkit? toolkit)
         {
             _client = client;
             _toolkit = toolkit;

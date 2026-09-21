@@ -13,6 +13,7 @@ import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 import { parse as parseYaml } from "yaml"
+import { compareCodePoints, compareDiscovery, sortEntriesByName } from "./order.js"
 import type { Tool, ToolResult } from "./types.js"
 
 export const SKILL_TOOL_DESCRIPTION = `Load a specialized skill when the task at hand matches one of the skills listed in the system prompt.
@@ -59,6 +60,12 @@ export type SkillSkipReason = "missing-name" | "malformed-frontmatter" | "duplic
 export interface SkillSkip {
   location: string
   reason: SkillSkipReason
+  /**
+   * The NATIVE parser's own message ("Tabs are not allowed as indentation at line 3"), which is
+   * one keystroke from fixed and used to be discarded. Kept as a SEPARATE field so `reason`
+   * stays byte-identical across ports while this stays native — never compare it for parity.
+   */
+  detail?: string
 }
 
 /** Result of a list-only validate pass (SPEC.md §3, S3). */
@@ -78,37 +85,80 @@ export interface LoadSkillsOptions {
 }
 
 /**
- * Parse YAML frontmatter (between the leading `---` fences) with a real YAML
- * parser, so folded (`>`)/literal (`|`) block scalars, quoting, and multi-line
- * values all resolve correctly. Scalar values are coerced to strings.
+ * Parse YAML frontmatter (between the leading `---` fences) with a real YAML parser, so folded
+ * (`>`)/literal (`|`) block scalars, quoting and multi-line values all resolve correctly.
+ * Scalar values are coerced to strings.
  *
- * `malformed` is true only when fences are present but the YAML fails to parse —
- * distinguishing a malformed header from a body with no frontmatter, so the
- * inventory (S3) can report the right skip reason. loadSkills' behavior is
- * unchanged: a malformed header yields no name and the skill is skipped.
+ * LENIENT FALLBACK (ADR 0028, issue #93) — **YAML FIRST**. A line-wise `key: rest-of-line` read
+ * of `name`/`description` runs ONLY on frontmatter a real YAML parser has ALREADY refused.
+ * The order is the whole point: line-wise FIRST misparses legitimate YAML (`description: |`
+ * becomes `"|"`, a continued plain scalar truncates to its first line), and running it only
+ * after a refusal means it can never see a file whose YAML semantics matter — by construction
+ * those files have none left to preserve. No file that parses today changes value.
+ *
+ * `malformed` is true only when fences are present, YAML refused, AND the rescue found no name.
  */
-function parseFrontmatter(text: string): { data: Record<string, string>; content: string; malformed: boolean } {
+const LENIENT_KEYS = ["name", "description"] as const
+/** A value opening one of these is a construct the rescue does not implement — refused, never
+ *  guessed, so a half-broken block scalar degrades to "no description", not to `"|"`. */
+const LENIENT_REFUSED_OPENERS = new Set(["|", ">", "&", "*", "[", "{", "!"])
+/** Column 0, ordinary key characters, one `:`; the value is the rest of the line. */
+const LENIENT_LINE = /^([A-Za-z0-9_][A-Za-z0-9_.-]*):[ \t]*(.*)$/
+
+function unquoteScalar(v: string): string {
+  const t = v.trim()
+  if (t.length > 1 && (t[0] === '"' || t[0] === "'") && t[t.length - 1] === t[0]) return t.slice(1, -1)
+  return t
+}
+
+/** Rescue `name`/`description` from a frontmatter block YAML refused. First-wins, column 0. */
+function lineWiseFrontmatter(block: string): Record<string, string> {
+  const data: Record<string, string> = {}
+  for (const raw of block.split(/\r?\n/)) {
+    const head = raw.slice(0, 1)
+    // indented continuation, comment, or blank — not a top-level key
+    if (head === " " || head === "\t" || head === "#" || head === "") continue
+    const m = LENIENT_LINE.exec(raw)
+    if (!m) continue
+    const key = m[1]
+    const value = m[2].trim()
+    if (!(LENIENT_KEYS as readonly string[]).includes(key) || key in data) continue
+    if (!value || LENIENT_REFUSED_OPENERS.has(value[0])) continue
+    data[key] = unquoteScalar(value)
+  }
+  return data
+}
+
+function parseFrontmatter(text: string): { data: Record<string, string>; content: string; malformed: boolean; detail?: string } {
   const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text)
   if (!match) return { data: {}, content: text, malformed: false }
   const data: Record<string, string> = {}
   let parsed: unknown
-  let malformed = false
+  let detail: string | undefined
   try {
     parsed = parseYaml(match[1])
-  } catch {
+  } catch (e) {
     parsed = null
-    malformed = true
+    detail = e instanceof Error ? e.message : String(e)
   }
-  if (parsed && typeof parsed === "object") {
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
     for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
       // Trim so block-scalar trailing newlines (chomping differs subtly between
-      // YAML libs) don't leak — keeps the five ports byte-identical.
+      // YAML libs) don't leak — keeps the ports byte-identical.
       if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
         data[key] = String(value).trim()
       }
     }
+    return { data, content: match[2], malformed: false }
   }
-  return { data, content: match[2], malformed }
+  // YAML refused (threw, or produced something that is not a mapping): rescue the two scalars.
+  const rescued = lineWiseFrontmatter(match[1])
+  return {
+    data: rescued,
+    content: match[2],
+    malformed: !rescued.name,
+    detail: detail ?? (rescued.name ? undefined : "frontmatter is not a YAML mapping"),
+  }
 }
 
 function walkSkillFiles(root: string): string[] {
@@ -121,10 +171,15 @@ function walkSkillFiles(root: string): string[] {
     const dir = stack.pop()!
     let entries
     try {
-      entries = readdirSync(dir, { withFileTypes: true })
+      // EXPLICIT (A24): `readdirSync` is sorted on most platforms, but Node guarantees
+      // nothing. An absent sort over a directory read is the same defect class as a wrong one,
+      // and it is invisible to a grep for comparators.
+      entries = sortEntriesByName(readdirSync(dir, { withFileTypes: true }))
     } catch {
       continue
     }
+    // Subdirectories are pushed REVERSED so the LIFO stack pops them in name order.
+    for (const entry of [...entries].reverse().filter((e) => e.isDirectory() || e.isSymbolicLink()).reverse().concat([])) void entry
     for (const entry of entries) {
       const full = path.join(dir, entry.name)
       let isDir = entry.isDirectory()
@@ -158,11 +213,23 @@ function walkSkillFiles(root: string): string[] {
   return out
 }
 
+/**
+ * The `<skill_files>` SAMPLE LIST: sibling resources shown to the model when a skill is loaded.
+ *
+ * This is SHIPPED OUTPUT, so its order is part of the cross-port contract (addendum A22). It
+ * used to be raw `readdirSync` order over a LIFO `stack.pop()` walk with the cap applied MID
+ * TRAVERSAL — so the filesystem decided not merely how the sample was ordered but WHICH files
+ * appeared in it at all. Now: collect everything, then order by DEPTH ascending then Unicode
+ * CODE POINT over the path relative to the skill dir (the same `compareDiscovery` rule as
+ * discovery), and only then apply the cap. The sample is therefore a function of the tree and
+ * the cap alone — never of readdir order, and stable across machines and platforms. The
+ * ordering is PLAIN Unicode code point over the relative path (A25).
+ */
 function sampleSiblingFiles(dir: string, limit = 10): string[] {
-  const out: string[] = []
+  const found: string[] = []
   const stack = [dir]
   const seen = new Set<string>()
-  while (stack.length && out.length < limit) {
+  while (stack.length) {
     const cur = stack.pop()!
     let entries
     try {
@@ -171,7 +238,6 @@ function sampleSiblingFiles(dir: string, limit = 10): string[] {
       continue
     }
     for (const entry of entries) {
-      if (out.length >= limit) break
       const full = path.join(cur, entry.name)
       let isDir = entry.isDirectory()
       let isFile = entry.isFile()
@@ -196,11 +262,17 @@ function sampleSiblingFiles(dir: string, limit = 10): string[] {
         seen.add(real)
         stack.push(full)
       } else if (isFile && entry.name !== "SKILL.md") {
-        out.push(full)
+        found.push(full)
       }
     }
   }
-  return out
+  // Order FIRST, cap SECOND: capping during the walk let readdir order pick the sample.
+  // PLAIN code point over the path relative to the skill dir (A25) — NOT the discovery rule.
+  // A15's depth rule exists to decide WHICH FILE a duplicated skill NAME resolves to; it has no
+  // business ordering a flat listing, where it would interleave `a-root.txt, z-root.txt,
+  // alpha/f.txt` instead of `a-root.txt, alpha/f.txt, z-root.txt`.
+  found.sort((a, b) => compareCodePoints(path.relative(dir, a), path.relative(dir, b)))
+  return found.slice(0, limit)
 }
 
 /** One raw candidate before cross-source dedupe: a parsed skill OR a typed skip. */
@@ -222,17 +294,26 @@ function candidatesFromDir(root: string): RawCandidate[] {
     console.warn(`[toolnexus] skills dir not found: ${root}`)
     return out
   }
-  for (const file of walkSkillFiles(root)) {
+  // DISCOVERY ORDER (addendum A1/A1a/A15): dirs in the order the CALLER passed them; within a
+  // dir, by DEPTH ASCENDING, then Unicode CODE-POINT comparison of the path relative to that dir.
+  // A symlink sorts at its DISCOVERED path, never its target.
+  //
+  // Depth comes FIRST, and that is the whole rule: code point alone makes the winner depend on
+  // the skill's own first letter. `docx`/`pdf`/`pptx` beat `synced/<uuid>/…` because d/p < s —
+  // but `xlsx` LOSES to it, because x > s. Depth-first makes "a shallower path beats a nested
+  // copy of the same name" true for EVERY name, which is what SPEC §3 already claims.
+  const files = walkSkillFiles(root).sort((a, b) => compareDiscovery(path.relative(root, a), path.relative(root, b), path.sep))
+  for (const file of files) {
     let text: string
     try {
       text = readFileSync(file, "utf8")
-    } catch {
-      out.push({ skip: { location: file, reason: "unreadable" } })
+    } catch (e) {
+      out.push({ skip: { location: file, reason: "unreadable", detail: e instanceof Error ? e.message : String(e) } })
       continue
     }
-    const { data, content, malformed } = parseFrontmatter(text)
+    const { data, content, malformed, detail } = parseFrontmatter(text)
     if (malformed) {
-      out.push({ skip: { location: file, reason: "malformed-frontmatter" } })
+      out.push({ skip: { location: file, reason: "malformed-frontmatter", ...(detail ? { detail } : {}) } })
       continue
     }
     if (!data.name) {
@@ -321,6 +402,13 @@ export interface SkillSource {
   tool: Tool
   /** Markdown catalog for the system prompt (mirrors opencode Skill.fmt). */
   prompt(): string
+  /**
+   * Candidate SKILL.md files that did NOT become skills, with the typed reason and the native
+   * parser `detail` (ADR 0028). Previously only `listSkills` reported these, so the path every
+   * README and example uses — `loadSkills` — could load 69 of 75 and say nothing. An omission
+   * that stops being reported is indistinguishable from something that was finished.
+   */
+  skipped: SkillSkip[]
 }
 
 /**
@@ -343,6 +431,7 @@ export function loadSkills(input: string | string[] | LoadSkillsOptions): SkillS
   const merged = mergeCandidates(collectCandidates(opts))
   const skills = applySkillsFilter(merged.skills, opts.filter)
 
+  const skipped = merged.skipped
   const tool: Tool = {
     name: "skill",
     description: SKILL_TOOL_DESCRIPTION,
@@ -358,7 +447,7 @@ export function loadSkills(input: string | string[] | LoadSkillsOptions): SkillS
       const info = skills[name]
       if (!info) {
         return {
-          output: `Skill "${name}" not found. Available skills: ${Object.keys(skills).sort().join(", ") || "none"}`,
+          output: `Skill "${name}" not found. Available skills: ${Object.keys(skills).sort(compareCodePoints).join(", ") || "none"}`,
           isError: true,
         }
       }
@@ -409,10 +498,15 @@ export function loadSkills(input: string | string[] | LoadSkillsOptions): SkillS
   return {
     skills,
     tool,
+    skipped,
     prompt() {
       const described = Object.values(skills)
         .filter((s) => s.description !== undefined)
-        .sort((a, b) => a.name.localeCompare(b.name))
+        // Unicode CODE POINT over the skill name, never `localeCompare` (addendum A22): a
+        // locale collation orders by the machine's ICU data, so the same build emitted a
+        // DIFFERENTLY ORDERED prompt on two machines. SPEC §0.10 pins this prompt as
+        // byte-identical across ports; it was not even stable within js.
+        .sort((a, b) => compareCodePoints(a.name, b.name))
       if (described.length === 0) return "No skills are currently available."
       return [
         SKILLS_PROMPT_PREAMBLE,

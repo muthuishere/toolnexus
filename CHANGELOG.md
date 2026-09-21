@@ -8,6 +8,186 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### Eight things that went wrong for people building on 0.18.x, fixed in all seven ports
+
+Eight consumer-reported issues (#86–#93), every one of them found by someone shipping on the
+library rather than reading it. The evidence for each — a runnable, hermetic spike and a decision
+record — is in `docs/adr/0023`–`0028`; the batch is `openspec/changes/fix-consumer-issues-86-93`.
+
+**You can run a completion with no toolkit at all.** `run`/`ask`/`stream` now accept no toolkit
+(and a null one), instead of failing while assembling the system message. Point the client at a
+model, send a prompt, get text — no empty `Toolkit` to construct, no `builtins: false` ceremony.
+The request body carries no `tools` and no `tool_choice` key at all, not an empty array, so a
+provider that treats the two differently sees a plain completion.
+
+**A guardrail on a harness now actually runs when the agent is driven by a loop.** In Go, an
+agent's `soul`, `guardrails` and `hooks` were silently dropped on the `Loop` path — you could
+write a policy denying `bash`, read it back in code review, and ship a harness with no policy.
+Go now applies them, as the other six ports already did. Two more fields join them everywhere:
+the harness's `model` and `budget.maxTurns` become loop defaults. Where both the harness and your
+client options set a system prompt, **the caller wins** in every port now (JS previously let the
+soul override yours). What a loop still cannot honour — `tools`, `team`, `waitFor`, `onMetric` —
+is no longer silent: `loopUnsupported(spec)` returns those exact names, the same strings in all
+seven ports, and the harness docs table says so. Note in particular that a loop-driven agent has
+**no `task` tool and cannot delegate at all**, whatever its `team` declares.
+
+**A delegated run now tells you what it cost and why it stopped.** `TaskResult.totalTokens` **and
+`TaskResult.turns`** now mean the same thing on *every* status; each previously meant one thing on
+three statuses and something else on the other three, which is unreadable whichever half you were
+holding. `totalTokens` is the **rolled-up subtree** total — a parent never reports fewer tokens
+than a child it delegated to — and the new `OwnTokens` gives you the per-agent figure when you need
+to attribute spend. `turns` is the handle's **own** cumulative round trips, reported identically on
+every status; it is **not** rolled up, so a parent that delegates in one turn to a child that takes
+five legitimately reports fewer turns than its child. There is deliberately **no `OwnTurns`** —
+with no roll-up, `turns` already is the own-figure. **This changes a value you may already be
+reading:** on the runtime path, `turns` on `done`/`pending`/`incomplete` becomes the handle's full
+cumulative count in the one port that reported a per-run figure there — **Go**. JS and C# already
+reported it consistently, so nothing moves for their callers.
+`TaskResult` gains `limit`, populated in six more ports and set for
+budget stops as well as run limits, so "it stopped" comes with which ceiling. **`limit`'s values are
+now a closed vocabulary you can branch on** — `maxTurns`, `maxTokens`, `maxToolCalls`, `maxWallMs`,
+`maxChildren`, `maxConcurrent`, `maxDepth`, `completion`, `timeout` — each naming the budget field
+that stopped the run, identical in all seven ports. Four ports were emitting their own internal pool
+names into that field (`maxWall`, `tokens`, `wallMs`), which defeats the point of a field whose only
+job is to be branched on. **If you already branch on one of the old strings, that branch breaks** —
+they map onto the canonical spelling above. And the field is now filled consistently: **a run
+could previously stop with `status: "timeout"` and no `limit` at all** — the two fields
+contradicting each other inside the very feature added so you could branch on a stop. That was
+live in three of the finished ports, and port-by-port audits then turned up further construction
+sites with the same shape that no bug report had reached. The rule is now a contract, asserted as
+an invariant rather than case by case: **a limit stop names its limit; a non-limit stop leaves it
+empty.** Both vocabularies are **public API in every port**, so you branch on
+`StopLimit.MaxWallMs`, not on a string literal. `Runtime.Resume`
+returns the result of the topmost handle it re-ran instead of nothing. Java no longer replays the
+literal string `"continue"` as the resumed prompt; C# and Clojure no longer hard-code "maxTurns"
+in the stop message when a different limit stopped the run.
+
+**A human's answer can no longer be dropped on a durable resume.** Go's answer-carrying entry point
+read exactly two keys out of `Answer.data` — `results`, then `output` — and quietly fabricated a
+tool error for anything else while handing you `status: "done"`. Hand it `{"value": "staging"}` and
+the reply vanished, the model was shown an invented failure, and your logs looked healthy. Now:
+`ok: true` with no determinable result for an outstanding call is an **error to you**, the keys are
+named in SPEC §10 for the first time, and two constructors — `answerOutput(id, output)` and its
+natural pair `answerDeclined(id, reason)`, for the human who says no — exist in all seven ports so
+the map is not hand-built. A non-string `output` errors rather than degrading to `""`. Elixir and
+Clojure now accept **string-keyed** answers — §10 says the keys are fixed across ports, but a
+JSON-round-tripped `Answer` previously crashed in Elixir and read as a silent *decline* in Clojure,
+which is precisely the path the durable posture exists for.
+
+**The documented durable-resume example was wrong, in all seven tabs, and is rewritten.** It showed
+resuming by calling `ask` again on the same conversation id. That is not a resume: the stored
+transcript already holds the halted call's placeholder, so the tool never re-runs, your `waitFor` is
+never called, and the run returns `"done"` with the model answering off the placeholder. The
+suspension page now shows two honest postures — a **deferred `waitFor`** that parks the run on a
+promise/future/channel and works in all seven ports, and the **answer-carrying resume**, which
+exists in `golang` only and is labelled as the preview it is. SPEC §10 no longer says "every port
+provides" two lines under its own "golang only" banner, and that banner now names Clojure too.
+
+**Provider error messages no longer carry your account id.** A non-2xx from the LLM endpoint rode
+out verbatim in every port — including, in the reported case, a `user_id` — as a bare string a host
+had to parse and scrub itself. Failures are now typed values carrying `status`, `body` and
+`retryAfter` as fields; `user_id`, `account_id`, `org_id` and `organization` are replaced with
+`«redacted»` in **both** the message and the typed `body`; `401`/`403` bodies are blanked; and the
+message's excerpt is capped at 200 characters while the typed field keeps the whole redacted body.
+A length cap was never the protection — the leaking body in the report was 96 bytes. The SPEC
+credentials guarantee now covers error messages, not only headers and `apiKeyEnv`.
+
+**Two different closed sets were both called `status`, and one of them contains `timeout`.** The
+agent runtime's `TaskResult.status` has seven values including `timeout`; the client's
+`RunResult.status` has three and does not. Branching on the documented set from the wrong section
+is what one report was actually about. No public field is renamed — that would break every host to
+fix a documentation failure. Instead both vocabularies ship as **named constants** in every port
+and are documented as distinct in SPEC §8 and §7D. Relatedly, a Go run that hit its own deadline
+returned a zero-value result beside an error; it now returns `status: "incomplete"` with
+`limit: "timeout"` and keeps the turns and usage it accumulated. Clojure gains a run-level deadline
+it never had, and no longer *retries* a timeout. Elixir's bare `RuntimeError` on timeout becomes a
+typed error. The classifier keeps `jev-latest` and gains a `backend` preset (`typesafe` |
+`openrouter`) that sets base URL, model and key-env name as a unit, failing at construction on the
+known model/backend mismatch rather than at the first call.
+
+**Six more of your skills load.** Frontmatter that real skill-writing tools emit — an unquoted
+`description` containing a `:` — was refused outright. Parsing now tries **strict YAML first** and
+falls back to a guarded line-wise read only on frontmatter YAML has already refused (column-0 keys,
+first wins, any value opening with `|`, `>`, `&`, `*`, `[`, `{` or `!` refused rather than
+mis-read), so block scalars stay byte-identical and genuinely broken files are still skipped with
+no invented description. On a 87-skill corpus that is 81 → 87. Clojure's hand-rolled frontmatter
+reader is replaced with real YAML on both hosts: it loaded 33 of those 87 where the other ports
+loaded 69. **Skips now come back as data** on the load result (`location`, `reason`, and a new
+`detail` carrying the native parser's error) — you no longer need the inventory surface to discover
+that six skills vanished. And **discovery order is now specified**, not left to each ecosystem's
+directory walk: roots in the order you passed them, then lexicographic by path within each root.
+Duplicate names still resolve first-wins, but "first" now means the same file in every port, and
+the rule is the one everyone assumed was already true: **a top-level skill beats a nested copy of
+the same name — uniformly, for every name.** Sorting is by **depth first**, then Unicode code point
+within a depth. Depth has to be its own key: a pure alphabetical sort silently made the winner
+depend on the skill's first letter, so `docx`, `pdf` and `pptx` beat `synced/<uuid>/…` while
+`xlsx` lost to it. **Every nested duplicate now loses**, so a duplicated skill's `content` and
+`location` can change under you: in `js` that is every duplicated name, and `golang` and `elixir`
+change wherever they kept a nested copy. If you rely on a duplicate resolving a particular way,
+check which file wins now. (The code-point tie-break, rather than the UTF-16 code-unit default,
+matters only for filenames above U+FFFF.)
+
+**The model now sees the same files on your machine and on CI.** Two defects, both in the same
+place — what a listing contains, not merely how it is ordered:
+
+- **`glob`, `grep` and the `<skill_files>` sample now sort BEFORE they cap.** They previously broke
+  the walk at the limit, so the **filesystem** chose which results the model was shown: a different
+  set on a different machine, and on some filesystems a different set between two runs of the same
+  code. The rule is now one rule everywhere — collect everything, sort by the path relative to the
+  walk root in code-point order, then truncate. This is ADR-0004's `K1` "sort-before-sample parity
+  bug", open since that triage, closed in every port. **It changes which files appear, not just
+  their order**, so a prompt that depended on a truncated listing may now carry different content.
+- **`grep` emits a relative, `/`-separated path**: `rel:line:text` where it used to print an
+  absolute one. Five ports had the identical defect — they **sorted on the relative path and
+  emitted the absolute one**, ordering by one thing while displaying another, and leaking machine
+  paths into model-visible output. **If you parse `grep` output, the string has changed.** Windows
+  listings now use `/` like everywhere else.
+
+**The skills prompt is ordered the same way on every machine.** The `## Available Skills` catalog —
+which `SPEC §0.10` pins byte-identical across ports — was sorted three different ways, and JS's was
+locale-dependent: the same code, the same `skills/` directory, a different order on a machine with
+different ICU data. All seven ports now sort by Unicode code point over the skill name, as does the
+`skill` tool's "Available: …" list when a skill is not found.
+
+#### What this batch does NOT do
+
+- **Transcript replay on resume is deferred** (`openspec/changes/fix-consumer-issues-86-93`, D3).
+  A durable resume still rewinds the suspended turn to its pre-turn checkpoint and replays it, so
+  **every tool that ran in that turn runs again**; reattachment-by-task-key protects `task` calls
+  and nothing else. A leaf's own `git push` is yours to guard. That is now stated loudly in SPEC
+  §7D, on the sub-agents and orchestrator pages, and in the `waitFor` doc comments — because it is
+  a conformance decision, not a bug, and changing it needs its own spec delta.
+- **Non-relay durable resumes still splice, they do not re-execute** (D4). On the golang durable
+  path the recognised payload is spliced into the transcript as the call's result; the tool is not
+  re-run and never sees `ctx.answer`, unlike the inline `waitFor` path, which does. Making
+  `kind: "input"`/`"approval"`/`"authorization"` resume by re-execution is deferred to its own
+  change and is the higher-value of the two.
+- **Durable resume is still `golang` only.** `js`, `python`, `java`, `csharp`, `elixir` and
+  `clojure` can raise a durable halt but have no answer-carrying way back in
+  (`openspec/changes/add-tool-relay-mode/tasks.md`). Use the deferred-`waitFor` posture, which is
+  at parity.
+- **Where an admission refusal surfaces is unchanged.** Three of the nine `limit` values —
+  `maxChildren`, `maxConcurrent`, `maxDepth` — are spawn/admission refusals, and in `js` and
+  `csharp` they come back as a **verb error**, never a settled `TaskResult` with a `limit` on it.
+  This batch pins the *spelling* wherever a port reports such a stop; it does not move any of them
+  onto a settled result, and no port invented a settle path to make the string appear. Whether an
+  admission refusal should be an error or a result is a real cross-port asymmetry that lives in the
+  verb's **return type**, not in the vocabulary — so it needs its own change, and is tracked as a
+  follow-up.
+- **The `<skill_files>` sample still emits ABSOLUTE paths**, on every port. It is the one listing
+  exempted from the relative-path rule above, and deliberately so for now: `SPEC §3` pins the
+  block's shape byte-identical, so a port that switched to relative paths alone would break that
+  identity — and unlike `grep`, there is no sort-key/emitted-string mismatch here, because every
+  entry shares the skill-directory prefix and both orderings agree. Making it relative needs a
+  seven-port decision, not a port-local fix.
+- **The classifier's canonical-JSON key ordering is not unified.** `js` orders keys by UTF-16 code
+  unit and `golang` byte-wise over UTF-8 — identical for every realistic key, since these are
+  schema names, so nothing observable differs today. It is still a genuine cross-port byte-identity
+  path, and changing it in one port would *create* the drift it exists to prevent, so it needs a
+  coordinated ruling of its own.
+- **Nothing stops a *third* vocabulary landing on a field named `status`.** The named constants pin
+  today's two sets; no conformance row pins the invariant. Tracked as a follow-up.
+
 ## 0.18.1 — 2026-09-21
 
 Documentation only. No code changed in any port; the published packages differ from 0.18.0

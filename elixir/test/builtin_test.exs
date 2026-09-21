@@ -320,12 +320,12 @@ defmodule Toolnexus.BuiltinTest do
       lines = String.split(result.output, "\n")
       assert result.metadata == %{count: 3}
 
-      assert "#{Path.join(tmp, "a.txt")}:1:hello world" in lines
-      assert "#{Path.join(tmp, "a.txt")}:3:hello again" in lines
-      assert "#{Path.join(tmp, "b.md")}:1:hello md" in lines
+      # A28/A27c: grep EMITS the RELATIVE `/`-path it sorts on, so it can never order
+      # by one string and display another. (Was the native absolute path.)
+      assert lines == ["a.txt:1:hello world", "a.txt:3:hello again", "b.md:1:hello md"]
 
       filtered = run("grep", %{"pattern" => "hello", "path" => tmp, "include" => "*.md"})
-      assert filtered.output == "#{Path.join(tmp, "b.md")}:1:hello md"
+      assert filtered.output == "b.md:1:hello md"
     end
 
     @tag :tmp_dir

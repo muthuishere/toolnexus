@@ -45,12 +45,13 @@ defmodule Toolnexus.Skill do
   defmodule Source do
     @moduledoc "The built skill source: skills + the single `skill` tool + system-prompt catalog."
     @enforce_keys [:skills, :tool, :prompt]
-    defstruct [:skills, :tool, :prompt]
+    defstruct [:skills, :tool, :prompt, skipped: []]
 
     @type t :: %__MODULE__{
             skills: [Toolnexus.Skill.Info.t()],
             tool: Toolnexus.Tool.t(),
-            prompt: String.t()
+            prompt: String.t(),
+            skipped: [%{location: String.t(), reason: String.t(), detail: String.t() | nil}]
           }
   end
 
@@ -70,6 +71,9 @@ defmodule Toolnexus.Skill do
     * `:filter` — `name => bool` allowlist/droplist, `nil`/empty ⇒ all (S2)
     * `:sample_limit` — sibling-file cap: `0` ⇒ default 10, `n > 0` ⇒ cap,
       `-1` ⇒ omit `<skill_files>` (S5)
+  Every candidate the loader REFUSED rides back on `Source.skipped` as
+  `%{location:, reason:, detail:}` (ADR 0028 / D6, addendum A2) — returned data, not a
+  hook, so a host never needs `list/1` to learn that 6 of 87 skills vanished.
 
   A bare binary or list of binaries is shorthand for `dirs: ...`.
   """
@@ -77,7 +81,7 @@ defmodule Toolnexus.Skill do
   def load(input) do
     opts = normalize_opts(input)
     sample_limit = opt(opts, :sample_limit) || 0
-    {skills, _skipped} = merge_candidates(collect_candidates(opts))
+    {skills, skipped} = merge_candidates(collect_candidates(opts))
     skills = apply_filter(skills, opt(opts, :filter))
     by_name = Map.new(skills, &{&1.name, &1})
 
@@ -96,7 +100,7 @@ defmodule Toolnexus.Skill do
       execute: fn args, _ctx -> execute_skill(args, by_name, sample_limit) end
     }
 
-    %Source{skills: skills, tool: tool, prompt: skills_prompt(skills)}
+    %Source{skills: skills, tool: tool, prompt: skills_prompt(skills), skipped: skipped}
   end
 
   @doc """
@@ -104,11 +108,13 @@ defmodule Toolnexus.Skill do
   parsed skills plus typed skip reasons — no toolkit wired (SPEC §3, S3). The
   inventory is UNFILTERED (it exists to author/validate the allowlist).
 
-  Skip reasons: `"missing-name" | "malformed-frontmatter" | "duplicate-name" | "unreadable"`.
+  Skip reasons: `"missing-name" | "malformed-frontmatter" | "duplicate-name" | "unreadable"` —
+  byte-identical to before. Each skip also carries `detail`: the NATIVE parser error
+  where there was one, `nil` otherwise (ADR 0028 / D6).
   """
   @spec list(String.t() | [String.t()] | keyword() | map()) :: %{
           skills: [Info.t()],
-          skipped: [%{location: String.t(), reason: String.t()}]
+          skipped: [%{location: String.t(), reason: String.t(), detail: String.t() | nil}]
         }
   def list(input) do
     opts = normalize_opts(input)
@@ -132,28 +138,120 @@ defmodule Toolnexus.Skill do
 
   # Parse YAML frontmatter (between the leading `---` fences) with a real YAML
   # parser. Scalar values are coerced to trimmed strings; non-scalars dropped.
-  # `malformed` is true only when fences are present but the YAML fails to parse.
+  # `malformed` is true only when fences are present but BOTH the YAML parser and
+  # the lenient rescue below refused the block; `detail` carries the native error.
+  #
+  # LENIENT READ, INVERTED (ADR 0028 / D6). YAML runs FIRST, always. The line-wise
+  # `key: rest-of-line` read runs ONLY on a block a real YAML parser has ALREADY
+  # refused — by construction such a block has no YAML semantics to preserve, so a
+  # block scalar (`description: |`) can never be misparsed by it. Line-wise FIRST is
+  # forbidden: it misreads exactly the files the six YAML ports handle today.
   defp parse_frontmatter(text) do
     case Regex.run(@frontmatter_re, text) do
       nil ->
-        {%{}, text, false}
+        {%{}, text, false, nil}
 
       [_, yaml, body] ->
         case safe_yaml(yaml) do
-          {:ok, parsed} when is_map(parsed) -> {coerce_scalars(parsed), body, false}
-          {:ok, _non_map} -> {%{}, body, false}
-          :error -> {%{}, body, true}
+          {:ok, parsed} when is_map(parsed) ->
+            data = coerce_scalars(parsed)
+
+            # A10: YAML libraries DISAGREE about `description: [unterminated, flow`.
+            # yaml_elixir throws; JS's `yaml` recovers it into a sequence. So the
+            # rescue must ALSO run when the parse SUCCEEDS but leaves `name` or
+            # `description` structurally wrong (a mapping/sequence where a scalar
+            # belongs) — the non-scalar is DROPPED by `coerce_scalars`, and the
+            # rescue may only fill what is now MISSING. Invariant: a file never
+            # gains an invented description and never keeps a structurally-wrong one.
+            if structurally_wrong?(parsed),
+              do: rescued(data, yaml, body, false, "non-scalar name/description dropped"),
+              else: {data, body, false, nil}
+
+          {:ok, _non_map} ->
+            # valid YAML that is not a mapping: same rescue, and the skip reason
+            # stays `missing-name`, byte-identical to before.
+            rescued(%{}, yaml, body, false, "frontmatter is not a YAML mapping")
+
+          {:error, detail} ->
+            # YAML refused outright. Rescue `name`/`description`, or stay refused.
+            rescued(%{}, yaml, body, true, detail)
         end
     end
+  end
+
+  # Merge the lenient rescue UNDER the YAML-derived data — it may only fill keys
+  # YAML did not supply. `malformed` distinguishes the two skip reasons: a parser
+  # that THREW yields `malformed-frontmatter`, anything else `missing-name`.
+  defp rescued(data, yaml, body, malformed, detail) do
+    data = Map.merge(lenient_frontmatter(yaml), data)
+    {data, body, data["name"] in [nil, ""] and malformed, detail}
+  end
+
+  defp structurally_wrong?(parsed) do
+    Enum.any?(["name", "description"], fn key ->
+      case Map.fetch(parsed, key) do
+        {:ok, v} -> not is_nil(v) and not scalar?(v)
+        :error -> false
+      end
+    end)
   end
 
   defp safe_yaml(yaml) do
     case YamlElixir.read_from_string(yaml) do
       {:ok, parsed} -> {:ok, parsed}
-      {:error, _} -> :error
+      {:error, e} -> {:error, yaml_detail(e)}
     end
   rescue
-    _ -> :error
+    e -> {:error, yaml_detail(e)}
+  end
+
+  defp yaml_detail(e) when is_exception(e), do: Exception.message(e)
+  defp yaml_detail(e) when is_binary(e), do: e
+  defp yaml_detail(e), do: inspect(e)
+
+  # Column 0, ordinary key characters, exactly one `:`; the value is the rest of the line.
+  @lenient_line_re ~r/\A([A-Za-z0-9_][A-Za-z0-9_.\-]*):[ \t]*(.*)\z/
+  @lenient_keys ["name", "description"]
+  # A value opening one of these starts a construct the lenient read does not
+  # implement (block scalar, anchor, alias, flow collection, tag). Take NOTHING
+  # rather than garbage: a half-broken block scalar degrades to "no description".
+  @lenient_openers ["|", ">", "&", "*", "[", "{", "!"]
+
+  defp lenient_frontmatter(block) do
+    block
+    |> String.split(~r/\r?\n/)
+    |> Enum.reduce(%{}, fn raw, acc ->
+      cond do
+        # indented continuation, comment, or blank — not a top-level key
+        raw == "" or String.starts_with?(raw, [" ", "\t", "#"]) ->
+          acc
+
+        true ->
+          case Regex.run(@lenient_line_re, raw) do
+            [_, key, value] -> take_lenient(acc, key, String.trim(value))
+            _ -> acc
+          end
+      end
+    end)
+  end
+
+  defp take_lenient(acc, key, value) do
+    cond do
+      key not in @lenient_keys -> acc
+      # FIRST WINS, exactly like the YAML ports' duplicate-key behaviour
+      Map.has_key?(acc, key) -> acc
+      value == "" -> acc
+      String.first(value) in @lenient_openers -> acc
+      true -> Map.put(acc, key, unquote_scalar(value))
+    end
+  end
+
+  defp unquote_scalar(v) do
+    first = String.first(v)
+
+    if String.length(v) > 1 and first in ["\"", "'"] and String.last(v) == first,
+      do: String.slice(v, 1..-2//1),
+      else: v
   end
 
   defp coerce_scalars(parsed) do
@@ -182,8 +280,9 @@ defmodule Toolnexus.Skill do
         walk(rest, seen, out)
 
       {:ok, entries} ->
-        # Node's readdirSync (libuv scandir) returns entries sorted; Erlang's
-        # list_dir does not — sort to keep traversal order byte-identical.
+        # `File.ls/1` is NOT sorted by the runtime. Sorted here by Unicode code point
+        # so the walk is deterministic; the candidate ORDER is then decided by the
+        # explicit global sort in `candidates_from_dir/1` (A15), not by this walk.
         {new_dirs, seen, out} =
           Enum.reduce(Enum.sort(entries), {[], seen, out}, fn entry, {dirs, seen, out} ->
             full = Path.join(dir, entry)
@@ -212,45 +311,74 @@ defmodule Toolnexus.Skill do
     end
   end
 
-  defp sample_sibling_files(dir, limit), do: sample([dir], MapSet.new(), [], limit)
+  # A25: COLLECT every candidate, SORT by the path RELATIVE to the skill directory in
+  # plain Unicode code-point order, THEN truncate to the cap — in that order.
+  #
+  # Two rules are being closed here. Capping MID-TRAVERSAL let the FILESYSTEM decide
+  # WHICH files the model saw, not merely their order (ADR-0004 K1, sort-before-sample).
+  # And ordering by per-directory traversal is a function of the STACK DISCIPLINE: it
+  # only agrees across ports if every port reproduces the same walk, and for a nested
+  # resource tree (`scripts/`, `reference/`) it interleaves differently from a global
+  # relative-path sort. The two coincide only for flat siblings — the common case, not
+  # every case. So the order comes from ONE global sort over the full candidate set.
+  # The `<skill_files>` sample KEEPS its absolute paths — SPEC §3 pins that shape,
+  # and unlike `grep` there is no sort-key/display split to fix here: every entry
+  # shares the skill directory as a constant prefix, so ordering by the relative
+  # path and ordering by the emitted absolute path are THE SAME ORDER. Do not
+  # "align" this with grep's relative output; that would create the divergence.
+  #
+  # A28: the sort key IS the emitted string. Paths are relative to the skill
+  # directory with `/` as the separator on every platform (elixir gets this free on
+  # POSIX; `Path.relative_to/2` never emits a backslash here), so this can never
+  # order by one string and display another.
+  defp sample_sibling_files(dir, limit) do
+    dir
+    |> collect_samples([dir], MapSet.new(), [])
+    |> Enum.sort_by(&Path.relative_to(&1, dir))
+    |> Enum.take(limit)
+  end
 
-  defp sample([], _seen, out, _limit), do: out
-  defp sample(_stack, _seen, out, limit) when length(out) >= limit, do: out
+  defp collect_samples(_root, [], _seen, out), do: out
 
-  defp sample([dir | rest], seen, out, limit) do
+  defp collect_samples(root, [dir | rest], seen, out) do
     case File.ls(dir) do
       {:error, _} ->
-        sample(rest, seen, out, limit)
+        collect_samples(root, rest, seen, out)
 
       {:ok, entries} ->
-        # Sorted for parity with Node readdirSync — see walk/3.
+        # Traversal order no longer decides anything user-visible — the global sort
+        # above does — but the walk stays deterministic so the cycle guard and the
+        # candidate SET are stable.
         {new_dirs, seen, out} =
-          Enum.reduce_while(Enum.sort(entries), {[], seen, out}, fn entry, {dirs, seen, out} ->
-            if length(out) >= limit do
-              {:halt, {dirs, seen, out}}
-            else
-              full = Path.join(dir, entry)
+          Enum.reduce(Enum.sort(entries), {[], seen, out}, fn entry, {dirs, seen, out} ->
+            full = Path.join(dir, entry)
 
-              case classify(full) do
-                {:dir, _} when entry in ["node_modules", ".git"] ->
-                  {:cont, {dirs, seen, out}}
+            case classify(full) do
+              {:dir, _} when entry in ["node_modules", ".git"] ->
+                {dirs, seen, out}
 
-                {:dir, id} ->
-                  if MapSet.member?(seen, id),
-                    do: {:cont, {dirs, seen, out}},
-                    else: {:cont, {[full | dirs], MapSet.put(seen, id), out}}
+              {:dir, id} ->
+                if MapSet.member?(seen, id),
+                  do: {dirs, seen, out},
+                  else: {[full | dirs], MapSet.put(seen, id), out}
 
-                :file when entry != "SKILL.md" ->
-                  {:cont, {dirs, seen, out ++ [full]}}
+              :file when entry != "SKILL.md" ->
+                {dirs, seen, out ++ [full]}
 
-                _ ->
-                  {:cont, {dirs, seen, out}}
-              end
+              _ ->
+                {dirs, seen, out}
             end
           end)
 
-        sample(new_dirs ++ rest, seen, out, limit)
+        collect_samples(root, new_dirs ++ rest, seen, out)
     end
+  end
+
+  # {depth, path} — depth ASCENDING first, then the whole relative path compared by
+  # code point (Elixir's binary term order IS code-point order for valid UTF-8).
+  defp discovery_key(file, root) do
+    rel = Path.relative_to(file, root)
+    {length(Path.split(rel)), rel}
   end
 
   # Classify a path (following symlinks) as {:dir, identity} | :file | :skip.
@@ -272,20 +400,35 @@ defmodule Toolnexus.Skill do
       end
 
     if is_dir do
-      Enum.map(walk_skill_files(root), fn file ->
+      # A1/A15: DISCOVERY ORDER is specified, not incidental. Roots keep the CALLER'S
+      # order; within a root, candidates are sorted by DEPTH ASCENDING (number of path
+      # segments relative to the logical base), then by Unicode CODE POINT as the
+      # tie-break WITHIN a depth. First-wins then resolves duplicates, so a skill at
+      # the top level always beats a nested copy of itself.
+      #
+      # Code point ALONE does not deliver that rule: `docx`/`pdf`/`pptx` beat
+      # `synced/<uuid>/…` only because `d`/`p` sort before `s`, while `xlsx` LOSES to
+      # `synced/<uuid>/xlsx` — the winner would depend on the skill's first letter
+      # relative to a sibling DIRECTORY's name. Depth first removes that accident.
+      # Symlinks sort at their DISCOVERED path, never their target; no locale
+      # collation, no case folding.
+      root
+      |> walk_skill_files()
+      |> Enum.sort_by(&discovery_key(&1, root))
+      |> Enum.map(fn file ->
         case File.read(file) do
           {:error, _} ->
-            {:skip, %{location: file, reason: "unreadable"}}
+            {:skip, %{location: file, reason: "unreadable", detail: nil}}
 
           {:ok, text} ->
             case parse_frontmatter(text) do
-              {_data, _content, true} ->
-                {:skip, %{location: file, reason: "malformed-frontmatter"}}
+              {_data, _content, true, detail} ->
+                {:skip, %{location: file, reason: "malformed-frontmatter", detail: detail}}
 
-              {data, content, false} ->
+              {data, content, false, detail} ->
                 case data["name"] do
                   name when name in [nil, ""] ->
-                    {:skip, %{location: file, reason: "missing-name"}}
+                    {:skip, %{location: file, reason: "missing-name", detail: detail}}
 
                   name ->
                     {:info,
@@ -311,7 +454,7 @@ defmodule Toolnexus.Skill do
       name = def_get(d, :name)
 
       if name in [nil, ""] do
-        {:skip, %{location: def_get(d, :base) || "skill://", reason: "missing-name"}}
+        {:skip, %{location: def_get(d, :base) || "skill://", reason: "missing-name", detail: nil}}
       else
         name = to_string(name)
 
@@ -385,7 +528,8 @@ defmodule Toolnexus.Skill do
               "[toolnexus] duplicate skill name \"#{info.name}\" (#{info.location}) — keeping first"
             )
 
-            {skills, [%{location: info.location, reason: "duplicate-name"} | skipped], names}
+            {skills,
+             [%{location: info.location, reason: "duplicate-name", detail: nil} | skipped], names}
           else
             {[info | skills], skipped, MapSet.put(names, info.name)}
           end
@@ -422,6 +566,8 @@ defmodule Toolnexus.Skill do
     case Map.get(by_name, name) do
       nil ->
         available =
+          # A22: also user-visible. Code point, by the same construction as the
+          # §0.10 prompt sort — see `skills_prompt/1`.
           case by_name |> Map.keys() |> Enum.sort() do
             [] -> "none"
             names -> Enum.join(names, ", ")
@@ -439,6 +585,9 @@ defmodule Toolnexus.Skill do
               base = info.base || "skill://#{info.name}/"
               res = info.resources || []
               emit = eff_limit != -1 and res != []
+              # RULED OUT of A25/A26 deliberately: `resources` is a HOST-SUPPLIED
+              # list, not a filesystem read. Its order is the caller's, and sorting
+              # it would overwrite a choice the host made. The cap is a plain prefix.
               files = if eff_limit > 0, do: Enum.take(res, eff_limit), else: res
               {base, files, base, emit}
 
@@ -487,6 +636,12 @@ defmodule Toolnexus.Skill do
   # ── System-prompt catalog (mirrors opencode Skill.fmt) ─────────────────────
 
   defp skills_prompt(skills) do
+    # A22: the §0.10 skills prompt has its OWN ordering, separate from discovery
+    # order, and SPEC §0.10 pins it byte-identical across ports. This sort is by
+    # Unicode CODE POINT **by construction**: Erlang term order on binaries is
+    # byte-wise, and byte-wise over UTF-8 IS code-point order. It must never become
+    # a locale-aware compare (`localeCompare` is machine-dependent) nor a UTF-16
+    # code-unit compare — both diverge from this above U+FFFF.
     described =
       skills
       |> Enum.filter(&(&1.description != nil))

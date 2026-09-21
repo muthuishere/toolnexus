@@ -87,6 +87,11 @@ var pendingSeq atomic.Uint64
 // metadata.pending = a Request. If req.ID is empty a unique id is generated.
 // Mirrors JS pending(). Sugar, not required (any ToolResult with a Request under
 // metadata.pending is a suspension).
+//
+// A tool that returns this MUST be idempotent: resolving the suspension
+// re-executes it, and on the §7D runtime a durable resume replays the whole turn
+// from its pre-turn checkpoint — every tool in that turn runs again. See
+// ClientOptions.WaitFor for the full contract.
 func Pending(req Request) ToolResult {
 	if req.ID == "" {
 		req.ID = "pnd-" + strconv.FormatInt(time.Now().UnixMilli(), 36) + "-" + strconv.FormatUint(pendingSeq.Add(1), 10)

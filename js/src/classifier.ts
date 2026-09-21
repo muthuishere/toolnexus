@@ -10,9 +10,8 @@
  * here is a security control.
  */
 import type { Client } from "./client.js"
-import { type ErrorInfo, type ErrorTier, type MetricEvent } from "./client.js"
+import { type ErrorInfo, type ErrorTier, type MetricEvent, redactErrorBody, capErrorBody } from "./client.js"
 import { retryAfterMs, isRetryableStatus } from "./retry.js"
-import type { Toolkit } from "./toolkit.js"
 
 // ---------------------------------------------------------------- constants
 
@@ -24,6 +23,19 @@ export const DEFAULT_CLASSIFIER_MODEL = "jev-latest"
 export const DEFAULT_CLASSIFIER_API_KEY_ENV = "TYPESAFE_API_KEY"
 /** Bounds ONE request; a classifier has no loop to bound. */
 export const DEFAULT_CLASSIFIER_TIMEOUT_MS = 10_000
+
+/**
+ * A named BACKEND: `baseUrl`, `model` and `apiKeyEnv` are only jointly valid, so they travel as
+ * a UNIT (ADR 0027 D1). `jev-latest` is TypeSafe's spelling; the gateway spells the same model
+ * `typesafe/jev-1.13`, and mixing the two is issue #91.
+ */
+export type ClassifierBackend = "typesafe" | "openrouter"
+
+/** The two servable pairings, as configurations rather than six independently-choosable cells. */
+export const CLASSIFIER_BACKENDS: Readonly<Record<ClassifierBackend, { baseUrl: string; model: string; apiKeyEnv: string }>> = {
+  typesafe: { baseUrl: DEFAULT_CLASSIFIER_BASE_URL, model: DEFAULT_CLASSIFIER_MODEL, apiKeyEnv: DEFAULT_CLASSIFIER_API_KEY_ENV },
+  openrouter: { baseUrl: "https://openrouter.ai/api/v1", model: "typesafe/jev-1.13", apiKeyEnv: "OPENROUTER_API_KEY" },
+}
 
 /** Client-side cap on a choice's named options (§8B). */
 export const MAX_CHOICE_OPTIONS = 255
@@ -392,6 +404,11 @@ export type EvaluateFn = (
 export interface ClassifierOptions {
   /** Default `"systemone"`. */
   style?: ClassifierStyle
+  /** A named `baseUrl` + `model` + `apiKeyEnv` pairing (`"typesafe"` | `"openrouter"`), set as a
+   * UNIT. Default `"typesafe"`. The three individual options still win where given, for a
+   * self-hosted origin — but a known-bad mixture is refused at construction, not 700 ms later
+   * as an "Unknown model" 400. */
+  backend?: ClassifierBackend
   /** Default `https://api.typesafe.ai/v1`. OpenRouter serves this wire today. */
   baseUrl?: string
   /** Default `"jev-latest"`. Pin it once thresholds are tuned. */
@@ -456,9 +473,12 @@ export class Classifier {
 
   constructor(private readonly opts: ClassifierOptions) {
     this.style = opts.style ?? "systemone"
-    this.baseUrl = opts.baseUrl ?? DEFAULT_CLASSIFIER_BASE_URL
-    this.model = opts.model ?? DEFAULT_CLASSIFIER_MODEL
-    this.apiKeyEnv = opts.apiKeyEnv ?? DEFAULT_CLASSIFIER_API_KEY_ENV
+    const preset = CLASSIFIER_BACKENDS[opts.backend ?? "typesafe"]
+    this.baseUrl = opts.baseUrl ?? preset.baseUrl
+    this.model = opts.model ?? preset.model
+    this.apiKeyEnv = opts.apiKeyEnv ?? preset.apiKeyEnv
+    const mismatch = backendMismatch(this.baseUrl, this.model)
+    if (mismatch) throw new Error(mismatch)
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_CLASSIFIER_TIMEOUT_MS
     switch (this.style) {
       case "systemone":
@@ -706,7 +726,8 @@ export class Classifier {
       '{"type":"choice","choice":"<one offered option id>","probabilities":{"<every offered option id>":<0..1>},"confidence":<0..1>}. ' +
       'A "score" answer is {"type":"score","score":<a number within the rubric bounds, fractional allowed>,' +
       '"legend":{"0":"<level 0>",…},"probabilities":{"0":<0..1>,…},"confidence":<0..1>}.'
-    const run = await this.opts.client!.run(prompt, { toolkit: EMPTY_TOOLKIT, signal })
+    // No toolkit at all: a classifier has no loop and executes nothing (SPEC §0.10, ADR 0023).
+    const run = await this.opts.client!.run(prompt, { signal })
     const payload = firstJsonObject(run.text)
     let parsed: unknown
     try {
@@ -778,9 +799,21 @@ export function degenerateCriteria(criteria: Record<string, string>): string {
  */
 function cause(status: number, body: string): string {
   if (status === 401 || status === 403) return ""
-  const s = body.trim()
-  if (!s) return ""
-  return ": " + (s.length > 200 ? s.slice(0, 200) + "…" : s)
+  // ONE policy, now shared with the §8 client path: redact account identifiers, then cap.
+  const s = capErrorBody(redactErrorBody(body))
+  return s ? ": " + s : ""
+}
+
+/**
+ * The one mixture known to fail, caught before the wire: TypeSafe's unqualified `jev-*` model id
+ * pointed at the OpenRouter gateway, which has never heard of it. Returns the message to fail
+ * with, or `""` when the pairing is fine.
+ */
+export function backendMismatch(baseUrl: string, model: string): string {
+  const host = baseUrl.replace(/^[a-z]+:\/\//i, "").split("/")[0].split(":")[0].toLowerCase()
+  if (host !== "openrouter.ai" && !host.endsWith(".openrouter.ai")) return ""
+  if (!/^jev-/.test(model)) return ""
+  return `classifier: model "${model}" is TypeSafe's spelling; on openrouter.ai use "${CLASSIFIER_BACKENDS.openrouter.model}"`
 }
 
 /** `${ENV_VAR}` expands at call time; an unset var expands to the empty string, as §2. */
@@ -813,20 +846,3 @@ function sleep(ms: number): Promise<void> {
   })
 }
 
-/**
- * The `llm` style declares no tools — a classifier has no loop and executes nothing. The §8
- * `run` takes a Toolkit, so this is the empty one; the cast is the price of not exposing a
- * public "no tools" Toolkit constructor just for this path.
- */
-const EMPTY_TOOLKIT = {
-  skillsPrompt: () => "",
-  toOpenAI: () => [],
-  toAnthropic: () => [],
-  toGemini: () => [],
-  get: () => undefined,
-  list: () => [],
-  execute: async () => {
-    throw new Error("classifier: the llm style declares no tools")
-  },
-  close: async () => {},
-} as unknown as Toolkit

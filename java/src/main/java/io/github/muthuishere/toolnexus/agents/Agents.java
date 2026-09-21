@@ -128,8 +128,10 @@ public final class Agents {
         public io.github.muthuishere.toolnexus.Loop loop(
                 io.github.muthuishere.toolnexus.LlmClient.Options options,
                 io.github.muthuishere.toolnexus.Toolkit toolkit) {
-            return new io.github.muthuishere.toolnexus.Loop(
-                    options, toolkit, spec.soul, spec.guardrails, spec.hooks, spec.completion);
+            // ADR 0024: the loop receives the SPEC, not four loose fields — so soul, guardrails,
+            // hooks, completion, model and budget.maxTurns all reach it. What a driver cannot
+            // honour is named by Loop.loopUnsupported(spec).
+            return new io.github.muthuishere.toolnexus.Loop(options, toolkit, spec);
         }
 
         /** Collect this agent + its whole team graph into a runtime registry (transitive closure
@@ -175,7 +177,7 @@ public final class Agents {
         public TaskResult run(RuntimeOptions rtOpts, String prompt) {
             AgentRuntime rt = new AgentRuntime(rtOpts.copyWithRegistry(registry()));
             AgentRuntime.Spawn sp = rt.spawn(rt.root, name);
-            if (sp.error() != null) return new TaskResult(sp.error(), true, "error", null, null, 0, 0);
+            if (sp.error() != null) return new TaskResult(sp.error(), true, TaskResult.STATUS_ERROR, null, null, 0, 0);
             var fut = rt.futureResult(sp.handle());
             rt.wake(sp.handle(), prompt);
             TaskResult r = fut.join();

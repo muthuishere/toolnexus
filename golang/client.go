@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -82,6 +83,18 @@ type ClientOptions struct {
 	// and returns a RunResult with Status "pending" and Pending set, so a durable
 	// host can deliver it out-of-band and resume later. Named WaitFor, never
 	// "await" (a reserved word). Mirrors js ClientOptions.waitFor.
+	//
+	// IDEMPOTENCY — read this before a suspendable tool does anything
+	// irreversible. A resolved suspension RE-EXECUTES the suspended tool once,
+	// so that tool always runs at least twice across a resume. On the §7D agent
+	// runtime the guarantee is wider: a durable resume replays the suspended turn
+	// FROM ITS PRE-TURN CHECKPOINT, so EVERY tool that ran in that turn runs
+	// again. Reattachment covers `task` calls only; a leaf agent's own
+	// side-effecting tools are the host's responsibility. Any tool reachable in a
+	// turn that can suspend MUST be idempotent — give it an externally-supplied
+	// key, or check-then-act. (Replaying the stored transcript instead is
+	// DEFERRED to its own change; it would narrow this requirement, never remove
+	// it. ADR 0025 D4.)
 	WaitFor func(Request) (Answer, error)
 	// RequestParams (§8 Gap 1) are extra top-level keys shallow-merged into EVERY
 	// LLM request body after the client builds its own — a RequestParams key WINS
@@ -543,6 +556,36 @@ func (c *Client) withDeadline(ctx context.Context) (context.Context, context.Can
 	return ctx, func() {}
 }
 
+// isRunTimeout reports whether err is OUR whole-run deadline expiring, as
+// opposed to caller cancellation or a caller-owned deadline. Only a configured
+// TimeoutMs can produce one, which is what keeps the two distinguishable — the
+// bare `context deadline exceeded` this replaced was not.
+func (c *Client) isRunTimeout(ctx context.Context, err error) bool {
+	return c.opts.TimeoutMs > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) && err != nil
+}
+
+// timedOutRun is what a whole-run deadline hands back. Two rules, both of them
+// things this port got wrong (ADR 0027 D2, DECISIONS D5):
+//
+//   - NEVER a zero-value RunResult beside a non-nil error. A caller who branches
+//     on Status first — which the §8 vocabulary invites — fell through every case
+//     on an empty string. The status is "incomplete" with Limit "timeout": that
+//     invents no new §8 status value and reuses the mechanism maxTurns already
+//     has.
+//   - PRESERVE the partial work. Turns, Usage, Messages and ToolCalls
+//     accumulated before the deadline already exist at every return site and were
+//     being discarded into RunResult{}.
+//
+// The error still comes back non-nil, and it now NAMES THE BUDGET
+// (`run timeout after <n>ms`) instead of being indistinguishable from caller
+// cancellation.
+func (c *Client) timedOutRun(messages []any, toolCalls []ToolCall, turns int, usage Usage) (RunResult, error) {
+	res := c.result("", messages, toolCalls, turns, usage)
+	res.Status = "incomplete"
+	res.Limit = "timeout"
+	return res, &RunTimeoutError{TimeoutMs: c.opts.TimeoutMs}
+}
+
 // resolveKey picks the API key from opts or the environment. The value is never
 // logged.
 func (c *Client) resolveKey() (string, error) {
@@ -902,7 +945,7 @@ func (c *Client) postJSON(ctx context.Context, endpoint string, headers map[stri
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("LLM %d: %s", resp.StatusCode, string(out))
+		return nil, newProviderError(resp.StatusCode, out, resp.Header.Get("Retry-After"))
 	}
 	return out, nil
 }
@@ -936,6 +979,9 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 	defer func() {
 		if err != nil {
 			c.emitRunError(runStart, toolCalls, turns, usage, err)
+			if c.isRunTimeout(ctx, err) {
+				res, err = c.timedOutRun(messages, toolCalls, turns, usage)
+			}
 		}
 	}()
 
@@ -1206,6 +1252,9 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 	defer func() {
 		if err != nil {
 			c.emitRunError(runStart, toolCalls, turns, usage, err)
+			if c.isRunTimeout(ctx, err) {
+				res, err = c.timedOutRun(messages, toolCalls, turns, usage)
+			}
 		}
 	}()
 
@@ -1513,6 +1562,12 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 	defer func() {
 		if err != nil {
 			c.emitRunError(runStart, toolCalls, turns, usage, err)
+			if c.isRunTimeout(ctx, err) {
+				// The streaming paths have no RunResult to populate here (the
+				// terminal one rides the channel), but the message must still
+				// name the budget rather than read as caller cancellation.
+				err = &RunTimeoutError{TimeoutMs: c.opts.TimeoutMs}
+			}
 		}
 	}()
 
@@ -1559,9 +1614,10 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			out, _ := io.ReadAll(resp.Body)
+			ra := resp.Header.Get("Retry-After")
 			resp.Body.Close()
 			c.emitLLM("error", t0, 0, 0)
-			return fmt.Errorf("LLM %d: %s", resp.StatusCode, string(out))
+			return newProviderError(resp.StatusCode, out, ra)
 		}
 
 		var content strings.Builder
@@ -1773,6 +1829,12 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 	defer func() {
 		if err != nil {
 			c.emitRunError(runStart, toolCalls, turns, usage, err)
+			if c.isRunTimeout(ctx, err) {
+				// The streaming paths have no RunResult to populate here (the
+				// terminal one rides the channel), but the message must still
+				// name the budget rather than read as caller cancellation.
+				err = &RunTimeoutError{TimeoutMs: c.opts.TimeoutMs}
+			}
 		}
 	}()
 
@@ -1823,9 +1885,10 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			out, _ := io.ReadAll(resp.Body)
+			ra := resp.Header.Get("Retry-After")
 			resp.Body.Close()
 			c.emitLLM("error", t0, 0, 0)
-			return fmt.Errorf("LLM %d: %s", resp.StatusCode, string(out))
+			return newProviderError(resp.StatusCode, out, ra)
 		}
 
 		blocks := map[int]*streamBlock{}

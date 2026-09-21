@@ -377,10 +377,36 @@ public sealed record RecordedDecision
 /// Mirrors <see cref="LlmClient.Options"/> field-for-field wherever a field makes sense, so a host
 /// that has configured one has configured the other (§8B).
 /// </summary>
+/// <summary>
+/// (ADR 0027 D1) Which HOST serves the System One wire. A preset, not a transport: it sets
+/// <c>BaseUrl</c> + <c>Model</c> + <c>ApiKeyEnv</c> AS A UNIT, because the three only ever make
+/// sense together and mixing them is the reported failure — <c>jev-latest</c> is TypeSafe's
+/// spelling for the floating alias and openrouter.ai does not serve that name.
+/// </summary>
+public enum ClassifierBackend
+{
+    /// <summary>No preset: the individual options apply as given.</summary>
+    Unset = 0,
+
+    /// <summary>api.typesafe.ai — <c>jev-latest</c>, <c>TYPESAFE_API_KEY</c>.</summary>
+    TypeSafe,
+
+    /// <summary>openrouter.ai — <c>typesafe/jev-1.13</c>, <c>OPENROUTER_API_KEY</c>.</summary>
+    OpenRouter,
+}
+
 public sealed class ClassifierOptions
 {
     /// <summary>Which backend answers. Default <see cref="ClassifierStyle.SystemOne"/>.</summary>
     public ClassifierStyle Style { get; set; } = ClassifierStyle.SystemOne;
+
+    /// <summary>
+    /// (ADR 0027 D1) A preset setting <see cref="BaseUrl"/>, <see cref="Model"/> and
+    /// <see cref="ApiKeyEnv"/> as a unit. Anything you set EXPLICITLY still wins — the preset only
+    /// fills what you left blank — but a model that the chosen backend is known not to serve is
+    /// refused AT CONSTRUCTION with the correct spelling, rather than at the first 404.
+    /// </summary>
+    public ClassifierBackend Backend { get; set; } = ClassifierBackend.Unset;
 
     /// <summary>The API base. Null/empty ⇒ <see cref="Classifier.DefaultBaseUrl"/>. OpenRouter
     /// (<c>https://openrouter.ai/api/v1</c>) serves this wire today.</summary>
@@ -461,6 +487,7 @@ public sealed class ClassifierOptions
     public IReadOnlyList<RecordedDecision>? Decisions { get; set; }
 
     public ClassifierOptions WithStyle(ClassifierStyle v) { Style = v; return this; }
+    public ClassifierOptions WithBackend(ClassifierBackend v) { Backend = v; return this; }
     public ClassifierOptions WithBaseUrl(string v) { BaseUrl = v; return this; }
     public ClassifierOptions WithModel(string v) { Model = v; return this; }
     public ClassifierOptions WithApiKeyEnv(string v) { ApiKeyEnv = v; return this; }
@@ -492,6 +519,12 @@ public sealed class Classifier
 
     /// <summary>The NAME of the env var holding the credential.</summary>
     public const string DefaultApiKeyEnv = "TYPESAFE_API_KEY";
+
+    /// <summary>(ADR 0027 D1) The OpenRouter preset's base, model and credential env-var name.
+    /// <c>jev-latest</c> is TypeSafe's alias and is NOT servable here — the pinned spelling is.</summary>
+    public const string OpenRouterBaseUrl = "https://openrouter.ai/api/v1";
+    public const string OpenRouterModel = "typesafe/jev-1.13";
+    public const string OpenRouterApiKeyEnv = "OPENROUTER_API_KEY";
 
     /// <summary>Bounds ONE request (a classifier has no loop to bound).</summary>
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(10);
@@ -538,9 +571,22 @@ public sealed class Classifier
     public Classifier(ClassifierOptions? options = null)
     {
         _opts = options ?? new ClassifierOptions();
-        _baseUrl = string.IsNullOrEmpty(_opts.BaseUrl) ? DefaultBaseUrl : _opts.BaseUrl!;
-        _model = string.IsNullOrEmpty(_opts.Model) ? DefaultModel : _opts.Model!;
-        _apiKeyEnv = string.IsNullOrEmpty(_opts.ApiKeyEnv) ? DefaultApiKeyEnv : _opts.ApiKeyEnv!;
+        // (ADR 0027 D1) The preset fills the three-as-a-unit; an explicit option still wins.
+        var (presetBase, presetModel, presetKeyEnv) = _opts.Backend switch
+        {
+            ClassifierBackend.TypeSafe => (DefaultBaseUrl, DefaultModel, DefaultApiKeyEnv),
+            ClassifierBackend.OpenRouter => (OpenRouterBaseUrl, OpenRouterModel, OpenRouterApiKeyEnv),
+            _ => (DefaultBaseUrl, DefaultModel, DefaultApiKeyEnv),
+        };
+        _baseUrl = string.IsNullOrEmpty(_opts.BaseUrl) ? presetBase : _opts.BaseUrl!;
+        _model = string.IsNullOrEmpty(_opts.Model) ? presetModel : _opts.Model!;
+        _apiKeyEnv = string.IsNullOrEmpty(_opts.ApiKeyEnv) ? presetKeyEnv : _opts.ApiKeyEnv!;
+        // Fail at CONSTRUCTION on the one mismatch we know about, naming the right spelling. The
+        // cost of not doing this is a 404 at the first live call, in production, saying nothing.
+        if (_model == DefaultModel && IsOpenRouter(_baseUrl))
+            throw new ClassifierException(
+                $"classifier: model \"{DefaultModel}\" is TypeSafe's spelling; "
+                + $"on openrouter.ai use \"{OpenRouterModel}\"");
         _timeout = _opts.Timeout is { } t && t > TimeSpan.Zero ? t : DefaultTimeout;
         _retries = _opts.Retries is { } r && r > 0 ? r : 2;
         _retryBaseMs = _opts.RetryBaseMs is { } rb && rb > 0 ? rb : 500L;
@@ -572,6 +618,12 @@ public sealed class Classifier
                 throw new ClassifierException($"classifier: unknown style \"{_opts.Style}\"");
         }
     }
+
+    private static bool IsOpenRouter(string baseUrl)
+        => baseUrl.Contains("openrouter.ai", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The applied backend preset (after defaults).</summary>
+    public ClassifierBackend Backend => _opts.Backend;
 
     /// <summary>Mirrors the other ports' <c>createClassifier</c> factory.</summary>
     public static Classifier Create(ClassifierOptions? options = null) => new(options);
@@ -987,11 +1039,11 @@ public sealed class Classifier
     /// reaches a log, a metric, an exception or a return value.</summary>
     private static string Cause(int status, string body)
     {
-        if (status == 401 || status == 403) return "";
-        var s = (body ?? "").Trim();
-        if (s.Length == 0) return "";
-        if (s.Length > 200) s = s[..200] + "…";
-        return ": " + s;
+        // (ADR 0027 D3.3) ONE policy, written once: the redaction + 401/403 blanking + 200-char cap
+        // now live on the §8 client path and this defers to them. A CAP IS NOT REDACTION — the
+        // account-identifier keys are replaced BEFORE the cap, which is the whole point.
+        var s = LlmClient.RedactBody(status, body);
+        return s.Length == 0 ? "" : ": " + s;
     }
 
     /// <summary>

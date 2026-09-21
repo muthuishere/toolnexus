@@ -74,13 +74,22 @@
   ;; noname — frontmatter without `name`
   (write-fixture! (str fixture-root "/noname/SKILL.md")
                   "---\ndescription: I have no name.\n---\n\nBody.\n")
-  ;; unclosed — an opening fence that never closes; frontmatter/parse THROWS
+  ;; unclosed — an opening fence that never closes. That is NOT frontmatter, so
+  ;; it is `missing-name`, which is what the other six ports report (their
+  ;; frontmatter regex simply fails to match). This port used to call it
+  ;; malformed-frontmatter — issue #93 / ADR 0028.
   (write-fixture! (str fixture-root "/unclosed/SKILL.md")
                   "---\nname: unclosed\ndescription: never closed\n\nBody.\n")
-  ;; blockscalar — legal YAML, OUTSIDE toolnexus.frontmatter's subset, so it
-  ;; throws too. This is the documented divergence from the five shipped ports.
+  ;; blockscalar — a folded block scalar. Ordinary YAML, LOADED since the port
+  ;; grew a real YAML parser; it used to be the documented divergence that cost
+  ;; 42 of 87 real skills.
   (write-fixture! (str fixture-root "/blockscalar/SKILL.md")
                   "---\nname: blocky\ndescription: >\n  folded text\n---\n\nBody.\n")
+  ;; tabbed — genuinely malformed: tab indentation, and no `name` the lenient
+  ;; rescue can take. Still refused, and the skip now carries the parser's own
+  ;; message in `:detail`.
+  (write-fixture! (str fixture-root "/tabbed/SKILL.md")
+                  "---\ndescription: x\n\tbad: value\n---\n\nBody.\n")
   ;; many — 12 siblings, so the sample cap of 10 is actually exercised
   (write-fixture! (str fixture-root "/many/SKILL.md")
                   (skill-md "many" "Twelve siblings." "Many body."))
@@ -105,11 +114,138 @@
 
 (deftest discovery-finds-every-named-skill
   (let [ld (loaded)]
-    (is (= ["alpha" "beta" "gamma" "many"] (vec (sort (keys (:by-name ld))))))
+    (is (= ["alpha" "beta" "blocky" "gamma" "many"] (vec (sort (keys (:by-name ld))))))
     (testing "nested SKILL.md is discovered at any depth"
       (is (= (str fixture-root "/nested/deep/beta") (:dir (get (:by-name ld) "beta")))))
     (testing "the body after the frontmatter is the content"
       (is (str/includes? (:content (get (:by-name ld) "alpha")) "Alpha body line.")))))
+
+(deftest discovery-order-is-pinned-by-code-point
+  ;; Addendum A1/A1a: lexicographic by path relative to the root's logical base,
+  ;; compared by CODE POINT. A1b's consequence is asserted directly below —
+  ;; `docx/SKILL.md` beats `synced/<hash>/docx/SKILL.md`, and all seven ports
+  ;; must pick the same winner or first-name-wins means a different file per
+  ;; language.
+  (let [root (str fixture-base "/order")]
+    (write-fixture! (str root "/synced/9f2/docx/SKILL.md")
+                    (skill-md "docx" "The synced copy that must LOSE." "synced body"))
+    (write-fixture! (str root "/docx/SKILL.md")
+                    (skill-md "docx" "The top-level copy that must WIN." "top body"))
+    (let [ld (skill/load-skills root)]
+      (is (= "The top-level copy that must WIN."
+             (:description (get (:by-name ld) "docx"))))
+      (is (= (str root "/docx") (:dir (get (:by-name ld) "docx"))))
+      (is (some #(and (= "duplicate-name" (:reason %))
+                      (str/includes? (:location %) "/synced/"))
+                (:skipped ld))))))
+
+(deftest a-shallower-path-beats-a-nested-one-for-EVERY-name
+  ;; Addendum A15 — the row a `docx`-only fixture cannot catch.
+  ;;
+  ;; §3 says a shallower path beats a nested copy of the same name. Under the
+  ;; PURE code-point sort A1a originally specified, that was true only by
+  ;; accident of the first letter:
+  ;;
+  ;;   "docx/SKILL.md"           < "synced/9f2/docx/SKILL.md"   (d < s)  WINS
+  ;;   "xlsx/SKILL.md"           > "synced/9f2/xlsx/SKILL.md"   (x > s)  LOSES
+  ;;
+  ;; So the winner depended on the skill's first letter relative to a sibling
+  ;; DIRECTORY's name. Both names are asserted here on purpose: `docx` passes
+  ;; under either rule and proves nothing, and that is exactly how six ports
+  ;; and a spec review all missed this. `xlsx` is the discriminator.
+  (let [root (str fixture-base "/depth")]
+    (doseq [nm ["docx" "xlsx"]]
+      (write-fixture! (str root "/synced/9f2/" nm "/SKILL.md")
+                      (skill-md nm (str "The nested " nm " copy that must LOSE.") "nested body"))
+      (write-fixture! (str root "/" nm "/SKILL.md")
+                      (skill-md nm (str "The top-level " nm " copy that must WIN.") "top body")))
+    (let [ld (skill/load-skills root)]
+      (doseq [nm ["docx" "xlsx"]]
+        (is (= (str "The top-level " nm " copy that must WIN.")
+               (:description (get (:by-name ld) nm)))
+            (str nm ": the SHALLOWER path must win regardless of its first letter"))
+        (is (= (str root "/" nm) (:dir (get (:by-name ld) nm)))))
+      (is (= 2 (count (filter #(= "duplicate-name" (:reason %)) (:skipped ld))))
+          "both nested copies are typed duplicate skips")))
+  (testing "the comparator itself: depth ascending, then code point within a depth"
+    (is (neg? (skill/discovery-compare "/xlsx/SKILL.md" "/synced/9f2/xlsx/SKILL.md"))
+        "depth wins over the letter — this is the whole of A15")
+    (testing "and the two rules genuinely DISAGREE here — otherwise this proves nothing"
+      ;; The assertion that makes the fixture a test. A `docx` fixture passes
+      ;; under BOTH rules, which is exactly how six ports and one spec review
+      ;; all shipped this bug. Deleting the depth comparison from
+      ;; `discovery-compare` must turn this row red, and here is the reason it
+      ;; would: the OLD rule returns the OPPOSITE sign for `xlsx`.
+      (is (pos? (tool/compare-strings "/xlsx/SKILL.md" "/synced/9f2/xlsx/SKILL.md"))
+          "pure code point (the pre-A15 rule) puts the NESTED xlsx copy first")
+      (is (neg? (tool/compare-strings "/docx/SKILL.md" "/synced/9f2/docx/SKILL.md"))
+          "…and agrees with A15 for docx, which is why docx alone is not a fixture"))
+    (is (neg? (skill/discovery-compare "/docx/SKILL.md" "/synced/9f2/docx/SKILL.md")))
+    (is (neg? (skill/discovery-compare "/a/SKILL.md" "/b/SKILL.md"))
+        "within one depth the A1c code-point tie-break still decides")
+    (is (neg? (skill/discovery-compare "/\uE000/SKILL.md" "/\uD83D\uDE00/SKILL.md"))
+        "and it is still code POINT, not UTF-16 code unit")))
+
+(deftest path-helpers-are-rune-safe-on-both-hosts
+  ;; A REAL host divergence, found by the astral discovery fixture above and
+  ;; fixed in `toolnexus.tool/last-index-of-char`.
+  ;;
+  ;; `clojure.string/last-index-of` returns a BYTE offset on the cljgo host,
+  ;; while `subs`/`count`/`nth` work in RUNES. So for ANY path containing a
+  ;; non-ASCII character the index and the slice disagreed and the split landed
+  ;; mid-name — measured, before the fix, on cljgo:
+  ;;
+  ;;   parent-dir "/base/\uE000dir/SKILL.md"  ->  "/base/\uE000dir/S"   (+2)
+  ;;   parent-dir "/base/😀dir/SKILL.md"       ->  "/base/😀dir/SK"      (+3)
+  ;;
+  ;; U+E000 is 3 UTF-8 bytes and 1 rune; an astral character is 4 and 1. The JVM
+  ;; host was always correct, which is precisely why this survived: every path
+  ;; in every fixture was ASCII, so no test could see it. It is asserted here
+  ;; rather than only through discovery because `file-name` also feeds a skill's
+  ;; reported directory and a content part's extension.
+  (doseq [[path dir nm]
+          [["/base/plain/dir/SKILL.md"        "/base/plain/dir"        "SKILL.md"]
+           ["/base/astral/\uE000dir/SKILL.md" "/base/astral/\uE000dir" "SKILL.md"]
+           ["/base/astral/\uD83D\uDE00dir/SKILL.md"
+            "/base/astral/\uD83D\uDE00dir" "SKILL.md"]
+           ["/base/\uE000/SKILL.md"           "/base/\uE000"           "SKILL.md"]
+           ["SKILL.md"                        "."                      "SKILL.md"]]]
+    (is (= dir (skill/parent-dir path)) (str "parent-dir of " (pr-str path)))
+    (is (= nm (skill/file-name path))   (str "file-name of "  (pr-str path))))
+  (testing "the seam itself: the index is in the SAME units as `subs` on this host"
+    (doseq [s ["/a/b" "/\uE000/b" "/\uD83D\uDE00/b"]]
+      (let [i (tool/last-index-of-char s \/)]
+        (is (= "b" (subs s (inc i)))
+            (str "index and slice must agree for " (pr-str s)))))))
+
+(deftest discovery-order-astral-plane-path-agrees-on-both-hosts
+  ;; Addendum A1c — the ONE case where code-POINT order and the natural
+  ;; UTF-16 code-UNIT order of a JVM `compare`/`compareTo` disagree, expressed
+  ;; where it actually bites: a DIRECTORY NAME, not a skill name.
+  ;;
+  ;;   U+E000 PRIVATE USE      UTF-16 = one unit  E000
+  ;;   U+1F600 GRINNING FACE   UTF-16 = D83D DE00, and D83D < E000
+  ;;
+  ;; So by code POINT "\uE000" sorts BEFORE the emoji, and by code UNIT it
+  ;; sorts AFTER it. Both directories declare the SAME skill name, so
+  ;; first-wins turns that ordering into a DIFFERENT FILE and a DIFFERENT
+  ;; `content` — silently, and only on an astral path. Asserting the winner is
+  ;; what stops the JVM host and the cljgo host (whose runes are already code
+  ;; points) from quietly disagreeing.
+  (let [root (str fixture-base "/astral")]
+    (write-fixture! (str root "/\uE000dir/SKILL.md")
+                    (skill-md "astral" "The U+E000 copy that must WIN." "pua body"))
+    (write-fixture! (str root "/\uD83D\uDE00dir/SKILL.md")
+                    (skill-md "astral" "The U+1F600 copy that must LOSE." "emoji body"))
+    (let [ld (skill/load-skills root)]
+      (is (= "The U+E000 copy that must WIN."
+             (:description (get (:by-name ld) "astral")))
+          "code-POINT order wins; UTF-16 code-unit order would pick the emoji")
+      (is (= (str root "/\uE000dir") (:dir (get (:by-name ld) "astral"))))
+      (is (some (fn [s] (and (= "duplicate-name" (:reason s))
+                             (str/includes? (:location s) "\uD83D\uDE00dir")))
+                (:skipped ld))
+          "the emoji-path copy is the typed duplicate skip"))))
 
 (deftest discovery-order-is-deterministic
   ;; The first-wins rule is order-dependent, so the port is only deterministic
@@ -117,7 +253,7 @@
   ;; if that sort ever leaves koine, this is the test that catches it.
   (let [paths (vec (fs/find-files fixture-root "/SKILL.md"))]
     (is (= (vec (sort paths)) paths))
-    (is (= 8 (count paths)))))
+    (is (= 9 (count paths)))))
 
 (deftest first-name-wins
   (let [ld (loaded)]
@@ -134,23 +270,38 @@
               (:skipped ld)))))
 
 (deftest rejected-frontmatter-does-not-kill-discovery
-  ;; toolnexus.frontmatter/parse THROWS outside its subset. Discovery isolates
-  ;; each candidate the way §0.3 isolates a failed MCP server: the throwing
-  ;; skill becomes a typed skip and every other skill still loads.
+  ;; A file neither the YAML parser nor the lenient rescue can name is a typed
+  ;; skip, isolated the way §0.3 isolates a failed MCP server: every other skill
+  ;; still loads.
   (let [ld (loaded)
         malformed (filter #(= "malformed-frontmatter" (:reason %)) (:skipped ld))]
-    (is (= 2 (count malformed)))
-    (testing "an unclosed fence is a skip, not a crash"
-      (is (some #(str/includes? (:location %) "/unclosed/") malformed)))
-    (testing "a block scalar is legal YAML but outside our subset — DIVERGENCE"
-      (is (some #(str/includes? (:location %) "/blockscalar/") malformed))
-      (is (nil? (get (:by-name ld) "blocky"))))
-    (testing "the four healthy skills survived"
-      (is (= 4 (count (:skills ld)))))))
+    (is (= 1 (count malformed)))
+    (testing "tab indentation with no rescuable name is still refused"
+      (is (some #(str/includes? (:location %) "/tabbed/") malformed)))
+    (testing "and the skip carries the parser's OWN message, so the file is fixable
+              — ADR 0028 decision 2. `:reason` stays byte-identical across ports;
+              `:detail` is native and is never compared for parity."
+      (is (re-find #"tab" (str (:detail (first malformed)))))
+      (is (re-find #"line" (str (:detail (first malformed))))))
+    (testing "an unclosed fence is missing-name, as in the other six ports"
+      (is (some #(and (= "missing-name" (:reason %))
+                      (str/includes? (:location %) "/unclosed/"))
+                (:skipped ld))))
+    (testing "a folded block scalar LOADS now — issue #93"
+      (is (= "folded text" (:description (get (:by-name ld) "blocky")))))
+    (testing "the five healthy skills survived"
+      (is (= 5 (count (:skills ld)))))))
+
+(deftest load-skills-returns-its-skips
+  ;; A host calling load-skills must not need list-skills to learn that files
+  ;; vanished (ADR 0028 decision 3 / addendum A2: RETURNED DATA, not a hook).
+  (let [ld (loaded)]
+    (is (seq (:skipped ld)))
+    (is (every? (fn [s] (and (string? (:location s)) (string? (:reason s)))) (:skipped ld)))))
 
 (deftest list-skills-inventory
   (let [inv (skill/list-skills fixture-root)]
-    (is (= 4 (count (:skills inv))))
+    (is (= 5 (count (:skills inv))))
     (is (= #{"missing-name" "malformed-frontmatter" "duplicate-name"}
            (set (map :reason (:skipped inv)))))))
 
@@ -216,7 +367,7 @@
   (let [ld (loaded)
         r  (skill/execute-skill ld "does-not-exist")]
     (is (true? (:isError r)))
-    (is (= "Skill \"does-not-exist\" not found. Available skills: alpha, beta, gamma, many"
+    (is (= "Skill \"does-not-exist\" not found. Available skills: alpha, beta, blocky, gamma, many"
            (:output r))))
   (testing "with no skills at all the list is the literal \"none\""
     (is (= "Skill \"anything\" not found. Available skills: none"
@@ -233,6 +384,7 @@
                 "\n\n## Available Skills\n"
                 "- **alpha**: The alpha skill.\n"
                 "- **beta**: A nested skill.\n"
+                "- **blocky**: folded text\n"
                 "- **many**: Twelve siblings.")
            p))
     (testing "a discovered skill with no description key is NOT in the catalog"
@@ -399,6 +551,154 @@
          (:output (skill/execute-skill (skill/load-skills {:dirs fixture-root :skills [data-skill]})
                                        "alpha")))))
 
+(def ^:private a22-names
+  "Golang's fixture, reused verbatim so all seven ports argue over one list.
+  Every pair of adjacent entries is ranked DIFFERENTLY by at least one of the
+  three candidate rules:
+
+    Zurich   U+005A  uppercase — a COLLATOR interleaves case and leads with `apple`
+    apple    U+0061
+    zebra    U+007A
+    Äpfel    U+00C4  a collator files this beside `apple`, code point puts it after `zebra`
+    \uFFFD       U+FFFD  the last BMP code point
+    \uD835\uDD1E  U+1D51E astral — UTF-16 code-UNIT order puts its LEAD SURROGATE
+                          (U+D835) BEFORE U+FFFD, code point puts it after
+
+  So: a locale collator fails on the case rows, `compare`/`compareTo`/
+  `StringComparer.Ordinal` (UTF-16 code unit) fails on the last row, and only
+  code point produces the order below. The JVM host's default string `compare`
+  IS UTF-16 code-unit order, so this is exactly where the two hosts diverge."
+  ["Zurich" "apple" "zebra" "\u00C4pfel" "\uFFFD" "\uD835\uDD1E"])
+
+(deftest the-a22-fixture-is-itself-code-point-ordered
+  ;; Golang's test self-checks its own expectation, and so does this one: an
+  ;; expectation hand-written in the wrong order would make every assertion
+  ;; below agree with a bug. Proven against the seam, and then against the
+  ;; RAW code points, so it does not merely agree with itself.
+  (is (= a22-names (tool/sort-strings a22-names)))
+  (let [cp-lex (fn [a b]
+                 ;; LEXICOGRAPHIC over code points. NOT `compare` on the
+                 ;; code-point vectors — clojure.core/compare orders vectors by
+                 ;; LENGTH first, which would rank "\uFFFD" above "apple"; the
+                 ;; port's own tool_test records the same trap.
+                 (let [xs (vec (tool/code-points a))
+                       ys (vec (tool/code-points b))]
+                   (loop [i 0]
+                     (cond (and (>= i (count xs)) (>= i (count ys))) 0
+                           (>= i (count xs)) -1
+                           (>= i (count ys)) 1
+                           (not= (nth xs i) (nth ys i)) (compare (nth xs i) (nth ys i))
+                           :else (recur (inc i))))))]
+    (is (= (vec (sort cp-lex a22-names)) a22-names)
+        "…and against the RAW code points, independently of the seam"))
+  ;; NOT asserted here: "a bare `sort` disagrees". That is true on the JVM host
+  ;; (UTF-16 code units) and FALSE on cljgo (UTF-8 bytes, which ARE code-point
+  ;; order), so it is a HOST-SPECIFIC claim and a suite that runs unchanged on
+  ;; both cannot make it. That asymmetry is precisely why the seam exists: the
+  ;; bug can only ever appear on one of the two hosts, so the assertions below
+  ;; pin the ORDER ITSELF rather than the failure of an alternative.
+  )
+
+(deftest a22-every-user-visible-skill-list-is-code-point-ordered
+  ;; A22. The §0.10 prompt was the reported site; the audit found FOUR
+  ;; user-visible orderings, and the lesson was that nobody had asked where ELSE
+  ;; the codebase sorts model-visible data. All four are pinned here.
+  (let [mk (fn [n] {:name n :description "D." :content "C."})
+        ld (skill/load-skills {:skills (mapv mk (reverse a22-names))})]
+
+    (testing "(1) the §0.10 skills-prompt catalog — SPEC-pinned byte-identical"
+      (is (= (str skill/skills-prompt-preamble
+                  "\n\n## Available Skills\n"
+                  (str/join "\n" (map (fn [n] (str "- **" n "**: D.")) a22-names)))
+             (skill/skills-prompt ld))))
+
+    (testing "(2) the `skill` tool's NOT-FOUND message, which enumerates every
+              skill name TO THE MODEL. js and csharp each had this wrong and it
+              was in nobody's bug report."
+      (is (= (str "Skill \"nope\" not found. Available skills: "
+                  (str/join ", " a22-names))
+             (:output (skill/execute-skill ld "nope")))))))
+
+(def ^:private a25-rels
+  "The `<skill_files>` fixture, in the order A25's rule produces: sort by the
+  path RELATIVE to the skill directory, in PLAIN Unicode code point.
+
+  Every entry earns its place by RULING OUT a specific wrong rule. csharp's
+  first attempt at this test passed under the wrong rule and it found out only
+  by mutating the implementation, because its nested files sorted identically
+  by bare name and by relative path — so it asserted only that SOME sort had
+  happened.
+
+    `alpha-b.txt` before `alpha/f.txt`   rules out PER-LEVEL (flat vs per-level)
+        Flat relative-path order compares `-` (0x2D) against `/` (0x2F) at the
+        sixth character, so the FILE wins. A level-by-level walk sorts the
+        names `alpha` and `alpha-b.txt` first, descends into `alpha` and emits
+        `alpha/f.txt` FIRST. The two rules disagree on these two rows alone.
+
+    `c.txt` fourth, not second           rules out BARE NAME
+        By bare name the entries sort `alpha-b.txt, c.txt, f.txt, zz-a.txt,
+        zz.txt, \u00DF.txt`, putting `c.txt` second; by relative path `alpha/f.txt`
+        and `b-nested/zz-a.txt` both precede it. `b-nested/zz-a.txt` is the
+        mirror image — third by path, fifth by bare name.
+
+    `\u00DF.txt` last                         rules out a LOCALE COLLATOR
+        `\u00DF` collates as `ss`, so a collator files it among the `s`/`z` names;
+        by code point it is 0x00DF, after every ASCII letter. It also has no NFD
+        decomposition, so macOS filename normalisation cannot hollow the row
+        out. MEASURED CAVEAT for the other ports: a sibling literally named
+        `ss` cannot be used beside it — macOS folds the two to ONE file, and
+        the fixture then silently shrinks rather than failing.
+
+    `U+FFFD.txt` before the astral name   rules out UTF-16 CODE UNIT
+        U+FFFD is the last BMP code point and U+1D51E is astral. By CODE POINT
+        U+FFFD comes first; in UTF-16 CODE-UNIT order the astral name's LEAD
+        SURROGATE (U+D835) sorts BELOW U+FFFD, so the two swap. This is the only
+        pair in the fixture that separates code point from the JVM host's
+        default `compare`, and without it a bare `sort` passes this test — which
+        is exactly what the mutation run caught."
+  ["alpha-b.txt" "alpha/f.txt" "b-nested/zz-a.txt" "c.txt" "zz.txt" "\u00DF.txt"
+   "�.txt" "𝔞.txt"])
+
+(deftest a25-the-skill-files-sample-is-sorted-by-relative-path-then-capped
+  ;; (4) The `<skill_files>` SAMPLE LIST — model-visible text built from a
+  ;; DIRECTORY READ, so with no explicit sort it carries filesystem order.
+  ;; A25's settled rule: COLLECT every candidate, SORT by the path relative to
+  ;; the skill directory in plain code point, THEN truncate to the cap.
+  ;;
+  ;; SORT-BEFORE-CAP is the load-bearing half (ADR-0004 K1): the list is capped,
+  ;; so the order decides WHICH files reach the model at all. It is sharper for
+  ;; this port than any other — `koine.fs/list-tree` promises no order on either
+  ;; host, so a cap applied mid-walk could ship different sample CONTENTS from
+  ;; the JVM host and the cljgo host for the same skill.
+  (let [root  (str fixture-base "/a25files")
+        sdir  (str root "/sampled")
+        rels  (fn [out]
+                (mapv (fn [l] (-> l
+                                  (str/replace "<file>" "")
+                                  (str/replace "</file>" "")
+                                  (str/replace (str sdir "/") "")))
+                      (file-lines out)))]
+    (write-fixture! (str sdir "/SKILL.md") (skill-md "sampled" "Has siblings." "Body."))
+    ;; created in REVERSE, so a walk that preserved creation order, or capped
+    ;; before sorting, produces a visibly different answer
+    (doseq [r (reverse a25-rels)]
+      (write-fixture! (str sdir "/" r) "x\n"))
+    (testing "the fixture really landed — a name the filesystem folded away would
+              make this test vacuous rather than red"
+      (is (= (count a25-rels)
+             (count (remove (fn [p] (str/ends-with? (str p) "SKILL.md"))
+                            (fs/find-files sdir ".txt"))))))
+    (testing "the FULL order, uncapped"
+      (let [ld (skill/load-skills {:dirs root :sample-limit 10})]
+        (is (= a25-rels (rels (:output (skill/execute-skill ld "sampled")))))))
+    (testing "the CAPPED prefix — WHICH files appear, not merely their order"
+      (let [ld  (skill/load-skills {:dirs root :sample-limit 2})
+            got (rels (:output (skill/execute-skill ld "sampled")))]
+        (is (= ["alpha-b.txt" "alpha/f.txt"] got)
+            "the cap takes the first two IN SORTED ORDER")
+        (is (not (some #{"\u00DF.txt" "zz.txt"} got))
+            "a cap-during-walk implementation leaks a late-sorting file in here")))))
+
 (deftest name-ordering-is-by-code-point-on-every-host-visible-list
   ;; Skill names are NOT sanitized — unlike MCP tool names, which
   ;; `mcp-tool-name` reduces to [a-zA-Z0-9_-] — so a name above the BMP reaches
@@ -422,7 +722,26 @@
     (testing ":filter-unmatched order"
       (let [f (skill/load-skills {:skills [(nm "as")]
                                   :filter {"😀no" true "\uE000no" true "zno" true "ano" true}})]
-        (is (= ["ano" "zno" "\uE000no" "😀no"] (vec (:filter-unmatched f))))))))
+        (is (= ["ano" "zno" "\uE000no" "😀no"] (vec (:filter-unmatched f)))))))
+  (testing "A22 — the §0.10 prompt order is CODE POINT, which also rules out a
+            LOCALE COLLATOR. The astral pair above discriminates code point from
+            UTF-16 code unit (csharp's `StringComparer.Ordinal` bug); it does NOT
+            discriminate either from a collator, because a collator agrees with
+            both there. Case does: by code point every uppercase letter precedes
+            every lowercase one (`Z` = 0x5A < `a` = 0x61), while essentially any
+            collator interleaves them and puts `apple` first. js sorted this
+            prompt with `localeCompare`, so its order was not even stable across
+            MACHINES — and SPEC §0.10 pins this prompt as byte-identical."
+    (let [nm (fn [n] {:name n :description "D." :content "C."})
+          ld (skill/load-skills {:skills [(nm "apple") (nm "Zebra") (nm "Banana") (nm "cherry")]})]
+      (is (= (str skill/skills-prompt-preamble
+                  "\n\n## Available Skills\n"
+                  "- **Banana**: D.\n"
+                  "- **Zebra**: D.\n"
+                  "- **apple**: D.\n"
+                  "- **cherry**: D.")
+             (skill/skills-prompt ld))
+          "uppercase before lowercase — a collator would lead with `apple`"))))
 
 ;; ---------------------------------------------------------------------------
 ;; §3 S2 — the per-agent skills allowlist
@@ -437,7 +756,7 @@
 
 (deftest skills-filter-droplist-removes-named-skills
   (let [ld (skill/load-skills {:dirs fixture-root :filter {"gamma" false}})]
-    (is (= ["alpha" "beta" "many"] (vec (sort (keys (:by-name ld))))))))
+    (is (= ["alpha" "beta" "blocky" "many"] (vec (sort (keys (:by-name ld))))))))
 
 (deftest an-unknown-filter-name-is-ignored-and-recorded
   (let [ld (skill/load-skills {:dirs fixture-root :filter {"alpha" true "nope" true}})]
@@ -447,8 +766,8 @@
       (is (= ["nope"] (:filter-unmatched ld))))))
 
 (deftest nil-and-empty-filters-expose-everything
-  (is (= 4 (count (:skills (skill/load-skills {:dirs fixture-root :filter nil})))))
-  (is (= 4 (count (:skills (skill/load-skills {:dirs fixture-root :filter {}})))))
+  (is (= 5 (count (:skills (skill/load-skills {:dirs fixture-root :filter nil})))))
+  (is (= 5 (count (:skills (skill/load-skills {:dirs fixture-root :filter {}})))))
   (is (= [] (:filter-unmatched (skill/load-skills {:dirs fixture-root})))))
 
 (deftest keyword-filter-keys-work-too
@@ -460,7 +779,7 @@
 (deftest the-inventory-is-unfiltered
   ;; js/src/skill.ts listSkills() ignores opts.filter entirely — the inventory
   ;; exists to AUTHOR the allowlist, so filtering it would be circular.
-  (is (= 4 (count (:skills (skill/list-skills {:dirs fixture-root :filter {"alpha" true}}))))))
+  (is (= 5 (count (:skills (skill/list-skills {:dirs fixture-root :filter {"alpha" true}}))))))
 
 ;; ---------------------------------------------------------------------------
 ;; §3 S5 — the sample cap travels with the source
