@@ -801,9 +801,15 @@ function errText(e: unknown): string {
 }
 
 function sleep(ms: number): Promise<void> {
+  // NOT unref'd, unlike the timeout watchdog above. This timer is the retry
+  // backoff we are about to await, so it is real pending work: unref'ing it
+  // tells Node the process need not stay alive for it, and the loop can resolve
+  // before the retry ever happens. The §8 client's `delay` has never unref'd for
+  // the same reason. Caught on Node 22, where it cancelled every test after the
+  // first one to exercise a classifier retry ("Promise resolution is still
+  // pending but the event loop has already resolved"); Node 24 happened to hide it.
   return new Promise((resolve) => {
-    const t = setTimeout(resolve, ms)
-    ;(t as any).unref?.()
+    setTimeout(resolve, ms)
   })
 }
 

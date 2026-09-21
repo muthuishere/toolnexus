@@ -8,6 +8,22 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### Fixed — a classifier retry backoff no longer lets Node exit out from under it (javascript)
+
+`Classifier`'s backoff timer was created and then `unref`'d. An unref'd timer does not keep
+Node's event loop alive, so when a retry backoff was the only pending work, the loop could
+resolve before the retry ever happened — the process exiting mid-retry rather than completing it.
+The timer is awaited, so it is real pending work and must hold the loop open; the §8 `Client`'s
+own `delay` has never unref'd, for exactly this reason. The request timeout watchdog still
+unrefs, which is correct: a watchdog should never be the reason a process stays alive.
+
+JavaScript only — the other six ports use blocking sleeps with no equivalent notion.
+
+Found by CI rather than by reading: Node 22 cancelled every test after the first one to exercise
+a classifier retry ("Promise resolution is still pending but the event loop has already
+resolved"), reporting `237 passed, 0 failed, 8 cancelled` and exiting 1. Node 24, which the work
+was written on, hid it completely. The suite is now 245/245 on both.
+
 ### Four quiet disagreements between the ports, closed
 
 Each of these produced a green build and a valid-looking request, which is why they went
