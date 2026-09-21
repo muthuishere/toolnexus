@@ -1,0 +1,128 @@
+{
+  "name": "near-uniform",
+  "why": "Pins the derived nearUniform flag (SPEC §8B, docs/adr/0021 D3) from BOTH sides of the tolerance. n = 4, so uniform is 0.25 per option and the rule is max|p - 1/n| <= 0.05, inclusive. boundary_inside sits at a maximum deviation of 0.0499 and boundary_outside at 0.0501 — 1e-4 either side, which is four orders of magnitude clear of double-precision noise, so no port needs an epsilon to decide it. Without these two a port can pick any tolerance and no test notices.",
+  "request": {
+    "model": "typesafe/jev-1.13",
+    "state": "the snake is 4 long; the apple is two cells north",
+    "questions": {
+      "boundary_inside": {
+        "criteria": {
+          "east": "turns toward the wall",
+          "north": "closes the gap to the apple",
+          "south": "backs into the tail",
+          "west": "opens space away from the apple"
+        },
+        "instructions": "Which move is best?",
+        "type": "choice"
+      },
+      "boundary_outside": {
+        "criteria": {
+          "east": "turns toward the wall",
+          "north": "closes the gap to the apple",
+          "south": "backs into the tail",
+          "west": "opens space away from the apple"
+        },
+        "instructions": "Which move is best?",
+        "type": "choice"
+      },
+      "exactly_uniform": {
+        "criteria": {
+          "east": "turns toward the wall",
+          "north": "closes the gap to the apple",
+          "south": "backs into the tail",
+          "west": "opens space away from the apple"
+        },
+        "instructions": "Which move is best?",
+        "type": "choice"
+      },
+      "peaked": {
+        "criteria": {
+          "east": "turns toward the wall",
+          "north": "closes the gap to the apple",
+          "south": "backs into the tail",
+          "west": "opens space away from the apple"
+        },
+        "instructions": "Which move is best?",
+        "type": "choice"
+      }
+    }
+  },
+  "response": {
+    "model": "typesafe/jev-1.13-20260917",
+    "answers": {
+      "peaked": {
+        "choice": "north",
+        "confidence": 0.93,
+        "probabilities": {
+          "east": 0.02,
+          "north": 0.93,
+          "south": 0.02,
+          "west": 0.03
+        },
+        "type": "choice"
+      },
+      "exactly_uniform": {
+        "choice": "north",
+        "confidence": 0.25,
+        "probabilities": {
+          "east": 0.25,
+          "north": 0.25,
+          "south": 0.25,
+          "west": 0.25
+        },
+        "type": "choice"
+      },
+      "boundary_inside": {
+        "choice": "north",
+        "confidence": 0.2999,
+        "probabilities": {
+          "east": 0.225,
+          "north": 0.2999,
+          "south": 0.225,
+          "west": 0.2501
+        },
+        "type": "choice"
+      },
+      "boundary_outside": {
+        "choice": "north",
+        "confidence": 0.3001,
+        "probabilities": {
+          "east": 0.225,
+          "north": 0.3001,
+          "south": 0.225,
+          "west": 0.2499
+        },
+        "type": "choice"
+      }
+    },
+    "usage": {
+      "input_tokens": 412,
+      "output_tokens": 96
+    }
+  },
+  "expect": {
+    "tolerance": 0.05,
+    "comparison": "inclusive (<=) on max|p - 1/n|, n = number of entries in probabilities",
+    "answers": {
+      "peaked": {
+        "maxDeviation": 0.68,
+        "nearUniform": false
+      },
+      "exactly_uniform": {
+        "maxDeviation": 0.0,
+        "nearUniform": true
+      },
+      "boundary_inside": {
+        "maxDeviation": 0.0499,
+        "nearUniform": true
+      },
+      "boundary_outside": {
+        "maxDeviation": 0.0501,
+        "nearUniform": false
+      }
+    }
+  },
+  "canonical": "{\"model\":\"typesafe/jev-1.13\",\"questions\":{\"boundary_inside\":{\"criteria\":{\"east\":\"turns toward the wall\",\"north\":\"closes the gap to the apple\",\"south\":\"backs into the tail\",\"west\":\"opens space away from the apple\"},\"instructions\":\"Which move is best?\",\"type\":\"choice\"},\"boundary_outside\":{\"criteria\":{\"east\":\"turns toward the wall\",\"north\":\"closes the gap to the apple\",\"south\":\"backs into the tail\",\"west\":\"opens space away from the apple\"},\"instructions\":\"Which move is best?\",\"type\":\"choice\"},\"exactly_uniform\":{\"criteria\":{\"east\":\"turns toward the wall\",\"north\":\"closes the gap to the apple\",\"south\":\"backs into the tail\",\"west\":\"opens space away from the apple\"},\"instructions\":\"Which move is best?\",\"type\":\"choice\"},\"peaked\":{\"criteria\":{\"east\":\"turns toward the wall\",\"north\":\"closes the gap to the apple\",\"south\":\"backs into the tail\",\"west\":\"opens space away from the apple\"},\"instructions\":\"Which move is best?\",\"type\":\"choice\"}}}",
+  "canonicalSha256": "6dfa5ba5ecbbad96670356b83ecfa27e24b8d0bcd979393e4bc09034b929d654",
+  "canonicalBytes": 939
+}

@@ -1,0 +1,73 @@
+{
+  "name": "numbers",
+  "why": "Without this a port passes with an emitter that writes 0.0 for integer 0 and 1.6716E-5 for 0.000016716 — Jackson round-trips the base fixture byte-perfectly while doing exactly that (spikes/classifier/reports/99-verdict.md §3). The request numbers live in state, which is outside the byte claim, so the assertion here is on the PARSE: every value below must come back numerically equal, and a zero probability must stay a zero, not become absent.",
+  "request": {
+    "model": "typesafe/jev-1.13",
+    "state": {
+      "attempts": 0,
+      "elapsed": 1.21,
+      "unit_cost": 1.6716e-05
+    },
+    "questions": {
+      "is_expensive": {
+        "instructions": "Is this operation expensive relative to a typical request?",
+        "type": "noul"
+      },
+      "urgency": {
+        "criteria": [
+          "routine",
+          "elevated",
+          "urgent"
+        ],
+        "instructions": "How urgent is this?",
+        "type": "score"
+      }
+    }
+  },
+  "response": {
+    "model": "typesafe/jev-1.13-20260917",
+    "answers": {
+      "is_expensive": {
+        "noul": 0.0,
+        "type": "noul"
+      },
+      "urgency": {
+        "confidence": 0.57,
+        "legend": {
+          "0": "routine",
+          "1": "elevated",
+          "2": "urgent"
+        },
+        "probabilities": {
+          "0": 0.04,
+          "1": 0.71,
+          "2": 0.25
+        },
+        "score": 1.21,
+        "type": "score"
+      }
+    },
+    "usage": {
+      "cost": 1.6716e-05,
+      "input_tokens": 398,
+      "output_tokens": 72
+    }
+  },
+  "expect": {
+    "parse": {
+      "answers.urgency.score": 1.21,
+      "answers.urgency.probabilities.0": 0.04,
+      "answers.is_expensive.noul": 0.0,
+      "usage.cost": 1.6716e-05
+    },
+    "stateRoundTrip": {
+      "attempts": 0,
+      "elapsed": 1.21,
+      "unit_cost": 1.6716e-05
+    },
+    "notes": "Compare numerically, never as strings: 0 vs 0.0 and 1.6716e-5 vs 0.000016716 are the same value and different bytes. A port that types the probability map as a float and prints 0.0 for 0 still passes THIS fixture and fails the wire — which is why the canonical bytes are asserted separately, on model + questions."
+  },
+  "canonical": "{\"model\":\"typesafe/jev-1.13\",\"questions\":{\"is_expensive\":{\"instructions\":\"Is this operation expensive relative to a typical request?\",\"type\":\"noul\"},\"urgency\":{\"criteria\":[\"routine\",\"elevated\",\"urgent\"],\"instructions\":\"How urgent is this?\",\"type\":\"score\"}}}",
+  "canonicalSha256": "065b0e4242a9546cda16d3b7503e63adbec9bdb646e3cf35a529ffe2071533a5",
+  "canonicalBytes": 257
+}

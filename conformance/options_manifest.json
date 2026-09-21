@@ -243,8 +243,125 @@
       }
     ]
   },
+  "classifierOptions": {
+    "_doc": "ClassifierOptions (SPEC.md §8B). Registered here so the same parity gate that covers the client covers the judgment seam: a field that ships in six ports and not the seventh fails loudly instead of silently. All seven ports have landed, so a missing options file here is a failure like any other — there is no grace flag, and there must not be one again: a gate with a hole in it reports the hole as a pass.",
+    "files": {
+      "js": "js/src/classifier.ts",
+      "python": "python/src/toolnexus/classifier.py",
+      "go": "golang/classifier.go",
+      "java": "java/src/main/java/io/github/muthuishere/toolnexus/Classifier.java",
+      "csharp": "csharp/src/Toolnexus/Classifier.cs",
+      "elixir": "elixir/lib/toolnexus/classifier.ex",
+      "clojure": "clojure/src/toolnexus/classifier.cljc"
+    },
+    "options": [
+      {
+        "name": "style",
+        "aliases": [
+          "style"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "baseUrl",
+        "aliases": [
+          "baseurl"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "model",
+        "aliases": [
+          "model"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "apiKeyEnv",
+        "aliases": [
+          "apikeyenv"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "headers",
+        "aliases": [
+          "headers"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "timeout",
+        "aliases": [
+          "timeout",
+          "timeoutms"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "httpClient",
+        "aliases": [
+          "httpclient",
+          "fetch",
+          "httptransport",
+          "httpoptions",
+          "transport"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "retries",
+        "aliases": [
+          "retries"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "onError",
+        "aliases": [
+          "onerror"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "requestParams",
+        "aliases": [
+          "requestparams"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "bodyTransform",
+        "aliases": [
+          "bodytransform"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "onMetric",
+        "aliases": [
+          "onmetric"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "client",
+        "aliases": [
+          "client"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "evaluate",
+        "aliases": [
+          "evaluate"
+        ],
+        "tier": "core"
+      }
+    ]
+  },
   "portTiers": {
-    "_doc": "The tier a port is HELD TO, declared here and nowhere else. A port declaring its own tier is a self-graded exam: the claim must live in the shared contract, where changing it is a visible diff reviewed by the other ports. 'full' = every option. 'core' = the SPEC \u00a70 conformance contract only; full-tier options are permitted absences, counted and printed on every run so the debt can never go quiet.",
+    "_doc": "The tier a port is HELD TO, declared here and nowhere else. A port declaring its own tier is a self-graded exam: the claim must live in the shared contract, where changing it is a visible diff reviewed by the other ports. 'full' = every option. 'core' = the SPEC §0 conformance contract only; full-tier options are permitted absences, counted and printed on every run so the debt can never go quiet.",
     "js": "full",
     "python": "full",
     "go": "full",

@@ -1092,7 +1092,11 @@ defmodule Toolnexus.Client do
   # HTTP-date and out-of-range values are not delays we can honour, so the caller
   # backs off rather than guessing. `0` is a real answer, hence the `>= 0` guard.
   @retry_after_max 2_147_483_647
-  defp parse_retry_after(s) do
+  #
+  # Public (but undocumented) so `Toolnexus.Classifier` reuses this rule VERBATIM
+  # rather than growing a second one — §8B says there is no second retry policy.
+  @doc false
+  def parse_retry_after(s) do
     case String.trim(to_string(s)) do
       "" ->
         nil

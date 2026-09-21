@@ -97,6 +97,18 @@ export type MetricEvent =
   | { event: "llm"; model: string; status: "ok" | "error"; ms: number; promptTokens: number; completionTokens: number }
   | { event: "tool"; tool: string; source: string; isError: boolean; ms: number; pending?: boolean }
   | { event: "run"; model: string; turns: number; toolCalls: number; totalTokens: number; ms: number; error?: string }
+  // §8B. The classifier emits into this SAME sink. Neither event is folded into the Prometheus
+  // registry, so `client.metrics()` text stays byte-identical to a build with no classifier.
+  | {
+      event: "classifier.evaluate"
+      model: string
+      status: "ok" | "error"
+      ms: number
+      promptTokens: number
+      completionTokens: number
+      error?: string
+    }
+  | { event: "classifier.warning"; question: string; error: string }
 
 /**
  * Where `ask()` conversations are remembered — two methods. Ship the in-memory
@@ -137,12 +149,18 @@ const RETRY_AFTER_MAX_SECONDS = 2147483647
  * backoff rather than guessing. `0` is a real answer, so it returns `0`, not
  * `null`, and callers must use `??` rather than `||`.
  */
-function retryAfterMs(raw: string | null | undefined): number | null {
+export function retryAfterMs(raw: string | null | undefined): number | null {
   if (raw == null) return null
   const s = raw.trim()
   if (!/^[0-9]+$/.test(s)) return null
   const secs = Number(s)
   return secs <= RETRY_AFTER_MAX_SECONDS ? secs * 1000 : null
+}
+
+/** Whether a status is in the default retryable set (429/5xx). Shared with §8B's classifier,
+ * which reuses this policy rather than inventing a second one. */
+export function isRetryableStatus(status: number): boolean {
+  return RETRYABLE.has(status)
 }
 
 function delay(ms: number, signal: AbortSignal): Promise<void> {

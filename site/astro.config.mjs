@@ -74,6 +74,7 @@ export default defineConfig({
 										{ label: 'Harness & loop', slug: 'harness' },
 										{ label: 'Completion gate & guardrails', slug: 'harness/completion-gate' },
 										{ label: 'Proved on live models', slug: 'harness/live' },
+										{ label: 'Judge — measured live', slug: 'harness/judge-live' },
 									],
 								},
 								{
@@ -91,6 +92,7 @@ export default defineConfig({
 										{ label: 'Fail fast, or retry', slug: 'cookbook/fail-fast-or-retry' },
 										{ label: 'Multi-turn memory', slug: 'cookbook/memory' },
 										{ label: 'Sub-agents & teams', slug: 'cookbook/subagents' },
+										{ label: 'Typed decisions (judge)', slug: 'cookbook/judge' },
 									],
 								},
 								{

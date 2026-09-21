@@ -149,8 +149,10 @@ public final class LlmClient {
      * ({@link #metrics()}). Modeled as a sealed interface (the type is the discriminator; the
      * {@link #event()} string mirrors the JS {@code event} field for convenience).
      */
-    public sealed interface MetricEvent permits MetricEvent.Llm, MetricEvent.Tool, MetricEvent.Run {
-        /** The event kind: {@code "llm"}, {@code "tool"}, or {@code "run"}. */
+    public sealed interface MetricEvent permits MetricEvent.Llm, MetricEvent.Tool, MetricEvent.Run,
+            MetricEvent.ClassifierEvaluate, MetricEvent.ClassifierWarning {
+        /** The event kind: {@code "llm"}, {@code "tool"}, {@code "run"},
+         * {@code "classifier.evaluate"} or {@code "classifier.warning"}. */
         String event();
 
         /** One LLM round trip. */
@@ -172,6 +174,21 @@ public final class LlmClient {
         record Run(String model, int turns, int toolCalls, long totalTokens, long ms, String error)
                 implements MetricEvent {
             @Override public String event() { return "run"; }
+        }
+
+        /** §8B: one {@link Classifier#evaluate} call. {@code status} is {@code "ok"} or
+         * {@code "error"}; {@code error} is null on success. NOT folded into the Prometheus
+         * registry, so {@link LlmClient#metrics()} text stays byte-identical. */
+        record ClassifierEvaluate(String model, String status, long ms,
+                                  long promptTokens, long completionTokens, String error)
+                implements MetricEvent {
+            @Override public String event() { return "classifier.evaluate"; }
+        }
+
+        /** §8B: a degenerate-criteria warning, naming the question KEY. Emitted once per key per
+         * classifier; the request goes out byte-unchanged (detection, never repair). */
+        record ClassifierWarning(String question, String message) implements MetricEvent {
+            @Override public String event() { return "classifier.warning"; }
         }
     }
 
@@ -2220,7 +2237,13 @@ public final class LlmClient {
      * is off here, so it matches ASCII digits exactly as the other six ports do.
      */
     private static java.util.OptionalLong retryAfterMs(HttpResponse<?> res) {
-        return res.headers().firstValue("retry-after")
+        return retryAfterDelayMs(res.headers().firstValue("retry-after").orElse(null));
+    }
+
+    /** The same rule, applied to a raw header value — so §8B's classifier path reuses this
+     * verbatim rather than growing a second retry policy. */
+    static java.util.OptionalLong retryAfterDelayMs(String header) {
+        return java.util.Optional.ofNullable(header)
                 .map(String::trim)
                 .filter(s -> s.matches("\\d+"))
                 .map(java.math.BigInteger::new) // never throws once the shape is digits-only

@@ -38,7 +38,14 @@ public sealed record MetricEvent
     public int Turns { get; init; }
     public int ToolCalls { get; init; }
     public long TotalTokens { get; init; }
+    /// <summary>The failure message on a failed run, on a failed <c>"classifier.evaluate"</c>, or
+    /// the warning text of a <c>"classifier.warning"</c> (§8B).</summary>
     public string? Error { get; init; }
+
+    /// <summary>The classifier question KEY an event is about (<c>"classifier.warning"</c>, §8B).
+    /// Null on every other event. Neither classifier event is folded into the Prometheus registry,
+    /// so <see cref="LlmClient.Metrics"/> text is unchanged by this field.</summary>
+    public string? Question { get; init; }
     // llm + tool + run
     public long Ms { get; init; }
 

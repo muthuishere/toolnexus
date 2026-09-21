@@ -389,8 +389,10 @@
      (cond-> {:model (:model client) :messages messages}
        (seq tools) (assoc :tools tools :tool_choice "auto")))))
 
-(def ^:private retryable-statuses
-  "§resilience-policy — the retryable set. Everything else is terminal unless a
+(def retryable-statuses
+  "§resilience-policy — the retryable set. PUBLIC because SPEC §8B's
+  `toolnexus.classifier` reuses this policy verbatim rather than shipping a
+  second one. Everything else is terminal unless a
   host `:on-error` says otherwise."
   #{429 500 502 503 504})
 
@@ -398,8 +400,13 @@
   "~68 years; the widest whole-second count all seven ports represent exactly."
   2147483647)
 
-(defn- retry-after-ms
-  "Honour a `Retry-After` header when the server sends one. Seconds only: the
+(defn retry-after-ms
+  "Honour a `Retry-After` header when the server sends one.
+
+  PUBLIC because SPEC §8B's `toolnexus.classifier` honours the SAME rule. It
+  calls this rather than carrying its own copy: §8B says the classifier reuses
+  the §8 Retry-After delay-seconds rule verbatim, and two implementations of
+  \"verbatim\" is how they stop being the same. Seconds only: the
   HTTP-date form needs date parsing, which is not portable across these two
   hosts without reaching past koine, and a server that sends it gets our
   backoff instead of a wrong answer.
@@ -436,8 +443,13 @@
     (http/request (cond-> {:method :post :url url :headers headers :body body}
                     (:timeout-ms client) (assoc :timeout-ms (:timeout-ms client))))))
 
-(defn- classify
-  "§resilience-policy — retry | fail, and NOTHING ELSE. The archived spec is
+(defn classify
+  "§resilience-policy — retry | fail, and NOTHING ELSE.
+
+  PUBLIC for the same reason as `retry-after-ms`: SPEC §8B's classifier reuses
+  this `ErrorInfo -> verdict` policy rather than shipping a second one. It reads
+  only `:on-error` off its first argument, so a classifier options map answers
+  it exactly as a client does. The archived spec is
   explicit that this capability does not add a failure-originated suspend tier:
   §10 suspension stays a user-action pause, so an LLM failure can never become
   one here.

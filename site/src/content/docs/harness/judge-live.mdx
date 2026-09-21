@@ -1,0 +1,148 @@
+---
+title: Judge — measured on a live backend
+description: Latency, cost, calibration and non-determinism for the Classifier seam, measured against a live System One backend and two chat models — including the shuffle control, the one encoding check that can fail.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="caution" title="Read this before you read a number">
+A decision is **advisory**. Calibration is **not** correctness. "Cannot hallucinate" means only
+that the returned value is inside the declared schema — a decision can be confidently wrong, and
+`nearUniform` cannot tell a good encoding from a subtly wrong one. **Authority is enforced in
+code**: numeric limits, permission checks and allowlists stay in your `if` statements. A classifier
+interprets; it never authorises. Nothing on this page is a security control.
+</Aside>
+
+Every number below came from a real run against
+`POST https://openrouter.ai/api/v1/systemone`, model `typesafe/jev-1.13`, answering as
+`jev-1.13-20260917`, on 2026-09-20. The key was read from the environment at the point of use and
+never printed. Provenance for each table is cited inline.
+
+<Aside type="note" title="What is not automated yet">
+These measurements are **recorded**, not regenerated on every docs build: there is no
+`judge-live` harness runner wired into the suite yet, the way `harness/live` has one. Until there
+is, this page is a transcription of the recorded run with its source named per table, and re-running
+it is a manual step. That gap is tracked in the `add-judge` change.
+</Aside>
+
+## The headline: it is not deterministic, so no test may assert a live number
+
+The same 514 request bytes, three times
+(<a href="https://github.com/muthuishere/toolnexus/blob/main/spikes/classifier/reports/00-live-backend.md">F2</a>):
+
+| run | `is_refund_request` (noul) | `department` P(shipping) | `urgency` (score) |
+|---|---|---|---|
+| 1 | 0.98 | 0.63 | 1.25 |
+| 2 | 0.98 | 0.65 | 1.22 |
+| 3 | 0.98 | 0.62 | 1.20 |
+
+Twelve concurrent calls on one borderline command: scores 1.90–1.95, **spread 0.05, σ ≈ 0.0153**
+on a 0–3 scale. The `noul` was stable at 0.98 every time; the jitter concentrates in `score` and in
+`choice` probabilities, which makes a binary gate the most reproducible primitive you can build.
+
+Two consequences you inherit:
+
+1. **CI runs the `static` backend.** Recorded decisions, no network, no credential. It is not a
+   convenience — it is the only backend a test may assert a number against. No test in this repo
+   asserts a live numeric answer; a live call, if run at all, asserts shape only.
+2. **A threshold needs clearance.** A band boundary sitting within ~0.1 of a typical value will
+   flip between runs. Give it room, or add hysteresis.
+
+## Latency and cost, and why `style: "llm"` is an exit rather than an equal
+
+The identical 64-option routing job on three backends (F5):
+
+| backend | latency | pick | confidence | input tok | cost | distribution |
+|---|---|---|---|---|---|---|
+| **System One** (`typesafe/jev-1.13`) | **0.52 s** | `dataviz` | 0.85 | 1 791 | **$0.000075** | **64 probabilities** |
+| `openai/gpt-4o-mini` | 1.72 s | `dataviz` | 0.95 | 1 235 | $0.000191 (2.5×) | none |
+| `deepseek/deepseek-chat` | 2.28 s | `dataviz` | 1.00 | 920 | $0.000254 (3.4×) | none |
+
+All three routed correctly, but the System One backend was **3.3–4.4× faster, 2.5–3.4× cheaper,
+and the only one that returned a distribution at all**. The two chat models emitted round,
+self-reported confidence — 0.95 and 1.00, the textbook overconfidence signature — and on a second
+probe the `llm` backend **disagreed outright**, answering `department: billing` at 0.95 where the
+System One backend said `shipping` at 0.61.
+
+<Aside type="danger" title="A threshold tuned on one backend does not transfer to another">
+This is exactly what `Decision.calibrated` is for, and it is why you read it. The `systemone`
+style reports `true`; the `llm` style reports `false` unless it derived its probabilities from
+provider token probabilities. Read it at the point you compare a number to a threshold — if it is
+`false`, your thresholds were tuned against a different instrument and you re-tune or you refuse:
+
+```
+d, err := classifier.Evaluate(ctx, state, questions)
+if err != nil { return err }
+if !d.Calibrated {
+    // The numbers are self-reported, not calibrated. Either re-tune for THIS
+    // backend or decline to threshold on them.
+    return errUncalibratedBackend
+}
+risk, err := d.Score("risk")
+```
+
+`style: "llm"` exists so a host with **no** System One credential can run the same questions on a
+cheap chat model. It is a compatibility exit, not an equivalent.
+</Aside>
+
+## Latency is flat in roster size
+
+One `choice` over a synthetic skill roster (F4):
+
+| options | request bytes | input tokens | latency | pick | confidence |
+|---|---|---|---|---|---|
+| 20 | 1 696 | 792 | 0.52 s | `dataviz` | 0.69 |
+| 64 | 5 427 | 2 015 | 0.54 s | `dataviz` | 0.92 |
+| 128 | 10 876 | 3 816 | 0.48 s | `dataviz` | 0.95 |
+| 200 | 17 068 | 5 904 | 0.54 s | `dataviz` | 0.90 |
+| 255 | 21 798 | 7 499 | 0.61 s | `dataviz` | 0.94 |
+| 300 | 25 668 | — | — | `HTTP 400 "Too many choices. Must have at most 255 choices."` |
+
+Latency does not grow with the roster — 0.48–0.61 s across a 12× range. A per-turn judge over 255
+skills costs about the same wall-clock as one over 20. Accuracy *improved* with more options
+(0.69 → 0.94): irrelevant distractors drain probability rather than adding noise. Cost at 255
+options was $0.000315 per turn; at 20 options, $0.000033.
+
+Budget **0.5–1.0 s** for a per-turn judge, not 100 ms: the observed 0.48–1.03 s sits well above the
+vendor's 70–500 ms claim, and the difference is gateway overhead. Twelve concurrent requests came
+back at a median of 0.80 s with no 429s.
+
+## The shuffle control — the one encoding check that can fail
+
+Most "is my prompt good" checks cannot fail: they measure the thing they are made of. This one can.
+
+**Keep the returned probabilities exactly as they came back, permute which option each one belongs
+to, and re-run the task.** If the score does not collapse, the distribution was never carrying
+information about the options — you were reading noise with two decimal places on it.
+
+Measured on snake, three games per encoding, identical seeds
+(<a href="https://github.com/muthuishere/toolnexus/blob/main/docs/adr/0021-the-encoding-carries-the-judgment.md">ADR 0021</a>):
+
+| encoding | apples | agrees w/ baseline | median confidence |
+|---|---|---|---|
+| **prose** — each option described by consequence | **17, 17, 17** | 0.63 | 0.80 |
+| `stale` — one clause frozen, no longer tracks the board | 17, 17, 17 | 0.64 | **0.82** |
+| `raw` — the same facts as numbers | 12, 15, 14 | 0.70 | 0.62 |
+| `labels` — bare option ids, no descriptions | **0, 1, 0** | 0.29 | 0.29 |
+| *shuffle control* — *prose, probabilities permuted* | *1, 0, 1* | *0.37* | — |
+
+**17 apples → 1.** It costs one function and it is the only control in this space that can come
+back negative. Run it before you trust an encoding, and run it again when you change one.
+
+Note where `labels` lands: on the shuffle control's floor, while keeping the **full prose state**.
+Describing the situation buys nothing if the options are not described — which is the
+[encoding obligation](/toolnexus/cookbook/judge/#the-encoding-obligation), and why the library
+detects degenerate criteria and warns, naming the question.
+
+## `nearUniform`, and the limit of every signal on this page
+
+A choice answer whose probabilities sit at the uniform floor (`1/n`) is a **detectable** symptom of
+an encoding that gave the model nothing to rank on — visible from responses alone, with no
+baseline, no labels and no outcomes, so it runs on live traffic. The undescribed encoding returned
+a median top probability of **0.29** on a four-option choice (deviation 0.04 from `1/n = 0.25`,
+inside the 0.05 tolerance); the described one returned **0.80** (deviation 0.55, far outside).
+
+That separation is the whole of what it buys. `nearUniform` **cannot** distinguish a good encoding
+from a subtly wrong one: a wrong-but-answerable question still reads as answerable. And confidence
+is no help either — `stale`, the worst *working* encoding measured, carried the **highest** median
+confidence of the lot (0.82). Confidence reports on the question, not on the answer.

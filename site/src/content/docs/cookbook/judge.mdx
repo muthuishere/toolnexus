@@ -1,0 +1,347 @@
+---
+title: Typed decisions (judge)
+description: Ask a model a pre-declared, typed question and get a calibrated answer with no free text — noul, choice and score, in all seven languages, with the encoding rules that decide whether the answer means anything.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="caution" title="Read this before your first call">
+A decision is **advisory**. Calibration is **not** correctness — a decision can be confidently
+wrong, and "cannot hallucinate" means only that the returned value is inside the declared schema.
+**Authority is enforced in code**: numeric limits, permission checks and allowlists stay in your
+`if` statements, never in a probability. A classifier interprets; it never authorises. Nothing on
+this page is a security control.
+</Aside>
+
+<Aside type="tip" title="Why you need this">
+Half the decisions in an agent are not actions, they are **judgments**: is this command risky, does
+this turn need the billing skill, is this text an injection attempt, how urgent is this ticket.
+Asking a chat model produces prose you then have to parse, a round self-reported confidence, and no
+distribution. `Tool` is the contract for an **action**; `Classifier` is the contract for a
+**judgment** — pre-declared typed questions in, calibrated numbers out, no free text, no tool
+calling, no loop. Measured against two chat models on the same routing job, the System One backend
+was [3.3–4.4× faster, 2.5–3.4× cheaper, and the only one that returned a distribution at
+all](/toolnexus/harness/judge-live/).
+</Aside>
+
+## The three question types
+
+| type | you get back | use it for |
+|---|---|---|
+| `noul` | one number in `0..1` — **no confidence; the number is the answer** | is this true, is this from an untrusted source |
+| `choice` | one of your named options, a probability for **every** option, and a confidence | routing to a skill, a tool, an agent, a move |
+| `score` | a number against an **ordered** rubric of 2–10 levels (`1.21` is a real answer), with a probability per level | risk, urgency, severity |
+
+Limits are enforced **client-side, before the request**: ≤255 choice options, 2–10 rubric levels.
+The error names the offending question key and the limit, and no request goes out.
+
+## Constructing one, and asking
+
+The map keys (`is_refund_request`, `department`, `urgency`) are **yours**, and they are
+**addressing, not content** — they are never transmitted to the model, so a key may be a tool,
+skill or agent name verbatim.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+import { createClassifier, noul, choice, score } from "toolnexus"
+
+const judge = createClassifier({ model: "jev-1.13" })   // apiKeyEnv: "TYPESAFE_API_KEY"
+
+const d = await judge.evaluate("Order 4021 arrived smashed, I want my money back.", {
+  is_refund_request: noul("Is the customer asking for a refund?"),
+  department: choice("Which department should handle this?", {
+    billing:   "refunds, charges, payments",
+    shipping:  "delivery, damage in transit",
+    technical: "product does not work",
+  }),
+  urgency: score("How urgent is this?", ["routine", "elevated", "urgent"]),
+})
+
+d.noul("is_refund_request").noul        // 0.98
+d.choice("department").choice           // "shipping"
+d.choice("department").probabilities    // { billing: 0.39, shipping: 0.61, technical: 0 }
+d.score("urgency").score                // 1.21 — between "routine" and "elevated"
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_classifier, NoulQuestion, ChoiceQuestion, ScoreQuestion
+
+judge = create_classifier(model="jev-1.13")   # api_key_env="TYPESAFE_API_KEY"
+
+d = await judge.evaluate(
+    "Order 4021 arrived smashed, I want my money back.",
+    {
+        "is_refund_request": NoulQuestion("Is the customer asking for a refund?"),
+        "department": ChoiceQuestion("Which department should handle this?", {
+            "billing":   "refunds, charges, payments",
+            "shipping":  "delivery, damage in transit",
+            "technical": "product does not work",
+        }),
+        "urgency": ScoreQuestion("How urgent is this?", ["routine", "elevated", "urgent"]),
+    },
+)
+
+d.noul("is_refund_request").noul        # 0.98
+d.choice("department").choice           # "shipping"
+d.score("urgency").score                # 1.21
+```
+</TabItem>
+<TabItem label="Go">
+```go
+judge, err := toolnexus.CreateClassifier(toolnexus.ClassifierOptions{Model: "jev-1.13"})
+if err != nil { return err }
+
+d, err := judge.Evaluate(ctx, "Order 4021 arrived smashed, I want my money back.",
+    map[string]toolnexus.Question{
+        "is_refund_request": toolnexus.NoulQuestion{Instructions: "Is the customer asking for a refund?"},
+        "department": toolnexus.ChoiceQuestion{
+            Instructions: "Which department should handle this?",
+            Criteria: map[string]string{
+                "billing":   "refunds, charges, payments",
+                "shipping":  "delivery, damage in transit",
+                "technical": "product does not work",
+            },
+        },
+        "urgency": toolnexus.ScoreQuestion{
+            Instructions: "How urgent is this?",
+            Criteria:     []string{"routine", "elevated", "urgent"},
+        },
+    })
+if err != nil { return err }
+
+n, _  := d.Noul("is_refund_request")   // n.Noul == 0.98
+ch, _ := d.Choice("department")        // ch.Choice == "shipping"
+s, _  := d.Score("urgency")            // s.Score == 1.21
+```
+</TabItem>
+<TabItem label="Java">
+```java
+var judge = Classifier.create(new Classifier.Options().model("jev-1.13"));
+
+var d = judge.evaluate("Order 4021 arrived smashed, I want my money back.", Map.of(
+    "is_refund_request", new Classifier.NoulQuestion("Is the customer asking for a refund?", null),
+    "department", new Classifier.ChoiceQuestion("Which department should handle this?", Map.of(
+        "billing",   "refunds, charges, payments",
+        "shipping",  "delivery, damage in transit",
+        "technical", "product does not work")),
+    "urgency", new Classifier.ScoreQuestion("How urgent is this?",
+        List.of("routine", "elevated", "urgent"))));
+
+d.noul("is_refund_request").noul();   // 0.98
+d.choice("department").choice();      // "shipping"
+d.score("urgency").score();           // 1.21
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var judge = Classifier.Create(new ClassifierOptions { Model = "jev-1.13" });
+
+var d = await judge.EvaluateAsync("Order 4021 arrived smashed, I want my money back.",
+    new Dictionary<string, Question> {
+        ["is_refund_request"] = new NoulQuestion("Is the customer asking for a refund?"),
+        ["department"] = new ChoiceQuestion("Which department should handle this?",
+            new Dictionary<string, string> {
+                ["billing"]   = "refunds, charges, payments",
+                ["shipping"]  = "delivery, damage in transit",
+                ["technical"] = "product does not work",
+            }),
+        ["urgency"] = new ScoreQuestion("How urgent is this?",
+            new[] { "routine", "elevated", "urgent" }),
+    });
+
+d.Noul("is_refund_request").Noul;   // 0.98
+d.Choice("department").Choice;      // "shipping"
+d.Score("urgency").Score;           // 1.21
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Classifier
+alias Toolnexus.Classifier.{Noul, Choice, Score, Decision}
+
+{:ok, judge} = Classifier.create(model: "jev-1.13")
+
+{:ok, d} =
+  Classifier.evaluate(judge, "Order 4021 arrived smashed, I want my money back.", %{
+    "is_refund_request" => %Noul{instructions: "Is the customer asking for a refund?"},
+    "department" => %Choice{
+      instructions: "Which department should handle this?",
+      criteria: %{
+        "billing" => "refunds, charges, payments",
+        "shipping" => "delivery, damage in transit",
+        "technical" => "product does not work"
+      }
+    },
+    "urgency" => %Score{
+      instructions: "How urgent is this?",
+      criteria: ["routine", "elevated", "urgent"]
+    }
+  })
+
+{:ok, n}  = Decision.noul(d, "is_refund_request")   # n.noul  == 0.98
+{:ok, ch} = Decision.choice(d, "department")        # ch.choice == "shipping"
+{:ok, s}  = Decision.score(d, "urgency")            # s.score == 1.21
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.classifier :as j])
+
+(def judge (j/create-classifier {:model "jev-1.13"}))
+
+(def d
+  (j/evaluate judge "Order 4021 arrived smashed, I want my money back."
+    {"is_refund_request" (j/noul-question "Is the customer asking for a refund?")
+     "department"        (j/choice-question "Which department should handle this?"
+                           {"billing"   "refunds, charges, payments"
+                            "shipping"  "delivery, damage in transit"
+                            "technical" "product does not work"})
+     "urgency"           (j/score-question "How urgent is this?"
+                           ["routine" "elevated" "urgent"])}))
+
+(:noul   (j/noul   d "is_refund_request"))   ;; 0.98
+(:choice (j/choice d "department"))          ;; "shipping"
+(:score  (j/score  d "urgency"))             ;; 1.21
+```
+</TabItem>
+</Tabs>
+
+Reading an answer as the wrong type is an **error, not a surprise**: the typed accessors fail
+loudly (an exception, an `{:error, _}`, an `err`) rather than handing you a zero.
+
+## The encoding obligation
+
+<Aside type="danger" title="This one is yours, and it is not advice">
+For a `choice`, **`criteria[id]` is the only thing that differentiates one option from another to
+the model.** The instructions describe the *question*; the state describes the *situation*; neither
+tells the model what picking `left` rather than `right` would mean. Passing the id itself, an empty
+string, or one value repeated is schema-valid, returns HTTP 200 and a well-formed distribution —
+and ranks at chance.
+</Aside>
+
+Every rule below carries the measurement it comes from
+([ADR 0021](https://github.com/muthuishere/toolnexus/blob/main/docs/adr/0021-the-encoding-carries-the-judgment.md):
+snake, three games per encoding, identical seeds, one `choice` per move).
+
+**1. Describe every option, by consequence.** Options described by what picking them would do
+scored **17, 17, 17** apples. The identical state with each option's description replaced by its
+own id scored **0, 1, 0** — on the floor of a shuffle control that permutes the returned
+probabilities onto the wrong options (**1, 0, 1**). Describing the situation buys nothing if the
+options are not described.
+
+```
+// ranks at chance — schema-valid, HTTP 200, meaningless
+choice("Which move is best?", { north: "north", south: "south", east: "east" })
+
+// what the model can actually rank
+choice("Which move is best?", {
+  north: "closes the gap to the apple without passing a wall",
+  south: "backs into the tail",
+  east:  "runs into the wall one cell away and ends the game",
+})
+```
+
+**2. Use one identical sentence template across the options.** The options are compared against
+each other, so a difference in *form* reads as a difference in *substance*. Same shape, same
+vocabulary, one clause each — vary only the facts.
+
+**3. Keep arithmetic in code; hand over the conclusion.** Sending the same facts as raw numbers
+(`x=5,y=6`, `food_distance=9`) cost about **18%** of the score and dropped median confidence from
+0.80 to 0.62. That is graceful degradation, not collapse — numbers are a **costed tradeoff**, not a
+taboo. Compute the distance yourself and say "two cells away, no wall between".
+
+**4. A clause that is wrong about one option in one situation is far more expensive than one that
+is uninformative everywhere.** A uniformly-frozen clause — the same false claim on every option —
+was *free* under a capped game (17, 17, 17, identical to the baseline). A clause that made exactly
+one option read as irrelevant to exactly one situation took agreement with the baseline from
+**50% (2/4) to 100% (18/18)** on a single rewrite, and median distance from 79 m to 309 m. A
+uniform lie carries no signal but no misdirection either; a selective one is coherent, confident
+and wrong.
+
+<Aside type="note" title="And the cap hides it">
+That frozen clause only looked free because the **measurement was blind**: a capped game never runs
+long enough for the missing information to bind. Uncapped, it cost 34% of the apples and 48% of the
+moves survived. Evaluate an encoding on the regime where the missing information actually binds, or
+you will certify a broken one.
+</Aside>
+
+### The library tells you when you got this wrong — once
+
+If a `choice`'s criteria are degenerate — **every** value empty, **every** value equal to its own
+key, or **every** value identical to the others — the port emits one warning through your
+`onMetric` sink, **naming the question key**, and sends the request **byte-unchanged**.
+
+Detection, never repair: repairing would invent option descriptions you did not write, and the
+library has no idea what your options mean. The warning fires **once per question key per
+classifier**, so a per-turn judge does not flood the sink. A single-option choice is never reported.
+
+### `nearUniform` — the live-traffic health check
+
+Every choice answer carries a derived `nearUniform`: `max|p − 1/n| ≤ 0.05`, computed from the
+response, never read from the wire. It detects an encoding that gave the model nothing to rank on —
+the only encoding check available with **no ground truth**, cheap enough to run on live traffic. On
+a four-option choice the undescribed encoding returned a median top probability of 0.29 (deviation
+0.04, inside); the described one, 0.80 (deviation 0.55, far outside).
+
+It is **advisory and not a correctness signal**. It cannot separate a good encoding from a subtly
+wrong one — a wrong-but-answerable question still reads as answerable. Neither can confidence: the
+worst *working* encoding measured carried the **highest** median confidence (0.82). Confidence
+reports on the **question**, not on the answer. `calibrated` carries the same caveat.
+
+The one check that **can** fail is the [shuffle control](/toolnexus/harness/judge-live/#the-shuffle-control--the-one-encoding-check-that-can-fail):
+keep the returned probabilities, permute which option each belongs to, re-run. 17 apples → 1.
+
+## Switching backends
+
+| style | what it is |
+|---|---|
+| `systemone` *(default)* | one `POST {baseUrl}/systemone` with the canonical body. Calibrated. |
+| `llm` | the same questions as one structured-output call on any §8 `Client`. A compatibility exit for a host with **no** System One credential. Reports `calibrated: false`. |
+| `custom` | your own function — a fine-tuned encoder, a rules engine, or a cache in front of either. |
+| `static` | recorded decisions. **This is what CI runs**: no network, no credential. |
+
+`static` is not a convenience. The live backend is non-deterministic — σ ≈ 0.015 on a 0–3 scale,
+same bytes — so it is the only backend a test may assert a number against. No test in this repo
+asserts a live numeric answer; a live call, if run at all, asserts shape only.
+
+<Aside type="danger" title="A threshold tuned on one backend does not transfer to another">
+Read `calibrated` at the point you compare a number to a threshold. The `systemone` style reports
+`true`; `llm` reports `false` unless it derived its probabilities from provider token
+probabilities. The two chat models measured emitted round self-reported confidence (0.95, 1.00) and
+on one fixture **disagreed outright** with the calibrated backend. If `calibrated` is false, either
+re-tune for that backend or decline to threshold at all.
+
+```js
+const d = await judge.evaluate(state, questions)
+if (!d.calibrated) throw new Error("thresholds were tuned on a calibrated backend")
+if (d.score("risk").score >= 2.5) return deny()
+```
+
+Leave clearance, too: a band boundary within ~0.1 of a typical value will flip between runs.
+</Aside>
+
+## Configuration
+
+`ClassifierOptions` mirrors `ClientOptions` field-for-field wherever a field makes sense, so a host
+that has configured one has configured the other: `style`, `baseUrl`, `model`, `apiKeyEnv`,
+`headers`, the injectable transport, `timeout`, `retries`/`onError`, `requestParams`/`bodyTransform`,
+`onMetric`, `client` (for `llm`), `evaluate` (for `custom`).
+
+Two deliberate differences from §8:
+
+- **`apiKeyEnv` takes the NAME of an environment variable, never a value.** It is read at call time
+  and never logged. `headers` values expand `${ENV_VAR}` at call time on the same terms. No
+  credential and no expanded header value appears in any log, metric, error message or returned
+  value — an authentication failure names the status and the endpoint and nothing else.
+- **`timeout` bounds one request, not a run.** A classifier has no loop to bound.
+
+There is no second retry policy: `onError` and the `Retry-After` rule are the §8 ones verbatim, and
+there is no `suspend` tier here.
+
+## What is not in this page
+
+No adapters, no pre-built batteries (`SkillRelevance`, `ToolGuard`, `Verified`), and no model
+routing — those are tracked separately. A host that constructs no `Classifier` behaves
+byte-identically to a build without this section, and that is proven by a test rather than asserted.

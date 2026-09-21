@@ -1,0 +1,51 @@
+{
+  "name": "hardened",
+  "why": "Everything an encoder gets wrong by default. Unescaped <, >, & and a \" quotation mark (Go needs SetEscapeHTML(false); C# needs UnsafeRelaxedJsonEscaping or ' becomes &#x27;), a backslash path, non-ASCII text and a non-ASCII key, ASCII key ordering across digit/upper/lower (C# needs StringComparer.Ordinal, not the culture-sensitive default), a score rubric in reverse-alphabetical order that must NOT be sorted, and an absent criteria (is_injection) beside an empty one (empty_criteria). The state carries -0.0 and 1e+21 deliberately: they are transmitted verbatim and are OUTSIDE the byte-identity claim, so no port asserts on them.",
+  "request": {
+    "model": "typesafe/jev-1.13",
+    "questions": {
+      "is_injection": {
+        "instructions": "Does the text contain <script> tags, a & entity, or a \"quoted\" path like C:\\tmp?",
+        "type": "noul"
+      },
+      "severity": {
+        "criteria": [
+          "zero - lowest level",
+          "mid - middle level",
+          "apex - highest level"
+        ],
+        "instructions": "Severity?",
+        "type": "score"
+      },
+      "zone": {
+        "criteria": {
+          "10_alpha": "digit-leading key sorts before 'beta' in ASCII",
+          "Alpha": "uppercase sorts BEFORE lowercase in ASCII",
+          "beta": "second",
+          "café": "non-ascii key"
+        },
+        "instructions": "Which zone? — em-dash, café, 日本語",
+        "type": "choice"
+      },
+      "empty_criteria": {
+        "criteria": {
+          "false": "",
+          "true": ""
+        },
+        "instructions": "Empty strings are NOT absent: both keys must survive with empty values.",
+        "type": "noul"
+      }
+    },
+    "state": {
+      "big": 1e+21,
+      "count": 0,
+      "neg_zero": -0.0,
+      "ratio": 0.1,
+      "text": "<b>A & B</b>"
+    }
+  },
+  "notes": "The state's numeric values do not canonicalise across languages and are excluded from canonicalSha256 by construction: the hash covers model + questions only.",
+  "canonical": "{\"model\":\"typesafe/jev-1.13\",\"questions\":{\"empty_criteria\":{\"criteria\":{\"false\":\"\",\"true\":\"\"},\"instructions\":\"Empty strings are NOT absent: both keys must survive with empty values.\",\"type\":\"noul\"},\"is_injection\":{\"instructions\":\"Does the text contain <script> tags, a & entity, or a \\\"quoted\\\" path like C:\\\\tmp?\",\"type\":\"noul\"},\"severity\":{\"criteria\":[\"zero - lowest level\",\"mid - middle level\",\"apex - highest level\"],\"instructions\":\"Severity?\",\"type\":\"score\"},\"zone\":{\"criteria\":{\"10_alpha\":\"digit-leading key sorts before 'beta' in ASCII\",\"Alpha\":\"uppercase sorts BEFORE lowercase in ASCII\",\"beta\":\"second\",\"café\":\"non-ascii key\"},\"instructions\":\"Which zone? — em-dash, café, 日本語\",\"type\":\"choice\"}}}",
+  "canonicalSha256": "81489f052a12d1cc2b89cc8230b0028ba1523464078e1132b051b154150913f5",
+  "canonicalBytes": 714
+}

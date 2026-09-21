@@ -43,6 +43,10 @@ public sealed class LlmClient
     private static readonly HttpClient DefaultHttp = new() { Timeout = Timeout.InfiniteTimeSpan };
     private static readonly HashSet<int> Retryable = new() { 429, 500, 502, 503, 504 };
 
+    /// <summary>The ONE retryable-status set (§8 Resilience). Shared with the §8B
+    /// <see cref="Classifier"/>, which reuses this policy rather than declaring a second one.</summary>
+    internal static bool IsRetryableStatus(int status) => Retryable.Contains(status);
+
     private readonly Options _opts;
 
     /// <summary>HTTP client for LLM requests — from <c>opts.HttpClient</c>/<c>opts.HttpHandler</c>, else the
@@ -1616,7 +1620,7 @@ public sealed class LlmClient
     /// backoff rather than guessing. Zero is a real answer — "retry now" — so it is
     /// returned as 0 rather than null.
     /// </summary>
-    private static long? RetryAfterMs(HttpResponseMessage res)
+    internal static long? RetryAfterMs(HttpResponseMessage res)
     {
         if (!res.Headers.TryGetValues("retry-after", out var values)) return null;
         var v = values.FirstOrDefault()?.Trim();

@@ -8,6 +8,71 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### Typed decisions — a `Classifier`, in all seven ports
+
+Half the decisions in an agent are not actions, they are **judgments**: is this command risky, does
+this turn need the billing skill, how urgent is this ticket. Until now you asked a chat model and
+parsed prose back, with a round self-reported confidence and no distribution. `Tool` is the
+contract for an action; `Classifier` is the contract for a judgment.
+
+You declare typed questions once and get calibrated numbers back — no free text, no tool calling,
+no loop:
+
+- **`noul`** — one probability in `0..1`. It reports no confidence; the number *is* the answer.
+- **`choice`** — one of your named options (up to 255), with a probability for **every** offered
+  option and a confidence.
+- **`score`** — a rating against an ordered rubric of 2–10 levels, and `1.21` is a real answer.
+
+The keys you address the questions by are never transmitted, so a key may be a tool, skill or agent
+name verbatim. Limits are enforced client-side before the request, and the error names the question
+key rather than making you read the backend's 400. Four backends: `systemone` (the wire),
+`llm` (the same questions as one structured-output call on the §8 client you already have — the
+exit for a host with no System One credential), `custom`, and `static`, which is what CI runs: no
+network, no credential. `ClassifierOptions` mirrors `ClientOptions` field-for-field, reusing the §8
+`onError`/`Retry-After` policy verbatim rather than growing a second one — with two deliberate
+differences: `apiKeyEnv` takes the **name** of an environment variable rather than a value, and
+`timeout` bounds one request rather than a run.
+
+**Two things in it exist because they were measured, not designed.** Describing your options is not
+style advice: options described by consequence scored 17, 17, 17 apples, and the identical state
+with each option replaced by its own id scored 0, 1, 0 — the floor of a shuffle control. That shape
+is schema-valid and returns HTTP 200, so nothing would have told you. Now something does: a `choice`
+whose criteria are all empty, all equal to their own keys, or all identical emits **one** warning
+per question key through your existing metric sink, naming the key, and sends the request
+byte-unchanged — detection, never repair. And every choice answer carries a derived `nearUniform`
+(`max|p − 1/n| ≤ 0.05`), the one encoding health check that needs no ground truth and can run on
+live traffic.
+
+Both are **advisory, and neither is a correctness signal**. `nearUniform` cannot separate a good
+encoding from a subtly wrong one, and confidence is no help either — the worst *working* encoding
+measured carried the highest median confidence. More bluntly: a classifier **interprets, it never
+authorises**. "Cannot hallucinate" means only that the value is inside the declared schema. Numeric
+limits, permission checks and allowlists stay in your code, and a threshold tuned against one
+backend does not transfer to another — which is what `Decision.calibrated` is for, and why you read
+it before you compare a number to a threshold.
+
+Same behaviour in js, python, golang, java, csharp, elixir and clojure, pinned by seven shared
+fixtures in `examples/judge/` that every port asserts byte-for-byte. A host that constructs no
+`Classifier` behaves byte-identically to a build without any of this, proven by a test rather than
+asserted. New docs: **Cookbook → Typed decisions (judge)** and **Harness → Judge, measured live**.
+Contract: `SPEC.md` §8B; encoding decisions: `docs/adr/0021`.
+
+**What is NOT done**, and where it is tracked:
+
+- **No adapters and no batteries.** There is no `SkillRelevance`, `ToolGuard` or `Verified` built on
+  this seam yet, and no model routing — you write the questions yourself. Tracked in
+  `openspec/changes/add-judge` as the follow-up `add-judge-adapters`.
+- **The live measurements on the judge page are recorded, not regenerated.** There is no
+  `judge-live` harness runner wired into the suite the way `harness/live` has one, so re-running
+  them is a manual step. The page says so, per table, with its source named.
+- **The `llm` backend is a compatibility exit, not an equivalent.** It reports
+  `calibrated: false`, returns no real distribution, and on one measured fixture disagreed outright
+  with the calibrated backend.
+- The parity gate's temporary `landing` flag — which let `conformance/check_options_parity.py`
+  report a not-yet-written port file as something other than a failure while these seven ports were
+  being written — **is deleted with this change**, along with the code path that honoured it. A
+  missing options file is a failure again, for every group.
+
 ### Spec — a `beforeTool` hook can raise a suspension, and now the contract says so
 
 `SPEC.md` §10 defined a suspension by the *result* — a `ToolResult` whose `metadata.pending` is a

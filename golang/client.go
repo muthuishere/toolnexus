@@ -180,8 +180,15 @@ type MetricEvent struct {
 	ToolCalls int
 	// TotalTokens is the aggregated token usage across the run ("run").
 	TotalTokens int
-	// Error is the failure message, set only on a failed run ("run").
+	// Error is the failure message, set only on a failed run ("run"), or on a
+	// failed "classifier.evaluate", or the warning text of a
+	// "classifier.warning".
 	Error string
+	// Question is the classifier question KEY an event is about
+	// ("classifier.warning", §8B). Empty on every other event. Neither classifier
+	// event is folded into the Prometheus registry, so Client.Metrics() text is
+	// unchanged by this field.
+	Question string
 }
 
 // retryableStatus is the set of HTTP statuses worth retrying. Mirrors js RETRYABLE.

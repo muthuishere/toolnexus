@@ -11,8 +11,12 @@
   contract, nor the HTTP status will tell them.
 - **Evidence:** two working demos driven by `typesafe/jev-1.13` over OpenRouter —
   `spikes/game/dino/` (real browser, ~800 ms budget) and `spikes/game/snake/` (1 s budget, seeded,
-  four-way encoding ablation plus a shuffle control). Raw per-decision records in
-  `spikes/game/*/results/*.json`; sweeps reproducible via `snake/ablate.sh` and `snake/uncapped.sh`.
+  four-way encoding ablation plus a shuffle control). **Raw per-decision records are retained for
+  snake only** (`spikes/game/snake/results/*.json` — every number in the tables below). The dino
+  run's records were deleted before they were committed, so its figures here are as reported at
+  the time and are **not independently re-checkable from this repo**. Snake's sweeps are
+  reproducible via `snake/ablate.sh` and `snake/uncapped.sh`; a fresh dino run would produce
+  different numbers, since neither the game nor the judge is deterministic.
 - **Related:** ADR 0020 (the seam), `openspec/changes/add-judge`.
 
 ## Context

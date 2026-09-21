@@ -1,0 +1,90 @@
+{
+  "name": "base",
+  "why": "One question of each type, with a recorded response. The floor: a port that fails this cannot serialise or parse anything. Lifted from spikes/classifier/fixture/request.json, which the live backend accepted unchanged (spikes/classifier/reports/00-live-backend.md F1).",
+  "request": {
+    "model": "typesafe/jev-1.13",
+    "questions": {
+      "department": {
+        "criteria": {
+          "billing": "refunds, charges, payments",
+          "shipping": "delivery, damage in transit",
+          "technical": "product does not work"
+        },
+        "instructions": "Which department should handle this?",
+        "type": "choice"
+      },
+      "is_refund_request": {
+        "instructions": "Is the customer asking for a refund?",
+        "type": "noul"
+      },
+      "urgency": {
+        "criteria": [
+          "routine",
+          "elevated",
+          "urgent"
+        ],
+        "instructions": "How urgent is this?",
+        "type": "score"
+      }
+    },
+    "state": "Order 4021 arrived smashed, I want my money back."
+  },
+  "response": {
+    "model": "typesafe/jev-1.13-20260917",
+    "answers": {
+      "department": {
+        "type": "choice",
+        "choice": "shipping",
+        "probabilities": {
+          "billing": 0.39,
+          "technical": 0,
+          "shipping": 0.61
+        },
+        "confidence": 0.41
+      },
+      "is_refund_request": {
+        "type": "noul",
+        "noul": 0.98
+      },
+      "urgency": {
+        "type": "score",
+        "score": 1.21,
+        "legend": {
+          "0": "routine",
+          "1": "elevated",
+          "2": "urgent"
+        },
+        "probabilities": {
+          "0": 0.04,
+          "1": 0.71,
+          "2": 0.25
+        },
+        "confidence": 0.57
+      }
+    },
+    "usage": {
+      "input_tokens": 398,
+      "output_tokens": 72
+    }
+  },
+  "expect": {
+    "calibrated": true,
+    "answers": {
+      "department": {
+        "choice": "shipping",
+        "confidence": 0.41,
+        "nearUniform": false
+      },
+      "is_refund_request": {
+        "noul": 0.98
+      },
+      "urgency": {
+        "score": 1.21,
+        "confidence": 0.57
+      }
+    }
+  },
+  "canonical": "{\"model\":\"typesafe/jev-1.13\",\"questions\":{\"department\":{\"criteria\":{\"billing\":\"refunds, charges, payments\",\"shipping\":\"delivery, damage in transit\",\"technical\":\"product does not work\"},\"instructions\":\"Which department should handle this?\",\"type\":\"choice\"},\"is_refund_request\":{\"instructions\":\"Is the customer asking for a refund?\",\"type\":\"noul\"},\"urgency\":{\"criteria\":[\"routine\",\"elevated\",\"urgent\"],\"instructions\":\"How urgent is this?\",\"type\":\"score\"}}}",
+  "canonicalSha256": "52b15f09c7d7e9ee653422993325ecd82aca69570ccc49699db5a1396d241dc9",
+  "canonicalBytes": 454
+}
