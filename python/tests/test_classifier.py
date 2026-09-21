@@ -729,3 +729,20 @@ async def test_metrics_carry_the_evaluate_event_with_tokens() -> None:
     assert ev[0]["prompt_tokens"] == f["response"]["usage"]["input_tokens"]
     assert ev[0]["completion_tokens"] == f["response"]["usage"]["output_tokens"]
     assert isinstance(ev[0]["ms"], int)
+
+
+async def test_absent_calibrated_decodes_as_true() -> None:
+    """SPEC §8B: the systemone wire reports calibration by being itself, and a backend
+    that is not calibrated says so explicitly. Only the literal ``false`` is false — a
+    host's tuned threshold must not be flipped by a field it never set. Pinned because
+    seven ports already agree on it, and agreement nobody wrote down is luck."""
+
+    async def cal(body: bytes) -> bool:
+        c = create_classifier(http_transport=RecordingTransport(response=body))
+        d = await c.evaluate("s", {"q": NoulQuestion(instructions="?")})
+        return d.calibrated
+
+    assert await cal(b'{"model":"m","answers":{}}') is True  # absent
+    assert await cal(b'{"model":"m","answers":{},"calibrated":null}') is True
+    assert await cal(b'{"model":"m","answers":{},"calibrated":true}') is True
+    assert await cal(b'{"model":"m","answers":{},"calibrated":false}') is False

@@ -373,6 +373,14 @@
         "tier": "full"
       },
       {
+        "name": "decisions",
+        "aliases": [
+          "decisions"
+        ],
+        "tier": "core",
+        "note": "style \"static\" only — the recorded corpus. This is the backend CI runs on, so a port without it cannot run the shared examples/judge fixture."
+      },
+      {
         "name": "evaluate",
         "aliases": [
           "evaluate"

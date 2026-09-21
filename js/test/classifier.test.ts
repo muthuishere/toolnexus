@@ -637,3 +637,21 @@ test("constructing a Classifier changes no client request byte", async () => {
 function emptyDecision() {
   return decodeDecision({ model: "m", answers: {}, usage: { input_tokens: 0, output_tokens: 0 } }, "m")
 }
+
+test("an absent calibrated decodes as true; only the literal false is false", async () => {
+  // SPEC §8B: the systemone wire reports calibration by being itself, and a backend that is
+  // not calibrated says so explicitly. Pinned because all seven ports already agree on it,
+  // and an agreement nobody wrote down is luck — a port that later defaulted it to false
+  // would flip every threshold a host has tuned, on a field the host never set.
+  const cal = async (body: string) => {
+    const c = createClassifier({
+      fetch: async () => new Response(body, { status: 200, headers: { "content-type": "application/json" } }),
+    })
+    const d = await c.evaluate("s", { q: noul("?") })
+    return d.calibrated
+  }
+  assert.equal(await cal('{"model":"m","answers":{}}'), true, "absent => true")
+  assert.equal(await cal('{"model":"m","answers":{},"calibrated":null}'), true, "null => true")
+  assert.equal(await cal('{"model":"m","answers":{},"calibrated":true}'), true)
+  assert.equal(await cal('{"model":"m","answers":{},"calibrated":false}'), false)
+})

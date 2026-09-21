@@ -137,7 +137,10 @@
     :retries        transient-failure budget (default 0); retries on
                     `429`/`500`/`502`/`503`/`504`/`529` + network. Widen the
                     status set with `:retryable-statuses`.
-    :retry-base-ms  base exponential backoff in ms (default 250)
+    :retry-base-ms  base of the exponential backoff in ms (default 500, as in
+                    the other six ports). The wait is
+                    `base * 2^attempt + jitter[0,100)ms`, and a usable
+                    `Retry-After` still wins over it.
     :retryable-statuses
                     extra HTTP statuses to treat as retryable, ADDED to the
                     default set (`429`/`500`/`502`/`503`/`504`/`529`). It can
@@ -515,7 +518,7 @@
   retry. `body` is the already-marshalled request string."
   [client url headers body]
   (let [budget  (or (:retries client) 0)
-        base-ms (or (:retry-base-ms client) 250)]
+        base-ms (or (:retry-base-ms client) 500)]
     (loop [attempt 0]
       (let [t0      (ktime/now-ms)
             res     (post-llm client url headers body)
@@ -545,8 +548,12 @@
                                             {:status status}))))]
             (if (and (= :retry verdict) (< attempt budget))
               (do (ktime/sleep! (or (retry-after-ms res)
-                                    ;; exponential backoff: base * 2^attempt
-                                    (* base-ms (bit-shift-left 1 attempt))))
+                                    ;; exponential backoff + jitter, identical to
+                                    ;; the other six ports: base * 2^attempt plus
+                                    ;; a uniform 0..99ms so a fleet retrying the
+                                    ;; same upstream does not re-collide in lockstep.
+                                    (+ (* base-ms (bit-shift-left 1 attempt))
+                                       (rand-int 100))))
                   (recur (inc attempt)))
               (throw!))))))))
 

@@ -653,6 +653,30 @@ class ClassifierTest {
         assertNull(d.usage().cost(), "an absent cost is not a zero cost");
     }
 
+    /**
+     * SPEC §8B: an absent or {@code null} {@code calibrated} decodes as {@code true}, and only the
+     * literal {@code false} is false. The systemone wire reports calibration by being itself, and
+     * a backend that is not calibrated says so explicitly. Pinned because all seven ports already
+     * agree on it, and an agreement nobody wrote down is luck — a port that later defaulted it to
+     * false would flip every threshold a host has tuned, on a field the host never set.
+     */
+    @Test
+    void anAbsentCalibratedDecodesAsTrue() throws IOException {
+        assertTrue(calibratedFrom("{\"model\":\"m\",\"answers\":{}}"), "absent => true");
+        assertTrue(calibratedFrom("{\"model\":\"m\",\"answers\":{},\"calibrated\":null}"), "null => true");
+        assertTrue(calibratedFrom("{\"model\":\"m\",\"answers\":{},\"calibrated\":true}"));
+        assertFalse(calibratedFrom("{\"model\":\"m\",\"answers\":{},\"calibrated\":false}"));
+    }
+
+    private boolean calibratedFrom(String body) throws IOException {
+        stopServer();
+        int port = start(ex -> respond(ex, 200, body));
+        Classifier c = Classifier.create(new Classifier.Options()
+                .baseUrl("http://127.0.0.1:" + port)
+                .model("jev-latest"));
+        return c.evaluate("s", Map.of("q", new Classifier.NoulQuestion("?"))).calibrated();
+    }
+
     // ------------------------------------------------------------------ plumbing
 
     private HttpServer server;

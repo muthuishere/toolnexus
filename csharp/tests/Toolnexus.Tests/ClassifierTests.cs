@@ -719,4 +719,31 @@ public class ClassifierTests
         var with = await CaptureAsync();
         Assert.Equal(without, with);
     }
+
+    // ---------------------------------------------------------------- calibration default
+
+    /// <summary>SPEC §8B: an absent or <c>null</c> <c>calibrated</c> decodes as <c>true</c>, and
+    /// only the literal <c>false</c> is false. The systemone wire reports calibration by being
+    /// itself, and a backend that is not calibrated says so explicitly. Pinned because all seven
+    /// ports already agree on it, and an agreement nobody wrote down is luck — a port that later
+    /// defaulted it to false would flip every threshold a host has tuned, on a field the host
+    /// never set.</summary>
+    [Theory]
+    [InlineData("""{"model":"m","answers":{}}""", true)]
+    [InlineData("""{"model":"m","answers":{},"calibrated":null}""", true)]
+    [InlineData("""{"model":"m","answers":{},"calibrated":true}""", true)]
+    [InlineData("""{"model":"m","answers":{},"calibrated":false}""", false)]
+    public async Task AnAbsentCalibratedDecodesAsTrue(string body, bool expected)
+    {
+        var c = new Classifier(new ClassifierOptions
+        {
+            BaseUrl = "https://api.typesafe.ai/v1",
+            Model = "jev-latest",
+            ApiKeyEnv = "TEST_JUDGE_UNSET",
+            HttpHandler = new FixedBodyHandler(body),
+        });
+
+        var d = await c.EvaluateAsync("s", new Dictionary<string, Question> { ["q"] = new NoulQuestion { Instructions = "?" } });
+        Assert.Equal(expected, d.Calibrated);
+    }
 }

@@ -8,6 +8,46 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### Four quiet disagreements between the ports, closed
+
+Each of these produced a green build and a valid-looking request, which is why they went
+unnoticed. Two are contract that was never written down; two are Clojure behaving unlike the
+other six.
+
+**`decisions` is now gated.** The `static` backend's recorded corpus is what CI runs on — no
+network, no credential, and the only backend a test may assert a number against. Every port had
+it; the options manifest had no row for it and `SPEC.md §8B` named the `"static"` style without
+naming the field that feeds it. The single option the whole test strategy rests on was the one
+option parity could not see. It is now a **core**-tier row (classifier options: 16 → 17), so a
+port that drops it fails the check rather than losing the ability to run the shared fixtures
+quietly. No port code changed.
+
+**An absent `calibrated` means `true`, and now says so.** All seven ports already decoded a
+missing or `null` `calibrated` as `true`, treating only the literal `false` as false — seven
+ports agreeing by inspection rather than by contract. `SPEC.md §8B` states it and each port pins
+all four cases in a test. Nothing changes today; what changes is that a port cannot later default
+it to `false` and silently invert every threshold you tuned, on a field your backend never sent.
+
+**Clojure: `choice-over` no longer ships the colon.** A keyword key reached the wire as
+`":billing"` rather than `billing`, because the port stringified ids with `str` instead of their
+name. That is schema-valid, returns HTTP 200 and a well-formed distribution — with option ids
+that differ from every other port (Elixir's atom `:billing` has always sent `billing`) and from
+the string you then compare `(:choice answer)` against. Keys may now be strings, keywords or
+symbols, and each travels as its plain name; a qualifier is kept (`:desk/billing` ⇒
+`desk/billing`) so two distinct options cannot collide into one id. **If you keyed a downstream
+branch on the `":billing"` form, drop the colon.** If you passed strings — which the port's own
+docs told you to — nothing changes.
+
+**Clojure: the client's retry backoff matches the other six.** `:retry-base-ms` defaulted to
+`250` where every other port defaults to `500`, and the backoff omitted the `+ jitter(0–99 ms)`
+term the others add. The jitter is not cosmetic: without it, a fleet of hosts that failed against
+the same upstream at the same moment retries against it at the same moment, so the retry turns one
+spike into several. Clojure now waits `base * 2^attempt + jitter(0–99 ms)` from a default of
+`500`, and a usable `Retry-After` still wins outright. **A Clojure host that never set
+`:retry-base-ms` now waits ~500 ms before its first retry instead of ~250 ms.**
+
+Tracked in `openspec/changes/close-typed-decision-parity-gaps`.
+
 ### The classifier's retry backoff is yours to set, in every port
 
 `Classifier` retried a transient failure on a backoff base nobody could change: a hardcoded
@@ -26,11 +66,8 @@ longer fake a `Retry-After: 0` header to stay off the clock.
 The option is registered in `conformance/options_manifest.json` (classifier options: 15 → 16), so
 a port that forgets it now fails the parity check instead of drifting quietly.
 
-**Not done:** two pre-existing differences in the *client's* backoff, found while doing this and
-left alone because fixing them would change what a Clojure host observes today. Clojure's
-`ClientOptions` `:retry-base-ms` defaults to **250** where the other six default to 500, and its
-client backoff omits the `+ jitter(0–100 ms)` term the other six add. Both are reported, neither
-is changed here; see `openspec/changes/add-classifier-retry-base-ms/proposal.md`.
+**Follow-up, now shipped:** this entry originally reported two unfixed differences in the
+*client's* backoff on Clojure. Both are closed below, under "Four quiet disagreements".
 
 ### TypeSafe's own API is a documented way to run a `Classifier` — and two defects it exposed
 

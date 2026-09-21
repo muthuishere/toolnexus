@@ -99,7 +99,7 @@ configured one has configured the other.
 | `:timeout-ms` | `10000` | Bounds **one request**, not a run — a classifier has no loop to bound. Spelled in milliseconds here; §8B names the slot `timeout`. |
 | `:http-client` | koine | `(fn [url headers body] response)` — the §8 Gap 2 injectable transport, scoped to the classifier path only. `body` is the marshalled canonical string; the response is a map with `:status` and `:body`. |
 | `:retries` | `2` | Attempts after the first, on a retryable status or a network fault. Backoff is exponential from `:retry-base-ms` (`base * 2^attempt`), with no jitter; a `Retry-After` header still wins. |
-| `:retry-base-ms` | `500` | Base of that backoff, in ms. The classifier's half of the §8 client option it mirrors — set it to `1` to take a retry test off the clock. (Note the *client* on this port defaults to `250`, not `500`.) |
+| `:retry-base-ms` | `500` | Base of that backoff, in ms. The classifier's half of the §8 client option it mirrors, same default — set it to `1` to take a retry test off the clock. The classifier's backoff adds no jitter; the client's does. |
 | `:retryable-statuses` | — | Extra HTTP statuses to treat as retryable, **added** to the default set. It can only widen, never remove. |
 | `:on-error` | retry when retryable | The §8 `ErrorInfo -> :retry \| :fail` classifier, **reused verbatim** from `toolnexus.client`. There is no second retry policy in this library, and no `:suspend` tier here. |
 | `:request-params` | — | Shallow-merged over the base body; a param **wins** on collision. `:questions` is refused — it is what this seam *is*, and rewriting it is `:body-transform`'s job. |

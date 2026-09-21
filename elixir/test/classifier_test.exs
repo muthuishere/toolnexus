@@ -494,6 +494,24 @@ defmodule Toolnexus.ClassifierTest do
     assert q.criteria == %{"a" => "does a", "b" => "does b"}
   end
 
+  # SPEC §8B: a convenience constructor must not decorate the caller's option ids. An
+  # atom key reaches the wire as its plain name — `:billing`, not `":billing"` — so an
+  # atom roster and its string equivalent are the SAME request. (Clojure's `str` kept
+  # the sigil until it was fixed; this test is why the two ports now agree.)
+  test "choice_over/2 sends an atom key as its plain name" do
+    q = Classifier.choice_over("Which desk?", %{billing: "money moved", shipping: "a parcel is late"})
+    assert q.criteria == %{"billing" => "money moved", "shipping" => "a parcel is late"}
+
+    assert Classifier.canonical_request("m", %{"r" => q}) ==
+             Classifier.canonical_request("m", %{
+               "r" =>
+                 Classifier.choice_over("Which desk?", %{
+                   "billing" => "money moved",
+                   "shipping" => "a parcel is late"
+                 })
+             })
+  end
+
   test "request_params merge then body_transform, in §8 order, and state goes out verbatim" do
     parent = self()
 

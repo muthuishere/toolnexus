@@ -1543,6 +1543,14 @@ situation is the expensive failure (50% → 100% agreement from a single rewrite
 reports on the **question**, not on the answer — the worst working encoding measured carried the
 **highest** median confidence (0.82).
 
+**Option ids are the caller's strings, and a convenience constructor must not decorate them.**
+Where a port offers a `choiceOver`-style constructor over `(name, description)` pairs, a key that
+is not already a string SHALL be coerced to its **plain name** — the identifier a host would
+write — never to its host's printed form. An Elixir atom `:billing` and a Clojure keyword
+`:billing` both reach the wire as `billing`. A printed form that keeps a sigil (`":billing"`)
+yields a schema-valid request whose option ids silently differ from every other port's, and from
+the string the caller then compares `answer.choice` against.
+
 ### Degenerate criteria — detect and report, never repair
 
 A port SHALL detect a `choice` whose criteria are degenerate, defined as **any** of:
@@ -1603,7 +1611,12 @@ wrong-but-answerable question still reads as answerable. `calibrated` carries th
 
 ### Calibration travels with the decision
 
-Every `Decision` reports `calibrated`. The `systemone` style reports **true**. The `llm` style
+Every `Decision` reports `calibrated`. **An absent or `null` `calibrated` on the wire decodes as
+`true`**, in every port: the systemone wire reports calibration by being itself, and a backend that
+is not calibrated says so explicitly. Only the literal `false` yields `false`. This is stated
+because seven ports already agree on it and agreement that is never written down is luck rather
+than contract — a port that later defaults it to `false` would flip every threshold a host has
+tuned, on a field the host never set. The `systemone` style reports **true**. The `llm` style
 reports **false** unless it derived its probabilities from provider token probabilities. Measured
 on one routing job, the `llm` backend was 3.3–4.4× slower, 2.5–3.4× costlier, returned no
 distribution, emitted round self-reported confidence (0.95, 1.00), and on one fixture disagreed
@@ -1664,6 +1677,7 @@ configured one client has configured the other. Idiomatic names per port, as eve
 | `onMetric` | — | emits `classifier.evaluate` events (latency, tokens, model, status) into the **same** §8 sink — its `error` set only on a failed evaluate — and carries the degenerate-criteria warning as a `classifier.warning` whose text is in `warning`, not `error` |
 | `client` | — | `style: "llm"` only — the §8 `Client` to emulate over |
 | `evaluate` | — | `style: "custom"` only — the host's own function. Every wire option is ignored |
+| `decisions` | — | `style: "static"` only — the recorded corpus, keyed by the canonical request. **This is the option CI runs on**, so it is a core option, not a convenience: a port without it cannot run the shared `examples/judge/decisions.json` fixture. An unmatched request is an error naming the key, never a silent live call |
 
 ### Backends
 

@@ -835,3 +835,49 @@ func TestClassifierRetryBaseMs(t *testing.T) {
 		}
 	})
 }
+
+// SPEC §8B: an absent or null `calibrated` decodes as true, and only the literal
+// false is false. The systemone wire reports calibration by being itself, and a
+// backend that is not calibrated says so explicitly. Pinned because all seven
+// ports already agree on it, and an agreement nobody wrote down is luck — a port
+// that later defaulted it to false would flip every threshold a host has tuned,
+// on a field the host never set.
+func TestAbsentCalibratedDecodesAsTrue(t *testing.T) {
+	cal := func(t *testing.T, body string) bool {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("content-type", "application/json")
+			fmt.Fprint(w, body)
+		}))
+		defer srv.Close()
+		c, err := CreateClassifier(ClassifierOptions{
+			BaseURL:    srv.URL,
+			APIKeyEnv:  "TEST_JUDGE_UNSET",
+			HTTPClient: srv.Client(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		d, err := c.Evaluate(context.Background(), "s", map[string]Question{"q": NoulQuestion{Instructions: "?"}})
+		if err != nil {
+			t.Fatalf("Evaluate: %v", err)
+		}
+		return d.Calibrated
+	}
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"absent", `{"model":"m","answers":{}}`, true},
+		{"null", `{"model":"m","answers":{},"calibrated":null}`, true},
+		{"true", `{"model":"m","answers":{},"calibrated":true}`, true},
+		{"false", `{"model":"m","answers":{},"calibrated":false}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cal(t, tc.body); got != tc.want {
+				t.Fatalf("Calibrated = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -130,12 +130,29 @@
   [instructions criteria]
   {:type "score" :instructions instructions :criteria (vec criteria)})
 
+(defn- option-id
+  "An option key as its PLAIN NAME, which is what §8B says reaches the wire.
+  `str` is the wrong coercion for the idiomatic Clojure key: `(str :billing)` is
+  `\":billing\"`, sigil included, so a keyword roster produced a schema-valid
+  request whose option ids differed from every other port's — Elixir's
+  `to_string(:billing)` is `\"billing\"` — and from the string the caller then
+  compares `(:choice answer)` against. Namespaces are kept (`:a/b` => `\"a/b\"`)
+  because dropping them can collide two distinct options into one id."
+  [k]
+  (if (keyword? k)
+    (if-let [ns (namespace k)] (str ns "/" (name k)) (name k))
+    ;; a symbol already prints without a sigil, and a string is itself
+    (str k)))
+
 (defn choice-over
   "A `choice` over any (name, description) pairs — a Tool, a skill, an agent, an
   A2A card skill. The description must say what picking that option would MEAN;
-  see the encoding obligation on `choice-question`."
+  see the encoding obligation on `choice-question`.
+
+  Keys may be strings, keywords or symbols; each reaches the wire as its plain
+  name, with no `:` sigil (§8B)."
   [instructions items]
-  (choice-question instructions (reduce (fn [m e] (assoc m (str (key e)) (val e)))
+  (choice-question instructions (reduce (fn [m e] (assoc m (option-id (key e)) (val e)))
                                         {} items)))
 
 (defn- question-error [key msg data]

@@ -216,7 +216,8 @@ onto the model — the host does the counting and hands over the conclusion.
 ### 3. The full surface — `choice-over`, and the degenerate warning
 
 `choice-over` builds a `choice` from any `(name, description)` pairs — a toolkit's tools, a skill
-roster, an A2A card's skills — stringifying the keys as it goes. The descriptions are still
+roster, an A2A card's skills. Keys may be strings, keywords or symbols; each reaches the wire as
+its **plain name**, so `:billing` sends `billing`, not `":billing"`. The descriptions are still
 yours, and still the whole ball game: a roster whose descriptions are just the names is exactly
 what `degenerate-criteria` catches.
 
@@ -224,9 +225,8 @@ what `degenerate-criteria` catches.
 (require '[toolnexus.classifier :as jev]
          '[clojure.string :as str])
 
-;; the routing roster you already have. Keys are stringified with `str`, NOT `name` — so a
-;; keyword key would arrive as ":billing", colon and all. Option ids are caller-chosen and
-;; travel verbatim, so hand `choice-over` the ids you actually want on the wire.
+;; the routing roster you already have. Option ids are caller-chosen and travel verbatim —
+;; a keyword key sends its name, so {:billing "..."} and {"billing" "..."} are the same request.
 (def skills {"billing"   "route here when money moved: a duplicate charge, a refund owed"
              "shipping"  "route here when a physical parcel is late or damaged"
              "technical" "route here when the product itself fails: a login error, a broken feature"})
@@ -234,6 +234,12 @@ what `degenerate-criteria` catches.
 (def routing (jev/choice-over "Which skill should handle this turn?" skills))
 (assert (= "choice" (:type routing)))
 (assert (= #{"billing" "shipping" "technical"} (set (keys (:criteria routing)))))
+
+;; keywords are welcome, and lose the colon on the way out
+(assert (= #{"billing" "shipping"}
+           (set (keys (:criteria (jev/choice-over "Which desk?"
+                                                  {:billing  "route here when money moved"
+                                                   :shipping "route here when a parcel is late"}))))))
 (assert (nil? (jev/degenerate-criteria (:criteria routing))))     ; described by consequence
 
 ;; the three degenerate shapes, and the one that is never reported

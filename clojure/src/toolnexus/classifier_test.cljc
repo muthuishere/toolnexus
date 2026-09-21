@@ -638,3 +638,34 @@
       (is (>= (waited {}) 450)))
     (testing "a short base shortens the wait, not the behaviour"
       (is (< (waited {:retry-base-ms 1}) 200)))))
+
+(deftest choice-over-sends-plain-option-names
+  ;; §8B: a convenience constructor must not decorate the caller's ids. `str` on
+  ;; a keyword keeps the sigil (`":billing"`), which is schema-valid, returns 200
+  ;; and a well-formed distribution — while disagreeing with every other port
+  ;; (Elixir's `to_string(:billing)` is "billing") and with the string the caller
+  ;; then compares `(:choice answer)` against. A namespace is KEPT, because
+  ;; dropping it collides `:a/x` and `:b/x` into one option.
+  (let [q (jev/choice-over "Which desk?" {:billing "money moved" :shipping "a parcel is late"})]
+    (is (= #{"billing" "shipping"} (set (keys (:criteria q))))))
+  (testing "strings are untouched and symbols lose nothing"
+    (is (= #{"billing" "ship"}
+           (set (keys (:criteria (jev/choice-over "?" {"billing" "a" 'ship "b"})))))))
+  (testing "a namespaced keyword keeps its namespace"
+    (is (= #{"desk/billing"}
+           (set (keys (:criteria (jev/choice-over "?" {:desk/billing "a"})))))))
+  (testing "a keyword roster and its string equivalent are the SAME request"
+    (is (= (jev/canonical-request "m" {"r" (jev/choice-over "?" {:a "x" :b "y"})})
+           (jev/canonical-request "m" {"r" (jev/choice-over "?" {"a" "x" "b" "y"})})))))
+
+(deftest absent-calibrated-decodes-as-true
+  ;; §8B: the systemone wire reports calibration by being itself; a backend that
+  ;; is not calibrated says so explicitly. Only the literal `false` is false, so
+  ;; a host's tuned threshold cannot be flipped by a field it never set.
+  (letfn [(cal [body]
+            (let [c (jev/create-classifier {:http-client (fn [_ _ _] {:status 200 :body body})})]
+              (:calibrated (jev/evaluate c "s" {"q" (jev/noul-question "?")}))))]
+    (is (true?  (cal "{\"model\":\"m\",\"answers\":{}}"))                      "absent => true")
+    (is (true?  (cal "{\"model\":\"m\",\"answers\":{},\"calibrated\":null}"))  "null => true")
+    (is (true?  (cal "{\"model\":\"m\",\"answers\":{},\"calibrated\":true}")))
+    (is (false? (cal "{\"model\":\"m\",\"answers\":{},\"calibrated\":false}")))))
