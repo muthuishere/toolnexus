@@ -86,14 +86,18 @@
 
 - [x] 5.1 `cookbook/judge` — the recipe in seven language tabs: constructing a `Classifier`, the
       three question types, reading a decision, and switching backends.
-- [ ] 5.2 `harness/judge-live` — latency, cost and calibration measured from a real run, with the
+- [x] 5.2 `harness/judge-live` — latency, cost and calibration measured from a real run, with the
       `systemone` and `llm` backends side by side and the non-determinism stated as a number.
       Generated from the harness, not hand-written.
-      **PARTIAL.** The page exists and every number on it came from the live run recorded in
-      `spikes/classifier/reports/00-live-backend.md`, with `systemone` and `llm` side by side and
-      the non-determinism given as σ ≈ 0.015 / spread 0.05. What is NOT done is the second half:
-      there is no `judge-live` harness runner, so the page is a transcription with its source named
-      per table rather than regenerated output, and the page says so in its own words.
+      The runner is `site/scripts/generate-judge-live.mjs`: it drives the shipped JS `Classifier`
+      against the live System One wire and a chat model on the shared `examples/judge/base.json`
+      fixture, and writes both `site/src/data/judge-live.json` (the raw record) and the page. One
+      command, `node site/scripts/generate-judge-live.mjs`, regenerates the page; the page states
+      in its own words that it is generated, when, by which command and at what cost. Latency is
+      p50 **and** p95, nearest-rank. Absent `OPENROUTER_API_KEY` it exits non-zero rather than
+      emitting numbers. **CI never invokes it** — no workflow and no suite references it, and the
+      `static` backend remains the whole CI path.
+
 - [x] 5.3 `cookbook/judge` — the **encoding section** (ADR 0021 D4), each claim citing its
       measurement: describe every option (undescribed options ranked at chance — 0 apples vs 17);
       use one identical sentence template across options; keep arithmetic in code and hand over

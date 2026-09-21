@@ -1,0 +1,176 @@
+---
+title: The encoding rules
+description: What you must write inside a choice question, and the measurements behind each rule — describing the situation buys nothing if the options are not described. Plus the two health signals, and what neither of them detects.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="caution" title="Read this before you trust a number">
+A decision is **advisory**. Calibration is **not** correctness, and neither `nearUniform` nor
+confidence can tell a good encoding from a subtly wrong one. **Authority is enforced in code**:
+numeric limits, permission checks and allowlists stay in your `if` statements. A classifier
+interprets; it never authorises. Nothing on this page is a security control.
+</Aside>
+
+The type system tells you the **shape** of a question. It says nothing about the **content**, and
+the content is where essentially all of the outcome lives. A caller who satisfies every rule in the
+contract can still ship something that ranks at chance, and neither the schema, the validation, nor
+the HTTP status will say so.
+
+Every rule below carries the measurement it came from — two games built for exactly this, with
+everything except the wording held fixed
+([ADR 0021](https://github.com/muthuishere/toolnexus/blob/main/docs/adr/0021-the-encoding-carries-the-judgment.md):
+snake, three games per encoding, identical seeds, one `choice` per move).
+
+<Aside type="danger" title="This one is yours, and it is not advice">
+For a `choice`, **`criteria[id]` is the only thing that differentiates one option from another to
+the model.** The instructions describe the *question*; the state describes the *situation*; neither
+tells the model what picking `left` rather than `right` would mean. Passing the id itself, an empty
+string, or one value repeated is schema-valid, passes validation, returns HTTP 200 and a
+well-formed distribution — and ranks at chance.
+</Aside>
+
+## 1. Describe every option, by consequence
+
+Options described by what picking them would *do* scored **17, 17, 17** apples. The identical state
+— same prose, same board, same seeds — with each option's description replaced by **its own id**
+scored **0, 1, 0**. That is the floor of a shuffle control that keeps the returned probabilities and
+permutes them onto the *wrong* options (**1, 0, 1**).
+
+Describing the situation buys nothing if the options are not described. Every usable bit of signal
+was in the sentence attached to each option.
+
+```js
+// ranks at chance — schema-valid, HTTP 200, meaningless
+choice("Which move is best?", { north: "north", south: "south", east: "east" })
+
+// what the model can actually rank
+choice("Which move is best?", {
+  north: "closes the gap to the apple without passing a wall",
+  south: "backs into the tail",
+  east:  "runs into the wall one cell away and ends the game",
+})
+```
+
+The measured gap between those two calls is the whole feature.
+
+## 2. Use one identical sentence template across the options
+
+The options are compared **against each other**, so a difference in *form* reads as a difference in
+*substance*. Same shape, same vocabulary, one clause each — vary only the facts. The
+[runnable examples](/toolnexus/cookbook/judge/) use one template for all three departments
+(*"own it here when the problem is X: a, b, c"*) for this reason and no other.
+
+## 3. Keep the arithmetic in code; hand over the conclusion
+
+Sending the same facts as raw numbers (`x=5,y=6`, `room=142`, `food_distance=9`) cost about **18%**
+of the score, and dropped median confidence from **0.80 to 0.62**.
+
+That is graceful degradation, not collapse. Numbers are a **costed tradeoff**, not a taboo — and now
+you have the price. Compute the distance yourself and say *"two cells away, no wall between"*.
+
+## 4. A clause wrong about one option in one situation is the expensive failure
+
+Two encodings were both "a clause that is wrong", and they cost wildly different amounts.
+
+A clause frozen so it no longer tracked the board — the **same** false claim on every option — was
+*free* under a capped game: 17, 17, 17, identical to the baseline.
+
+A clause that made exactly **one** option read as irrelevant to exactly **one** situation was
+catastrophic. One option promised it *"passes over whatever is **standing** in your way"*; nothing
+is standing when a bird is coming, so the judge read that option as irrelevant to birds and crouched
+at every one — fatal at the knee-high bird. Rewriting that single clause so the options use the same
+height vocabulary as the state:
+
+| | before | after |
+|---|---|---|
+| agrees with the code baseline, bird waves | **50%** (2/4) | **100%** (18/18) |
+| median distance | 79 m | **309 m** |
+
+A uniform lie carries no signal, but no misdirection either. A selective one is coherent, confident
+and wrong — the judge's answer was consistent with what it was told, and what it was told was false
+in exactly one place.
+
+<Aside type="note" title="And the cap was hiding it">
+The frozen clause only *looked* free because the **measurement was blind**: a capped game never runs
+long enough for the missing information to bind. Uncapped, it cost **34%** of the apples (38 → 25)
+and **48%** of the moves survived (466 → 242). Evaluate an encoding on the regime where the missing
+information actually binds, or you will certify a broken one.
+</Aside>
+
+## The library tells you when you got this wrong — once
+
+If a `choice`'s criteria are degenerate — **every** value empty, **every** value equal to its own
+key, or **every** value identical to the others — the port emits one warning through your `onMetric`
+sink, **naming the question key**, and sends the request **byte-unchanged**.
+
+The advisory text travels in the event's **warning** field, never in its **error** field, which
+stays absent: a warning is not a failure, and a consumer filtering the metrics sink on "has an
+error" must not count one.
+
+Detection, never repair. Repairing would mean inventing option descriptions you did not write, and
+the library has no way to know what your options mean. The warning fires **once per question key per
+classifier**, so a per-turn judge does not flood the sink, and a single-option choice is never
+reported — there is nothing to differentiate.
+
+## `nearUniform` — the live-traffic health check
+
+Every choice answer carries a derived `nearUniform`:
+
+```
+nearUniform  ⇔  max over i of |p_i − 1/n|  ≤  0.05
+```
+
+It is **computed from the response and never read from the wire** — no wire change, no request
+change, no fixture change. `n` is the number of entries in the probability map, an offered option
+absent from the map counts as `0`, and nothing is sorted, renormalised or rounded first. A
+single-option choice is trivially near-uniform.
+
+The tolerance is **0.05 absolute**, and the comparison is inclusive. It is not a feel:
+
+- **wire rounding** — probabilities arrive at two decimals, so ±0.005 of deviation is quantisation
+  alone;
+- **backend non-determinism** — σ ≈ 0.015, spread 0.05 across twelve identical calls, so 0.05 is
+  roughly 3σ;
+- **the separation it must make** — on a four-option choice (`1/n = 0.25`) the undescribed encoding
+  returned a median top probability of **0.29** (deviation 0.04, inside) and the described one
+  **0.80** (deviation 0.55, far outside).
+
+It is absolute rather than relative to `1/n` because a relative tolerance collapses below the noise
+floor on a large roster: at 255 options `1/n` is 0.0039, finer than the rounding the wire already
+applies.
+
+## What neither signal detects
+
+This is the important part, and it is the reason both flags are documented next to the caveat rather
+than next to the feature.
+
+**`nearUniform` detects an encoding that gave the model nothing to rank on.** That is the only
+encoding check available with **no ground truth**, cheap enough to run on live traffic. It cannot
+separate a good encoding from a subtly wrong one: a wrong-but-answerable question still reads as
+answerable.
+
+**Confidence reports on the question, not on the answer.** It tracks how constrained the position is
+and how thin the information is — not whether the answer is right:
+
+| observation | confidence |
+|---|---|
+| moves agreeing with the code baseline vs diverging from it | 0.87 vs 0.54 |
+| a described deck vs an undescribed one | 0.80 vs **0.29** |
+| moves into a tight pocket vs the rest | 0.75 vs 0.67 |
+
+And the clincher: the **frozen** encoding carried the **highest** median confidence of any style
+(**0.82**) while being the worst working encoding measured. `calibrated` carries the same caveat —
+it says the probabilities came from a calibrated backend, not that they are correct.
+
+**The one check that can fail** is the
+[shuffle control](/toolnexus/harness/judge-live/#the-control-that-can-fail):
+keep the returned probabilities and permute which option each belongs to. If your scores barely
+move, the judge was never ranking and your code was doing the steering. 17 apples → 1. It costs one
+function, and it is the only control in this space that can come out the other way.
+
+<Aside type="note" title="How far these numbers go">
+Two games, three runs each, one model, one machine. Strong enough to justify a warning and a derived
+flag; **not** strong enough to justify refusing a request, which is exactly why the library warns
+rather than rejects.
+</Aside>

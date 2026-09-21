@@ -22,7 +22,11 @@ I then hunted it: **10 further runs with randomised `--seed`, zero failures** (1
 I checked the detector would have caught one — ExUnit prints `Result: 506/507 passed` on failure
 against `Result: 507 passed` on success, and the pattern matches only the former.
 
-**So: one unexplained failure, not reproducible in 14 runs, and its identity is lost.** That is
+**UPDATE 2026-09-21: 61 more consecutive suites via `mix test --repeat-until-failure 60
+--max-failures 1` — zero failures. 75 clean runs total.** That flag stops ON the failure with full
+output, so had it recurred the name would have survived; it did not recur.
+
+**So: one unexplained failure, not reproducible in 75 runs, and its identity is lost.** That is
 where it stands. It is not evidence the suite is healthy, and I am not going to call it fixed
 because it stopped happening. If it recurs, capture the full output — the name is the whole
 problem.

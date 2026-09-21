@@ -1,0 +1,105 @@
+---
+title: Typed decisions
+description: A Classifier is the contract for a judgment, as a Tool is the contract for an action — pre-declared typed questions in, calibrated numbers out, no free text, no tool calling, no loop. In all seven languages.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="caution" title="Read this before your first call">
+A decision is **advisory**. Calibration is **not** correctness — a decision can be confidently
+wrong, and "cannot hallucinate" means only that the returned value is inside the declared schema.
+**Authority is enforced in code**: numeric limits, permission checks and allowlists stay in your
+`if` statements, never in a probability. A classifier interprets; it never authorises. Nothing in
+this section is a security control.
+</Aside>
+
+Half the decisions inside an agent are not actions at all. *Is this shell command risky. Does this
+turn need the billing skill. Is this text an injection attempt. How urgent is this ticket.* None of
+them changes the world; each of them is a **judgment** that then steers something that does.
+
+`Tool` is the contract for an **action**. `Classifier` is the contract for a **judgment**.
+
+## The third tier
+
+You already have two ways to decide, and they sit at opposite ends of a very wide gap:
+
+| | cost | latency | understands meaning |
+|---|---|---|---|
+| **code** — an `if`, a regex, an allowlist | free | ~0 ms | no |
+| **a `Classifier`** | fractions of a cent | **~0.3–0.5 s** | yes |
+| **a frontier-model turn** | cents | seconds | yes, and it can also act |
+
+The gap is where most agents overpay. A routing question does not need a model that can call tools,
+write prose and hold a conversation; it needs one number you can threshold. A **System One** model
+takes a state plus pre-declared, typed questions and returns calibrated answers with **no free
+text** — no messages, no tool calling, no streaming. It never enters the [client loop](/toolnexus/harness/),
+and it is never selected as a model for `run`/`ask`.
+
+Measured on one routing job against two chat models on the same fixture, the System One backend was
+[3.3–4.4× faster, 2.5–3.4× cheaper, and the only one that returned a distribution at
+all](/toolnexus/harness/judge-live/).
+
+## The three question types
+
+You declare the questions **up front**. There is no parsing step afterwards, because there is
+nothing to parse.
+
+| type | you get back | reach for it when |
+|---|---|---|
+| `noul` | one number in `0..1` — **no confidence; the number is the answer** | is this true, is this from an untrusted source |
+| `choice` | one of **your** named options, a probability for **every** option, and a confidence | routing to a skill, a tool, an agent, a move |
+| `score` | a number against an **ordered** rubric of 2–10 levels (`1.21` is a real answer), with a probability per level | risk, urgency, severity |
+
+- **`noul`** is the odd one: it reports *no* confidence, on purpose. The number *is* the
+  confidence. Its optional `criteria` describes the true and the false case, and absent, empty and
+  populated are three different values — all three survive the wire intact.
+- **`choice`** always returns one of the options you offered, and the probability map names exactly
+  those options. Up to 255 of them.
+- **`score`** rates against an ordered rubric, and **the order is the numbering** — level 0 is the
+  first string you passed. Nothing sorts it. A score may land *between* levels, which is usually
+  the interesting part: `0.49` means the model is genuinely split between level 0 and level 1.
+
+Limits are enforced **client-side, before the request** — ≤255 choice options, 2–10 rubric levels.
+The error names the offending question key and the limit, and no request goes out. You find out
+faster and more legibly than you would from the backend's own `400`.
+
+## The `Decision` shape
+
+One call carries many questions: one round trip, one state ingest, one bill.
+
+```
+Decision { model, answers: { <your key>: Answer }, usage, calibrated }
+
+Answer =
+  | NoulAnswer   { noul }                                         // 0..1, no confidence
+  | ChoiceAnswer { choice, probabilities, confidence, nearUniform }
+  | ScoreAnswer  { score, probabilities, legend, confidence }
+```
+
+Two things about this shape are worth knowing before you write the first call.
+
+**The map keys are yours, and they are addressing, not content.** They are **never transmitted to
+the model**, so a key may be a tool, skill or agent name verbatim, and two evaluations differing
+only in their keys send byte-identical content.
+
+**The questions are independent.** One answer is never context for another — ask "is this a refund
+request" and "which desk owns it" in the same call and neither leans on the other. A backend that
+cannot guarantee that reports `calibrated: false`, which carries the caveat for you.
+
+Reading an answer as the wrong type is an **error, not a surprise**: the typed accessors fail
+loudly — an exception, an `{:error, _}`, an `err` — rather than handing you a zero.
+
+## Where to go next
+
+| page | what it answers |
+|---|---|
+| [Run it — the recipe](/toolnexus/cookbook/judge/) | a working judge in every language, pointing at a real file you can run right now with no credential |
+| [The encoding rules](/toolnexus/judge/encoding/) | what you must write **inside** a question, and the measurements that say so — the part that decides whether the answer means anything |
+| [Backends & configuration](/toolnexus/judge/backends/) | `systemone`, `llm`, `custom` and `static` — and why `static` is what CI runs, with no network and no credential |
+| [Measured on a live backend](/toolnexus/harness/judge-live/) | generated output: latency, cost, calibration, non-determinism, and the one control that **can** fail |
+
+## What is not here
+
+No adapters, no pre-built batteries (`SkillRelevance`, `ToolGuard`, `Verified`), and no model
+routing — those are tracked separately. A host that constructs no `Classifier` behaves
+byte-identically to a build without this seam, and that is proven by a test rather than asserted.

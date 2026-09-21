@@ -1,6 +1,6 @@
 # ADR 0021 — The encoding carries the judgment: what a `Classifier` caller must write, and how to detect when they have not
 
-- **Status:** **Accepted — measured 2026-09-20.** Not argued from priors: every claim below is a
+- **Status:** **Accepted — measured 2026-09-20; gate MET 2026-09-21, all four items.** Not argued from priors: every claim below is a
   number from a run that could have come out the other way, and two of my own predictions did not
   survive (recorded in *Corrections* rather than quietly dropped).
 - **Date:** 2026-09-20
@@ -174,8 +174,9 @@ significant loss either — what is reportable is the absence of the predicted w
 ## Gate
 
 1. `labels`-shaped input (every criterion equal to its key) produces a warning naming the question
-   id, in all seven ports, and still sends the original bytes. ☐
+   id, in all seven ports, and still sends the original bytes. ☑
 2. `nearUniform` is computed identically in all seven ports against a shared fixture, including
-   the boundary case. ☐
-3. `cookbook/judge` carries D4's four claims, each with its measurement cited. ☐
-4. A run that constructs no `Classifier` is byte-identical to `main`. ☐ *(inherited from 0020)*
+   the boundary case. ☑
+3. D4's four claims each carry their measurement, on `/judge/encoding`; `cookbook/judge` keeps
+   the obligation itself and links across. ☑
+4. A run that constructs no `Classifier` is byte-identical to `main`. ☑ *(inherited from 0020)*

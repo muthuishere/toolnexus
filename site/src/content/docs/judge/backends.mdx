@@ -1,0 +1,101 @@
+---
+title: Backends & configuration
+description: systemone, llm, custom and static — what each one is for, why static is the backend CI runs with no network and no credential, and why a threshold tuned on one backend does not transfer to another.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="caution" title="Read this before you set a threshold">
+A decision is **advisory**. Calibration is **not** correctness — a decision can be confidently
+wrong. **Authority is enforced in code**: numeric limits, permission checks and allowlists stay in
+your `if` statements, never in a probability. A classifier interprets; it never authorises. Nothing
+on this page is a security control.
+</Aside>
+
+One option chooses where a decision comes from. Everything else — the questions, the state, the
+answers you read back — is identical across all four.
+
+| `style` | what it is |
+|---|---|
+| `systemone` *(default)* | one `POST {baseUrl}/systemone` with the canonical body. Calibrated. |
+| `llm` | the same questions as one structured-output call on any `Client`. A compatibility exit for a host with **no** System One credential. Reports `calibrated: false`. |
+| `custom` | your own function — a fine-tuned encoder, a rules engine, or a cache in front of either. |
+| `static` | recorded decisions. **This is what CI runs**: no network, no credential. |
+
+## `static` is not a convenience
+
+The live backend is **non-deterministic**. The same bytes, twelve times, move by σ ≈ 0.015 — so
+`static` is the only backend a test may assert a number against.
+
+That is why every test in this repo, in all seven ports, runs on `static`: **no network, no
+credential, no cost**, and a numeric assertion that means something. A live call, if it is run at
+all, asserts shape only. It is also why the
+[runnable examples](/toolnexus/cookbook/judge/) work for you with nothing configured — they replay
+one recorded decision unless `OPENROUTER_API_KEY` is present in the environment, in which case they
+go live.
+
+A recorded decision is a `(state, questions, response)` triple, matched on the canonical request
+bytes. Record it once from a live run; it stays honest because the questions are part of the key —
+change the encoding and the recording no longer matches.
+
+## `llm` is an exit, not an equal
+
+The `llm` style sends the same typed questions as one structured-output call on any
+[`Client`](/toolnexus/harness/), so a host with no System One credential is not blocked. It is not a
+substitute.
+
+Measured on one routing job, the `llm` backend was
+[3.3–4.4× slower and 2.5–3.4× costlier](/toolnexus/harness/judge-live/), returned **no
+distribution**, emitted round self-reported confidence (0.95, 1.00), and on one fixture disagreed
+outright with the calibrated backend.
+
+<Aside type="danger" title="A threshold tuned on one backend does not transfer to another">
+Read `calibrated` at the point where you compare a number to a threshold. The `systemone` style
+reports `true`; `llm` reports `false` unless it derived its probabilities from provider token
+probabilities. If `calibrated` is false, either re-tune for that backend or decline to threshold at
+all.
+
+```js
+const d = await judge.evaluate(state, questions)
+if (!d.calibrated) throw new Error("thresholds were tuned on a calibrated backend")
+if (d.score("risk").score >= 2.5) return deny()
+```
+
+Leave clearance, too: a band boundary within ~0.1 of a typical value will flip between runs on the
+same backend.
+</Aside>
+
+## Configuration
+
+`ClassifierOptions` mirrors `ClientOptions` field-for-field wherever a field makes sense, so a host
+that has configured one has configured the other: `style`, `baseUrl`, `model`, `apiKeyEnv`,
+`headers`, the injectable transport, `timeout`, `retries`/`onError`, `requestParams`/`bodyTransform`,
+`onMetric`, `client` (for `llm`), `evaluate` (for `custom`), `decisions` (for `static`).
+
+Two deliberate differences:
+
+- **`apiKeyEnv` takes the NAME of an environment variable, never a value.** It is read at call time
+  and never logged. `headers` values expand `${ENV_VAR}` at call time on the same terms. No
+  credential and no expanded header value appears in any log, metric, error message or returned
+  value — an authentication failure names the status and the endpoint and nothing else.
+- **`timeout` bounds one request, not a run.** A classifier has no loop to bound.
+
+There is no second retry policy: `onError` and the `Retry-After` rule are the client's ones
+verbatim, and there is no `suspend` tier here — there is nothing to suspend into.
+
+## The canonical request
+
+For identical `questions` and `model`, **every port emits byte-identical `questions` + `model`
+bytes**. That is what makes a recording made in one language replayable in another, and a fixture
+shared across seven test suites:
+
+- object keys sorted **recursively** in **ASCII** order — not culture-sensitive order;
+- **arrays are never reordered** — a `score` rubric's order *is* its level numbering, so a
+  "sort everything" canonicaliser would silently renumber the rubric;
+- compact separators, no spaces;
+- `<`, `>`, `&`, `'`, quotation marks and non-ASCII characters transmitted **raw**, never escaped;
+- absent and empty are **different**: an absent `criteria` is absent, not `null` and not `{}`.
+
+**`state` is transmitted verbatim as you supplied it, and is explicitly outside that claim** —
+numbers do not canonicalise identically across seven languages, so the library does not pretend
+they do.

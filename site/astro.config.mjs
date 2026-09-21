@@ -74,6 +74,14 @@ export default defineConfig({
 										{ label: 'Harness & loop', slug: 'harness' },
 										{ label: 'Completion gate & guardrails', slug: 'harness/completion-gate' },
 										{ label: 'Proved on live models', slug: 'harness/live' },
+									],
+								},
+								{
+									label: 'Typed decisions',
+									items: [
+										{ label: 'What a Classifier is', slug: 'judge' },
+										{ label: 'The encoding rules', slug: 'judge/encoding' },
+										{ label: 'Backends & configuration', slug: 'judge/backends' },
 										{ label: 'Judge — measured live', slug: 'harness/judge-live' },
 									],
 								},
