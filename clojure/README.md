@@ -7,7 +7,7 @@ implementation, byte-identical on both.
 
 ```clojure
 ;; deps.edn
-net.clojars.muthuishere/toolnexus {:mvn/version "0.17.0"}   ; this port
+net.clojars.muthuishere/toolnexus {:mvn/version "0.18.0"}   ; this port
 net.clojars.muthuishere/koine     {:mvn/version "0.11.0"}    ; its only dependency
 ```
 
