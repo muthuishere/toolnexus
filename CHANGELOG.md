@@ -8,6 +8,62 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### Spec — a `beforeTool` hook can raise a suspension, and now the contract says so
+
+`SPEC.md` §10 defined a suspension by the *result* — a `ToolResult` whose `metadata.pending` is a
+`Request` — but only ever described a tool producing one. A `beforeTool` hook short-circuiting
+with that same result suspends the run identically, and the guarded tool never executes. Five
+ports already implemented and tested it; it was simply never written down, so nothing said it was
+guaranteed rather than incidental.
+
+§10 now names both paths (A: the tool returns it, B: a hook short-circuits with it) and requires
+every port to resolve a hook-raised suspension through `waitFor` exactly as it resolves a
+tool-raised one, and to halt with the hook's own `Request` when no `waitFor` is set. This is what
+a three-state policy gate needs: a guardrail returns a string and has only allow and deny, so
+"ask a human first" belongs on `beforeTool`. Two coverage gaps closed with it — Go lacked the
+hook-raised-plus-no-`waitFor` corner (the one a durable approval queue actually ships on), and
+Elixir had no path-B test at all.
+
+### Fixed — a guardrail that is not a plain string is refused, loudly, in every port
+
+A `Guardrail` returns a verdict string synchronously: `""` or `"allow"` to permit, any other
+string to deny. Handing it something else — most naturally an `async` function — did not report
+an error anywhere. It silently did the wrong thing, and it did **three different wrong things**
+depending on the port:
+
+- **JS and Python** took the deny branch on every call. A `Promise`/coroutine is truthy and is not
+  `"allow"`, so an async guardrail **denied every tool call in the run**, with the reason rendered
+  as `denied: [object Promise]` / `denied: <coroutine object …>` (Python additionally leaked an
+  un-awaited coroutine). An agent wired this way could not call a single tool, and nothing said why.
+- **Elixir and Clojure** did the opposite: a non-string verdict failed the `is_binary` / `string?`
+  test and fell through as an **allow**, so a policy check silently widened — the one direction a
+  guardrail must never fail.
+- **Go, Java and C#** were never reachable; their `Guardrail` type returns a `string`.
+
+All four dynamic ports now raise immediately, naming what came back and where asynchronous work
+belongs (a `beforeTool` hook, which is awaited). The contract is unchanged and stays synchronous
+in all seven ports, so every guardrail that was already correct keeps its exact behaviour; only
+the previously-silent mistake is now loud. If you need a judgement that takes I/O — a policy
+service, a classifier — put it in `beforeTool` rather than in a guardrail.
+
+### Fixed — `Run`/`Ask` accept a nil toolkit as "no tools" (golang)
+
+`client.Run(ctx, prompt, nil)` panicked with a nil-pointer dereference, although §8 already
+defines what an empty tool list does (the `tools` key, and `tool_choice` on the openai style, are
+omitted from the request entirely). Passing `nil` is the obvious way to say "this call needs no
+tools", so it now means exactly that: `Tools`, `ToOpenAI`, `ToAnthropic`, `ToGemini`,
+`SkillsPrompt`, `Get`, `Execute` and `McpStatus` are all nil-safe on the receiver. Building an
+empty `Toolkit` still works and is unchanged.
+
+### Docs — the coding-agent scenario no longer says the agent runtime hides the hooks
+
+The page claimed the runtime "does not surface" `beforeTool`/`afterTool`, and listed that under
+its honest limits. That stopped being true when the harness and loop shipped: an agent spec takes
+`hooks`, which the runtime forwards verbatim, and `guardrails`, which compile into one
+`beforeTool`. The page now explains when to wrap a tool and when to use a hook — wrap when the
+rule belongs to one tool and should travel with it, hook when the policy spans many — and the
+limits list carries the guardrail's synchronous contract instead.
+
 ## 0.17.0 — 2026-09-02
 
 ### Fixed — an aborted A2A call reports a cancel, not a transport error (all ports)

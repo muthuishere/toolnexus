@@ -151,6 +151,20 @@
         "an allowed call falls through")
     (is (= 1 @seen))))
 
+(deftest non-string-guardrail-verdict-fails-loudly
+  ;; `string?` used to send anything non-string to the fall-through, i.e. a silent
+  ;; ALLOW — a policy check failing OPEN, the one direction a guardrail must never
+  ;; fail. (JS/Python had the mirror bug and failed closed. Three behaviours for
+  ;; one mistake is exactly the drift the seven ports exist to prevent.)
+  (let [hooks (tnloop/guarded-hooks [(fn [_] 42)] nil)]
+    (is (thrown-with-msg?
+         Throwable
+         #"must return a string"
+         ((:before-tool hooks) {:name "safe" :args {} :turn 1}))))
+  ;; nil and "" still permit — unchanged.
+  (let [ok (tnloop/guarded-hooks [(fn [_] nil) (fn [_] "")] nil)]
+    (is (nil? ((:before-tool ok) {:name "safe" :args {} :turn 1})))))
+
 (deftest guardrails-run-before-an-existing-hook
   (let [prior (atom 0)
         hooks (tnloop/guarded-hooks

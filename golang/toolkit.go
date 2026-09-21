@@ -320,7 +320,13 @@ func (tk *Toolkit) Serve(addr string, opts ServeOptions) (*ServeHandle, error) {
 }
 
 // Tools returns all tools (mcp tools + skill tool + extras), in insertion order.
+// A nil Toolkit is a toolkit with no tools — callers may pass nil to Run/Ask to
+// mean "no tools" rather than having to build an empty one (§8 Gap 5 then omits
+// the tools key entirely).
 func (tk *Toolkit) Tools() []Tool {
+	if tk == nil {
+		return nil
+	}
 	out := make([]Tool, 0, len(tk.order))
 	for _, name := range tk.order {
 		out = append(out, tk.byName[name])
@@ -330,12 +336,18 @@ func (tk *Toolkit) Tools() []Tool {
 
 // Get returns a tool by name, or false if absent.
 func (tk *Toolkit) Get(name string) (Tool, bool) {
+	if tk == nil {
+		return Tool{}, false
+	}
 	t, ok := tk.byName[name]
 	return t, ok
 }
 
 // Execute routes to the right tool and runs it.
 func (tk *Toolkit) Execute(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+	if tk == nil {
+		return ToolResult{Output: fmt.Sprintf("Unknown tool: %s", name), IsError: true}, nil
+	}
 	tool, ok := tk.byName[name]
 	if !ok {
 		return ToolResult{Output: fmt.Sprintf("Unknown tool: %s", name), IsError: true}, nil
@@ -366,7 +378,7 @@ func (tk *Toolkit) executeWithAnswer(ctx context.Context, name string, args map[
 
 // SkillsPrompt returns the markdown skill catalog for the system prompt.
 func (tk *Toolkit) SkillsPrompt() string {
-	if tk.skill == nil {
+	if tk == nil || tk.skill == nil {
 		return ""
 	}
 	return tk.skill.Prompt()
@@ -374,7 +386,7 @@ func (tk *Toolkit) SkillsPrompt() string {
 
 // McpStatus returns each server's connection status.
 func (tk *Toolkit) McpStatus() map[string]McpStatus {
-	if tk.mcp == nil {
+	if tk == nil || tk.mcp == nil {
 		return map[string]McpStatus{}
 	}
 	return tk.mcp.Status

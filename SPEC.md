@@ -1508,6 +1508,37 @@ signature. A convenience producer helper MAY exist —
 { kind:"authorization", url, prompt }` and a generated `id` — but it is sugar, not
 required.
 
+### Two ways to raise one — a tool, or a `beforeTool` hook (path A / path B)
+
+A suspension is produced by the **result**, never by who produced the result. So there
+are exactly two paths, and the loop cannot tell them apart:
+
+- **Path A** — the tool's own `execute` returns the pending-carrying `ToolResult`.
+- **Path B** — a `beforeTool` hook (§8) short-circuits with `{ result }` whose
+  `metadata.pending` is a `Request`. The tool never runs.
+
+Both are detected by the same check on the result the tool step produced, so path B gets
+the whole of §10 for free: resolved inline by `waitFor` → the loop re-enters the tool
+step with the `Answer` in `ctx`; no `waitFor` → `Status "pending"` carrying that
+`Request`, resumable durably. The `AfterTool` skip and the pending-not-error metric
+classification apply identically.
+
+Path B is what lets a policy gate ask a human **without the guarded tool being reached
+at all** — the tool is not executed, not even to be denied. A `Guardrail` (§7D) cannot
+express this, because it returns a string: allow or deny, two states. A gate needing a
+third (ask) belongs on `beforeTool`.
+
+```
+hooks.beforeTool = (ev) =>
+  needsApproval(ev) ? { result: { output: "...", isError: true,
+                                  metadata: { pending: { id, kind: "approval", prompt } } } }
+                    : undefined
+```
+
+**Conformance:** every port MUST resolve a hook-raised suspension through `waitFor`
+exactly as it resolves a tool-raised one, and MUST halt with `Status "pending"` carrying
+the hook's own `Request` when no `waitFor` is configured.
+
 ### `Request` — byte-identical wire data
 
 ```

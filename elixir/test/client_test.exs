@@ -552,6 +552,33 @@ defmodule Toolnexus.ClientTest do
     assert tool_msg["content"] == "unresolved: Login required"
   end
 
+  test "path B: a before_tool hook raises the suspension and the tool never runs" do
+    # SPEC §10 — a suspension is defined by the RESULT, not by who produced it. A
+    # before_tool hook short-circuiting with a pending-carrying result must halt the
+    # run exactly as a tool-raised one does, carrying the HOOK's own Request. This is
+    # the shape a three-state policy gate ships on: a guardrail returns a string and
+    # has only allow/deny, so "ask a human" has to live here.
+    {:ok, ran} = Agent.start_link(fn -> false end)
+    guarded = tool("deploy", fn _, _ -> Agent.update(ran, fn _ -> true end); "DEPLOYED" end)
+    {base, _agent} = start_stub([fn _ -> openai_calls([{"c1", "deploy", "{}"}]) end])
+
+    client =
+      make_client(base,
+        hooks: %{
+          before_tool: fn _ev ->
+            %{result: pending_result("r-gate", "approve deploy to prod?")}
+          end
+        }
+      )
+
+    result = Client.run(client, "ship it", [guarded])
+
+    assert result.status == "pending"
+    assert %Request{id: "r-gate"} = result.pending
+    assert result.pending.prompt == "approve deploy to prod?"
+    refute Agent.get(ran, & &1), "the guarded tool must not run when the gate suspends"
+  end
+
   test "G3: two concurrent suspensions, no wait_for => halts on FIRST in call order" do
     # first call is SLOWER — order must come from call order, not completion order
     p1 = tool("p1", fn _, _ -> Process.sleep(60); pending_result("req-1", "first prompt") end)

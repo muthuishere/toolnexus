@@ -219,3 +219,30 @@ async def test_turns_accumulate_and_status_is_observed():
     await loop.run("two")
     assert loop.turns > after_first, "turns accumulate across runs"
     assert loop.status == "idle"
+
+
+@pytest.mark.asyncio
+async def test_async_guardrail_fails_loudly_instead_of_denying_everything():
+    """A coroutine is truthy and != "allow", so before this fix an async guardrail
+    denied EVERY tool call with ``denied: <coroutine object ...>`` — fail-closed,
+    silent, with a garbage reason, and leaking an un-awaited coroutine. The
+    contract is synchronous; say so out loud."""
+
+    async def rail(_ev):
+        return "allow"
+
+    hooks = guarded_hooks([rail], None)
+    with pytest.raises(TypeError) as exc:
+        await hooks["before_tool"]({"name": "safe", "args": {}, "turn": 1})
+    assert "coroutine" in str(exc.value)
+    assert "before_tool" in str(exc.value)
+
+    # Any other non-string is refused the same way.
+    bad = guarded_hooks([lambda _ev: 42], None)
+    with pytest.raises(TypeError) as exc2:
+        await bad["before_tool"]({"name": "safe", "args": {}, "turn": 1})
+    assert "int" in str(exc2.value)
+
+    # A sync guardrail returning None still permits — unchanged.
+    ok = guarded_hooks([lambda _ev: None], None)
+    assert await ok["before_tool"]({"name": "safe", "args": {}, "turn": 1}) is None

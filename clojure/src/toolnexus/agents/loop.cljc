@@ -44,7 +44,21 @@
              (fn [ev]
                (let [denial (some (fn [rail]
                                     (let [v (rail ev)]
-                                      (when (and (string? v) (seq v) (not= v "allow")) v)))
+                                      (cond
+                                        (nil? v) nil
+                                        (string? v) (when (and (seq v) (not= v "allow")) v)
+                                        ;; A guardrail is SYNCHRONOUS and returns a string by
+                                        ;; contract. Anything else used to fall through as an
+                                        ;; ALLOW, silently widening a policy check — the one
+                                        ;; direction a guardrail must never fail. Fail loudly.
+                                        :else
+                                        (throw (ex-info
+                                                (str "guardrail returned " (pr-str v)
+                                                     ": a guardrail must return a string "
+                                                     "synchronously (\"\" or \"allow\" to permit, "
+                                                     "any other string to deny). Do asynchronous "
+                                                     "work in the :before-tool hook, which is awaited.")
+                                                {:returned v})))))
                                   guardrails)]
                  (cond
                    denial {:result {:output (str "denied: " denial) :is-error true}}
