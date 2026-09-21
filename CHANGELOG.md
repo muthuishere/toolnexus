@@ -39,7 +39,9 @@ with each option replaced by its own id scored 0, 1, 0 — the floor of a shuffl
 is schema-valid and returns HTTP 200, so nothing would have told you. Now something does: a `choice`
 whose criteria are all empty, all equal to their own keys, or all identical emits **one** warning
 per question key through your existing metric sink, naming the key, and sends the request
-byte-unchanged — detection, never repair. And every choice answer carries a derived `nearUniform`
+byte-unchanged — detection, never repair. That warning arrives as a `classifier.warning` event
+carrying its text in a **`warning`** field, never in `error`: it is advisory, not a failure, so a
+consumer already counting failures off the same sink does not start counting warnings as outages. And every choice answer carries a derived `nearUniform`
 (`max|p − 1/n| ≤ 0.05`), the one encoding health check that needs no ground truth and can run on
 live traffic.
 

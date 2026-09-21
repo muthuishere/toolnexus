@@ -298,7 +298,7 @@ class ClassifierTest {
                 .filter(e -> e instanceof LlmClient.MetricEvent.ClassifierWarning)
                 .map(e -> (LlmClient.MetricEvent.ClassifierWarning) e).findFirst().orElseThrow();
         assertEquals("classifier.warning", w.event());
-        assertTrue(w.message().contains(w.question()));
+        assertTrue(w.warning().contains(w.question()));
 
         // The bytes are identical WITH detection to what the fixture pins.
         assertEquals(f.get("canonicalSha256").asText(), sha256(Classifier.canonicalRequest(

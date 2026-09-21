@@ -1543,8 +1543,11 @@ A port SHALL detect a `choice` whose criteria are degenerate, defined as **any**
 2. every value equals its own key, or
 3. every value is identical to every other value (`n ≥ 2`).
 
-On detection the port emits **one** warning through the configured `onMetric` / log sink, **naming
-the question key**, and sends the request **byte-unchanged**. Detection is **once per question
+On detection the port emits **one** `classifier.warning` event through the configured `onMetric` /
+log sink, **naming the question key**, and sends the request **byte-unchanged**. The advisory text
+travels in the event's **warning** field, never in its **error** field, which stays absent: a
+warning is not a failure, and a consumer filtering the §8 sink on "has an error" MUST NOT count one.
+(The field name follows each port's local casing, as the rest of the §8 event does.) Detection is **once per question
 key** per classifier, so a per-turn judge does not flood the sink. The request a caller gets is
 identical with and without detection; the warning is the entire observable effect.
 
@@ -1649,7 +1652,7 @@ configured one client has configured the other. Idiomatic names per port, as eve
 | `timeout` | 10 s | per request, not per run — a classifier has no loop to bound |
 | `retries` / `onError` | retry `408`/`429`/`5xx` + network, honour `Retry-After` | **reuses** the §8 `ErrorInfo → "retry" \| "fail"` classifier and the `Retry-After` `delay-seconds` rule verbatim. There is no second retry policy, and no `"suspend"` tier here either |
 | `requestParams` / `bodyTransform` | — | the §8 Gap 1 shape, same ordering: base body → `requestParams` merge → `bodyTransform` → marshal. How a gateway's wrapper or extra fields land without a proxy |
-| `onMetric` | — | emits `classifier.evaluate` events (latency, tokens, model, status) into the **same** §8 sink, and carries the degenerate-criteria warning |
+| `onMetric` | — | emits `classifier.evaluate` events (latency, tokens, model, status) into the **same** §8 sink — its `error` set only on a failed evaluate — and carries the degenerate-criteria warning as a `classifier.warning` whose text is in `warning`, not `error` |
 | `client` | — | `style: "llm"` only — the §8 `Client` to emulate over |
 | `evaluate` | — | `style: "custom"` only — the host's own function. Every wire option is ignored |
 

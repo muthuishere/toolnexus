@@ -300,7 +300,9 @@
                   :on-metric (fn [ev]
                                (when (= jev/metric-warning (:event ev))
                                  (swap! warned conj (:question ev))
-                                 (is (str/includes? (:error ev) (:question ev))
+                                 (is (nil? (:error ev))
+                                     "a warning is advisory, never a failure")
+                                 (is (str/includes? (:warning ev) (:question ev))
                                      "the warning NAMES the offending question key")))})]
     ;; Twice: detection is ONCE PER QUESTION KEY, so a per-turn judge does not
     ;; flood the sink.

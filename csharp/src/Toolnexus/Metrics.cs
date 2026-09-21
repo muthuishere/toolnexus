@@ -38,9 +38,15 @@ public sealed record MetricEvent
     public int Turns { get; init; }
     public int ToolCalls { get; init; }
     public long TotalTokens { get; init; }
-    /// <summary>The failure message on a failed run, on a failed <c>"classifier.evaluate"</c>, or
-    /// the warning text of a <c>"classifier.warning"</c> (§8B).</summary>
+    /// <summary>The failure message on a failed run or on a failed <c>"classifier.evaluate"</c>
+    /// (§8B). A <c>"classifier.warning"</c> is advisory, not a failure, so it leaves this null and
+    /// carries <see cref="Warning"/> instead — a consumer filtering on "Error is set" must never
+    /// count a warning as a failure.</summary>
     public string? Error { get; init; }
+
+    /// <summary>The advisory text of a <c>"classifier.warning"</c> (§8B). Null on every other
+    /// event.</summary>
+    public string? Warning { get; init; }
 
     /// <summary>The classifier question KEY an event is about (<c>"classifier.warning"</c>, §8B).
     /// Null on every other event. Neither classifier event is folded into the Prometheus registry,

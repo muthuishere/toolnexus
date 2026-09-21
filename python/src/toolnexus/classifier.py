@@ -671,7 +671,10 @@ class Classifier:
                 {
                     "event": METRIC_CLASSIFIER_WARNING,
                     "question": key,
-                    "error": (
+                    # ``warning``, never ``error``: a degenerate-criteria report is
+                    # advisory, and a consumer counting "has an error" as a failure
+                    # must not count this one.
+                    "warning": (
                         f"classifier: question {key!r} has degenerate criteria ({reason}) — "
                         "every option reads the same to the model and the answer ranks at "
                         "chance; describe what picking each option would MEAN (SPEC.md §8B)"

@@ -231,7 +231,7 @@ test("degenerate criteria: three keys warn once each, described never, bytes unc
     onMetric: (ev: MetricEvent) => {
       if (ev.event === "classifier.warning") {
         warned.push(ev.question)
-        assert.ok(ev.error.includes(ev.question), `warning must name the key: ${ev.error}`)
+        assert.ok(ev.warning.includes(ev.question), `warning must name the key: ${ev.warning}`)
       }
     },
   })

@@ -273,8 +273,9 @@ async def test_degenerate_criteria_warn_once_per_key_and_change_no_bytes() -> No
     assert all(k not in warned for k in f["expect"]["noWarning"])
     # The warning NAMES the key and points at the contract.
     for ev in (e for e in seen if e["event"] == "classifier.warning"):
-        assert repr(ev["question"]) in ev["error"]
-        assert "SPEC.md §8B" in ev["error"]
+        assert "error" not in ev  # a warning is advisory, never a failure
+        assert repr(ev["question"]) in ev["warning"]
+        assert "SPEC.md §8B" in ev["warning"]
 
     # Once per question key per classifier, however many times it is called.
     seen.clear()

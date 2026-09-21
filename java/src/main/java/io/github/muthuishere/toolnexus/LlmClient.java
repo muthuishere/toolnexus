@@ -186,8 +186,10 @@ public final class LlmClient {
         }
 
         /** §8B: a degenerate-criteria warning, naming the question KEY. Emitted once per key per
-         * classifier; the request goes out byte-unchanged (detection, never repair). */
-        record ClassifierWarning(String question, String message) implements MetricEvent {
+         * classifier; the request goes out byte-unchanged (detection, never repair). The advisory
+         * text is {@code warning}, NOT an {@code error}: this event is not a failure, and no
+         * consumer counting failures may count it as one. */
+        record ClassifierWarning(String question, String warning) implements MetricEvent {
             @Override public String event() { return "classifier.warning"; }
         }
     }

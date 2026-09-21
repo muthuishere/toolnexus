@@ -583,7 +583,9 @@ defmodule Toolnexus.Classifier do
       emit(c, %{
         event: @metric_warning,
         question: key,
-        error:
+        # `:warning`, never `:error` — this event is advisory, not a failure, and a
+        # consumer matching on `%{error: _}` must not count it as one.
+        warning:
           "classifier: question #{inspect(key)} has degenerate criteria (#{reason}) — every " <>
             "option reads the same to the model and the answer ranks at chance; describe what " <>
             "picking each option would MEAN (SPEC.md §8B)"

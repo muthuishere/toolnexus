@@ -180,10 +180,14 @@ type MetricEvent struct {
 	ToolCalls int
 	// TotalTokens is the aggregated token usage across the run ("run").
 	TotalTokens int
-	// Error is the failure message, set only on a failed run ("run"), or on a
-	// failed "classifier.evaluate", or the warning text of a
-	// "classifier.warning".
+	// Error is the failure message, set only on a failed run ("run") or on a
+	// failed "classifier.evaluate". A "classifier.warning" is advisory, not a
+	// failure, so it carries Warning instead and leaves this empty — a consumer
+	// filtering on "Error is set" must never count a warning as a failure.
 	Error string
+	// Warning is the advisory text of a "classifier.warning" (§8B). Empty on
+	// every other event.
+	Warning string
 	// Question is the classifier question KEY an event is about
 	// ("classifier.warning", §8B). Empty on every other event. Neither classifier
 	// event is folded into the Prometheus registry, so Client.Metrics() text is

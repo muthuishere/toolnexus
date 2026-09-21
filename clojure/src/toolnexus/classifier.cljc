@@ -438,9 +438,10 @@
         (when-let [reason (degenerate-criteria (:criteria q))]
           (when-not (contains? @(:warned c) key)
             (swap! (:warned c) conj key)
+            ;; `:warning`, never `:error` — advisory, not a failure.
             (emit! c {:event    metric-warning
                       :question key
-                      :error    (str "classifier: question \"" key
+                      :warning  (str "classifier: question \"" key
                                      "\" has degenerate criteria (" reason
                                      ") — every option reads the same to the model and the "
                                      "answer ranks at chance; describe what picking each "

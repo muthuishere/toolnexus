@@ -234,7 +234,8 @@ defmodule Toolnexus.ClassifierTest do
   defp collect_warnings(acc \\ []) do
     receive do
       {:metric, %{event: "classifier.warning"} = ev} ->
-        assert ev.error =~ ev.question
+        refute Map.has_key?(ev, :error)
+        assert ev.warning =~ ev.question
         collect_warnings([ev.question | acc])
 
       {:metric, _} ->

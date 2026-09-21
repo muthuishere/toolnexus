@@ -809,7 +809,7 @@ public sealed class Classifier
             {
                 Event = MetricWarning,
                 Question = key,
-                Error = $"classifier: question \"{key}\" has degenerate criteria ({reason}) — every option "
+                Warning = $"classifier: question \"{key}\" has degenerate criteria ({reason}) — every option "
                         + "reads the same to the model and the answer ranks at chance; describe what picking "
                         + "each option would MEAN (SPEC.md §8B)",
             });

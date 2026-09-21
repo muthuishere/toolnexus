@@ -389,23 +389,27 @@
      (cond-> {:model (:model client) :messages messages}
        (seq tools) (assoc :tools tools :tool_choice "auto")))))
 
-(def retryable-statuses
-  "§resilience-policy — the retryable set. PUBLIC because SPEC §8B's
-  `toolnexus.classifier` reuses this policy verbatim rather than shipping a
-  second one. Everything else is terminal unless a
-  host `:on-error` says otherwise."
+(def ^:no-doc retryable-statuses
+  "§resilience-policy — the retryable set. Everything else is terminal unless a
+  host `:on-error` says otherwise.
+
+  INTERNAL. A Clojure var has no package-private tier, so `^:no-doc` is the
+  marker: this is not API, it is not in the parity-checked option surface, and
+  it is a var only because SPEC §8B's `toolnexus.classifier` reuses this policy
+  verbatim rather than shipping a second one."
   #{429 500 502 503 504})
 
 (def ^:private retry-after-max-seconds
   "~68 years; the widest whole-second count all seven ports represent exactly."
   2147483647)
 
-(defn retry-after-ms
+(defn ^:no-doc retry-after-ms
   "Honour a `Retry-After` header when the server sends one.
 
-  PUBLIC because SPEC §8B's `toolnexus.classifier` honours the SAME rule. It
-  calls this rather than carrying its own copy: §8B says the classifier reuses
-  the §8 Retry-After delay-seconds rule verbatim, and two implementations of
+  INTERNAL (`^:no-doc`), not API. It is a var rather than a private fn only
+  because SPEC §8B's `toolnexus.classifier` honours the SAME rule and calls this
+  instead of carrying its own copy: §8B says the classifier reuses the §8
+  Retry-After delay-seconds rule verbatim, and two implementations of
   \"verbatim\" is how they stop being the same. Seconds only: the
   HTTP-date form needs date parsing, which is not portable across these two
   hosts without reaching past koine, and a server that sends it gets our
@@ -443,11 +447,12 @@
     (http/request (cond-> {:method :post :url url :headers headers :body body}
                     (:timeout-ms client) (assoc :timeout-ms (:timeout-ms client))))))
 
-(defn classify
+(defn ^:no-doc classify
   "§resilience-policy — retry | fail, and NOTHING ELSE.
 
-  PUBLIC for the same reason as `retry-after-ms`: SPEC §8B's classifier reuses
-  this `ErrorInfo -> verdict` policy rather than shipping a second one. It reads
+  INTERNAL (`^:no-doc`), not API, for the same reason as `retry-after-ms`: SPEC
+  §8B's classifier reuses this `ErrorInfo -> verdict` policy rather than
+  shipping a second one. It reads
   only `:on-error` off its first argument, so a classifier options map answers
   it exactly as a client does. The archived spec is
   explicit that this capability does not add a failure-originated suspend tier:

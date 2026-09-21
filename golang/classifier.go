@@ -638,7 +638,7 @@ func (c *Classifier) reportDegenerate(questions map[string]Question) {
 		c.emit(MetricEvent{
 			Event:    MetricClassifierWarning,
 			Question: key,
-			Error: fmt.Sprintf(
+			Warning: fmt.Sprintf(
 				"classifier: question %q has degenerate criteria (%s) — every option reads "+
 					"the same to the model and the answer ranks at chance; describe what "+
 					"picking each option would MEAN (SPEC.md §8B)", key, reason),

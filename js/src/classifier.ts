@@ -10,7 +10,8 @@
  * here is a security control.
  */
 import type { Client } from "./client.js"
-import { type ErrorInfo, type ErrorTier, type MetricEvent, retryAfterMs, isRetryableStatus } from "./client.js"
+import { type ErrorInfo, type ErrorTier, type MetricEvent } from "./client.js"
+import { retryAfterMs, isRetryableStatus } from "./retry.js"
 import type { Toolkit } from "./toolkit.js"
 
 // ---------------------------------------------------------------- constants
@@ -550,7 +551,7 @@ export class Classifier {
       this.emit({
         event: "classifier.warning",
         question: key,
-        error:
+        warning:
           `classifier: question "${key}" has degenerate criteria (${reason}) — every option reads ` +
           "the same to the model and the answer ranks at chance; describe what picking each " +
           "option would MEAN (SPEC.md §8B)",

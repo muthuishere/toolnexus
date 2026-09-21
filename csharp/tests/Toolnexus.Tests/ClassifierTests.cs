@@ -293,7 +293,8 @@ public class ClassifierTests
             {
                 if (ev.Event != Classifier.MetricWarning) return;
                 warned.Add(ev.Question!);
-                Assert.Contains(ev.Question!, ev.Error!); // the warning NAMES the key
+                Assert.Null(ev.Error); // a warning is advisory, never a failure
+                Assert.Contains(ev.Question!, ev.Warning!); // the warning NAMES the key
             },
         });
 

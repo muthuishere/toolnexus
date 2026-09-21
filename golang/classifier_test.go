@@ -368,8 +368,11 @@ func TestClassifierDegenerateCriteria(t *testing.T) {
 		OnMetric: func(ev MetricEvent) {
 			if ev.Event == MetricClassifierWarning {
 				warned = append(warned, ev.Question)
-				if !strings.Contains(ev.Error, ev.Question) {
-					t.Errorf("warning text does not name the question key: %q", ev.Error)
+				if ev.Error != "" {
+					t.Errorf("a warning is not a failure; Error must stay empty, got %q", ev.Error)
+				}
+				if !strings.Contains(ev.Warning, ev.Question) {
+					t.Errorf("warning text does not name the question key: %q", ev.Warning)
 				}
 			}
 		},
