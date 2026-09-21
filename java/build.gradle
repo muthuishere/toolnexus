@@ -128,6 +128,17 @@ tasks.register('runMultimodal', JavaExec) {
     environment 'OPENROUTER_MODEL', System.getenv('OPENROUTER_MODEL') ?: ''
 }
 
+tasks.register('runJudge', JavaExec) {
+    group = 'application'
+    description = 'Run the Judge example (Classifier §8B — noul + choice + score; live with a key, recorded without).'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'io.github.muthuishere.toolnexus.examples.Judge'
+    // forward OPENROUTER_API_KEY from the environment (absent ⇒ the recorded `static` backend)
+    if (System.getenv('OPENROUTER_API_KEY')) {
+        environment 'OPENROUTER_API_KEY', System.getenv('OPENROUTER_API_KEY')
+    }
+}
+
 mavenPublishing {
     publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL)
     signAllPublications()

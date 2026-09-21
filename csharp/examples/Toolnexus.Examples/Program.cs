@@ -12,12 +12,13 @@ return which switch
     "advanced" => await Advanced.Run(),
     "openrouter" => await Openrouter.Run(),
     "multimodal" => await Multimodal.Run(),
+    "judge" => await Judge.Run(),
     _ => Unknown(which),
 };
 
 static int Unknown(string which)
 {
     Console.Error.WriteLine($"Unknown example: {which}");
-    Console.Error.WriteLine("Usage: dotnet run -- [basic|agent|hooks|streaming|memory|advanced|openrouter|multimodal]");
+    Console.Error.WriteLine("Usage: dotnet run -- [basic|agent|hooks|streaming|memory|advanced|openrouter|multimodal|judge]");
     return 1;
 }
