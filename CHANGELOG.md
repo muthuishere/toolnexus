@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.18.0 — 2026-09-21
+
 ### Fixed — a classifier retry backoff no longer lets Node exit out from under it (javascript)
 
 `Classifier`'s backoff timer was created and then `unref`'d. An unref'd timer does not keep
