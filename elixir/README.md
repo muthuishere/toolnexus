@@ -2,18 +2,15 @@
 
 Your LLM, with MCP tools and agent skills built in — in 3 lines, on the BEAM.
 
-`toolnexus` unifies every tool source an agent needs — **MCP servers** (stdio +
-streamable-HTTP), **agent skills** (`SKILL.md` folders), your own functions, HTTP
-endpoints, ten built-in shell/file tools, and remote **A2A agents** — behind one
-uniform `Tool`, emits the schema in **OpenAI / Anthropic / Gemini** formats, and
-ships a unified client with a built-in tool-calling loop (hooks, parallel tool
-calls, retries, conversation memory, suspension/resume, metrics).
+`toolnexus` unifies every tool source an agent needs — **MCP servers** (stdio + streamable-HTTP),
+**agent skills** (`SKILL.md` folders), your own functions, HTTP endpoints, ten built-in shell/file
+tools, and remote **A2A agents** — behind one uniform `Tool`, emits the schema in **OpenAI /
+Anthropic / Gemini** formats, and ships a unified client with a built-in tool-calling loop.
 
-It is the Elixir port of [toolnexus](https://github.com/muthuishere/toolnexus),
-**byte-identical in behavior** with the JS, Python, Go, Java, and C# ports — same
-config files, same outputs, same wire formats. The MCP client is implemented
-in-house on OTP (supervised connections, no third-party MCP SDK), which is also
-why this port ships the **full** elicitation bridge (form *and* URL mode).
+The Elixir port of [toolnexus](https://github.com/muthuishere/toolnexus) — the same library,
+byte-identical, also in **JavaScript, Python, Go, Java, C# and Clojure**. The MCP client is
+implemented in-house on OTP (supervised connections, no third-party MCP SDK), which is also why
+this port ships the **full** elicitation bridge (form *and* URL mode).
 
 ## Install
 
@@ -34,73 +31,27 @@ result = Toolnexus.Client.run(client, "What tools do you have? Use one.", toolki
 IO.puts(result.text)
 ```
 
-- `mcp.json` is the standard Claude-desktop-style config (`mcpServers` /
-  `servers` / `mcp` top-level keys all accepted).
-- `skills/` is a folder of `**/SKILL.md` files with YAML frontmatter —
-  loaded on demand through the single `skill` tool (progressive disclosure).
-- Remote MCP `headers` values expand `${ENV_VAR}` at call time and are never
-  logged.
-
-## Images, PDFs and audio
-
-`run/4` takes a string **or** a list of content parts, in that same first
-position, so your text/image ordering reaches the model unchanged:
-
-```elixir
-alias Toolnexus.ContentPart
-
-Client.run(client, [ContentPart.text("What broke?"), ContentPart.image!("shot.png")], toolkit)
-```
-
-`image!/2`, `file!/2` and `audio!/2` take what you already hold: a path, a
-`data:` URL, an `https:` URL, `{:bytes, binary}` or **iodata** (a proper or
-improper iolist) with an explicit `:mime_type`, a `File.Stream` — which knows
-its own path, so it carries a mime type the way a path does — or any other
-**`Enumerable`** yielding binary chunks. Everything normalises at construction:
-a part holds bytes plus a `mime_type`, never a filesystem path and never an
-unread stream, so a saved transcript replays without the file. A stream is
-consumed **eagerly** and is not closed on your behalf. Mime types come from a
-fixed extension table — never sniffed — so every port agrees. The non-raising
-`image/2` etc. return `{:ok, part} | {:error, exception}`.
-
-A tool can answer with parts too (`%ToolResult{output: "screenshot, 8x8 png",
-parts: [part]}`), and MCP servers returning images, audio, embedded resources or
-resource links no longer have that content silently dropped.
+- `mcp.json` is the standard Claude-desktop-style config (`mcpServers` / `servers` / `mcp` keys all accepted).
+- `skills/` is a folder of `**/SKILL.md` files, loaded on demand through one `skill` tool.
+- Remote MCP `headers` values expand `${ENV_VAR}` at call time and are never logged.
 
 ## Why the BEAM port
 
-Long-running agents want supervision. Every MCP connection is a supervised
-process; a crashed stdio server is isolated (status `"failed"`) without taking
-your toolkit down; parallel tool calls ride `Task.async_stream`. Same contract
-as the other five ports, native OTP underneath.
+Long-running agents want supervision. Every MCP connection is a supervised process; a crashed
+stdio server is isolated (status `"failed"`) without taking your toolkit down; parallel tool calls
+ride `Task.async_stream`. Same contract as the other six ports, native OTP underneath.
 
-## Sub-agents & teams
+## Documentation
 
-An **Agent is a Tool**: a system prompt × a scoped toolkit view × the client loop. One agent
-delegates to another **in-process** via one `task` tool — isolated context, one result back,
-tokens rolled up, hierarchical budgets, durable suspension (`SPEC.md §7D`). Each handle is a
-GenServer with an inbox-as-state; `interrupt` kills only the in-flight Run, never the agent.
+Everything else — the full surface, with runnable examples — lives on the docs site:
 
-```elixir
-alias Toolnexus.Agents
+| | |
+|---|---|
+| **Start here** | [Quickstart](https://muthuishere.github.io/toolnexus/quickstart/) · [Concepts](https://muthuishere.github.io/toolnexus/concepts/) · [Install](https://muthuishere.github.io/toolnexus/install/) |
+| **Tool sources** | [MCP](https://muthuishere.github.io/toolnexus/mcp/) · [Skills](https://muthuishere.github.io/toolnexus/skills/) · [Native](https://muthuishere.github.io/toolnexus/native/) · [HTTP](https://muthuishere.github.io/toolnexus/http/) · [Built-ins](https://muthuishere.github.io/toolnexus/builtins/) · [A2A](https://muthuishere.github.io/toolnexus/a2a/) |
+| **The loop** | [Streaming](https://muthuishere.github.io/toolnexus/streaming/) · [Memory](https://muthuishere.github.io/toolnexus/memory/) · [Suspension](https://muthuishere.github.io/toolnexus/suspension/) · [Resilience](https://muthuishere.github.io/toolnexus/resilience/) · [Observability](https://muthuishere.github.io/toolnexus/observability/) |
+| **Agents** | [Sub-agents & teams](https://muthuishere.github.io/toolnexus/subagents/) · [Personas](https://muthuishere.github.io/toolnexus/persona-agents/) · [Typed decisions](https://muthuishere.github.io/toolnexus/judge/) |
+| **API reference** | **[Elixir](https://muthuishere.github.io/toolnexus/api/elixir/)** |
+| **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
 
-explore = Agents.agent("explore", does: "read-only research", uses: %{tools: [lookup]})
-
-coder =
-  Agents.agent("coder",
-    does: "implements changes",
-    soul_file: "AGENTS.md",
-    team: [explore],                     # team = the task tool's only targets; no team ⇒ no task tool
-    budget: %{max_tokens: 10_000}
-  )
-
-r = Agents.run(coder, [llm: %{base_url: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini"}], "fix the failing test")
-IO.puts("#{r.status} #{r.text} #{r.total_tokens}")
-```
-
-Full guide: [Sub-agents & teams](https://muthuishere.github.io/toolnexus/subagents/).
-
-## Docs
-
-Full documentation (all six languages, one site):
-<https://muthuishere.github.io/toolnexus/>
+Contract across all seven ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).

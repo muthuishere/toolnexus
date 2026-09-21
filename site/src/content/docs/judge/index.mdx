@@ -89,6 +89,35 @@ cannot guarantee that reports `calibrated: false`, which carries the caveat for 
 Reading an answer as the wrong type is an **error, not a surprise**: the typed accessors fail
 loudly — an exception, an `{:error, _}`, an `err` — rather than handing you a zero.
 
+## Jev, and what toolnexus does with it
+
+The model behind the default `systemone` backend is **Jev**, a System One model from TypeSafe: it
+takes a state plus pre-declared, typed questions and returns a calibrated distribution, with no
+free text and nothing to parse. That is the whole reason this tier exists.
+
+**In toolnexus, Jev is not an integration — it is one backend behind a vendor-neutral seam.** The
+`Classifier` contract is the product; `systemone` is its default wire, `llm` runs the same
+questions on any chat model, `custom` is your own function, and `static` replays a recorded corpus
+with no network. Swap the backend and your questions do not change. No port depends on a vendor
+SDK for any of them — the wire is one POST.
+
+| | |
+|---|---|
+| The wire this seam speaks | [`docs.typesafe.ai/api`](https://docs.typesafe.ai/api) — `POST {baseUrl}/systemone`, default `https://api.typesafe.ai/v1` |
+| The same wire, via a gateway | [OpenRouter](https://openrouter.ai/) (`https://openrouter.ai/api/v1`) — [both measured side by side](/toolnexus/judge/backends/) |
+| What it costs and how much it moves | [Measured on a live backend](/toolnexus/harness/judge-live/) — latency, cost, calibration, non-determinism |
+| Why your option descriptions decide the answer | [The encoding rules](/toolnexus/judge/encoding/) and [ADR 0021](https://github.com/muthuishere/toolnexus/blob/main/docs/adr/0021-the-encoding-carries-the-judgment.md) |
+
+**Seen it play games?** Most of the public excitement is game demos —
+[`zebedelu/sudoku-vs-jev`](https://github.com/zebedelu/sudoku-vs-jev) is the substantive one (one
+described option per legal `(cell,digit)`, most-constrained-first), and
+[`levente-horvath/jev-plays-wordle`](https://github.com/levente-horvath/jev-plays-wordle) passes
+`criteria` with **no per-option description at all** — which is precisely the mistake our own
+measurements say costs you the answer: options described by consequence scored **17, 17, 17**
+apples where the same options named only by their own id scored **0, 1, 0**, at the floor of a
+shuffle control. We reproduced both patterns in `spikes/game/` before writing the encoding rules,
+which is why this documentation leads with the encoding rather than with the model.
+
 ## Where to go next
 
 | page | what it answers |
