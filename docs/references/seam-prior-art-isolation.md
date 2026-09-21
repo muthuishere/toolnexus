@@ -481,6 +481,36 @@ be chained with other commands that run commands in a different context"
 ([coreutils](https://www.gnu.org/software/coreutils/manual/html_node/env-invocation.html)).
 A blocklist that misses `env -C` blocks nothing.
 
+> **CORRECTION (2026-09-22), and the better evidence.** `env -C` was a bad example, and it
+> was *our* error: wfnexus's tokeniser matches a bare `-C` token whatever command precedes
+> it, so `env -C`, `make -C` and `tar -C` were all already denied. We inferred the deny list
+> from the prose of their ADR ("cd, pushd, git -C, --git-dir, --work-tree") rather than from
+> their code. The lesson is narrow — do not infer an implementation from its write-up — but
+> the principle survives in a much stronger form, because they then PROBED their own
+> guardrail instead of reasoning about it, and found five escapes that were open in shipped
+> public code:
+>
+> ```
+> cat /etc/passwd                                    ALLOWED
+> echo pwned > /tmp/pwned                            ALLOWED
+> rsync -a . /tmp/exfil/                             ALLOWED
+> find / -name secret -execdir cat {} \;             ALLOWED
+> python3 -c "import os; os.chdir('/etc'); print(open('passwd').read())"   ALLOWED
+> ```
+>
+> **None of these changes directory.** The guardrail scanned for directory *changes*, so it
+> could not see the category next door: `rsync -a . /tmp/exfil/` is one line, needs no `cd`,
+> and walks the entire workspace out. Every `-C`-style variant is a near miss on a scanner
+> that is blind to exfiltration entirely.
+>
+> This is the strongest available statement of the rule: the failure was not a missing verb,
+> it was a missing *category*, and no amount of verb-hunting would have found it. Their fix
+> (deny any absolute path resolving outside the workspace, with a read-only allowance for
+> `/usr`, `/bin`, `/lib`, `/System` and Homebrew so an interpreter is reachable) is itself
+> escape-enumeration one level down, and their ADR says so — the table means "these five
+> holes are closed", not "it is safe now". Worked example:
+> <https://github.com/muthuishere/wfnexus> ADR 0006.
+
 Beyond it: git exposes the same capability through **three independent channels** — the
 `--git-dir`/`--work-tree` flags, the `GIT_DIR`/`GIT_WORK_TREE` environment variables, *and*
 `core.worktree` in config ([git(1)](https://git-scm.com/docs/git)) — so `git checkout`
