@@ -1,0 +1,271 @@
+---
+title: "Classifier.Decision"
+description: "One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero. — Java."
+sidebar:
+  label: "Classifier.Decision"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/Classifier.java">Classifier.java</a>
+</p>
+
+```java
+public record Decision(String model, Map<String, DecisionAnswer> answers,
+                       Usage usage, boolean calibrated) {
+    public NoulAnswer   noul(String key);     // throws if absent or the wrong type
+    public ChoiceAnswer choice(String key);
+    public ScoreAnswer  score(String key);
+}
+
+public sealed interface DecisionAnswer permits NoulAnswer, ChoiceAnswer, ScoreAnswer {
+    String type();
+}
+
+public record NoulAnswer(double noul) implements DecisionAnswer { }
+public record ChoiceAnswer(String choice, Map<String, Double> probabilities,
+                           double confidence, boolean nearUniform) implements DecisionAnswer { }
+public record ScoreAnswer(double score, Map<String, String> legend,
+                          Map<String, Double> probabilities, double confidence) implements DecisionAnswer {
+    public List<String> levels();             // the legend in LEVEL order
+}
+
+public record Usage(long inputTokens, long outputTokens, Double cost) { }
+
+public static boolean nearUniform(Map<String, Double> probabilities);
+```
+
+One answer per question, keyed by **your** keys. The keys are addressing, not content: they are
+never transmitted, so a key may be a tool, skill or agent name verbatim.
+
+## When to use it
+
+`evaluate` returns one. `model()` echoes what actually answered, which may be more specific than
+what you asked for (`jev-latest` in, `typesafe/jev-1.13-20260917` out) — log that, not your
+request, when you are reasoning about why a threshold moved.
+
+## Why typed accessors and not a map lookup
+
+<Aside type="tip" title="Reach into answers() directly when you are iterating">
+`answers()` is a plain `Map<String, DecisionAnswer>` and the interface is **sealed**, so a
+`switch` pattern-match over it is exhaustive with no default branch. Use that when you are walking
+every answer; use the typed accessors when you know what you asked for.
+</Aside>
+
+`noul(key)`, `choice(key)` and `score(key)` each **throw an unchecked
+`Classifier.ClassifierException`** rather than return a default:
+
+- key absent — `classifier: no answer "x" in this decision`
+- wrong type — `classifier: answer "x" is a choice answer, not score`
+
+That is deliberate. The alternative, handing back `0.0` for a missing answer, is the one failure
+mode a judgment seam must not have: a silent zero reads as *definitely not*, and it would route
+tickets. Java has no ergonomic sum-type return here, so the failure is an exception; other ports
+raise their own idiomatic error for the same two cases.
+
+## The three answer shapes
+
+| Shape | Carries | Notes |
+|---|---|---|
+| `NoulAnswer` | `noul` in `0..1` | **no confidence.** The number *is* the answer |
+| `ChoiceAnswer` | `choice`, `probabilities`, `confidence`, `nearUniform` | the selected option is always one of the offered options, and the map names exactly the offered options |
+| `ScoreAnswer` | `score`, `probabilities`, `legend`, `confidence` | `score` MAY fall **between** levels (`1.21` is a real answer) and is always within the rubric's bounds |
+
+`legend()` echoes the rubric back keyed by level index as a string (`"0"`, `"1"`, …).
+`levels()` returns it in **level** order, which the map itself loses — `"2"` sorts before `"10"`.
+
+`Usage.cost()` is a `Double` and is **null** when the backend does not report one. Absent is not
+zero: print "not reported" rather than a `$0.00` that would read as a free call.
+
+## Examples
+
+### 1. Reading a decision, and what a wrong key does
+
+```java test
+import io.github.muthuishere.toolnexus.Classifier;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        String state = "the deploy script runs `rm -rf /var/lib/postgresql` on the prod host";
+        Map<String, Classifier.Question> questions = Map.of(
+            "risk", new Classifier.ScoreQuestion("How hard would this be to undo?", List.of(
+                "trivially reversible: a file that can be restored from git",
+                "reversible with effort: a service restart, a redeploy",
+                "irreversible: data that exists nowhere else is destroyed")));
+
+        String recorded = """
+            {"model":"typesafe/jev-1.13-20260917",
+             "answers":{"risk":{"type":"score","score":1.87,
+               "legend":{"0":"trivially reversible: a file that can be restored from git",
+                         "1":"reversible with effort: a service restart, a redeploy",
+                         "2":"irreversible: data that exists nowhere else is destroyed"},
+               "probabilities":{"0":0.01,"1":0.11,"2":0.88},"confidence":0.84}},
+             "usage":{"input_tokens":184,"output_tokens":19}}
+            """;
+
+        Classifier.Decision d = Classifier.create(new Classifier.Options()
+            .style(Classifier.STYLE_STATIC)
+            .model("typesafe/jev-1.13")
+            .decisions(List.of(new Classifier.RecordedDecision(state, questions, recorded))))
+            .evaluate(state, questions);
+
+        Classifier.ScoreAnswer risk = d.score("risk");
+        int level = (int) Math.round(risk.score());
+
+        if (level != 2) throw new AssertionError("level " + level);
+        if (!risk.levels().get(2).startsWith("irreversible")) throw new AssertionError(risk.levels());
+
+        // The accessors FAIL rather than hand back a zero that would read as "definitely not".
+        try {
+            d.noul("risk");
+            throw new AssertionError("expected a type mismatch");
+        } catch (Classifier.ClassifierException e) {
+            if (!e.getMessage().contains("not noul")) throw new AssertionError(e.getMessage());
+        }
+        try {
+            d.score("does_not_exist");
+            throw new AssertionError("expected a missing-key failure");
+        } catch (Classifier.ClassifierException e) {
+            if (!e.getMessage().contains("no answer")) throw new AssertionError(e.getMessage());
+        }
+
+        System.out.println("ok: model=" + d.model() + " score=" + risk.score()
+            + " level " + level + " confidence=" + risk.confidence()
+            + " cost=" + (d.usage().cost() == null ? "not reported" : d.usage().cost()));
+    }
+}
+```
+
+### 2. `nearUniform` — the exact rule
+
+`nearUniform` is **derived from the response on decode and never read from the wire**: no wire
+change, no request change, no fixture change. The static method is public so you can apply the same
+rule to a distribution you obtained some other way.
+
+```java test
+import io.github.muthuishere.toolnexus.Classifier;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        // n = the number of ENTRIES IN THE MAP. nearUniform <=> max |p - 1/n| <= 0.05.
+        check(Map.of("a", 0.25, "b", 0.25, "c", 0.25, "d", 0.25), true,  "exactly flat");
+        check(Map.of("a", 0.29, "b", 0.26, "c", 0.24, "d", 0.21), true,  "inside the band (max dev 0.04)");
+        check(Map.of("a", 0.30, "b", 0.25, "c", 0.25, "d", 0.20), true,  "dev exactly 0.05 — INCLUSIVE");
+        check(Map.of("a", 0.80, "b", 0.10, "c", 0.05, "d", 0.05), false, "a real ranking");
+        check(Map.of("only", 1.0), true,  "n = 1 is trivially uniform");
+        check(new LinkedHashMap<>(), false, "an empty map has no distribution at all");
+
+        // Values are taken AS RETURNED — never renormalised, sorted or rounded. These sum to 0.9
+        // and are still uniform, because uniformity is about spread, not about summing to one.
+        check(Map.of("a", 0.45, "b", 0.45), true, "not renormalised");
+
+        System.out.println("ok: tolerance=" + Classifier.NEAR_UNIFORM_TOLERANCE + ", inclusive");
+    }
+
+    static void check(Map<String, Double> p, boolean want, String why) {
+        if (Classifier.nearUniform(p) != want) {
+            throw new AssertionError("nearUniform" + p + " should be " + want + " — " + why);
+        }
+    }
+}
+```
+
+An offered option **absent** from the map counts as `0` by not being an entry. The tolerance is
+absolute rather than relative to `1/n` because a relative band collapses below the noise floor on a
+large roster: at 255 options `1/n` is 0.0039, finer than the two-decimal rounding the wire already
+applies. 0.05 is roughly 3σ of the backend's own non-determinism. The measurements are on
+[`nearUniform` — the live-traffic health check](/judge/encoding/#nearuniform--the-live-traffic-health-check).
+
+### 3. `calibrated`, and walking every answer exhaustively
+
+```java test
+import io.github.muthuishere.toolnexus.Classifier;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+
+public class Example {
+    public static void main(String[] args) {
+        // A `custom` backend decides what it reports. This one is a rules engine: it has no
+        // probability model at all, so calibrated is FALSE and no threshold tuned against a
+        // systemone backend carries over to it.
+        Classifier judge = Classifier.create(new Classifier.Options()
+            .style(Classifier.STYLE_CUSTOM)
+            .evaluate((state, questions) -> new Classifier.Decision(
+                "rules-engine/v1",
+                new TreeMap<>(Map.of(
+                    "is_question", new Classifier.NoulAnswer(
+                        String.valueOf(state).endsWith("?") ? 1.0 : 0.0),
+                    "lane", new Classifier.ChoiceAnswer("support",
+                        Map.of("support", 0.5, "sales", 0.5), 0.5,
+                        Classifier.nearUniform(Map.of("support", 0.5, "sales", 0.5))))),
+                new Classifier.Usage(0, 0, null),
+                false)));
+
+        Classifier.Decision d = judge.evaluate("where is my refund?", Map.of(
+            "is_question", new Classifier.NoulQuestion("Is this phrased as a question?"),
+            "lane", new Classifier.ChoiceQuestion("Which lane?", Map.of(
+                "support", "the customer needs help with something they already bought",
+                "sales", "the customer is asking what something would cost them"))));
+
+        // The interface is sealed, so this switch is exhaustive with no default branch.
+        List<String> lines = new ArrayList<>();
+        for (Map.Entry<String, Classifier.DecisionAnswer> e : new TreeMap<>(d.answers()).entrySet()) {
+            lines.add(e.getKey() + "=" + switch (e.getValue()) {
+                case Classifier.NoulAnswer a -> "noul " + a.noul();
+                case Classifier.ChoiceAnswer a -> a.choice()
+                    + (a.nearUniform() ? " (nearUniform — nothing to rank on)" : "");
+                case Classifier.ScoreAnswer a -> "score " + a.score();
+            });
+        }
+
+        if (d.calibrated()) throw new AssertionError("a rules engine is not calibrated");
+        if (!d.choice("lane").nearUniform()) throw new AssertionError("50/50 is near-uniform");
+
+        System.out.println("ok: calibrated=" + d.calibrated() + " " + lines);
+    }
+}
+```
+
+## What `calibrated` and `nearUniform` do **not** tell you
+
+<Aside type="caution" title="Both are advisory. Neither is a correctness signal.">
+`nearUniform` detects an encoding that gave the model **nothing to rank on** — the one encoding
+health check available with no ground truth, cheap enough to run on live traffic. It **cannot**
+distinguish a good encoding from a subtly wrong one: a wrong-but-answerable question still reads as
+answerable, and the worst working encoding measured carried the **highest** median confidence
+(0.82). `calibrated` carries the same caveat — it says where the probabilities came from, not
+whether they are right.
+
+And a threshold tuned against one backend **does not transfer** to another. `systemone` reports
+`calibrated: true`; `llm` reports `false` unless it derived the numbers from provider token
+probabilities. Re-tune when you change backend or unpin the model.
+</Aside>
+
+## Members
+
+| Member | Type | What it is |
+|---|---|---|
+| `model()` | `String` | what actually answered, possibly more specific than what you asked for |
+| `answers()` | `Map<String, DecisionAnswer>` | one entry per question, under your keys |
+| `usage()` | `Usage` | `inputTokens`, `outputTokens`, and a nullable `cost` |
+| `calibrated()` | `boolean` | `systemone` ⇒ true; `llm` ⇒ false unless it read token probabilities |
+| `noul(key)` / `choice(key)` / `score(key)` | typed answer | throws `ClassifierException` on a missing key or a type mismatch |
+| `ChoiceAnswer.nearUniform()` | `boolean` | derived on decode, never read from the wire |
+| `ScoreAnswer.levels()` | `List<String>` | the legend in level order |
+| `Classifier.nearUniform(map)` | `boolean` | static; the same rule, applied to any distribution |
+| `Classifier.NEAR_UNIFORM_TOLERANCE` | `double` | `0.05`, absolute, compared inclusively |
+
+## See also
+
+- [`Classifier.create`](/api/java/judge/classifier/) — constructing the classifier and every option
+- [`Classifier.NoulQuestion`](/api/java/judge/questions/) — the questions these answers correspond to
+- [Writing options a model can rank](/judge/encoding/) — what a near-uniform answer usually means
+- [Backends](/judge/backends/) — which backend reports `calibrated: true`, and why
+- [Cookbook: a judgment in one call](/cookbook/judge/) — reading a decision end to end

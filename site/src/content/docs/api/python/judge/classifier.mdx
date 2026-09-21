@@ -1,0 +1,337 @@
+---
+title: "create_classifier"
+description: "A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop. — Python."
+sidebar:
+  label: "create_classifier"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/classifier.py">python/src/toolnexus/classifier.py</a>
+</p>
+
+```python
+def create_classifier(
+    *,
+    style: ClassifierStyle = "systemone",          # "systemone" | "llm" | "custom" | "static"
+    base_url: str | None = None,                   # "https://api.typesafe.ai/v1"
+    model: str | None = None,                      # "jev-latest"
+    api_key_env: str | None = None,                # "TYPESAFE_API_KEY" — the NAME, never the value
+    headers: Mapping[str, str] | None = None,
+    timeout: float | None = None,                  # seconds; 10.0
+    http_transport: ClassifierTransport | None = None,
+    retries: int = 2,
+    retryable_statuses: Iterable[int] | None = None,
+    on_error: ErrorClassifier | None = None,
+    request_params: Mapping[str, Any] | None = None,
+    body_transform: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+    on_metric: OnMetric | None = None,
+    client: Client | None = None,                  # style="llm" only
+    evaluate: Callable[..., Any] | None = None,    # style="custom" only
+    decisions: list[RecordedDecision] | None = None,  # style="static" only
+) -> Classifier
+
+async def Classifier.evaluate(state: Any, questions: Mapping[str, Question]) -> Decision
+```
+
+A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages,
+no tool calling, no loop. `Tool` is the contract for an **action**; `Classifier` is the contract
+for a **judgment**. A classifier has no messages, no streaming and no tool calling, so it never
+enters the §8 client loop and is never selected as a model for `run`/`ask`.
+
+In Python `evaluate` is a **coroutine** — `await judge.evaluate(state, questions)` — unlike the
+Go and Java ports, whose calls are plain blocking methods. Construction is synchronous and makes
+no request: `create_classifier` applies the §8B defaults and rejects a style whose required
+option is missing before any call happens.
+
+<Aside type="caution" title="A classifier interprets; it never authorises">
+Its output is a reading of intent inside a boundary, never the boundary. Schema validity is not
+correctness: a decision can be confidently wrong, and "cannot hallucinate" means only that the
+returned value is in the declared schema. Numeric limits, permission checks and allowlists stay
+in code. Nothing here is a security control.
+</Aside>
+
+## When to use it
+
+- You need a **judgment, not an action** — is this ticket asking for a refund, which desk owns
+  it, how urgent is it — and you want a typed number back rather than prose you then parse.
+- You want **many questions in one round trip** over one state ingest. Questions are
+  independent: one answer is never context for another.
+- You want a **threshold you can tune**: a calibrated probability is a number you can compare
+  against a cutoff, which free text is not.
+- You want the judgment **out of the loop** — a classifier makes no tool call, so it cannot act
+  on what it concluded.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use the §8 client when you want an action or prose">
+`create_client` is for anything that talks, calls tools, streams or remembers. A classifier does
+none of those. If the answer has to be a sentence, or the model has to *do* something with its
+conclusion, that is a client run. If you only need a number out of a fixed set of questions,
+routing it through a chat completion costs a loop, a parse and a prompt injection surface you do
+not need — and measured on one routing job the `llm` backend was 3.3–4.4× slower and 2.5–3.4×
+costlier than the System One wire.
+</Aside>
+
+A host that constructs no `Classifier` observes byte-identical behaviour to a build without §8B,
+and constructing one alters no request the client loop makes. This is proven by a test, not
+asserted.
+
+## Options
+
+`ClassifierOptions` mirrors §8 `ClientOptions` field-for-field wherever a field makes sense, so a
+host that has configured one has configured the other.
+
+| option | default | what it does |
+|---|---|---|
+| `style` | `"systemone"` | `"systemone"`, `"llm"`, `"custom"` or `"static"`. Same slot as the client's `style`; the values differ because the wires differ. See [Backends](/judge/backends/). |
+| `base_url` | `"https://api.typesafe.ai/v1"` | The System One endpoint base. OpenRouter (`https://openrouter.ai/api/v1`) serves the same wire; self-hosted and open-weights implementations speak it too. |
+| `model` | `"jev-latest"` | A floating alias. **Pin it** (e.g. `jev-1.13.0`) once thresholds are tuned — `Decision.model` echoes what actually answered, which may be more specific. |
+| `api_key_env` | `"TYPESAFE_API_KEY"` | The **name** of an environment variable, not the value. Read at call time, never logged. §8's `api_key` takes a value; this option deliberately does not. |
+| `headers` | — | Extra request headers. Values expand `${ENV_VAR}` from the environment at call time and are never logged, identically to remote-MCP headers (§2). |
+| `timeout` | `10.0` (seconds) | Bounds **one request**, not a run — a classifier has no loop to bound. |
+| `http_transport` | stdlib `urllib` | The §8 Gap 2 injectable transport, scoped to the classifier path only. Takes **bytes**, because the body is the canonical form this module produced and re-serialising it would throw those bytes away. (§8B calls this slot `httpClient`/`transport`.) |
+| `retries` | `2` | Attempts after the first. `<= 0` falls back to 2. Backoff is exponential from `retry_base_ms`, no jitter; a `Retry-After` header still wins. |
+| `retry_base_ms` | `500` | Base of that backoff, in ms: the delay is `base * 2 ** attempt`. `<= 0` falls back to 500. The classifier's half of the §8 `retry_base_ms` it mirrors — set it to `1` to take a retry test off the clock. |
+| `retryable_statuses` | — | Extra HTTP statuses to treat as retryable, **added** to the default set — it can only widen, never remove. `on_error` still runs per attempt and has the final say. |
+| `on_error` | retry when retryable | The §8 `ErrorInfo -> "retry" \| "fail"` classifier, reused verbatim. There is no second retry policy and no `"suspend"` tier here. |
+| `request_params` | — | Merged into the base body before marshalling; a `request_params` key **wins** on collision. |
+| `body_transform` | — | Runs after the merge, last before marshalling. Order is base body → `request_params` → `body_transform` → marshal. How a gateway's wrapper or extra fields land without a proxy. |
+| `on_metric` | — | Receives `classifier.evaluate` events (latency, tokens, model, status) in the **same** §8 sink, plus `classifier.warning` for degenerate criteria — whose text is in `warning`, never `error`. |
+| `client` | — | `style="llm"` only: the §8 `Client` to emulate over. Missing ⇒ `ClassifierError` at construction. |
+| `evaluate` | — | `style="custom"` only: your own function (sync or async). Every wire option is ignored. Missing ⇒ `ClassifierError` at construction. |
+| `decisions` | — | **Port-local, `style="static"` only** (§8B describes the static backend but does not name this option): a list of `RecordedDecision(state, questions, response)`, keyed by the canonical request **and** the state. |
+
+### Retries and `Retry-After`
+
+The default retryable set is `408`, `429`, `500`, `502`, `503`, `504`, `529`, plus every network
+fault. `408` is the classifier's addition over the §8 client set — a request timeout on a single
+short POST is worth one more attempt. `retryable_statuses` **adds** to that set and can never
+remove from it (a host cannot drop `429` and lose `Retry-After` handling with it); `on_error`
+still decides each attempt, so returning `"fail"` overrides a status listed there. A
+`Retry-After` header is honoured by the §8 delay-seconds rule and takes precedence over the
+exponential backoff.
+
+### Secrets
+
+The credential is read from the **named** environment variable at call time and `${ENV_VAR}`
+header references expand at call time. No credential value and no expanded header value appears
+in any log, metric, error message or returned value; a `401`/`403` body is never echoed back,
+because a gateway happily reflects a bad `Authorization` header into its own error text. An
+authentication failure names the status and the endpoint and nothing else.
+
+## Examples
+
+### 1. The smallest useful call — one question, recorded, offline
+
+The `static` backend replays a recorded response keyed by the canonical request plus the state.
+It is what CI runs: no network, no credential. It is not a convenience — the live backend is
+non-deterministic, so it is the only backend a test may assert a *number* against.
+
+```python test
+import asyncio
+
+from toolnexus import NoulQuestion, RecordedDecision, create_classifier
+
+TICKET = "My card was charged twice and the second charge has not been refunded."
+QUESTIONS = {"wants_money_back": NoulQuestion("Is the customer asking for money to be returned?")}
+
+RECORDED = RecordedDecision(
+    state=TICKET,
+    questions=QUESTIONS,
+    response={
+        "model": "typesafe/jev-1.13-20260917",
+        "answers": {"wants_money_back": {"type": "noul", "noul": 0.99}},
+        "usage": {"input_tokens": 118, "output_tokens": 6},
+    },
+)
+
+
+async def main():
+    judge = create_classifier(style="static", model="typesafe/jev-1.13", decisions=[RECORDED])
+    decision = await judge.evaluate(TICKET, QUESTIONS)
+
+    answer = decision.noul("wants_money_back")
+    assert answer.noul == 0.99          # a noul carries NO confidence — the number IS the answer
+    assert decision.calibrated is True
+    assert decision.model == "typesafe/jev-1.13-20260917"   # more specific than what we asked for
+
+    print("ok: wants_money_back =", answer.noul, "| model:", decision.model)
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — `custom`, so a rules engine or a cache is the same seam
+
+`style="custom"` hands `evaluate` the state and questions and takes your `Decision` back. Every
+wire option is ignored. The function may be sync or async — this one is sync, and the classifier
+awaits it only if it returns an awaitable. A cache in front of the live backend, a fine-tuned
+local encoder and a hand-written rules engine are all this shape.
+
+```python test
+import asyncio
+
+from toolnexus import (
+    ChoiceAnswer,
+    ChoiceQuestion,
+    ClassifierUsage,
+    Decision,
+    NoulAnswer,
+    NoulQuestion,
+    create_classifier,
+)
+
+QUESTIONS = {
+    "wants_money_back": NoulQuestion("Is the customer asking for money to be returned?"),
+    "department": ChoiceQuestion(
+        "Which desk should own this ticket?",
+        {
+            "billing": "own it here when the problem is money that moved: a duplicate charge, a refund owed",
+            "technical": "own it here when the problem is the product itself: a login that fails, a feature that errors",
+        },
+    ),
+}
+
+
+def rules_engine(state, questions):
+    """A deterministic stand-in. `calibrated=False` because nothing here derived a
+    probability from token probabilities — say so, so no threshold is carried over."""
+    money = "charged" in state or "refund" in state
+    return Decision(
+        model="rules-engine-v1",
+        answers={
+            "wants_money_back": NoulAnswer(noul=1.0 if money else 0.0),
+            "department": ChoiceAnswer(
+                choice="billing" if money else "technical",
+                probabilities={"billing": 1.0 if money else 0.0, "technical": 0.0 if money else 1.0},
+                confidence=1.0,
+            ),
+        },
+        usage=ClassifierUsage(),
+        calibrated=False,
+    )
+
+
+async def main():
+    judge = create_classifier(style="custom", evaluate=rules_engine)
+    decision = await judge.evaluate("My card was charged twice.", QUESTIONS)
+
+    assert decision.choice("department").choice == "billing"
+    assert decision.calibrated is False   # thresholds tuned on another backend do NOT transfer
+
+    print("ok: department =", decision.choice("department").choice, "| calibrated:", decision.calibrated)
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — the real wire, with the transport injected
+
+`http_transport` is the §8 Gap 2 seam. Injecting it exercises the actual `systemone` path — the
+canonical body, `request_params`, `body_transform`, the retry budget, the metric sink — with no
+socket and no credential. Note what the transport receives: the canonical bytes, with keys
+sorted recursively in ASCII order, arrays never reordered, and `state` verbatim.
+
+```python test
+import asyncio
+import json
+
+from toolnexus import (
+    ClassifierResponse,
+    NoulQuestion,
+    ScoreQuestion,
+    create_classifier,
+)
+
+SEEN = {}
+
+
+class RecordingTransport:
+    """Whatever you pass here must expose one `post(url, headers, body, timeout)`."""
+
+    def post(self, url, headers, body, timeout):
+        SEEN["url"] = url
+        SEEN["body"] = json.loads(body)
+        SEEN["auth"] = "Authorization" in headers
+        SEEN["tenant"] = headers.get("X-Tenant")
+        payload = {
+            "model": "jev-1.13.0",
+            "answers": {
+                "resolved": {"type": "noul", "noul": 0.12},
+                "urgency": {
+                    "type": "score",
+                    "score": 1.4,
+                    "legend": {"0": "can wait", "1": "chase today", "2": "blocked now"},
+                    "probabilities": {"0": 0.1, "1": 0.5, "2": 0.4},
+                    "confidence": 0.61,
+                },
+            },
+            "usage": {"input_tokens": 210, "output_tokens": 30, "cost": 0.0000118},
+        }
+        return ClassifierResponse(status=200, body=json.dumps(payload).encode("utf-8"))
+
+
+EVENTS = []
+
+QUESTIONS = {
+    "urgency": ScoreQuestion(
+        "How fast does this ticket need a human?",
+        ["can wait", "chase today", "blocked now"],   # ORDER IS THE NUMBERING — never sorted
+    ),
+    "resolved": NoulQuestion("Has the customer's problem already been solved?"),
+}
+
+
+async def main():
+    judge = create_classifier(
+        base_url="https://api.typesafe.ai/v1",
+        model="jev-1.13.0",                     # pinned, not the floating "jev-latest"
+        api_key_env="TYPESAFE_API_KEY",         # the NAME of an env var, never the value
+        headers={"X-Tenant": "${TOOLNEXUS_DOCS_TENANT}"},  # expands at call time; unset ⇒ ""
+        timeout=5.0,
+        retries=3,
+        retryable_statuses=[520, 521],          # ADDS to {408,429,500,502,503,504,529}
+        request_params={"trace": "docs"},       # merged in; a collision here WINS
+        body_transform=lambda b: {**b, "tier": "batch"},   # last before marshalling
+        on_metric=EVENTS.append,
+        http_transport=RecordingTransport(),
+    )
+
+    decision = await judge.evaluate({"ticket": 4021, "text": "still waiting"}, QUESTIONS)
+
+    assert SEEN["url"] == "https://api.typesafe.ai/v1/systemone"
+    assert list(SEEN["body"]) == ["model", "questions", "state", "tier", "trace"]   # ASCII order
+    assert SEEN["body"]["questions"]["urgency"]["criteria"] == ["can wait", "chase today", "blocked now"]
+    assert SEEN["body"]["state"] == {"ticket": 4021, "text": "still waiting"}       # verbatim
+    assert SEEN["tenant"] == ""             # an unset ${ENV_VAR} expands to empty, never leaks
+    assert decision.score("urgency").score == 1.4      # a score MAY fall between levels
+    assert decision.usage.cost == 0.0000118
+    assert EVENTS[-1]["event"] == "classifier.evaluate" and EVENTS[-1]["status"] == "ok"
+
+    print("ok: urgency =", decision.score("urgency").score, "| events:", len(EVENTS))
+
+
+asyncio.run(main())
+```
+
+## Backends in one line each
+
+| style | what it is |
+|---|---|
+| `systemone` | One `POST {base_url}/systemone` with the canonical body. Chunking under the token budget and the 255-option cap is the backend's business and invisible to you. Reports `calibrated=True`. |
+| `llm` | The three question types rendered as **one** structured-output call on any §8 `Client`. This is what makes the seam vendor-neutral — no System One credential needed. Reports `calibrated=False`. |
+| `custom` | Your own `evaluate`: a fine-tuned encoder, a rules engine, or a cache in front of either. |
+| `static` | Recorded decisions keyed by the canonical request plus the state. **This is what CI runs.** A miss raises rather than guessing. |
+
+The full comparison, with the measured latency and cost figures, is on
+[Backends](/judge/backends/).
+
+## See also
+
+- [`NoulQuestion`](/api/python/judge/questions/) — The three question types, the criteria each one needs, and the limits enforced client-side before the request.
+- [`Decision`](/api/python/judge/decision/) — One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero.
+- [Typed decisions](/judge/) — why a judgment is a different contract from an action.
+- [The encoding obligation](/judge/encoding/) — the measured reason option descriptions decide whether a `choice` works at all.
+- [Cookbook: a classifier in the loop](/cookbook/judge/) — the end-to-end recipe.

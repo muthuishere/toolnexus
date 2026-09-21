@@ -1,0 +1,281 @@
+---
+title: "Decision"
+description: "One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero. — C#."
+sidebar:
+  label: "Decision"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Classifier.cs">Classifier.cs</a>
+</p>
+
+```csharp
+public sealed record Decision
+{
+    public string Model { get; init; }                                        // what ACTUALLY answered
+    public IReadOnlyDictionary<string, DecisionAnswer> Answers { get; init; } // keyed by YOUR keys
+    public ClassifierUsage Usage { get; init; }
+    public bool Calibrated { get; init; }
+
+    public NoulAnswer   Noul(string key);     // throws ClassifierException on a wrong type or a missing key
+    public ChoiceAnswer Choice(string key);
+    public ScoreAnswer  Score(string key);
+}
+
+public abstract record DecisionAnswer { public abstract string AnswerType { get; } }
+
+public sealed record NoulAnswer : DecisionAnswer
+{
+    public double Noul { get; init; }                                          // 0..1, and NO confidence
+}
+
+public sealed record ChoiceAnswer : DecisionAnswer
+{
+    public string Choice { get; init; }
+    public IReadOnlyDictionary<string, double> Probabilities { get; init; }     // one entry per OFFERED option
+    public double Confidence { get; init; }
+    public bool NearUniform { get; init; }                                      // DERIVED, never read from the wire
+}
+
+public sealed record ScoreAnswer : DecisionAnswer
+{
+    public double Score { get; init; }                                          // MAY fall between levels
+    public IReadOnlyDictionary<string, string> Legend { get; init; }            // the rubric, echoed back
+    public IReadOnlyDictionary<string, double> Probabilities { get; init; }     // per level index
+    public double Confidence { get; init; }
+    public IReadOnlyList<string> Levels();                                      // the legend in level order
+}
+
+public sealed record ClassifierUsage
+{
+    public long InputTokens { get; init; }
+    public long OutputTokens { get; init; }
+    public double? Cost { get; init; }        // null ⇒ NOT REPORTED by this backend, which is not zero
+}
+
+public static bool Classifier.NearUniform(IReadOnlyDictionary<string, double> probabilities);
+```
+
+One answer per question under the caller's own keys, read through typed accessors that fail loudly
+rather than hand back a zero.
+
+## When to use it
+
+Always read a decision through `Noul` / `Choice` / `Score`. They resolve the key **and** the
+answer's type in one step and throw a `ClassifierException` on either mistake, so a
+question renamed on one side of your code can never silently become a `0.0` that quietly routes
+every ticket to the same desk.
+
+`Answers` stays public for the cases the accessors do not cover — iterating every answer, or
+switching on `DecisionAnswer` with a pattern match when the shape is genuinely dynamic.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Do not cast out of `Answers` by hand">
+`decision.Answers["urgency"] as ScoreAnswer` hands back `null` on a mismatch, and `null` becomes a
+`NullReferenceException` three frames away from the mistake — or worse, a `?? 0` that routes on a
+fabricated zero. `decision.Score("urgency")` throws immediately, naming the key and the type it
+actually found.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — the typed accessors
+
+```csharp test
+using Toolnexus;
+
+var questions = new Dictionary<string, Question>
+{
+    ["urgency"] = new ScoreQuestion
+    {
+        Instructions = "How fast does this ticket need a human?",
+        Criteria = new[]
+        {
+            "the customer is working normally and is waiting on an answer",
+            "the customer is inconvenienced and will chase if nobody replies today",
+            "the customer is blocked from working right now and every hour costs them",
+        },
+    },
+};
+
+var judge = Classifier.Create(new ClassifierOptions
+{
+    Style = ClassifierStyle.Static,
+    Model = "typesafe/jev-1.13",
+    Decisions = new[]
+    {
+        new RecordedDecision
+        {
+            State = "the checkout page 500s for every customer",
+            Questions = questions,
+            Response = """
+            {"model":"typesafe/jev-1.13-20260917",
+             "answers":{"urgency":{"type":"score","score":1.87,
+               "legend":{"0":"the customer is working normally and is waiting on an answer","1":"the customer is inconvenienced and will chase if nobody replies today","2":"the customer is blocked from working right now and every hour costs them"},
+               "probabilities":{"0":0.02,"1":0.09,"2":0.89},"confidence":0.84}},
+             "usage":{"input_tokens":121,"output_tokens":18,"cost":0.0000118}}
+            """,
+        },
+    },
+});
+
+var d = await judge.EvaluateAsync("the checkout page 500s for every customer", questions);
+var urgency = d.Score("urgency");
+
+// A score MAY fall between levels — 1.87 is a real answer, not a rounding artefact.
+var level = (int)Math.Round(urgency.Score, MidpointRounding.AwayFromZero);
+
+// Cost is a gateway field: null means NOT REPORTED, which is not the same as free.
+var cost = d.Usage.Cost is { } c ? $"${c}" : "not reported";
+
+Console.WriteLine($"ok: model={d.Model} score={urgency.Score} level={level} "
+    + $"\"{urgency.Levels()[level]}\" confidence={urgency.Confidence} "
+    + $"tokens={d.Usage.InputTokens}/{d.Usage.OutputTokens} cost={cost}");
+```
+
+### 2. The realistic case — how a typed read FAILS
+
+```csharp test
+using Toolnexus;
+
+var questions = new Dictionary<string, Question>
+{
+    ["risky"] = new NoulQuestion { Instructions = "Is this command risky?" },
+};
+
+var judge = Classifier.Create(new ClassifierOptions
+{
+    Style = ClassifierStyle.Static,
+    Model = "typesafe/jev-1.13",
+    Decisions = new[]
+    {
+        new RecordedDecision
+        {
+            State = "rm -rf /var/log",
+            Questions = questions,
+            Response = """
+            {"model":"typesafe/jev-1.13-20260917",
+             "answers":{"risky":{"type":"noul","noul":0.94}},
+             "usage":{"input_tokens":33,"output_tokens":5}}
+            """,
+        },
+    },
+});
+
+var d = await judge.EvaluateAsync("rm -rf /var/log", questions);
+
+// A noul carries NO confidence: the number IS the answer, and there is no `Confidence` to read.
+if (d.Noul("risky").Noul < 0.9) throw new Exception("expected risky");
+
+string Caught(Func<object> read)
+{
+    try { read(); } catch (ClassifierException e) { return e.Message; }
+    throw new Exception("expected a ClassifierException");
+}
+
+var wrongType = Caught(() => d.Choice("risky"));   // it is a noul, not a choice
+var missing = Caught(() => d.Noul("urgency"));     // never asked
+
+if (!wrongType.Contains("not choice")) throw new Exception(wrongType);
+if (!missing.Contains("no answer")) throw new Exception(missing);
+
+// The authority is the `if`, not the probability. The classifier only read the intent.
+var allowed = !"rm -rf /var/log".StartsWith("rm ", StringComparison.Ordinal);
+
+Console.WriteLine($"ok: {wrongType} | {missing} | allowed-by-code={allowed}");
+```
+
+### 3. Full surface — `NearUniform` and `Calibrated`, and what neither of them detects
+
+```csharp test
+using Toolnexus;
+
+// nearUniform ⇔ max over i of |p_i − 1/n| ≤ 0.05.
+//   · n is the number of ENTRIES IN THE MAP; an offered option absent from the map counts as 0 by
+//     not being an entry.
+//   · the values are taken AS RETURNED — never renormalised, sorted or rounded.
+//   · the tolerance is ABSOLUTE and the comparison is INCLUSIVE (a deviation of exactly 0.05 IS
+//     near-uniform). It is computed in double precision, which is why the shared fixtures never
+//     place a deviation within 1e-9 of the tolerance — and why you should not either.
+//   · n == 1 is trivially uniform; an EMPTY map has no distribution at all and is false.
+var flat = new Dictionary<string, double> { ["left"] = 0.5, ["right"] = 0.5 };
+// n = 4, so 1/n = 0.25 and the largest deviation here is 0.05 — AT the tolerance, and inside it.
+var boundary = new Dictionary<string, double> { ["n"] = 0.30, ["e"] = 0.20, ["s"] = 0.25, ["w"] = 0.25 };
+var outside = new Dictionary<string, double> { ["left"] = 0.56, ["right"] = 0.44 };   // deviation 0.06
+var decided = new Dictionary<string, double> { ["left"] = 0.8, ["right"] = 0.2 };
+var single = new Dictionary<string, double> { ["only"] = 1.0 };
+var none = new Dictionary<string, double>();
+
+if (!Classifier.NearUniform(flat)) throw new Exception("flat");
+if (!Classifier.NearUniform(boundary)) throw new Exception("the comparison is inclusive");
+if (Classifier.NearUniform(outside)) throw new Exception("0.06 is past the tolerance");
+if (Classifier.NearUniform(decided)) throw new Exception("decided");
+if (!Classifier.NearUniform(single)) throw new Exception("n == 1 is trivially uniform");
+if (Classifier.NearUniform(none)) throw new Exception("an empty map is not a distribution");
+
+// On an answer it is DERIVED from the response, never read from the wire: no wire change, no
+// request change, no fixture change.
+var questions = new Dictionary<string, Question>
+{
+    ["lane"] = new ChoiceQuestion
+    {
+        Instructions = "Which lane?",
+        Criteria = new Dictionary<string, string> { ["left"] = "left", ["right"] = "right" },
+    },
+};
+
+var judge = Classifier.Create(new ClassifierOptions
+{
+    Style = ClassifierStyle.Static,
+    Model = "typesafe/jev-1.13",
+    Decisions = new[]
+    {
+        new RecordedDecision
+        {
+            State = "merging",
+            Questions = questions,
+            Response = """
+            {"model":"typesafe/jev-1.13-20260917",
+             "answers":{"lane":{"type":"choice","choice":"left","probabilities":{"left":0.51,"right":0.49},"confidence":0.5}},
+             "usage":{"input_tokens":40,"output_tokens":6},"calibrated":true}
+            """,
+        },
+    },
+});
+
+var lane = (await judge.EvaluateAsync("merging", questions)).Choice("lane");
+if (!lane.NearUniform) throw new Exception("0.51/0.49 is flat");
+
+Console.WriteLine($"ok: choice={lane.Choice} nearUniform={lane.NearUniform} confidence={lane.Confidence}");
+```
+
+## `Calibrated`
+
+Every decision reports it. The `SystemOne` backend reports **true**. The `Llm` backend reports
+**false** unless it derived its probabilities from provider token probabilities. A backend that
+cannot guarantee the questions were answered independently also reports false.
+
+<Aside type="caution" title="Neither flag is a correctness signal">
+`NearUniform` detects an encoding that gave the model **nothing to rank on** — the one encoding
+health check available with no ground truth, cheap enough to run on live traffic. It **cannot
+distinguish a good encoding from a subtly wrong one**: a wrong-but-answerable question still reads
+as answerable, and the worst working encoding measured carried the *highest* median confidence
+(0.82). `Calibrated` carries the same caveat: it says the numbers came from a calibrated backend,
+not that they are right. Both are **advisory**.
+
+And **a threshold tuned against one backend does not transfer to another**. Re-tune when you change
+`Style`, `BaseUrl` or `Model` — which is why `Decision.Model` echoes what actually answered rather
+than what you asked for.
+</Aside>
+
+## See also
+
+- [`Classifier.Create`](/api/csharp/judge/classifier/) — A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop.
+- [`NoulQuestion`](/api/csharp/judge/questions/) — The three question types, the criteria each one needs, and the limits enforced client-side before the request.
+- [Typed decisions](/judge/) — Why a judgment is a different contract from an action.
+- [Encoding a choice](/judge/encoding/) — The measurement `NearUniform` was calibrated against.
+- [Backends](/judge/backends/) — Where `Calibrated` comes from, per backend.
+- [Cookbook: a judge in the loop](/cookbook/judge/) — The end-to-end recipe.

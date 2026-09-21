@@ -1,0 +1,262 @@
+---
+title: "NoulQuestion"
+description: "The three question types, the criteria each one needs, and the limits enforced client-side before the request. — C#."
+sidebar:
+  label: "NoulQuestion"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/Classifier.cs">Classifier.cs</a>
+</p>
+
+```csharp
+public abstract record Question
+{
+    internal Question();                                  // the set is CLOSED — these three only
+    public required string Instructions { get; init; }
+}
+
+public sealed record NoulCriteria
+{
+    public string True  { get; init; } = "";
+    public string False { get; init; } = "";
+}
+
+/// the probability that a statement holds, one number in 0..1
+public sealed record NoulQuestion : Question
+{
+    public NoulCriteria? Criteria { get; init; }          // null ⇒ the field is ABSENT from the request
+}
+
+/// one option from a named set, 1..255 options
+public sealed record ChoiceQuestion : Question
+{
+    public IReadOnlyDictionary<string, string> Criteria { get; init; }   // option id ⇒ what picking it would MEAN
+}
+
+/// a rating against an ORDERED rubric of 2..10 levels — the list order IS the numbering
+public sealed record ScoreQuestion : Question
+{
+    public IReadOnlyList<string> Criteria { get; init; }
+}
+```
+
+The three question types, the criteria each one needs, and the limits enforced client-side before
+the request. The set is closed: `Question`'s constructor is `internal`, so `NoulQuestion`,
+`ChoiceQuestion` and `ScoreQuestion` are the only shapes that exist. They differ only in what
+`criteria` is on the wire — absent, an object, or an ordered array.
+
+<Aside type="caution" title="C# records with `required init` properties — there is no positional form">
+Every question is a record with **`required` init-only properties and no positional parameter
+list**, so `new NoulQuestion("Is it risky?")` does **not** compile (CS1729). Always use an object
+initialiser: `new NoulQuestion { Instructions = "Is it risky?" }`. The compiler enforces
+`Instructions`, which is why a question can never reach the wire without one.
+</Aside>
+
+## When to use it
+
+Pick the type by the **shape of the answer you need to threshold**, not by the shape of the
+question:
+
+| You need | Type | `Criteria` | The answer |
+|---|---|---|---|
+| a probability you will threshold | `NoulQuestion` | `NoulCriteria?` — optional labels for the true and false case | `NoulAnswer.Noul`, `0..1`, **no confidence** |
+| one branch out of a named set | `ChoiceQuestion` | `IReadOnlyDictionary<string, string>`, 1–255 entries — **required, and it is the whole encoding** | `ChoiceAnswer` — the pick, a probability for *every* offered option, a confidence |
+| a rating on an ordered scale | `ScoreQuestion` | `IReadOnlyList<string>`, 2–10 levels, **order is the numbering** | `ScoreAnswer.Score`, which MAY fall between levels (`1.21` is a real answer) |
+
+A `noul` reports **no** confidence because the number *is* the answer. A `choice` and a `score`
+both report one — but confidence reports on the **question**, not on the answer.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Do not fake a choice with several nouls">
+Three nouls are three unrelated probabilities that do not sum to anything; a `choice` returns one
+distribution over the options you offered, which is what you actually want to rank or threshold.
+Equally, do not fake a score with a choice over `"low" | "medium" | "high"` — a `score` rubric is
+**ordered**, so "between level 1 and 2" is expressible, and the order survives canonicalisation
+untouched (arrays are never reordered, so a "sort everything" canonicaliser cannot silently
+renumber your rubric).
+</Aside>
+
+## The encoding obligation on a `choice` — yours, and it is not advice
+
+For a `choice`, `Criteria[id]` is the only thing that differentiates one option from another to the
+model. The instructions describe the question and the state describes the situation; neither tells
+the model what picking `left` rather than `right` would **mean**. Passing the id itself, an empty
+string, or one value repeated is schema-valid, passes validation, returns HTTP 200 and a
+well-formed distribution — **and ranks at chance**. The measurement behind that claim, and the
+rewrite that fixes it, are on [Encoding a choice](/judge/encoding/).
+
+The library **detects and reports** degenerate criteria — every value empty, every value equal to
+its own key, or every value identical — as one `classifier.warning` per question key, naming the
+key, with the request sent byte-unchanged. It never repairs them: repairing would invent option
+descriptions you did not write.
+
+## Examples
+
+### 1. The smallest useful call — all three types in one round trip
+
+```csharp test
+using Toolnexus;
+
+var ticket = "Ticket 4021: my card was charged twice for the annual plan on Tuesday, and the second "
+           + "charge has not been refunded. I am not blocked from working.";
+
+// The keys are ADDRESSING, not content: they are never transmitted, so two evaluations differing
+// only in their keys send identical bytes. A key may be a tool or skill name verbatim.
+var questions = new Dictionary<string, Question>
+{
+    ["wants_money_back"] = new NoulQuestion
+    {
+        Instructions = "Is the customer asking for money to be returned?",
+    },
+    ["department"] = new ChoiceQuestion
+    {
+        Instructions = "Which desk should own this ticket?",
+        Criteria = new Dictionary<string, string>
+        {
+            ["billing"] = "own it here when the problem is money that moved: a duplicate charge, a refund owed",
+            ["shipping"] = "own it here when the problem is a physical parcel: a late delivery, damage in transit",
+            ["technical"] = "own it here when the problem is the product itself: a login that fails, a feature that errors",
+        },
+    },
+    ["urgency"] = new ScoreQuestion
+    {
+        Instructions = "How fast does this ticket need a human?",
+        // ORDER IS THE NUMBERING: index 0 is the bottom of the scale.
+        Criteria = new[]
+        {
+            "the customer is working normally and is waiting on an answer",
+            "the customer is inconvenienced and will chase if nobody replies today",
+            "the customer is blocked from working right now and every hour costs them",
+        },
+    },
+};
+
+var judge = Classifier.Create(new ClassifierOptions
+{
+    Style = ClassifierStyle.Static,
+    Model = "typesafe/jev-1.13",
+    Decisions = new[]
+    {
+        new RecordedDecision
+        {
+            State = ticket,
+            Questions = questions,
+            Response = """
+            {"model":"typesafe/jev-1.13-20260917",
+             "answers":{
+               "wants_money_back":{"type":"noul","noul":0.99},
+               "department":{"type":"choice","choice":"billing","probabilities":{"billing":1,"shipping":0,"technical":0},"confidence":1},
+               "urgency":{"type":"score","score":0.49,
+                 "legend":{"0":"the customer is working normally and is waiting on an answer","1":"the customer is inconvenienced and will chase if nobody replies today","2":"the customer is blocked from working right now and every hour costs them"},
+                 "probabilities":{"0":0.52,"1":0.48,"2":0},"confidence":0.27}},
+             "usage":{"input_tokens":516,"output_tokens":72}}
+            """,
+        },
+    },
+});
+
+var d = await judge.EvaluateAsync(ticket, questions);
+
+var urgency = d.Score("urgency");
+if (urgency.Levels().Count != 3) throw new Exception("rubric lost its order");
+
+Console.WriteLine($"ok: noul={d.Noul("wants_money_back").Noul} "
+    + $"choice={d.Choice("department").Choice} "
+    + $"score={urgency.Score} of 0..{urgency.Legend.Count - 1}");
+```
+
+### 2. The limits are enforced client-side — the error names the key, and no request is sent
+
+```csharp test
+using Toolnexus;
+
+// A `static` classifier with NO recorded decisions: if a request were ever built, this would fail
+// with "no recorded decision". It does not — validation happens first, before any backend runs.
+var judge = Classifier.Create(new ClassifierOptions
+{
+    Style = ClassifierStyle.Static,
+    Decisions = Array.Empty<RecordedDecision>(),
+});
+
+async Task<string> Rejected(Dictionary<string, Question> qs)
+{
+    try { await judge.EvaluateAsync("anything", qs); }
+    catch (ClassifierException e) { return e.Message; }
+    throw new Exception("expected a ClassifierException");
+}
+
+// A choice needs 1..255 options.
+var noOptions = await Rejected(new Dictionary<string, Question>
+{
+    ["desk"] = new ChoiceQuestion { Instructions = "which desk?", Criteria = new Dictionary<string, string>() },
+});
+
+// A score needs 2..10 ordered levels — one level is not a scale, eleven is not a rubric.
+var oneLevel = await Rejected(new Dictionary<string, Question>
+{
+    ["urgency"] = new ScoreQuestion { Instructions = "how urgent?", Criteria = new[] { "only level" } },
+});
+
+// The error names the OFFENDING QUESTION KEY and the limit, so a caller finds out faster and more
+// legibly than from the backend's own 400.
+if (!noOptions.Contains("\"desk\"") || !noOptions.Contains("255")) throw new Exception(noOptions);
+if (!oneLevel.Contains("\"urgency\"") || !oneLevel.Contains("2..10")) throw new Exception(oneLevel);
+
+Console.WriteLine($"ok: {noOptions}\n    {oneLevel}");
+```
+
+### 3. Full surface — `Criteria` absent is not `Criteria` empty
+
+```csharp test
+using Toolnexus;
+
+// For a noul, ABSENT and EMPTY are different values and BOTH are preserved on the wire.
+var absent = new Dictionary<string, Question>
+{
+    ["risky"] = new NoulQuestion { Instructions = "Is this command risky?" },                 // no criteria at all
+};
+
+var empty = new Dictionary<string, Question>
+{
+    ["risky"] = new NoulQuestion { Instructions = "Is this command risky?", Criteria = new NoulCriteria() },
+};
+
+var labelled = new Dictionary<string, Question>
+{
+    ["risky"] = new NoulQuestion
+    {
+        Instructions = "Is this command risky?",
+        Criteria = new NoulCriteria
+        {
+            True = "it deletes, overwrites or transmits data that cannot be recovered",
+            False = "it only reads, lists or prints",
+        },
+    },
+};
+
+// The canonical request is what every port emits byte-identically for the same questions + model:
+// keys sorted recursively in ASCII order, arrays never reordered, compact separators, <>&'" and
+// non-ASCII transmitted RAW. `state` is explicitly outside that claim — it is sent verbatim.
+var a = Classifier.CanonicalRequestString("jev-latest", absent);
+var e = Classifier.CanonicalRequestString("jev-latest", empty);
+var l = Classifier.CanonicalRequestString("jev-latest", labelled);
+
+if (a.Contains("criteria")) throw new Exception("absent must not emit the field");
+if (!e.Contains("""{"false":"","true":""}""")) throw new Exception(e);
+if (a == e) throw new Exception("absent and empty must differ on the wire");
+if (!l.Contains("cannot be recovered")) throw new Exception(l);
+
+Console.WriteLine($"ok: absent={a}\n    empty={e}");
+```
+
+## See also
+
+- [`Classifier.Create`](/api/csharp/judge/classifier/) — A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop.
+- [`Decision`](/api/csharp/judge/decision/) — One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero.
+- [Encoding a choice](/judge/encoding/) — Why `Criteria[id]` is the whole ball game, with the numbers.
+- [Backends](/judge/backends/) — Which backend answers, and what each one costs.
+- [Cookbook: a judge in the loop](/cookbook/judge/) — The end-to-end recipe.

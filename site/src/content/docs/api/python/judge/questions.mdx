@@ -1,0 +1,324 @@
+---
+title: "NoulQuestion"
+description: "The three question types, the criteria each one needs, and the limits enforced client-side before the request. — Python."
+sidebar:
+  label: "NoulQuestion"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/classifier.py">python/src/toolnexus/classifier.py</a>
+</p>
+
+```python
+@dataclass
+class NoulCriteria:
+    true: str = ""
+    false: str = ""
+
+@dataclass
+class NoulQuestion:
+    instructions: str
+    criteria: NoulCriteria | None = None       # None ⇒ the field is ABSENT from the request
+    type: Literal["noul"] = "noul"
+
+@dataclass
+class ChoiceQuestion:
+    instructions: str
+    criteria: dict[str, str] = field(default_factory=dict)   # 1..255 options
+    type: Literal["choice"] = "choice"
+
+@dataclass
+class ScoreQuestion:
+    instructions: str
+    criteria: list[str] = field(default_factory=list)        # 2..10 ORDERED levels
+    type: Literal["score"] = "score"
+
+Question = NoulQuestion | ChoiceQuestion | ScoreQuestion
+
+def choice_over(instructions: str, items: Mapping[str, str]) -> ChoiceQuestion
+def canonical_request(model: str, questions: Mapping[str, Question]) -> bytes
+def canonical_json(value: Any) -> bytes
+```
+
+The question set is **closed**: noul, choice, score. They differ only in what `criteria` is —
+absent, an object, or an ordered array — and each carries a literal `type` discriminant.
+
+`questions` is a map from **caller-chosen keys** to question definitions. The keys are
+addressing, not content: they are never transmitted to the model, so a key may be a tool, skill
+or agent name verbatim, and two evaluations differing only in their keys send identical bytes.
+
+Questions are **independent**. One answer is never context for another. A backend that cannot
+guarantee that reports `calibrated=False`, which carries both caveats.
+
+## When to use which
+
+| type | answer | use it when |
+|---|---|---|
+| `NoulQuestion` | `noul`, one number in `0..1` | A statement either holds or it does not, and you want the probability that it does. It reports **no** confidence — the number *is* the answer. |
+| `ChoiceQuestion` | one option id + a probability for **every** offered option + a confidence | You have a named set and need exactly one of them. The selected option is always one of the offered options, and the probability map names exactly the offered options. |
+| `ScoreQuestion` | a number that MAY fall between levels, + a per-level probability map, + the rubric echoed back as a `legend` | You are rating against an **ordered** rubric. `1.21` is a real answer, always inside the rubric's bounds. |
+
+`choice_over(instructions, items)` is sugar for building a `ChoiceQuestion` from any
+`(name, description)` pairs you already have — a toolkit's tools, a skill inventory, an A2A
+agent card's skills.
+
+## Why this and not the alternative
+
+<Aside type="caution" title="`criteria` on a choice is not documentation — it is the input">
+For a `choice`, `criteria[id]` is the **only** thing that differentiates one option from another
+to the model. The instructions describe the question and the state describes the situation;
+neither tells the model what picking `left` rather than `right` would mean. Passing the id
+itself, an empty string, or one value repeated is schema-valid, passes validation, returns HTTP
+200 and a well-formed distribution — **and ranks at chance**: options described by consequence
+scored 17/17/17 apples on a snake benchmark, the same options described by their own ids scored
+0/1/0, on the floor of a shuffle control. The measurement is in
+[the encoding obligation](/judge/encoding/).
+</Aside>
+
+## The two client-side limits
+
+Enforced **before the request**, so you find out faster and more legibly than from the backend's
+own `400 "Too many choices. Must have at most 255 choices."` (which is still surfaced intact if
+it arrives). The error is a `ClassifierError` that names the **offending question key** and the
+limit, and **no request is sent**.
+
+| type | limit | constant |
+|---|---|---|
+| `ChoiceQuestion` | 1–255 named options | `MAX_CHOICE_OPTIONS` |
+| `ScoreQuestion` | 2–10 ordered levels | `MIN_SCORE_LEVELS`, `MAX_SCORE_LEVELS` |
+
+Keys are walked in sorted order, so the same malformed set always names the same key first.
+
+### Absent is not empty
+
+A `NoulQuestion` with `criteria=None` emits **no** `criteria` key at all. One with
+`NoulCriteria()` emits both keys with empty strings. Both are legal, they are different values,
+and both are preserved on the wire — which is why the projection onto the wire is hand-written
+rather than `dataclasses.asdict`, since `asdict` cannot tell absent from empty.
+
+### What the byte-identity claim covers
+
+`canonical_request(model, questions)` returns the bytes every port emits identically for the
+same input: object keys sorted **recursively** in ASCII order, **arrays never reordered** (a
+score rubric's order *is* its level numbering, so a "sort everything" canonicaliser silently
+renumbers the rubric), compact separators, and `<`, `>`, `&`, quotes and non-ASCII transmitted
+raw.
+
+`state` is **outside** the claim and is transmitted verbatim as you supplied it. That is a
+measured fact, not a caveat: numbers do not canonicalise across languages — `-0.0` renders four
+ways and `1e21` three ways across the seven runtimes. If you need your state pinned,
+canonicalise it yourself before handing it over.
+
+## Examples
+
+### 1. The smallest useful call — all three types in one evaluate
+
+Many questions, one round trip, one state ingest.
+
+```python test
+import asyncio
+
+from toolnexus import (
+    ChoiceQuestion,
+    NoulQuestion,
+    RecordedDecision,
+    ScoreQuestion,
+    create_classifier,
+)
+
+TICKET = "Ticket 4021: my card was charged twice for the annual plan and I would like the money back."
+
+QUESTIONS = {
+    "wants_money_back": NoulQuestion("Is the customer asking for money to be returned?"),
+    "department": ChoiceQuestion(
+        "Which desk should own this ticket?",
+        {
+            # Each description says what PICKING that option would MEAN — same template, no ids.
+            "billing": "own it here when the problem is money that moved: a duplicate charge, a refund owed",
+            "shipping": "own it here when the problem is a physical parcel: a late or damaged delivery",
+            "technical": "own it here when the problem is the product itself: a login that fails, a feature that errors",
+        },
+    ),
+    "urgency": ScoreQuestion(
+        "How fast does this ticket need a human?",
+        [
+            "the customer is working normally and is waiting on an answer",
+            "the customer is inconvenienced and will chase if nobody replies today",
+            "the customer is blocked from working right now",
+        ],
+    ),
+}
+
+RECORDED = RecordedDecision(
+    state=TICKET,
+    questions=QUESTIONS,
+    response={
+        "model": "typesafe/jev-1.13-20260917",
+        "answers": {
+            "wants_money_back": {"type": "noul", "noul": 0.99},
+            "department": {
+                "type": "choice",
+                "choice": "billing",
+                "probabilities": {"billing": 1, "shipping": 0, "technical": 0},
+                "confidence": 1,
+            },
+            "urgency": {
+                "type": "score",
+                "score": 0.49,
+                "legend": {
+                    "0": "the customer is working normally and is waiting on an answer",
+                    "1": "the customer is inconvenienced and will chase if nobody replies today",
+                    "2": "the customer is blocked from working right now",
+                },
+                "probabilities": {"0": 0.52, "1": 0.48, "2": 0},
+                "confidence": 0.27,
+            },
+        },
+        "usage": {"input_tokens": 516, "output_tokens": 72},
+    },
+)
+
+
+async def main():
+    judge = create_classifier(style="static", model="typesafe/jev-1.13", decisions=[RECORDED])
+    d = await judge.evaluate(TICKET, QUESTIONS)
+
+    assert d.noul("wants_money_back").noul == 0.99
+    assert d.choice("department").choice == "billing"
+    assert d.score("urgency").score == 0.49           # between level 0 and level 1
+
+    print("ok:", d.choice("department").choice, "| urgency", d.score("urgency").score)
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — the limits, and the canonical bytes
+
+The error names the key and the limit, and nothing was sent. Note also that a rubric in
+non-alphabetical order survives the canonicaliser untouched, while object keys are sorted.
+
+```python test
+import asyncio
+
+from toolnexus import (
+    ChoiceQuestion,
+    ClassifierError,
+    NoulCriteria,
+    NoulQuestion,
+    ScoreQuestion,
+    canonical_request,
+    choice_over,
+    create_classifier,
+)
+
+
+async def main():
+    judge = create_classifier(style="custom", evaluate=lambda state, questions: None)
+
+    # 256 options: one over the cap. The error names the KEY, and no request is sent.
+    too_many = ChoiceQuestion("pick one", {f"opt{i}": f"means {i}" for i in range(256)})
+    try:
+        await judge.evaluate("s", {"route": too_many})
+        raise AssertionError("expected a ClassifierError")
+    except ClassifierError as e:
+        assert "'route'" in str(e) and "255" in str(e)
+
+    # A one-level rubric is under the floor of 2.
+    try:
+        await judge.evaluate("s", {"urgency": ScoreQuestion("how urgent?", ["only level"])})
+        raise AssertionError("expected a ClassifierError")
+    except ClassifierError as e:
+        assert "'urgency'" in str(e) and "2..10" in str(e)
+
+    # Absent criteria is NOT empty criteria: one omits the field, the other sends two empty strings.
+    absent = canonical_request("m", {"q": NoulQuestion("holds?")})
+    empty = canonical_request("m", {"q": NoulQuestion("holds?", NoulCriteria())})
+    assert b"criteria" not in absent
+    assert b'"criteria":{"false":"","true":""}' in empty
+
+    # Object keys sort in ASCII order; a score rubric's ARRAY order is its numbering and survives.
+    rubric = canonical_request("m", {"u": ScoreQuestion("how urgent?", ["zebra", "alpha"])})
+    assert b'"criteria":["zebra","alpha"]' in rubric
+
+    # choice_over builds the same question from any (name, description) pairs you already have.
+    assert canonical_request("m", {"r": choice_over("which?", {"b": "means b", "a": "means a"})}) == \
+        canonical_request("m", {"r": ChoiceQuestion("which?", {"a": "means a", "b": "means b"})})
+
+    print("ok: both limits named their key; absent != empty; rubric order preserved")
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — degenerate criteria are detected, reported, never repaired
+
+If every option description is empty, or equals its own key, or is identical to every other, the
+classifier emits **one** `classifier.warning` per question key per classifier — naming the key —
+and sends the request **byte-unchanged**. The advisory text is in the event's `warning` field,
+never in `error`: a consumer filtering the §8 sink on "has an error" must not count one.
+
+Repairing would mean inventing option descriptions you did not write, and the library has no way
+to know what the options mean. A single-option choice is never reported — there is nothing to
+differentiate.
+
+```python test
+import asyncio
+
+from toolnexus import (
+    ChoiceAnswer,
+    ChoiceQuestion,
+    Decision,
+    create_classifier,
+)
+
+EVENTS = []
+
+BAD = ChoiceQuestion("Which desk should own this ticket?", {"billing": "billing", "technical": "technical"})
+GOOD = ChoiceQuestion(
+    "Which desk should own this ticket?",
+    {
+        "billing": "own it here when the problem is money that moved",
+        "technical": "own it here when the problem is the product itself",
+    },
+)
+
+
+def stub(state, questions):
+    return Decision(
+        model="stub",
+        answers={
+            k: ChoiceAnswer(choice="billing", probabilities={"billing": 0.5, "technical": 0.5}, confidence=0.5)
+            for k in questions
+        },
+        calibrated=False,
+    )
+
+
+async def main():
+    judge = create_classifier(style="custom", evaluate=stub, on_metric=EVENTS.append)
+
+    await judge.evaluate("charged twice", {"department": BAD, "fine": GOOD})
+    await judge.evaluate("charged twice", {"department": BAD, "fine": GOOD})   # same key again
+
+    warnings = [e for e in EVENTS if e["event"] == "classifier.warning"]
+    assert len(warnings) == 1                     # ONCE per question key per classifier
+    assert warnings[0]["question"] == "department"
+    assert "error" not in warnings[0]             # advisory, never a failure
+    assert "own its" not in warnings[0]["warning"]  # nothing was repaired or rewritten
+
+    print("ok:", len(warnings), "warning for", warnings[0]["question"])
+
+
+asyncio.run(main())
+```
+
+## See also
+
+- [`create_classifier`](/api/python/judge/classifier/) — A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop.
+- [`Decision`](/api/python/judge/decision/) — One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero.
+- [The encoding obligation](/judge/encoding/) — the measurement behind the `criteria` rule above.
+- [Backends](/judge/backends/) — `systemone`, `llm`, `custom`, `static`, and what each costs.
+- [Cookbook: a classifier in the loop](/cookbook/judge/) — the end-to-end recipe.

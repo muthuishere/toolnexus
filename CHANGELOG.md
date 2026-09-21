@@ -8,6 +8,30 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### The classifier's retry backoff is yours to set, in every port
+
+`Classifier` retried a transient failure on a backoff base nobody could change: a hardcoded
+`500 ms`, so two retries cost `1.5 s` of real waiting. Only JavaScript exposed a
+`retryBaseMs` for it — one port with an option the other six lacked, on a seam `SPEC.md §8B`
+says mirrors `ClientOptions` field-for-field.
+
+`ClassifierOptions` now carries it everywhere, spelled natively: `retryBaseMs` (JavaScript, Java),
+`RetryBaseMs` (Go, C#), `retry_base_ms` (Python, Elixir), `:retry-base-ms` (Clojure). The default
+is `500`, the delay is still `base * 2^attempt` with no jitter, and a `Retry-After` header still
+wins over it — so if you do not set the option, nothing about your timing changes. Set it to `1`
+and a test that exercises the retry path stops sleeping: our own classifier retry tests dropped
+from 1.51 s to 0.01 s (Go) and 2.56 s to 0.05 s (Java), and the C#, Elixir and Clojure suites no
+longer fake a `Retry-After: 0` header to stay off the clock.
+
+The option is registered in `conformance/options_manifest.json` (classifier options: 15 → 16), so
+a port that forgets it now fails the parity check instead of drifting quietly.
+
+**Not done:** two pre-existing differences in the *client's* backoff, found while doing this and
+left alone because fixing them would change what a Clojure host observes today. Clojure's
+`ClientOptions` `:retry-base-ms` defaults to **250** where the other six default to 500, and its
+client backoff omits the `+ jitter(0–100 ms)` term the other six add. Both are reported, neither
+is changed here; see `openspec/changes/add-classifier-retry-base-ms/proposal.md`.
+
 ### TypeSafe's own API is a documented way to run a `Classifier` — and two defects it exposed
 
 `style: "systemone"` already reached TypeSafe's first-party API by default

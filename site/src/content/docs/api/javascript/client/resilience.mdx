@@ -215,6 +215,10 @@ classifier cannot make the client loop unbounded. There is no `"suspend"` tier; 
 | `timeoutMs` | `number` | Whole-run deadline; aborts the in-flight request when exceeded. |
 | `onError` | `(info: ErrorInfo) => ErrorTier` | Classify each failed attempt. Omit ⇒ the default classifier. |
 
+### The classifier has the same backoff base
+
+`Classifier` carries the same knob under the same name: `ClassifierOptions.retryBaseMs` (default `500`, `base * 2 ** attempt`, no jitter, `Retry-After` still wins). See [`createClassifier`](/api/javascript/judge/classifier/).
+
 ## See also
 
 - [`createClient`](/api/javascript/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

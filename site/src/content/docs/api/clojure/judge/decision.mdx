@@ -1,0 +1,266 @@
+---
+title: "toolnexus.classifier/parse-decision"
+description: "One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero. — Clojure."
+sidebar:
+  label: "toolnexus.classifier/parse-decision"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/classifier.cljc">clojure/src/toolnexus/classifier.cljc</a>
+</p>
+
+```clojure
+(parse-decision body)        ; a parsed response body (STRING keys) => a decision map
+(noul   decision key)        ; => the noul answer at key,   or throws
+(choice decision key)        ; => the choice answer at key, or throws
+(score  decision key)        ; => the score answer at key,  or throws
+(levels answer)              ; => a score answer's legend in LEVEL order
+(near-uniform? probabilities) ; => true when max|p - 1/n| <= 0.05
+
+;; the decision
+{:model      "typesafe/jev-1.13-20260917"   ; what ACTUALLY answered
+ :calibrated true
+ :usage      {:input-tokens 516 :output-tokens 72 :cost 0.000021672}  ; :cost only if reported
+ :answers    {"wants_money_back" {:type "noul" :noul 0.99}
+              "department"       {:type "choice" :choice "billing"
+                                  :probabilities {"billing" 1 "shipping" 0 "technical" 0}
+                                  :confidence 1
+                                  :near-uniform false}     ; DERIVED, never read from the wire
+              "urgency"          {:type "score" :score 0.49
+                                  :legend {"0" "…" "1" "…" "2" "…"}
+                                  :probabilities {"0" 0.52 "1" 0.48 "2" 0}
+                                  :confidence 0.27}}}
+```
+
+A decision carries **one answer per question, keyed by your own keys** — the same keys you handed
+[`evaluate`](/api/clojure/judge/classifier/), which were never transmitted to the model. It is a
+plain map, so `get-in` works, `pr-str` works, and it round-trips through EDN or JSON without a
+codec.
+
+`parse-decision` is the decoder the `systemone`, `llm` and `static` backends all go through, and
+it is public because a `custom` backend that already holds a wire-shaped body should use it
+rather than hand-building the map. It takes a body with **string** keys — exactly the wire — and
+the answer set is **closed**: an unknown answer type throws rather than guessing. An unparseable
+answer is no answer; nothing here is repaired.
+
+<Aside type="caution" title="A classifier interprets; it never authorises">
+A decision is a reading of intent inside a boundary, never the boundary. Schema validity is not
+correctness: a decision can be confidently wrong, and "cannot hallucinate" means only that the
+returned value is in the declared schema. Numeric limits, permission checks and allowlists stay
+in code. Nothing on this page is a security control.
+</Aside>
+
+## The three answer shapes
+
+| key | `noul` | `choice` | `score` |
+|---|---|---|---|
+| `:type` | `"noul"` | `"choice"` | `"score"` |
+| the answer | `:noul` — one number in `0..1` | `:choice` — one of **your** offered ids | `:score` — a number within the rubric's bounds, fractional allowed |
+| distribution | — | `:probabilities` — one entry per offered id | `:probabilities` — keyed `"0"`, `"1"`, … |
+| `:confidence` | **absent by design** | present | present |
+| extra | — | `:near-uniform` (derived) | `:legend` — the rubric echoed back |
+
+- **`noul` reports no confidence, on purpose.** The number *is* the confidence, and there is no
+  second number to reconcile it with.
+- **A `choice` is always one of the options you offered**, and the probability map names exactly
+  those options.
+- **A `score` may land between levels.** `0.49` is a real answer and usually the interesting one:
+  the model is genuinely split between level 0 and level 1. Use `levels` to get the legend back in
+  level order — a map loses it, and `"2"` sorts before `"10"` as a level but after it as a string,
+  which is exactly the bug `levels` exists to not have.
+
+### Typed accessors fail loudly
+
+`noul`, `choice` and `score` each assert the answer's type. A missing key, or a key whose answer
+is a different type, **throws an `ex-info`** whose `ex-data` carries `{:question … :want … :got …}`
+— it never hands back a zero, a `nil` or a default you would then threshold. That is the whole
+point of the accessors over a bare `get-in`: a renamed question key fails at the read, not three
+branches later when a `0.0` quietly routes everything to the wrong desk.
+
+Failures in this port are thrown `ex-info`s — the same shape as the JS, Python, Java and C#
+ports' exceptions, unlike Go's `(T, error)` and Elixir's tuples.
+
+### `:usage`, and why absent is not zero
+
+`:input-tokens` and `:output-tokens` are always present (possibly `nil`). **`:cost` is present
+only when the backend reported one** — OpenRouter does, TypeSafe's own API does not. Check with
+`contains?` and say "not reported" rather than printing a `$0.00` that would read as a free call.
+
+## When to use it
+
+- Read every answer through the accessors, at the point you use it.
+- Reach for `parse-decision` directly when you are writing a `custom` backend over a body that is
+  already wire-shaped — a cache, a replay, a gateway that hands you JSON.
+- Reach for `near-uniform?` directly when you want the check on a distribution you did not get
+  from this library.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Destructure the map only after the accessor has checked it">
+Nothing stops you writing `(get-in d [:answers "department" :choice])`, and on the happy path it
+is identical. It is the unhappy path that differs: the accessor tells you *which* question was
+absent or mistyped and what you asked for, while `get-in` returns `nil` and lets a threshold
+comparison downstream turn it into a confident wrong answer. Use `get-in` to reach **inside** an
+answer you already got from an accessor.
+</Aside>
+
+## `:calibrated` and `:near-uniform` — the two health flags
+
+Both are advisory. Both are worth reading on every decision. **Neither is a correctness signal.**
+
+**`:calibrated`** travels with the decision and says whether the probabilities came from a
+calibrated backend. The `systemone` style reports `true`; the `llm` style reports `false` unless
+it derived its numbers from provider token probabilities, which is the common case, so its
+numbers are the model's self-report. Absent on the wire means `true` — the System One wire
+reports calibration by being itself, and a backend that is *not* calibrated says so explicitly.
+**A threshold tuned against one backend does not transfer to another.**
+
+**`:near-uniform`** is on every `choice` answer, **derived on decode and never read from the
+wire** — no wire change, no request change, no fixture change. The rule:
+
+```
+near-uniform  ⇔  max over i of |p_i − 1/n|  ≤  0.05
+```
+
+- `n` is the **number of entries in the probability map**, and the values are taken **as
+  returned** — never renormalised, never sorted, never rounded. An offered option absent from the
+  map counts as `0` by not being an entry.
+- The tolerance is **0.05 absolute** and the comparison is **inclusive** (`≤`, so a maximum
+  deviation of exactly 0.05 *is* near-uniform). Absolute rather than relative because at 255
+  options `1/n` is 0.0039 and any relative band is finer than the two-decimal rounding the wire
+  already applies. The comparison is made in double precision, and the shared fixtures never
+  place a deviation within `1e-9` of the tolerance — so the rule is decidable without a
+  port-specific epsilon, and an "exactly 0.05" case is a property of your literals rather than of
+  the rule.
+- **`n = 1` is true** (a single option is trivially uniform). **An empty map is false** — it has
+  no distribution at all.
+
+The 0.05 is measured, not felt: wire rounding alone is ±0.005, backend non-determinism is
+σ ≈ 0.015 (so 0.05 is roughly 3σ), and on a four-option choice the undescribed-options encoding
+returned a median top probability of 0.29 (deviation 0.04, inside) against the described one's
+0.80 (deviation 0.55, far outside). The full derivation is on
+[The encoding rules](/judge/encoding/).
+
+<Aside type="danger" title="What neither flag detects">
+`:near-uniform` detects an encoding that gave the model **nothing to rank on** — the one encoding
+health check available with no ground truth, cheap enough to run on live traffic. It **cannot
+tell a good encoding from a subtly wrong one**: a wrong-but-answerable question still reads as
+answerable, and the worst working encoding measured carried the **highest** median confidence
+(0.82). `:calibrated` carries the same caveat — it says where the numbers came from, not whether
+they are right. A threshold tuned on one backend does not transfer to another. Neither flag is a
+correctness signal, and neither is a security control.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — reading all three answer types
+
+```clojure test
+(require '[toolnexus.classifier :as jev])
+
+(def d
+  (jev/parse-decision
+   {"model" "typesafe/jev-1.13-20260917"
+    "answers"
+    {"wants_money_back" {"type" "noul" "noul" 0.99}
+     "department"       {"type" "choice" "choice" "billing"
+                         "probabilities" {"technical" 0 "shipping" 0 "billing" 1}
+                         "confidence" 1}
+     "urgency"          {"type" "score" "score" 0.49
+                         "legend" {"0" "waiting on an answer"
+                                   "1" "will chase if nobody replies today"
+                                   "2" "blocked right now"}
+                         "probabilities" {"0" 0.52 "1" 0.48 "2" 0}
+                         "confidence" 0.27}}
+    "usage" {"input_tokens" 516 "output_tokens" 72}}))
+
+;; a noul carries NO confidence — the number IS the answer
+(def want (jev/noul d "wants_money_back"))
+(assert (= 0.99 (:noul want)))
+(assert (false? (contains? want :confidence)))
+
+;; a choice is always one of the options offered, with a probability for every one
+(def dept (jev/choice d "department"))
+(assert (= "billing" (:choice dept)))
+(assert (= 3 (count (:probabilities dept))))
+(assert (false? (:near-uniform dept)))        ; DERIVED here, never sent on the wire
+
+;; a score MAY fall between levels — 0.49 is a real answer, not a rounding artefact
+(def urg (jev/score d "urgency"))
+(assert (= 0.49 (:score urg)))
+(assert (= ["waiting on an answer"
+            "will chase if nobody replies today"
+            "blocked right now"]
+           (jev/levels urg)))                 ; the legend in LEVEL order, which the map loses
+
+;; absent `calibrated` means TRUE: the systemone wire reports calibration by being itself
+(assert (true? (:calibrated d)))
+;; :cost is absent, and absent is NOT zero
+(assert (false? (contains? (:usage d) :cost)))
+
+(println "department:" (:choice dept) "| urgency:" (:score urg))
+(println "OK")
+```
+
+### 2. The realistic case — the accessors fail loudly, which is the point
+
+```clojure
+;; a renamed question key fails HERE, not three branches later
+(try (jev/noul d "wants_refund")               ; typo for "wants_money_back"
+     (catch Throwable t
+       (ex-data t)))                           ; => {:question "wants_refund" :want "noul"}
+
+;; and so does asking for the wrong type
+(try (jev/noul d "department")
+     (catch Throwable t
+       (ex-data t)))                           ; => {:question "department" :want "noul" :got "choice"}
+```
+
+### 3. The full surface — the near-uniform boundary, exactly as pinned
+
+```clojure test
+(require '[toolnexus.classifier :as jev])
+
+;; the tolerance is 0.05 ABSOLUTE and the comparison is INCLUSIVE
+(assert (true?  (jev/near-uniform? {"a" 0.2999 "b" 0.2 "c" 0.2501 "d" 0.25})))   ; max dev 0.0499
+(assert (false? (jev/near-uniform? {"a" 0.3001 "b" 0.2 "c" 0.2499 "d" 0.25})))   ; max dev 0.0501
+;; The fixtures never place a deviation within 1e-9 of the tolerance, and neither should
+;; you: `0.55` is 0.05000000000000004 away from `1/2` in double precision, so an
+;; "exactly 0.05" case is a property of your literals, not of the rule.
+
+;; n is the number of ENTRIES IN THE MAP — nothing is renormalised, sorted or rounded
+(assert (true?  (jev/near-uniform? {"only" 1.0})))    ; n = 1 is trivially uniform
+(assert (false? (jev/near-uniform? {})))              ; an empty map has NO distribution
+(assert (= jev/near-uniform-tolerance 0.05))
+
+;; a flat distribution is what an undescribed roster returns: schema-valid, HTTP 200, chance
+(def flat
+  (jev/parse-decision
+   {"model" "m"
+    "calibrated" false
+    "answers" {"move" {"type" "choice" "choice" "left"
+                       "probabilities" {"left" 0.26 "right" 0.24 "up" 0.25 "down" 0.25}
+                       "confidence" 0.81}}}))
+
+(def move (jev/choice flat "move"))
+(assert (true? (:near-uniform move)))
+;; ADVISORY. A high confidence alongside a flat distribution is exactly the measured failure:
+;; the worst working encoding carried the HIGHEST median confidence.
+(assert (= 0.81 (:confidence move)))
+;; an explicit `calibrated: false` means thresholds tuned elsewhere do NOT transfer
+(assert (false? (:calibrated flat)))
+
+(println "near-uniform boundary: ok")
+(println "OK")
+```
+
+## See also
+
+- [`toolnexus.classifier/create-classifier`](/api/clojure/judge/classifier/) — A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop.
+- [`toolnexus.classifier/noul-question`](/api/clojure/judge/questions/) — The three question types, the criteria each one needs, and the limits enforced client-side before the request.
+- [The encoding rules](/judge/encoding/) — where the 0.05 comes from, and what `near-uniform` cannot see.
+- [Backends & configuration](/judge/backends/) — why `calibrated` differs between `systemone` and `llm`.
+- [Typed decisions](/judge/) — why a judgment is a different contract from an action.
+- [Cookbook: a classifier in the loop](/cookbook/judge/) — the end-to-end recipe.

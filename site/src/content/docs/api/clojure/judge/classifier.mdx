@@ -1,0 +1,290 @@
+---
+title: "toolnexus.classifier/create-classifier"
+description: "A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop. — Clojure."
+sidebar:
+  label: "toolnexus.classifier/create-classifier"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/classifier.cljc">clojure/src/toolnexus/classifier.cljc</a>
+</p>
+
+```clojure
+(create-classifier opts)          ; => classifier (a plain map, defaults filled in)
+(evaluate classifier state questions)  ; => decision (a plain map)
+
+;; opts — idiomatic kebab-case; none of these keys ever reach the wire
+;;   :style              "systemone" (default) | "llm" | "custom" | "static"
+;;   :base-url           "https://api.typesafe.ai/v1"
+;;   :model              "jev-latest"
+;;   :api-key-env        "TYPESAFE_API_KEY"  — the NAME of an env var, never the value
+;;   :headers            extra request headers; values expand ${ENV_VAR} at call time
+;;   :timeout-ms         10000 — bounds ONE request
+;;   :http-client        (fn [url headers body] response)
+;;   :retries            2
+;;   :retryable-statuses extra statuses, ADDED to the default set
+;;   :on-error           (fn [info] :retry | :fail) — the §8 classifier, reused
+;;   :request-params     shallow-merged into the body, wins on collision
+;;   :body-transform     (fn [body] body) — runs last, its return value is sent
+;;   :on-metric          (fn [event] …) — the SAME §8 sink
+;;   :client             :style "llm" only
+;;   :evaluate           :style "custom" only — (fn [state questions] decision)
+;;   :decisions          :style "static" only — [{:state … :questions … :response …}]
+```
+
+A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages,
+no tool calling, no loop. `Tool` is the contract for an **action**; `Classifier` is the contract
+for a **judgment**. It has no messages, no streaming and no tool calling, so it never enters the
+§8 client loop and is never selected as a model for `run`/`ask`.
+
+Everything here is **plain data**. A classifier is a map, a question is a map, a decision is a
+map — no record, no protocol, no `deftype`, because this file must load identically on the JVM
+and on cljgo. You can `assoc` into a classifier, print it, or hold several side by side.
+`evaluate` is a plain blocking call, as in the Go and Java ports; the Python port's is a
+coroutine.
+
+`create-classifier` builds nothing and connects to nothing. It fills in the §8B defaults, rejects
+an unknown `:style`, and rejects a style whose required option is missing — `"llm"` without
+`:client`, `"custom"` without `:evaluate` — **at construction**, not at the first call. Failures
+in this port are thrown `ex-info`s, unlike Go's `(T, error)` and Elixir's tuples; the `ex-data`
+carries the structured detail (`:question`, `:limit`, `:count`, `:status`, `:url`).
+
+<Aside type="caution" title="A classifier interprets; it never authorises">
+Its output is a reading of intent inside a boundary, never the boundary. Schema validity is not
+correctness: a decision can be confidently wrong, and "cannot hallucinate" means only that the
+returned value is in the declared schema. Numeric limits, permission checks and allowlists stay
+in code. Nothing here is a security control.
+</Aside>
+
+## When to use it
+
+- You need a **judgment, not an action** — is this ticket asking for a refund, which desk owns
+  it, how urgent is it — and you want a typed number back rather than prose you then parse.
+- You want **many questions in one round trip** over one state ingest. Questions are
+  independent: one answer is never context for another.
+- You want a **threshold you can tune**: a calibrated probability is a number you can compare
+  against a cutoff, which free text is not.
+- You want the judgment **out of the loop** — a classifier makes no tool call, so it cannot act
+  on what it concluded.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use the §8 client when you want an action or prose">
+[`toolnexus.client/create-client`](/api/clojure/client/create/) is for anything that talks, calls
+tools, streams or remembers. A classifier does none of those. If the answer has to be a sentence,
+or the model has to *do* something with its conclusion, that is a client run. If you only need a
+number out of a fixed set of questions, routing it through a chat completion costs a loop, a
+parse and a prompt-injection surface you do not need — and measured on one routing job the `llm`
+backend was 3.3–4.4× slower and 2.5–3.4× costlier than the System One wire.
+</Aside>
+
+A host that constructs no classifier observes byte-identical behaviour to a build without §8B,
+and constructing one alters no request the client loop makes. That is proven by a test, not
+asserted.
+
+## Options
+
+`opts` mirrors §8 `create-client` field-for-field wherever a field makes sense, so a host that has
+configured one has configured the other.
+
+| Option | Default | What it does |
+|---|---|---|
+| `:style` | `"systemone"` | `"systemone"`, `"llm"`, `"custom"` or `"static"`. Same slot as the client's `:style`; the values differ because the wires differ. See [Backends](/judge/backends/). |
+| `:base-url` | `"https://api.typesafe.ai/v1"` | The System One endpoint base; trailing slashes are trimmed. OpenRouter (`https://openrouter.ai/api/v1`) serves the same wire, and so do self-hosted and open-weights implementations. |
+| `:model` | `"jev-latest"` | A floating alias. **Pin it** (e.g. `jev-1.13.0`) once thresholds are tuned — the decision's `:model` echoes what actually answered, which may be more specific. |
+| `:api-key-env` | `"TYPESAFE_API_KEY"` | The **name** of an environment variable, not the value. Read at call time, never logged. §8's `:api-key` takes a value; this option deliberately does not. |
+| `:headers` | — | Extra request headers. Keys are lower-cased; values expand `${ENV_VAR}` from the environment at call time and are never logged, identically to remote-MCP headers (§2). |
+| `:timeout-ms` | `10000` | Bounds **one request**, not a run — a classifier has no loop to bound. Spelled in milliseconds here; §8B names the slot `timeout`. |
+| `:http-client` | koine | `(fn [url headers body] response)` — the §8 Gap 2 injectable transport, scoped to the classifier path only. `body` is the marshalled canonical string; the response is a map with `:status` and `:body`. |
+| `:retries` | `2` | Attempts after the first, on a retryable status or a network fault. Backoff is exponential from `:retry-base-ms` (`base * 2^attempt`), with no jitter; a `Retry-After` header still wins. |
+| `:retry-base-ms` | `500` | Base of that backoff, in ms. The classifier's half of the §8 client option it mirrors — set it to `1` to take a retry test off the clock. (Note the *client* on this port defaults to `250`, not `500`.) |
+| `:retryable-statuses` | — | Extra HTTP statuses to treat as retryable, **added** to the default set. It can only widen, never remove. |
+| `:on-error` | retry when retryable | The §8 `ErrorInfo -> :retry \| :fail` classifier, **reused verbatim** from `toolnexus.client`. There is no second retry policy in this library, and no `:suspend` tier here. |
+| `:request-params` | — | Shallow-merged over the base body; a param **wins** on collision. `:questions` is refused — it is what this seam *is*, and rewriting it is `:body-transform`'s job. |
+| `:body-transform` | — | `(fn [body] body)` — runs last, and its return value is what is marshalled. Order: base body → `:request-params` → `:body-transform` → marshal. |
+| `:on-metric` | — | Receives `"classifier.evaluate"` events (latency, tokens, model, status) in the **same** §8 sink, plus `"classifier.warning"` for degenerate criteria — whose text is in `:warning`, never `:error`. |
+| `:client` | — | `:style "llm"` only: the §8 client to emulate over. Missing ⇒ throws at construction. |
+| `:evaluate` | — | `:style "custom"` only: `(fn [state questions] decision)`. Every wire option is ignored. Missing ⇒ throws at construction. |
+| `:decisions` | — | **Port-local**, `:style "static"` only (§8B describes the static backend but does not name this option; every port spells it for itself): a vector of `{:state … :questions … :response <parsed body>}`, keyed by the canonical request **and** the state. |
+
+### Retries and `Retry-After`
+
+The default retryable set is `408`, `429`, `500`, `502`, `503`, `504`, `529`, plus every network
+fault. **`408` is the classifier's addition** over the §8 client set — a request timeout on a
+single short POST is worth one more attempt. `:retryable-statuses` **adds** to that set and can
+never remove from it, so a host cannot drop `429` and lose `Retry-After` handling with it;
+`:on-error` still runs per attempt and has the final say, so returning `:fail` overrides a status
+listed there. A `Retry-After` header is honoured by the §8 delay-seconds rule and takes
+precedence over the exponential backoff.
+
+### Secrets
+
+The credential is read from the **named** environment variable at call time, and `${ENV_VAR}`
+header references expand at call time. No credential value and no expanded header value appears
+in any log, metric, error message or returned value. A `401`/`403` body is never echoed back,
+because a gateway happily reflects a bad `Authorization` header into its own error text — an
+authentication failure names the status and the endpoint and nothing else. Every other status
+carries its reported cause intact (truncated at 200 characters), so you can tell a limit error
+from a transport fault.
+
+## Examples
+
+### 1. The smallest useful call — one question, recorded, offline
+
+The `static` backend replays a recorded response keyed by the canonical request plus the state.
+It is what CI runs: no network, no credential. It is not a convenience — the live backend is
+non-deterministic, so it is the only backend a test may assert a *number* against.
+
+```clojure test
+(require '[toolnexus.classifier :as jev])
+
+(def ticket "My card was charged twice and the second charge has not been refunded.")
+
+(def questions
+  {"wants_money_back" (jev/noul-question "Is the customer asking for money to be returned?")})
+
+(def recorded
+  {:state     ticket
+   :questions questions
+   ;; :response is a PARSED body — string keys, exactly the wire
+   :response  {"model"   "typesafe/jev-1.13-20260917"
+               "answers" {"wants_money_back" {"type" "noul" "noul" 0.99}}
+               "usage"   {"input_tokens" 118 "output_tokens" 6}}})
+
+(def judge (jev/create-classifier {:style "static" :model "typesafe/jev-1.13"
+                                   :decisions [recorded]}))
+
+(def d (jev/evaluate judge ticket questions))
+
+;; a noul carries NO confidence — the number IS the answer
+(assert (= 0.99 (:noul (jev/noul d "wants_money_back"))))
+(assert (true? (:calibrated d)))
+;; the decision echoes what actually answered, which is more specific than what we asked for
+(assert (= "typesafe/jev-1.13-20260917" (:model d)))
+(assert (= 118 (get-in d [:usage :input-tokens])))
+;; cost is a gateway field; absent is NOT zero
+(assert (false? (contains? (:usage d) :cost)))
+
+;; an unrecorded state is an ERROR, never a neighbouring band
+(assert (= :threw (try (jev/evaluate judge "a different ticket" questions)
+                       :no-throw
+                       (catch Throwable _ :threw))))
+
+(println "wants_money_back:" (:noul (jev/noul d "wants_money_back")) "| model:" (:model d))
+(println "OK")
+```
+
+### 2. The realistic case — `custom`, so a rules engine or a cache is the same seam
+
+`:style "custom"` hands `:evaluate` the state and the questions and takes your decision back.
+Every wire option is ignored. A cache in front of the live backend, a fine-tuned local encoder
+and a hand-written rules engine are all this shape — and all of them report
+`:calibrated false`, because nothing in them derived a probability from token probabilities.
+
+```clojure
+(def judge
+  (jev/create-classifier
+   {:style "custom"
+    :evaluate (fn [state _questions]
+                (let [money? (or (str/includes? state "charged")
+                                 (str/includes? state "refund"))]
+                  {:model      "rules-engine-v1"
+                   :calibrated false        ; say so — thresholds do NOT carry over
+                   :usage      {}
+                   :answers    {"wants_money_back"
+                                {:type "noul" :noul (if money? 1.0 0.0)}}}))}))
+```
+
+### 3. The full surface — the real wire, with the transport injected
+
+`:http-client` is the §8 Gap 2 seam. Injecting it exercises the actual `systemone` path — the
+canonical body, `:request-params`, `:body-transform`, the retry budget, the metric sink — with no
+socket and no credential. Note what the transport receives: the canonical bytes, keys sorted
+recursively in ASCII order, arrays never reordered, and `state` **verbatim**.
+
+```clojure test
+(require '[toolnexus.classifier :as jev]
+         '[koine.json :as json])
+
+(def seen (atom nil))
+(def events (atom []))
+(def attempts (atom 0))
+
+(def payload
+  (json/write-str
+   {"model"   "jev-1.13.0"
+    "answers" {"resolved" {"type" "noul" "noul" 0.12}
+               "urgency"  {"type"          "score"
+                           "score"         1.4
+                           "legend"        {"0" "can wait" "1" "chase today" "2" "blocked now"}
+                           "probabilities" {"0" 0.1 "1" 0.5 "2" 0.4}
+                           "confidence"    0.61}}
+    "usage"   {"input_tokens" 210 "output_tokens" 30 "cost" 0.0000118}}))
+
+;; a 503 first, then the answer — the retry policy is the §8 one, reused
+(def http
+  (fn [url headers body]
+    (reset! seen {:url url :headers headers :body (json/read-str body {:key-fn str})})
+    (if (< (swap! attempts inc) 2)
+      {:status 503 :body "upstream warming up"}
+      {:status 200 :body payload})))
+
+(def questions
+  {"urgency"  (jev/score-question "How fast does this ticket need a human?"
+                                  ;; ORDER IS THE NUMBERING — nothing sorts it
+                                  ["can wait" "chase today" "blocked now"])
+   "resolved" (jev/noul-question "Has the customer's problem already been solved?")})
+
+(def judge
+  (jev/create-classifier
+   {:base-url           "https://api.typesafe.ai/v1"
+    :model              "jev-1.13.0"          ; pinned, not the floating "jev-latest"
+    :api-key-env        "TYPESAFE_API_KEY"    ; the NAME of an env var, never the value
+    :timeout-ms         5000
+    :retries            3
+    :retryable-statuses [520 521]             ; ADDS to {408 429 500 502 503 504 529}
+    :request-params     {:trace "docs"}       ; merged in; a collision here WINS
+    :body-transform     (fn [b] (assoc b :tier "batch"))  ; last before marshalling
+    :on-metric          (fn [ev] (swap! events conj ev))
+    :http-client        http}))
+
+(def d (jev/evaluate judge {:ticket 4021 :text "still waiting"} questions))
+
+(assert (= "https://api.typesafe.ai/v1/systemone" (:url @seen)))
+(assert (= 2 @attempts))                                   ; the 503 was retried
+(assert (= ["can wait" "chase today" "blocked now"]
+           (get-in @seen [:body "questions" "urgency" "criteria"])))
+(assert (= {"ticket" 4021 "text" "still waiting"} (get-in @seen [:body "state"])))  ; verbatim
+(assert (= "docs" (get-in @seen [:body "trace"])))
+(assert (= "batch" (get-in @seen [:body "tier"])))
+(assert (= 1.4 (:score (jev/score d "urgency"))))          ; a score MAY fall between levels
+(assert (= 0.0000118 (get-in d [:usage :cost])))
+(assert (= "classifier.evaluate" (:event (last @events))))
+(assert (= "ok" (:status (last @events))))
+
+(println "urgency:" (:score (jev/score d "urgency")) "| attempts:" @attempts)
+(println "OK")
+```
+
+## Backends in one line each
+
+| `:style` | What it is |
+|---|---|
+| `"systemone"` | One `POST {base-url}/systemone` with the canonical body. Chunking under the token budget and the 255-option cap is the backend's business and invisible to you. Reports `:calibrated true`. |
+| `"llm"` | The three question types rendered as **one** structured-output call on any §8 client. This is what makes the seam vendor-neutral — no System One credential needed. Reports `:calibrated false`. |
+| `"custom"` | Your own `:evaluate`: a fine-tuned encoder, a rules engine, or a cache in front of either. |
+| `"static"` | Recorded decisions keyed by the canonical request **and** the state. **This is what CI runs.** A miss throws rather than guessing. |
+
+The full comparison, with the measured latency and cost figures, is on
+[Backends](/judge/backends/).
+
+## See also
+
+- [`toolnexus.classifier/noul-question`](/api/clojure/judge/questions/) — The three question types, the criteria each one needs, and the limits enforced client-side before the request.
+- [`toolnexus.classifier/parse-decision`](/api/clojure/judge/decision/) — One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero.
+- [Typed decisions](/judge/) — why a judgment is a different contract from an action.
+- [The encoding rules](/judge/encoding/) — the measured reason option descriptions decide whether a `choice` works at all.
+- [Backends & configuration](/judge/backends/) — `systemone`, `llm`, `custom`, `static`.
+- [Cookbook: a classifier in the loop](/cookbook/judge/) — the end-to-end recipe.

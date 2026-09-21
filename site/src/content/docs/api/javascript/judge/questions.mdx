@@ -1,0 +1,253 @@
+---
+title: "noul"
+description: "The three question types, the criteria each one needs, and the limits enforced client-side before the request. — JavaScript."
+sidebar:
+  label: "noul"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/classifier.ts">js/src/classifier.ts</a>
+</p>
+
+```ts
+function noul(instructions: string, criteria?: NoulCriteria): NoulQuestion
+function choice(instructions: string, criteria: Record<string, string>): ChoiceQuestion
+function score(instructions: string, criteria: string[]): ScoreQuestion
+function choiceOver(instructions: string, items: Record<string, string>): ChoiceQuestion
+
+type Question = NoulQuestion | ChoiceQuestion | ScoreQuestion
+```
+
+The three question types, the criteria each one needs, and the limits enforced client-side before
+the request. You pass a `Record<string, Question>` to
+[`evaluate`](/api/javascript/judge/classifier/); the map keys are yours and are never transmitted.
+
+## When to use it
+
+| helper | answer shape | use it when |
+|---|---|---|
+| `noul` | one number in `0..1` | the question is a statement that either holds or does not — *is this a refund request*, *is this text an injection attempt* |
+| `choice` | one option from a named set, plus a probability for **every** offered option | the answer is one of a roster you already have — a desk, a skill, an agent, a tool |
+| `score` | a number against an **ordered** rubric of 2–10 levels | the answer is a degree — urgency, risk, confidence in a claim |
+| `choiceOver` | as `choice` | the same thing, named for building a choice out of (name, description) pairs you already hold: a tool list, a skill inventory, an A2A card |
+
+`choiceOver` is `choice` under a name that reads better at a call site that is mapping over an
+existing roster. There is no behavioural difference.
+
+## The shapes
+
+```ts
+interface NoulCriteria { true: string; false: string }
+
+interface NoulQuestion   { type: "noul";   instructions: string; criteria?: NoulCriteria }
+interface ChoiceQuestion { type: "choice"; instructions: string; criteria: Record<string, string> }
+interface ScoreQuestion  { type: "score";  instructions: string; criteria: string[] }
+```
+
+- **`noul`** — `criteria` is optional and describes the true and false cases. **Absent and empty are
+  different values** and both are preserved on the wire: omit it and the field is absent (not
+  `null`, not an empty object); pass `{ true: "", false: "" }` and it is emitted with empty values.
+- **`choice`** — `criteria` maps an option id to *what picking it would mean*. 1–255 options.
+- **`score`** — `criteria` is an ordered array. **The array order is the level numbering** and is
+  never sorted, so level `0` is the first element. A "sort everything" canonicaliser would silently
+  renumber your rubric; toolnexus never reorders an array.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Don't ask a classifier to do arithmetic">
+A `score` rates a situation; it does not add up a bill. Do the counting in code and hand the
+conclusion over in the state. The same goes for authority: a `noul` of `0.99` is a reading, not a
+permission. See [`createClassifier`](/api/javascript/judge/classifier/) for the full caution.
+</Aside>
+
+## The encoding obligation on a `choice` — yours, and it is not advice
+
+`criteria[id]` is **the only thing that differentiates one option from another to the model**. The
+instructions describe the question and the state describes the situation; neither tells the model
+what picking `left` rather than `right` would mean. Passing the id itself, an empty string, or one
+value repeated is schema-valid, passes validation, returns HTTP 200 and a well-formed distribution
+— and ranks at chance. The library detects the fully degenerate cases and emits **one**
+`classifier.warning` naming the question key, then sends the request **byte-unchanged**: this is
+detection, not repair, because repairing would invent descriptions you did not write.
+
+The measurements, the sentence template that works, and the failure mode that costs the most are on
+[Encoding](/toolnexus/judge/encoding/) — read it before you write your first `choice`.
+
+## The limits, enforced before the request
+
+| rule | limit | error |
+|---|---|---|
+| `choice` options | 1–255 | `classifier: question "<key>": a choice needs 1..255 options, got N` |
+| `score` levels | 2–10 | `classifier: question "<key>": a score needs 2..10 ordered levels, got N` |
+
+The error **names the offending question key** and the limit, and **no request is sent** — you find
+out faster and more legibly than from the backend's own `400 "Too many choices."`, which is still
+surfaced intact if it arrives. Keys are walked in sorted order, so the same malformed set always
+names the same key first. An empty `questions` map is itself an error.
+
+## Examples
+
+### 1. All three types in one call
+
+Many questions, one round trip, one state ingest. They are independent — one answer is never context
+for another.
+
+```ts test
+import assert from "node:assert"
+import { createClassifier, noul, choice, score, type RecordedDecision } from "toolnexus"
+
+const TICKET =
+  "Ticket 4021: my card was charged twice for the annual plan, and the second charge has not been " +
+  "refunded. I am not blocked from working, but I would like the money back this week."
+
+const QUESTIONS = {
+  wants_money_back: noul("Is the customer asking for money to be returned?"),
+  department: choice("Which desk should own this ticket?", {
+    // Every description says what picking THAT option would mean, on one shared template.
+    billing: "own it here when the problem is money that moved: a duplicate charge, a refund owed",
+    shipping: "own it here when the problem is a physical parcel: a late delivery, a damaged package",
+    technical: "own it here when the problem is the product itself: a login that fails, a feature that errors",
+  }),
+  urgency: score("How fast does this ticket need a human?", [
+    // The array ORDER is the level numbering. Level 0 is the first element.
+    "the customer is working normally and is waiting on an answer",
+    "the customer is inconvenienced and will chase if nobody replies today",
+    "the customer is blocked from working right now and every hour costs them",
+  ]),
+}
+
+const RECORDED: RecordedDecision = {
+  state: TICKET,
+  questions: QUESTIONS,
+  response: {
+    model: "typesafe/jev-1.13-20260917",
+    answers: {
+      wants_money_back: { type: "noul", noul: 0.99 },
+      department: {
+        type: "choice",
+        choice: "billing",
+        probabilities: { technical: 0, shipping: 0, billing: 1 },
+        confidence: 1,
+      },
+      urgency: {
+        type: "score",
+        score: 0.49,
+        legend: {
+          "0": "the customer is working normally and is waiting on an answer",
+          "1": "the customer is inconvenienced and will chase if nobody replies today",
+          "2": "the customer is blocked from working right now and every hour costs them",
+        },
+        probabilities: { "0": 0.52, "1": 0.48, "2": 0 },
+        confidence: 0.27,
+      },
+    },
+    usage: { input_tokens: 516, output_tokens: 72 },
+  },
+}
+
+const judge = createClassifier({ style: "static", model: "typesafe/jev-1.13", decisions: [RECORDED] })
+const d = await judge.evaluate(TICKET, QUESTIONS)
+
+assert.equal(d.noul("wants_money_back").noul, 0.99)
+assert.equal(d.choice("department").choice, "billing")
+// A score MAY fall between levels — 0.49 is a real answer, not a rounding artefact.
+assert.equal(d.score("urgency").score, 0.49)
+console.log("ok:", d.choice("department").choice, "| urgency", d.score("urgency").score)
+```
+
+### 2. The limits fire client-side, and name the key
+
+No request leaves the process. That is true of the `systemone` backend too — validation runs before
+the backend is ever chosen.
+
+```ts test
+import assert from "node:assert"
+import { createClassifier, choice, score, noul } from "toolnexus"
+
+const judge = createClassifier({ style: "static", decisions: [] })
+
+// A score rubric needs 2..10 ordered levels. One level is not a rubric.
+await assert.rejects(
+  () => judge.evaluate("s", { urgency: score("How urgent?", ["only one level"]) }),
+  /question "urgency": a score needs 2\.\.10 ordered levels, got 1/,
+)
+
+// A choice needs 1..255 named options.
+const tooMany: Record<string, string> = {}
+for (let i = 0; i < 256; i++) tooMany[`opt${i}`] = `pick this when case ${i} applies`
+await assert.rejects(
+  () => judge.evaluate("s", { department: choice("Which desk?", tooMany) }),
+  /question "department": a choice needs 1\.\.255 options, got 256/,
+)
+
+// And an empty question map is an error of its own.
+await assert.rejects(() => judge.evaluate("s", {}), /no questions to evaluate/)
+
+// A valid set gets past validation and fails LATER, on the empty static corpus — proof the two
+// failures are different stages.
+await assert.rejects(
+  () => judge.evaluate("s", { ok: noul("Does this hold?") }),
+  /no recorded decision/,
+)
+console.log("ok: limits rejected before any request")
+```
+
+### 3. `choiceOver` a roster you already have
+
+Building the option set from a toolkit, a skill inventory or an agent card is the common case — and
+the description you already wrote for the model is exactly the description the classifier needs.
+
+```ts test
+import assert from "node:assert"
+import { createClassifier, choiceOver, Decision, nearUniform, type Question } from "toolnexus"
+
+// Pretend these came from `tk.tools()` — name plus the description the model already reads.
+const tools = [
+  { name: "refund_charge", description: "pick this to return money the customer was charged" },
+  { name: "reset_password", description: "pick this to let the customer back into their account" },
+]
+
+const questions: Record<string, Question> = {
+  // The key may be anything; it is addressing, never content, and is never transmitted.
+  next_tool: choiceOver(
+    "Which tool moves this ticket forward?",
+    Object.fromEntries(tools.map((t) => [t.name, t.description])),
+  ),
+}
+
+const judge = createClassifier({
+  style: "custom",
+  evaluate(state, qs) {
+    assert.deepEqual(Object.keys((qs.next_tool as any).criteria), ["refund_charge", "reset_password"])
+    const probabilities = { refund_charge: 0.91, reset_password: 0.09 }
+    return new Decision(
+      "roster-stub",
+      {
+        next_tool: {
+          type: "choice",
+          choice: "refund_charge",
+          probabilities,
+          nearUniform: nearUniform(probabilities),
+          confidence: 0.9,
+        },
+      },
+      { inputTokens: 0, outputTokens: 0 },
+      false,
+    )
+  },
+})
+
+const d = await judge.evaluate("charged twice, wants the money back", questions)
+assert.equal(d.choice("next_tool").choice, "refund_charge")
+console.log("ok:", d.choice("next_tool").choice)
+```
+
+## See also
+
+- [`createClassifier`](/api/javascript/judge/classifier/) — A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop.
+- [`Decision`](/api/javascript/judge/decision/) — One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero.
+- [Encoding](/toolnexus/judge/encoding/) — the measured argument behind the encoding obligation
+- [Typed decisions](/toolnexus/judge/) — where this tier sits, and what it costs
+- [Cookbook: a classifier end to end](/toolnexus/cookbook/judge/)

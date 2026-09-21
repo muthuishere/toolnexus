@@ -1,0 +1,284 @@
+---
+title: "createClassifier"
+description: "A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop. — JavaScript."
+sidebar:
+  label: "createClassifier"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/classifier.ts">js/src/classifier.ts</a>
+</p>
+
+```ts
+function createClassifier(opts?: ClassifierOptions): Classifier
+
+class Classifier {
+  evaluate(
+    state: unknown,
+    questions: Record<string, Question>,
+    signal?: AbortSignal,
+  ): Promise<Decision>
+}
+```
+
+A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no
+tool calling, no loop. `Tool` is the contract for an **action**; `Classifier` is the contract for a
+**judgment**. A classifier has no conversation to hold, so it is never selected as a model for
+`run`/`ask` and never enters the client loop.
+
+`state` is whatever the host already has — a string, an object, an array. `questions` is a map from
+**your own keys** to question definitions; the keys are addressing, not content, and are never
+transmitted, so a key may be a tool, skill or agent name verbatim. Questions are **independent**:
+one answer is never context for another.
+
+<Aside type="caution" title="A classifier interprets; it never authorises">
+Its output is a reading of intent inside a boundary, never the boundary. Schema validity is not
+correctness: a decision can be confidently wrong, and "cannot hallucinate" means only that the
+returned value is in the declared schema. Numeric limits, permission checks and allowlists stay in
+your `if` statements. Nothing here is a security control.
+</Aside>
+
+## When to use it
+
+When the thing you need is a **number you can threshold**, not a turn. Routing a ticket to a desk,
+deciding whether a turn needs the billing skill, rating how risky a shell command looks, scoring
+urgency — none of them changes the world, each of them steers something that does. See
+[Typed decisions](/toolnexus/judge/) for where this sits between an `if` and a frontier-model turn.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use the client when the answer is prose or an action">
+[`createClient`](/api/javascript/client/create/) holds a conversation, calls tools and streams. A
+`Classifier` does none of that: it has no messages, no tools and no streaming. If you find yourself
+parsing a number out of `run()` text, that is the question this seam exists for — and if you need
+the model to *do* something, a classifier cannot.
+</Aside>
+
+## Defaults
+
+| | default |
+|---|---|
+| `style` | `"systemone"` |
+| `baseUrl` | `https://api.typesafe.ai/v1` |
+| `model` | `"jev-latest"` — pin it (e.g. `jev-1.13.0`) once your thresholds are tuned |
+| `apiKeyEnv` | `"TYPESAFE_API_KEY"` — the **name** of an env var, never the value |
+| `timeoutMs` | `10_000` (bounds **one request**; a classifier has no loop to bound) |
+| `retries` | `2`, exponential from `retryBaseMs` (`500`) |
+
+These are exported as `DEFAULT_CLASSIFIER_BASE_URL`, `DEFAULT_CLASSIFIER_MODEL`,
+`DEFAULT_CLASSIFIER_API_KEY_ENV` and `DEFAULT_CLASSIFIER_TIMEOUT_MS`.
+
+## The four backends
+
+| `style` | what it does | requires |
+|---|---|---|
+| `"systemone"` | one `POST {baseUrl}/systemone` with the canonical body. Reports `calibrated: true` | a credential in `apiKeyEnv` |
+| `"llm"` | the same three question types rendered as **one** structured-output call on any §8 `Client`. Reports `calibrated: false` | `client` |
+| `"custom"` | your own function — a fine-tuned encoder, a rules engine, a cache. Every wire option is ignored | `evaluate` |
+| `"static"` | recorded decisions, keyed by the canonical request **and** the state. No network, no credential | `decisions` |
+
+A missing required option is rejected in the constructor, before any call is made. `static` is what
+CI runs, and it is not a convenience — the live backend is non-deterministic, so it is the only
+backend a test may assert a number against. See [Backends](/toolnexus/judge/backends/).
+
+## Examples
+
+### 1. The smallest useful call — `static`, so it runs with no key
+
+```ts test
+import assert from "node:assert"
+import { createClassifier, noul, type RecordedDecision } from "toolnexus"
+
+const STATE = "Ticket 4021: my card was charged twice and the second charge has not been refunded."
+const QUESTIONS = { wants_money_back: noul("Is the customer asking for money to be returned?") }
+
+// One decision recorded off the live backend. `static` matches on the canonical request AND the
+// state, so the model, the questions and the state below must be the ones you evaluate with.
+const RECORDED: RecordedDecision = {
+  state: STATE,
+  questions: QUESTIONS,
+  response: {
+    model: "typesafe/jev-1.13-20260917",
+    answers: { wants_money_back: { type: "noul", noul: 0.99 } },
+    usage: { input_tokens: 412, output_tokens: 12 },
+  },
+}
+
+const judge = createClassifier({ style: "static", model: "typesafe/jev-1.13", decisions: [RECORDED] })
+const d = await judge.evaluate(STATE, QUESTIONS)
+
+// A noul carries NO confidence: the number IS the answer.
+assert.equal(d.noul("wants_money_back").noul, 0.99)
+assert.equal(d.calibrated, true)
+console.log("ok: refund wanted p =", d.noul("wants_money_back").noul)
+```
+
+### 2. A `custom` backend — a rules engine, a cache, or a test double
+
+`style: "custom"` hands the whole evaluation to you and ignores every wire option. This is also how
+you put a cache in front of a live classifier: check it, and fall through to a real one on a miss.
+
+```ts test
+import assert from "node:assert"
+import { createClassifier, choice, Decision, nearUniform } from "toolnexus"
+
+const questions = {
+  department: choice("Which desk should own this ticket?", {
+    billing: "own it here when the problem is money that moved: a duplicate charge, a refund owed",
+    technical: "own it here when the problem is the product itself: a login that fails",
+  }),
+}
+
+let calls = 0
+const judge = createClassifier({
+  style: "custom",
+  evaluate(state, qs) {
+    calls++
+    // Whatever you like in here — a rules engine, a fine-tuned encoder, a lookup.
+    const billing = String(state).includes("charge") ? 0.93 : 0.07
+    const probabilities = { billing, technical: 1 - billing }
+    return new Decision(
+      "rules-v1",
+      {
+        department: {
+          type: "choice",
+          choice: billing > 0.5 ? "billing" : "technical",
+          probabilities,
+          // Derive it the same way the wire decode does, so consumers read one flag everywhere.
+          nearUniform: nearUniform(probabilities),
+          confidence: Math.abs(billing - 0.5) * 2,
+        },
+      },
+      { inputTokens: 0, outputTokens: 0 },
+      // A rules engine reports no calibrated probabilities. Say so rather than claiming it.
+      false,
+    )
+  },
+})
+
+const d = await judge.evaluate("my card was charged twice", questions)
+assert.equal(d.choice("department").choice, "billing")
+assert.equal(d.choice("department").nearUniform, false)
+assert.equal(d.calibrated, false)
+assert.equal(calls, 1)
+console.log("ok:", d.choice("department").choice, "via", d.model)
+```
+
+### 3. The full surface — metrics, the degenerate warning, and no repair
+
+`onMetric` feeds the **same** §8 sink the client uses. A successful evaluate emits one
+`classifier.evaluate`; badly-encoded criteria emit `classifier.warning`, whose text lives in
+`warning` and **never** in `error` — a warning is not a failure, and a consumer filtering the sink
+on "has an error" must not count one. Detection is once per question key per classifier, so a
+per-turn judge does not flood the sink, and the request goes out **byte-unchanged**.
+
+```ts test
+import assert from "node:assert"
+import { createClassifier, choice, type MetricEvent, type RecordedDecision } from "toolnexus"
+
+const STATE = "ticket text"
+// Every description is just its own option id — schema-valid, HTTP 200, and ranks at chance.
+const QUESTIONS = { department: choice("Which desk?", { billing: "billing", technical: "technical" }) }
+
+const RECORDED: RecordedDecision = {
+  state: STATE,
+  questions: QUESTIONS,
+  response: {
+    model: "jev-latest",
+    answers: {
+      department: {
+        type: "choice",
+        choice: "billing",
+        probabilities: { billing: 0.51, technical: 0.49 },
+        confidence: 0.52,
+      },
+    },
+    usage: { input_tokens: 90, output_tokens: 8 },
+  },
+}
+
+const events: MetricEvent[] = []
+const judge = createClassifier({
+  style: "static",
+  decisions: [RECORDED],
+  onMetric: (ev) => events.push(ev),
+})
+
+await judge.evaluate(STATE, QUESTIONS)
+await judge.evaluate(STATE, QUESTIONS) // the warning does NOT repeat for the same key
+
+const warnings = events.filter(
+  (e): e is Extract<MetricEvent, { event: "classifier.warning" }> => e.event === "classifier.warning",
+)
+assert.equal(warnings.length, 1)
+assert.match(warnings[0].warning, /department/)
+assert.equal("error" in warnings[0], false) // a warning is not a failure
+assert.equal(events.filter((e) => e.event === "classifier.evaluate").length, 2)
+console.log("ok:", warnings[0].warning)
+```
+
+## `ClassifierOptions`
+
+Mirrors [`ClientOptions`](/api/javascript/client/create/) field-for-field wherever a field makes
+sense, so a host that has configured one has configured the other.
+
+| Option | Type | Default | What it does |
+|---|---|---|---|
+| `style` | `"systemone" \| "llm" \| "custom" \| "static"` | `"systemone"` | Which backend answers. Same slot as the client's `style`; the values differ because the wires differ. |
+| `baseUrl` | `string` | `https://api.typesafe.ai/v1` | The System One endpoint base. OpenRouter (`https://openrouter.ai/api/v1`) serves this wire today; self-hosted and open-weights implementations speak it too. |
+| `model` | `string` | `"jev-latest"` | The model asked for. `Decision.model` echoes what actually answered, which may be more specific. |
+| `apiKeyEnv` | `string` | `"TYPESAFE_API_KEY"` | The **name** of the env var holding the credential, read at call time and never logged. §8's `apiKey` takes a value; this option deliberately does not. |
+| `headers` | `Record<string, string>` | — | Extra headers. Values expand `${ENV_VAR}` from the environment at call time and are **never logged**, identically to remote-MCP headers. |
+| `timeoutMs` | `number` | `10_000` | Bounds one request, not a run. |
+| `fetch` | `typeof fetch` | global `fetch` | The injectable transport (§8 Gap 2). Scope is the classifier path only. |
+| `retries` | `number` | `2` | Attempts after the first, on a retryable status or a network error. |
+| `retryableStatuses` | `readonly number[]` | — | Extra statuses **added** to the retryable set. It can only widen — see below. |
+| `onError` | `(info: ErrorInfo) => ErrorTier` | retry iff `info.retryable` | Reuses the §8 `ErrorInfo → "retry" \| "fail"` classifier verbatim. There is no second retry policy and no `"suspend"` tier here. |
+| `requestParams` | `Record<string, unknown>` | — | Extra top-level body keys, shallow-merged after the classifier builds its own; a `requestParams` key **wins** on collision. Omit and the body is byte-identical. |
+| `bodyTransform` | `(body) => body \| void` | — | Receives the assembled body after the merge and returns the body to send. Order: base body → `requestParams` merge → `bodyTransform` → marshal, exactly as §8. |
+| `onMetric` | `(ev: MetricEvent) => void` | — | The §8 sink. Emits `classifier.evaluate` and `classifier.warning`. |
+| `client` | `Client` | — | `style: "llm"` only — the §8 client to emulate over. |
+| `evaluate` | `EvaluateFn` | — | `style: "custom"` only — your own function. |
+| `retryBaseMs` | `number` | `500` | Base of the exponential backoff, in milliseconds: the delay is `base * 2 ** attempt`, no jitter, and a `Retry-After` header still wins. |
+| `decisions` | `RecordedDecision[]` | — | **JavaScript-local naming.** `style: "static"` only — the recorded corpus. |
+
+`decisions` is not in the cross-port options manifest; everything above it is.
+
+## Retries, and what `retryableStatuses` can and cannot do
+
+The classifier retries `408`, `429`, `500`, `502`, `503`, `504`, `529` and network errors.
+**`408` is the classifier's addition over the §8 client set** — a request timeout on a single
+stateless POST is safe to repeat in a way a mid-conversation turn is not.
+
+`retryableStatuses` **adds** to that set and can never remove from it: a host cannot drop `429` and
+lose `Retry-After` handling with it. It sets the *default* classification only — `onError` still
+runs per attempt and has the final say, so `onError` returning `"fail"` overrides a status listed
+here. A `Retry-After` header wins over the backoff, and `Retry-After: 0` means "retry now", not "no
+opinion".
+
+```ts
+// A Cloudflare-fronted origin that answers 520–527.
+createClassifier({ retryableStatuses: [520, 521, 522, 523, 524, 525, 526, 527] })
+```
+
+## Secrets
+
+The credential resolves at call time from the **named** environment variable, and `${ENV_VAR}`
+header references expand at call time. No credential value and no expanded header value appears in
+any log, metric, error message or returned value — an authentication failure names the status and
+the endpoint and nothing else, and a `401`/`403` body is never echoed back, because a gateway
+happily reflects a bad `Authorization` header into its own error text.
+
+A host that constructs no `Classifier` observes byte-identical behaviour to a build without this
+section, and constructing one alters no request the client loop makes.
+
+## See also
+
+- [`noul`](/api/javascript/judge/questions/) — The three question types, the criteria each one needs, and the limits enforced client-side before the request.
+- [`Decision`](/api/javascript/judge/decision/) — One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero.
+- [Typed decisions](/toolnexus/judge/) — why this tier exists, and what it costs
+- [Backends](/toolnexus/judge/backends/) — `systemone`, `llm`, `custom`, `static`, and the canonical request
+- [Encoding](/toolnexus/judge/encoding/) — the measurements behind the encoding obligation
+- [Cookbook: a classifier end to end](/toolnexus/cookbook/judge/) — the runnable example this page is drawn from

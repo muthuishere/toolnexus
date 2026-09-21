@@ -203,6 +203,10 @@ IO.puts("ok: retries: 1 bounded the loop to #{Agent.get(attempts, & &1)} total a
 | `:retryable_statuses` | `nil` | Extra HTTP statuses to classify as retryable, **added** to the default `429`/`500`/`502`/`503`/`504`/`529` — widens the set only, never shrinks it, and `on_error` still has the final say. |
 | `:on_error` | `nil` (default classifier) | `(info -> :retry \| :fail)`. `info`: `%{status:, error:, attempt:, retryable:}` — `status` on a non-2xx response, `error` on a transport exception, `attempt` zero-based, `retryable` = whether the default rule (`429`/`500`/`502`/`503`/`504`/`529`/network, plus any `:retryable_statuses`) would already retry it. Absent ⇒ `retryable? :retry : :fail`, byte-identical to the hardcoded rule this option replaced. |
 
+### The classifier has the same backoff base
+
+`Classifier` carries the same knob under the same name: `:retry_base_ms` (default `500`, `base * 2^attempt`, no jitter, `Retry-After` still wins). See [`Toolnexus.Classifier`](/api/elixir/judge/classifier/).
+
 ## See also
 
 - [`Toolnexus.Client.create`](/api/elixir/client/create/) — the unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

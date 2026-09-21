@@ -572,6 +572,57 @@
 			"parityNote": "Elixir configures retries/timeout as options on Toolnexus.Client.create/1 rather than a distinct error-classifier type."
 		},
 		{
+			"id": "judge/classifier",
+			"group": "judge",
+			"member": "classifier",
+			"title": "createClassifier — the judgment seam",
+			"spec": "§8B",
+			"summary": "A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop.",
+			"symbols": {
+				"javascript": "createClassifier",
+				"python": "create_classifier",
+				"golang": "CreateClassifier",
+				"java": "Classifier.create",
+				"csharp": "Classifier.Create",
+				"elixir": "Toolnexus.Classifier.create",
+				"clojure": "toolnexus.classifier/create-classifier"
+			}
+		},
+		{
+			"id": "judge/questions",
+			"group": "judge",
+			"member": "questions",
+			"title": "Questions — noul, choice and score",
+			"spec": "§8B",
+			"summary": "The three question types, the criteria each one needs, and the limits enforced client-side before the request.",
+			"symbols": {
+				"javascript": "noul",
+				"python": "NoulQuestion",
+				"golang": "NoulQuestion",
+				"java": "Classifier.NoulQuestion",
+				"csharp": "NoulQuestion",
+				"elixir": "Toolnexus.Classifier.Noul",
+				"clojure": "toolnexus.classifier/noul-question"
+			}
+		},
+		{
+			"id": "judge/decision",
+			"group": "judge",
+			"member": "decision",
+			"title": "Decision — typed answers, calibration and nearUniform",
+			"spec": "§8B",
+			"summary": "One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero.",
+			"symbols": {
+				"javascript": "Decision",
+				"python": "Decision",
+				"golang": "Decision",
+				"java": "Classifier.Decision",
+				"csharp": "Decision",
+				"elixir": "Toolnexus.Classifier.Decision",
+				"clojure": "toolnexus.classifier/parse-decision"
+			}
+		},
+		{
 			"id": "agents/agent",
 			"group": "agents",
 			"member": "agent",

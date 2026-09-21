@@ -1,0 +1,381 @@
+---
+title: "CreateClassifier"
+description: "A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop. — Go."
+sidebar:
+  label: "CreateClassifier"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/classifier.go">golang/classifier.go</a>
+</p>
+
+```go
+func CreateClassifier(opts ClassifierOptions) (*Classifier, error)
+
+func (c *Classifier) Evaluate(
+	ctx context.Context,
+	state any,
+	questions map[string]Question,
+) (Decision, error)
+```
+
+A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages,
+no tool calling, no loop. `state` is whatever the host already has (a string, a struct, a map, a
+slice); `questions` is a map from **caller-chosen keys** to question definitions. The keys are
+addressing, not content — they are never transmitted, so a key may be a tool, skill or agent name
+verbatim, and two evaluations differing only in their keys send identical bytes.
+
+Go returns `(T, error)` everywhere the other ports throw, and `Evaluate` takes a
+`context.Context` — cancel it and the call returns `ctx.Err()` without retrying.
+
+<Aside type="caution" title="A classifier interprets; it never authorises">
+A decision is **advisory**. Schema validity is not correctness: a decision can be confidently
+wrong, and "cannot hallucinate" means only that the returned value is inside the declared schema.
+Numeric limits, permission checks and allowlists stay in your `if` statements. Nothing on this
+page is a security control.
+</Aside>
+
+## When to use it
+
+Reach for a classifier when the thing you need is a **judgment**, not an action: *is this command
+risky, does this turn need the billing skill, is this text an injection attempt, how urgent is this
+ticket*. `Tool` is the contract for an action; `Classifier` is the contract for a judgment. The
+concepts and the measurements live in [Typed decisions](/toolnexus/judge/); this page is the Go
+surface.
+
+A `Classifier` is **not** a model you can hand to `Client.Run` — it has no messages, no tool
+calling and no streaming, and it never enters the client loop.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="When NOT to use it">
+If the answer is already decidable in code — a numeric threshold, a regex, an allowlist — use the
+code. It is free, instant and auditable. If the decision must also *act* (call tools, write prose,
+hold a conversation), you want [`CreateClient`](/api/go/client/create/) instead. A classifier sits
+between the two: fractions of a cent, ~0.3–0.5 s, one number you can threshold.
+</Aside>
+
+## Defaults
+
+| Setting | Default |
+|---|---|
+| `Style` | `StyleSystemOne` |
+| `BaseURL` | `https://api.typesafe.ai/v1` (`DefaultClassifierBaseURL`) |
+| `Model` | `jev-latest` (`DefaultClassifierModel`) — a floating alias; pin it once thresholds are tuned |
+| `APIKeyEnv` | `TYPESAFE_API_KEY` (`DefaultClassifierAPIKeyEnv`) — the **name** of an env var, never a value |
+| `Timeout` | 10 s (`DefaultClassifierTimeout`), bounding **one** request |
+| `Retries` | 2 |
+| `HTTPClient` | `http.DefaultClient` |
+
+## `ClassifierOptions`
+
+```go
+type ClassifierOptions struct {
+	Style             ClassifierStyle
+	BaseURL           string
+	Model             string
+	APIKeyEnv         string
+	Headers           map[string]string
+	Timeout           time.Duration
+	HTTPClient        *http.Client
+	Retries           int
+	RetryableStatuses []int
+	OnError           func(ErrorInfo) Tier
+	RequestParams     map[string]any
+	BodyTransform     func(body map[string]any) map[string]any
+	OnMetric          func(MetricEvent)
+	Client            *Client
+	Evaluate          func(ctx context.Context, state any, questions map[string]Question) (Decision, error)
+	Decisions         []RecordedDecision
+}
+```
+
+| Field | Default | What it does |
+|---|---|---|
+| `Style` | `StyleSystemOne` | Which backend answers: `StyleSystemOne`, `StyleLLM`, `StyleCustom`, `StyleStatic`. |
+| `BaseURL` | `https://api.typesafe.ai/v1` | API base. The request goes to `<BaseURL>/systemone`. OpenRouter (`https://openrouter.ai/api/v1`) serves the same wire. |
+| `Model` | `jev-latest` | Model asked for. `Decision.Model` echoes what actually answered, which may be more specific. |
+| `APIKeyEnv` | `TYPESAFE_API_KEY` | The **name** of the env var holding the credential, read at call time and never logged. Unlike §8's `APIKey`, this option deliberately never takes a value. |
+| `Headers` | — | Extra request headers. Values expand `${ENV_VAR}` at call time and are never logged. |
+| `Timeout` | 10 s | Bounds **one** request — a classifier has no loop to bound. |
+| `HTTPClient` | `http.DefaultClient` | Transport override, scoped to the classifier path only. |
+| `Retries` | 2 | Retries on a transient failure. Backoff is `RetryBaseMs * 2^attempt` with no jitter; a `Retry-After` header wins over it. |
+| `RetryBaseMs` | 500 | Base of that backoff, in ms. `0` ⇒ 500. The classifier's half of the §8 `ClientOptions.RetryBaseMs` it mirrors — set it to `1` to take a retry test off the clock. |
+| `RetryableStatuses` | — | Extra HTTP statuses to treat as retryable. It **adds only** — it can never remove `429` and lose `Retry-After` handling with it. |
+| `OnError` | built-in | Classifies one failed attempt into `TierRetry` or `TierFail`. Reuses §8's `ErrorInfo`/`Tier` verbatim; there is no second retry policy and no `suspend` tier here. |
+| `RequestParams` | — | Extra top-level body keys, shallow-merged after the classifier builds its own body. A `RequestParams` key **wins** on collision. |
+| `BodyTransform` | — | Receives the assembled body after the merge and returns the body to send; returning `nil` leaves it unchanged. Order: base body → `RequestParams` → `BodyTransform` → marshal. |
+| `OnMetric` | — | The §8 metric sink. Emits `MetricClassifierEvaluate` per call and `MetricClassifierWarning` for degenerate criteria. |
+| `Client` | — | The §8 `Client` to emulate over. **Required** for `StyleLLM`. |
+| `Evaluate` | — | Your own function. **Required** for `StyleCustom`; every wire option is ignored. |
+| `Decisions` | — | The recorded corpus. `StyleStatic` only. |
+
+A style whose required option is missing is rejected by `CreateClassifier`, before any call is
+made — `StyleLLM` without `Client`, `StyleCustom` without `Evaluate`, an unknown style at all.
+
+## The four backends
+
+| `Style` | Where the answer comes from | `Calibrated` |
+|---|---|---|
+| `StyleSystemOne` | `POST <BaseURL>/systemone` — TypeSafe's own API, or any gateway serving that wire | `true` |
+| `StyleLLM` | One structured-output call on a §8 `Client` — the vendor-neutral exit when you have no System One credential | `false` (self-reported numbers, not token probabilities) |
+| `StyleCustom` | Your `Evaluate` func | whatever you return |
+| `StyleStatic` | A recorded corpus, matched on the canonical request **and** the state | whatever was recorded |
+
+The trade-offs — and why `static` is a test *contract* rather than a convenience — are in
+[Backends](/toolnexus/judge/backends/).
+
+## Retries
+
+The classifier's default retryable set is `{408, 429, 500, 502, 503, 504, 529}` — the §8 client
+set plus **408**, which the classifier adds rather than inventing a second policy. `Retry-After`
+(delay-seconds) wins over the computed backoff. `RetryableStatuses` widens the set and never
+narrows it; `OnError` still runs per attempt and has the final say, so `OnError` returning
+`TierFail` overrides a status listed there. A cancelled `ctx` is never retried.
+
+A `401`/`403` body is never echoed into an error, a log or a metric — a gateway happily reflects a
+bad `Authorization` header into its own error text.
+
+## Examples
+
+### 1. The smallest useful call — one question, replayed offline
+
+`StyleStatic` needs no key and no network, so this is the whole surface in one file.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	state := "Ticket 4021: my card was charged twice and the second charge was not refunded."
+
+	questions := map[string]toolnexus.Question{
+		"wants_money_back": toolnexus.NoulQuestion{
+			Instructions: "Is the customer asking for money to be returned?",
+		},
+	}
+
+	recorded := `{"model":"typesafe/jev-1.13-20260917",
+		"answers":{"wants_money_back":{"type":"noul","noul":0.99}},
+		"usage":{"input_tokens":180,"output_tokens":8}}`
+
+	judge, err := toolnexus.CreateClassifier(toolnexus.ClassifierOptions{
+		Style: toolnexus.StyleStatic,
+		Model: "typesafe/jev-1.13",
+		Decisions: []toolnexus.RecordedDecision{
+			{State: state, Questions: questions, Response: []byte(recorded)},
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	d, err := judge.Evaluate(context.Background(), state, questions)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	want, err := d.Noul("wants_money_back")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if want.Noul < 0.9 || !d.Calibrated {
+		log.Fatalf("unexpected decision: %+v", d)
+	}
+
+	fmt.Println("ok: wants_money_back =", want.Noul, "model:", d.Model)
+}
+```
+
+### 2. The realistic case — your own backend, and the degenerate-criteria warning
+
+`StyleCustom` hands the whole evaluation to you; every wire option is ignored. The client-side
+limits and the degenerate-criteria detection still run first, because they are properties of the
+questions, not of the transport.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	var warnings []string
+
+	judge, err := toolnexus.CreateClassifier(toolnexus.ClassifierOptions{
+		Style: toolnexus.StyleCustom,
+		Evaluate: func(_ context.Context, _ any, _ map[string]toolnexus.Question) (toolnexus.Decision, error) {
+			return toolnexus.Decision{
+				Model: "house-rules-v1",
+				Answers: map[string]toolnexus.DecisionAnswer{
+					"desk": toolnexus.ChoiceAnswer{
+						Choice:        "billing",
+						Probabilities: map[string]float64{"billing": 0.5, "technical": 0.5},
+						Confidence:    0.5,
+					},
+				},
+				Calibrated: false,
+			}, nil
+		},
+		OnMetric: func(ev toolnexus.MetricEvent) {
+			if ev.Event == toolnexus.MetricClassifierWarning {
+				warnings = append(warnings, ev.Question)
+			}
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Every description is just its own option id — schema-valid, and it tells the
+	// model nothing. Detection, never repair: the request goes out byte-unchanged.
+	questions := map[string]toolnexus.Question{
+		"desk": toolnexus.ChoiceQuestion{
+			Instructions: "Which desk should own this ticket?",
+			Criteria:     map[string]string{"billing": "billing", "technical": "technical"},
+		},
+	}
+
+	if _, err := judge.Evaluate(context.Background(), "charged twice", questions); err != nil {
+		log.Fatal(err)
+	}
+	// Once per question key per classifier, so a per-turn judge never floods the sink.
+	if _, err := judge.Evaluate(context.Background(), "charged twice", questions); err != nil {
+		log.Fatal(err)
+	}
+
+	if len(warnings) != 1 || warnings[0] != "desk" {
+		log.Fatalf("expected one warning naming the key, got %v", warnings)
+	}
+
+	fmt.Println("ok: warned once about question", warnings[0])
+}
+```
+
+The warning travels in the event's `Warning` field and `Error` stays empty — a consumer filtering
+the §8 sink on "has an error" must not count one. Why the library refuses to repair the criteria,
+and what a good encoding is worth in measured points, is in
+[The encoding obligation](/toolnexus/judge/encoding/).
+
+### 3. The full surface — the `systemone` wire, against a local server
+
+`BaseURL` points anywhere that serves the wire, so a `httptest` server exercises the request
+shaping, the retry budget and the metric sink with no network and no credential.
+
+```go test
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"time"
+
+	"context"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	var seen map[string]any
+	calls := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "0") // delay-seconds wins over the backoff
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &seen)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"jev-1.13","calibrated":true,
+			"answers":{"risk":{"type":"score","score":1.21,
+				"legend":{"0":"harmless","1":"reversible","2":"destructive"},
+				"probabilities":{"0":0.10,"1":0.59,"2":0.31},"confidence":0.71}},
+			"usage":{"input_tokens":210,"output_tokens":24}}`))
+	}))
+	defer srv.Close()
+
+	judge, err := toolnexus.CreateClassifier(toolnexus.ClassifierOptions{
+		Style:             toolnexus.StyleSystemOne,
+		BaseURL:           srv.URL,
+		Model:             "jev-latest",
+		APIKeyEnv:         "TYPESAFE_API_KEY", // the NAME of an env var, never the value
+		Timeout:           5 * time.Second,
+		Retries:           2,
+		RetryableStatuses: []int{520}, // adds only; 429 stays retryable
+		RequestParams:     map[string]any{"tenant": "acme"},
+		BodyTransform: func(b map[string]any) map[string]any {
+			b["trace"] = "docs-example"
+			return b
+		},
+		OnError: func(info toolnexus.ErrorInfo) toolnexus.Tier {
+			if info.Retryable {
+				return toolnexus.TierRetry
+			}
+			return toolnexus.TierFail
+		},
+		OnMetric: func(ev toolnexus.MetricEvent) {
+			if ev.Event == toolnexus.MetricClassifierEvaluate {
+				fmt.Println("metric:", ev.Event, ev.Status)
+			}
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	questions := map[string]toolnexus.Question{
+		"risk": toolnexus.ScoreQuestion{
+			Instructions: "How destructive is this shell command?",
+			Criteria:     []string{"harmless", "reversible", "destructive"},
+		},
+	}
+
+	d, err := judge.Evaluate(context.Background(), "rm -rf ./build", questions)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if calls != 2 {
+		log.Fatalf("expected the 429 to be retried once, got %d calls", calls)
+	}
+	if seen["tenant"] != "acme" || seen["trace"] != "docs-example" {
+		log.Fatalf("body shaping did not land: %v", seen)
+	}
+	risk, err := d.Score("risk")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("ok: risk=%v calibrated=%v after %d attempts\n", risk.Score, d.Calibrated, calls)
+}
+```
+
+## See also
+
+- [`NoulQuestion`](/api/go/judge/questions/) — The three question types, the criteria each one needs, and the limits enforced client-side before the request.
+- [`Decision`](/api/go/judge/decision/) — One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero.
+- [Typed decisions](/toolnexus/judge/) — what a judgment is, and when it beats both an `if` and a chat turn.
+- [Backends](/toolnexus/judge/backends/) — `systemone`, `llm`, `custom`, `static`, and what each one costs.
+- [The encoding obligation](/toolnexus/judge/encoding/) — why option descriptions are the whole ball game.
+- [Cookbook: typed decisions](/toolnexus/cookbook/judge/) — a working judge in every language.
