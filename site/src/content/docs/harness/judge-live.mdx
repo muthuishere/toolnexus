@@ -30,6 +30,34 @@ Backends measured: `systemone` = `typesafe/jev-1.13` and `llm` = `openai/gpt-4o-
 figure is a call that actually happened.
 </Aside>
 
+## What one call actually looks like
+
+<video
+  src="/toolnexus/judge-run.webm"
+  autoplay
+  loop
+  muted
+  playsinline
+  controls
+  style="width:100%;border-radius:8px;border:1px solid var(--sl-color-gray-5);margin-block:1rem"
+  aria-label="A terminal recording of js/examples/judge.ts making one live Classifier call through OpenRouter and printing the returned decision."
+></video>
+
+That is `js/examples/judge.ts`, unmodified, against the live `systemone` wire over OpenRouter —
+**one POST, three question types, one state ingest**: a `noul` (`wants_money_back`), a `choice`
+(`department`) and a `score` (`urgency`), each answered independently. It costs
+**$0.000021672** and the credential appears nowhere in the output, which is why this recording can
+be published at all.
+
+Watch the `urgency` line if you re-run it. The take above returned **0.53 — "level 1: the customer
+is inconvenienced"**; the take before it, same bytes, same model, returned **0.47 — "level 0: the
+customer is working normally"**. One recording, and the whole argument of this page is already on
+screen: *a score sits between levels, and it moves.* That is the reason no test may assert a live
+number, and the reason the `static` backend is what CI runs.
+
+Regenerate it with `OPENROUTER_API_KEY=… vhs site/scripts/judge-run.tape` — the tape is in the
+repo and holds no credential.
+
 ## The headline: it is not deterministic, so no test may assert a live number
 
 The same fixture, 12 times through the `systemone` backend:
