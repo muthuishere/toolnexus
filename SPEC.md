@@ -1659,6 +1659,7 @@ configured one client has configured the other. Idiomatic names per port, as eve
 | `httpClient` / `transport` | default | the §8 Gap 2 injectable transport. Scope is the classifier path only |
 | `timeout` | 10 s | per request, not per run — a classifier has no loop to bound |
 | `retries` / `onError` / `retryableStatuses` | retry `408`/`429`/`500`/`502`/`503`/`504`/`529` + network, honour `Retry-After`; `retryableStatuses` adds to that set (never removes), `onError` still decides each attempt | **reuses** the §8 `ErrorInfo → "retry" \| "fail"` classifier and the `Retry-After` `delay-seconds` rule verbatim. There is no second retry policy, and no `"suspend"` tier here either |
+| `retryBaseMs` | 500 ms | base of the retry backoff: the delay is `base * 2^attempt`, no jitter, and a `Retry-After` header still wins. Same name, same units and same default as §8's `retryBaseMs`; absent, zero or negative ⇒ 500 |
 | `requestParams` / `bodyTransform` | — | the §8 Gap 1 shape, same ordering: base body → `requestParams` merge → `bodyTransform` → marshal. How a gateway's wrapper or extra fields land without a proxy |
 | `onMetric` | — | emits `classifier.evaluate` events (latency, tokens, model, status) into the **same** §8 sink — its `error` set only on a failed evaluate — and carries the degenerate-criteria warning as a `classifier.warning` whose text is in `warning`, not `error` |
 | `client` | — | `style: "llm"` only — the §8 `Client` to emulate over |

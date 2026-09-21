@@ -20,6 +20,7 @@
             [koine.fs :as fs]
             [koine.json :as json]
             [koine.text :as ktext]
+            [koine.time :as ktime]
             [toolnexus.classifier :as jev]
             [toolnexus.client :as client]))
 
@@ -475,8 +476,8 @@
       (is (= 1 @n) "one attempt, because the host said fail"))))
 
 (deftest the-retryable-status-matrix
-  ;; `retry-after: 0` keeps the suite from sleeping through a backoff it is not
-  ;; testing. The default set is an ENUMERATION on purpose: "any 5xx" would
+  ;; `:retry-base-ms 1` keeps the suite from sleeping through a backoff it is
+  ;; not testing — the wait is configured, not routed around with a faked header. The default set is an ENUMERATION on purpose: "any 5xx" would
   ;; sweep in permanently-broken statuses (501, 505) and silently change the
   ;; retry behaviour of every existing host. A backend with its own transient
   ;; status opts in through :retryable-statuses instead.
@@ -484,9 +485,10 @@
             (let [n    (atom 0)
                   http (fn [_ _ _]
                          (if (= 1 (swap! n inc))
-                           {:status status :headers {"retry-after" "0"} :body "nope"}
+                           {:status status :body "nope"}
                            {:status 200 :body "{\"answers\":{},\"model\":\"m\"}"}))
-                  c    (jev/create-classifier (merge {:http-client http :retries 2} opts))]
+                  c    (jev/create-classifier
+                        (merge {:http-client http :retries 2 :retry-base-ms 1} opts))]
               (try (jev/evaluate c "s" {"q" (jev/noul-question "?")})
                    (catch Throwable _ nil))
               @n))]
@@ -614,3 +616,25 @@
                     (jev/evaluate c "s" {"q" (jev/noul-question "?")}))
           with    (capture)]
       (is (= without with)))))
+
+(deftest retry-base-ms-scales-the-backoff
+  ;; :retry-base-ms is the classifier's half of the §8 client option it mirrors:
+  ;; the same default (500) and the same `base * 2^attempt` shape. The default is
+  ;; asserted as a LOWER bound on a real wait, because an unset option that
+  ;; silently became 1ms would pass every other test faster. No `retry-after`
+  ;; header here — it wins over backoff and would hide the rule under test.
+  (letfn [(waited [opts]
+            (let [n    (atom 0)
+                  http (fn [_ _ _]
+                         (if (= 1 (swap! n inc))
+                           {:status 503 :body "transient"}
+                           {:status 200 :body "{\"answers\":{},\"model\":\"m\"}"}))
+                  c    (jev/create-classifier (merge {:http-client http :retries 2} opts))
+                  t0   (ktime/now-ms)]
+              (jev/evaluate c "s" {"q" (jev/noul-question "?")})
+              (is (= 2 @n) "the retry must actually have happened")
+              (- (ktime/now-ms) t0)))]
+    (testing "an unset base still backs off ~500ms"
+      (is (>= (waited {}) 450)))
+    (testing "a short base shortens the wait, not the behaviour"
+      (is (< (waited {:retry-base-ms 1}) 200)))))

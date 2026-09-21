@@ -440,6 +440,35 @@ test("retries honour Retry-After and the onError tier, and emit one ok metric", 
   assert.equal(tries, 1)
 })
 
+test("retryBaseMs scales the classifier backoff, and defaults to 500ms", async () => {
+  // The classifier's half of the §8 `retryBaseMs` it mirrors: same default, same
+  // `base * 2 ** attempt` shape. The default is asserted as a LOWER bound on a real wait,
+  // because an unset option that silently became 1ms would pass every other test faster.
+  // No `Retry-After` here — that header wins over backoff and would hide what is under test.
+  const waited = async (retryBaseMs?: number) => {
+    const f = load("base")
+    let attempts = 0
+    const c = createClassifier({
+      baseUrl: "https://gateway.example/v1",
+      model: f.request.model,
+      apiKeyEnv: "TEST_JUDGE_UNSET",
+      retries: 2,
+      ...(retryBaseMs === undefined ? {} : { retryBaseMs }),
+      fetch: async () => {
+        attempts++
+        if (attempts === 1) return new Response("transient", { status: 503 })
+        return new Response(JSON.stringify(f.response), { status: 200 })
+      },
+    })
+    const t0 = Date.now()
+    await c.evaluate(f.request.state, questionsOf(f))
+    assert.equal(attempts, 2, "the retry must actually have happened")
+    return Date.now() - t0
+  }
+  assert.ok((await waited()) >= 450, "an unset base must still back off ~500ms")
+  assert.ok((await waited(1)) < 200, "retryBaseMs: 1 must not wait ~500ms")
+})
+
 test("529 Overloaded retries by default; other unlisted 5xx do not until retryableStatuses says so", async () => {
   // TypeSafe documents 529 Overloaded as "retry with backoff"; the default set made it terminal.
   // It is now in the defaults. The set stays an ENUMERATION, so 520-527 and 501 remain terminal

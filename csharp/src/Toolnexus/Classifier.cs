@@ -412,6 +412,11 @@ public sealed class ClassifierOptions
     /// Widen the status set with <see cref="RetryableStatuses"/>.</summary>
     public int? Retries { get; set; }
 
+    /// <summary>Base of the retry backoff in ms (<c>base * 2^attempt</c>, no jitter — a
+    /// <c>Retry-After</c> header still wins). Null or &lt;= 0 ⇒ 500, the §8
+    /// <see cref="LlmClient.Options.RetryBaseMs"/> default this mirrors.</summary>
+    public int? RetryBaseMs { get; set; }
+
     /// <summary>
     /// Extra HTTP statuses to treat as retryable, ADDED to the default set
     /// (<c>429</c>/<c>500</c>/<c>502</c>/<c>503</c>/<c>504</c>/<c>529</c>, plus <c>408</c> here). It
@@ -463,6 +468,7 @@ public sealed class ClassifierOptions
     public ClassifierOptions WithTimeout(TimeSpan v) { Timeout = v; return this; }
     public ClassifierOptions WithHttpClient(HttpClient v) { HttpClient = v; return this; }
     public ClassifierOptions WithRetries(int v) { Retries = v; return this; }
+    public ClassifierOptions WithRetryBaseMs(int v) { RetryBaseMs = v; return this; }
     public ClassifierOptions WithRetryableStatuses(IReadOnlyCollection<int> v) { RetryableStatuses = v; return this; }
     public ClassifierOptions WithOnError(Func<LlmClient.ErrorInfo, LlmClient.Tier> v) { OnError = v; return this; }
     public ClassifierOptions WithRequestParams(IReadOnlyDictionary<string, object?> v) { RequestParams = v; return this; }
@@ -512,6 +518,7 @@ public sealed class Classifier
     private readonly string _apiKeyEnv;
     private readonly TimeSpan _timeout;
     private readonly int _retries;
+    private readonly long _retryBaseMs;
     private readonly HttpClient _http;
     private readonly Dictionary<string, string> _static = new(StringComparer.Ordinal);
 
@@ -536,6 +543,7 @@ public sealed class Classifier
         _apiKeyEnv = string.IsNullOrEmpty(_opts.ApiKeyEnv) ? DefaultApiKeyEnv : _opts.ApiKeyEnv!;
         _timeout = _opts.Timeout is { } t && t > TimeSpan.Zero ? t : DefaultTimeout;
         _retries = _opts.Retries is { } r && r > 0 ? r : 2;
+        _retryBaseMs = _opts.RetryBaseMs is { } rb && rb > 0 ? rb : 500L;
         _http = _opts.HttpClient
                 ?? (_opts.HttpHandler != null
                     ? new HttpClient(_opts.HttpHandler, disposeHandler: false) { Timeout = System.Threading.Timeout.InfiniteTimeSpan }
@@ -969,7 +977,7 @@ public sealed class Classifier
             if (classify(new LlmClient.ErrorInfo(transport, status, attempt, retryable)) != LlmClient.Tier.Retry)
                 throw new ClassifierException(lastError!);
 
-            var delay = retryAfterMs ?? (long)(500 * Math.Pow(2, attempt));
+            var delay = retryAfterMs ?? (long)(_retryBaseMs * Math.Pow(2, attempt));
             if (delay > 0) await Task.Delay((int)Math.Min(delay, int.MaxValue), cancellationToken).ConfigureAwait(false);
         }
     }

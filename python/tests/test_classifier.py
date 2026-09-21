@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -472,6 +473,35 @@ async def test_a_retryable_status_is_retried_within_the_budget() -> None:
     d = await c.evaluate("s", {"q": NoulQuestion(instructions="?")})
     assert t.n == 3
     assert d.model == "m"
+
+
+async def test_retry_base_ms_scales_the_backoff_and_defaults_to_500() -> None:
+    """``retry_base_ms`` is the classifier's half of the §8 ``retry_base_ms`` it mirrors:
+    the same default (500) and the same ``base * 2 ** attempt`` shape. The default is asserted
+    as a LOWER bound on a real wait, because an unset option that silently became 1 ms would
+    otherwise pass every other test faster. No ``Retry-After`` here — that header wins over
+    backoff, so it would hide the very thing under test."""
+
+    class Flaky:
+        def __init__(self) -> None:
+            self.n = 0
+
+        def post(self, url, headers, body, timeout):
+            self.n += 1
+            if self.n == 1:
+                return ClassifierResponse(status=503, body=b"busy")
+            return ClassifierResponse(status=200, body=json.dumps({"model": "m", "answers": {}}).encode())
+
+    async def waited(**kw) -> float:
+        t = Flaky()
+        c = create_classifier(http_transport=t, retries=2, **kw)
+        t0 = time.monotonic()
+        await c.evaluate("s", {"q": NoulQuestion(instructions="?")})
+        assert t.n == 2, "the retry must actually have happened"
+        return time.monotonic() - t0
+
+    assert await waited() >= 0.45, "an unset base must still back off ~500ms"
+    assert await waited(retry_base_ms=1) < 0.2, "retry_base_ms=1 must not wait ~500ms"
 
 
 async def test_on_error_can_refuse_to_retry() -> None:

@@ -473,6 +473,10 @@ type ClassifierOptions struct {
 	// Retries on transient errors (408/429/500/502/503/504/529 + network). 0 ⇒ 2.
 	// Widen the status set with RetryableStatuses.
 	Retries int
+	// RetryBaseMs is the base of the retry backoff in ms (base * 2^attempt, no
+	// jitter — a Retry-After header still wins). 0 ⇒ 500, the §8
+	// ClientOptions.RetryBaseMs default this mirrors.
+	RetryBaseMs int
 	// RetryableStatuses are extra HTTP statuses to treat as retryable, ADDED to
 	// the default set (429/500/502/503/504/529, plus 408 here). It can only
 	// widen: a host cannot remove 429 and lose Retry-After handling with it. This
@@ -778,6 +782,10 @@ func (c *Classifier) post(ctx context.Context, raw []byte) ([]byte, error) {
 	if retries <= 0 {
 		retries = 2
 	}
+	baseMs := c.opts.RetryBaseMs
+	if baseMs <= 0 {
+		baseMs = 500
+	}
 	classify := c.opts.OnError
 	if classify == nil {
 		classify = func(info ErrorInfo) Tier {
@@ -818,7 +826,7 @@ func (c *Classifier) post(ctx context.Context, raw []byte) ([]byte, error) {
 		}
 		delay, ok := retryAfterSeconds(retryAfter)
 		if !ok {
-			delay = time.Duration(500*(1<<attempt)) * time.Millisecond
+			delay = time.Duration(baseMs*(1<<attempt)) * time.Millisecond
 		}
 		t := time.NewTimer(delay)
 		select {

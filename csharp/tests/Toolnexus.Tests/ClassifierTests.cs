@@ -359,9 +359,9 @@ public class ClassifierTests
 
     // ---------------------------------------------------------------- retry rule
 
-    /// <summary>A handler that answers the given status once, then the fixture's response. The
-    /// <c>Retry-After: 0</c> is a real, honoured delay of zero — it keeps the test off the clock
-    /// without weakening the rule under test.</summary>
+    /// <summary>A handler that answers the given status once, then the fixture's response.
+    /// What keeps these tests off the clock is <c>RetryBaseMs</c> on the options, not a faked
+    /// <c>Retry-After</c> header — the wait is configured, not routed around.</summary>
     private sealed class FailThenSucceedHandler : HttpMessageHandler
     {
         private readonly int _status;
@@ -376,7 +376,6 @@ public class ClassifierTests
             var res = n == 1
                 ? new HttpResponseMessage((System.Net.HttpStatusCode)_status) { Content = new StringContent("overloaded") }
                 : new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent(_body) };
-            if (n == 1) res.Headers.TryAddWithoutValidation("Retry-After", "0");
             return Task.FromResult(res);
         }
     }
@@ -409,6 +408,7 @@ public class ClassifierTests
             ApiKeyEnv = "TEST_JUDGE_UNSET",
             HttpHandler = handler,
             Retries = 2,
+            RetryBaseMs = 1, // the rule under test is the status set, not the wait
             RetryableStatuses = extra,
             OnError = onError,
         });
@@ -444,6 +444,38 @@ public class ClassifierTests
             Assert.Contains(status.ToString(), e.Message);
             Assert.Equal(1, handler.Calls);
         }
+    }
+
+    /// <summary><c>RetryBaseMs</c> is the classifier's half of the §8
+    /// <c>ClientOptions.RetryBaseMs</c> it mirrors: the same default (500) and the same
+    /// <c>base * 2^attempt</c> shape. The default is asserted as a LOWER bound on a real wait,
+    /// because an unset option that silently became 1 ms would pass every other test faster.
+    /// No <c>Retry-After</c> is sent — that header wins over backoff and would hide the rule.</summary>
+    [Fact]
+    public async Task RetryBaseMsScalesTheBackoffAndDefaultsTo500()
+    {
+        async Task<long> WaitedAsync(int? retryBaseMs)
+        {
+            var f = LoadFixture("base");
+            var handler = new FailThenSucceedHandler(503, f.ResponseJson!);
+            var c = new Classifier(new ClassifierOptions
+            {
+                BaseUrl = "https://gateway.example/v1",
+                Model = f.RequestModel,
+                ApiKeyEnv = "TEST_JUDGE_UNSET",
+                HttpHandler = handler,
+                Retries = 2,
+                RetryBaseMs = retryBaseMs,
+            });
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            await c.EvaluateAsync(f.State, f.Questions);
+            sw.Stop();
+            Assert.Equal(2, handler.Calls);
+            return sw.ElapsedMilliseconds;
+        }
+
+        Assert.True(await WaitedAsync(null) >= 450, "an unset base must still back off ~500ms");
+        Assert.True(await WaitedAsync(1) < 200, "RetryBaseMs = 1 must not wait ~500ms");
     }
 
     /// <summary><c>RetryableStatuses</c> sets the DEFAULT classification only — <c>OnError</c> runs

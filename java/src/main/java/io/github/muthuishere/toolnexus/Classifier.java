@@ -492,6 +492,10 @@ public final class Classifier {
         /** Retries on transient errors (408/429/500/502/503/504/529 + network). Null ⇒ 2.
          * Widen the status set with {@link #retryableStatuses}. */
         public Integer retries;
+        /** Base of the retry backoff in ms ({@code base * 2^attempt}, no jitter — a
+         * {@code Retry-After} header still wins). Null or &le; 0 ⇒ 500, the §8
+         * {@link LlmClient.Options#retryBaseMs} default this mirrors. */
+        public Integer retryBaseMs;
         /** Extra HTTP statuses to treat as retryable, ADDED to the default set
          * ({@code 429}/{@code 500}/{@code 502}/{@code 503}/{@code 504}/{@code 529}, plus
          * {@code 408} here). It can only widen: a host cannot remove {@code 429} and lose
@@ -533,6 +537,7 @@ public final class Classifier {
         public Options timeoutMs(long v) { this.timeoutMs = v; return this; }
         public Options httpClient(HttpClient v) { this.httpClient = v; return this; }
         public Options retries(int v) { this.retries = v; return this; }
+        public Options retryBaseMs(int v) { this.retryBaseMs = v; return this; }
         public Options retryableStatuses(List<Integer> v) { this.retryableStatuses = v; return this; }
         public Options onError(Function<LlmClient.ErrorInfo, LlmClient.Tier> v) { this.onError = v; return this; }
         public Options requestParams(Map<String, Object> v) { this.requestParams = v; return this; }
@@ -553,6 +558,7 @@ public final class Classifier {
     private final String apiKeyEnv;
     private final long timeoutMs;
     private final int retries;
+    private final long retryBaseMs;
     private final HttpClient http;
     private final Function<String, String> env;
     private final Map<String, String> staticCorpus;
@@ -567,6 +573,7 @@ public final class Classifier {
         this.apiKeyEnv = opts.apiKeyEnv == null ? DEFAULT_API_KEY_ENV : opts.apiKeyEnv;
         this.timeoutMs = opts.timeoutMs == null ? DEFAULT_TIMEOUT_MS : opts.timeoutMs;
         this.retries = opts.retries == null || opts.retries <= 0 ? 2 : opts.retries;
+        this.retryBaseMs = opts.retryBaseMs == null || opts.retryBaseMs <= 0 ? 500L : opts.retryBaseMs;
         this.http = opts.httpClient != null ? opts.httpClient : HttpClient.newHttpClient();
         this.env = opts.env != null ? opts.env : System::getenv;
         this.staticCorpus = staticCorpus;
@@ -802,7 +809,7 @@ public final class Classifier {
                     ? opts.onError.apply(new LlmClient.ErrorInfo(thrown, status, attempt, retryable))
                     : (retryable ? LlmClient.Tier.RETRY : LlmClient.Tier.FAIL);
             if (tier != LlmClient.Tier.RETRY) throw last;
-            long delay = LlmClient.retryAfterDelayMs(retryAfter).orElse(500L << attempt);
+            long delay = LlmClient.retryAfterDelayMs(retryAfter).orElse(retryBaseMs << attempt);
             try {
                 Thread.sleep(delay);
             } catch (InterruptedException e) {

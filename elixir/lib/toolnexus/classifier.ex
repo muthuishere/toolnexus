@@ -81,6 +81,8 @@ defmodule Toolnexus.Classifier do
   @default_api_key_env "TYPESAFE_API_KEY"
   @default_timeout 10_000
   @default_retries 2
+  # Base of the retry backoff in ms — the same 500 as §8 `ClientOptions.retry_base_ms`.
+  @default_retry_base_ms 500
 
   @max_choice_options 255
   @min_score_levels 2
@@ -358,6 +360,7 @@ defmodule Toolnexus.Classifier do
             http_options: [],
             transport: nil,
             retries: @default_retries,
+            retry_base_ms: @default_retry_base_ms,
             retryable_statuses: nil,
             on_error: nil,
             request_params: nil,
@@ -390,6 +393,8 @@ defmodule Toolnexus.Classifier do
     * `:transport` — §8 Gap 2, an injectable HTTP transport
       `(%{method:, url:, headers:, body:, receive_timeout:} -> {:ok, %{status:, headers:,
       body:}} | {:error, Exception.t()})`. `body` is the canonical request BINARY
+    * `:retry_base_ms` (default 500) — base of the retry backoff in ms
+      (`base * 2^attempt`, no jitter); a `Retry-After` header still wins
     * `:retries` (default 2) and `:on_error` — REUSES the §8 `%{error?, status?, attempt,
       retryable} -> :retry | :fail` classifier and the `Retry-After` delay-seconds rule
       verbatim. There is no second retry policy, and no `:suspend` tier here either.
@@ -430,6 +435,7 @@ defmodule Toolnexus.Classifier do
         timeout: c.timeout || @default_timeout,
         http_options: c.http_options || [],
         retries: c.retries || @default_retries,
+        retry_base_ms: c.retry_base_ms || @default_retry_base_ms,
         decisions: c.decisions || []
     }
 
@@ -717,7 +723,7 @@ defmodule Toolnexus.Classifier do
              classify_error(c, %{status: status, attempt: attempt, retryable: retryable}) == :fail do
           {:error, error}
         else
-          Process.sleep(backoff_ms(resp, attempt))
+          Process.sleep(backoff_ms(c, resp, attempt))
           post(c, raw, attempt + 1)
         end
 
@@ -728,7 +734,7 @@ defmodule Toolnexus.Classifier do
              classify_error(c, %{error: e, attempt: attempt, retryable: true}) == :fail do
           {:error, error}
         else
-          Process.sleep(500 * Integer.pow(2, attempt))
+          Process.sleep(base_backoff_ms(c, attempt))
           post(c, raw, attempt + 1)
         end
     end
@@ -745,9 +751,12 @@ defmodule Toolnexus.Classifier do
 
   defp classify_error(%{on_error: f}, info) when is_function(f, 1), do: f.(info)
 
-  defp backoff_ms(resp, attempt) do
+  defp base_backoff_ms(c, attempt),
+    do: (c.retry_base_ms || @default_retry_base_ms) * Integer.pow(2, attempt)
+
+  defp backoff_ms(c, resp, attempt) do
     case Toolnexus.Client.parse_retry_after(header(resp, "retry-after")) do
-      nil -> 500 * Integer.pow(2, attempt)
+      nil -> base_backoff_ms(c, attempt)
       seconds -> seconds * 1000
     end
   end

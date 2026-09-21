@@ -590,6 +590,33 @@ defmodule Toolnexus.ClassifierTest do
     assert Agent.get(counter2, & &1) == 1
   end
 
+  test ":retry_base_ms scales the backoff and defaults to 500" do
+    # The classifier's half of the §8 `:retry_base_ms` it mirrors: the same default and the
+    # same `base * 2^attempt` shape. The default is asserted as a LOWER bound on a real wait,
+    # because an unset option that silently became 1ms would pass every other test faster.
+    # No `retry-after` header here — it wins over backoff and would hide the rule under test.
+    waited = fn opts ->
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      transport = fn _ ->
+        n = Agent.get_and_update(counter, &{&1, &1 + 1})
+
+        if n == 0,
+          do: {:ok, %{status: 503, headers: %{}, body: "transient"}},
+          else: {:ok, %{status: 200, headers: %{}, body: ~s({"answers":{},"model":"m"})}}
+      end
+
+      {:ok, c} = Classifier.create(Keyword.merge([transport: transport, retries: 2], opts))
+      t0 = System.monotonic_time(:millisecond)
+      assert {:ok, %Decision{}} = Classifier.evaluate(c, "s", %{"q" => %Noul{instructions: "i"}})
+      assert Agent.get(counter, & &1) == 2, "the retry must actually have happened"
+      System.monotonic_time(:millisecond) - t0
+    end
+
+    assert waited.([]) >= 450, "an unset base must still back off ~500ms"
+    assert waited.(retry_base_ms: 1) < 200, "retry_base_ms: 1 must not wait ~500ms"
+  end
+
   test "529 retries by default; an unlisted 5xx (520) and a permanent one (501) are terminal" do
     # TypeSafe documents 529 Overloaded as "retry with backoff"; the old six-status set
     # (408/429/500/502/503/504) made it terminal on the first attempt. The set stays an
@@ -604,7 +631,8 @@ defmodule Toolnexus.ClassifierTest do
         else: {:ok, %{status: 200, headers: %{}, body: ~s({"answers":{},"model":"m"})}}
     end
 
-    {:ok, c} = Classifier.create(transport: transport, retries: 2)
+    # :retry_base_ms keeps this off the clock: the rule under test is the status set, not the wait.
+    {:ok, c} = Classifier.create(transport: transport, retries: 2, retry_base_ms: 1)
     assert {:ok, %Decision{}} = Classifier.evaluate(c, "s", %{"q" => %Noul{instructions: "i"}})
     assert Agent.get(counter, & &1) == 2
 
@@ -640,7 +668,12 @@ defmodule Toolnexus.ClassifierTest do
       end
 
       {:ok, c} =
-        Classifier.create(transport: transport, retries: 2, retryable_statuses: cloudflare)
+        Classifier.create(
+          transport: transport,
+          retries: 2,
+          retry_base_ms: 1,
+          retryable_statuses: cloudflare
+        )
 
       assert {:ok, %Decision{}} = Classifier.evaluate(c, "s", %{"q" => %Noul{instructions: "i"}})
       assert Agent.get(counter, & &1) == 2, "status #{status} should have been retried"

@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------- fixtures
@@ -613,6 +614,7 @@ func TestClassifierRetryableStatuses(t *testing.T) {
 				BaseURL:           srv.URL,
 				APIKeyEnv:         "TEST_JUDGE_UNSET",
 				Retries:           2,
+				RetryBaseMs:       1, // the rule under test is the status set, not the wait
 				RetryableStatuses: tc.extra,
 				HTTPClient:        srv.Client(),
 			})
@@ -775,4 +777,61 @@ func TestCreateClassifierRejectsIncompleteStyles(t *testing.T) {
 		c.opts.Timeout != DefaultClassifierTimeout {
 		t.Fatalf("defaults not applied: %+v", c.opts)
 	}
+}
+
+// RetryBaseMs is the classifier's half of the §8 ClientOptions.RetryBaseMs it
+// mirrors: the same default (500) and the same base * 2^attempt shape. The
+// default is asserted as a LOWER bound on a real wait, because an unset option
+// that silently became 1ms would otherwise pass every other test faster.
+func TestClassifierRetryBaseMs(t *testing.T) {
+	newSrv := func(attempts *int) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			*attempts++
+			if *attempts == 1 {
+				w.WriteHeader(503)
+				fmt.Fprint(w, "transient")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"model":"m","answers":{"q":{"type":"noul","noul":0.5}},"usage":{"input_tokens":1,"output_tokens":1}}`)
+		}))
+	}
+	run := func(t *testing.T, baseMs int) (time.Duration, int) {
+		t.Helper()
+		var attempts int
+		srv := newSrv(&attempts)
+		defer srv.Close()
+		c, err := CreateClassifier(ClassifierOptions{
+			BaseURL: srv.URL, APIKeyEnv: "TEST_JUDGE_UNSET",
+			Retries: 2, RetryBaseMs: baseMs, HTTPClient: srv.Client(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t0 := time.Now()
+		if _, err := c.Evaluate(context.Background(), "s", map[string]Question{"q": NoulQuestion{Instructions: "?"}}); err != nil {
+			t.Fatal(err)
+		}
+		return time.Since(t0), attempts
+	}
+
+	t.Run("unset keeps the 500ms default", func(t *testing.T) {
+		d, attempts := run(t, 0)
+		if attempts != 2 {
+			t.Fatalf("attempts = %d, want 2", attempts)
+		}
+		if d < 450*time.Millisecond {
+			t.Fatalf("an unset base must still back off ~500ms, waited %v", d)
+		}
+	})
+
+	t.Run("a short base shortens the wait, not the behavior", func(t *testing.T) {
+		d, attempts := run(t, 1)
+		if attempts != 2 {
+			t.Fatalf("attempts = %d, want 2", attempts)
+		}
+		if d > 200*time.Millisecond {
+			t.Fatalf("RetryBaseMs: 1 must not wait ~500ms, waited %v", d)
+		}
+	})
 }

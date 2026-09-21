@@ -542,6 +542,7 @@ class ClassifierTest {
                 .baseUrl("http://127.0.0.1:" + port)
                 .model(req.get("model").asText())
                 .retries(2)
+                .retryBaseMs(1) // the rule under test is the status set, not the wait
                 .retryableStatuses(retryableStatuses));
         try {
             c.evaluate(state(req), questions(req));
@@ -572,6 +573,45 @@ class ClassifierTest {
         assertEquals(2, attemptsFor(520, cloudflare), "an opted-in status retries");
         assertEquals(2, attemptsFor(429, cloudflare), "the defaults are not replaced");
         assertEquals(1, attemptsFor(501, cloudflare), "a status outside both sets stays terminal");
+    }
+
+    /**
+     * {@code retryBaseMs} is the classifier's half of the §8 {@code ClientOptions.retryBaseMs} it
+     * mirrors: the same default (500) and the same {@code base * 2^attempt} shape. The default is
+     * asserted as a LOWER bound on a real wait, because an unset option that silently became 1 ms
+     * would otherwise pass every other test faster.
+     */
+    @Test
+    void retryBaseMsScalesTheBackoffAndDefaultsTo500() throws IOException {
+        assertTrue(oneRetryWaitMs(null) >= 450,
+                "an unset base must still back off ~500ms");
+        assertTrue(oneRetryWaitMs(1) < 200,
+                "retryBaseMs(1) must not wait ~500ms");
+    }
+
+    /** One 503, then success; returns how long the whole evaluate took. */
+    private long oneRetryWaitMs(Integer retryBaseMs) throws IOException {
+        JsonNode f = fixture("base");
+        JsonNode req = f.get("request");
+        String ok = f.get("response").toString();
+        AtomicInteger attempts = new AtomicInteger();
+        int port = start(ex -> {
+            if (attempts.incrementAndGet() == 1) respond(ex, 503, "transient");
+            else respond(ex, 200, ok);
+        });
+        Classifier.Options o = new Classifier.Options()
+                .baseUrl("http://127.0.0.1:" + port)
+                .model(req.get("model").asText())
+                .retries(2);
+        if (retryBaseMs != null) o.retryBaseMs(retryBaseMs);
+        Classifier c = Classifier.create(o);
+        long t0 = System.nanoTime();
+        c.evaluate(state(req), questions(req));
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        stopServer();
+        server = null;
+        assertEquals(2, attempts.get(), "the retry must actually have happened");
+        return ms;
     }
 
     /** The option is a default; {@code onError} has the final say, on every attempt. */

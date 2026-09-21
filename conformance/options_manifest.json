@@ -324,6 +324,13 @@
         "tier": "full"
       },
       {
+        "name": "retryBaseMs",
+        "aliases": [
+          "retrybasems"
+        ],
+        "tier": "full"
+      },
+      {
         "name": "onError",
         "aliases": [
           "onerror"

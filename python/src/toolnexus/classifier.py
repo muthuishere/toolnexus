@@ -105,6 +105,8 @@ METRIC_CLASSIFIER_WARNING = "classifier.warning"
 
 #: Default retry budget, matching Go's ``retries <= 0 ⇒ 2``.
 _DEFAULT_RETRIES = 2
+#: Default retry backoff base in ms — the same 500 as §8 ``ClientOptions.retry_base_ms``.
+_DEFAULT_RETRY_BASE_MS = 500
 
 ClassifierStyle = Literal["systemone", "llm", "custom", "static"]
 
@@ -562,6 +564,7 @@ class Classifier:
         timeout: float = DEFAULT_CLASSIFIER_TIMEOUT,
         http_transport: Optional[ClassifierTransport] = None,
         retries: int = _DEFAULT_RETRIES,
+        retry_base_ms: int = _DEFAULT_RETRY_BASE_MS,
         retryable_statuses: Optional[Iterable[int]] = None,
         on_error: Optional[ErrorClassifier] = None,
         request_params: Optional[Mapping[str, Any]] = None,
@@ -579,6 +582,10 @@ class Classifier:
         self.timeout = timeout
         self.http_transport: ClassifierTransport = http_transport or _UrllibTransport()
         self.retries = retries
+        # Base of the retry backoff in ms (``base * 2 ** attempt``, no jitter — a
+        # ``Retry-After`` header still wins). 0 or negative ⇒ 500, the §8
+        # ``ClientOptions.retry_base_ms`` default this mirrors.
+        self.retry_base_ms = retry_base_ms
         # Extra HTTP statuses to treat as retryable, ADDED to the default set
         # (429/500/502/503/504/529, plus 408 here). It can only widen: a host cannot remove
         # 429 and lose ``Retry-After`` handling with it. This sets the DEFAULT classification;
@@ -740,6 +747,7 @@ class Classifier:
         """
         endpoint = self.base_url.rstrip("/") + "/systemone"
         retries = self.retries if self.retries > 0 else _DEFAULT_RETRIES
+        base = (self.retry_base_ms if self.retry_base_ms > 0 else _DEFAULT_RETRY_BASE_MS) / 1000.0
         classify = self.on_error or (lambda info: "retry" if info.get("retryable") else "fail")
         attempt = 0
         while True:
@@ -764,7 +772,7 @@ class Classifier:
             if classify(info) != "retry":
                 raise last
             delay = _parse_retry_after(retry_after_header)
-            await asyncio.sleep(delay if delay is not None else 0.5 * (2**attempt))
+            await asyncio.sleep(delay if delay is not None else base * (2**attempt))
             attempt += 1
 
     def _headers(self) -> dict[str, str]:
@@ -880,6 +888,7 @@ def create_classifier(
     timeout: Optional[float] = None,
     http_transport: Optional[ClassifierTransport] = None,
     retries: int = _DEFAULT_RETRIES,
+    retry_base_ms: int = _DEFAULT_RETRY_BASE_MS,
     retryable_statuses: Optional[Iterable[int]] = None,
     on_error: Optional[ErrorClassifier] = None,
     request_params: Optional[Mapping[str, Any]] = None,
@@ -910,6 +919,7 @@ def create_classifier(
         timeout=timeout if timeout else DEFAULT_CLASSIFIER_TIMEOUT,
         http_transport=http_transport,
         retries=retries,
+        retry_base_ms=retry_base_ms,
         retryable_statuses=retryable_statuses,
         on_error=on_error,
         request_params=request_params,

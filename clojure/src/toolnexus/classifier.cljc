@@ -374,6 +374,9 @@
     :timeout-ms     per REQUEST, not per run — default 10000
     :http-client    the §8 injectable transport, `(fn [url headers body])`;
                     scope is the classifier path only
+    :retry-base-ms  base of the retry backoff in ms (default 500); the delay is
+                    `base * 2^attempt` with no jitter, and a `Retry-After`
+                    header still wins.
     :retries        transient-failure budget (default 2); retries on
                     `408`/`429`/`500`/`502`/`503`/`504`/`529` + network. Widen
                     the status set with `:retryable-statuses`.
@@ -411,7 +414,8 @@
                      :model       (or (:model opts) default-model)
                      :api-key-env (or (:api-key-env opts) default-api-key-env)
                      :timeout-ms  (or (:timeout-ms opts) default-timeout-ms)
-                     :retries     (or (:retries opts) 2))]
+                     :retries     (or (:retries opts) 2)
+                     :retry-base-ms (or (:retry-base-ms opts) 500))]
     (when-not (contains? styles style)
       (throw (ex-info (str "classifier: unknown style " (pr-str style)
                            " — expected one of " (pr-str (vec (sort styles))))
@@ -518,7 +522,8 @@
   [c body]
   (let [url     (str (str/replace (str (:base-url c)) #"/+$" "") "/systemone")
         headers (request-headers c)
-        budget  (or (:retries c) 2)]
+        budget  (or (:retries c) 2)
+        base-ms (or (:retry-base-ms c) 500)]
     (loop [attempt 0]
       (let [res     (if-let [f (:http-client c)]
                       (f url headers body)
@@ -539,7 +544,7 @@
                 verdict (client/classify c info)]
             (if (and (= :retry verdict) (< attempt budget))
               (do (ktime/sleep! (or (client/retry-after-ms res)
-                                    (* 500 (bit-shift-left 1 attempt))))
+                                    (* base-ms (bit-shift-left 1 attempt))))
                   (recur (inc attempt)))
               (throw (if failed?
                        (ex-info (str "classifier: POST " url " transport " (name (:error res)))
