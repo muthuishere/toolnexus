@@ -16,17 +16,17 @@ byte-identical, also in **JavaScript, Python, Go, C#, Elixir and Clojure**. Buil
 
 ## Install
 
-Maven Central coordinate: **`io.github.muthuishere:toolnexus:0.18.0`**
+Maven Central coordinate: **`io.github.muthuishere:toolnexus:0.18.1`**
 
 ```gradle
-implementation 'io.github.muthuishere:toolnexus:0.18.0'
+implementation 'io.github.muthuishere:toolnexus:0.18.1'
 ```
 
 ```xml
 <dependency>
   <groupId>io.github.muthuishere</groupId>
   <artifactId>toolnexus</artifactId>
-  <version>0.18.0</version>
+  <version>0.18.1</version>
 </dependency>
 ```
 

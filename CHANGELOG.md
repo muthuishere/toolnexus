@@ -8,6 +8,60 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.18.1 — 2026-09-21
+
+Documentation only. No code changed in any port; the published packages differ from 0.18.0
+solely in the README each registry shows you.
+
+### The READMEs are a front page again, not a second copy of the manual
+
+Eight READMEs went from **3249 lines to 594**. Each one now answers what it is, how to install
+it, one quick start, and the single thing that port does differently — then points at the
+documentation site and that language's API reference for everything else.
+
+Nothing was lost. Every section removed already had its own page: suspension, memory,
+observability, native and HTTP tools, attachments, built-ins, A2A, serve-as-MCP,
+bring-your-own-loop, sub-agents, streaming. What went was a duplicate that drifted — and the
+duplicate nothing checked, since no gate reads a README while the site's 968 documented snippets
+are compiled and executed on every change.
+
+Two things that had already drifted, now correct:
+
+- **Every port advertised parity across five languages.** "Also in JavaScript, Python, Go, Java,
+  and C#" — Java said "five languages", Elixir said six. There are **seven**; Elixir and Clojure
+  had been shipping for releases without appearing in the claim.
+- **Clojure's README undersold its own test suite**, quoting "291 tests / 1100 assertions" across
+  "all five execution modes" when it is **495 / 2051**, and listing three modes where
+  `all-modes-check.sh` runs five — both REPL evaluators were missing.
+
+### Jev, on the typed-decisions page
+
+Jev is the model behind the default `systemone` backend and most of the public interest in it is
+game demos, so the page now says plainly what toolnexus does with it: **Jev is one backend behind
+a vendor-neutral seam, not an integration.** `llm` runs the same questions on any chat model,
+`custom` is your own function, `static` replays a recorded corpus offline — swap the backend and
+your questions do not change. Links to the wire documentation, the gateway, the live
+measurements and the encoding rules, and names both public game repos, including the one that
+sends `criteria` with no per-option description — the exact mistake ADR 0021 measured at 17
+apples against 0.
+
+### A real call you can watch
+
+[Measured on a live backend](https://muthuishere.github.io/toolnexus/harness/judge-live/) was
+170 lines of generated tables and nothing to watch. It now opens with a 12-second recording of
+`js/examples/judge.ts`, unmodified, making one real POST to the systemone wire over OpenRouter —
+three question types in a single round trip, for $0.000022.
+
+It also demonstrates the page's own argument. The take that shipped answered `urgency` **0.53 —
+"level 1: the customer is inconvenienced"**; the take before it, identical bytes and identical
+model, answered **0.47 — "level 0: the customer is working normally"**. A score sits between
+levels and it moves, which is why no test asserts a live number and why `static` is the backend
+CI runs.
+
+Reproduce it with `OPENROUTER_API_KEY=… vhs site/scripts/judge-run.tape`. The tape is in the repo
+and holds no credential: the library reads the key at the point of use and it appears in no
+output, which is the only reason a recording of a credentialed call can be published.
+
 ## 0.18.0 — 2026-09-21
 
 ### Fixed — a classifier retry backoff no longer lets Node exit out from under it (javascript)
