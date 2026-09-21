@@ -60,11 +60,81 @@ jobs:
           [ "$CLJ" = "$VERSION" ] || { echo "::error::clojure/build.clj is $CLJ, expected $VERSION"; fail=1; }
           exit $fail
 
+  scope:
+    # Did any PORT SOURCE change since the previous tag? A docs-only release —
+    # a README trim, a site page, a changelog roll — ships identical library
+    # bytes under a new number, so the live proof below would re-prove exactly
+    # what the previous release already proved, at the cost of a paid model
+    # call and one more way for a release to fail for no reason.
+    #
+    # This gates ONLY the live proof. Every registry still publishes, because
+    # all seven ports move in lockstep or the version numbers drift apart —
+    # which is the failure `preflight` exists to catch.
+    #
+    # Anything outside the doc paths counts as code, so the default is to RUN
+    # the proof: a path this filter has never seen is treated as source, not
+    # as documentation.
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    outputs:
+      code_changed: ${{ steps.diff.outputs.code_changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - id: diff
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          [ -n "$TAG" ] || TAG=$(git describe --tags --abbrev=0 2>/dev/null)
+          PREV=$(git tag --list 'v*' --sort=-v:refname | grep -v "^${TAG}$" | head -1)
+          if [ -z "$PREV" ]; then
+            echo "no previous tag — treating as a code release"
+            echo "code_changed=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "comparing $PREV..$TAG"
+
+          # Documentation paths, and the version manifests. The manifests are here
+          # because EVERY release bumps them by definition — counting them as code
+          # would mean `code_changed` is always true and this gate never fires.
+          # That exclusion is not a free pass: the check below re-reads each
+          # manifest's own diff and promotes it back to CODE if it changed for any
+          # reason other than the version string.
+          DOCS='^(site/|docs/|openspec/|README\.md$|CHANGELOG\.md$|PUBLISHING\.md$|CLAUDE\.md$|SPEC\.md$|.*/README\.md$|.*/GUIDE\.md$)'
+          MANIFESTS='^(js/package\.json|python/pyproject\.toml|csharp/src/Toolnexus/Toolnexus\.csproj|java/build\.gradle|elixir/mix\.exs|clojure/build\.clj|clojure/examples/.*/deps\.edn)$'
+
+          CHANGED=$(git diff --name-only "$PREV".."$TAG" | grep -vE "$DOCS" | grep -vE "$MANIFESTS" || true)
+
+          # A manifest that changed for more than its version — a new dependency, a
+          # changed target framework, an edited script — is a code change, and the
+          # release must prove itself live.
+          for f in $(git diff --name-only "$PREV".."$TAG" | grep -E "$MANIFESTS" || true); do
+            SUBSTANTIVE=$(git diff -U0 "$PREV".."$TAG" -- "$f" \
+              | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
+              | grep -vE '[0-9]+\.[0-9]+\.[0-9]+' || true)
+            if [ -n "$SUBSTANTIVE" ]; then
+              echo "$f changed beyond its version:"; echo "$SUBSTANTIVE" | head -5
+              CHANGED=$(printf '%s\n%s' "$CHANGED" "$f")
+            fi
+          done
+
+          CHANGED=$(echo "$CHANGED" | grep -v '^$' || true)
+          if [ -n "$CHANGED" ]; then
+            echo "code changed — the live proof will run:"; echo "$CHANGED" | head -20
+            echo "code_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "documentation only — skipping the live proof, still publishing every registry"
+            echo "code_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
   live-scenarios:
     # Live harness proof against a REAL model, golang only. The other six ports
     # prove parity hermetically; this proves the mechanisms actually work against
     # a provider before we publish. Gates every registry leg below.
-    needs: preflight
+    #
+    # SKIPPED for a documentation-only release (see `scope`): identical library
+    # bytes under a new number need no new proof. The legs below accept a
+    # skipped result, never a failed one.
+    needs: [preflight, scope]
+    if: ${{ needs.scope.outputs.code_changed == 'true' }}
     runs-on: ubuntu-latest
     environment: prod          # OPENROUTER_API_KEY lives in this environment's secrets
     permissions: { contents: read }
@@ -94,8 +164,15 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 
   npm:
-    needs: [preflight, live-scenarios]
-    if: ${{ vars.ENABLE_NPM == 'true' }}
+    needs: [preflight, scope, live-scenarios]
+    # `always()` because a SKIPPED live proof (documentation-only release) must not
+    # skip the publish with it. preflight must still have passed, and the live proof
+    # must be success-or-skipped — never failed.
+    if: |
+      always() &&
+      needs.preflight.result == 'success' &&
+      (needs.live-scenarios.result == 'success' || needs.live-scenarios.result == 'skipped') &&
+      vars.ENABLE_NPM == 'true'
     runs-on: ubuntu-latest
     environment: prod          # the npm Trusted Publisher is scoped to this environment
     permissions: { id-token: write, contents: read }
@@ -115,8 +192,15 @@ jobs:
         # No NODE_AUTH_TOKEN: npm uses the OIDC token via the configured Trusted Publisher.
 
   pypi:
-    needs: [preflight, live-scenarios]
-    if: ${{ vars.ENABLE_PYPI == 'true' }}
+    needs: [preflight, scope, live-scenarios]
+    # `always()` because a SKIPPED live proof (documentation-only release) must not
+    # skip the publish with it. preflight must still have passed, and the live proof
+    # must be success-or-skipped — never failed.
+    if: |
+      always() &&
+      needs.preflight.result == 'success' &&
+      (needs.live-scenarios.result == 'success' || needs.live-scenarios.result == 'skipped') &&
+      vars.ENABLE_PYPI == 'true'
     runs-on: ubuntu-latest
     environment: prod
     permissions: { id-token: write }
@@ -133,8 +217,15 @@ jobs:
         # OIDC trusted publishing — no API token.
 
   go-tag:
-    needs: [preflight, live-scenarios]
-    if: ${{ vars.ENABLE_GO == 'true' }}
+    needs: [preflight, scope, live-scenarios]
+    # `always()` because a SKIPPED live proof (documentation-only release) must not
+    # skip the publish with it. preflight must still have passed, and the live proof
+    # must be success-or-skipped — never failed.
+    if: |
+      always() &&
+      needs.preflight.result == 'success' &&
+      (needs.live-scenarios.result == 'success' || needs.live-scenarios.result == 'skipped') &&
+      vars.ENABLE_GO == 'true'
     runs-on: ubuntu-latest
     environment: prod
     permissions: { contents: write }
@@ -153,8 +244,15 @@ jobs:
           fi
 
   nuget:
-    needs: [preflight, live-scenarios]
-    if: ${{ vars.ENABLE_NUGET == 'true' }}
+    needs: [preflight, scope, live-scenarios]
+    # `always()` because a SKIPPED live proof (documentation-only release) must not
+    # skip the publish with it. preflight must still have passed, and the live proof
+    # must be success-or-skipped — never failed.
+    if: |
+      always() &&
+      needs.preflight.result == 'success' &&
+      (needs.live-scenarios.result == 'success' || needs.live-scenarios.result == 'skipped') &&
+      vars.ENABLE_NUGET == 'true'
     runs-on: ubuntu-latest
     environment: prod          # the NuGet Trusted Publishing policy is scoped to this environment
     permissions: { id-token: write, contents: read }
@@ -179,8 +277,15 @@ jobs:
         # No stored key: the API key is minted via the Trusted Publishing policy + OIDC.
 
   maven:
-    needs: [preflight, live-scenarios]
-    if: ${{ vars.ENABLE_JAVA == 'true' }}
+    needs: [preflight, scope, live-scenarios]
+    # `always()` because a SKIPPED live proof (documentation-only release) must not
+    # skip the publish with it. preflight must still have passed, and the live proof
+    # must be success-or-skipped — never failed.
+    if: |
+      always() &&
+      needs.preflight.result == 'success' &&
+      (needs.live-scenarios.result == 'success' || needs.live-scenarios.result == 'skipped') &&
+      vars.ENABLE_JAVA == 'true'
     runs-on: ubuntu-latest
     environment: prod          # Central Portal token + GPG key live in this environment's secrets
     permissions: { contents: read }
@@ -199,8 +304,15 @@ jobs:
       - run: ./gradlew publishAndReleaseToMavenCentral --no-daemon --no-configuration-cache
 
   hex:
-    needs: [preflight, live-scenarios]
-    if: ${{ vars.ENABLE_ELIXIR == 'true' }}
+    needs: [preflight, scope, live-scenarios]
+    # `always()` because a SKIPPED live proof (documentation-only release) must not
+    # skip the publish with it. preflight must still have passed, and the live proof
+    # must be success-or-skipped — never failed.
+    if: |
+      always() &&
+      needs.preflight.result == 'success' &&
+      (needs.live-scenarios.result == 'success' || needs.live-scenarios.result == 'skipped') &&
+      vars.ENABLE_ELIXIR == 'true'
     runs-on: ubuntu-latest
     environment: prod          # HEX_API_KEY lives in this environment's secrets (Hex has no OIDC)
     permissions: { contents: read }
@@ -218,8 +330,15 @@ jobs:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
 
   clojars:
-    needs: [preflight, live-scenarios]
-    if: ${{ vars.ENABLE_CLOJARS == 'true' }}
+    needs: [preflight, scope, live-scenarios]
+    # `always()` because a SKIPPED live proof (documentation-only release) must not
+    # skip the publish with it. preflight must still have passed, and the live proof
+    # must be success-or-skipped — never failed.
+    if: |
+      always() &&
+      needs.preflight.result == 'success' &&
+      (needs.live-scenarios.result == 'success' || needs.live-scenarios.result == 'skipped') &&
+      vars.ENABLE_CLOJARS == 'true'
     runs-on: ubuntu-latest
     environment: prod          # CLOJARS_* live in this environment's secrets (Clojars has no OIDC)
     permissions: { contents: read }

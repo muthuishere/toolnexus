@@ -13,6 +13,36 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 Documentation only. No code changed in any port; the published packages differ from 0.18.0
 solely in the README each registry shows you.
 
+### A documentation release no longer pays for a live model call
+
+Every registry leg `needs:` the `live-scenarios` job — a real, paid call to a provider that
+proves the harness mechanisms work before anything publishes. That is the right gate for a
+release that changes code. For a release that changes only a README or a docs page it re-proves
+exactly what the previous release proved, costs money, and adds one more way for a publish to
+fail for no reason.
+
+`release.yml` now decides. A new `scope` job diffs the tag against the previous one and sets
+`code_changed`; `live-scenarios` runs only when it is true, and every registry leg accepts a
+**skipped** live proof while still refusing a **failed** one.
+
+**All seven registries publish either way.** The gate decides whether to re-prove the library,
+never whether to ship it — the ports move in lockstep or their version numbers drift apart, which
+is the failure `preflight` exists to catch.
+
+Two details that decide whether a gate like this is honest:
+
+- **The version manifests are excluded from the code set, and then put back.** Every release
+  bumps all six by definition, so counting them as code would make `code_changed` permanently
+  true and the gate would never fire. So each manifest's own diff is re-read, and a manifest that
+  changed for anything other than its version string — a new dependency, a changed target
+  framework, an edited script — is promoted back to code and the live proof runs.
+- **Anything the filter has not seen counts as code.** The doc paths are enumerated; everything
+  else, including workflow files, defaults to running the proof. A gate that guesses "probably
+  docs" about an unfamiliar path is a gate that eventually skips a real release.
+
+Verified in both directions before shipping: this release classifies as documentation-only, and
+`v0.17.0..v0.18.0` — 340 changed files — classifies as code.
+
 ### The READMEs are a front page again, not a second copy of the manual
 
 Eight READMEs went from **3249 lines to 594**. Each one now answers what it is, how to install
