@@ -1,0 +1,165 @@
+;; The port's test entry point, for BOTH hosts.
+;;
+;; It runs the suite in-process and gates on the summary map that `run-tests`
+;; returns — never on the exit code. On cljgo, exit 0 means nothing threw, not
+;; that anything ran: a suite that collects zero tests still exits 0 and looks
+;; green forever. The count gate is the only thing standing between us and that.
+;;
+;; It also lives under src/ rather than test/ for a measured reason: `cljgo run`
+;; and `cljgo build` resolve requires relative to the ENTRY FILE's own root, so
+;; an entry under src/ cannot require a namespace in test/. (`cljgo test` walks
+;; both trees — that is a different mechanism. Measured 2026-07-31.)
+(ns toolnexus.test-main
+  (:require [clojure.test :as t]
+            [koine.env :as env]
+            [koine.json :as json]
+            [koine.host :as host]
+            [toolnexus.tool-test]
+            [toolnexus.frontmatter-test]
+            [toolnexus.mcp-test]
+            [toolnexus.mcp-http-test]
+            [toolnexus.skill-test]
+            [toolnexus.adapter-test]
+            [toolnexus.native-test]
+            [toolnexus.http-test]
+            [toolnexus.in-process-test]
+            [toolnexus.builtin-test]
+            [toolnexus.content-test]
+            [toolnexus.client-test]
+            [toolnexus.classifier-test]
+            [toolnexus.translate-test]
+            [toolnexus.a2a-test]
+            [toolnexus.serve-test]
+            [toolnexus.core-test]
+            [toolnexus.agents.compaction-test]
+            [toolnexus.agents.home-test]
+            [toolnexus.agents.loop-test]
+            [toolnexus.agents.runtime-test]
+            [toolnexus.agents.runtime-fixture-test]
+            [toolnexus.agents.inprocess-test]))
+
+(def suites
+  '[toolnexus.tool-test
+    toolnexus.frontmatter-test
+    toolnexus.mcp-test
+    toolnexus.mcp-http-test
+    toolnexus.skill-test
+    toolnexus.adapter-test
+    toolnexus.native-test
+    toolnexus.http-test
+    toolnexus.in-process-test
+    toolnexus.builtin-test
+    toolnexus.content-test
+    toolnexus.client-test
+    toolnexus.classifier-test
+    toolnexus.translate-test
+    toolnexus.a2a-test
+    toolnexus.serve-test
+    toolnexus.core-test
+    toolnexus.agents.compaction-test
+    toolnexus.agents.home-test
+    toolnexus.agents.loop-test
+    toolnexus.agents.runtime-test
+    toolnexus.agents.runtime-fixture-test
+    toolnexus.agents.inprocess-test])
+
+;; A floor, not an exact count — it must fail on an EMPTY collection without
+;; needing an edit every time a test is added. RAISED from 100 after an audit
+;; removed the four largest suites from `suites` and this gate still reported OK:
+;; 150 of 291 tests is 48% of the suite gone, and the floor could not see it.
+(def minimum-tests 280)
+
+;; The number of suites that MUST be registered. `suites` is a hand-kept
+;; duplicate of the `:require` list above, and dropping an entry from it is the
+;; exact bug that once hid 27 tests: the namespace still loads, so nothing errors,
+;; and the count stays above any floor. Comparing `suites` against a constant is
+;; the only check that can see the vector shrink, because every count derived
+;; FROM the vector shrinks with it. Adding a suite is meant to be a two-line diff.
+(def expected-suite-count 23)
+
+(defn- declared-tests
+  "How many deftests a namespace actually holds, read off its interns rather than
+  off the run. A suite that is registered but collected NOTHING — a load that
+  half-failed, a namespace whose tests were all renamed — is invisible in an
+  aggregate that only sums what ran."
+  [ns-sym]
+  (count (filter (fn [v] (:test (meta v))) (vals (ns-interns ns-sym)))))
+
+(defn- describe-throwable
+  "clojure.test prints a caught throwable with `pr`, which on cljgo renders an
+  ExceptionInfo as a bare `#object[*lang.ExceptionInfo]` — no message, no ex-data.
+  Three intermittent failures in this suite were each reported that way and were
+  undiagnosable from the log alone.
+
+  So print what the object actually says. Costs nothing on a green run."
+  [e]
+  (let [msg  (try (ex-message e) (catch Throwable _ nil))
+        data (try (ex-data e) (catch Throwable _ nil))
+        cause (try (ex-cause e) (catch Throwable _ nil))]
+    (str (or msg (pr-str e))
+         (when data (str " | ex-data: " (pr-str data)))
+         (when cause (str " | cause: " (or (try (ex-message cause) (catch Throwable _ nil))
+                                           (pr-str cause)))))))
+
+(defmethod t/report :error [m]
+  ;; Same shape clojure.test uses, plus the message/ex-data it drops on the floor.
+  (t/with-test-out
+    (t/inc-report-counter :error)
+    (println "\nERROR in" (t/testing-vars-str m))
+    (when (seq t/*testing-contexts*) (println (t/testing-contexts-str)))
+    (when-let [message (:message m)] (println message))
+    (println "expected:" (pr-str (:expected m)))
+    (print "  actual: ")
+    (let [actual (:actual m)]
+      (println (if (instance? Throwable actual)
+                 (describe-throwable actual)
+                 (pr-str actual))))))
+
+(defn run []
+  (let [s          (apply t/run-tests suites)
+        assertions (+ (:pass s 0) (:fail s 0) (:error s 0))
+        empty-ns   (vec (filter (fn [n] (zero? (declared-tests n))) suites))
+        declared   (reduce + (map declared-tests suites))]
+    {:host       (name host/id)
+     :suites     (count suites)
+     :tests      (:test s 0)
+     :assertions assertions
+     :fail       (:fail s 0)
+     :error      (:error s 0)
+     :gate       (cond
+                   (zero? (:test s 0))            "FAILED: zero tests collected"
+                   (not= (count suites) expected-suite-count)
+                   (str "FAILED: " (count suites) " suites registered, expected "
+                        expected-suite-count " — a suite was dropped from `suites`, "
+                        "or one was added without updating `expected-suite-count`")
+                   (seq empty-ns)
+                   (str "FAILED: registered but holding zero tests: " (pr-str empty-ns))
+                   (not= declared (:test s 0))
+                   (str "FAILED: " declared " tests are declared across the registered "
+                        "namespaces but " (:test s 0) " ran")
+                   (< (:test s 0) minimum-tests)  (str "FAILED: only " (:test s 0)
+                                                       " tests, expected >= " minimum-tests)
+                   (pos? (+ (:fail s 0) (:error s 0))) "FAILED: assertions failed"
+                   :else "OK")}))
+
+(defn -main [& _]
+  ;; Four suites read the shared fixture tree through TN_EXAMPLES. Unset, it
+  ;; concatenates into "/subagent-lifecycle/fixture.json" and the run reports ten
+  ;; FileInputStream errors and six golden-byte failures — sixteen symptoms of one
+  ;; missing variable, none of which name it. Say it once, before anything runs.
+  ;; `./all-modes-check.sh` exports it; running the entry point by hand does not.
+  (when (empty? (env/get-env "TN_EXAMPLES"))
+    (throw (ex-info (str "TN_EXAMPLES is not set: it must point at the repo's shared "
+                         "examples/ directory, which four suites read fixtures from. "
+                         "Run ./all-modes-check.sh, or set it explicitly.")
+                    {:gate "FAILED: TN_EXAMPLES is not set"})))
+  (let [r (run)]
+    (println (json/write-str r))
+    ;; The suite uses `future` for parallel tool calls. On the JVM the agent
+    ;; pool's non-daemon threads keep the process alive for their 60s keepalive
+    ;; after the last assertion, so a 7s suite takes 67s of wall clock. Present
+    ;; on BOTH hosts — checked with (resolve 'clojure.core/shutdown-agents) —
+    ;; so it needs no reader conditional and is a no-op where there is no pool.
+    (shutdown-agents)
+    (when-not (= "OK" (:gate r))
+      (throw (ex-info (:gate r) r)))))

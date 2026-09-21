@@ -35,7 +35,8 @@
             [toolnexus.agents.home-test]
             [toolnexus.agents.loop-test]
             [toolnexus.agents.runtime-test]
-            [toolnexus.agents.runtime-fixture-test]))
+            [toolnexus.agents.runtime-fixture-test]
+            [toolnexus.acp-test :as acp-test]))
 
 (def suites
   '[toolnexus.tool-test
@@ -59,7 +60,8 @@
     toolnexus.agents.home-test
     toolnexus.agents.loop-test
     toolnexus.agents.runtime-test
-    toolnexus.agents.runtime-fixture-test])
+    toolnexus.agents.runtime-fixture-test
+    toolnexus.acp-test])
 
 ;; A floor, not an exact count — it must fail on an EMPTY collection without
 ;; needing an edit every time a test is added. RAISED from 100 after an audit
@@ -73,7 +75,7 @@
 ;; and the count stays above any floor. Comparing `suites` against a constant is
 ;; the only check that can see the vector shrink, because every count derived
 ;; FROM the vector shrinks with it. Adding a suite is meant to be a two-line diff.
-(def expected-suite-count 22)
+(def expected-suite-count 23)
 
 (defn- declared-tests
   "How many deftests a namespace actually holds, read off its interns rather than
@@ -141,23 +143,35 @@
                    :else "OK")}))
 
 (defn -main [& _]
-  ;; Four suites read the shared fixture tree through TN_EXAMPLES. Unset, it
-  ;; concatenates into "/subagent-lifecycle/fixture.json" and the run reports ten
-  ;; FileInputStream errors and six golden-byte failures — sixteen symptoms of one
-  ;; missing variable, none of which name it. Say it once, before anything runs.
-  ;; `./all-modes-check.sh` exports it; running the entry point by hand does not.
-  (when (empty? (env/get-env "TN_EXAMPLES"))
-    (throw (ex-info (str "TN_EXAMPLES is not set: it must point at the repo's shared "
-                         "examples/ directory, which four suites read fixtures from. "
-                         "Run ./all-modes-check.sh, or set it explicitly.")
-                    {:gate "FAILED: TN_EXAMPLES is not set"})))
-  (let [r (run)]
-    (println (json/write-str r))
-    ;; The suite uses `future` for parallel tool calls. On the JVM the agent
-    ;; pool's non-daemon threads keep the process alive for their 60s keepalive
-    ;; after the last assertion, so a 7s suite takes 67s of wall clock. Present
-    ;; on BOTH hosts — checked with (resolve 'clojure.core/shutdown-agents) —
-    ;; so it needs no reader conditional and is a no-op where there is no pool.
-    (shutdown-agents)
-    (when-not (= "OK" (:gate r))
-      (throw (ex-info (:gate r) r)))))
+  ;; ACP_FAKE_SERVER, checked FIRST, before the TN_EXAMPLES gate below: this
+  ;; exact entry point (`clojure -M -m toolnexus.test-main` on the JVM,
+  ;; `cljgo run src/run_tests.cljc` -> this -main on cljgo) is how
+  ;; toolnexus.acp-test re-invokes ITSELF as a hermetic fake ACP agent
+  ;; subprocess — the same "re-invoke the test binary" trick
+  ;; golang/acp_test.go uses (GO_WANT_ACP_HELPER), generalised to this port's
+  ;; two hosts because neither has a lighter-weight standalone entry point
+  ;; that all five all-modes-check.sh legs already prove works. See
+  ;; toolnexus.acp-test/fake-server-command and run-fake-server!.
+  (if (= "1" (env/get-env "ACP_FAKE_SERVER"))
+    (acp-test/run-fake-server!)
+    (do
+      ;; Four suites read the shared fixture tree through TN_EXAMPLES. Unset, it
+      ;; concatenates into "/subagent-lifecycle/fixture.json" and the run reports ten
+      ;; FileInputStream errors and six golden-byte failures — sixteen symptoms of one
+      ;; missing variable, none of which name it. Say it once, before anything runs.
+      ;; `./all-modes-check.sh` exports it; running the entry point by hand does not.
+      (when (empty? (env/get-env "TN_EXAMPLES"))
+        (throw (ex-info (str "TN_EXAMPLES is not set: it must point at the repo's shared "
+                             "examples/ directory, which four suites read fixtures from. "
+                             "Run ./all-modes-check.sh, or set it explicitly.")
+                        {:gate "FAILED: TN_EXAMPLES is not set"})))
+      (let [r (run)]
+        (println (json/write-str r))
+        ;; The suite uses `future` for parallel tool calls. On the JVM the agent
+        ;; pool's non-daemon threads keep the process alive for their 60s keepalive
+        ;; after the last assertion, so a 7s suite takes 67s of wall clock. Present
+        ;; on BOTH hosts — checked with (resolve 'clojure.core/shutdown-agents) —
+        ;; so it needs no reader conditional and is a no-op where there is no pool.
+        (shutdown-agents)
+        (when-not (= "OK" (:gate r))
+          (throw (ex-info (:gate r) r)))))))

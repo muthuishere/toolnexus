@@ -1,4 +1,4 @@
-<!-- ctx-optimize:instructions:begin v0.14.0-64-g7381927-dirty -->
+<!-- ctx-optimize:instructions:begin v0.15.2-1-gc2b2e45 -->
 # ctx-optimize — the usage card for this repo's knowledge store
 
 **ctx-optimize is a SHELL COMMAND (a CLI on PATH), not a callable tool: run
@@ -35,6 +35,7 @@ CI gate: `up && fresh`.
 | **Connection** — how are A and B related | `ctx-optimize path "A" "B" --json` |
 | **Orient** — where do I start | `ctx-optimize hubs --top 10 --json` |
 | **List / filter** — every node of a kind, edges of a relation, deps by scope ("all k8s services", "which files use react", "our dev deps") | `ctx-optimize nodes --kind K` / `edges --relation R` / `deps --scope dev [--importers]` — native, portable, **never `export \| jq`**. **An empty result that CANNOT match says so**: `nodes --kind route` prints `(0 nodes)  — no node in this store has kind "route"; kinds present: …` and still exits 0 (there is no `route` kind — served routes are `port` nodes with `direction=provides`). A real kind filtered to nothing is NOT decorated. `--json`/`--ndjson` put it on stderr as `{"filter_disclosure":{…}}` |
+| **Literal sweep** — an exact string, every occurrence, a config value, an error message, a comment | `ctx-optimize search '<regex>' [--ext .go,.ts] [--path dir/] [--count|--files] [--json]` — built in, so no `rg`/`grep`/PowerShell needed anywhere; sweeps the EXTRACTOR's file set so counts reconcile with the store. The graph does not index literals — this is the way in, and `query` is the wrong verb for one |
 | **Boundaries** — what does this call out to / expose, which env vars are secrets, what does it shell out to, is that call http or a queue | `ctx-optimize boundaries [--sensitive] [--transport T] [--direction consumes\|provides] [--json]` — CONSUMES/PROVIDES split with `file:line`. **`query` cannot reach these** (a hostname scores as prose); this verb or `nodes --kind port` are the ways in |
 | **Need the actual code body inline** — not just the pointer | add `--include-content` to `query`/`card` — verbatim source hydrated from the file at answer time (nothing stored) |
 | **The answer looks short — where are the rest of the callers?** | add `--include-ambiguous` to `card`/`explain`/`affected`/`path`/`hubs`/`change-plan`. These verbs answer with FACTS ONLY by default, so a **method's blast radius is a floor**: call sites the store refused to attribute are held back as a shortlist. The flag walks them, and marks every widened row (`?`, or a `MAYBE` heading) — candidates to verify, never callers |
@@ -123,7 +124,7 @@ answer from a partial store without saying so.
 | Question shape | Tool |
 |---|---|
 | symbols, structure, callers, impact, architecture, "how does X work" | store verbs (table above) |
-| exact literal strings, every occurrence, config VALUES, comments, member fields, build files | **grep directly — the store does not index these; say so and grep.** No `grep`/`rg` (Windows, bare container)? `ctx-optimize search '<literal>' [--ext .go] [--count]` sweeps the extractor's own file set — same gitignore, same skip-dirs, so counts match what the store saw |
+| exact literal strings, every occurrence, config VALUES, comments, member fields, build files, error-message text | **`ctx-optimize search '<regex>' [--ext .go,.ts] [--path dir/] [--count|--files] [--json]`** — the store does not index these, but you do NOT need an external tool to sweep for them. Reach for it FIRST, for three reasons: **(a) it is always there** — no `rg`, no `grep`, no shell differences, so on Windows or in a bare container you never write a PowerShell or python script to search; **(b) its file set is the extractor's** (gitignore + skip-dirs + size cap), so a count reconciles with what the graph saw — `rg` will happily count a vendored tree the store never read and leave you unable to explain the mismatch; **(c) `--json`/`--count`/`--files` parse directly**, no regex over another tool's text. Go RE2 syntax. On raw speed `rg` is modestly ahead (kernel: 2.06 s vs our 3.18 s) — **that margin is not a reason to switch.** The rule: **use the tool that is already here unless the alternative is dramatically faster**, because a second tool costs you a file set that no longer matches the store, an output shape you have to parse, and a dependency that is absent on the next machine. A ~1.5x gap on a 144k-file repo does not buy that back; an order of magnitude would |
 | external hosts, env-var NAMES, spawned binaries, exposed routes | `ctx-optimize boundaries` — these look like "config values" but the store DOES index them as `port` nodes with `file:line`. Grep finds the string; this tells you the direction, transport and whether it is a credential |
 
 The ladder: right-tool store verb first → verify before a human acts → READ
@@ -304,3 +305,27 @@ class: weaker query rephrasing when the first hit is noise, and
 fabrication risk on plausible-but-absent symbols — keep `verify` in the
 loop before humans act on citations.
 <!-- ctx-optimize:instructions:end -->
+
+<!-- repo-specific notes (outside the generated block — `init` will not touch these) -->
+## toolnexus notes — what the store does and does not cover
+
+The module list in `.ctxoptimize/config.json` declares **all seven ports** plus
+every benchmark runner. `csharp`, `elixir` and `clojure` are not found by the
+built-in scan markers, so `scan.markers` adds `Toolnexus.slnx` / `mix.exs` /
+`deps.edn` and `scan.include` force-adds the C# dirs (their `.csproj` names vary).
+Anything outside a module — `SPEC.md`, `docs/`, `openspec/`, `examples/`,
+`conformance/`, `marketing/`, `scripts/` — is gathered by the root **residual**
+task, so it is in the store without being a module.
+
+Two parity gaps to know before you trust a symbol query:
+
+- **Elixir has no grammar.** `ctx-optimize` parses go/python/js/ts/tsx/java/c/cpp/
+  csharp/rust/zig/sql (+ a Clojure pack). The `elixir/` store therefore holds
+  manifests and git co-change only — **zero code nodes**. For `elixir/lib/**`,
+  `card`/`affected`/`change-plan` will find nothing; use
+  `ctx-optimize search '<regex>' --path elixir/` and read the file. A not-found
+  there means "unsupported language", NOT "absent from the codebase".
+- **Clojure symbols appear twice.** `clojure/examples/src/` is a source MIRROR of
+  `clojure/src/` (see the repo's `examples-mirror-check.sh` guard), so every
+  Clojure symbol returns from both paths. `clojure/src/` is canonical; the
+  `examples/` hit is the copy, not a second definition.

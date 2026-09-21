@@ -2173,11 +2173,16 @@ def create_client(
 _IN_PROCESS_BASE_URL = "http://in-process.invalid/v1"
 
 
-class _InProcessTransport:
+class InProcessTransport:
     """Turns a semantic ``generate`` into the shipped ``HttpTransport`` seam.
 
     The host returns one assistant message; this builds the provider envelope
     (``choices``, ``finish_reason``, ``usage``) so a model author never has to.
+
+    Public (ADR 0030 / issue #95): ``create_in_process_client`` builds one of these
+    internally, and :class:`toolnexus.agents.AgentRuntime`'s own ``in_process``
+    option calls this SAME class — the top-level client and the sub-agent runtime
+    share one adapter, never two copies of the request/response assembly.
     """
 
     def __init__(self, generate: Callable[[dict[str, Any]], Any]) -> None:
@@ -2272,6 +2277,6 @@ def create_in_process_client(*, model: str, generate: Callable[[dict[str, Any]],
         # An in-process model has no endpoint to authenticate to, so the host must never need a key — but the client resolves one from the environment and fails when it finds none. A sentinel keeps that resolution from ever running. Caught by CI, which has no OPENROUTER_API_KEY; every local run passed because a developer shell has one.
         api_key="in-process",
         model=model,
-        http_transport=_InProcessTransport(generate),
+        http_transport=InProcessTransport(generate),
         **options,
     )

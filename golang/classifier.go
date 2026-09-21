@@ -779,7 +779,9 @@ func (c *Classifier) evaluateSystemOne(ctx context.Context, state any, questions
 func (c *Classifier) post(ctx context.Context, raw []byte) ([]byte, error) {
 	endpoint := strings.TrimRight(c.opts.BaseURL, "/") + "/systemone"
 	retries := c.opts.Retries
-	if retries <= 0 {
+	if retries == -1 { // SPIKE (ADR-0029): explicit-zero sentinel
+		retries = 0
+	} else if retries <= 0 {
 		retries = 2
 	}
 	baseMs := c.opts.RetryBaseMs

@@ -1,0 +1,6 @@
+;; Portability spike on cljgo. `cljgo run`/`build` resolve dependencies from
+;; THIS file, not deps.edn (deps.edn is for the plain `clojure` CLI / JVM
+;; host only) — the real clojure/ port's own build.cljgo is the reference.
+(defn build [b]
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.11.0"})
+  (install b (exe b {:name "climodel-test" :main "src/run_climodel_test.cljc"})))
