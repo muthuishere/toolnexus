@@ -865,8 +865,14 @@
                              :body (json/write-str (text-response "openai" "late"))})
                           {:port 0})]
     (try
+      ;; :retries 0 is load-bearing, not decoration. This asserts that :timeout-ms
+      ;; BOUNDS ONE call; with a retry budget the wall clock legitimately becomes
+      ;; timeout x attempts + backoff, which measures the retry policy instead.
+      ;; Before this port's default was corrected from 0 to 2 the absence worked by
+      ;; accident; now the intent is stated.
       (let [c (client/create-client {:base-url (str "http://127.0.0.1:" (server/port srv))
-                                     :model "m" :api-key "k" :timeout-ms 150})
+                                     :model "m" :api-key "k" :timeout-ms 150
+                                     :retries 0})
             started (ktime/now-ms)]
         (is (thrown? Throwable (client/run c "hi" {:toolkit (tool/toolkit tools)})))
         (is (< (- (ktime/now-ms) started) 1500)

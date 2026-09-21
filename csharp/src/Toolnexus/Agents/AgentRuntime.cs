@@ -510,7 +510,12 @@ public sealed class AgentRuntime
                 BaseUrl = _opts.BaseUrl ?? "http://runtime.invalid",
                 Style = _opts.Style ?? "openai",
                 Model = h.Def.Model == "inherit" ? (_opts.Model ?? "inherit") : h.Def.Model,
-                ApiKey = _opts.ApiKey,
+                // An in-process model has no endpoint to authenticate to, so the host must never
+                // need a key — but LlmClient resolves one from the environment and throws when it
+                // finds none. A sentinel keeps that resolution from ever running. Caught by CI,
+                // which has no OPENROUTER_API_KEY; every local run passed because a developer
+                // shell has one. Same fix as python's create_in_process_client.
+                ApiKey = _opts.InProcess is not null ? "in-process" : _opts.ApiKey,
                 SystemPrompt = string.IsNullOrEmpty(h.Def.Soul) ? null : h.Def.Soul,
                 MaxTurns = h.EffMaxTurns,
                 HttpHandler = _gate,             // the turn gate wraps ONLY the LLM HTTP call
