@@ -466,6 +466,16 @@
     :http-client          the LLM transport (fn [url headers body] response) —
                           the hermetic-test seam, and the thing the turn gate
                           wraps. Same shape as `koine.http/post-json`
+    :in-process           a model running IN THIS PROCESS (ADR 0030): a semantic
+                          `generate` function, `(fn [req] answer)` — same shape
+                          `toolnexus.client/create-in-process-client` takes. It
+                          is turned into an `:http-client` by calling that same
+                          namespace's PUBLIC `in-process-http-client`, so it is
+                          wrapped by the identical global turn gate below —
+                          zero duplicated adapter logic. Mutually exclusive
+                          with `:http-client` and `:llm`; `create-runtime`
+                          throws (`ex-info`) at construction time if more than
+                          one is set — never resolved by precedence
     :clock                the time source; default `system-clock`
     :store                the ONE conversation store for every handle
                           (conversation id = handle id); default in-memory
@@ -503,7 +513,23 @@
   :max-wall-ms :max-children :max-concurrent :max-depth`. Money is deliberately
   absent — it is vendor data, and a host converts tokens to money itself."
   [opts]
-  (let [clock (or (:clock opts) (system-clock))
+  (when (and (:http-client opts) (:in-process opts))
+    (throw (ex-info (str "toolnexus/agents: :http-client and :in-process are mutually "
+                         "exclusive — set one, not both")
+                    {:option :in-process})))
+  (when (and (:llm opts) (:in-process opts))
+    (throw (ex-info (str "toolnexus/agents: :llm and :in-process are mutually exclusive "
+                         "— an in-process model has no wire endpoint to point :llm at")
+                    {:option :in-process})))
+  (let [opts  (if (:in-process opts)
+                ;; The exact same adapter `create-in-process-client` calls,
+                ;; now reused here (ADR 0030) — built BEFORE anything else is
+                ;; wired, so the existing global turn gate (`gated-http-client`,
+                ;; which wraps `(:http-client (:opts rt))`) picks it up with NO
+                ;; new code path.
+                (assoc opts :http-client (client/in-process-http-client (:in-process opts)))
+                opts)
+        clock (or (:clock opts) (system-clock))
         store (or (:store opts) (client/in-memory-store))
         rt    {:opts     opts
                :registry (or (:registry opts) {})

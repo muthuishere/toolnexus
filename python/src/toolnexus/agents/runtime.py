@@ -58,6 +58,7 @@ from ..client import (
     ConversationStore,
     HttpTransport,
     InMemoryConversationStore,
+    InProcessTransport,
     UrllibTransport,
     create_client,
 )
@@ -442,11 +443,26 @@ class AgentRuntime:
         max_concurrent_turns: int = 8,
         shutdown_ms: float = 200,
         llm: Optional[dict[str, Any]] = None,
+        in_process: Optional[Callable[[dict[str, Any]], Any]] = None,
         store: Optional[ConversationStore] = None,
         clock: Optional[Clock] = None,
         hooks: Optional[Any] = None,
         on_metric: Optional[Callable[[dict[str, Any]], None]] = None,
     ) -> None:
+        # ``in_process`` (ADR 0030 / issue #95) is a model running IN THIS PROCESS —
+        # no wire, no `llm` endpoint to dial. Mutually exclusive with `transport`
+        # (both configure the HTTP seam) and with `llm` (there is no endpoint an
+        # in-process model could dial). Resolved LOUDLY at construction, never by
+        # precedence — a silently-ignored option is a worse bug than a raised one.
+        if transport is not None and in_process is not None:
+            raise ValueError(
+                "toolnexus.agents: `transport` and `in_process` are mutually exclusive — set one, not both"
+            )
+        if llm is not None and in_process is not None:
+            raise ValueError(
+                "toolnexus.agents: `llm` and `in_process` are mutually exclusive — an in-process model "
+                "has no wire endpoint for `llm` to point at"
+            )
         self._registry = registry
         # The §8 seams (SPEC §7D "The §8 seams on an agent run"): applied to EVERY
         # agent's turns unless that agent's def replaces them. Forwarded verbatim —
@@ -455,6 +471,11 @@ class AgentRuntime:
         # the gated HTTP transport, the store). Unset ⇒ byte-identical runs.
         self._hooks = hooks
         self._on_metric = on_metric
+        if in_process is not None:
+            # Reuses create_in_process_client's own adapter (ADR 0030) — zero
+            # duplicated request/response-assembly logic between the top-level
+            # client and the sub-agent runtime.
+            transport = InProcessTransport(in_process)
         self._inner_transport: HttpTransport = transport if transport is not None else UrllibTransport()
         self._gated = _GatedTransport(self)
         self._inbox_cap = inbox_cap

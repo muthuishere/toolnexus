@@ -7,9 +7,15 @@
 ;; runs on the JVM. koine is resolved from Clojars: the same artifact and the
 ;; same version (cljgo ADR 0095), and while resolving it cljgo statically
 ;; rejects any namespace in that jar that reaches for Java interop.
+;; `acp_demo` is compiled here (so `cljgo build` always proves it still
+;; builds) but deliberately left OUT of run.sh's NAMES/SRCS arrays below,
+;; same as clj/run.sh's EXAMPLES — it needs a real ACP agent CLI installed
+;; and authenticated, so it is not run in CI. Run it by hand:
+;;   ./ex-acp_demo
+;;   cljgo run src/run_acp_demo.cljc
 (defn build [b]
   (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.11.0"})
-  (doseq [n ["demo" "native_and_http" "skills" "persona_memory" "compaction" "multimodal" "judge"]]
+  (doseq [n ["demo" "native_and_http" "skills" "persona_memory" "compaction" "multimodal" "judge" "acp_demo"]]
     (install b (exe b {:name (str "ex-" n)
                        :main (if (= n "demo")
                                "src/toolnexus/demo.cljc"

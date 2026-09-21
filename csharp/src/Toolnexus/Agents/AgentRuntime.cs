@@ -46,11 +46,27 @@ public sealed class AgentRuntime
 
     public AgentRuntime(RuntimeOptions opts)
     {
+        if (opts.Handler is not null && opts.InProcess is not null)
+            throw new InvalidOperationException(
+                "toolnexus/agents: RuntimeOptions.Handler and RuntimeOptions.InProcess are mutually "
+                + "exclusive — set one, not both");
+        if (opts.InProcess is not null && (opts.BaseUrl is not null || opts.Style is not null || opts.ApiKey is not null))
+            throw new InvalidOperationException(
+                "toolnexus/agents: RuntimeOptions.InProcess and the LLM endpoint fields "
+                + "(BaseUrl/Style/ApiKey) are mutually exclusive — an in-process model has no wire "
+                + "endpoint to point them at");
+
         _opts = opts;
         _store = opts.Store ?? new InMemoryConversationStore();
         _clock = opts.Clock ?? TimeProvider.System;
         _turnGate = new SemaphoreSlim(opts.MaxConcurrentTurns);
-        _gate = new GateHandler(this, opts.Handler ?? new HttpClientHandler());
+        // InProcess (ADR 0030) is turned into a handler by calling the SAME public adapter the
+        // top-level InProcess.CreateClient uses — zero duplicated logic — before any other wiring,
+        // so the global turn gate below wraps it exactly as it would wrap Handler.
+        var innerHandler = opts.InProcess is not null
+            ? new Toolnexus.InProcess.GenerateBackedHandler(opts.InProcess)
+            : opts.Handler ?? new HttpClientHandler();
+        _gate = new GateHandler(this, innerHandler);
         Root = new Handle("root", new AgentDef { Name = "root", Does = "runtime root", Model = "none" },
             null, _sync, _clock.GetUtcNow());
     }
@@ -522,7 +538,12 @@ public sealed class AgentRuntime
                 BaseUrl = _opts.BaseUrl ?? "http://runtime.invalid",
                 Style = _opts.Style ?? "openai",
                 Model = h.Def.Model == "inherit" ? (_opts.Model ?? "inherit") : h.Def.Model,
-                ApiKey = _opts.ApiKey,
+                // An in-process model has no endpoint to authenticate to, so the host must never
+                // need a key — but LlmClient resolves one from the environment and throws when it
+                // finds none. A sentinel keeps that resolution from ever running. Caught by CI,
+                // which has no OPENROUTER_API_KEY; every local run passed because a developer
+                // shell has one. Same fix as python's create_in_process_client.
+                ApiKey = _opts.InProcess is not null ? "in-process" : _opts.ApiKey,
                 SystemPrompt = string.IsNullOrEmpty(h.Def.Soul) ? null : h.Def.Soul,
                 MaxTurns = h.EffMaxTurns,
                 HttpHandler = _gate,             // the turn gate wraps ONLY the LLM HTTP call

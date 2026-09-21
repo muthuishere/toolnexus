@@ -710,6 +710,38 @@
         (is (= "done" (:text r)))
         (is (= 3 @hits) "two 429s consumed two retries, the third call succeeded")))))
 
+(deftest retries-zero-means-exactly-one-attempt
+  ;; ADR-0029 — :retries must be able to mean "zero retries" (exactly one
+  ;; attempt), and an explicit 0 must be honored even though 0 is truthy in
+  ;; Clojure's `or` — this is the failure mode the bug fix pins.
+  (flaky-llm [429 429 429]
+    (fn [{:keys [base hits]}]
+      (let [c (client/create-client {:base-url base :model "m" :api-key "k"
+                                     :retries 0 :retry-base-ms 1})]
+        (is (thrown? Throwable (client/run c "hi" {:toolkit (tool/toolkit tools)})))
+        (is (= 1 @hits) "an explicit :retries 0 spends no retry budget — one attempt, full stop")))))
+
+(deftest retries-unset-defaults-to-two-matching-every-other-port
+  ;; The Clojure port's own default was silently 0 (never normalized in
+  ;; create-client) while all six other ports default to 2 — a real 7-port
+  ;; parity bug. Unset :retries must mean 2 retries, i.e. 3 total attempts.
+  (flaky-llm [429 429]
+    (fn [{:keys [base hits]}]
+      (let [c (client/create-client {:base-url base :model "m" :api-key "k"
+                                     :retry-base-ms 1})
+            r (client/run c "hi" {:toolkit (tool/toolkit tools)})]
+        (is (= "done" (:text r)))
+        (is (= 3 @hits) "unset :retries must still allow 3 total attempts (1 + 2 retries)"))))
+  ;; And the boundary the other way: a persistently-failing backend must be
+  ;; called EXACTLY 3 times when :retries is unset — not fewer (the old,
+  ;; wrong 0-retries default) and not more.
+  (flaky-llm [429 429 429 429 429]
+    (fn [{:keys [base hits]}]
+      (let [c (client/create-client {:base-url base :model "m" :api-key "k"
+                                     :retry-base-ms 1})]
+        (is (thrown? Throwable (client/run c "hi" {:toolkit (tool/toolkit tools)})))
+        (is (= 3 @hits) "unset :retries against a persistently failing backend must be exactly 3 total attempts")))))
+
 (deftest a-non-retryable-status-fails-immediately
   (flaky-llm [400]
     (fn [{:keys [base hits]}]
@@ -833,8 +865,14 @@
                              :body (json/write-str (text-response "openai" "late"))})
                           {:port 0})]
     (try
+      ;; :retries 0 is load-bearing, not decoration. This asserts that :timeout-ms
+      ;; BOUNDS ONE call; with a retry budget the wall clock legitimately becomes
+      ;; timeout x attempts + backoff, which measures the retry policy instead.
+      ;; Before this port's default was corrected from 0 to 2 the absence worked by
+      ;; accident; now the intent is stated.
       (let [c (client/create-client {:base-url (str "http://127.0.0.1:" (server/port srv))
-                                     :model "m" :api-key "k" :timeout-ms 150})
+                                     :model "m" :api-key "k" :timeout-ms 150
+                                     :retries 0})
             started (ktime/now-ms)]
         (is (thrown? Throwable (client/run c "hi" {:toolkit (tool/toolkit tools)})))
         (is (< (- (ktime/now-ms) started) 1500)

@@ -1257,19 +1257,18 @@ export type InProcessOptions = Omit<ClientOptions, "baseUrl" | "apiKey" | "style
 const IN_PROCESS_BASE_URL = "http://in-process.invalid/v1"
 
 /**
- * A client backed by a model running IN THIS PROCESS — no server, no socket, and no
- * HTTP types to construct.
- *
- * This is a second constructor, not a second seam: it builds on the same injectable
- * transport that `fetch`/`httpClient` uses, so the tool-calling loop, MCP servers,
- * skills, sub-agents, hooks, metrics and the completion gate all behave identically.
+ * Build a `fetch`-shaped adapter over a semantic `generate` function (ADR 0030):
+ * the reusable piece of {@link createInProcessClient} — assembles the wire request,
+ * calls `generate`, and re-encodes its answer as an OpenAI-shaped `Response`. Every
+ * caller that wants an in-process model behind a `fetch` slot (the top-level client,
+ * or the agent runtime's `inProcess` option) goes through this ONE function, so there
+ * is no second copy of the request/response assembly to drift.
  *
  * Streaming is refused rather than faked — see the thrown error.
  */
-export function createInProcessClient(opts: InProcessOptions): Client {
-  const { generate, ...rest } = opts
+export function createInProcessFetch(generate: (request: InProcessRequest) => InProcessResponse | Promise<InProcessResponse>): typeof fetch {
   if (typeof generate !== "function") {
-    throw new Error("toolnexus: createInProcessClient requires a `generate` function")
+    throw new Error("toolnexus: createInProcessFetch requires a `generate` function")
   }
 
   const inProcessFetch: typeof fetch = async (_url, init) => {
@@ -1323,6 +1322,25 @@ export function createInProcessClient(opts: InProcessOptions): Client {
       { status: 200, headers: { "content-type": "application/json" } },
     )
   }
+
+  return inProcessFetch
+}
+
+/**
+ * A client backed by a model running IN THIS PROCESS — no server, no socket, and no
+ * HTTP types to construct.
+ *
+ * This is a second constructor, not a second seam: it builds on the same injectable
+ * transport that `fetch`/`httpClient` uses, so the tool-calling loop, MCP servers,
+ * skills, sub-agents, hooks, metrics and the completion gate all behave identically.
+ * The `fetch`-shaped adapter itself is {@link createInProcessFetch} — this function
+ * is just that adapter wired into a `Client`.
+ *
+ * Streaming is refused rather than faked — see {@link createInProcessFetch}.
+ */
+export function createInProcessClient(opts: InProcessOptions): Client {
+  const { generate, ...rest } = opts
+  const inProcessFetch = createInProcessFetch(generate)
 
   return new Client({
     // Retries default to ZERO here, unlike a network client. There is no wire, so

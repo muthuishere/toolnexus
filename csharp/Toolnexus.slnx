@@ -6,6 +6,7 @@
     <Project Path="src/Toolnexus/Toolnexus.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/FakeAcpServer/FakeAcpServer.csproj" />
     <Project Path="tests/Toolnexus.Tests/Toolnexus.Tests.csproj" />
   </Folder>
 </Solution>

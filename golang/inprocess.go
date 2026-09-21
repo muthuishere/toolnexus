@@ -60,17 +60,17 @@ type InProcessOptions struct {
 	// OnError, when set, classifies a failed Generate exactly as it would a failed HTTP
 	// attempt. Unset ⇒ every failure is FINAL (see CreateInProcessClient) — set this to
 	// opt back into retries for a model that is genuinely flaky, e.g. a GPU that OOMs.
-	OnError        func(ErrorInfo) Tier
-	SystemPrompt   string
-	MaxTurns       int
-	Hooks          *Hooks
-	TimeoutMs      int
-	Store          ConversationStore
-	OnMetric       func(MetricEvent)
-	WaitFor        func(Request) (Answer, error)
-	RequestParams  map[string]any
-	BodyTransform  func(map[string]any) map[string]any
-	Headers        map[string]string
+	OnError       func(ErrorInfo) Tier
+	SystemPrompt  string
+	MaxTurns      int
+	Hooks         *Hooks
+	TimeoutMs     int
+	Store         ConversationStore
+	OnMetric      func(MetricEvent)
+	WaitFor       func(Request) (Answer, error)
+	RequestParams map[string]any
+	BodyTransform func(map[string]any) map[string]any
+	Headers       map[string]string
 }
 
 // inProcessBaseURL is a sentinel. It is never dialled — the round tripper below
@@ -78,6 +78,14 @@ type InProcessOptions struct {
 // string internally, so it must be syntactically valid. `.invalid` is reserved by
 // RFC 2606 precisely so a name can never resolve.
 const inProcessBaseURL = "http://in-process.invalid/v1"
+
+// InProcessTransport builds the SAME round tripper CreateInProcessClient uses, as a
+// plain http.RoundTripper — for a host that needs to hand a sub-agent runtime
+// (agents.Options.Transport) the identical in-process model a top-level client was
+// built with, without re-implementing the wire assembly (ADR 0030 / issue #95).
+func InProcessTransport(generate func(InProcessRequest) (InProcessResponse, error)) http.RoundTripper {
+	return &inProcessRoundTripper{generate: generate}
+}
 
 type inProcessRoundTripper struct {
 	generate func(InProcessRequest) (InProcessResponse, error)
@@ -185,26 +193,23 @@ func CreateInProcessClient(opts InProcessOptions) *Client {
 	if opts.Generate == nil {
 		panic("toolnexus: CreateInProcessClient requires a Generate function")
 	}
-	// Every failure is FINAL by default. There is no wire, so there is no transient
-	// failure to ride out: whatever Generate returns will be returned again, and
-	// retrying only buys backoff before the caller sees their own bug — measured at
-	// 3.7s for the streaming refusal before this.
-	//
-	// This goes through OnError rather than Retries because this port documents
-	// `Retries: 0 ⇒ 2`, so zero cannot mean zero here without changing shipped
-	// semantics for every network client.
-	onError := opts.OnError
-	if onError == nil {
-		onError = func(ErrorInfo) Tier { return TierFail }
-	}
+	// SPIKE (ADR-0029): every failure is FINAL by default via the GENERAL
+	// Retries mechanism now that -1 is a real "explicit zero" spelling --
+	// no more forcing OnError=TierFail as a workaround. opts.OnError (nil
+	// unless the host sets one) passes through untouched; it is moot when the
+	// budget is 0 (attempt==retries fires on the first and only attempt
+	// regardless of tier), and if this constructor later grows its own
+	// `Retries` field for a host that wants to opt back in, OnError keeps
+	// working independently of it.
 	return CreateClient(ClientOptions{
-		OnError:       onError,
-		BaseURL:       inProcessBaseURL,
-		Style:         StyleOpenAI,
+		OnError: opts.OnError,
+		Retries: -1,
+		BaseURL: inProcessBaseURL,
+		Style:   StyleOpenAI,
 		// An in-process model has no endpoint to authenticate to, so the host must never need a key — but the client resolves one from the environment and fails when it finds none. A sentinel keeps that resolution from ever running. Caught by CI, which has no OPENROUTER_API_KEY; every local run passed because a developer shell has one.
 		APIKey:        "in-process",
 		Model:         opts.Model,
-		HTTPClient:    &http.Client{Transport: &inProcessRoundTripper{generate: opts.Generate}},
+		HTTPClient:    &http.Client{Transport: InProcessTransport(opts.Generate)},
 		SystemPrompt:  opts.SystemPrompt,
 		MaxTurns:      opts.MaxTurns,
 		Hooks:         opts.Hooks,

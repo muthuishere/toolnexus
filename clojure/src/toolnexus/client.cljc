@@ -166,6 +166,7 @@
   #{"maxTurns" "contentPart" "timeout"})
 
 (def ^:private default-max-turns 10)
+(def ^:private default-retries 2)
 
 (defn- trim-slashes [s] (str/replace (str s) #"/+$" ""))
 
@@ -204,7 +205,7 @@
     :headers        extra request headers
     :system-prompt  prepended to the toolkit's skills prompt
     :max-turns      default 10
-    :retries        transient-failure budget (default 0); retries on
+    :retries        transient-failure budget (default 2); retries on
                     `429`/`500`/`502`/`503`/`504`/`529` + network. Widen the
                     status set with `:retryable-statuses`.
     :retry-base-ms  base of the exponential backoff in ms (default 500, as in
@@ -243,6 +244,12 @@
   (-> opts
       (assoc :style (style-of opts))
       (update :max-turns #(or % default-max-turns))
+      ;; :retries is explicitly given a value at construction time so that
+      ;; every other reader (post-with-retry included) always sees an
+      ;; explicit budget — never a bare absence that could be mistaken for
+      ;; zero. Unset => 2 (matching all six other ports: 3 total attempts);
+      ;; an explicit value, including 0, is honored as-is.
+      (update :retries #(if (some? %) % default-retries))
       ;; §conversation-store: the default is in-memory and per-client, so two
       ;; clients never share a transcript by accident.
       (update :store #(or % (in-memory-store)))))
@@ -267,9 +274,14 @@
     (string? v) v
     :else (json/write-str v)))
 
-(defn- in-process-http-client
+(defn in-process-http-client
   "Turns a semantic `generate` into the shipped `:http-client` seam: the host returns
-  ONE assistant message and this builds the provider envelope."
+  ONE assistant message and this builds the provider envelope.
+
+  Public (ADR 0030) so a caller OTHER than `create-in-process-client` — the
+  agent runtime's `:in-process` option, in particular — can build the exact
+  same `:http-client` from a `generate` function with zero duplicated logic.
+  `create-in-process-client` itself is unchanged: it still calls this."
   [generate]
   (fn [_url _headers body]
     (let [payload (json/read-str (if (string? body) body (json/write-str body)))

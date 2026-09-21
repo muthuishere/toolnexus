@@ -1,6 +1,7 @@
 package io.github.muthuishere.toolnexus.agents;
 
 import io.github.muthuishere.toolnexus.Answer;
+import io.github.muthuishere.toolnexus.InProcess;
 import io.github.muthuishere.toolnexus.LlmClient;
 import io.github.muthuishere.toolnexus.Request;
 import io.github.muthuishere.toolnexus.Tool;
@@ -101,15 +102,34 @@ public final class AgentRuntime {
     private final Semaphore turnSlots;
     private final AtomicInteger concurrentTurns = new AtomicInteger();
     private final AtomicInteger maxObservedConcurrentTurns = new AtomicInteger();
-    private final HttpClient gated = new GatedHttpClient();
+    private final HttpClient gated;
 
     public AgentRuntime(RuntimeOptions opts) {
+        // Construction-time validation, never precedence (ADR 0030): a host that sets more than
+        // one of httpClient/inProcess/baseUrl must be told loudly, not silently resolved.
+        if (opts.httpClient != null && opts.inProcess != null) {
+            throw new IllegalArgumentException(
+                    "toolnexus/agents: RuntimeOptions.httpClient and RuntimeOptions.inProcess are "
+                            + "mutually exclusive — set one, not both");
+        }
+        if (opts.baseUrl != null && opts.inProcess != null) {
+            throw new IllegalArgumentException(
+                    "toolnexus/agents: RuntimeOptions.baseUrl and RuntimeOptions.inProcess are "
+                            + "mutually exclusive — an in-process model has no wire endpoint to point baseUrl at");
+        }
         this.opts = opts;
         this.inboxCap = opts.inboxCap != null ? opts.inboxCap : 8;
         this.turnSlots = new Semaphore(opts.maxConcurrentTurns != null ? opts.maxConcurrentTurns : 8, true);
         this.clock = opts.clock != null ? opts.clock : RuntimeClock.system();
         this.store = opts.store != null ? opts.store : new LlmClient.InMemoryConversationStore();
         this.root = new Handle("root", new AgentDef("root", "runtime root", "", "none"), null);
+        // The in-process delegate reuses the SAME public adapter InProcess.createClient builds
+        // (InProcess.GenerateBackedHttpClient) — no duplicated logic, no second code path. The
+        // global turn gate wraps it identically to a wire httpClient.
+        HttpClient delegate = opts.inProcess != null
+                ? new InProcess.GenerateBackedHttpClient(opts.inProcess)
+                : (opts.httpClient != null ? opts.httpClient : HttpClient.newHttpClient());
+        this.gated = new GatedHttpClient(delegate);
     }
 
     /** The runtime-wide conversation store (conversation id = handle id). Transcripts written by
@@ -548,8 +568,11 @@ public final class AgentRuntime {
                 String model = "inherit".equals(h.def.model)
                         ? (opts.defaultModel != null ? opts.defaultModel : "inherit") : h.def.model;
                 Function<Request, Answer> waitFor = oneShotWaitFor != null ? oneShotWaitFor : escalator(h);
+                // opts.inProcess routes through the SAME sentinel wire config InProcess.createClient
+                // uses (ADR 0030): a syntactically-valid, never-dialled base URL and a placeholder
+                // key, so the client's env-apiKey resolution never runs for a model with no endpoint.
                 LlmClient.Options co = new LlmClient.Options()
-                        .baseUrl(opts.baseUrl)
+                        .baseUrl(opts.inProcess != null ? InProcess.BASE_URL : opts.baseUrl)
                         .style(opts.style != null ? opts.style : "openai")
                         .model(model)
                         .maxTurns(h.effMaxTurns)
@@ -568,7 +591,11 @@ public final class AgentRuntime {
                         h.def.onMetric != null ? h.def.onMetric : opts.onMetric;
                 if (hooks != null) co.hooks(hooks);
                 if (onMetric != null) co.onMetric(onMetric);
-                if (opts.apiKey != null) co.apiKey(opts.apiKey);
+                if (opts.inProcess != null) {
+                    co.apiKey("in-process");
+                } else if (opts.apiKey != null) {
+                    co.apiKey(opts.apiKey);
+                }
                 if (h.def.soul != null && !h.def.soul.isEmpty()) co.systemPrompt(h.def.soul);
                 if (waitFor != null) co.waitFor(waitFor);
                 LlmClient client = LlmClient.create(co);
@@ -814,7 +841,9 @@ public final class AgentRuntime {
     // killed Run cannot strand it (gate-release-on-death).
     // ------------------------------------------------------------------
     private final class GatedHttpClient extends HttpClient {
-        private final HttpClient d = HttpClient.newHttpClient();
+        private final HttpClient d;
+
+        GatedHttpClient(HttpClient delegate) { this.d = delegate; }
 
         @Override
         public <T> HttpResponse<T> send(HttpRequest req, HttpResponse.BodyHandler<T> handler)

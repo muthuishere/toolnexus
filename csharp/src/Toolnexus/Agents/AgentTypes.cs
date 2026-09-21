@@ -217,8 +217,23 @@ public sealed record HandleView(string Id, string State, long Tokens, int Inbox)
 public sealed class RuntimeOptions
 {
     /// <summary>The LLM HTTP seam (§8 Gap 2). The runtime wraps it with the global turn gate;
-    /// tests inject a scripted in-process handler. Null ⇒ the default HTTP stack.</summary>
+    /// tests inject a scripted in-process handler. Null ⇒ the default HTTP stack.
+    /// Mutually exclusive with <see cref="InProcess"/> — the constructor throws if both are
+    /// set.</summary>
     public HttpMessageHandler? Handler { get; set; }
+
+    /// <summary>
+    /// A model running IN THIS PROCESS (ADR 0030): the semantic counterpart to
+    /// <see cref="Handler"/>, so a host whose model is a C# function doesn't have to hand-build an
+    /// <see cref="HttpMessageHandler"/> to reach the sub-agent runtime. Internally this is turned
+    /// into a <see cref="Toolnexus.InProcess.GenerateBackedHandler"/> — the SAME public adapter
+    /// the top-level <see cref="Toolnexus.InProcess.CreateClient"/> uses — and wrapped by the same
+    /// global turn gate as <see cref="Handler"/>; there is no second code path.
+    /// Mutually exclusive with <see cref="Handler"/> and with the LLM endpoint fields
+    /// (<see cref="BaseUrl"/>/<see cref="Style"/>/<see cref="ApiKey"/>) — the constructor throws
+    /// if more than one is set.
+    /// </summary>
+    public Func<Toolnexus.InProcess.Request, Toolnexus.InProcess.Response>? InProcess { get; set; }
 
     /// <summary>name → definition. With the Level-1 surface this is the transitive closure of the
     /// entry agent's team graph (<see cref="Agent.Registry"/>).</summary>
@@ -260,7 +275,7 @@ public sealed class RuntimeOptions
 
     internal RuntimeOptions CloneWithRegistry(Dictionary<string, AgentDef> registry) => new()
     {
-        Handler = Handler, Registry = registry, InboxCap = InboxCap,
+        Handler = Handler, InProcess = InProcess, Registry = registry, InboxCap = InboxCap,
         MaxConcurrentTurns = MaxConcurrentTurns, ShutdownMs = ShutdownMs,
         Store = Store, Clock = Clock,
         BaseUrl = BaseUrl, Style = Style, ApiKey = ApiKey, Model = Model,

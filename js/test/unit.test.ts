@@ -365,6 +365,32 @@ test("client: onError has the final say over retryableStatuses", async () => {
   server.close()
 })
 
+test("client: retries: 0 means exactly one attempt, not the default of 3 (ADR-0029)", async () => {
+  let hits = 0
+  const server = http.createServer((req, res) => { hits++; res.writeHead(503); res.end("busy") })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({})
+  const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "x", apiKey: "k", retries: 0, retryBaseMs: 5 })
+  await assert.rejects(() => client.run("hi", { toolkit: tk }))
+  assert.equal(hits, 1, "retries: 0 must mean exactly one attempt, no retries")
+  await tk.close()
+  server.close()
+})
+
+test("client: omitted retries default to 2 retries -> 3 total attempts (ADR-0029)", async () => {
+  let hits = 0
+  const server = http.createServer((req, res) => { hits++; res.writeHead(503); res.end("busy") })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({})
+  const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "x", apiKey: "k", retryBaseMs: 5 })
+  await assert.rejects(() => client.run("hi", { toolkit: tk }))
+  assert.equal(hits, 3, "omitted retries must default to 2 retries (3 total attempts)")
+  await tk.close()
+  server.close()
+})
+
 test("host controls: disableTools drops a builtin by final name; disableSkills folds into the filter", async () => {
   const tk = await createToolkit({
     skills: [

@@ -145,4 +145,40 @@ defmodule Toolnexus.ClientTransportTest do
     assert retry_delay_ms("Wed, 21 Oct 2015 07:28:00 GMT", 5) < 1_000
   end
 
+  # ADR-0029: `retries` must be able to mean "zero retries" (exactly one attempt).
+  # `struct!/2` (create/1) only takes keys PRESENT in opts, so `retries: 0` is stored
+  # as 0 (not the defstruct default of 2), and `client.retries || 2` keeps 0 as 0
+  # since Elixir's `||` only falls through on nil/false. Pins that against a real
+  # failing transport, counting invocations directly.
+  test "retries: 0 means exactly one attempt, no retry" do
+    {:ok, calls} = Agent.start_link(fn -> 0 end)
+
+    transport = fn _req ->
+      Agent.update(calls, &(&1 + 1))
+      {:ok, %{status: 500, headers: %{}, body: %{"error" => "boom"}}}
+    end
+
+    assert_raise RuntimeError, ~r/LLM 500/, fn ->
+      Client.run(client(transport, retries: 0, retry_base_ms: 1), "go", [])
+    end
+
+    assert Agent.get(calls, & &1) == 1
+  end
+
+  test "retries omitted defaults to 2 retries: three total attempts" do
+    {:ok, calls} = Agent.start_link(fn -> 0 end)
+
+    transport = fn _req ->
+      Agent.update(calls, &(&1 + 1))
+      {:ok, %{status: 500, headers: %{}, body: %{"error" => "boom"}}}
+    end
+
+    assert_raise RuntimeError, ~r/LLM 500/, fn ->
+      Client.run(client(transport, retry_base_ms: 1), "go", [])
+    end
+
+    # 1 initial + 2 retries
+    assert Agent.get(calls, & &1) == 3
+  end
+
 end

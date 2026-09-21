@@ -28,6 +28,14 @@ defmodule Toolnexus.Agents.Runtime do
     * `:registry` — map of agent name → definition (see `Toolnexus.Agents.registry/1`)
     * `:transport` — the LLM transport function (see `Toolnexus.Client` `:transport`);
       the runtime wraps it with the turn gate
+    * `:in_process` — a model running IN THIS PROCESS (ADR 0030): a bare `generate`
+      function (see `Toolnexus.Client.create_in_process/1`), the semantic counterpart
+      to `:transport`, for a host whose model is an Elixir function rather than a
+      wire endpoint. Internally this is turned into a transport by calling the SAME
+      `Toolnexus.Client.in_process_transport/1` export `create_in_process/1` uses —
+      no duplicated adapter — and wrapped by the identical turn gate as `:transport`.
+      Mutually exclusive with `:transport` and `:llm`; `new/1` raises `ArgumentError`
+      at construction time if more than one is set (never resolved by precedence).
     * `:llm` — client settings shared by every handle:
       `%{base_url, style, model, api_key, retries}` (agent `model: "inherit"`
       resolves to `llm.model`)
@@ -48,8 +56,26 @@ defmodule Toolnexus.Agents.Runtime do
   @doc "Start a runtime and return its pid (raises on bad options)."
   @spec new(keyword() | map()) :: pid()
   def new(opts) do
+    opts = Map.new(opts)
+    validate_transport_opts!(opts)
     {:ok, pid} = start_link(opts)
     pid
+  end
+
+  # Construction-time validation, never precedence: `:in_process` is mutually
+  # exclusive with `:transport` and `:llm` (ADR 0030 — mirrors
+  # Toolnexus.Client.create_in_process/1's own reserved-key style).
+  defp validate_transport_opts!(opts) do
+    if opts[:in_process] && opts[:transport] do
+      raise ArgumentError,
+            "toolnexus: Runtime :transport and :in_process are mutually exclusive — set one, not both"
+    end
+
+    if opts[:in_process] && opts[:llm] do
+      raise ArgumentError,
+            "toolnexus: Runtime :llm and :in_process are mutually exclusive — an in-process model " <>
+              "has no wire endpoint to point :llm at"
+    end
   end
 
   @doc false
@@ -68,7 +94,11 @@ defmodule Toolnexus.Agents.Runtime do
           %InMemoryConversationStore{pid: store_agent}
         )
 
-    transport = opts[:transport]
+    # :in_process is turned into a transport by calling the SAME
+    # Toolnexus.Client.in_process_transport/1 export create_in_process/1 uses —
+    # so it rides the identical gated-transport wrapping below with zero new code
+    # path. Mutual exclusion with :transport/:llm is already enforced in new/1.
+    transport = opts[:transport] || (opts[:in_process] && Toolnexus.Client.in_process_transport(opts[:in_process]))
 
     ctx = %{
       runtime: self(),

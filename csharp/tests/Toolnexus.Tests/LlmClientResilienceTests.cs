@@ -323,4 +323,60 @@ public class LlmClientResilienceTests
     public async Task IntegerRetryAfterIsHonoredOverBackoff()
         => Assert.True(await RetryDelayMsAsync("1", 5) >= 900);
 
+    // ---- ADR-0029: Retries must be able to mean zero ----
+
+    /// <summary><c>Retries = 0</c> means exactly one attempt — no retries at all — against a
+    /// persistently failing backend. Pins the nullable-int + `?? 2` defaulting in
+    /// <c>LlmClient.Options.Retries</c> / <c>LlmClient.Retries()</c>.</summary>
+    [Fact]
+    public async Task ZeroRetriesMeansExactlyOneAttempt()
+    {
+        var hits = 0;
+        using var server = new StubServer(ctx =>
+        {
+            Interlocked.Increment(ref hits);
+            StubServer.Respond(ctx, 503, "busy");
+        });
+
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+        var client = LlmClient.Create(new LlmClient.Options
+        {
+            BaseUrl = server.BaseUrl,
+            Style = "openai",
+            Model = "x",
+            ApiKey = "k",
+            Retries = 0,
+            RetryBaseMs = 5,
+        });
+
+        await Assert.ThrowsAnyAsync<Exception>(() => client.RunAsync("hi", tk));
+        Assert.Equal(1, hits);
+    }
+
+    /// <summary>Leaving <c>Retries</c> unset (null) still defaults to 2 retries — 3 total
+    /// attempts — against a persistently failing backend.</summary>
+    [Fact]
+    public async Task UnsetRetriesDefaultsToThreeTotalAttempts()
+    {
+        var hits = 0;
+        using var server = new StubServer(ctx =>
+        {
+            Interlocked.Increment(ref hits);
+            StubServer.Respond(ctx, 503, "busy");
+        });
+
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+        var client = LlmClient.Create(new LlmClient.Options
+        {
+            BaseUrl = server.BaseUrl,
+            Style = "openai",
+            Model = "x",
+            ApiKey = "k",
+            // Retries left unset (null) on purpose.
+            RetryBaseMs = 5,
+        });
+
+        await Assert.ThrowsAnyAsync<Exception>(() => client.RunAsync("hi", tk));
+        Assert.Equal(3, hits);
+    }
 }

@@ -1478,7 +1478,14 @@ record-replay — this is a second constructor over it, not a second seam.
 
 `ClientOptions`: `retries` (default 2), `retryBaseMs` (default 500), `retryableStatuses` (optional,
 additive — see below), `timeoutMs` (whole-run
-deadline, optional). The LLM request retries on the **enumerated set
+deadline, optional). **"No retries" (exactly one attempt) must be expressible and is
+byte-identical across ports; only the spelling is per-port.** JS/Python/Java/C#/Elixir already
+distinguish an explicit `retries: 0` from an unset field through their native idiom (`??`,
+a plain keyword default, a boxed/nullable integer, keyword-list presence) — `0` there means
+zero retries, and unset keeps meaning 2. Go's `Retries` is a bare `int` whose zero value is
+indistinguishable from unset, so Go alone spells "no retries" as `Retries: -1`; `0` there still
+means the default 2, unchanged. Clojure's default is 2, matching every other port. The LLM
+request retries on the **enumerated set
 `429`/`500`/`502`/`503`/`504`/`529`** and network errors, with exponential backoff + jitter,
 honoring `Retry-After`. That set is exhaustive, not shorthand for "5xx": every other status,
 including `501`, `505` and the Cloudflare `520`–`527` family, is terminal by default. `529
