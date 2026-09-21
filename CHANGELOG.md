@@ -8,6 +8,93 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### `retries: 0` now reliably means zero retries, in every port, pinned by a test
+
+A consumer building a CLI-backed model (issue #94) asked for 3 attempts and measured 9 backend
+invocations — each of their 3 attempts retried twice, at ~15s per process launch, because
+`retries: 0` had never meant "no retries" anywhere it wasn't already spelled that way. A spike
+(`spikes/retries-zero/SPIKE.md`) found the contract already held in five ports (js/python/java/
+csharp/elixir all distinguish an unset field from an explicit `0` through their own idiom) and
+was broken in two, in opposite directions:
+
+- **golang** — `Retries` is a bare `int`; its zero value was indistinguishable from "unset", so
+  `Retries: 0` silently became the default of 2 retries. Fixed by adding `Retries: -1` as the
+  explicit "no retries" spelling; `0` is unchanged and still means the default. `CreateInProcessClient`
+  now passes `Retries: -1` directly instead of forcing a private `OnError: TierFail` workaround.
+- **clojure** — the opposite bug: this port's shipped default was **0 retries**, not 2, so an
+  unset `:retries` client made 1/3 the LLM calls on a transient failure that every other port
+  made. Fixed to default to 2, matching the other six ports.
+
+All seven ports now carry two tests each pinning the contract: an explicit "no retries" makes
+exactly one backend invocation, and the default (unset) makes exactly three total attempts.
+
+### One model function now serves a top-level client *and* its sub-agents
+
+`createInProcessClient` (0.16.0) let you hand the library a `generate` function instead of an
+HTTP endpoint. Sub-agents never got the same option: a runtime accepted only a wire-shaped
+transport, so a host whose model was a function had exactly one way to use sub-agents — copy the
+library's *private* request/response adapter into its own tree and track an unexported file it
+could not import (issue #95). That copy was guaranteed to drift the first time the shape changed
+upstream, which is the single failure this repo exists to prevent.
+
+An audit found the gap in **all seven ports**, not just the one that reported it: every port
+accepted only a transport, and every port already built an equivalent generate-backed adapter
+privately. So two things change everywhere:
+
+- the agent/sub-agent runtime accepts a semantic `generate` (`InProcess` / `in_process` /
+  `:in-process`, per port idiom) as an alternative to a transport or provider config. Supplying
+  both fails at construction, naming the conflict — never resolved by a silent precedence rule.
+- each port's generate-backed adapter is now **public** (Go `InProcessTransport`, Python
+  `InProcessTransport`, Java `InProcess.GenerateBackedHttpClient`, C# `InProcess.GenerateBackedHandler`,
+  Elixir `in_process_transport/1`, Clojure `in-process-http-client`), and each port's in-process
+  client is a *caller* of it. One adapter, no duplicates.
+
+Concurrency is unaffected: every port's turn gate already wrapped whichever transport resolved, so
+the in-process path is gated by construction. Each port ships a gate test with a negative control.
+
+Fixed in passing, **csharp only**: `GenerateBackedHandler.SendAsync` never actually yielded, so
+in-process turns ran fully synchronously inside the runtime lock — shipped behaviour since 0.16.0.
+
+### ACP: talk to devin, Gemini CLI or Zed's agents as a model, over one warm session
+
+MCP is how toolnexus consumes *tools*; ACP (Agent Client Protocol) is the equivalent for consuming
+a whole *agent* — JSON-RPC 2.0, one object per line, over a child process's stdin/stdout. New in
+every port: connect to an ACP agent and use it as the model behind a client (issue #96), so the
+tool-calling loop, skills, MCP tools and sub-agents work through it unchanged.
+
+The point is process startup. Driving an agent CLI one-shot pays its launch cost on *every* turn
+of the loop; a warm ACP session pays it once. Against `devin` (SWE-1.6 Slow) a turn went from
+~15s to ~1.6s by the third prompt, and prompt size turned out to be free — a 12 KB prompt cost no
+more than a 17-byte one. **Stated plainly, because it is easy to over-read: that win is the CLI's
+startup cost, not a protocol-level speedup.** Against a server with no startup cost the same path
+gains almost nothing.
+
+A stateful session collides with how toolnexus assembles a complete request every turn — the
+session accumulates near-duplicate histories and the agent will sometimes answer the stale one.
+The library sends the full request and marks it as superseding everything earlier; you do not have
+to write that line yourself. Sending only the delta is faster still but makes the client own a
+shadow transcript that can desynchronise from your `ConversationStore`, so it is not offered.
+
+Also handled, because each one silently breaks a run otherwise: only `agent_message_chunk` forms
+the reply (thoughts and tool narration are dropped, or they wrap prose around structured output);
+`session/request_permission` is answered rather than awaited (unanswered, a turn hangs forever,
+even in bypass mode); turns on one session are serialised; the process outlives any single turn's
+cancellation; `close` is idempotent. `session/new` sends an absolute `cwd` and an `mcpServers`
+array — real `devin acp` rejects anything else with `-32602`.
+
+**python only**: its in-process seam is synchronous by contract, so the ACP client runs a
+background reader thread and a queue rather than widening that seam — `generate` stays an ordinary
+synchronous function and nothing async crosses the boundary.
+
+### Not done
+
+- The one-shot CLI-backed model source (issue #97, `docs/adr/0026`) is designed and spiked but
+  **not implemented in any port**. ACP covers agents that speak the protocol; a CLI offering only
+  `-p` still needs a host-written adapter.
+- ACP **delta mode** is not shipped; every turn sends the full request.
+- A `generate` that internally relaunches a CLI or repairs a malformed reply reports **one** LLM
+  metric event for N underlying calls, so that cost is currently invisible to client metrics.
+
 ## 0.18.1 — 2026-09-21
 
 Documentation only. No code changed in any port; the published packages differ from 0.18.0

@@ -326,6 +326,58 @@ class LlmClientResilienceTest {
         assertEquals(1, attemptsFor(501, cloudflare), "a status in neither set stays terminal");
     }
 
+    // ------------------------------------------------------------------ ADR-0023: retries=0 must mean zero
+    // LlmClient.Options.retries is a boxed Integer (LlmClient.java:92); the defaulting method
+    // `private int retries()` (LlmClient.java:2166) is a null-check (`opts.retries != null ? opts.retries : 2`),
+    // not a truthiness/`> 0` check, so an explicit 0 already survives distinctly from "unset".
+    // These tests pin that behavior against a real local HTTP server so a future edit to the
+    // defaulting method can't silently fold explicit-zero back into "unset means 2".
+
+    /** Explicit {@code retries=0} means exactly one attempt: no retry, even against a persistently failing backend. */
+    @Test
+    void explicitZeroRetriesMeansExactlyOneAttempt() throws IOException {
+        AtomicInteger hits = new AtomicInteger(0);
+        int port = start(ex -> {
+            hits.incrementAndGet();
+            respond(ex, 500, "boom");
+        });
+
+        Toolkit tk = Toolkit.create(new Toolkit.Options());
+        LlmClient client = LlmClient.create(new LlmClient.Options()
+                .baseUrl("http://127.0.0.1:" + port)
+                .style("openai")
+                .model("x")
+                .apiKey("k")
+                .retries(0)
+                .retryBaseMs(5));
+
+        assertThrows(RuntimeException.class, () -> client.run("hi", tk));
+        assertEquals(1, hits.get(), "retries=0 must mean exactly one attempt, not the unset default of 2");
+        tk.close();
+    }
+
+    /** Unset {@code retries} (null) still defaults to 2 retries: 3 total attempts against a persistently failing backend. */
+    @Test
+    void unsetRetriesStillDefaultsToThreeTotalAttempts() throws IOException {
+        AtomicInteger hits = new AtomicInteger(0);
+        int port = start(ex -> {
+            hits.incrementAndGet();
+            respond(ex, 500, "boom");
+        });
+
+        Toolkit tk = Toolkit.create(new Toolkit.Options());
+        LlmClient client = LlmClient.create(new LlmClient.Options()
+                .baseUrl("http://127.0.0.1:" + port)
+                .style("openai")
+                .model("x")
+                .apiKey("k")
+                .retryBaseMs(5)); // retries left unset (null)
+
+        assertThrows(RuntimeException.class, () -> client.run("hi", tk));
+        assertEquals(3, hits.get(), "unset retries must still default to 2 retries (1 + 2 = 3 total attempts)");
+        tk.close();
+    }
+
     /** The option sets the default classification only; {@code onError} has the final say. */
     @Test
     void onErrorHasTheFinalSayOverRetryableStatuses() throws IOException {

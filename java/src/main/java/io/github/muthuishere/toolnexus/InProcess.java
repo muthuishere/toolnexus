@@ -136,7 +136,10 @@ public final class InProcess {
      * reached — but a URL string is built internally, so it must be syntactically valid.
      * {@code .invalid} is reserved by RFC 2606 precisely so a name can never resolve.
      */
-    private static final String BASE_URL = "http://in-process.invalid/v1";
+    /** Public so a caller building its own adapter around {@link GenerateBackedHttpClient}
+     * (e.g. an agent runtime's in-process option) can reuse the exact same sentinel — see
+     * ADR 0024. */
+    public static final String BASE_URL = "http://in-process.invalid/v1";
 
     /** Build a client backed by a model running IN THIS PROCESS. */
     public static LlmClient createClient(Options opts) {
@@ -167,10 +170,16 @@ public final class InProcess {
 
     // ---- the HTTP shim the host no longer has to write ---------------------------
 
-    static final class GenerateBackedHttpClient extends HttpClient {
+    /**
+     * Public per ADR 0024 (the in-process seam stops at the top-level client): the only
+     * adapter turning a semantic {@code generate} function into an {@link HttpClient} lives
+     * here. {@link #createClient} and {@code AgentRuntime}'s {@code RuntimeOptions.inProcess}
+     * option both build this SAME class — zero duplicated logic.
+     */
+    public static final class GenerateBackedHttpClient extends HttpClient {
         private final Function<Request, Response> generate;
 
-        GenerateBackedHttpClient(Function<Request, Response> generate) { this.generate = generate; }
+        public GenerateBackedHttpClient(Function<Request, Response> generate) { this.generate = generate; }
 
         @Override @SuppressWarnings("unchecked")
         public <T> HttpResponse<T> send(HttpRequest req, HttpResponse.BodyHandler<T> handler) throws IOException {

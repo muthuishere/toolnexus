@@ -64,3 +64,22 @@ never printed.
 `TN_EXAMPLES` points at the repo's shared fixtures (`examples/mcp.json`,
 `examples/skills/`) and defaults correctly from either project directory. The
 fixtures are the same ones all seven ports run against.
+
+## An eighth, NOT run by `run.sh` — `examples.acp-demo`
+
+`src/examples/acp_demo.cljc` puts an ACP (Agent Client Protocol) agent CLI —
+`devin acp` or `opencode acp` — behind the unified client as its model
+(issue #96, ADR 0025), reusing one warm session across a couple of turns and
+printing each turn's elapsed time. It needs that CLI installed and
+authenticated on the machine, so unlike the seven above it is **not
+hermetic** and is deliberately left out of `clj/run.sh` / `cljgo/run.sh` —
+run it by hand:
+
+```sh
+clojure -M -m examples.acp-demo                                          # clj, default: devin acp
+ACP_AGENT_CMD=opencode ACP_AGENT_ARGS=acp clojure -M -m examples.acp-demo # clj, opencode acp
+cljgo run src/run_acp_demo.cljc                                          # cljgo, same env vars
+```
+
+`clojure/src/toolnexus/acp_test.cljc` has the hermetic, fake-server-backed
+coverage of `toolnexus.acp` itself.

@@ -1,0 +1,142 @@
+package toolnexus
+
+// SPIKE FILE — ADR-0023. Lives here only long enough to `go test` against the
+// real package internals (retries(), llmFetch's attempt loop, backoff());
+// copied into spikes/retries-zero/ and removed from this package afterward.
+// See spikes/retries-zero/SPIKE.md for the write-up.
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+)
+
+func countingFailingServer(t *testing.T, calls *int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*calls++
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"boom"}`))
+	}))
+}
+
+func TestSpikeRetriesExplicitZero(t *testing.T) {
+	var calls int
+	srv := countingFailingServer(t, &calls)
+	defer srv.Close()
+
+	c := CreateClient(ClientOptions{
+		BaseURL:     srv.URL,
+		Style:       StyleOpenAI,
+		Model:       "test-model",
+		APIKey:      "x",
+		Retries:     -1, // explicit zero
+		RetryBaseMs: 1,  // keep any accidental sleep short
+	})
+
+	tk, err := CreateToolkit(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("CreateToolkit: %v", err)
+	}
+
+	start := time.Now()
+	_, _ = c.Run(context.Background(), "hi", tk)
+	elapsed := time.Since(start)
+
+	t.Logf("calls with Retries=-1 -> %d, elapsed=%s", calls, elapsed)
+	if calls != 1 {
+		t.Fatalf("expected exactly 1 call (no retry), got %d", calls)
+	}
+	// Loose bound: with no retry there is no backoff sleep at all, so this
+	// should be near-instant; anything over 1s means a sleep leaked in.
+	if elapsed > time.Second {
+		t.Fatalf("expected near-instant (no backoff sleep), took %s", elapsed)
+	}
+}
+
+func TestSpikeRetriesUnsetStillDefaultsToTwo(t *testing.T) {
+	var calls int
+	srv := countingFailingServer(t, &calls)
+	defer srv.Close()
+
+	c := CreateClient(ClientOptions{
+		BaseURL:     srv.URL,
+		Style:       StyleOpenAI,
+		Model:       "test-model",
+		APIKey:      "x",
+		// Retries left at Go's zero value (0) -- unset.
+		RetryBaseMs: 1,
+	})
+
+	tk, err := CreateToolkit(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("CreateToolkit: %v", err)
+	}
+
+	_, _ = c.Run(context.Background(), "hi", tk)
+	t.Logf("calls with Retries UNSET (zero value) -> %d", calls)
+	if calls != 3 {
+		t.Fatalf("expected exactly 3 calls (byte-identical default: 2 retries), got %d", calls)
+	}
+}
+
+func TestSpikeRetriesPositiveStillWorks(t *testing.T) {
+	var calls int
+	srv := countingFailingServer(t, &calls)
+	defer srv.Close()
+
+	c := CreateClient(ClientOptions{
+		BaseURL:     srv.URL,
+		Style:       StyleOpenAI,
+		Model:       "test-model",
+		APIKey:      "x",
+		Retries:     3,
+		RetryBaseMs: 1,
+	})
+
+	tk, err := CreateToolkit(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("CreateToolkit: %v", err)
+	}
+
+	_, _ = c.Run(context.Background(), "hi", tk)
+	t.Logf("calls with Retries=3 -> %d", calls)
+	if calls != 4 {
+		t.Fatalf("expected exactly 4 calls (3 retries + initial), got %d", calls)
+	}
+}
+
+// TestSpikeRetriesResolverNeverNegative directly exercises the resolver +
+// the loop bound shape (`for attempt := 0; attempt <= retries; attempt++`)
+// to prove -1 never reaches it as a raw bound -- which, unresolved, would make
+// the loop condition `0 <= -1` false on the FIRST attempt: zero HTTP calls at
+// all, not even the initial one. That is the "leak into backoff arithmetic"
+// failure mode gate item 2 asks about.
+func TestSpikeRetriesResolverNeverNegative(t *testing.T) {
+	c := CreateClient(ClientOptions{
+		BaseURL: "http://example.invalid",
+		Style:   StyleOpenAI,
+		Model:   "m",
+		APIKey:  "x",
+		Retries: -1,
+	})
+	got := c.retries()
+	t.Logf("c.retries() with ClientOptions.Retries=-1 -> %d", got)
+	if got < 0 {
+		t.Fatalf("retries() resolved to a NEGATIVE loop bound (%d) -- this is exactly the "+
+			"bug gate item 2 guards against: `for attempt:=0; attempt<=retries; attempt++` never runs", got)
+	}
+	if got != 0 {
+		t.Fatalf("expected resolved retries()==0 for the -1 sentinel, got %d", got)
+	}
+
+	// backoff() itself must also never be asked to compute a negative-exponent
+	// shift for attempt 0 in this path (it isn't reached at all when retries==0,
+	// but assert the shape is still sane if ever called at attempt 0).
+	d := c.backoff(0, "")
+	if d < 0 {
+		t.Fatalf("backoff(0, \"\") produced a negative duration: %s", d)
+	}
+}

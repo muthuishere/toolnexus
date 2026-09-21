@@ -5,6 +5,13 @@ Mirrors the JS reference implementation (``js/src/``); shared contract in
 """
 from __future__ import annotations
 
+from .acp import (
+    ACPClient,
+    ACPError,
+    ACPOptions,
+    ACPPermissionTimeoutError,
+    load_acp,
+)
 from .a2a import (
     Agent,
     AgentConfig,
@@ -43,6 +50,7 @@ from .client import (
     Hooks,
     HttpTransport,
     InMemoryConversationStore,
+    InProcessTransport,
     MetricEvent,
     OnMetric,
     RunCancelled,
@@ -148,6 +156,12 @@ from .types import (
 )
 
 __all__ = [
+    # acp (ADR 0025, issue #96)
+    "ACPClient",
+    "ACPError",
+    "ACPOptions",
+    "ACPPermissionTimeoutError",
+    "load_acp",
     # types
     "JSONSchema",
     "McpStatus",
@@ -258,6 +272,7 @@ __all__ = [
     "InMemoryConversationStore",
     "Hooks",
     "HttpTransport",
+    "InProcessTransport",
     "UrllibTransport",
     "MetricEvent",
     "OnMetric",

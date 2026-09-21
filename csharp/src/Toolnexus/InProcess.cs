@@ -112,7 +112,14 @@ public static class InProcess
         return LlmClient.Create(o);
     }
 
-    private sealed class GenerateBackedHandler : HttpMessageHandler
+    /// <summary>
+    /// The adapter that turns a semantic <c>Generate</c> function into an
+    /// <see cref="HttpMessageHandler"/> (SPEC §8 Gap 2, ADR 0024). Public so ANY caller that needs
+    /// an in-process handler — not only <see cref="CreateClient"/> — can construct the same
+    /// adapter instead of duplicating this translation; the agent runtime's semantic in-process
+    /// option (<c>RuntimeOptions.InProcess</c>) is built by calling this constructor directly.
+    /// </summary>
+    public sealed class GenerateBackedHandler : HttpMessageHandler
     {
         private readonly Func<Request, Response> _generate;
         public GenerateBackedHandler(Func<Request, Response> generate) => _generate = generate;
@@ -131,6 +138,16 @@ public static class InProcess
                 throw new NotSupportedException(
                     "toolnexus: InProcess.CreateClient does not support streaming — `Generate` returns "
                     + "a complete answer. Use RunAsync, or supply an HttpHandler that streams.");
+
+            // Force a real async suspension before running the callback. `ReadAsStringAsync` above
+            // completes synchronously for the small in-memory request bodies this adapter always
+            // sees, so without this yield the entire call — including whatever `Generate` does —
+            // would run inline on the caller's thread. That is invisible to a bare top-level client
+            // call, but it is NOT invisible to a caller like the agent runtime, which invokes this
+            // handler from inside a lock it means to release before the turn runs (see
+            // AgentRuntime.Wake): an inline `Generate` would hold that lock for the callback's full
+            // duration and silently serialize turns that should run concurrently.
+            await Task.Yield();
 
             var answer = _generate(new Request
             {

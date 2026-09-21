@@ -1,0 +1,13 @@
+;; Portability spike deps. `cljgo run` cannot resolve a require that lands
+;; outside its own project's :paths (confirmed empirically: an external
+;; ../../../clojure/src path loads fine on the plain `clojure` CLI but cljgo
+;; fails deeper requires from that file with "could not locate namespace
+;; koine.env" — its dependency-provider registration is scoped to the
+;; project root, not the JVM classpath). So the real port's toolnexus.*
+;; sources are copied read-only into src/toolnexus/ below (verbatim,
+;; `cp -n`, never edited) instead of path-referenced, purely so BOTH hosts
+;; can load this spike from one deps.edn. climodel.cljc / climodel_test.cljc
+;; / run_climodel_test.cljc are this spike's own new files.
+{:paths ["src"]
+ :deps  {org.clojure/clojure           {:mvn/version "1.12.5"}
+         net.clojars.muthuishere/koine {:mvn/version "0.11.0"}}}

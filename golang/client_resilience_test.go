@@ -85,6 +85,52 @@ func TestClientRetryExhausted(t *testing.T) {
 	}
 }
 
+// TestClientRetriesExplicitZeroMeansOneAttempt pins ADR-0023: Retries: -1 is
+// the "explicit zero" sentinel and must make exactly one backend call, never
+// retrying and never skipping the first attempt.
+func TestClientRetriesExplicitZeroMeansOneAttempt(t *testing.T) {
+	tk, err := CreateToolkit(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer srv.Close()
+
+	c := CreateClient(ClientOptions{BaseURL: srv.URL, Style: StyleOpenAI, Model: "m", APIKey: "k", Retries: -1, RetryBaseMs: 1})
+	_, _ = c.Run(context.Background(), "hi", tk)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("server calls = %d, want 1 (no retries, first attempt not skipped)", got)
+	}
+}
+
+// TestClientRetriesUnsetDefaultsToThreeAttempts pins the byte-identical
+// existing default: Retries left unset (Go zero value 0) still means 2
+// retries, i.e. 3 total attempts.
+func TestClientRetriesUnsetDefaultsToThreeAttempts(t *testing.T) {
+	tk, err := CreateToolkit(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer srv.Close()
+
+	c := CreateClient(ClientOptions{BaseURL: srv.URL, Style: StyleOpenAI, Model: "m", APIKey: "k", RetryBaseMs: 1})
+	_, _ = c.Run(context.Background(), "hi", tk)
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("server calls = %d, want 3 (default 2 retries + initial attempt)", got)
+	}
+}
+
 // TestClientTimeout uses a slow server and a small TimeoutMs and asserts Run
 // returns a context/timeout error.
 func TestClientTimeout(t *testing.T) {

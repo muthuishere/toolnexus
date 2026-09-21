@@ -443,3 +443,64 @@ async def test_on_error_fail_overrides_a_status_the_host_listed():
         520, retryable_statuses=_CLOUDFLARE, retries=5, on_error=lambda info: "fail"
     )
     assert n == 1
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0023 — `retries` must be able to mean zero (exactly one attempt), and the
+# default (unset) must still mean 2 retries (3 total attempts). Python's keyword
+# default (`retries: int = 2`) is not a 0-as-sentinel, so `retries=0` and an
+# omitted `retries` are already distinct code paths — pin that here so it can't
+# silently regress. See docs/adr/0023-retries-must-be-able-to-mean-zero.md and
+# spikes/retries-zero/SPIKE.md.
+# --------------------------------------------------------------------------- #
+class _FailingTransport:
+    """An in-process HttpTransport that always raises a retryable 500."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def post(self, url, headers, payload, timeout):
+        self.calls += 1
+        from toolnexus.client import _HttpError
+
+        raise _HttpError(500, "boom", None)
+
+    def open(self, url, headers, payload, timeout):
+        raise NotImplementedError
+
+
+async def test_retries_zero_makes_exactly_one_attempt():
+    t = _FailingTransport()
+    tk = await create_toolkit()
+    try:
+        client = create_client(
+            base_url="https://example.invalid",
+            style="openai",
+            model="test-model",
+            api_key="sk-test",
+            retries=0,
+            http_transport=t,
+        )
+        with pytest.raises(Exception):
+            await client.run("hi", tk)
+        assert t.calls == 1, "retries=0 must mean exactly one attempt, no retries"
+    finally:
+        await tk.close()
+
+
+async def test_retries_unset_defaults_to_three_total_attempts():
+    t = _FailingTransport()
+    tk = await create_toolkit()
+    try:
+        client = create_client(
+            base_url="https://example.invalid",
+            style="openai",
+            model="test-model",
+            api_key="sk-test",
+            http_transport=t,
+        )
+        with pytest.raises(Exception):
+            await client.run("hi", tk)
+        assert t.calls == 3, "omitted retries must default to 2 retries (3 total attempts)"
+    finally:
+        await tk.close()

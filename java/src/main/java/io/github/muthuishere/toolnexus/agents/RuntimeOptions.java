@@ -1,9 +1,12 @@
 package io.github.muthuishere.toolnexus.agents;
 
+import io.github.muthuishere.toolnexus.InProcess;
 import io.github.muthuishere.toolnexus.LlmClient;
 
+import java.net.http.HttpClient;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.function.Function;
 
 /**
  * Options for an {@link AgentRuntime}. LLM plumbing ({@code baseUrl}/{@code style}/{@code apiKey})
@@ -20,6 +23,20 @@ public final class RuntimeOptions {
     public String apiKey;
     /** Model substituted for defs declaring {@code "inherit"}. */
     public String defaultModel;
+    /** The pre-gate LLM HTTP transport (a scripted {@link HttpClient} in fixtures — zero
+     * network). {@code null} = {@code HttpClient.newHttpClient()}. The global turn gate wraps
+     * whatever this resolves to. Mutually exclusive with {@link #inProcess} — the
+     * {@link AgentRuntime} constructor throws if both are set (ADR 0024). */
+    public HttpClient httpClient;
+    /** A model running IN THIS PROCESS (ADR 0024) — the semantic counterpart to
+     * {@link #httpClient}, so a host whose model is a Java function doesn't have to hand-build an
+     * {@link HttpClient} to reach the sub-agent runtime. Internally this is turned into an
+     * {@link InProcess.GenerateBackedHttpClient} — the SAME public adapter
+     * {@link InProcess#createClient} builds — and wrapped by the SAME global turn gate as
+     * {@link #httpClient}: there is no second code path. Mutually exclusive with
+     * {@link #httpClient} and with {@link #baseUrl} — the {@link AgentRuntime} constructor throws
+     * if more than one of {@code httpClient}/{@code inProcess}/{@code baseUrl} is set. */
+    public Function<InProcess.Request, InProcess.Response> inProcess;
     public Map<String, AgentDef> registry = new LinkedHashMap<>();
     /** Inbox gate capacity per handle. Default 8. */
     public Integer inboxCap;
@@ -45,6 +62,8 @@ public final class RuntimeOptions {
     public RuntimeOptions style(String v) { this.style = v; return this; }
     public RuntimeOptions apiKey(String v) { this.apiKey = v; return this; }
     public RuntimeOptions defaultModel(String v) { this.defaultModel = v; return this; }
+    public RuntimeOptions httpClient(HttpClient v) { this.httpClient = v; return this; }
+    public RuntimeOptions inProcess(Function<InProcess.Request, InProcess.Response> v) { this.inProcess = v; return this; }
     public RuntimeOptions registry(Map<String, AgentDef> v) { this.registry = v; return this; }
     public RuntimeOptions inboxCap(int v) { this.inboxCap = v; return this; }
     public RuntimeOptions maxConcurrentTurns(int v) { this.maxConcurrentTurns = v; return this; }
@@ -61,6 +80,8 @@ public final class RuntimeOptions {
         o.style = style;
         o.apiKey = apiKey;
         o.defaultModel = defaultModel;
+        o.httpClient = httpClient;
+        o.inProcess = inProcess;
         o.registry = reg;
         o.inboxCap = inboxCap;
         o.maxConcurrentTurns = maxConcurrentTurns;

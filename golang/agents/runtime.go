@@ -269,7 +269,16 @@ type LLMOptions struct {
 type Options struct {
 	// Transport is the LLM HTTP transport (a scripted RoundTripper in fixtures —
 	// zero network). Nil ⇒ http.DefaultTransport. The global turn gate wraps it.
+	// Mutually exclusive with InProcess — NewRuntime panics if both are set.
 	Transport http.RoundTripper
+	// InProcess is a model running IN THIS PROCESS (ADR 0024 / issue #95): the
+	// semantic counterpart to Transport, so a host whose model is a Go function
+	// doesn't have to hand-build an http.RoundTripper to reach the sub-agent
+	// runtime. Internally this is turned into a tn.InProcessTransport and wrapped
+	// by the SAME global turn gate as Transport — there is no second code path.
+	// Mutually exclusive with Transport and with LLM — NewRuntime panics if more
+	// than one of Transport/InProcess is set.
+	InProcess func(tn.InProcessRequest) (tn.InProcessResponse, error)
 	// Registry maps agent name → Def. Prefer Agent.Registry() (the transitive
 	// team closure) over hand-built maps.
 	Registry map[string]Def
@@ -357,6 +366,19 @@ type Runtime struct {
 
 // NewRuntime builds a runtime with a root handle.
 func NewRuntime(opts Options) *Runtime {
+	if opts.Transport != nil && opts.InProcess != nil {
+		panic("toolnexus/agents: Options.Transport and Options.InProcess are mutually exclusive — set one, not both")
+	}
+	if opts.LLM != nil && opts.InProcess != nil {
+		panic("toolnexus/agents: Options.LLM and Options.InProcess are mutually exclusive — an in-process model has no wire endpoint to point LLM at")
+	}
+	if opts.InProcess != nil {
+		// Build the transport ONCE, here, by calling the exported per-port
+		// convenience — CreateInProcessClient's own adapter — so there is zero
+		// duplicated wire-assembly logic between the top-level client and the
+		// sub-agent runtime (ADR 0024).
+		opts.Transport = tn.InProcessTransport(opts.InProcess)
+	}
 	store := opts.Store
 	if store == nil {
 		store = tn.NewInMemoryConversationStore()

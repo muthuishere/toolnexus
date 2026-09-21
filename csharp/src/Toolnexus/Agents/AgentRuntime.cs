@@ -46,11 +46,27 @@ public sealed class AgentRuntime
 
     public AgentRuntime(RuntimeOptions opts)
     {
+        if (opts.Handler is not null && opts.InProcess is not null)
+            throw new InvalidOperationException(
+                "toolnexus/agents: RuntimeOptions.Handler and RuntimeOptions.InProcess are mutually "
+                + "exclusive — set one, not both");
+        if (opts.InProcess is not null && (opts.BaseUrl is not null || opts.Style is not null || opts.ApiKey is not null))
+            throw new InvalidOperationException(
+                "toolnexus/agents: RuntimeOptions.InProcess and the LLM endpoint fields "
+                + "(BaseUrl/Style/ApiKey) are mutually exclusive — an in-process model has no wire "
+                + "endpoint to point them at");
+
         _opts = opts;
         _store = opts.Store ?? new InMemoryConversationStore();
         _clock = opts.Clock ?? TimeProvider.System;
         _turnGate = new SemaphoreSlim(opts.MaxConcurrentTurns);
-        _gate = new GateHandler(this, opts.Handler ?? new HttpClientHandler());
+        // InProcess (ADR 0024) is turned into a handler by calling the SAME public adapter the
+        // top-level InProcess.CreateClient uses — zero duplicated logic — before any other wiring,
+        // so the global turn gate below wraps it exactly as it would wrap Handler.
+        var innerHandler = opts.InProcess is not null
+            ? new Toolnexus.InProcess.GenerateBackedHandler(opts.InProcess)
+            : opts.Handler ?? new HttpClientHandler();
+        _gate = new GateHandler(this, innerHandler);
         Root = new Handle("root", new AgentDef { Name = "root", Does = "runtime root", Model = "none" },
             null, _sync, _clock.GetUtcNow());
     }

@@ -1,0 +1,29 @@
+diff --git a/golang/inprocess.go b/golang/inprocess.go
+index 0fd92e3..4b17874 100644
+--- a/golang/inprocess.go
++++ b/golang/inprocess.go
+@@ -173,6 +173,15 @@ func encodeArgs(v any) string {
+ 	}
+ }
+ 
++// InProcessTransport builds the SAME round tripper CreateInProcessClient uses,
++// as a plain http.RoundTripper — for a host that needs to hand a sub-agent
++// runtime (agents.Options.Transport) the identical in-process model a
++// top-level client was built with, without re-implementing the wire assembly.
++// SPIKE (issue #95 / ADR 0024): not yet a committed export.
++func InProcessTransport(generate func(InProcessRequest) (InProcessResponse, error)) http.RoundTripper {
++	return &inProcessRoundTripper{generate: generate}
++}
++
+ // CreateInProcessClient builds a client backed by a model running IN THIS PROCESS —
+ // no server, no socket, and no HTTP types to construct.
+ //
+@@ -204,7 +213,7 @@ func CreateInProcessClient(opts InProcessOptions) *Client {
+ 		// An in-process model has no endpoint to authenticate to, so the host must never need a key — but the client resolves one from the environment and fails when it finds none. A sentinel keeps that resolution from ever running. Caught by CI, which has no OPENROUTER_API_KEY; every local run passed because a developer shell has one.
+ 		APIKey:        "in-process",
+ 		Model:         opts.Model,
+-		HTTPClient:    &http.Client{Transport: &inProcessRoundTripper{generate: opts.Generate}},
++		HTTPClient:    &http.Client{Transport: InProcessTransport(opts.Generate)},
+ 		SystemPrompt:  opts.SystemPrompt,
+ 		MaxTurns:      opts.MaxTurns,
+ 		Hooks:         opts.Hooks,

@@ -1,0 +1,68 @@
+diff --git a/golang/classifier.go b/golang/classifier.go
+index c2a9944..d4c00c6 100644
+--- a/golang/classifier.go
++++ b/golang/classifier.go
+@@ -779,7 +779,9 @@ func (c *Classifier) evaluateSystemOne(ctx context.Context, state any, questions
+ func (c *Classifier) post(ctx context.Context, raw []byte) ([]byte, error) {
+ 	endpoint := strings.TrimRight(c.opts.BaseURL, "/") + "/systemone"
+ 	retries := c.opts.Retries
+-	if retries <= 0 {
++	if retries == -1 { // SPIKE (ADR-0023): explicit-zero sentinel
++		retries = 0
++	} else if retries <= 0 {
+ 		retries = 2
+ 	}
+ 	baseMs := c.opts.RetryBaseMs
+diff --git a/golang/client.go b/golang/client.go
+index 39101b7..74060e6 100644
+--- a/golang/client.go
++++ b/golang/client.go
+@@ -519,6 +519,13 @@ func (c *Client) maxTurns() int {
+ }
+ 
+ func (c *Client) retries() int {
++	// SPIKE (ADR-0023): -1 is the "explicit zero" sentinel. It must resolve to
++	// the ACTUAL retry budget (0), never be handed to the loop bound as -1 --
++	// `for attempt := 0; attempt <= -1; attempt++` would never execute even
++	// the FIRST attempt, which is a worse bug than the one being fixed.
++	if c.opts.Retries == -1 {
++		return 0
++	}
+ 	if c.opts.Retries > 0 {
+ 		return c.opts.Retries
+ 	}
+diff --git a/golang/inprocess.go b/golang/inprocess.go
+index 0fd92e3..60c55b7 100644
+--- a/golang/inprocess.go
++++ b/golang/inprocess.go
+@@ -185,20 +185,17 @@ func CreateInProcessClient(opts InProcessOptions) *Client {
+ 	if opts.Generate == nil {
+ 		panic("toolnexus: CreateInProcessClient requires a Generate function")
+ 	}
+-	// Every failure is FINAL by default. There is no wire, so there is no transient
+-	// failure to ride out: whatever Generate returns will be returned again, and
+-	// retrying only buys backoff before the caller sees their own bug — measured at
+-	// 3.7s for the streaming refusal before this.
+-	//
+-	// This goes through OnError rather than Retries because this port documents
+-	// `Retries: 0 ⇒ 2`, so zero cannot mean zero here without changing shipped
+-	// semantics for every network client.
+-	onError := opts.OnError
+-	if onError == nil {
+-		onError = func(ErrorInfo) Tier { return TierFail }
+-	}
++	// SPIKE (ADR-0023): every failure is FINAL by default via the GENERAL
++	// Retries mechanism now that -1 is a real "explicit zero" spelling --
++	// no more forcing OnError=TierFail as a workaround. opts.OnError (nil
++	// unless the host sets one) passes through untouched; it is moot when the
++	// budget is 0 (attempt==retries fires on the first and only attempt
++	// regardless of tier), and if this constructor later grows its own
++	// `Retries` field for a host that wants to opt back in, OnError keeps
++	// working independently of it.
+ 	return CreateClient(ClientOptions{
+-		OnError:       onError,
++		OnError:       opts.OnError,
++		Retries:       -1,
+ 		BaseURL:       inProcessBaseURL,
+ 		Style:         StyleOpenAI,
+ 		// An in-process model has no endpoint to authenticate to, so the host must never need a key — but the client resolves one from the environment and fails when it finds none. A sentinel keeps that resolution from ever running. Caught by CI, which has no OPENROUTER_API_KEY; every local run passed because a developer shell has one.

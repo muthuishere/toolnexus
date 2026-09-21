@@ -20,6 +20,12 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/Toolnexus/Toolnexus.csproj" />
+    <!-- Test-only helper (AcpClientTests): a scripted ACP server spawned as a real child
+         process over real OS pipes. Referencing it (rather than just adding it to the .slnx)
+         guarantees it is built before the tests that spawn it, and copies FakeAcpServer.dll +
+         its runtime files next to Toolnexus.Tests.dll so AcpClientTests can find it by a
+         same-directory path instead of searching the tree. -->
+    <ProjectReference Include="../FakeAcpServer/FakeAcpServer.csproj" />
   </ItemGroup>
 
 </Project>

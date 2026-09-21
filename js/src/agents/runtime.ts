@@ -15,7 +15,17 @@
  * identical per-handle transition traces against `examples/subagent-*` fixtures.
  */
 import type { PromptInput } from "../content.js"
-import { createClient, InMemoryConversationStore, type ClientStyle, type ConversationStore, type Hooks, type MetricEvent } from "../client.js"
+import {
+  createClient,
+  createInProcessFetch,
+  InMemoryConversationStore,
+  type ClientStyle,
+  type ConversationStore,
+  type Hooks,
+  type InProcessRequest,
+  type InProcessResponse,
+  type MetricEvent,
+} from "../client.js"
 import { runGated, type Completion } from "./loop.js"
 import { createToolkit, type Toolkit } from "../toolkit.js"
 import { defineTool } from "../native.js"
@@ -270,8 +280,16 @@ export interface RuntimeOptions {
   registry: Record<string, AgentDef>
   /** LLM endpoint. Omit for hermetic runs against an injected `fetch` mock. */
   llm?: { baseUrl?: string; style?: ClientStyle; apiKey?: string; model?: string }
-  /** HTTP transport for LLM requests (§8 Gap 2) — the hermetic-test seam. */
+  /** HTTP transport for LLM requests (§8 Gap 2) — the hermetic-test seam.
+   * Mutually exclusive with `inProcess` — `new AgentRuntime(...)` throws if both are set. */
   fetch?: typeof fetch
+  /** A model running IN THIS PROCESS (ADR 0024): the semantic counterpart to
+   * `fetch`, so a host whose model is a plain function never has to build its own
+   * `fetch`-shaped adapter. Internally this is turned into a `createInProcessFetch`
+   * adapter and wrapped by the SAME global turn gate as `fetch` — there is no second
+   * code path. Mutually exclusive with `fetch` and with `llm` — `new AgentRuntime(...)`
+   * throws if more than one of `fetch`/`inProcess` is set. */
+  inProcess?: (request: InProcessRequest) => InProcessResponse | Promise<InProcessResponse>
   /** Time source for every timer/timeout/deadline. Default: the system clock. */
   clock?: Clock
   /** The ONE ConversationStore for all handles (conversation id = handle id).
@@ -324,6 +342,20 @@ export class AgentRuntime {
   private readonly turnQueue: GateWaiter[] = []
 
   constructor(opts: RuntimeOptions) {
+    if (opts.fetch && opts.inProcess) {
+      throw new Error("toolnexus/agents: RuntimeOptions.fetch and RuntimeOptions.inProcess are mutually exclusive — set one, not both")
+    }
+    if (opts.llm && opts.inProcess) {
+      throw new Error(
+        "toolnexus/agents: RuntimeOptions.llm and RuntimeOptions.inProcess are mutually exclusive — an in-process model has no wire endpoint to point llm at",
+      )
+    }
+    if (opts.inProcess) {
+      // Reuse the SAME adapter createInProcessClient builds on (ADR 0024) — the
+      // runtime's in-process wiring is a CALLER of that export, not a second copy
+      // of the request/response assembly.
+      opts = { ...opts, fetch: createInProcessFetch(opts.inProcess) }
+    }
     this.opts = opts
     this.registry = opts.registry
     this.clock = opts.clock ?? systemClock

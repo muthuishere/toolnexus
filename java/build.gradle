@@ -142,6 +142,19 @@ tasks.register('runJudge', JavaExec) {
     }
 }
 
+tasks.register('runAcp', JavaExec) {
+    group = 'application'
+    description = 'Run the Acp example (ACP agent CLI — devin/opencode — as the model behind the unified client). NOT run in CI: needs the agent CLI installed + authenticated.'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'io.github.muthuishere.toolnexus.examples.Acp'
+    if (System.getenv('ACP_AGENT_CMD')) {
+        environment 'ACP_AGENT_CMD', System.getenv('ACP_AGENT_CMD')
+    }
+    if (System.getenv('ACP_AGENT_ARGS')) {
+        environment 'ACP_AGENT_ARGS', System.getenv('ACP_AGENT_ARGS')
+    }
+}
+
 mavenPublishing {
     publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL)
     signAllPublications()
