@@ -1,0 +1,16 @@
+/Users/muthuishere/.herdr/worktrees/toolnexus/jev/spikes/classifier/csharp/Spike/bin/Debug/net10.0/Toolnexus.Spike.deps.json
+/Users/muthuishere/.herdr/worktrees/toolnexus/jev/spikes/classifier/csharp/Spike/bin/Debug/net10.0/Toolnexus.Spike.dll
+/Users/muthuishere/.herdr/worktrees/toolnexus/jev/spikes/classifier/csharp/Spike/bin/Debug/net10.0/Toolnexus.Spike.pdb
+/Users/muthuishere/.herdr/worktrees/toolnexus/jev/spikes/classifier/csharp/Spike/bin/Debug/net10.0/Toolnexus.dll
+/Users/muthuishere/.herdr/worktrees/toolnexus/jev/spikes/classifier/csharp/Spike/bin/Debug/net10.0/Toolnexus.pdb
+/Users/muthuishere/.herdr/worktrees/toolnexus/jev/spikes/classifier/csharp/Spike/obj/Debug/net10.0/Spike.csproj.AssemblyReference.cache
+/Users/muthuishere/.herdr/worktrees/toolnexus/jev/spikes/classifier/csharp/Spike/obj/Debug/net10.0/Spike.GeneratedMSBuildEditorConfig.editorconfig
+/Users/muthuishere/.herdr/worktrees/toolnexus/jev/spikes/classifier/csharp/Spike/obj/Debug/net10.0/Spike.AssemblyInfoInputs.cache
+/Users/muthuishere/.herdr/worktrees/toolnexus/jev/spikes/classifier/csharp/Spike/obj/Debug/net10.0/Spike.AssemblyInfo.cs
+/Users/muthuishere/.herdr/worktrees/toolnexus/jev/spikes/classifier/csharp/Spike/obj/Debug/net10.0/Spike.csproj.CoreCompileInputs.cache
+/Users/muthuishere/.herdr/worktrees/toolnexus/jev/spikes/classifier/csharp/Spike/obj/Debug/net10.0/Spike.sourcelink.json
+/Users/muthuishere/.herdr/worktrees/toolnexus/jev/spikes/classifier/csharp/Spike/obj/Debug/net10.0/Spike.csproj.Up2Date
+/Users/muthuishere/.herdr/worktrees/toolnexus/jev/spikes/classifier/csharp/Spike/obj/Debug/net10.0/Toolnexus.Spike.dll
+/Users/muthuishere/.herdr/worktrees/toolnexus/jev/spikes/classifier/csharp/Spike/obj/Debug/net10.0/refint/Toolnexus.Spike.dll
+/Users/muthuishere/.herdr/worktrees/toolnexus/jev/spikes/classifier/csharp/Spike/obj/Debug/net10.0/Toolnexus.Spike.pdb
+/Users/muthuishere/.herdr/worktrees/toolnexus/jev/spikes/classifier/csharp/Spike/obj/Debug/net10.0/ref/Toolnexus.Spike.dll
