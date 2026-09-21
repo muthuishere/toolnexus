@@ -440,6 +440,82 @@ test("retries honour Retry-After and the onError tier, and emit one ok metric", 
   assert.equal(tries, 1)
 })
 
+test("529 Overloaded retries by default; other unlisted 5xx do not until retryableStatuses says so", async () => {
+  // TypeSafe documents 529 Overloaded as "retry with backoff"; the default set made it terminal.
+  // It is now in the defaults. The set stays an ENUMERATION, so 520-527 and 501 remain terminal
+  // until a host opts in — which is what `retryableStatuses` is for.
+  const attemptsFor = async (status: number, retryableStatuses?: readonly number[]) => {
+    let attempts = 0
+    const f = load("base")
+    const c = createClassifier({
+      baseUrl: "https://gateway.example/v1",
+      model: f.request.model,
+      apiKeyEnv: "TEST_JUDGE_UNSET",
+      retries: 2,
+      retryBaseMs: 1,
+      retryableStatuses,
+      fetch: async () => {
+        attempts++
+        if (attempts === 1) return new Response("transient", { status })
+        return new Response(JSON.stringify(f.response), { status: 200 })
+      },
+    })
+    await c.evaluate(f.request.state, questionsOf(f)).catch(() => {})
+    return attempts
+  }
+
+  assert.equal(await attemptsFor(529), 2, "529 is retryable by default")
+  assert.equal(await attemptsFor(429), 2, "429 still retries")
+  assert.equal(await attemptsFor(520), 1, "an unlisted 5xx is terminal by default")
+  assert.equal(await attemptsFor(501), 1, "a permanent 5xx is terminal by default")
+
+  // Additive, the Cloudflare case: 520-527 opted in, and the defaults still stand beside them.
+  const cloudflare = [520, 521, 522, 523, 524, 525, 526, 527]
+  assert.equal(await attemptsFor(520, cloudflare), 2, "an opted-in status retries")
+  assert.equal(await attemptsFor(429, cloudflare), 2, "the defaults are not replaced")
+  assert.equal(await attemptsFor(501, cloudflare), 1, "a status outside both sets stays terminal")
+
+  // 4xx other than 429 is terminal; the option is a default, and onError has the final say.
+  assert.equal(await attemptsFor(422), 1)
+  let tries = 0
+  const c4 = createClassifier({
+    baseUrl: "https://gateway.example/v1",
+    apiKeyEnv: "TEST_JUDGE_UNSET",
+    retries: 3,
+    retryBaseMs: 1,
+    retryableStatuses: [520],
+    onError: () => "fail",
+    fetch: async () => {
+      tries++
+      return new Response("cloudflare", { status: 520 })
+    },
+  })
+  await assert.rejects(() => c4.evaluate("s", { q: noul("?") }), /520/)
+  assert.equal(tries, 1, "onError overrides a status the host itself listed")
+})
+
+test("a TypeSafe-shaped usage block reports an ABSENT cost, not a free call", async () => {
+  // TypeSafe's own API returns model/answers/usage and no `cost` key at all. Reporting 0 there
+  // would read as "this call was free" when the truth is "this backend does not say".
+  const c = createClassifier({
+    baseUrl: "https://api.typesafe.ai/v1",
+    model: "jev-latest",
+    apiKeyEnv: "TEST_JUDGE_UNSET",
+    fetch: async () =>
+      new Response(
+        JSON.stringify({
+          model: "jev-1.13.0",
+          answers: { q: { type: "noul", noul: 0.98 } },
+          usage: { input_tokens: 331, output_tokens: 48 },
+        }),
+        { status: 200 },
+      ),
+  })
+  const d = await c.evaluate("s", { q: noul("?") })
+  assert.equal(d.usage.inputTokens, 331)
+  assert.equal(d.usage.cost, undefined)
+})
+
 // ---------------------------------------------------------------- llm style
 
 test("the llm style renders one structured-output call and reports calibrated: false", async () => {

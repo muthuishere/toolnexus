@@ -256,7 +256,16 @@ defmodule Toolnexus.Client do
   alias Toolnexus.{Answer, ContentPart, Context, Request, Tool, ToolResult}
   alias Toolnexus.Client.{InMemoryConversationStore, MetricsRegistry, RunResult}
 
-  @retryable [429, 500, 502, 503, 504]
+  # The default retryable set: `429` plus the 5xx worth another try — and `529 Overloaded`,
+  # which TypeSafe documents as "retry with backoff" and which this enumeration once made
+  # terminal on the first attempt.
+  #
+  # It is an ENUMERATION on purpose. "Any 5xx" would sweep in permanently-broken statuses
+  # (`501 Not Implemented`, `505 HTTP Version Not Supported`) and change the retry behaviour
+  # of every existing host without asking. A backend with its own transient status — a
+  # Cloudflare origin answering `520`–`527`, say — opts in declaratively through
+  # `:retryable_statuses`, which ADDS to this set and can never remove from it.
+  @retryable [429, 500, 502, 503, 504, 529]
 
   defstruct base_url: nil,
             style: "openai",
@@ -268,6 +277,7 @@ defmodule Toolnexus.Client do
             hooks: %{},
             retries: 2,
             retry_base_ms: 500,
+            retryable_statuses: nil,
             timeout_ms: nil,
             store: nil,
             on_metric: nil,
@@ -295,7 +305,15 @@ defmodule Toolnexus.Client do
     failed LLM attempt (§8 Resilience). Absent ⇒ default (`retryable ⇒ :retry, else :fail`),
     byte-identical to today. A `:retry` is bounded by `:retries`. No `:suspend` tier.
   - `:hooks` — map with `:before_llm`, `:after_llm`, `:before_tool`, `:after_tool`
-  - `:retries` (default 2), `:retry_base_ms` (default 500), `:timeout_ms` (whole-run deadline)
+  - `:retries` (default 2), `:retry_base_ms` (default 500), `:timeout_ms` (whole-run deadline).
+    `:retries` covers the transient LLM statuses `429`/`500`/`502`/`503`/`504`/`529` plus
+    network errors; widen the set with `:retryable_statuses`
+  - `:retryable_statuses` — a list of extra HTTP statuses to treat as retryable, ADDED to the
+    default set (`429`/`500`/`502`/`503`/`504`/`529`). It can only widen: a host cannot remove
+    `429` and lose `Retry-After` handling with it. It sets the DEFAULT classification only —
+    `:on_error` still runs per attempt and has the final say, so `:on_error` returning `:fail`
+    overrides a status listed here. Example: a Cloudflare-fronted origin that answers
+    `520`–`527`. `Retry-After` handling is untouched
   - `:store` — a `Toolnexus.Client.ConversationStore` struct (default: in-memory)
   - `:on_metric` — `(event_map -> any)` semantic observability sink
   - `:wait_for` — §10 suspension resolver, `(Request -> Answer)`
@@ -1067,7 +1085,7 @@ defmodule Toolnexus.Client do
         {:ok, resp}
 
       {:ok, %Req.Response{status: status} = resp} ->
-        retryable = status in @retryable
+        retryable = retryable_status?(status, client.retryable_statuses)
         tier = classify_error(client, %{status: status, attempt: attempt, retryable: retryable})
 
         if tier == :fail or attempt >= client.retries do
@@ -1143,6 +1161,12 @@ defmodule Toolnexus.Client do
   # §8 Resilience. Host-classified retry-vs-fail. Absent on_error ⇒ the default classifier
   # (retryable ⇒ retry, else fail), byte-identical to the prior hardcoded rule. No :suspend tier —
   # a failure never becomes a §10 Pending (suspension stays a user-action pause).
+  #
+  # `retryable_status?/2` decides only the DEFAULT classification; `:retryable_statuses` is
+  # ADDITIVE to `@retryable` (see its comment) and never subtractive.
+  defp retryable_status?(status, extra),
+    do: status in @retryable or (is_list(extra) and status in extra)
+
   defp classify_error(%{on_error: nil}, %{retryable: retryable}),
     do: if(retryable, do: :retry, else: :fail)
 

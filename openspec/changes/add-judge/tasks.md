@@ -123,3 +123,38 @@
 - [x] 6.3 Confirm CI needs no network and no credential — the `static` backend is the whole path.
 - [x] 6.4 Confirm no test asserts a live numeric answer; the live call, if run, asserts shape only.
 - [x] 6.5 `openspec validate add-judge`.
+
+## 7. TypeSafe's first-party API, and the two defects it exposed
+
+- [x] 7.1 Add exactly `529` to the default retryable set — `{429,500,502,503,504,529}` on the
+      client path, plus the classifier's existing `408`. The set stays an exhaustive enumeration;
+      no other status changes classification, and `Retry-After` is untouched.
+      Ports: [x] js [x] python [x] golang [x] java [x] csharp [x] elixir [x] clojure
+- [x] 7.1b Add a `retryableStatuses` option (named per port) to BOTH `ClientOptions` and
+      `ClassifierOptions`: additive to the defaults, unable to subtract, deciding the default
+      classification only while `onError` keeps the final say per attempt. Register it in
+      `conformance/options_manifest.json` (clientOptions 18→19, classifierOptions 14→15).
+      Ports: [x] js [x] python [x] golang [x] java [x] csharp [x] elixir [x] clojure
+- [x] 7.2 Make an unreported cost representable in Go (`*float64`) and C# (`double?`), matching the
+      five ports that already had an optional. A real `0` stays a real `0`.
+      Ports: n/a js [x] n/a python [x] golang n/a java [x] csharp n/a elixir n/a clojure
+- [x] 7.3 Each port's `examples/judge.*` selects its backend from the environment —
+      `TYPESAFE_API_KEY`, else `OPENROUTER_API_KEY`, else the existing offline `static` replay —
+      prints which one it used, and prints an absent cost as absent rather than `$0`.
+      Ports: [x] js [x] python [x] golang [x] java [x] csharp [x] elixir [x] clojure
+- [x] 7.4 One hermetic test per port, on the client path and the classifier path: `529` retries,
+      an unlisted `520`/`501` does not, `retryableStatuses` makes `520` retry while `429` still
+      retries, `422` stays terminal, and `onError` overrides a host-listed status. Plus: a
+      TypeSafe-shaped `usage` block yields an absent cost, not zero.
+      Ports: [x] js [x] python [x] golang [x] java [x] csharp [x] elixir [x] clojure
+- [x] 7.5 `SPEC.md` §8, §8B's option table and the per-language API reference state the REAL
+      enumerated set instead of the long-standing and incorrect "429/5xx/network" shorthand, and
+      point at `retryableStatuses` for anything beyond it. Documentation corrected to the code.
+- [x] 7.6 `judge/backends` and `cookbook/judge` document both endpoints side by side, state that
+      they are **equivalent in latency** with both sets of numbers, and state that TypeSafe returns
+      no cost so a cost-based budget only works through the gateway.
+- [x] 7.7 `CHANGELOG.md` entry naming the source-breaking Go/C# `Usage.Cost` type change and what
+      the widened rule changes beyond `529`.
+- [ ] 7.8 **Not done:** `SPEC.md` §8B does not yet say which response fields are backend-specific
+      (`usage.cost`, `id`, `provider` are OpenRouter's, not the wire's). Wording proposed to the
+      owner rather than written, since §8B's canonical-request rules were out of scope.

@@ -5,8 +5,10 @@ namespace Toolnexus.Examples;
 ///
 ///   dotnet run -- judge
 ///
-/// With OPENROUTER_API_KEY set it calls the live System One backend; with no key it replays one
-/// recorded decision through the <c>static</c> backend, so the example runs offline with no credential.
+/// Three backends, picked by what is in the environment: TYPESAFE_API_KEY calls TypeSafe's own API,
+/// OPENROUTER_API_KEY calls the same wire through OpenRouter's gateway, and with no key at all it
+/// replays one recorded decision through the <c>static</c> backend — so this runs offline,
+/// uncredentialed.
 /// </summary>
 internal static class Judge
 {
@@ -15,7 +17,11 @@ internal static class Judge
         "Ticket 4021: my card was charged twice for the annual plan on Tuesday, and the second charge " +
         "has not been refunded. I am not blocked from working, but I would like the money back this week.";
 
+    /// <summary>OpenRouter's name for the model; <c>static</c> replays a recording made under it.</summary>
     private const string Model = "typesafe/jev-1.13";
+
+    /// <summary>Which of the three backends the environment selects.</summary>
+    private enum Backend { TypeSafe, OpenRouter, Static }
 
     // All three question types in ONE call: many questions, one round trip, one state ingest.
     // The questions are INDEPENDENT — one answer is never context for another.
@@ -68,20 +74,36 @@ internal static class Judge
 
     public static async Task<int> Run()
     {
-        var live = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("OPENROUTER_API_KEY"));
+        // Same wire, two ways in. TypeSafe's own API is a first-party key and no gateway in the
+        // path; OpenRouter is a gateway you may already hold a key for, and the only one of the two
+        // that reports `usage.cost`. They are equivalent in latency — neither is the "fast" one.
+        var backend =
+            !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("TYPESAFE_API_KEY")) ? Backend.TypeSafe
+            : !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("OPENROUTER_API_KEY")) ? Backend.OpenRouter
+            : Backend.Static;
 
-        var judge = live
-            ? Classifier.Create(new ClassifierOptions
+        Action<MetricEvent> onMetric = ev =>
+        {
+            if (ev.Event == Classifier.MetricWarning) Console.WriteLine("warning: " + ev.Warning);
+        };
+
+        var judge = backend switch
+        {
+            Backend.TypeSafe => Classifier.Create(new ClassifierOptions
             {
-                BaseUrl = "https://openrouter.ai/api/v1", // serves the System One wire today
+                BaseUrl = "https://api.typesafe.ai/v1", // the library default; spelled out so it is visible
+                Model = "jev-latest",
+                ApiKeyEnv = "TYPESAFE_API_KEY", // the NAME of an env var, never the value
+                OnMetric = onMetric,
+            }),
+            Backend.OpenRouter => Classifier.Create(new ClassifierOptions
+            {
+                BaseUrl = "https://openrouter.ai/api/v1", // a gateway that serves the same System One wire
                 Model = Model,
-                ApiKeyEnv = "OPENROUTER_API_KEY", // the NAME of an env var, never the value
-                OnMetric = ev =>
-                {
-                    if (ev.Event == Classifier.MetricWarning) Console.WriteLine("warning: " + ev.Warning);
-                },
-            })
-            : Classifier.Create(new ClassifierOptions
+                ApiKeyEnv = "OPENROUTER_API_KEY",
+                OnMetric = onMetric,
+            }),
+            _ => Classifier.Create(new ClassifierOptions
             {
                 Style = ClassifierStyle.Static,
                 Model = Model,
@@ -89,11 +111,15 @@ internal static class Judge
                 {
                     new RecordedDecision { State = Ticket, Questions = Questions, Response = RecordedResponse },
                 },
-            });
+            }),
+        };
 
-        Console.WriteLine(live
-            ? "backend: systemone (live)"
-            : "backend: static (recorded — set OPENROUTER_API_KEY to go live)");
+        Console.WriteLine(backend switch
+        {
+            Backend.TypeSafe => "backend: systemone via api.typesafe.ai (live)",
+            Backend.OpenRouter => "backend: systemone via openrouter.ai (live)",
+            _ => "backend: static (recorded — set TYPESAFE_API_KEY or OPENROUTER_API_KEY to go live)",
+        });
 
         var d = await judge.EvaluateAsync(Ticket, Questions);
 
@@ -116,7 +142,10 @@ internal static class Judge
             $"nearUniform(department): {dept.NearUniform}  — max|p - 1/n| <= 0.05, derived from the response. " +
             "True would mean the model had nothing to rank on (usually undescribed options). Advisory, NOT correctness.");
 
-        Console.WriteLine($"\nusage: {d.Usage.InputTokens} in / {d.Usage.OutputTokens} out / ${d.Usage.Cost:0.############}");
+        // Cost is a gateway field. TypeSafe's own API does not return one, and absent is NOT zero —
+        // print "cost: not reported" rather than a $0.00 that would read as a free call.
+        var cost = d.Usage.Cost is { } c ? $" / ${c:0.############}" : " / cost: not reported by this backend";
+        Console.WriteLine($"\nusage: {d.Usage.InputTokens} in / {d.Usage.OutputTokens} out{cost}");
         return 0;
     }
 }

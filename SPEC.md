@@ -1225,9 +1225,16 @@ record-replay — this is a second constructor over it, not a second seam.
 
 ### Resilience (retries + timeout/cancel)
 
-`ClientOptions`: `retries` (default 2), `retryBaseMs` (default 500), `timeoutMs` (whole-run
-deadline, optional). The LLM request retries on `429`/`500`/`502`/`503`/`504` and network errors
-with exponential backoff + jitter, honoring `Retry-After`. **`Retry-After` is honored only in its
+`ClientOptions`: `retries` (default 2), `retryBaseMs` (default 500), `retryableStatuses` (optional,
+additive — see below), `timeoutMs` (whole-run
+deadline, optional). The LLM request retries on the **enumerated set
+`429`/`500`/`502`/`503`/`504`/`529`** and network errors, with exponential backoff + jitter,
+honoring `Retry-After`. That set is exhaustive, not shorthand for "5xx": every other status,
+including `501`, `505` and the Cloudflare `520`–`527` family, is terminal by default. `529
+Overloaded` is in it because TypeSafe documents it as retry-with-backoff. **`retryableStatuses`
+(optional) ADDS statuses to that set** and can never remove from it, so a host cannot drop `429`
+and lose `Retry-After` handling with it; it sets the default classification only, and `onError`
+still runs per attempt and has the final say. **`Retry-After` is honored only in its
 `delay-seconds` form** — a run of ASCII digits (RFC 9110 §10.2.3) in `0 … 2147483647`, waited as
 exactly that many whole seconds, **including `0`** ("retry now"). Every other value — fractional,
 signed, the HTTP-date form, out of range, empty, unparseable — falls back to backoff, and never
@@ -1240,7 +1247,8 @@ HTTP request, so a timeout or external cancel aborts the in-flight call. Aborts 
 failed LLM attempt is host-configurable via `onError(info) -> "retry" | "fail"` (idiomatic name +
 return per port). `info = { error?, status?, attempt, retryable }` — `status` on a non-ok HTTP
 response, `error` on a transport/network throw, `attempt` zero-based, `retryable` = whether the
-status/error is in the default set (`429`/`5xx`/network). A `"retry"` is always **bounded by
+status/error is in the default set (`429`/`500`/`502`/`503`/`504`/`529`/network, plus anything
+`retryableStatuses` added). A `"retry"` is always **bounded by
 `retries`** (the classifier cannot loop unbounded); `"fail"` surfaces the error immediately,
 skipping remaining retries. **Absent `onError` ⇒ the default classifier `retryable ? "retry" :
 "fail"`, i.e. byte-identical to the paragraph above.** There is **no `"suspend"` tier** — a failure
@@ -1650,7 +1658,7 @@ configured one client has configured the other. Idiomatic names per port, as eve
 | `headers` | — | extra headers; values expand `${ENV_VAR}` from the environment at call time and are **never logged**, identically to remote-MCP headers (§2) |
 | `httpClient` / `transport` | default | the §8 Gap 2 injectable transport. Scope is the classifier path only |
 | `timeout` | 10 s | per request, not per run — a classifier has no loop to bound |
-| `retries` / `onError` | retry `408`/`429`/`5xx` + network, honour `Retry-After` | **reuses** the §8 `ErrorInfo → "retry" \| "fail"` classifier and the `Retry-After` `delay-seconds` rule verbatim. There is no second retry policy, and no `"suspend"` tier here either |
+| `retries` / `onError` / `retryableStatuses` | retry `408`/`429`/`500`/`502`/`503`/`504`/`529` + network, honour `Retry-After`; `retryableStatuses` adds to that set (never removes), `onError` still decides each attempt | **reuses** the §8 `ErrorInfo → "retry" \| "fail"` classifier and the `Retry-After` `delay-seconds` rule verbatim. There is no second retry policy, and no `"suspend"` tier here either |
 | `requestParams` / `bodyTransform` | — | the §8 Gap 1 shape, same ordering: base body → `requestParams` merge → `bodyTransform` → marshal. How a gateway's wrapper or extra fields land without a proxy |
 | `onMetric` | — | emits `classifier.evaluate` events (latency, tokens, model, status) into the **same** §8 sink — its `error` set only on a failed evaluate — and carries the degenerate-criteria warning as a `classifier.warning` whose text is in `warning`, not `error` |
 | `client` | — | `style: "llm"` only — the §8 `Client` to emulate over |

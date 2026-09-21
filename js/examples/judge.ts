@@ -3,8 +3,9 @@
  *
  *   node --experimental-strip-types examples/judge.ts      (npm run example:judge)
  *
- * With OPENROUTER_API_KEY set it calls the live System One backend; with no key it replays one
- * recorded decision through the `static` backend, so the example runs offline with no credential.
+ * Three backends, picked by what is in the environment: TYPESAFE_API_KEY calls TypeSafe's own API,
+ * OPENROUTER_API_KEY calls the same wire through OpenRouter's gateway, and with no key at all it
+ * replays one recorded decision through the `static` backend — so this runs offline, uncredentialed.
  */
 import { createClassifier, noul, choice, score, type RecordedDecision } from "../dist/index.js"
 
@@ -36,6 +37,7 @@ const QUESTIONS = {
   ]),
 }
 
+/** OpenRouter's name for the model; `static` replays a recording made under it. */
 const MODEL = "typesafe/jev-1.13"
 
 /** One decision recorded off the live backend, so this file runs with no key and no network. */
@@ -68,17 +70,42 @@ const RECORDED: RecordedDecision = {
   },
 }
 
-const live = Boolean(process.env.OPENROUTER_API_KEY)
-const judge = live
-  ? createClassifier({
-      baseUrl: "https://openrouter.ai/api/v1", // serves the System One wire today
-      model: MODEL,
-      apiKeyEnv: "OPENROUTER_API_KEY", // the NAME of an env var, never the value
-      onMetric: (ev) => ev.event === "classifier.warning" && console.log("warning:", ev.warning),
-    })
-  : createClassifier({ style: "static", model: MODEL, decisions: [RECORDED] })
+// Same wire, two ways in. TypeSafe's own API is a first-party key and no gateway in the path;
+// OpenRouter is a gateway you may already hold a key for, and the only one of the two that
+// reports `usage.cost`. They are equivalent in latency — neither is the "fast" one.
+const backend = process.env.TYPESAFE_API_KEY
+  ? "typesafe"
+  : process.env.OPENROUTER_API_KEY
+    ? "openrouter"
+    : "static"
 
-console.log(live ? "backend: systemone (live)" : "backend: static (recorded — set OPENROUTER_API_KEY to go live)")
+const onMetric = (ev: { event: string; warning?: string }) =>
+  ev.event === "classifier.warning" && console.log("warning:", ev.warning)
+
+const judge =
+  backend === "typesafe"
+    ? createClassifier({
+        baseUrl: "https://api.typesafe.ai/v1", // the library default; spelled out so it is visible
+        model: "jev-latest",
+        apiKeyEnv: "TYPESAFE_API_KEY", // the NAME of an env var, never the value
+        onMetric,
+      })
+    : backend === "openrouter"
+      ? createClassifier({
+          baseUrl: "https://openrouter.ai/api/v1", // a gateway that serves the same System One wire
+          model: MODEL,
+          apiKeyEnv: "OPENROUTER_API_KEY",
+          onMetric,
+        })
+      : createClassifier({ style: "static", model: MODEL, decisions: [RECORDED] })
+
+console.log(
+  backend === "typesafe"
+    ? "backend: systemone via api.typesafe.ai (live)"
+    : backend === "openrouter"
+      ? "backend: systemone via openrouter.ai (live)"
+      : "backend: static (recorded — set TYPESAFE_API_KEY or OPENROUTER_API_KEY to go live)",
+)
 
 const d = await judge.evaluate(TICKET, QUESTIONS)
 
@@ -101,4 +128,9 @@ console.log(
   `nearUniform(department): ${dept.nearUniform}  — max|p - 1/n| <= 0.05, derived from the response. ` +
     `True would mean the model had nothing to rank on (usually undescribed options). Advisory, NOT correctness.`,
 )
-console.log(`\nusage: ${d.usage.inputTokens} in / ${d.usage.outputTokens} out` + (d.usage.cost === undefined ? "" : ` / $${d.usage.cost}`))
+// Cost is a gateway field. TypeSafe's own API does not return one, and absent is NOT zero —
+// print "cost: not reported" rather than a $0.00 that would read as a free call.
+console.log(
+  `\nusage: ${d.usage.inputTokens} in / ${d.usage.outputTokens} out` +
+    (d.usage.cost === undefined ? " / cost: not reported by this backend" : ` / $${d.usage.cost}`),
+)

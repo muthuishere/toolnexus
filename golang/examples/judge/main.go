@@ -2,8 +2,9 @@
 //
 //	go run ./examples/judge
 //
-// With OPENROUTER_API_KEY set it calls the live System One backend; with no key it replays one
-// recorded decision through the `static` backend, so the example runs offline with no credential.
+// Three backends, picked by what is in the environment: TYPESAFE_API_KEY calls TypeSafe's own API,
+// OPENROUTER_API_KEY calls the same wire through OpenRouter's gateway, and with no key at all it
+// replays one recorded decision through the `static` backend — so this runs offline, uncredentialed.
 package main
 
 import (
@@ -22,6 +23,7 @@ import (
 const ticket = "Ticket 4021: my card was charged twice for the annual plan on Tuesday, and the second charge " +
 	"has not been refunded. I am not blocked from working, but I would like the money back this week."
 
+// OpenRouter's name for the model; `static` replays a recording made under it.
 const model = "typesafe/jev-1.13"
 
 // All three question types in ONE call: many questions, one round trip, one state ingest.
@@ -66,24 +68,49 @@ const recorded = `{"model":"typesafe/jev-1.13-20260917",
  "usage":{"input_tokens":516,"output_tokens":72,"cost":0.000021672}}`
 
 func main() {
-	live := os.Getenv("OPENROUTER_API_KEY") != ""
-
-	opts := toolnexus.ClassifierOptions{
-		Style:     toolnexus.StyleStatic,
-		Model:     model,
-		Decisions: []toolnexus.RecordedDecision{{State: ticket, Questions: questions, Response: []byte(recorded)}},
+	// Same wire, two ways in. TypeSafe's own API is a first-party key and no gateway in the path;
+	// OpenRouter is a gateway you may already hold a key for, and the only one of the two that
+	// reports usage.cost. They are equivalent in latency — neither is the "fast" one.
+	backend := "static"
+	switch {
+	case os.Getenv("TYPESAFE_API_KEY") != "":
+		backend = "typesafe"
+	case os.Getenv("OPENROUTER_API_KEY") != "":
+		backend = "openrouter"
 	}
-	if live {
-		opts = toolnexus.ClassifierOptions{
-			BaseURL:   "https://openrouter.ai/api/v1", // serves the System One wire today
-			Model:     model,
-			APIKeyEnv: "OPENROUTER_API_KEY", // the NAME of an env var, never the value
-			OnMetric: func(ev toolnexus.MetricEvent) {
-				if ev.Event == toolnexus.MetricClassifierWarning {
-					fmt.Println("warning:", ev.Warning)
-				}
-			},
+
+	onMetric := func(ev toolnexus.MetricEvent) {
+		if ev.Event == toolnexus.MetricClassifierWarning {
+			fmt.Println("warning:", ev.Warning)
 		}
+	}
+
+	var opts toolnexus.ClassifierOptions
+	var banner string
+	switch backend {
+	case "typesafe":
+		opts = toolnexus.ClassifierOptions{
+			BaseURL:   "https://api.typesafe.ai/v1", // the library default; spelled out so it is visible
+			Model:     "jev-latest",
+			APIKeyEnv: "TYPESAFE_API_KEY", // the NAME of an env var, never the value
+			OnMetric:  onMetric,
+		}
+		banner = "backend: systemone via api.typesafe.ai (live)"
+	case "openrouter":
+		opts = toolnexus.ClassifierOptions{
+			BaseURL:   "https://openrouter.ai/api/v1", // a gateway that serves the same System One wire
+			Model:     model,
+			APIKeyEnv: "OPENROUTER_API_KEY",
+			OnMetric:  onMetric,
+		}
+		banner = "backend: systemone via openrouter.ai (live)"
+	default:
+		opts = toolnexus.ClassifierOptions{
+			Style:     toolnexus.StyleStatic,
+			Model:     model,
+			Decisions: []toolnexus.RecordedDecision{{State: ticket, Questions: questions, Response: []byte(recorded)}},
+		}
+		banner = "backend: static (recorded — set TYPESAFE_API_KEY or OPENROUTER_API_KEY to go live)"
 	}
 
 	judge, err := toolnexus.CreateClassifier(opts)
@@ -91,11 +118,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if live {
-		fmt.Println("backend: systemone (live)")
-	} else {
-		fmt.Println("backend: static (recorded — set OPENROUTER_API_KEY to go live)")
-	}
+	fmt.Println(banner)
 
 	d, err := judge.Evaluate(context.Background(), ticket, questions)
 	if err != nil {
@@ -130,9 +153,11 @@ func main() {
 		"True would mean the model had nothing to rank on (usually undescribed options). Advisory, NOT correctness.\n",
 		dept.NearUniform)
 
-	cost := ""
-	if d.Usage.Cost != 0 {
-		cost = " / $" + strconv.FormatFloat(d.Usage.Cost, 'f', -1, 64)
+	// Cost is a gateway field. TypeSafe's own API does not return one, and absent is NOT zero —
+	// print "cost: not reported" rather than a $0.00 that would read as a free call.
+	cost := " / cost: not reported by this backend"
+	if d.Usage.Cost != nil {
+		cost = " / $" + strconv.FormatFloat(*d.Usage.Cost, 'f', -1, 64)
 	}
 	fmt.Printf("\nusage: %d in / %d out%s\n", d.Usage.InputTokens, d.Usage.OutputTokens, cost)
 }

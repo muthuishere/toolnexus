@@ -216,7 +216,7 @@ public class ClassifierTests
         Assert.Equal(1.21, s.Score);
         Assert.Equal(0.04, s.Probabilities["0"]);
         Assert.Equal(0.0, d.Noul("is_expensive").Noul);
-        Assert.Equal(1.6716e-05, d.Usage.Cost);
+        Assert.Equal(1.6716e-05, d.Usage.Cost!.Value);
     }
 
     /// <summary>40 keys: above the width at which some runtimes stop iterating small maps in term
@@ -355,6 +355,144 @@ public class ClassifierTests
         var e = await Assert.ThrowsAsync<ClassifierException>(() =>
             c.EvaluateAsync(JsonDocument.Parse("{\"command\":\"unseen\"}").RootElement.Clone(), f.Entries[0].Questions));
         Assert.Contains("no recorded decision", e.Message);
+    }
+
+    // ---------------------------------------------------------------- retry rule
+
+    /// <summary>A handler that answers the given status once, then the fixture's response. The
+    /// <c>Retry-After: 0</c> is a real, honoured delay of zero — it keeps the test off the clock
+    /// without weakening the rule under test.</summary>
+    private sealed class FailThenSucceedHandler : HttpMessageHandler
+    {
+        private readonly int _status;
+        private readonly string _body;
+        public int Calls;
+
+        public FailThenSucceedHandler(int status, string body) { _status = status; _body = body; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var n = Interlocked.Increment(ref Calls);
+            var res = n == 1
+                ? new HttpResponseMessage((System.Net.HttpStatusCode)_status) { Content = new StringContent("overloaded") }
+                : new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent(_body) };
+            if (n == 1) res.Headers.TryAddWithoutValidation("Retry-After", "0");
+            return Task.FromResult(res);
+        }
+    }
+
+    private sealed class AlwaysHandler : HttpMessageHandler
+    {
+        private readonly int _status;
+        public int Calls;
+
+        public AlwaysHandler(int status) { _status = status; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref Calls);
+            return Task.FromResult(new HttpResponseMessage((System.Net.HttpStatusCode)_status)
+            {
+                Content = new StringContent("unprocessable"),
+            });
+        }
+    }
+
+    private static readonly int[] Cloudflare = { 520, 521, 522, 523, 524, 525, 526, 527 };
+
+    private Classifier Judge(HttpMessageHandler handler, IReadOnlyCollection<int>? extra = null,
+        Func<LlmClient.ErrorInfo, LlmClient.Tier>? onError = null, string? model = null) =>
+        new(new ClassifierOptions
+        {
+            BaseUrl = "https://gateway.example/v1",
+            Model = model,
+            ApiKeyEnv = "TEST_JUDGE_UNSET",
+            HttpHandler = handler,
+            Retries = 2,
+            RetryableStatuses = extra,
+            OnError = onError,
+        });
+
+    /// <summary>The default set is an ENUMERATION: 529 (TypeSafe's "retry with backoff") is in it,
+    /// an unlisted 5xx (520) and a permanently-broken one (501) are terminal. A host widens it
+    /// declaratively with <c>RetryableStatuses</c>, which ADDS and never replaces — 429 keeps
+    /// retrying (and keeps <c>Retry-After</c> with it) while 501 stays terminal.</summary>
+    [Theory]
+    [InlineData(529, null, true)]
+    [InlineData(520, null, false)]
+    [InlineData(501, null, false)]
+    [InlineData(520, "cf", true)]
+    [InlineData(429, "cf", true)]
+    [InlineData(501, "cf", false)]
+    [InlineData(422, null, false)]
+    public async Task RetryableStatusMatrix(int status, string? extra, bool retried)
+    {
+        var set = extra is null ? null : Cloudflare;
+        if (retried)
+        {
+            var f = LoadFixture("base");
+            var handler = new FailThenSucceedHandler(status, f.ResponseJson!);
+            await Judge(handler, set, model: f.RequestModel).EvaluateAsync(f.State, f.Questions);
+            Assert.Equal(2, handler.Calls);
+        }
+        else
+        {
+            var handler = new AlwaysHandler(status);
+            var c = Judge(handler, set);
+            var e = await Assert.ThrowsAsync<ClassifierException>(() =>
+                c.EvaluateAsync("s", new Dictionary<string, Question> { ["q"] = new NoulQuestion { Instructions = "?" } }));
+            Assert.Contains(status.ToString(), e.Message);
+            Assert.Equal(1, handler.Calls);
+        }
+    }
+
+    /// <summary><c>RetryableStatuses</c> sets the DEFAULT classification only — <c>OnError</c> runs
+    /// per attempt and has the final say, so "fail" overrides a status the host itself listed.</summary>
+    [Fact]
+    public async Task OnErrorFailOverridesAListedStatus()
+    {
+        var handler = new AlwaysHandler(520);
+        var c = Judge(handler, Cloudflare, onError: info =>
+        {
+            Assert.True(info.Retryable);
+            return LlmClient.Tier.Fail;
+        });
+
+        await Assert.ThrowsAsync<ClassifierException>(() =>
+            c.EvaluateAsync("s", new Dictionary<string, Question> { ["q"] = new NoulQuestion { Instructions = "?" } }));
+        Assert.Equal(1, handler.Calls);
+    }
+
+    // ---------------------------------------------------------------- absent cost
+
+    private sealed class FixedBodyHandler : HttpMessageHandler
+    {
+        private readonly string _body;
+        public FixedBodyHandler(string body) { _body = body; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent(_body) });
+    }
+
+    /// <summary>TypeSafe's own API returns model/answers/usage and no <c>cost</c> key at all.
+    /// Reporting 0 there would read as "this call was free" when the truth is "this backend does
+    /// not say".</summary>
+    [Fact]
+    public async Task AnAbsentCostIsNullNotZero()
+    {
+        var handler = new FixedBodyHandler(
+            """{"model":"jev-1.13.0","answers":{"q":{"type":"noul","noul":0.98}},"usage":{"input_tokens":331,"output_tokens":48}}""");
+        var c = new Classifier(new ClassifierOptions
+        {
+            BaseUrl = "https://api.typesafe.ai/v1",
+            Model = "jev-latest",
+            ApiKeyEnv = "TEST_JUDGE_UNSET",
+            HttpHandler = handler,
+        });
+
+        var d = await c.EvaluateAsync("s", new Dictionary<string, Question> { ["q"] = new NoulQuestion { Instructions = "?" } });
+        Assert.Equal(331, d.Usage.InputTokens);
+        Assert.Null(d.Usage.Cost);
     }
 
     // ---------------------------------------------------------------- limits

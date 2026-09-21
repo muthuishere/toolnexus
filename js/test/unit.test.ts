@@ -316,6 +316,55 @@ test("client: retries on 503 then succeeds (backoff)", async () => {
   server.close()
 })
 
+test("client: 529 retries by default; retryableStatuses adds to the set without replacing it", async () => {
+  // One server that answers `status` once, then succeeds. `hits` is the attempt count.
+  const attemptsFor = async (status: number, retryableStatuses?: readonly number[]) => {
+    let hits = 0
+    const server = http.createServer((req, res) => {
+      hits++
+      if (hits < 2) { res.writeHead(status); res.end("transient"); return }
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ choices: [{ message: { content: "ok" } }], usage: {} }))
+    })
+    await new Promise<void>((r) => server.listen(0, r))
+    const port = (server.address() as any).port
+    const tk = await createToolkit({})
+    const client = createClient({
+      baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "x", apiKey: "k",
+      retries: 2, retryBaseMs: 5, retryableStatuses,
+    })
+    await client.run("hi", { toolkit: tk }).catch(() => {})
+    await tk.close()
+    server.close()
+    return hits
+  }
+
+  assert.equal(await attemptsFor(529), 2, "529 Overloaded is retryable by default")
+  assert.equal(await attemptsFor(520), 1, "an unlisted 5xx is terminal by default")
+
+  // Additive: opting 520-527 in (a Cloudflare-fronted origin) never removes the defaults.
+  const cloudflare = [520, 521, 522, 523, 524, 525, 526, 527]
+  assert.equal(await attemptsFor(520, cloudflare), 2, "an opted-in status retries")
+  assert.equal(await attemptsFor(429, cloudflare), 2, "429 still retries, so Retry-After still applies")
+  assert.equal(await attemptsFor(501, cloudflare), 1, "a status in neither set stays terminal")
+})
+
+test("client: onError has the final say over retryableStatuses", async () => {
+  let hits = 0
+  const server = http.createServer((req, res) => { hits++; res.writeHead(520); res.end("cloudflare") })
+  await new Promise<void>((r) => server.listen(0, r))
+  const port = (server.address() as any).port
+  const tk = await createToolkit({})
+  const client = createClient({
+    baseUrl: `http://127.0.0.1:${port}`, style: "openai", model: "x", apiKey: "k",
+    retries: 3, retryBaseMs: 5, retryableStatuses: [520], onError: () => "fail",
+  })
+  await assert.rejects(() => client.run("hi", { toolkit: tk }))
+  assert.equal(hits, 1, "onError:fail overrode a status the host itself listed")
+  await tk.close()
+  server.close()
+})
+
 test("host controls: disableTools drops a builtin by final name; disableSkills folds into the filter", async () => {
   const tk = await createToolkit({
     skills: [

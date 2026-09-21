@@ -498,6 +498,99 @@ async def test_a_transport_fault_is_classified_and_retried() -> None:
     assert t.n == 2
 
 
+CLOUDFLARE = [520, 521, 522, 523, 524, 525, 526, 527]
+
+
+def _flaky(status: int):
+    """A transport that answers `status` once, then succeeds — so `n == 2` means retried."""
+
+    class Flaky:
+        def __init__(self) -> None:
+            self.n = 0
+
+        def post(self, url, headers, body, timeout):
+            self.n += 1
+            if self.n == 1:
+                return ClassifierResponse(status=status, body=b"nope", retry_after="0")
+            return ClassifierResponse(status=200, body=json.dumps({"model": "m", "answers": {}}).encode())
+
+    return Flaky()
+
+
+async def test_529_overloaded_is_retryable_by_default() -> None:
+    """TypeSafe documents 529 Overloaded as "retry with backoff"; the five-status set
+    (429/500/502/503/504) made it terminal on the first attempt."""
+    t = _flaky(529)
+    c = create_classifier(http_transport=t, retries=2)
+    await c.evaluate("s", {"q": NoulQuestion(instructions="?")})
+    assert t.n == 2
+
+
+@pytest.mark.parametrize("status", [520, 501])
+async def test_an_unlisted_5xx_stays_terminal_by_default(status: int) -> None:
+    """The set is an ENUMERATION on purpose — "any 5xx" would sweep in permanently-broken
+    statuses and change every existing host's retry behaviour without asking."""
+    t = RecordingTransport(response=b"nope", status=status)
+    c = create_classifier(http_transport=t, retries=3)
+    with pytest.raises(ClassifierError, match=str(status)):
+        await c.evaluate("s", {"q": NoulQuestion(instructions="?")})
+    assert len(t.calls) == 1
+
+
+@pytest.mark.parametrize("status", [520, 429])
+async def test_retryable_statuses_widens_the_set_and_keeps_the_defaults(status: int) -> None:
+    """A Cloudflare-fronted origin opts 520–527 in declaratively; 429 STILL retries, because
+    the option is ADDITIVE and can never remove a default."""
+    t = _flaky(status)
+    c = create_classifier(http_transport=t, retries=2, retryable_statuses=CLOUDFLARE)
+    await c.evaluate("s", {"q": NoulQuestion(instructions="?")})
+    assert t.n == 2
+
+
+async def test_retryable_statuses_does_not_make_a_permanent_5xx_retryable() -> None:
+    t = RecordingTransport(response=b"nope", status=501)
+    c = create_classifier(http_transport=t, retries=3, retryable_statuses=CLOUDFLARE)
+    with pytest.raises(ClassifierError, match="501"):
+        await c.evaluate("s", {"q": NoulQuestion(instructions="?")})
+    assert len(t.calls) == 1
+
+
+async def test_on_error_fail_overrides_a_status_the_host_listed_as_retryable() -> None:
+    # retryable_statuses sets the DEFAULT classification only; on_error has the final say.
+    t = RecordingTransport(response=b"nope", status=520)
+    c = create_classifier(
+        http_transport=t, retries=5, retryable_statuses=CLOUDFLARE, on_error=lambda info: "fail"
+    )
+    with pytest.raises(ClassifierError, match="520"):
+        await c.evaluate("s", {"q": NoulQuestion(instructions="?")})
+    assert len(t.calls) == 1
+
+
+async def test_a_4xx_other_than_429_stays_terminal() -> None:
+    # Widening covered 5xx only: a 422 still fails on the first attempt.
+    t = RecordingTransport(response=b"unprocessable", status=422)
+    c = create_classifier(http_transport=t, retries=3)
+    with pytest.raises(ClassifierError, match="422"):
+        await c.evaluate("s", {"q": NoulQuestion(instructions="?")})
+    assert len(t.calls) == 1
+
+
+async def test_a_typesafe_shaped_usage_block_reports_an_absent_cost_not_a_free_call() -> None:
+    # TypeSafe's own API returns model/answers/usage and no `cost` key at all. Reporting 0 there
+    # would read as "this call was free" when the truth is "this backend does not say".
+    t = RecordingTransport(
+        response={
+            "model": "jev-1.13.0",
+            "answers": {"q": {"type": "noul", "noul": 0.98}},
+            "usage": {"input_tokens": 331, "output_tokens": 48},
+        }
+    )
+    c = create_classifier(base_url="https://api.typesafe.ai/v1", model="jev-latest", http_transport=t)
+    d = await c.evaluate("s", {"q": NoulQuestion(instructions="?")})
+    assert d.usage.input_tokens == 331
+    assert d.usage.cost is None
+
+
 # --------------------------------------------------------------------------- #
 # Styles
 # --------------------------------------------------------------------------- #

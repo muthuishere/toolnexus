@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -523,6 +524,93 @@ class ClassifierTest {
         assertEquals(2, bodies.size());
         assertEquals(bodies.get(0), bodies.get(1),
                 "constructing a Classifier changed a client request");
+    }
+
+    // ------------------------------------------------------------------ retry rule
+
+    /** One transient {@code status}, then success; returns the attempt count. */
+    private int attemptsFor(int status, List<Integer> retryableStatuses) throws IOException {
+        JsonNode f = fixture("base");
+        JsonNode req = f.get("request");
+        String ok = f.get("response").toString();
+        AtomicInteger attempts = new AtomicInteger();
+        int port = start(ex -> {
+            if (attempts.incrementAndGet() == 1) respond(ex, status, "transient");
+            else respond(ex, 200, ok);
+        });
+        Classifier c = Classifier.create(new Classifier.Options()
+                .baseUrl("http://127.0.0.1:" + port)
+                .model(req.get("model").asText())
+                .retries(2)
+                .retryableStatuses(retryableStatuses));
+        try {
+            c.evaluate(state(req), questions(req));
+        } catch (RuntimeException ignored) {
+            // a terminal status surfaces; the attempt count is what this asserts
+        }
+        stopServer();
+        server = null;
+        return attempts.get();
+    }
+
+    /**
+     * TypeSafe documents {@code 529 Overloaded} as "retry with backoff", so it is in the defaults
+     * (alongside this seam's {@code 408}). The set stays an ENUMERATION, so {@code 520}–{@code 527}
+     * and {@code 501} remain terminal until a host opts in through {@code retryableStatuses} —
+     * which only ever widens.
+     */
+    @Test
+    void fiveTwentyNineRetriesByDefaultAndRetryableStatusesOnlyWidensTheSet() throws IOException {
+        assertEquals(2, attemptsFor(529, null), "529 is retryable by default");
+        assertEquals(2, attemptsFor(429, null), "429 still retries");
+        assertEquals(2, attemptsFor(408, null), "408 is this seam's own addition");
+        assertEquals(1, attemptsFor(520, null), "an unlisted 5xx is terminal by default");
+        assertEquals(1, attemptsFor(501, null), "a permanent 5xx is terminal by default");
+        assertEquals(1, attemptsFor(422, null), "a non-429 4xx stays terminal");
+
+        List<Integer> cloudflare = List.of(520, 521, 522, 523, 524, 525, 526, 527);
+        assertEquals(2, attemptsFor(520, cloudflare), "an opted-in status retries");
+        assertEquals(2, attemptsFor(429, cloudflare), "the defaults are not replaced");
+        assertEquals(1, attemptsFor(501, cloudflare), "a status outside both sets stays terminal");
+    }
+
+    /** The option is a default; {@code onError} has the final say, on every attempt. */
+    @Test
+    void onErrorOverridesAStatusTheHostItselfListed() throws IOException {
+        AtomicInteger tries = new AtomicInteger();
+        int port = start(ex -> {
+            tries.incrementAndGet();
+            respond(ex, 520, "cloudflare");
+        });
+        Classifier c = Classifier.create(new Classifier.Options()
+                .baseUrl("http://127.0.0.1:" + port)
+                .retries(3)
+                .retryableStatuses(List.of(520))
+                .onError(info -> LlmClient.Tier.FAIL));
+        Classifier.ClassifierException e = assertThrows(Classifier.ClassifierException.class,
+                () -> c.evaluate("s", Map.of("q", new Classifier.NoulQuestion("?"))));
+        assertTrue(e.getMessage().contains("520"), "error must name the status, got: " + e.getMessage());
+        assertEquals(1, tries.get());
+    }
+
+    /**
+     * TypeSafe's own API returns {@code model}/{@code answers}/{@code usage} and no {@code cost}
+     * key at all. Reporting {@code 0} there would read as "this call was free" when the truth is
+     * "this backend does not say".
+     */
+    @Test
+    void aTypeSafeShapedUsageBlockReportsAnAbsentCostNotAFreeCall() throws IOException {
+        int port = start(ex -> respond(ex, 200, """
+                {"model":"jev-1.13.0",
+                 "answers":{"q":{"type":"noul","noul":0.98}},
+                 "usage":{"input_tokens":331,"output_tokens":48}}
+                """));
+        Classifier c = Classifier.create(new Classifier.Options()
+                .baseUrl("http://127.0.0.1:" + port)
+                .model("jev-latest"));
+        Classifier.Decision d = c.evaluate("s", Map.of("q", new Classifier.NoulQuestion("?")));
+        assertEquals(331, d.usage().inputTokens());
+        assertNull(d.usage().cost(), "an absent cost is not a zero cost");
     }
 
     // ------------------------------------------------------------------ plumbing

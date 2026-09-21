@@ -140,6 +140,13 @@
           "onerror"
         ],
         "tier": "full"
+      },
+      {
+        "name": "retryableStatuses",
+        "aliases": [
+          "retryablestatuses"
+        ],
+        "tier": "full"
       }
     ]
   },
@@ -320,6 +327,13 @@
         "name": "onError",
         "aliases": [
           "onerror"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "retryableStatuses",
+        "aliases": [
+          "retryablestatuses"
         ],
         "tier": "full"
       },

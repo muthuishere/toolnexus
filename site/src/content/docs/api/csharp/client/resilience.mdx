@@ -21,18 +21,33 @@ public Func<ErrorInfo, Tier>? OnError { get; set; }
 public int? Retries { get; set; }       // default 2
 public int? RetryBaseMs { get; set; }   // default 500
 public long? TimeoutMs { get; set; }    // whole-run deadline; null = none
+public IReadOnlyCollection<int>? RetryableStatuses { get; set; }  // ADDED to the default set
 ```
 
-Three independent knobs on `LlmClient.Options` govern how a failed LLM call is handled:
+Four independent knobs on `LlmClient.Options` govern how a failed LLM call is handled:
 
 - **`OnError`** — classify each failed attempt into `Tier.Retry` or `Tier.Fail`. Called with an
   `ErrorInfo`: `Status` is set for a non-2xx HTTP response, `Error` for a transport/network throw,
-  `Attempt` is zero-based, `Retryable` is whether the default classifier (429/500/502/503/504, or
-  any network error) would already retry it. `null` ⇒ the default classifier
+  `Attempt` is zero-based, `Retryable` is whether the default classifier (429/500/502/503/504/529,
+  or any network error) would already retry it. `null` ⇒ the default classifier
   (`Retryable ? Retry : Fail`) — byte-identical to not setting it at all. A `Tier.Retry` is always
   bounded by `Retries` — the classifier cannot loop forever.
 - **`Retries` / `RetryBaseMs`** — retry budget and exponential backoff base (`baseMs * 2^attempt`
   plus jitter), honoring a server's `Retry-After` header when present.
+- **`RetryableStatuses`** — extra HTTP statuses to classify as retryable, **added** to the default
+  set and never replacing it, so it can only widen the set and a host cannot accidentally drop
+  `429` and lose `Retry-After` handling with it. The motivating case is a Cloudflare-fronted origin
+  answering `520`–`527`. It sets the *default classification* only — `OnError` still runs on every
+  failed attempt and has the final say, so an `OnError` returning `Tier.Fail` overrides a status
+  the host itself listed. `Retry-After` handling is unaffected.
+
+  ```csharp
+  var client = LlmClient.Create(new LlmClient.Options {
+      Model = model,
+      ApiKey = apiKey,
+      RetryableStatuses = new[] { 520, 521, 522, 523, 524, 525, 526, 527 },
+  });
+  ```
 - **`TimeoutMs`** — a whole-run deadline. Exceeding it throws `LlmClient.RunTimeoutException`,
   distinct from an external `CancellationToken` cancel (`OperationCanceledException`) — so a caller
   can always tell "the deadline elapsed" from "someone cancelled me" without inspecting exception
@@ -40,8 +55,11 @@ Three independent knobs on `LlmClient.Options` govern how a failed LLM call is h
 
 ## When to use it
 
-The default classifier already retries 429/5xx and gives up on everything else — fine for most
-callers. Reach for `OnError` when a provider needs a non-standard rule (e.g. treat a `402` as
+The default classifier retries exactly `429`, `500`, `502`, `503`, `504`, `529` and network errors,
+and gives up on everything else — that is an enumeration, not "429 plus any 5xx", so a `501`, a
+`507` or a Cloudflare `520` is terminal by default. Fine for most callers. Reach for
+`RetryableStatuses` when the upstream emits a transient status outside that set, for `OnError` when
+a provider needs a non-standard rule (e.g. treat a `402` as
 retryable after a top-up, or never retry a specific model's `400`s), and reach for `TimeoutMs` any
 time a run must not hang past a caller-facing SLA.
 
@@ -149,7 +167,7 @@ var seen = new List<LlmClient.ErrorInfo>();
 using var stub = new Stub(ctx =>
 {
     calls++;
-    // 402 is NOT in the default retryable set (429/500/502/503/504) — RunAsync would normally
+    // 402 is NOT in the default retryable set (429/500/502/503/504/529) — RunAsync would normally
     // fail on the first attempt. OnError below retries it anyway.
     if (calls == 1) { Stub.Json(ctx, 402, """{"error":"payment required"}"""); return; }
     Stub.Json(ctx, 200, """
@@ -354,7 +372,7 @@ only ever sees a completed non-2xx response or a transport-level throw.
 | `Error` | `Exception?` | Set on a transport/network throw; `null` for a completed non-2xx response. |
 | `Status` | `int?` | The HTTP status, when the call completed with a non-2xx response. |
 | `Attempt` | `int` | Zero-based attempt number for this call. |
-| `Retryable` | `bool` | Whether the default classifier (429/500/502/503/504, or any network error) would already retry it. |
+| `Retryable` | `bool` | Whether the default classifier (429/500/502/503/504/529, or any network error, plus anything in `RetryableStatuses`) would already retry it. |
 
 ## Options that shape resilience
 
@@ -363,6 +381,7 @@ only ever sees a completed non-2xx response or a transport-level throw.
 | `OnError` | `Func<ErrorInfo, Tier>?` | default classifier | Retry-vs-fail decision per failed attempt. |
 | `Retries` | `int?` | `2` | Retry budget — always caps a `Tier.Retry`. |
 | `RetryBaseMs` | `int?` | `500` | Backoff base for `baseMs * 2^attempt + jitter`, unless a `Retry-After` header says otherwise. |
+| `RetryableStatuses` | `IReadOnlyCollection<int>?` | `null` | Extra statuses to classify as retryable, **added** to the default `429`/`500`/`502`/`503`/`504`/`529`. Widens only, never shrinks; `OnError` still has the final say. |
 | `TimeoutMs` | `long?` | `null` (none) | Whole-run deadline; exceeding it throws `RunTimeoutException`. |
 
 ## See also

@@ -16,26 +16,45 @@ interface ErrorInfo {
   error?: unknown    // the thrown network/transport error, when it wasn't an HTTP response
   status?: number     // the HTTP status, when it was a non-ok response
   attempt: number     // zero-based attempt index (0 = first try)
-  retryable: boolean  // whether status/error is in the default retryable set (429/5xx/network)
+  retryable: boolean  // whether status/error is in the default retryable set
+                      // (429, 500, 502, 503, 504, 529, or any network error)
 }
 type ErrorTier = "retry" | "fail"
 
-createClient({ retries?, retryBaseMs?, timeoutMs?, onError?: (info: ErrorInfo) => ErrorTier, … })
+createClient({ retries?, retryBaseMs?, timeoutMs?, retryableStatuses?: readonly number[], onError?: (info: ErrorInfo) => ErrorTier, … })
 ```
 
 The resilience layer around every LLM call: retries with exponential backoff + jitter (honoring
 `Retry-After`), a whole-run deadline that aborts the in-flight request, and — via `onError` — the
 classifier that decides retry-or-fail for each failed attempt. Omit `onError` and you get the
-default classifier: the normally-retryable set (429/5xx/network) retries within budget, everything
-else fails immediately. That default is byte-identical to what the client did before `onError`
+default classifier: the normally-retryable set — `429`, `500`, `502`, `503`, `504`, `529`, and any
+network error — retries within budget, everything else fails immediately. That set is an
+exhaustive enumeration, not "429 plus any 5xx": a `501`, a `507` or a Cloudflare `520` is terminal
+by default. That default is byte-identical to what the client did before `onError`
 existed.
 
 ## When to use it
 
 The built-in retry/timeout behavior (`retries`, `retryBaseMs`, `timeoutMs`) covers the common case
-with no code. Reach for `onError` specifically when the default retry set is wrong for your
-provider or your budget — e.g. treat a `400` from a flaky gateway as retryable, or stop retrying a
-`429` immediately because you're already over cost budget for this run.
+with no code. Reach for `retryableStatuses` when your provider emits a transient status the
+default set doesn't cover, and for `onError` specifically when the default retry decision is wrong
+for your provider or your budget — e.g. treat a `400` from a flaky gateway as retryable, or stop
+retrying a `429` immediately because you're already over cost budget for this run.
+
+### Widening the set with `retryableStatuses`
+
+A Cloudflare-fronted origin answers `520`–`527` when the edge can't get a clean response from the
+origin — transient, and not in the default set. List those statuses and they classify as retryable:
+
+```ts
+const client = createClient({ model, apiKey, retryableStatuses: [520, 521, 522, 523, 524, 525, 526, 527] })
+```
+
+`retryableStatuses` is **additive to the defaults, never a replacement** — it can only make more
+statuses retryable, never fewer, so listing it cannot accidentally drop `429` and lose
+`Retry-After` handling along with it. It sets the *default classification* only: `onError` still
+runs on every failed attempt and has the final say, so an `onError` returning `"fail"` overrides a
+status the host itself listed. `Retry-After` handling is unaffected.
 
 ## Why this and not the alternative
 
@@ -180,7 +199,7 @@ console.log("ok:", seen.length, elapsed)
 | `error` | `unknown` | The thrown network/transport error, when the failure was not an HTTP response. |
 | `status` | `number` | The HTTP status, when the failure was a non-ok response. |
 | `attempt` | `number` | Zero-based attempt index (`0` = first try). |
-| `retryable` | `boolean` | Whether `status`/`error` is in the default retryable set (429/5xx/network). |
+| `retryable` | `boolean` | Whether `status`/`error` is in the default retryable set — `429`, `500`, `502`, `503`, `504`, `529`, or any network error — as widened by `retryableStatuses`. |
 
 `onError(info: ErrorInfo) => "retry" | "fail"` — a `"retry"` is always bounded by `retries`, so a
 classifier cannot make the client loop unbounded. There is no `"suspend"` tier; use
@@ -192,6 +211,7 @@ classifier cannot make the client loop unbounded. There is no `"suspend"` tier; 
 |---|---|---|
 | `retries` | `number` | Transient-error retries. Default `2`. |
 | `retryBaseMs` | `number` | Base backoff, exponential + jitter, honoring `Retry-After`. Default `500`. |
+| `retryableStatuses` | `readonly number[]` | Extra HTTP statuses to classify as retryable, **added** to the default `429`/`500`/`502`/`503`/`504`/`529`. It can only widen the set, never shrink it; `onError` still has the final say. |
 | `timeoutMs` | `number` | Whole-run deadline; aborts the in-flight request when exceeded. |
 | `onError` | `(info: ErrorInfo) => ErrorTier` | Classify each failed attempt. Omit ⇒ the default classifier. |
 

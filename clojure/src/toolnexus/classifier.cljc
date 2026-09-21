@@ -374,7 +374,18 @@
     :timeout-ms     per REQUEST, not per run — default 10000
     :http-client    the §8 injectable transport, `(fn [url headers body])`;
                     scope is the classifier path only
-    :retries        transient-failure budget (default 2)
+    :retries        transient-failure budget (default 2); retries on
+                    `408`/`429`/`500`/`502`/`503`/`504`/`529` + network. Widen
+                    the status set with `:retryable-statuses`.
+    :retryable-statuses
+                    extra HTTP statuses to treat as retryable, ADDED to the
+                    default set (`429`/`500`/`502`/`503`/`504`/`529`, plus `408`
+                    here). It can only widen: a host cannot remove `429` and
+                    lose `Retry-After` handling with it. This sets the DEFAULT
+                    classification; `:on-error` still runs per attempt and has
+                    the final say, so `:on-error` returning `:fail` overrides a
+                    status listed here. Example: a Cloudflare-fronted origin
+                    that answers `520`–`527`.
     :on-error       the §8 `ErrorInfo -> :retry | :fail` classifier, REUSED
                     verbatim from `toolnexus.client` along with the Retry-After
                     delay-seconds rule. There is no second retry policy here and
@@ -523,7 +534,8 @@
                          :attempt    attempt
                          :retryable? (boolean (or failed?
                                                   (= 408 status)
-                                                  (contains? client/retryable-statuses status)))}
+                                                  (client/retryable-status?
+                                                   status (:retryable-statuses c))))}
                 verdict (client/classify c info)]
             (if (and (= :retry verdict) (< attempt budget))
               (do (ktime/sleep! (or (client/retry-after-ms res)

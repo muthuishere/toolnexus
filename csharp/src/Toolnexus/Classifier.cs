@@ -217,13 +217,17 @@ public sealed record ScoreAnswer : DecisionAnswer
             .ToList();
 }
 
-/// <summary>Mirrors the wire's <c>usage</c> block. <see cref="Cost"/> is absent on some backends.
-/// Named apart from <see cref="LlmClient.Usage"/>, which counts a client run.</summary>
+/// <summary>Mirrors the wire's <c>usage</c> block. Named apart from
+/// <see cref="LlmClient.Usage"/>, which counts a client run.</summary>
 public sealed record ClassifierUsage
 {
     public long InputTokens { get; init; }
     public long OutputTokens { get; init; }
-    public double Cost { get; init; }
+
+    /// <summary>What the call cost, when the backend says. <c>null</c> means it did NOT say —
+    /// cost is a gateway field, and TypeSafe's own API never returns one. A non-null <c>0</c> is a
+    /// backend genuinely reporting a free call, which is why this is nullable rather than 0.</summary>
+    public double? Cost { get; init; }
 }
 
 /// <summary>
@@ -283,7 +287,7 @@ public sealed record Decision
             {
                 InputTokens = Num(u, "input_tokens") is { } i ? (long)i : 0,
                 OutputTokens = Num(u, "output_tokens") is { } o ? (long)o : 0,
-                Cost = Num(u, "cost") ?? 0,
+                Cost = Num(u, "cost"), // absent stays absent; a real 0 stays a real 0
             };
         }
         // Absent ⇒ true: the systemone wire reports calibration by being itself. A backend that is
@@ -404,8 +408,20 @@ public sealed class ClassifierOptions
     /// <see cref="HttpClient"/> is set.</summary>
     public HttpMessageHandler? HttpHandler { get; set; }
 
-    /// <summary>Retries on transient errors (408/429/5xx/network). Null ⇒ 2.</summary>
+    /// <summary>Retries on transient errors (408/429/500/502/503/504/529 + network). Null ⇒ 2.
+    /// Widen the status set with <see cref="RetryableStatuses"/>.</summary>
     public int? Retries { get; set; }
+
+    /// <summary>
+    /// Extra HTTP statuses to treat as retryable, ADDED to the default set
+    /// (<c>429</c>/<c>500</c>/<c>502</c>/<c>503</c>/<c>504</c>/<c>529</c>, plus <c>408</c> here). It
+    /// can only widen: a host cannot remove <c>429</c> and lose <c>Retry-After</c> handling with it.
+    /// This sets the DEFAULT classification; <c>OnError</c> still runs per attempt and has the final
+    /// say, so <c>OnError</c> returning <c>Fail</c> overrides a status listed here.
+    /// Example: a Cloudflare-fronted origin that answers <c>520</c>–<c>527</c>.
+    /// <c>Retry-After</c> handling is untouched. Null ⇒ the defaults alone.
+    /// </summary>
+    public IReadOnlyCollection<int>? RetryableStatuses { get; set; }
 
     /// <summary>(§8 Resilience) Classifies a failed attempt into <see cref="LlmClient.Tier.Retry"/>
     /// or <see cref="LlmClient.Tier.Fail"/>. Null ⇒ the default classifier. REUSES the client's
@@ -447,6 +463,7 @@ public sealed class ClassifierOptions
     public ClassifierOptions WithTimeout(TimeSpan v) { Timeout = v; return this; }
     public ClassifierOptions WithHttpClient(HttpClient v) { HttpClient = v; return this; }
     public ClassifierOptions WithRetries(int v) { Retries = v; return this; }
+    public ClassifierOptions WithRetryableStatuses(IReadOnlyCollection<int> v) { RetryableStatuses = v; return this; }
     public ClassifierOptions WithOnError(Func<LlmClient.ErrorInfo, LlmClient.Tier> v) { OnError = v; return this; }
     public ClassifierOptions WithRequestParams(IReadOnlyDictionary<string, object?> v) { RequestParams = v; return this; }
     public ClassifierOptions WithBodyTransform(Func<IDictionary<string, object?>, IDictionary<string, object?>?> v) { BodyTransform = v; return this; }
@@ -928,7 +945,7 @@ public sealed class Classifier
                 var text = await res.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
                 if (res.IsSuccessStatusCode) return text;
                 status = (int)res.StatusCode;
-                retryable = status == 408 || LlmClient.IsRetryableStatus(status.Value);
+                retryable = status == 408 || LlmClient.IsRetryableStatus(status.Value, _opts.RetryableStatuses);
                 retryAfterMs = LlmClient.RetryAfterMs(res);
                 // The backend's own cause is surfaced INTACT so a caller can tell a limit error from
                 // a transport fault — but never for an auth status.

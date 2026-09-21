@@ -16,20 +16,39 @@ Toolnexus.Client.create(
   retries: 2,           # default. Bounds every retry-vs-fail decision.
   retry_base_ms: 500,    # default. Exponential backoff base (+ jitter), honors Retry-After.
   timeout_ms: nil,        # default. Whole-run deadline; nil = no deadline.
+  retryable_statuses: nil, # default. Extra retryable statuses, ADDED to the default set.
   on_error: (%{error: Exception.t() | nil, status: integer() | nil, attempt: non_neg_integer(), retryable: boolean()} -> :retry | :fail)
 )
 ```
 
-There is no separate resilience type — retry/timeout behavior lives on four
+There is no separate resilience type — retry/timeout behavior lives on five
 [`Toolnexus.Client.create/1`](/api/elixir/client/create/) options. `on_error` is the one
 host-classification seam: it decides, per failed LLM attempt, whether the client retries or
 gives up immediately.
 
 ## When to use it
 
-- **The defaults are usually right** — `429`/`500`/`502`/`503`/`504` and network errors retry
-  with exponential backoff + jitter, honoring a `Retry-After` header; anything else fails
-  immediately. Most callers never touch `on_error`.
+- **The defaults are usually right** — `429`/`500`/`502`/`503`/`504`/`529` and network errors
+  retry with exponential backoff + jitter, honoring a `Retry-After` header; anything else fails
+  immediately. That list is exhaustive, not "429 plus any 5xx" — a `501`, a `507` or a Cloudflare
+  `520` is terminal by default. Most callers never touch `on_error`.
+- **Your upstream returns a transient status outside that set** — `retryable_statuses` lists
+  them, the classic case being a Cloudflare-fronted origin answering `520`–`527`:
+
+  ```elixir
+  {:ok, client} =
+    Toolnexus.Client.create(
+      model: model,
+      api_key: api_key,
+      retryable_statuses: [520, 521, 522, 523, 524, 525, 526, 527]
+    )
+  ```
+
+  It is **additive to the defaults, never a replacement** — it can only make more statuses
+  retryable, never fewer, so setting it cannot accidentally drop `429` and lose `Retry-After`
+  handling with it. It sets the *default classification* only: `on_error` still runs on every
+  failed attempt and has the final say, so an `on_error` returning `:fail` overrides a status you
+  listed yourself. `Retry-After` handling is unaffected.
 - **You need a different retry policy** — e.g. treat `429` (rate limit) as an immediate fail
   because your caller already backs off at a higher layer, or extend retryability to a
   provider-specific status your upstream returns.
@@ -181,7 +200,8 @@ IO.puts("ok: retries: 1 bounded the loop to #{Agent.get(attempts, & &1)} total a
 | `:retries` | `2` | Hard ceiling on retry attempts — bounds `:retry` no matter what `on_error` decides. |
 | `:retry_base_ms` | `500` | Exponential backoff base (`base * 2^attempt` + jitter), overridden by a `Retry-After` response header when present. |
 | `:timeout_ms` | `nil` | Whole-run deadline in ms. `nil` = no deadline. Checked before every LLM attempt; past it, the run raises rather than making another call. |
-| `:on_error` | `nil` (default classifier) | `(info -> :retry \| :fail)`. `info`: `%{status:, error:, attempt:, retryable:}` — `status` on a non-2xx response, `error` on a transport exception, `attempt` zero-based, `retryable` = whether the default rule (`429`/`5xx`/network) would already retry it. Absent ⇒ `retryable? :retry : :fail`, byte-identical to the hardcoded rule this option replaced. |
+| `:retryable_statuses` | `nil` | Extra HTTP statuses to classify as retryable, **added** to the default `429`/`500`/`502`/`503`/`504`/`529` — widens the set only, never shrinks it, and `on_error` still has the final say. |
+| `:on_error` | `nil` (default classifier) | `(info -> :retry \| :fail)`. `info`: `%{status:, error:, attempt:, retryable:}` — `status` on a non-2xx response, `error` on a transport exception, `attempt` zero-based, `retryable` = whether the default rule (`429`/`500`/`502`/`503`/`504`/`529`/network, plus any `:retryable_statuses`) would already retry it. Absent ⇒ `retryable? :retry : :fail`, byte-identical to the hardcoded rule this option replaced. |
 
 ## See also
 

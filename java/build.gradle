@@ -133,7 +133,10 @@ tasks.register('runJudge', JavaExec) {
     description = 'Run the Judge example (Classifier §8B — noul + choice + score; live with a key, recorded without).'
     classpath = sourceSets.main.runtimeClasspath
     mainClass = 'io.github.muthuishere.toolnexus.examples.Judge'
-    // forward OPENROUTER_API_KEY from the environment (absent ⇒ the recorded `static` backend)
+    // forward whichever key is present (TypeSafe preferred; neither ⇒ the recorded `static` backend)
+    if (System.getenv('TYPESAFE_API_KEY')) {
+        environment 'TYPESAFE_API_KEY', System.getenv('TYPESAFE_API_KEY')
+    }
     if (System.getenv('OPENROUTER_API_KEY')) {
         environment 'OPENROUTER_API_KEY', System.getenv('OPENROUTER_API_KEY')
     }

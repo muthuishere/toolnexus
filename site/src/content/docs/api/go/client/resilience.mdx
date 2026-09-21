@@ -16,7 +16,8 @@ type ErrorInfo struct {
 	Err       error // transport error (nil on a non-ok response)
 	Status    int   // HTTP status (0 on a transport error)
 	Attempt   int   // zero-based attempt index
-	Retryable bool  // true if Status/Err is in the default retryable set (429/5xx/network)
+	Retryable bool  // true if Status/Err is in the default retryable set
+	                // (429, 500, 502, 503, 504, 529, or any transport error)
 }
 
 type Tier string
@@ -27,6 +28,7 @@ const (
 
 // ClientOptions.OnError func(ErrorInfo) Tier
 // ClientOptions.Retries, RetryBaseMs, TimeoutMs int
+// ClientOptions.RetryableStatuses []int
 ```
 
 Three independent resilience knobs on `ClientOptions`: retry classification (`OnError`, given an
@@ -36,12 +38,34 @@ than let it run to completion unheeded.
 
 ## When to use it
 
-The defaults (retry 429/5xx/network up to `Retries`, exponential backoff honoring `Retry-After`, no
-deadline) are right for most callers — you get resilience for free by doing nothing. Reach for
+The defaults (retry `429`, `500`, `502`, `503`, `504`, `529` and transport errors up to `Retries`,
+exponential backoff honoring `Retry-After`, no deadline) are right for most callers — you get
+resilience for free by doing nothing. Note that the default set is an exhaustive enumeration, not
+"429 plus any 5xx": a `501`, a `507` or a Cloudflare `520` is terminal unless you say otherwise.
+Reach for `RetryableStatuses` when your provider emits a transient status outside that set; reach for
 `OnError` when a provider's failure modes don't fit the default classifier (e.g. treat a specific 400
 as retryable, or stop retrying 429 early because you're rate-limit-sensitive); reach for `TimeoutMs`
 to bound worst-case latency on a run; reach for `ctx` cancellation for the ordinary Go pattern of
 "the caller gave up, stop everything downstream."
+
+### Widening the default set with `RetryableStatuses`
+
+A Cloudflare-fronted origin answers `520`–`527` when the edge cannot get a clean response from the
+origin. Those are transient, and not in the default set — list them and they classify as retryable:
+
+```go
+client, err := toolnexus.CreateClient(toolnexus.ClientOptions{
+	Model:             model,
+	APIKey:            apiKey,
+	RetryableStatuses: []int{520, 521, 522, 523, 524, 525, 526, 527},
+})
+```
+
+`RetryableStatuses` is **additive to the defaults, never a replacement** — it can only make more
+statuses retryable, never fewer, so setting it cannot accidentally drop `429` and lose `Retry-After`
+handling along with it. It sets the *default classification* only: `OnError` still runs on every
+failed attempt and has the final say, so an `OnError` returning `TierFail` overrides a status you
+listed yourself. `Retry-After` handling is unaffected.
 
 ## Why this and not the alternative
 
@@ -54,12 +78,13 @@ governs only failed LLM HTTP attempts.
 
 ## Examples
 
-Each example points `CreateClient` at a local `httptest.Server` that returns 429/5xx or stalls — no
+Each example points `CreateClient` at a local `httptest.Server` that returns 429/503 or stalls — no
 real network call, no real API key. `RetryBaseMs`/`TimeoutMs` are set small so the examples run fast.
 
 ### 1. The smallest useful call — default retry on a transient 503
 
-No `OnError` set: the default classifier retries 429/5xx/network up to `Retries` (2 by default),
+No `OnError` set: the default classifier retries `429`/`500`/`502`/`503`/`504`/`529`/transport
+errors up to `Retries` (2 by default),
 with exponential backoff.
 
 ```go test
@@ -262,9 +287,10 @@ func main() {
 
 | Field | Type | Default | What it does |
 |---|---|---|---|
-| `Retries` | `int` | `2` | Retries on transient LLM errors (429/5xx/network), bounded — never unbounded even with a custom `OnError`. |
+| `Retries` | `int` | `2` | Retries on transient LLM errors (`429`, `500`, `502`, `503`, `504`, `529`, or a transport error), bounded — never unbounded even with a custom `OnError`. |
 | `RetryBaseMs` | `int` | `500` | Base backoff in ms; exponential + jitter, honoring a `Retry-After` header when present. |
 | `TimeoutMs` | `int` | `0` (no deadline) | When `> 0`, the whole run (and its in-flight request) is aborted once exceeded. |
+| `RetryableStatuses` | `[]int` | `nil` | Extra HTTP statuses to classify as retryable, **added** to the default `429`/`500`/`502`/`503`/`504`/`529`. Widens only, never shrinks; `OnError` still has the final say. |
 | `OnError` | `func(ErrorInfo) Tier` | the default classifier | Classify each failed attempt; `nil` ⇒ retryable status/network ⇒ `TierRetry`, else `TierFail` (byte-identical to no classifier at all). |
 | `HTTPClient` | `*http.Client` | `http.DefaultClient` | Overrides the client used for LLM requests (retries included); scope is the LLM path only. |
 

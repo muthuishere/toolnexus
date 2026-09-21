@@ -14,9 +14,10 @@ import java.util.stream.Collectors;
  *
  * <pre>./gradlew runJudge</pre>
  *
- * With {@code OPENROUTER_API_KEY} set it calls the live System One backend; with no key it replays
- * one recorded decision through the {@code static} backend, so the example runs offline with no
- * credential.
+ * <p>Three backends, picked by what is in the environment: {@code TYPESAFE_API_KEY} calls
+ * TypeSafe's own API, {@code OPENROUTER_API_KEY} calls the same wire through OpenRouter's
+ * gateway, and with no key at all it replays one recorded decision through the {@code static}
+ * backend — so this runs offline, uncredentialed.
  */
 public final class Judge {
 
@@ -62,28 +63,42 @@ public final class Judge {
             """;
 
     public static void main(String[] args) {
-        String key = System.getenv("OPENROUTER_API_KEY");
-        boolean live = key != null && !key.isBlank();
+        // Same wire, two ways in. TypeSafe's own API is a first-party key and no gateway in the
+        // path; OpenRouter is a gateway you may already hold a key for, and the only one of the
+        // two that reports `usage.cost`. They are equivalent in latency — neither is the "fast" one.
+        String backend = set(System.getenv("TYPESAFE_API_KEY")) ? "typesafe"
+                : set(System.getenv("OPENROUTER_API_KEY")) ? "openrouter"
+                : "static";
 
-        Classifier.Options opts = live
-                ? new Classifier.Options()
-                        .baseUrl("https://openrouter.ai/api/v1") // serves the System One wire today
-                        .model(MODEL)
-                        .apiKeyEnv("OPENROUTER_API_KEY")        // the NAME of an env var, never the value
-                        .onMetric(ev -> {
-                            if (ev instanceof LlmClient.MetricEvent.ClassifierWarning w) {
-                                System.out.println("warning: " + w.warning());
-                            }
-                        })
-                : new Classifier.Options()
-                        .style(Classifier.STYLE_STATIC)
-                        .model(MODEL)
-                        .decisions(List.of(new Classifier.RecordedDecision(TICKET, QUESTIONS, RECORDED)));
+        java.util.function.Consumer<LlmClient.MetricEvent> onMetric = ev -> {
+            if (ev instanceof LlmClient.MetricEvent.ClassifierWarning w) {
+                System.out.println("warning: " + w.warning());
+            }
+        };
+
+        Classifier.Options opts = switch (backend) {
+            case "typesafe" -> new Classifier.Options()
+                    .baseUrl("https://api.typesafe.ai/v1") // the library default; spelled out so it is visible
+                    .model("jev-latest")
+                    .apiKeyEnv("TYPESAFE_API_KEY")         // the NAME of an env var, never the value
+                    .onMetric(onMetric);
+            case "openrouter" -> new Classifier.Options()
+                    .baseUrl("https://openrouter.ai/api/v1") // a gateway that serves the same System One wire
+                    .model(MODEL)
+                    .apiKeyEnv("OPENROUTER_API_KEY")
+                    .onMetric(onMetric);
+            default -> new Classifier.Options()
+                    .style(Classifier.STYLE_STATIC)
+                    .model(MODEL)
+                    .decisions(List.of(new Classifier.RecordedDecision(TICKET, QUESTIONS, RECORDED)));
+        };
 
         Classifier judge = Classifier.create(opts);
-        System.out.println(live
-                ? "backend: systemone (live)"
-                : "backend: static (recorded — set OPENROUTER_API_KEY to go live)");
+        System.out.println(switch (backend) {
+            case "typesafe" -> "backend: systemone via api.typesafe.ai (live)";
+            case "openrouter" -> "backend: systemone via openrouter.ai (live)";
+            default -> "backend: static (recorded — set TYPESAFE_API_KEY or OPENROUTER_API_KEY to go live)";
+        });
 
         Classifier.Decision d = judge.evaluate(TICKET, QUESTIONS);
 
@@ -112,11 +127,18 @@ public final class Judge {
                 + "  — max|p - 1/n| <= 0.05, derived from the response. True would mean the model had nothing"
                 + " to rank on (usually undescribed options). Advisory, NOT correctness.");
 
+        // Cost is a gateway field. TypeSafe's own API does not return one, and absent is NOT zero —
+        // print "cost: not reported" rather than a $0.00 that would read as a free call.
         Classifier.Usage u = d.usage();
         System.out.println();
         System.out.println("usage: " + u.inputTokens() + " in / " + u.outputTokens() + " out"
-                + (u.cost() == null ? "" : " / $" + new java.math.BigDecimal(u.cost().toString()).toPlainString()));
+                + (u.cost() == null
+                        ? " / cost: not reported by this backend"
+                        : " / $" + new java.math.BigDecimal(u.cost().toString()).toPlainString()));
     }
+
+    /** An env var counts as present only when it holds something. */
+    private static boolean set(String v) { return v != null && !v.isBlank(); }
 
     /** Render a probability map with stable, sorted keys — a HashMap's order is not an answer. */
     private static String probs(Map<String, Double> p) {

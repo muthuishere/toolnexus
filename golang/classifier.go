@@ -298,9 +298,13 @@ func (a ScoreAnswer) Levels() []string {
 // ClassifierUsage mirrors the wire's usage block. Cost is absent on some
 // backends. Named apart from the §8 Usage, which counts a client run.
 type ClassifierUsage struct {
-	InputTokens  int     `json:"input_tokens"`
-	OutputTokens int     `json:"output_tokens"`
-	Cost         float64 `json:"cost,omitempty"`
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	// Cost is nil when the backend did not report one — TypeSafe's own API never
+	// does. Absent is NOT zero: a nil here means "this backend does not say",
+	// while a real 0 means the call was free, and printing $0.00 for the first
+	// would be a lie about money.
+	Cost *float64 `json:"cost,omitempty"`
 }
 
 // Decision carries one answer per question, keyed by the CALLER's keys. The keys
@@ -466,8 +470,16 @@ type ClassifierOptions struct {
 	// HTTPClient (§8 Gap 2) overrides the transport. Scope is the classifier path
 	// only. Nil ⇒ http.DefaultClient.
 	HTTPClient *http.Client
-	// Retries on transient errors (408/429/5xx/network). 0 ⇒ 2.
+	// Retries on transient errors (408/429/500/502/503/504/529 + network). 0 ⇒ 2.
+	// Widen the status set with RetryableStatuses.
 	Retries int
+	// RetryableStatuses are extra HTTP statuses to treat as retryable, ADDED to
+	// the default set (429/500/502/503/504/529, plus 408 here). It can only
+	// widen: a host cannot remove 429 and lose Retry-After handling with it. This
+	// sets the DEFAULT classification; OnError still runs per attempt and has the
+	// final say, so OnError returning TierFail overrides a status listed here.
+	// Example: a Cloudflare-fronted origin that answers 520–527.
+	RetryableStatuses []int
 	// OnError (§8 Resilience) classifies a failed attempt into TierRetry or
 	// TierFail. Nil ⇒ the default classifier. REUSES the client's ErrorInfo/Tier
 	// and the Retry-After delay-seconds rule verbatim — there is no second retry
@@ -787,7 +799,7 @@ func (c *Classifier) post(ctx context.Context, raw []byte) ([]byte, error) {
 		if err == nil && status < 300 {
 			return body, nil
 		}
-		retryable := err != nil || status == 408 || retryableStatus[status]
+		retryable := err != nil || status == 408 || isRetryableStatus(status, c.opts.RetryableStatuses)
 		if ctx.Err() != nil { // caller cancellation is never retried
 			return nil, ctx.Err()
 		}

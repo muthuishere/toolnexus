@@ -590,6 +590,114 @@ defmodule Toolnexus.ClassifierTest do
     assert Agent.get(counter2, & &1) == 1
   end
 
+  test "529 retries by default; an unlisted 5xx (520) and a permanent one (501) are terminal" do
+    # TypeSafe documents 529 Overloaded as "retry with backoff"; the old six-status set
+    # (408/429/500/502/503/504) made it terminal on the first attempt. The set stays an
+    # ENUMERATION — "any 5xx" would sweep in 501/505 and change every host's behaviour.
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    transport = fn _ ->
+      n = Agent.get_and_update(counter, &{&1, &1 + 1})
+
+      if n == 0,
+        do: {:ok, %{status: 529, headers: %{}, body: "overloaded"}},
+        else: {:ok, %{status: 200, headers: %{}, body: ~s({"answers":{},"model":"m"})}}
+    end
+
+    {:ok, c} = Classifier.create(transport: transport, retries: 2)
+    assert {:ok, %Decision{}} = Classifier.evaluate(c, "s", %{"q" => %Noul{instructions: "i"}})
+    assert Agent.get(counter, & &1) == 2
+
+    for status <- [520, 501, 422] do
+      {:ok, tries} = Agent.start_link(fn -> 0 end)
+
+      terminal = fn _ ->
+        Agent.update(tries, &(&1 + 1))
+        {:ok, %{status: status, headers: %{}, body: "no"}}
+      end
+
+      {:ok, c} = Classifier.create(transport: terminal, retries: 3)
+
+      assert {:error, msg} = Classifier.evaluate(c, "s", %{"q" => %Noul{instructions: "i"}})
+      assert msg =~ "#{status}"
+      assert Agent.get(tries, & &1) == 1, "status #{status} must not be retried by default"
+    end
+  end
+
+  test ":retryable_statuses ADDS to the default set, and :on_error still overrides it" do
+    cloudflare = [520, 521, 522, 523, 524, 525, 526, 527]
+
+    # 520 retries once opted in; 429 STILL retries (additive, not a replacement).
+    for status <- [520, 429] do
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      transport = fn _ ->
+        n = Agent.get_and_update(counter, &{&1, &1 + 1})
+
+        if n == 0,
+          do: {:ok, %{status: status, headers: %{}, body: "transient"}},
+          else: {:ok, %{status: 200, headers: %{}, body: ~s({"answers":{},"model":"m"})}}
+      end
+
+      {:ok, c} =
+        Classifier.create(transport: transport, retries: 2, retryable_statuses: cloudflare)
+
+      assert {:ok, %Decision{}} = Classifier.evaluate(c, "s", %{"q" => %Noul{instructions: "i"}})
+      assert Agent.get(counter, & &1) == 2, "status #{status} should have been retried"
+    end
+
+    # 501 is not on the list, so it stays terminal.
+    {:ok, tries} = Agent.start_link(fn -> 0 end)
+
+    terminal = fn _ ->
+      Agent.update(tries, &(&1 + 1))
+      {:ok, %{status: 501, headers: %{}, body: "nope"}}
+    end
+
+    {:ok, c} = Classifier.create(transport: terminal, retries: 3, retryable_statuses: cloudflare)
+    assert {:error, _} = Classifier.evaluate(c, "s", %{"q" => %Noul{instructions: "i"}})
+    assert Agent.get(tries, & &1) == 1
+
+    # :on_error has the final say over a status the host itself listed.
+    {:ok, tries2} = Agent.start_link(fn -> 0 end)
+
+    listed = fn _ ->
+      Agent.update(tries2, &(&1 + 1))
+      {:ok, %{status: 520, headers: %{}, body: "origin"}}
+    end
+
+    {:ok, c2} =
+      Classifier.create(
+        transport: listed,
+        retries: 5,
+        retryable_statuses: cloudflare,
+        on_error: fn _ -> :fail end
+      )
+
+    assert {:error, msg} = Classifier.evaluate(c2, "s", %{"q" => %Noul{instructions: "i"}})
+    assert msg =~ "520"
+    assert Agent.get(tries2, & &1) == 1
+  end
+
+  test "a TypeSafe-shaped usage block reports an ABSENT cost, not a free call" do
+    # TypeSafe's own API returns model/answers/usage and no `cost` key at all. Reporting 0
+    # there would read as "this call was free" when the truth is "this backend does not say".
+    body =
+      ~s({"model":"jev-1.13.0","answers":{"q":{"type":"noul","noul":0.98}},) <>
+        ~s("usage":{"input_tokens":331,"output_tokens":48}})
+
+    {:ok, c} =
+      Classifier.create(
+        base_url: "https://api.typesafe.ai/v1",
+        model: "jev-latest",
+        transport: fn _ -> {:ok, %{status: 200, headers: %{}, body: body}} end
+      )
+
+    assert {:ok, d} = Classifier.evaluate(c, "s", %{"q" => %Noul{instructions: "i"}})
+    assert d.usage.input_tokens == 331
+    assert is_nil(d.usage.cost)
+  end
+
   test "a transport error is classified, retried and finally reported" do
     {:ok, counter} = Agent.start_link(fn -> 0 end)
 

@@ -246,7 +246,7 @@ func TestClassifierNumbersParse(t *testing.T) {
 	if err != nil || n.Noul != 0 {
 		t.Fatalf("noul = %+v, %v", n, err)
 	}
-	if d.Usage.Cost != 1.6716e-05 {
+	if d.Usage.Cost == nil || *d.Usage.Cost != 1.6716e-05 {
 		t.Fatalf("usage.cost = %v", d.Usage.Cost)
 	}
 }
@@ -572,6 +572,123 @@ func TestClassifierNeverLeaksCredentials(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), srv.URL) {
 		t.Fatalf("an auth failure names the status and the endpoint: %v", err)
+	}
+}
+
+// The default retryable set is an ENUMERATION (429/500/502/503/504/529, plus the
+// classifier's 408), not "429 plus any 5xx": a permanently-broken 501 must not
+// cost a host Retries backed-off attempts. A backend with its own transient
+// status opts in through RetryableStatuses, which ADDS to the set and cannot
+// remove from it.
+func TestClassifierRetryableStatuses(t *testing.T) {
+	cases := []struct {
+		name   string
+		extra  []int
+		status int
+		want   int // expected attempts
+	}{
+		{"529 retries by default", nil, 529, 2},
+		{"an unlisted 5xx is terminal by default", nil, 520, 1},
+		{"a permanent 5xx is terminal by default", nil, 501, 1},
+		{"a listed 520 retries", []int{520, 521, 522, 523, 524, 525, 526, 527}, 520, 2},
+		{"429 still retries alongside a list (additive)", []int{520, 521, 522, 523, 524, 525, 526, 527}, 429, 2},
+		{"501 stays terminal alongside a list", []int{520, 521, 522, 523, 524, 525, 526, 527}, 501, 1},
+		{"a non-429 4xx stays terminal", nil, 422, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var attempts int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				attempts++
+				if attempts == 1 {
+					w.WriteHeader(tc.status)
+					fmt.Fprint(w, "nope")
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"model":"m","answers":{"q":{"type":"noul","noul":0.5}},"usage":{"input_tokens":1,"output_tokens":1}}`)
+			}))
+			defer srv.Close()
+			c, err := CreateClassifier(ClassifierOptions{
+				BaseURL:           srv.URL,
+				APIKeyEnv:         "TEST_JUDGE_UNSET",
+				Retries:           2,
+				RetryableStatuses: tc.extra,
+				HTTPClient:        srv.Client(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = c.Evaluate(context.Background(), "s", map[string]Question{"q": NoulQuestion{Instructions: "?"}})
+			if tc.want == 1 && err == nil {
+				t.Fatalf("status %d must fail terminally", tc.status)
+			}
+			if tc.want > 1 && err != nil {
+				t.Fatalf("status %d should have been retried: %v", tc.status, err)
+			}
+			if attempts != tc.want {
+				t.Fatalf("status %d: attempts = %d, want %d", tc.status, attempts, tc.want)
+			}
+		})
+	}
+}
+
+// RetryableStatuses sets the DEFAULT classification only; OnError still runs per
+// attempt and has the final say, so TierFail overrides a status the host listed.
+func TestClassifierOnErrorOverridesRetryableStatuses(t *testing.T) {
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(520)
+		fmt.Fprint(w, "origin error")
+	}))
+	defer srv.Close()
+	c, err := CreateClassifier(ClassifierOptions{
+		BaseURL:           srv.URL,
+		APIKeyEnv:         "TEST_JUDGE_UNSET",
+		Retries:           3,
+		RetryableStatuses: []int{520},
+		OnError:           func(ErrorInfo) Tier { return TierFail },
+		HTTPClient:        srv.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Evaluate(context.Background(), "s", map[string]Question{"q": NoulQuestion{Instructions: "?"}}); err == nil {
+		t.Fatal("OnError returning TierFail must fail the call")
+	}
+	if attempts != 1 {
+		t.Fatalf("OnError TierFail must stop after one attempt, attempts = %d", attempts)
+	}
+}
+
+// TypeSafe's own API returns model/answers/usage and no `cost` key at all.
+// Reporting 0 there would read as "this call was free" when the truth is "this
+// backend does not say".
+func TestClassifierAbsentCostIsNotZero(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"model":"jev-1.13.0","answers":{"q":{"type":"noul","noul":0.98}},"usage":{"input_tokens":331,"output_tokens":48}}`)
+	}))
+	defer srv.Close()
+	c, err := CreateClassifier(ClassifierOptions{
+		BaseURL:    srv.URL,
+		Model:      "jev-latest",
+		APIKeyEnv:  "TEST_JUDGE_UNSET",
+		HTTPClient: srv.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := c.Evaluate(context.Background(), "s", map[string]Question{"q": NoulQuestion{Instructions: "?"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Usage.InputTokens != 331 {
+		t.Fatalf("usage.input_tokens = %d", d.Usage.InputTokens)
+	}
+	if d.Usage.Cost != nil {
+		t.Fatalf("an absent cost must stay absent, got %v", *d.Usage.Cost)
 	}
 }
 

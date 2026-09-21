@@ -392,6 +392,104 @@ defmodule Toolnexus.ClientTest do
     assert length(captured(agent)) == 3
   end
 
+  # ---- the retryable set, and :retryable_statuses (additive) ----
+  #
+  # These use the injectable :transport rather than the Bandit stub: Plug cannot send a
+  # status with no registered reason phrase (520, 529), and the point here is exactly those.
+
+  defp status_transport(counter, status) do
+    fn _ ->
+      n = Agent.get_and_update(counter, &{&1, &1 + 1})
+
+      if n == 0 do
+        {:ok, %{status: status, headers: %{}, body: %{"error" => "transient"}}}
+      else
+        {:ok,
+         %{
+           status: 200,
+           headers: %{},
+           body: %{
+             "choices" => [%{"message" => %{"role" => "assistant", "content" => "ok"}}],
+             "usage" => openai_usage()
+           }
+         }}
+      end
+    end
+  end
+
+  defp always(counter, status) do
+    fn _ ->
+      Agent.update(counter, &(&1 + 1))
+      {:ok, %{status: status, headers: %{}, body: %{"error" => "no"}}}
+    end
+  end
+
+  test "529 retries by default; an unlisted 5xx (520), a permanent one (501) and 422 are terminal" do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    client =
+      make_client("http://127.0.0.1:1", retries: 3, transport: status_transport(counter, 529))
+
+    assert Client.run(client, "hi", []).text == "ok"
+    assert Agent.get(counter, & &1) == 2
+
+    # The set is an ENUMERATION: "any 5xx" would sweep in permanently-broken statuses.
+    for status <- [520, 501, 422] do
+      {:ok, tries} = Agent.start_link(fn -> 0 end)
+      c = make_client("http://127.0.0.1:1", retries: 3, transport: always(tries, status))
+
+      assert_raise RuntimeError, ~r/^LLM #{status}:/, fn -> Client.run(c, "hi", []) end
+      assert Agent.get(tries, & &1) == 1, "status #{status} must not be retried by default"
+    end
+  end
+
+  test ":retryable_statuses ADDS to the default set, and never removes from it" do
+    cloudflare = [520, 521, 522, 523, 524, 525, 526, 527]
+
+    # 520 retries once opted in; 429 STILL retries (additive, not a replacement).
+    for status <- [520, 429] do
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      client =
+        make_client("http://127.0.0.1:1",
+          retries: 3,
+          retryable_statuses: cloudflare,
+          transport: status_transport(counter, status)
+        )
+
+      assert Client.run(client, "hi", []).text == "ok"
+      assert Agent.get(counter, & &1) == 2, "status #{status} should have been retried"
+    end
+
+    # 501 is not on the list, so it stays terminal.
+    {:ok, tries} = Agent.start_link(fn -> 0 end)
+
+    c =
+      make_client("http://127.0.0.1:1",
+        retries: 3,
+        retryable_statuses: cloudflare,
+        transport: always(tries, 501)
+      )
+
+    assert_raise RuntimeError, ~r/^LLM 501:/, fn -> Client.run(c, "hi", []) end
+    assert Agent.get(tries, & &1) == 1
+  end
+
+  test ":on_error :fail overrides a status the host listed in :retryable_statuses" do
+    {:ok, tries} = Agent.start_link(fn -> 0 end)
+
+    client =
+      make_client("http://127.0.0.1:1",
+        retries: 5,
+        retryable_statuses: [520],
+        on_error: fn _ -> :fail end,
+        transport: always(tries, 520)
+      )
+
+    assert_raise RuntimeError, ~r/^LLM 520:/, fn -> Client.run(client, "hi", []) end
+    assert Agent.get(tries, & &1) == 1
+  end
+
   test "resilience: default (no on_error) unchanged — 429 retried, 400 failed" do
     {base, agent} =
       start_stub([fn _ -> {:json, 429, %{"e" => 1}} end, fn _ -> openai_text("ok") end])

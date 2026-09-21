@@ -5,10 +5,12 @@
 ;; and returns calibrated answers with no free text — no messages, no tool
 ;; calling, no streaming, so it never enters the §8 client loop.
 ;;
-;; WITHOUT `OPENROUTER_API_KEY` this example replays ONE recorded decision
-;; through the `static` backend: no network, no credential, same output shape.
-;; With the key set it makes a single live call (a fraction of a cent). The key
-;; is read from the environment BY NAME and is never printed or logged.
+;; Three backends, picked by what is in the environment: `TYPESAFE_API_KEY`
+;; calls TypeSafe's own API, `OPENROUTER_API_KEY` calls the same wire through
+;; OpenRouter's gateway, and with no key at all it replays ONE recorded decision
+;; through the `static` backend — so this runs offline and uncredentialed, with
+;; the same output shape. Either key is read from the environment BY NAME and is
+;; never printed or logged.
 (ns examples.judge
   (:require [koine.env :as env]
             [toolnexus.classifier :as jev]))
@@ -72,20 +74,38 @@
     "usage" {"input_tokens" 516 "output_tokens" 72 "cost" 0.000021672}}})
 
 (defn -main [& _]
-  (let [live?  (not (empty? (str (env/get-env "OPENROUTER_API_KEY"))))
-        judge  (if live?
-                 (jev/create-classifier
-                  {:base-url    "https://openrouter.ai/api/v1" ; serves the System One wire today
-                   :model       model
-                   :api-key-env "OPENROUTER_API_KEY" ; the NAME of an env var, never the value
-                   :on-metric   (fn [ev]
-                                  (when (= jev/metric-warning (:event ev))
-                                    (println "warning:" (:warning ev))))})
-                 (jev/create-classifier {:style "static" :model model :decisions [recorded]}))]
+  (let [env?    (fn [n] (not (empty? (str (env/get-env n)))))
+        ;; Same wire, two ways in. TypeSafe's own API is a first-party key and no
+        ;; gateway in the path; OpenRouter is a gateway you may already hold a key
+        ;; for, and the only one of the two that reports `usage.cost`. They are
+        ;; equivalent in latency — neither is the "fast" one.
+        backend (cond (env? "TYPESAFE_API_KEY")   :typesafe
+                      (env? "OPENROUTER_API_KEY") :openrouter
+                      :else                       :static)
+        on-metric (fn [ev]
+                    (when (= jev/metric-warning (:event ev))
+                      (println "warning:" (:warning ev))))
+        judge   (case backend
+                  :typesafe
+                  (jev/create-classifier
+                   {:base-url    "https://api.typesafe.ai/v1" ; the library default; spelled out so it is visible
+                    :model       "jev-latest"
+                    :api-key-env "TYPESAFE_API_KEY" ; the NAME of an env var, never the value
+                    :on-metric   on-metric})
 
-    (println (if live?
-               "backend: systemone (live)"
-               "backend: static (recorded — set OPENROUTER_API_KEY to go live)"))
+                  :openrouter
+                  (jev/create-classifier
+                   {:base-url    "https://openrouter.ai/api/v1" ; a gateway that serves the same System One wire
+                    :model       model
+                    :api-key-env "OPENROUTER_API_KEY"
+                    :on-metric   on-metric})
+
+                  (jev/create-classifier {:style "static" :model model :decisions [recorded]}))]
+
+    (println (case backend
+               :typesafe   "backend: systemone via api.typesafe.ai (live)"
+               :openrouter "backend: systemone via openrouter.ai (live)"
+               "backend: static (recorded — set TYPESAFE_API_KEY or OPENROUTER_API_KEY to go live)"))
 
     (let [d     (jev/evaluate judge ticket questions)
           want  (jev/noul d "wants_money_back")
@@ -119,5 +139,10 @@
 
       (println (str "\nusage: " (get-in d [:usage :input-tokens]) " in / "
                     (get-in d [:usage :output-tokens]) " out"
-                    (if-let [c (get-in d [:usage :cost])] (str " / $" c) ""))))
+                    ;; Cost is a gateway field. TypeSafe's own API does not return
+                    ;; one, and absent is NOT zero — say "not reported" rather than
+                    ;; a $0.00 that would read as a free call.
+                    (if (contains? (:usage d) :cost)
+                      (str " / $" (get-in d [:usage :cost]))
+                      " / cost: not reported by this backend"))))
     (println "OK")))

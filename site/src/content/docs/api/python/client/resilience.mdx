@@ -16,17 +16,23 @@ class ErrorInfo(TypedDict, total=False):
     error: Any        # present on a transport/network throw
     status: int        # present on a non-ok HTTP response
     attempt: int        # zero-based try index
-    retryable: bool     # whether status/error is in the default retryable set (429/5xx/network)
+    retryable: bool     # whether status/error is in the default retryable set
+                        # (429, 500, 502, 503, 504, 529, or a network error)
 
 ErrorTier = Literal["retry", "fail"]
 ErrorClassifier = Callable[[ErrorInfo], ErrorTier]
 
-# create_client(..., retries=2, retry_base_ms=500, timeout_ms=None, on_error: ErrorClassifier | None = None)
+# create_client(..., retries=2, retry_base_ms=500, timeout_ms=None,
+#               retryable_statuses: Iterable[int] | None = None,
+#               on_error: ErrorClassifier | None = None)
 ```
 
 `retries`/`retry_base_ms`/`timeout_ms` are the built-in resilience knobs every `run`/`ask`/
-`stream` call goes through: exponential backoff with jitter on 429/5xx/network errors
-(honoring `Retry-After`), and an optional whole-run deadline. `on_error` lets you override the
+`stream` call goes through: exponential backoff with jitter on the default retryable set —
+`429`, `500`, `502`, `503`, `504`, `529` and network errors (honoring `Retry-After`) — and an
+optional whole-run deadline. That set is an exhaustive enumeration, not "429 plus any 5xx": a
+`501`, a `507` or a Cloudflare `520` is terminal by default, and `retryable_statuses` is how you
+widen it. `on_error` lets you override the
 default retry-vs-fail classification per failed attempt — every "retry" tier is still bounded
 by `retries`, so a classifier can never loop unbounded. A cooperative `cancel: asyncio.Event`
 aborts a run in flight.
@@ -34,12 +40,31 @@ aborts a run in flight.
 ## When to use it
 
 - **Defaults are usually enough** — `retries=2, retry_base_ms=500` already retries transient
-  429/5xx/network failures with backoff; most callers never touch `on_error`.
+  `429`/`500`/`502`/`503`/`504`/`529`/network failures with backoff; most callers never touch
+  `on_error`.
+- **`retryable_statuses`** — when your provider emits a transient status the default set does
+  not cover, most commonly a Cloudflare-fronted origin answering `520`–`527`.
 - **`on_error`** — when your policy differs from "retryable status ⇒ retry": fail fast on a
   429 that means "quota exhausted, don't hammer it" even though 429 is normally retryable; or
   retry a *normally* non-retryable 400 your gateway sometimes returns transiently.
 - **`timeout_ms` + `cancel`** — bound a run's total wall-clock time, or let an external signal
   (a user hitting stop, a request's own deadline) abort a run cleanly mid-flight.
+
+### Widening the default set with `retryable_statuses`
+
+```python
+client = create_client(
+    model=model,
+    api_key=api_key,
+    retryable_statuses=[520, 521, 522, 523, 524, 525, 526, 527],
+)
+```
+
+`retryable_statuses` is **additive to the defaults, never a replacement** — it can only make more
+statuses retryable, never fewer, so passing it cannot accidentally drop `429` and lose
+`Retry-After` handling along with it. It sets the *default classification* only: `on_error` still
+runs on every failed attempt and has the final say, so an `on_error` returning `"fail"` overrides
+a status you listed yourself. `Retry-After` handling is unaffected.
 
 ## Why this and not the alternative
 
@@ -348,7 +373,17 @@ asyncio.run(main())
 | `status` | `int` | The failed attempt got an HTTP response (its status code). |
 | `error` | `Any` | The failed attempt raised a transport/network exception instead. |
 | `attempt` | `int` | Zero-based try index — `0` is the first attempt. |
-| `retryable` | `bool` | Whether `status`/`error` is in the default retryable set (429, 500, 502, 503, 504, or network errors). |
+| `retryable` | `bool` | Whether `status`/`error` is in the default retryable set (429, 500, 502, 503, 504, 529, or network errors), as widened by `retryable_statuses`. |
+
+## Resilience options (on `create_client`)
+
+| Option | Type | Default | What it does |
+|---|---|---|---|
+| `retries` | `int` | `2` | Bounded retries on a transient failure. |
+| `retry_base_ms` | `int` | `500` | Base backoff, exponential + jitter, honoring `Retry-After`. |
+| `timeout_ms` | `int \| None` | `None` | Whole-run deadline; raises `RunTimeout`. |
+| `retryable_statuses` | `Iterable[int] \| None` | `None` | Extra HTTP statuses to classify as retryable, **added** to the default `429`/`500`/`502`/`503`/`504`/`529`. Widens only, never shrinks; `on_error` still has the final say. |
+| `on_error` | `ErrorClassifier \| None` | `None` | Classify each failed attempt as `"retry"` or `"fail"`. |
 
 `on_error` returning `"retry"` is always bounded by `retries` — a classifier cannot make a
 run loop forever. `RunTimeout` and `RunCancelled` (an aborted attempt) are never retried,

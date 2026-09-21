@@ -19,6 +19,7 @@ public record ErrorInfo(Throwable error, int status, int attempt, boolean retrya
 public Options onError(Function<ErrorInfo, Tier> v)   // default: retryable ? RETRY : FAIL
 public Options retries(int v)                          // default 2
 public Options retryBaseMs(int v)                       // default 500 (exponential + jitter)
+public Options retryableStatuses(List<Integer> v)       // extra retryable statuses, ADDED to the defaults
 public Options timeoutMs(long v)                        // whole-run deadline; null = unbounded
 
 // LlmClient
@@ -31,24 +32,43 @@ public static final class CancelledException extends RuntimeException {}
 ```
 
 The client's three resilience knobs. `ErrorInfo` is what `onError` sees for every failed LLM
-attempt (429/5xx/network are `retryable=true` by default) and returns a `Tier` — `RETRY` (bounded
+attempt (`429`, `500`, `502`, `503`, `504`, `529` and network errors are `retryable=true` by
+default) and returns a `Tier` — `RETRY` (bounded
 by `retries`) or `FAIL` (surface immediately). `timeoutMs` bounds the WHOLE run — including
 retries and backoff — with a monotonic deadline. `CancelToken` lets an external caller abort a
 run cooperatively from another thread.
 
 ## When to use it
 
-`onError` when the default "retry 429/5xx/network, fail everything else" isn't right for your
-host — e.g. a budget-conscious caller that never wants to retry a rate limit, or one that wants to
-retry a normally-terminal status because the upstream is flaky in a nonstandard way. `timeoutMs`
-whenever a run must not hang past a caller-facing SLA. `CancelToken` whenever something OTHER than
-the run itself decides to abort it — a user closing a tab, a supervisor killing a stuck job.
+`onError` when the default "retry `429`/`500`/`502`/`503`/`504`/`529`/network, fail everything
+else" isn't right for your host — e.g. a budget-conscious caller that never wants to retry a rate
+limit, or one that wants to retry a normally-terminal status because the upstream is flaky in a
+nonstandard way. That default set is an exhaustive enumeration, not "429 plus any 5xx": a `501`, a
+`507` or a Cloudflare `520` is terminal unless you say otherwise. `retryableStatuses` when the
+upstream emits a transient status outside the set — the motivating case is a Cloudflare-fronted
+origin answering `520`–`527`. `timeoutMs` whenever a run must not hang past a caller-facing SLA.
+`CancelToken` whenever something OTHER than the run itself decides to abort it — a user closing a
+tab, a supervisor killing a stuck job.
+
+```java
+LlmClient client = LlmClient.create(new LlmClient.Options()
+        .model(model)
+        .apiKey(apiKey)
+        .retryableStatuses(List.of(520, 521, 522, 523, 524, 525, 526, 527)));
+```
+
+`retryableStatuses` is **additive to the defaults, never a replacement** — it can only make more
+statuses retryable, never fewer, so setting it cannot accidentally drop `429` and lose
+`Retry-After` handling along with it. It sets the *default classification* only: `onError` still
+runs on every failed attempt and has the final say, so an `onError` returning `FAIL` overrides a
+status the host itself listed. `Retry-After` handling is unaffected.
 
 ## Why this and not the alternative
 
 <Aside type="tip" title="Leave onError unset for the byte-identical default">
 Every port ships the same default classifier: `retryable ? RETRY : FAIL`, where `retryable` is
-429/5xx/network. Most callers never need `onError` at all — set `retries`/`retryBaseMs` to tune
+`429`/`500`/`502`/`503`/`504`/`529`/network (plus anything in `retryableStatuses`). Most callers
+never need `onError` at all — set `retries`/`retryBaseMs` to tune
 the budget/backoff and stop there. Reach for `onError` only when a status needs to be
 reclassified against that default, and reach for `CancelToken` instead of `timeoutMs` when the
 abort decision comes from OUTSIDE the run (a click, a signal) rather than from elapsed time.
@@ -87,7 +107,7 @@ public class Example {
         int port = server.getAddress().getPort();
 
         try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
-            // No onError set — the default classifier treats 429/5xx/network as RETRY, everything
+            // No onError set — the default classifier treats 429/500/502/503/504/529/network as RETRY, everything
             // else as FAIL. Two 503s are absorbed silently.
             LlmClient client = LlmClient.create(new LlmClient.Options()
                     .baseUrl("http://127.0.0.1:" + port)
@@ -270,6 +290,7 @@ public class Example {
 | `Tier.RETRY` / `Tier.FAIL` | `enum` | What `onError` returns — `RETRY` is still bounded by `retries`; `FAIL` surfaces immediately, skipping remaining retries. |
 | `Options.onError(v)` | — | `null` ⇒ default classifier (`retryable ? RETRY : FAIL`), byte-identical to no classifier at all. |
 | `Options.retries(v)` / `retryBaseMs(v)` | `int` | Retry budget and exponential-backoff-with-jitter base, in ms. |
+| `Options.retryableStatuses(v)` | `List<Integer>` | Extra HTTP statuses to classify as retryable, **added** to the default `429`/`500`/`502`/`503`/`504`/`529`. Widens only, never shrinks; `onError` still has the final say. `null` ⇒ defaults only. |
 | `Options.timeoutMs(v)` | `long` | Whole-run monotonic deadline; aborts the run (and its in-flight request) once exceeded — throws `TimeoutException`. Never retried. |
 | `CancelToken.cancel()` / `isCancelled()` | — | Cooperative external cancellation; aborts the run — throws `CancelledException`. Never retried, bypasses `onError`. |
 

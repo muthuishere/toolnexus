@@ -134,6 +134,19 @@
     :headers        extra request headers
     :system-prompt  prepended to the toolkit's skills prompt
     :max-turns      default 10
+    :retries        transient-failure budget (default 0); retries on
+                    `429`/`500`/`502`/`503`/`504`/`529` + network. Widen the
+                    status set with `:retryable-statuses`.
+    :retry-base-ms  base exponential backoff in ms (default 250)
+    :retryable-statuses
+                    extra HTTP statuses to treat as retryable, ADDED to the
+                    default set (`429`/`500`/`502`/`503`/`504`/`529`). It can
+                    only widen: a host cannot remove `429` and lose
+                    `Retry-After` handling with it. This sets the DEFAULT
+                    classification; `:on-error` still runs per attempt and has
+                    the final say, so `:on-error` returning `:fail` overrides a
+                    status listed here. Example: a Cloudflare-fronted origin
+                    that answers `520`–`527`.
     :hooks          §8 lifecycle middleware — a map of any of
                     {:before-llm :after-llm :before-tool :after-tool}; see
                     `before-llm!` / `execute-tool`. Absent => nothing changes.
@@ -389,15 +402,41 @@
      (cond-> {:model (:model client) :messages messages}
        (seq tools) (assoc :tools tools :tool_choice "auto")))))
 
-(def ^:no-doc retryable-statuses
-  "§resilience-policy — the retryable set. Everything else is terminal unless a
-  host `:on-error` says otherwise.
+(def ^:private default-retryable-statuses
+  "The default retryable set: `429` plus the 5xx worth another try — and `529
+  Overloaded`, which TypeSafe documents as \"retry with backoff\" and which the
+  older five-status set made terminal on the first attempt.
+
+  It is an ENUMERATION on purpose. \"Any 5xx\" would sweep in permanently-broken
+  statuses (`501 Not Implemented`, `505 HTTP Version Not Supported`) and change
+  the retry behaviour of every existing host without asking. A backend with its
+  own transient status — a Cloudflare origin answering `520`–`527`, say — opts
+  in declaratively through `:retryable-statuses`, which ADDS to this set and
+  cannot remove from it.
+
+  Shared with §8B's classifier, which adds `408` to it rather than inventing a
+  second policy."
+  #{429 500 502 503 504 529})
+
+(defn ^:no-doc retryable-status?
+  "§resilience-policy — whether a status is retryable by default, optionally
+  widened by a host's `:retryable-statuses`.
+
+  `extra` is ADDITIVE: it can only make more statuses retryable, never fewer, so
+  a host cannot accidentally drop `429` and lose `Retry-After` handling with it.
+  It decides the DEFAULT classification only — `:on-error` still runs afterwards
+  and has the final say on every attempt, so `:on-error` returning `:fail`
+  overrides a status the host itself listed here.
 
   INTERNAL. A Clojure var has no package-private tier, so `^:no-doc` is the
   marker: this is not API, it is not in the parity-checked option surface, and
-  it is a var only because SPEC §8B's `toolnexus.classifier` reuses this policy
+  it is public only because SPEC §8B's `toolnexus.classifier` reuses this policy
   verbatim rather than shipping a second one."
-  #{429 500 502 503 504})
+  ([status] (retryable-status? status nil))
+  ([status extra]
+   (boolean (and status
+                 (or (contains? default-retryable-statuses status)
+                     (and extra (some #(= % status) extra)))))))
 
 (def ^:private retry-after-max-seconds
   "~68 years; the widest whole-second count all seven ports represent exactly."
@@ -494,7 +533,9 @@
                          :status    status
                          :attempt   attempt
                          ;; a transport failure has no status and is retryable
-                         :retryable? (boolean (or failed? (contains? retryable-statuses status)))}
+                         :retryable? (boolean (or failed?
+                                                   (retryable-status?
+                                                    status (:retryable-statuses client))))}
                 verdict (classify client info)
                 throw!  (fn []
                           (if failed?

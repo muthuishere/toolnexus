@@ -464,10 +464,10 @@ func TestRetryAfterParsing(t *testing.T) {
 		{"0", true, 0}, // the server is saying "retry now", not "no opinion"
 		{"  7  ", true, 7},
 		{"2147483647", true, 2147483647},
-		{"0.5", false, 0},   // fractional: honored by py/js before this change
-		{"5.9", false, 0},   // elixir truncated this to 5s before this change
-		{"-5", false, 0},    // must never become an immediate or negative wait
-		{"+5", false, 0},    // Atoi accepted this; the regex ports never did
+		{"0.5", false, 0}, // fractional: honored by py/js before this change
+		{"5.9", false, 0}, // elixir truncated this to 5s before this change
+		{"-5", false, 0},  // must never become an immediate or negative wait
+		{"+5", false, 0},  // Atoi accepted this; the regex ports never did
 		{"2147483648", false, 0},
 		{"99999999999999999999", false, 0}, // java threw on this one
 		{"", false, 0},
@@ -494,5 +494,88 @@ func TestRetryAfterRejectedFallsBackToBackoff(t *testing.T) {
 	}
 	if honored := c.backoff(0, "3"); honored != 3*time.Second {
 		t.Fatalf("accepted Retry-After should win over backoff, got %v", honored)
+	}
+}
+
+// The client's default retryable set is an ENUMERATION (429/500/502/503/504/529),
+// not "429 plus any 5xx". RetryableStatuses ADDS to it — a Cloudflare-fronted
+// origin answering 520–527 opts in declaratively — and can never remove from it,
+// so 429 (and its Retry-After handling) survives a host's list. OnError still has
+// the final say per attempt.
+func TestClientRetryableStatuses(t *testing.T) {
+	cloudflare := []int{520, 521, 522, 523, 524, 525, 526, 527}
+	cases := []struct {
+		name   string
+		extra  []int
+		status int
+		want   int32 // expected server calls
+	}{
+		{"529 retries by default", nil, 529, 2},
+		{"an unlisted 5xx is terminal by default", nil, 520, 1},
+		{"a permanent 5xx is terminal by default", nil, 501, 1},
+		{"a listed 520 retries", cloudflare, 520, 2},
+		{"429 still retries alongside a list (additive)", cloudflare, 429, 2},
+		{"501 stays terminal alongside a list", cloudflare, 501, 1},
+		{"a non-429 4xx stays terminal", nil, 422, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tk, err := CreateToolkit(context.Background(), Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var calls int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if atomic.AddInt32(&calls, 1) == 1 {
+					w.WriteHeader(tc.status)
+					_, _ = w.Write([]byte(`{"error":"nope"}`))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hello"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+			}))
+			defer srv.Close()
+			c := CreateClient(ClientOptions{
+				BaseURL: srv.URL, Style: StyleOpenAI, Model: "m", APIKey: "k",
+				Retries: 2, RetryBaseMs: 1, RetryableStatuses: tc.extra,
+			})
+			_, err = c.Run(context.Background(), "hi", tk)
+			if tc.want == 1 && err == nil {
+				t.Fatalf("status %d must fail terminally", tc.status)
+			}
+			if tc.want > 1 && err != nil {
+				t.Fatalf("status %d should have been retried: %v", tc.status, err)
+			}
+			if got := atomic.LoadInt32(&calls); got != tc.want {
+				t.Fatalf("status %d: server calls = %d, want %d", tc.status, got, tc.want)
+			}
+		})
+	}
+}
+
+// RetryableStatuses sets the DEFAULT classification only; OnError still runs per
+// attempt and has the final say, so TierFail overrides a status the host listed.
+func TestClientOnErrorOverridesRetryableStatuses(t *testing.T) {
+	tk, err := CreateToolkit(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(520)
+		_, _ = w.Write([]byte(`{"error":"origin error"}`))
+	}))
+	defer srv.Close()
+	c := CreateClient(ClientOptions{
+		BaseURL: srv.URL, Style: StyleOpenAI, Model: "m", APIKey: "k",
+		Retries: 3, RetryBaseMs: 1, RetryableStatuses: []int{520},
+		OnError: func(ErrorInfo) Tier { return TierFail },
+	})
+	if _, err := c.Run(context.Background(), "hi", tk); err == nil {
+		t.Fatal("OnError returning TierFail must fail the run")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("OnError TierFail must stop after one attempt, server calls = %d", got)
 	}
 }

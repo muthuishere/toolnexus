@@ -31,10 +31,20 @@ export interface ClientOptions {
   systemPrompt?: string
   maxTurns?: number
   hooks?: Hooks
-  /** Retries on transient LLM errors (429/5xx/network). Default 2. */
+  /** Retries on transient LLM errors (`429`/`500`/`502`/`503`/`504`/`529` + network). Default 2.
+   * Widen the status set with `retryableStatuses`. */
   retries?: number
   /** Base backoff in ms (exponential + jitter). Default 500. */
   retryBaseMs?: number
+  /**
+   * Extra HTTP statuses to treat as retryable, ADDED to the default set
+   * (`429`/`500`/`502`/`503`/`504`/`529`). It can only widen: a host cannot remove `429` and
+   * lose `Retry-After` handling with it. This sets the DEFAULT classification; `onError` still
+   * runs per attempt and has the final say, so `onError` returning `"fail"` overrides a status
+   * listed here. Example: a Cloudflare-fronted origin that answers `520`–`527`.
+   */
+  retryableStatuses?: readonly number[]
+
   /** Whole-run deadline in ms; aborts the run (and its in-flight request) when exceeded. */
   timeoutMs?: number
   /** Conversation provider for `ask(prompt, { id })`. Default: in-memory (process lifetime).
@@ -85,7 +95,8 @@ export interface ErrorInfo {
   status?: number
   /** Zero-based attempt index (0 = first try). */
   attempt: number
-  /** Whether `status`/the error is in the default retryable set (429/5xx/network). */
+  /** Whether `status`/the error is in the default retryable set
+   * (429/500/502/503/504/529/network, plus anything `retryableStatuses` added). */
   retryable: boolean
 }
 
@@ -656,7 +667,8 @@ export class Client {
     return ctrl.signal
   }
 
-  /** fetch with retry + exponential backoff on 429/5xx/network, honoring Retry-After; aborts via signal.
+  /** fetch with retry + exponential backoff on the default retryable set (429/500/502/503/504/529)
+   * plus network errors and anything `retryableStatuses` added, honoring Retry-After; aborts via signal.
    * The retry-vs-fail decision is the host's `onError` (default: retryable-within-budget ⇒ retry). */
   private async llmFetch(url: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
     const retries = this.opts.retries ?? 2
@@ -669,7 +681,7 @@ export class Client {
       try {
         const res = await (this.opts.fetch ?? fetch)(url, { ...init, signal })
         if (res.ok) return res
-        const retryable = isRetryableStatus(res.status)
+        const retryable = isRetryableStatus(res.status, this.opts.retryableStatuses)
         const tier = classify({ status: res.status, attempt, retryable })
         if (tier === "fail" || attempt === retries) return res // caller surfaces the non-ok status
         const ra = retryAfterMs(res.headers.get("retry-after"))

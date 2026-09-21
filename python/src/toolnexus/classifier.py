@@ -33,9 +33,9 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Mapping, Optional, Protocol, Union
+from typing import Any, Callable, Iterable, Literal, Mapping, Optional, Protocol, Union
 
-from .client import Client, ErrorClassifier, ErrorInfo, MetricEvent, OnMetric, _parse_retry_after, _RETRYABLE
+from .client import Client, ErrorClassifier, ErrorInfo, MetricEvent, OnMetric, _parse_retry_after, _is_retryable_status
 from .toolkit import Toolkit
 
 __all__ = [
@@ -562,6 +562,7 @@ class Classifier:
         timeout: float = DEFAULT_CLASSIFIER_TIMEOUT,
         http_transport: Optional[ClassifierTransport] = None,
         retries: int = _DEFAULT_RETRIES,
+        retryable_statuses: Optional[Iterable[int]] = None,
         on_error: Optional[ErrorClassifier] = None,
         request_params: Optional[Mapping[str, Any]] = None,
         body_transform: Optional[Callable[[dict[str, Any]], Optional[dict[str, Any]]]] = None,
@@ -578,6 +579,13 @@ class Classifier:
         self.timeout = timeout
         self.http_transport: ClassifierTransport = http_transport or _UrllibTransport()
         self.retries = retries
+        # Extra HTTP statuses to treat as retryable, ADDED to the default set
+        # (429/500/502/503/504/529, plus 408 here). It can only widen: a host cannot remove
+        # 429 and lose ``Retry-After`` handling with it. This sets the DEFAULT classification;
+        # ``on_error`` still runs per attempt and has the final say, so ``on_error`` returning
+        # "fail" overrides a status listed here. Example: a Cloudflare-fronted origin
+        # answering 520–527.
+        self.retryable_statuses = frozenset(retryable_statuses) if retryable_statuses is not None else None
         self.on_error = on_error
         self.request_params = dict(request_params or {})
         self.body_transform = body_transform
@@ -749,7 +757,7 @@ class Classifier:
             except Exception as e:  # noqa: BLE001 — a transport fault, not a status
                 err = e
                 last = ClassifierError(f"classifier: POST {endpoint}: {type(e).__name__}: {e}")
-            retryable = err is not None or status == 408 or status in _RETRYABLE
+            retryable = err is not None or status == 408 or _is_retryable_status(status, self.retryable_statuses)
             if attempt >= retries:
                 raise last
             info: ErrorInfo = {"error": err, "status": status, "attempt": attempt, "retryable": retryable}
@@ -872,6 +880,7 @@ def create_classifier(
     timeout: Optional[float] = None,
     http_transport: Optional[ClassifierTransport] = None,
     retries: int = _DEFAULT_RETRIES,
+    retryable_statuses: Optional[Iterable[int]] = None,
     on_error: Optional[ErrorClassifier] = None,
     request_params: Optional[Mapping[str, Any]] = None,
     body_transform: Optional[Callable[[dict[str, Any]], Optional[dict[str, Any]]]] = None,
@@ -901,6 +910,7 @@ def create_classifier(
         timeout=timeout if timeout else DEFAULT_CLASSIFIER_TIMEOUT,
         http_transport=http_transport,
         retries=retries,
+        retryable_statuses=retryable_statuses,
         on_error=on_error,
         request_params=request_params,
         body_transform=body_transform,

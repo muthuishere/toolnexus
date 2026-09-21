@@ -75,8 +75,21 @@ public final class Classifier {
     public static final String STYLE_CUSTOM = "custom";
     public static final String STYLE_STATIC = "static";
 
-    /** Statuses retried by default, alongside network throws. Same set as §8, plus 408. */
-    private static final Set<Integer> RETRYABLE = Set.of(408, 429, 500, 502, 503, 504);
+    /**
+     * Retried by default, alongside network throws: the §8 set
+     * ({@code 429}/{@code 500}/{@code 502}/{@code 503}/{@code 504}/{@code 529}, see
+     * {@link LlmClient#isRetryableStatus}) plus {@code 408} — the one status this seam adds,
+     * because a classifier's single bounded request is worth re-sending on a request timeout.
+     *
+     * <p>Reused rather than re-enumerated, so there is one retry policy and not two. The set is
+     * an ENUMERATION on purpose: "any 5xx" would sweep in permanently-broken statuses
+     * ({@code 501}, {@code 505}) and change every host's retry behaviour without asking. A
+     * backend with its own transient status — a Cloudflare origin answering {@code 520}–{@code 527}
+     * — opts in declaratively through {@link Options#retryableStatuses}, which only widens.
+     */
+    private static boolean retryableStatus(int status, java.util.Collection<Integer> extra) {
+        return status == 408 || LlmClient.isRetryableStatus(status, extra);
+    }
 
     // ------------------------------------------------------------------ failures
 
@@ -476,8 +489,18 @@ public final class Classifier {
         public Long timeoutMs;
         /** §8 Gap 2: the injectable transport. Scope is the classifier path only. */
         public HttpClient httpClient;
-        /** Retries on transient errors (408/429/5xx/network). Null ⇒ 2. */
+        /** Retries on transient errors (408/429/500/502/503/504/529 + network). Null ⇒ 2.
+         * Widen the status set with {@link #retryableStatuses}. */
         public Integer retries;
+        /** Extra HTTP statuses to treat as retryable, ADDED to the default set
+         * ({@code 429}/{@code 500}/{@code 502}/{@code 503}/{@code 504}/{@code 529}, plus
+         * {@code 408} here). It can only widen: a host cannot remove {@code 429} and lose
+         * {@code Retry-After} handling with it. This sets the DEFAULT classification;
+         * {@link #onError} still runs per attempt and has the final say, so an {@code onError}
+         * returning {@link LlmClient.Tier#FAIL} overrides a status listed here. Example: a
+         * Cloudflare-fronted origin that answers {@code 520}–{@code 527}. Null ⇒ the defaults
+         * alone. {@code Retry-After} handling is untouched. */
+        public List<Integer> retryableStatuses;
         /** §8 Resilience: classify a failed attempt into {@link LlmClient.Tier#RETRY} or
          * {@link LlmClient.Tier#FAIL}. REUSES the client's {@link LlmClient.ErrorInfo}/{@code Tier}
          * and the {@code Retry-After} delay-seconds rule verbatim — there is no second retry
@@ -510,6 +533,7 @@ public final class Classifier {
         public Options timeoutMs(long v) { this.timeoutMs = v; return this; }
         public Options httpClient(HttpClient v) { this.httpClient = v; return this; }
         public Options retries(int v) { this.retries = v; return this; }
+        public Options retryableStatuses(List<Integer> v) { this.retryableStatuses = v; return this; }
         public Options onError(Function<LlmClient.ErrorInfo, LlmClient.Tier> v) { this.onError = v; return this; }
         public Options requestParams(Map<String, Object> v) { this.requestParams = v; return this; }
         public Options bodyTransform(Function<Map<String, Object>, Map<String, Object>> v) { this.bodyTransform = v; return this; }
@@ -773,7 +797,7 @@ public final class Classifier {
                     : new ClassifierException("classifier: POST " + endpoint + ": HTTP " + status
                             + cause(status, bodyText));
             if (attempt >= retries) throw last;
-            boolean retryable = thrown != null || RETRYABLE.contains(status);
+            boolean retryable = thrown != null || retryableStatus(status, opts.retryableStatuses);
             LlmClient.Tier tier = opts.onError != null
                     ? opts.onError.apply(new LlmClient.ErrorInfo(thrown, status, attempt, retryable))
                     : (retryable ? LlmClient.Tier.RETRY : LlmClient.Tier.FAIL);

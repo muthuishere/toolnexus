@@ -36,6 +36,10 @@ const N_SYSTEMONE = repeatsArg ? Number(repeatsArg.split("=")[1]) : 12
 const N_LLM = 6
 const N_ENCODING = 5
 
+// Pinned to the GATEWAY on purpose: this page's whole argument is a cost comparison between
+// `systemone` and `llm`, and `usage.cost` is a gateway field. TypeSafe's own API
+// (https://api.typesafe.ai/v1, model jev-latest) serves the same wire and is the library default,
+// but it returns no cost — run against it and the cost columns render "—", correctly but uselessly.
 const KEY_ENV = "OPENROUTER_API_KEY"
 const BASE_URL = "https://openrouter.ai/api/v1"
 const SYSTEMONE_MODEL = "typesafe/jev-1.13"

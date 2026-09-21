@@ -4,9 +4,10 @@
 # Run from the elixir/ directory (deps fetched):
 #     mix run examples/judge.exs
 #
-# With OPENROUTER_API_KEY set it calls the live System One backend; with no key it
-# replays one recorded decision through the `static` backend, so the example runs
-# offline with no credential.
+# Three backends, picked by what is in the environment: TYPESAFE_API_KEY calls TypeSafe's
+# own API, OPENROUTER_API_KEY calls the same wire through OpenRouter's gateway, and with
+# no key at all it replays one recorded decision through the `static` backend — so this
+# runs offline, uncredentialed.
 
 alias Toolnexus.Classifier
 alias Toolnexus.Classifier.{Choice, Decision, Noul, Score}
@@ -80,31 +81,56 @@ recorded = %{
   }
 }
 
-live = System.get_env("OPENROUTER_API_KEY") not in [nil, ""]
+# Same wire, two ways in. TypeSafe's own API is a first-party key and no gateway in the path;
+# OpenRouter is a gateway you may already hold a key for, and the only one of the two that
+# reports `usage.cost`. They are equivalent in latency — neither is the "fast" one.
+set? = fn name -> System.get_env(name) not in [nil, ""] end
+
+backend =
+  cond do
+    set?.("TYPESAFE_API_KEY") -> :typesafe
+    set?.("OPENROUTER_API_KEY") -> :openrouter
+    true -> :static
+  end
+
+on_metric = fn
+  %{event: "classifier.warning", warning: w} -> IO.puts("warning: " <> w)
+  _ -> :ok
+end
 
 opts =
-  if live do
-    [
-      # serves the System One wire today
-      base_url: "https://openrouter.ai/api/v1",
-      model: model,
-      # the NAME of an env var, never the value
-      api_key_env: "OPENROUTER_API_KEY",
-      on_metric: fn
-        %{event: "classifier.warning", warning: w} -> IO.puts("warning: " <> w)
-        _ -> :ok
-      end
-    ]
-  else
-    [style: "static", model: model, decisions: [recorded]]
+  case backend do
+    :typesafe ->
+      [
+        # the library default; spelled out so it is visible
+        base_url: "https://api.typesafe.ai/v1",
+        model: "jev-latest",
+        # the NAME of an env var, never the value
+        api_key_env: "TYPESAFE_API_KEY",
+        on_metric: on_metric
+      ]
+
+    :openrouter ->
+      [
+        # a gateway that serves the same System One wire
+        base_url: "https://openrouter.ai/api/v1",
+        model: model,
+        api_key_env: "OPENROUTER_API_KEY",
+        on_metric: on_metric
+      ]
+
+    :static ->
+      [style: "static", model: model, decisions: [recorded]]
   end
 
 {:ok, judge} = Classifier.create(opts)
 
 IO.puts(
-  if live,
-    do: "backend: systemone (live)",
-    else: "backend: static (recorded — set OPENROUTER_API_KEY to go live)"
+  case backend do
+    :typesafe -> "backend: systemone via api.typesafe.ai (live)"
+    :openrouter -> "backend: systemone via openrouter.ai (live)"
+    :static -> "backend: static (recorded — set TYPESAFE_API_KEY or OPENROUTER_API_KEY to go live)"
+  end
 )
 
 {:ok, d} = Classifier.evaluate(judge, ticket, questions)
@@ -146,5 +172,10 @@ IO.puts(
     "Advisory, NOT correctness."
 )
 
-cost = if is_nil(d.usage.cost), do: "", else: " / $#{d.usage.cost}"
+# Cost is a gateway field. TypeSafe's own API does not return one, and absent is NOT zero —
+# print "cost: not reported" rather than a $0.00 that would read as a free call.
+cost =
+  if is_nil(d.usage.cost),
+    do: " / cost: not reported by this backend",
+    else: " / $#{d.usage.cost}"
 IO.puts("\nusage: #{d.usage.input_tokens} in / #{d.usage.output_tokens} out" <> cost)

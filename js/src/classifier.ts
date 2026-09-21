@@ -406,10 +406,20 @@ export interface ClassifierOptions {
   timeoutMs?: number
   /** §8 Gap 2 injectable transport. Scope is the classifier path only. */
   fetch?: typeof fetch
-  /** Retries on transient errors (408/429/5xx/network). Default 2. */
+  /** Retries on transient errors (`408`/`429`/`500`/`502`/`503`/`504`/`529` + network). Default 2.
+   * Widen the status set with `retryableStatuses`. */
   retries?: number
   /** Base backoff in ms (exponential). Default 500. */
   retryBaseMs?: number
+  /**
+   * Extra HTTP statuses to treat as retryable, ADDED to the default set
+   * (`429`/`500`/`502`/`503`/`504`/`529` plus `408` here). It can only widen: a host cannot remove `429` and
+   * lose `Retry-After` handling with it. This sets the DEFAULT classification; `onError` still
+   * runs per attempt and has the final say, so `onError` returning `"fail"` overrides a status
+   * listed here. Example: a Cloudflare-fronted origin that answers `520`–`527`.
+   */
+  retryableStatuses?: readonly number[]
+
   /** §8 Resilience. REUSES the client's `ErrorInfo`/`ErrorTier` and the `Retry-After`
    * delay-seconds rule verbatim — there is no second retry policy, and no `"suspend"` tier. */
   onError?: (info: ErrorInfo) => ErrorTier
@@ -655,7 +665,7 @@ export class Classifier {
       } else {
         lastErr = new Error(`classifier: POST ${endpoint}: ${errText(thrown)}`)
       }
-      const retryable = res ? res.status === 408 || isRetryableStatus(res.status) : true
+      const retryable = res ? res.status === 408 || isRetryableStatus(res.status, this.opts.retryableStatuses) : true
       if (attempt >= retries) throw lastErr
       const tier = classify(res ? { status: res.status, attempt, retryable } : { error: thrown, attempt, retryable })
       if (tier !== "retry") throw lastErr

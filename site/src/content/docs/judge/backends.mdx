@@ -31,12 +31,50 @@ That is why every test in this repo, in all seven ports, runs on `static`: **no 
 credential, no cost**, and a numeric assertion that means something. A live call, if it is run at
 all, asserts shape only. It is also why the
 [runnable examples](/toolnexus/cookbook/judge/) work for you with nothing configured — they replay
-one recorded decision unless `OPENROUTER_API_KEY` is present in the environment, in which case they
-go live.
+one recorded decision unless `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY` is present in the
+environment, in which case they go live.
 
 A recorded decision is a `(state, questions, response)` triple, matched on the canonical request
 bytes. Record it once from a live run; it stays honest because the questions are part of the key —
 change the encoding and the recording no longer matches.
+
+## Two ways to reach `systemone`: TypeSafe directly, or a gateway
+
+`style: "systemone"` says *what* a decision is, not *whose endpoint answers it*. Two endpoints serve
+the same wire, and the library ships configured for the first:
+
+| | TypeSafe's own API *(the default)* | OpenRouter |
+|---|---|---|
+| `baseUrl` | `https://api.typesafe.ai/v1` | `https://openrouter.ai/api/v1` |
+| `model` | `jev-latest` (answers as `jev-1.13.0`) | `typesafe/jev-1.13` |
+| `apiKeyEnv` | `TYPESAFE_API_KEY` | `OPENROUTER_API_KEY` |
+| credential | a first-party TypeSafe key | a gateway key you may already hold |
+| in the path | nobody | a gateway |
+| `usage.cost` | **not returned** | returned |
+| p50 / p95 | 339 ms / 449 ms | 351 ms / 400 ms |
+
+```js
+// TypeSafe's own API — these three values are the library defaults, spelled out
+const judge = createClassifier({
+  baseUrl: "https://api.typesafe.ai/v1",
+  model: "jev-latest",
+  apiKeyEnv: "TYPESAFE_API_KEY", // the NAME of an env var, never the value
+})
+```
+
+**Neither one is the fast one.** Those latencies are a warm, interleaved measurement of both, and
+they are a tie: TypeSafe wins p50 by 12 ms and loses p95 by 49 ms, which is noise at this sample
+size. Do not choose between them on speed. The real difference is **a gateway dependency versus a
+first-party key** — one fewer party between you and the model, against one more key to obtain when
+you already have an OpenRouter account.
+
+<Aside type="caution" title="A cost budget only works through the gateway">
+`usage.cost` is a **gateway** field. TypeSafe's own API returns `model`, `answers` and `usage`
+(input and output tokens) and no cost at all — and it does not return OpenRouter's `id` or
+`provider` either. Every port reports an absent cost as **absent**, never as `0`, precisely so a
+budget cannot read "free" off a backend that simply does not say. If you meter spend per decision
+from `usage.cost`, run through OpenRouter, or meter on tokens instead.
+</Aside>
 
 ## `llm` is an exit, not an equal
 
@@ -70,7 +108,8 @@ same backend.
 `ClassifierOptions` mirrors `ClientOptions` field-for-field wherever a field makes sense, so a host
 that has configured one has configured the other: `style`, `baseUrl`, `model`, `apiKeyEnv`,
 `headers`, the injectable transport, `timeout`, `retries`/`onError`, `requestParams`/`bodyTransform`,
-`onMetric`, `client` (for `llm`), `evaluate` (for `custom`), `decisions` (for `static`).
+`onMetric`, `client` (for `llm`), `evaluate` (for `custom`), `decisions` (for `static`), and
+`retryableStatuses`.
 
 Two deliberate differences:
 
@@ -81,7 +120,25 @@ Two deliberate differences:
 - **`timeout` bounds one request, not a run.** A classifier has no loop to bound.
 
 There is no second retry policy: `onError` and the `Retry-After` rule are the client's ones
-verbatim, and there is no `suspend` tier here — there is nothing to suspend into.
+verbatim, and there is no `suspend` tier here — there is nothing to suspend into. The default
+retryable set is **`408`, `429`, `500`, `502`, `503`, `504`, `529`** plus transport failures. It is
+an exhaustive list, not shorthand for "5xx": `501`, `505` and the Cloudflare `520`–`527` family are
+terminal unless you say otherwise. `529 Overloaded` is in the list because TypeSafe documents it as
+retry-with-backoff.
+
+Anything else is **opt-in, declaratively**, through `retryableStatuses`:
+
+```js
+const judge = createClassifier({
+  // A Cloudflare-fronted origin answers 520-527 when the tunnel wobbles. These are ADDED to the
+  // defaults, never substituted for them — 429 keeps retrying, and keeps honouring Retry-After.
+  retryableStatuses: [520, 521, 522, 523, 524, 525, 526, 527],
+})
+```
+
+It decides the **default** classification only. `onError` still runs on every failed attempt and
+has the final say, so `onError` returning `"fail"` overrides a status you listed yourself. The
+option exists on `ClientOptions` and `ClassifierOptions` alike, with the same meaning.
 
 ## The canonical request
 

@@ -474,6 +474,56 @@
       (is (thrown? Throwable (jev/evaluate c "s" {"q" (jev/noul-question "?")})))
       (is (= 1 @n) "one attempt, because the host said fail"))))
 
+(deftest the-retryable-status-matrix
+  ;; `retry-after: 0` keeps the suite from sleeping through a backoff it is not
+  ;; testing. The default set is an ENUMERATION on purpose: "any 5xx" would
+  ;; sweep in permanently-broken statuses (501, 505) and silently change the
+  ;; retry behaviour of every existing host. A backend with its own transient
+  ;; status opts in through :retryable-statuses instead.
+  (letfn [(attempts [status opts]
+            (let [n    (atom 0)
+                  http (fn [_ _ _]
+                         (if (= 1 (swap! n inc))
+                           {:status status :headers {"retry-after" "0"} :body "nope"}
+                           {:status 200 :body "{\"answers\":{},\"model\":\"m\"}"}))
+                  c    (jev/create-classifier (merge {:http-client http :retries 2} opts))]
+              (try (jev/evaluate c "s" {"q" (jev/noul-question "?")})
+                   (catch Throwable _ nil))
+              @n))]
+    (testing "529 Overloaded retries by default — TypeSafe documents it as retry-with-backoff"
+      (is (= 2 (attempts 529 {}))))
+    (testing "an unlisted 5xx and a permanently-broken one stay terminal by default"
+      (is (= 1 (attempts 520 {})))
+      (is (= 1 (attempts 501 {}))))
+    (testing ":retryable-statuses is ADDITIVE — it widens, it never replaces"
+      (let [cf {:retryable-statuses [520 521 522 523 524 525 526 527]}]
+        (is (= 2 (attempts 520 cf)) "the Cloudflare status the host opted into retries")
+        (is (= 2 (attempts 429 cf)) "429 STILL retries — the default set is not replaced")
+        (is (= 1 (attempts 501 cf)) "a status nobody listed is still terminal")))
+    (testing "a 4xx other than 429 stays terminal"
+      (is (= 1 (attempts 422 {}))))
+    (testing ":on-error :fail overrides a status the host itself listed"
+      (is (= 1 (attempts 520 {:retryable-statuses [520] :on-error (fn [_] :fail)}))))))
+
+(deftest a-typesafe-shaped-usage-block-reports-an-absent-cost
+  ;; TypeSafe's own API returns model/answers/usage and no `cost` key at all.
+  ;; Reporting 0 there would read as "this call was free" when the truth is
+  ;; "this backend does not say".
+  (let [http (fn [_ _ _]
+               {:status 200
+                :body (json/write-str
+                       {"model" "jev-1.13.0"
+                        "answers" {"q" {"type" "noul" "noul" 0.98}}
+                        "usage" {"input_tokens" 331 "output_tokens" 48}})})
+        c    (jev/create-classifier {:base-url "https://api.typesafe.ai/v1"
+                                     :model "jev-latest"
+                                     :http-client http})
+        d    (jev/evaluate c "s" {"q" (jev/noul-question "?")})]
+    (is (== 331 (get-in d [:usage :input-tokens])))
+    (is (== 48 (get-in d [:usage :output-tokens])))
+    (is (not (contains? (:usage d) :cost)) "absent is not zero")
+    (is (nil? (get-in d [:usage :cost])))))
+
 ;; ---------------------------------------------------------------------------
 ;; the other backends
 ;; ---------------------------------------------------------------------------

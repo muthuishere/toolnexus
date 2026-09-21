@@ -737,6 +737,36 @@
         (is (= 3 @hits)
             "the classifier may force retry, but :retries still bounds it")))))
 
+(deftest the-retryable-status-matrix-on-the-client-path
+  ;; Same policy as the classifier, one var away — the default set is an
+  ;; ENUMERATION, and a host widens it declaratively rather than by returning
+  ;; :retry from :on-error for every status it has ever seen.
+  (letfn [(attempts [status opts]
+            (flaky-llm [status]
+              (fn [{:keys [base hits]}]
+                (let [c (client/create-client
+                         (merge {:base-url base :model "m" :api-key "k"
+                                 :retries 2 :retry-base-ms 1}
+                                opts))]
+                  (try (client/run c "hi" {:toolkit (tool/toolkit tools)})
+                       (catch Throwable _ nil))
+                  @hits))))]
+    (testing "529 retries by default"
+      (is (= 2 (attempts 529 {}))))
+    (testing "an unlisted 5xx and a permanent one are terminal by default"
+      (is (= 1 (attempts 520 {})))
+      (is (= 1 (attempts 501 {}))))
+    (testing ":retryable-statuses adds to the default set without replacing it"
+      (let [cf {:retryable-statuses [520 521 522 523 524 525 526 527]}]
+        (is (= 2 (attempts 520 cf)))
+        (is (= 2 (attempts 429 cf)) "429 STILL retries")
+        (is (= 1 (attempts 501 cf)))))
+    (testing "a non-429 4xx stays terminal"
+      (is (= 1 (attempts 422 {}))))
+    (testing ":on-error :fail wins over a host-listed status"
+      (is (= 1 (attempts 520 {:retryable-statuses [520]
+                              :on-error (fn [_info] :fail)}))))))
+
 (deftest on-error-receives-the-failure-context
   (flaky-llm [503]
     (fn [{:keys [base]}]

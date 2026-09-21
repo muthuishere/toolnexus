@@ -138,15 +138,77 @@ loop uses, and SHALL honour `Retry-After` by the same rule. This capability SHAL
 second retry policy. A backend's own limit errors SHALL be surfaced with their reported cause
 intact so a caller can distinguish a limit from a transport fault.
 
+The default retryable set SHALL be an exhaustive enumeration, not a range: `429`, `500`, `502`,
+`503`, `504` and `529`, plus transport failures, and additionally `408` on the classifier path.
+Every other status SHALL be terminal by default. Both the client and the classifier SHALL accept a
+`retryableStatuses` option (named per port) whose statuses are **added** to that set; it SHALL NOT
+be able to remove a default status, and `onError` SHALL retain the final say on every attempt. The
+set and the option SHALL be identical in all seven ports.
+
 #### Scenario: A rate-limited evaluation is retried on the existing policy
 
 - **WHEN** a backend responds with a rate-limit status carrying a delay
 - **THEN** the call is retried according to the client's existing error-tier and `Retry-After` rules
 
+#### Scenario: A documented overload status is retried, not failed
+
+- **WHEN** a backend responds `529 Overloaded`
+- **THEN** the call is retried with backoff up to the configured retry budget
+
+#### Scenario: An unlisted status is terminal until the host opts in
+
+- **WHEN** a backend responds `520` and the host has set no `retryableStatuses`
+- **THEN** the call fails on the first attempt
+- **AND** with `retryableStatuses` containing `520` the same call is retried, while `429` remains retryable
+
+#### Scenario: The host option cannot remove a default, and onError still decides
+
+- **WHEN** a host sets `retryableStatuses` to a list that does not contain `429`
+- **THEN** `429` is still retried and `Retry-After` is still honoured
+- **AND** an `onError` returning fail on a status the host listed stops the call after one attempt
+
+#### Scenario: A non-429 client error is still terminal
+
+- **WHEN** a backend responds `422 Unprocessable Entity`
+- **THEN** the call fails on the first attempt with no retry
+
 #### Scenario: A limit breach is reported as itself
 
 - **WHEN** a backend rejects a request because it exceeds a documented limit
 - **THEN** the error names that cause rather than reporting a generic transport failure
+
+### Requirement: An unreported cost is absent, never zero
+
+A `Decision`'s usage SHALL be able to express that the backend reported no cost. A backend that
+omits `cost` SHALL yield an absent cost in every port, and a backend that reports a cost of `0`
+SHALL yield a cost of `0`. No port SHALL substitute zero for an unreported cost.
+
+#### Scenario: A backend that reports no cost
+
+- **WHEN** a response carries `usage` with token counts and no `cost` key
+- **THEN** the decision's usage reports the token counts and an absent cost
+
+#### Scenario: A reported zero is preserved
+
+- **WHEN** a response carries `usage.cost` of `0`
+- **THEN** the decision's usage reports a cost of `0`, distinguishable from absent
+
+### Requirement: The System One style is reachable at more than one endpoint
+
+The System One style SHALL be configurable at any endpoint serving that wire, through the existing
+`baseUrl`, `model` and `apiKeyEnv` options and no new API. Documentation SHALL name both TypeSafe's
+first-party API and a gateway that serves the same wire, SHALL state that they are equivalent in
+latency, and SHALL state which response fields are backend-specific.
+
+#### Scenario: The same questions through either endpoint
+
+- **WHEN** a classifier is pointed at TypeSafe's own API rather than the gateway, by `baseUrl`, `model` and `apiKeyEnv` alone
+- **THEN** the returned `Decision` has the same shape and the same typed accessors, differing only in the absent cost
+
+#### Scenario: A runnable example works with either key or none
+
+- **WHEN** the runnable judge example runs with `TYPESAFE_API_KEY`, with `OPENROUTER_API_KEY`, or with neither
+- **THEN** it reports which backend it used and produces a decision, using the recorded `static` replay when no key is present
 
 ### Requirement: Absent configuration changes nothing
 

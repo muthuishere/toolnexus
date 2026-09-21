@@ -5,9 +5,10 @@ Mirrors js/examples/judge.ts. Run from a venv where the package is installed
 
     python examples/judge.py
 
-With OPENROUTER_API_KEY set it calls the live System One backend; with no key it
-replays one recorded decision through the `static` backend, so the example runs
-offline with no credential.
+Three backends, picked by what is in the environment: TYPESAFE_API_KEY calls
+TypeSafe's own API, OPENROUTER_API_KEY calls the same wire through OpenRouter's
+gateway, and with no key at all it replays one recorded decision through the
+`static` backend — so this runs offline, uncredentialed.
 """
 from __future__ import annotations
 
@@ -58,6 +59,7 @@ QUESTIONS = {
     ),
 }
 
+#: OpenRouter's name for the model; `static` replays a recording made under it.
 MODEL = "typesafe/jev-1.13"
 
 #: One decision recorded off the live backend, so this file runs with no key and no network.
@@ -92,21 +94,42 @@ RECORDED = RecordedDecision(
 
 
 async def main() -> None:
-    live = bool(os.environ.get("OPENROUTER_API_KEY"))
-    if live:
+    # Same wire, two ways in. TypeSafe's own API is a first-party key and no gateway in the
+    # path; OpenRouter is a gateway you may already hold a key for, and the only one of the
+    # two that reports `usage.cost`. They are equivalent in latency — neither is the "fast" one.
+    if os.environ.get("TYPESAFE_API_KEY"):
+        backend = "typesafe"
+    elif os.environ.get("OPENROUTER_API_KEY"):
+        backend = "openrouter"
+    else:
+        backend = "static"
+
+    def on_metric(ev):
+        return ev["event"] == "classifier.warning" and print("warning:", ev["warning"])
+
+    if backend == "typesafe":
         judge = create_classifier(
-            base_url="https://openrouter.ai/api/v1",  # serves the System One wire today
+            base_url="https://api.typesafe.ai/v1",  # the library default; spelled out so it is visible
+            model="jev-latest",
+            api_key_env="TYPESAFE_API_KEY",  # the NAME of an env var, never the value
+            on_metric=on_metric,
+        )
+    elif backend == "openrouter":
+        judge = create_classifier(
+            base_url="https://openrouter.ai/api/v1",  # a gateway that serves the same System One wire
             model=MODEL,
-            api_key_env="OPENROUTER_API_KEY",  # the NAME of an env var, never the value
-            on_metric=lambda ev: ev["event"] == "classifier.warning" and print("warning:", ev["warning"]),
+            api_key_env="OPENROUTER_API_KEY",
+            on_metric=on_metric,
         )
     else:
         judge = create_classifier(style="static", model=MODEL, decisions=[RECORDED])
 
     print(
-        "backend: systemone (live)"
-        if live
-        else "backend: static (recorded — set OPENROUTER_API_KEY to go live)"
+        {
+            "typesafe": "backend: systemone via api.typesafe.ai (live)",
+            "openrouter": "backend: systemone via openrouter.ai (live)",
+            "static": "backend: static (recorded — set TYPESAFE_API_KEY or OPENROUTER_API_KEY to go live)",
+        }[backend]
     )
 
     d = await judge.evaluate(TICKET, QUESTIONS)
@@ -133,7 +156,9 @@ async def main() -> None:
         "response. True would mean the model had nothing to rank on (usually undescribed options). "
         "Advisory, NOT correctness."
     )
-    cost = "" if d.usage.cost is None else f" / ${d.usage.cost}"
+    # Cost is a gateway field. TypeSafe's own API does not return one, and absent is NOT zero —
+    # print "cost: not reported" rather than a $0.00 that would read as a free call.
+    cost = " / cost: not reported by this backend" if d.usage.cost is None else f" / ${d.usage.cost}"
     print(f"\nusage: {d.usage.input_tokens} in / {d.usage.output_tokens} out{cost}")
 
 

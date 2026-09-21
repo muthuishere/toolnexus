@@ -8,6 +8,56 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### TypeSafe's own API is a documented way to run a `Classifier` — and two defects it exposed
+
+`style: "systemone"` already reached TypeSafe's first-party API by default
+(`https://api.typesafe.ai/v1`, model `jev-latest`, `TYPESAFE_API_KEY`), but everything written down
+pointed at OpenRouter's gateway. Both are now documented side by side on
+[Backends & configuration](https://muthuishere.github.io/toolnexus/judge/backends/), and every
+port's `examples/judge.*` picks its backend from the environment: `TYPESAFE_API_KEY` first,
+`OPENROUTER_API_KEY` second, and with no key at all the existing offline `static` replay, exactly
+as before. No default changed, and no new API was needed — `baseUrl`, `model` and `apiKeyEnv` were
+already enough.
+
+They are **equivalent in latency** (339 ms / 449 ms p50 / p95 against 351 ms / 400 ms, warm and
+interleaved — a tie). The reason to use the first-party key is one fewer party in the path, not
+speed. The one functional difference: **TypeSafe returns no `usage.cost`**, so a cost-based budget
+only works through the gateway.
+
+Pointing at it turned up two real defects, fixed in all seven ports:
+
+- **`529 Overloaded` was not retryable, anywhere.** The default retryable set was
+  `429/500/502/503/504`, so TypeSafe's documented "retry with backoff" status failed hard on the
+  first attempt. `529` is now in the set — on the client path and the classifier path alike — and
+  that is the whole behaviour change: **no status other than `529` changed classification.** The
+  set stays an exhaustive enumeration rather than "any 5xx", because sweeping in permanently-broken
+  statuses like `501 Not Implemented` would change the retry behaviour of every existing host
+  without asking.
+- **`retryableStatuses`, a new option on both `ClientOptions` and `ClassifierOptions`** (named per
+  port: `RetryableStatuses`, `retryable_statuses`, `:retryable-statuses`). It is how a backend with
+  its own transient status opts in — the case it exists for is a Cloudflare-fronted origin
+  answering `520`–`527`:
+
+  ```js
+  createClient({ retryableStatuses: [520, 521, 522, 523, 524, 525, 526, 527] })
+  ```
+
+  It is **additive and cannot subtract**: listing statuses never removes `429` from the set, so you
+  cannot accidentally lose `Retry-After` handling by using it. It decides the *default*
+  classification only — `onError` still runs on every failed attempt and has the final say, so
+  `onError` returning `"fail"` overrides a status you listed yourself. Registered in
+  `conformance/options_manifest.json`, so the parity check covers it in all seven ports.
+- **The docs were wrong about the retry set, and had been all along.** `SPEC.md` §8, §8B's option
+  table and every port's `retries` doc comment said "429/5xx/network" while the code enumerated
+  five statuses. The prose now states the real set (`429`/`500`/`502`/`503`/`504`/`529`, plus `408`
+  on the classifier path) and points at `retryableStatuses` for anything beyond it. **No behaviour
+  changed to make that true** — the documentation was corrected to the code, not the reverse.
+- **"cost absent" was not representable in Go or C#.** `ClassifierUsage.Cost` was a bare `float64`
+  / `double`, so against a backend that reports no cost both said **$0.00, as though the call were
+  free**, when the truth was "unknown". Go now exposes `*float64` and C# `double?`, matching
+  js/python/java/elixir/clojure, and a real `0` is still a real `0`. **This is a source-breaking
+  change for Go and C# hosts that read `Usage.Cost`** — dereference or null-check it.
+
 ### Typed decisions — a `Classifier`, in all seven ports
 
 Half the decisions in an agent are not actions, they are **judgments**: is this command risky, does

@@ -93,7 +93,16 @@ defmodule Toolnexus.Classifier do
   @metric_evaluate "classifier.evaluate"
   @metric_warning "classifier.warning"
 
-  @retryable_statuses [408, 429, 500, 502, 503, 504]
+  # The default retryable set: the §8 client set (`429`/`500`/`502`/`503`/`504`/`529`) plus
+  # this seam's extra `408`. `529 Overloaded` is here because TypeSafe documents it as
+  # "retry with backoff" and the enumeration once made it fail hard on the first attempt.
+  #
+  # It is an ENUMERATION on purpose. "Any 5xx" would sweep in permanently-broken statuses
+  # (`501 Not Implemented`, `505 HTTP Version Not Supported`) and change the retry behaviour
+  # of every existing host without asking. A backend with its own transient status — a
+  # Cloudflare origin answering `520`–`527`, say — opts in declaratively through
+  # `:retryable_statuses`, which ADDS to this set and can never remove from it.
+  @retryable_statuses [408, 429, 500, 502, 503, 504, 529]
 
   @doc "The System One endpoint base (§8B default)."
   def default_base_url, do: @default_base_url
@@ -349,6 +358,7 @@ defmodule Toolnexus.Classifier do
             http_options: [],
             transport: nil,
             retries: @default_retries,
+            retryable_statuses: nil,
             on_error: nil,
             request_params: nil,
             body_transform: nil,
@@ -382,7 +392,14 @@ defmodule Toolnexus.Classifier do
       body:}} | {:error, Exception.t()})`. `body` is the canonical request BINARY
     * `:retries` (default 2) and `:on_error` — REUSES the §8 `%{error?, status?, attempt,
       retryable} -> :retry | :fail` classifier and the `Retry-After` delay-seconds rule
-      verbatim. There is no second retry policy, and no `:suspend` tier here either
+      verbatim. There is no second retry policy, and no `:suspend` tier here either.
+      `:retries` covers `408`/`429`/`500`/`502`/`503`/`504`/`529` plus network errors
+    * `:retryable_statuses` — a list of extra HTTP statuses to treat as retryable, ADDED to
+      the default set (`429`/`500`/`502`/`503`/`504`/`529` plus `408` here). It can only
+      widen: a host cannot remove `429` and lose `Retry-After` handling with it. It sets the
+      DEFAULT classification only — `:on_error` still runs per attempt and has the final say,
+      so `:on_error` returning `:fail` overrides a status listed here. Example: a
+      Cloudflare-fronted origin that answers `520`–`527`. `Retry-After` handling is untouched
     * `:request_params` / `:body_transform` — §8 Gap 1, same ordering: base body →
       `:request_params` merge (a caller key wins) → `:body_transform` → marshal
     * `:on_metric` — emits `"classifier.evaluate"` events into the **same** §8 sink,
@@ -693,7 +710,7 @@ defmodule Toolnexus.Classifier do
         {:ok, body}
 
       {:ok, %{status: status} = resp} ->
-        retryable = status in @retryable_statuses
+        retryable = retryable_status?(status, c.retryable_statuses)
         error = "classifier: POST #{endpoint}: HTTP #{status}#{cause(status, resp.body)}"
 
         if attempt >= c.retries or
@@ -716,6 +733,11 @@ defmodule Toolnexus.Classifier do
         end
     end
   end
+
+  # Only the DEFAULT classification; `:retryable_statuses` is ADDITIVE to `@retryable_statuses`
+  # (see its comment) and never subtractive. `:on_error` still has the final say per attempt.
+  defp retryable_status?(status, extra),
+    do: status in @retryable_statuses or (is_list(extra) and status in extra)
 
   # §8 Resilience, verbatim: absent :on_error ⇒ retryable ⇒ :retry, else :fail.
   defp classify_error(%{on_error: nil}, %{retryable: retryable}),

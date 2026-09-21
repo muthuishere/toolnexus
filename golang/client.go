@@ -47,10 +47,18 @@ type ClientOptions struct {
 	// Hooks are optional lifecycle callbacks around the loop. A nil Hooks (or any
 	// nil field) is skipped. Any hook returning an error aborts the run.
 	Hooks *Hooks
-	// Retries on transient LLM errors (429/5xx/network). 0 ⇒ 2.
+	// Retries on transient LLM errors (429/500/502/503/504/529 + network). 0 ⇒ 2.
+	// Widen the status set with RetryableStatuses.
 	Retries int
 	// RetryBaseMs is the base backoff in ms (exponential + jitter). 0 ⇒ 500.
 	RetryBaseMs int
+	// RetryableStatuses are extra HTTP statuses to treat as retryable, ADDED to
+	// the default set (429/500/502/503/504/529). It can only widen: a host cannot
+	// remove 429 and lose Retry-After handling with it. This sets the DEFAULT
+	// classification; OnError still runs per attempt and has the final say, so
+	// OnError returning TierFail overrides a status listed here. Example: a
+	// Cloudflare-fronted origin that answers 520–527.
+	RetryableStatuses []int
 	// TimeoutMs is the whole-run deadline in ms; when > 0 the run (and its
 	// in-flight request) is aborted once exceeded. 0 ⇒ no deadline.
 	TimeoutMs int
@@ -136,7 +144,7 @@ type ErrorInfo struct {
 	// Attempt is the zero-based attempt index (0 = first try).
 	Attempt int
 	// Retryable reports whether Status/Err is in the default retryable set
-	// (429/5xx/network).
+	// (429/500/502/503/504/529/network, plus anything RetryableStatuses added).
 	Retryable bool
 }
 
@@ -195,8 +203,40 @@ type MetricEvent struct {
 	Question string
 }
 
-// retryableStatus is the set of HTTP statuses worth retrying. Mirrors js RETRYABLE.
-var retryableStatus = map[int]bool{429: true, 500: true, 502: true, 503: true, 504: true}
+// retryableStatuses is the default retryable set: 429 plus the 5xx worth another
+// try — and 529 Overloaded, which TypeSafe documents as "retry with backoff" and
+// which the older five-status set made terminal on the first attempt.
+//
+// It is an ENUMERATION on purpose. "Any 5xx" would sweep in permanently-broken
+// statuses (501 Not Implemented, 505 HTTP Version Not Supported) and change the
+// retry behaviour of every existing host without asking. A backend with its own
+// transient status — a Cloudflare origin answering 520–527, say — opts in
+// declaratively through the RetryableStatuses option, which ADDS to this set and
+// cannot remove from it.
+//
+// Shared with §8B's classifier, which adds 408 to it rather than inventing a
+// second policy.
+var retryableStatuses = map[int]bool{429: true, 500: true, 502: true, 503: true, 504: true, 529: true}
+
+// isRetryableStatus reports whether a status is retryable by default, optionally
+// widened by a host's RetryableStatuses.
+//
+// extra is ADDITIVE: it can only make more statuses retryable, never fewer, so a
+// host cannot accidentally drop 429 and lose Retry-After handling with it. It
+// decides the DEFAULT classification only — OnError still runs afterwards and has
+// the final say on every attempt, so OnError returning TierFail overrides a status
+// the host itself listed here.
+func isRetryableStatus(status int, extra []int) bool {
+	if retryableStatuses[status] {
+		return true
+	}
+	for _, s := range extra {
+		if s == status {
+			return true
+		}
+	}
+	return false
+}
 
 // Hooks are lifecycle callbacks around the agent loop. Each may observe; the
 // noted ones may mutate or short-circuit. A nil field is skipped, and any hook
@@ -757,7 +797,8 @@ func (c *Client) backoff(attempt int, retryAfter string) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
-// llmFetch issues the POST with retry + exponential backoff on 429/5xx/network,
+// llmFetch issues the POST with retry + exponential backoff on the default set
+// (429/500/502/503/504/529) plus network errors and anything RetryableStatuses added,
 // honoring Retry-After. ctx cancellation/timeout aborts the in-flight request
 // and is NOT retried. The caller owns resp.Body. Mirrors js Client.llmFetch.
 func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[string]string, raw []byte) (*http.Response, error) {
@@ -805,7 +846,7 @@ func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[stri
 		if resp.StatusCode < 300 {
 			return resp, nil
 		}
-		retryable := retryableStatus[resp.StatusCode]
+		retryable := isRetryableStatus(resp.StatusCode, c.opts.RetryableStatuses)
 		tier := classify(ErrorInfo{Status: resp.StatusCode, Attempt: attempt, Retryable: retryable})
 		if tier == TierFail || attempt == retries {
 			return resp, nil // caller surfaces the non-ok status

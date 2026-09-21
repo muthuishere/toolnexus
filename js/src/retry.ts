@@ -8,9 +8,6 @@
  * option surface, and nothing here may be added to `index.ts`.
  */
 
-/** The default retryable set (429 + the 5xx worth another try). */
-const RETRYABLE = new Set([429, 500, 502, 503, 504])
-
 /** ~68 years; the widest whole-second count all seven ports represent exactly. */
 const RETRY_AFTER_MAX_SECONDS = 2147483647
 
@@ -33,8 +30,28 @@ export function retryAfterMs(raw: string | null | undefined): number | null {
   return secs <= RETRY_AFTER_MAX_SECONDS ? secs * 1000 : null
 }
 
-/** Whether a status is in the default retryable set (429/5xx). Shared with §8B's classifier,
- * which reuses this policy rather than inventing a second one. */
-export function isRetryableStatus(status: number): boolean {
-  return RETRYABLE.has(status)
+/**
+ * The default retryable set: `429` plus the 5xx worth another try — and `529 Overloaded`,
+ * which TypeSafe documents as "retry with backoff" and which an enumeration made terminal.
+ *
+ * It is an ENUMERATION on purpose. "Any 5xx" would sweep in permanently-broken statuses
+ * (`501 Not Implemented`, `505 HTTP Version Not Supported`) and change the retry behaviour of
+ * every existing host without asking. A backend with its own transient status — a Cloudflare
+ * origin answering `520`–`527`, say — opts in declaratively through `retryableStatuses`, which
+ * ADDS to this set and cannot remove from it.
+ *
+ * Shared with §8B's classifier, which adds `408` to it rather than inventing a second policy.
+ */
+const RETRYABLE = new Set([429, 500, 502, 503, 504, 529])
+
+/**
+ * Whether a status is retryable by default, optionally widened by a host's `retryableStatuses`.
+ *
+ * `extra` is ADDITIVE: it can only make more statuses retryable, never fewer, so a host cannot
+ * accidentally drop `429` and lose `Retry-After` handling with it. It decides the DEFAULT
+ * classification only — `onError` still runs afterwards and has the final say on every attempt,
+ * so `onError` returning `"fail"` overrides a status the host itself listed here.
+ */
+export function isRetryableStatus(status: number, extra?: readonly number[] | null): boolean {
+  return RETRYABLE.has(status) || (extra != null && extra.includes(status))
 }
