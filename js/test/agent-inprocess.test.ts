@@ -1,5 +1,5 @@
 /**
- * Tests for ADR 0024 / issue #95: agents.RuntimeOptions.inProcess, the semantic
+ * Tests for ADR 0030 / issue #95: agents.RuntimeOptions.inProcess, the semantic
  * counterpart to RuntimeOptions.fetch, so a host whose model is a plain function
  * doesn't have to hand-build a `fetch`-shaped adapter to reach the sub-agent
  * runtime. Ported from spikes/inprocess-subagent/SPIKE.md and the Go reference

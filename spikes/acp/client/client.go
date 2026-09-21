@@ -1,5 +1,5 @@
 // Package client is a MINIMAL ACP (Agent Client Protocol) client, built only
-// to settle the ADR-0025 spike gate against a real child process over real
+// to settle the ADR-0031 spike gate against a real child process over real
 // OS pipes. It is not meant to be a reusable library — it does the bare
 // minimum: initialize, session/new, session/prompt, demultiplexing by
 // JSON-RPC id (because session/update notifications interleave with
@@ -37,7 +37,7 @@ type rpcError struct {
 // PermissionTimeoutErr is returned when a turn hangs waiting on an
 // unanswered session/request_permission past the client's own timeout.
 // A real client without this timeout would hang forever — this is the
-// trap ADR-0025 gate item #2 is about.
+// trap ADR-0031 gate item #2 is about.
 type PermissionTimeoutErr struct{ Waited time.Duration }
 
 func (e *PermissionTimeoutErr) Error() string {

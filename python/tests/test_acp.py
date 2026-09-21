@@ -1,4 +1,4 @@
-"""ACP (Agent Client Protocol) as a model source — ADR 0025, issue #96, ported to
+"""ACP (Agent Client Protocol) as a model source — ADR 0031, issue #96, ported to
 Python.
 
 Hermetic: no network, no real `devin`/agent binary. Drives
@@ -29,7 +29,7 @@ def _opts(scenario: str, **overrides) -> ACPOptions:
 
 # --------------------------------------------------------------------------- #
 # session/new carries an absolute cwd + mcpServers — the real `devin acp` trap
-# (ADR 0025 / spike: -32602 Invalid params without it).
+# (ADR 0031 / spike: -32602 Invalid params without it).
 # --------------------------------------------------------------------------- #
 def test_session_new_sends_absolute_cwd_and_mcp_servers():
     client = load_acp(_opts("default"))
@@ -74,7 +74,7 @@ def test_thought_and_tool_narration_filtered_from_reply():
         # notifications with agent_thought_chunk + tool_call/tool_call_update noise
         # interleaved between them; the reply must be exactly the concatenation of
         # the message chunks: the clean JSON-shaped wrapper from the fixture, with
-        # none of the thought-chunk text mixed in (the corruption ADR 0025 gate
+        # none of the thought-chunk text mixed in (the corruption ADR 0031 gate
         # item 3 is about — unfiltered accumulation would wrap prose around this).
         content = result["content"]
         assert content.startswith('{"answer":"')
@@ -132,7 +132,7 @@ def test_supersedes_marker_prevents_stale_answers():
         r1 = client.generate({"messages": [{"role": "user", "content": "What is the capital of France?"}]})
         assert r1["content"] == "FRESH-ANSWER-TO:What is the capital of France?"
 
-        # Turn 2 sends the FULL transcript (per ADR 0025's chosen default), which
+        # Turn 2 sends the FULL transcript (per ADR 0031's chosen default), which
         # now contains turn 1's question verbatim — the exact shape that made the
         # fixture's "stale" scenario answer the FIRST remembered question when no
         # marker is present (see spikes/acp/SPIKE.md gate 1). Because

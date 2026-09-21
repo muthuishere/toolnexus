@@ -1,4 +1,4 @@
-;; Gate: prove a CLI-backed `generate` (ADR 0026 envelope shape), built on
+;; Gate: prove a CLI-backed `generate` (ADR 0032 envelope shape), built on
 ;; `koine.process/sh`, drives the REAL clojure/ `create-in-process-client`
 ;; end to end and returns a tool call — on WHICHEVER host loads this file
 ;; (JVM Clojure or cljgo; the source is identical, no reader conditionals).

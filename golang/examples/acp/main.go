@@ -1,10 +1,10 @@
 // ACP (Agent Client Protocol) as the model behind the client loop — issue #96,
-// ADR 0025 (openspec/changes/add-acp-model-source).
+// ADR 0031 (openspec/changes/add-acp-model-source).
 //
 // HONEST HEADER: the "warm session" win this example prints is the ACP
 // agent CLI's process-startup cost amortised across turns, NOT a
 // protocol-level speedup — session/prompt itself is not faster than any
-// other wire. See ADR 0025's measurements.
+// other wire. See ADR 0031's measurements.
 //
 // This example spawns a real ACP agent CLI (devin or opencode), registers
 // one trivial local tool, and drives it through the ordinary toolnexus

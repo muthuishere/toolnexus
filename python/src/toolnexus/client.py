@@ -2179,7 +2179,7 @@ class InProcessTransport:
     The host returns one assistant message; this builds the provider envelope
     (``choices``, ``finish_reason``, ``usage``) so a model author never has to.
 
-    Public (ADR 0024 / issue #95): ``create_in_process_client`` builds one of these
+    Public (ADR 0030 / issue #95): ``create_in_process_client`` builds one of these
     internally, and :class:`toolnexus.agents.AgentRuntime`'s own ``in_process``
     option calls this SAME class — the top-level client and the sub-agent runtime
     share one adapter, never two copies of the request/response assembly.

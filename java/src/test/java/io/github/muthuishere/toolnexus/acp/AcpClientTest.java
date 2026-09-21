@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Hermetic tests for {@link AcpClient} against {@link FakeAcpServer}, spawned as a real child
  * process over real OS pipes — no network, no real {@code devin}, no MCP SDK. Mirrors the six
- * ADR 0025 / {@code openspec/changes/add-acp-model-source} spec scenarios (see
+ * ADR 0031 / {@code openspec/changes/add-acp-model-source} spec scenarios (see
  * {@code spikes/acp/SPIKE.md} for the Go reference this was built from).
  */
 class AcpClientTest {
@@ -94,7 +94,7 @@ class AcpClientTest {
             // agent_thought_chunk and tool_call/tool_call_update notifications interleaved
             // around two agent_message_chunk halves of a JSON object. Only the message-chunk
             // halves may appear in the result: no thought/tool narration, and the result must
-            // parse as valid JSON (the exact corruption ADR 0025 warns about).
+            // parse as valid JSON (the exact corruption ADR 0031 warns about).
             String expectedUserText = AcpClient.assemblePrompt(request(List.of(userMessage("77"))));
             assertEquals("{\"answer\":\"" + expectedUserText + "\"}", resp.content);
             assertTrue(!resp.content.contains("Let me think"), resp.content);
@@ -208,7 +208,7 @@ class AcpClientTest {
 
     // ---- helper: build an InProcess.Request without a public constructor -----------------
 
-    /** {@link InProcess.Request} has no public constructor (ADR 0024) — the seam is only meant
+    /** {@link InProcess.Request} has no public constructor (ADR 0030) — the seam is only meant
      * to be reached via {@link InProcess#createClient} / the sub-agent runtime. For a direct,
      * single-call unit test we drive the SAME wire shape those callers build (an OpenAI-style
      * {@code messages} array) through {@link InProcess.GenerateBackedHttpClient}, which is the

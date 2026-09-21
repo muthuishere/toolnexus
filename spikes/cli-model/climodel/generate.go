@@ -1,4 +1,4 @@
-// Package climodel is the spike implementation for ADR 0026: a CLI-backed
+// Package climodel is the spike implementation for ADR 0032: a CLI-backed
 // model source that plugs into toolnexus.CreateInProcessClient's Generate seam.
 //
 // It hands a scripted or real one-shot agent CLI the verbatim assembled

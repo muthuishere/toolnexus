@@ -88,7 +88,7 @@ synchronous function and nothing async crosses the boundary.
 
 ### Not done
 
-- The one-shot CLI-backed model source (issue #97, `docs/adr/0026`) is designed and spiked but
+- The one-shot CLI-backed model source (issue #97, `docs/adr/0032`) is designed and spiked but
   **not implemented in any port**. ACP covers agents that speak the protocol; a CLI offering only
   `-p` still needs a host-written adapter.
 - ACP **delta mode** is not shipped; every turn sends the full request.

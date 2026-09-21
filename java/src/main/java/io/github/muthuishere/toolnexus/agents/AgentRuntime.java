@@ -105,7 +105,7 @@ public final class AgentRuntime {
     private final HttpClient gated;
 
     public AgentRuntime(RuntimeOptions opts) {
-        // Construction-time validation, never precedence (ADR 0024): a host that sets more than
+        // Construction-time validation, never precedence (ADR 0030): a host that sets more than
         // one of httpClient/inProcess/baseUrl must be told loudly, not silently resolved.
         if (opts.httpClient != null && opts.inProcess != null) {
             throw new IllegalArgumentException(
@@ -552,7 +552,7 @@ public final class AgentRuntime {
                         ? (opts.defaultModel != null ? opts.defaultModel : "inherit") : h.def.model;
                 Function<Request, Answer> waitFor = oneShotWaitFor != null ? oneShotWaitFor : escalator(h);
                 // opts.inProcess routes through the SAME sentinel wire config InProcess.createClient
-                // uses (ADR 0024): a syntactically-valid, never-dialled base URL and a placeholder
+                // uses (ADR 0030): a syntactically-valid, never-dialled base URL and a placeholder
                 // key, so the client's env-apiKey resolution never runs for a model with no endpoint.
                 LlmClient.Options co = new LlmClient.Options()
                         .baseUrl(opts.inProcess != null ? InProcess.BASE_URL : opts.baseUrl)

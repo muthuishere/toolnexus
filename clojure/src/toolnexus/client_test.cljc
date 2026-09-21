@@ -711,7 +711,7 @@
         (is (= 3 @hits) "two 429s consumed two retries, the third call succeeded")))))
 
 (deftest retries-zero-means-exactly-one-attempt
-  ;; ADR-0023 — :retries must be able to mean "zero retries" (exactly one
+  ;; ADR-0029 — :retries must be able to mean "zero retries" (exactly one
   ;; attempt), and an explicit 0 must be honored even though 0 is truthy in
   ;; Clojure's `or` — this is the failure mode the bug fix pins.
   (flaky-llm [429 429 429]

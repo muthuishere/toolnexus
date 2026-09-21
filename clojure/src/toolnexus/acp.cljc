@@ -1,4 +1,4 @@
-;; ACP (Agent Client Protocol) model source — issue #96, ADR 0025,
+;; ACP (Agent Client Protocol) model source — issue #96, ADR 0031,
 ;; openspec/changes/add-acp-model-source. Ports golang/acp.go (the reference,
 ;; already green) and elixir/lib/toolnexus/acp.ex (the closest functional
 ;; sibling) to this dual-host `.cljc` — zero reader conditionals, no java.*,
@@ -11,7 +11,7 @@
 ;; portability spike, `spikes/portability/SPIKE.md`, proves `koine.process` is
 ;; already dual-host-proven for exactly this shape).
 ;;
-;; A WARM SESSION (ADR 0025 — "the warm session is the feature"): `connect`
+;; A WARM SESSION (ADR 0031 — "the warm session is the feature"): `connect`
 ;; spawns the child and completes `initialize` + `session/new` (+ optional
 ;; `session/set_mode`) ONCE; every later turn is one `session/prompt` on that
 ;; same session. Concretely, mirroring the Go/Elixir gates:
@@ -104,7 +104,7 @@
 
 ;; ---------------------------------------------------------------------------
 ;; prompt assembly — full request every turn + the library-built supersedes
-;; marker (ADR 0025's default; spikes/acp/SPIKE.md gate 1).
+;; marker (ADR 0031's default; spikes/acp/SPIKE.md gate 1).
 ;; ---------------------------------------------------------------------------
 
 (defn- msg-role [m]
@@ -135,7 +135,7 @@
   client a second, shadow copy of conversation state) — and append the
   supersedes marker naming the latest message's text, so a stateful agent
   answers the CURRENT request rather than an earlier near-duplicate already
-  sitting in its own session history (ADR 0025)."
+  sitting in its own session history (ADR 0031)."
   [messages]
   (let [transcript (str/join "\n" (map (fn [m] (str (msg-role m) ": " (msg-text m))) messages))
         latest     (if (seq messages) (msg-text (last messages)) "")
@@ -158,7 +158,7 @@
 (defn- answer-permission!
   "Answer a `session/request_permission` request with the first `allow`-kind
   option, inline — an unanswered permission request hangs the turn forever,
-  even in bypass mode (ADR 0025)."
+  even in bypass mode (ADR 0031)."
   [client req]
   (let [options (get-in req [:params :options])
         chosen  (some (fn [o] (when (str/starts-with? (str (:kind o)) "allow") (:optionId o)))
@@ -270,7 +270,7 @@
   opts:
     :cwd                 absolute working directory handed to `session/new`.
                           A real `devin acp` REJECTS session/new with -32602
-                          without an absolute cwd (ADR 0025) — defaults to
+                          without an absolute cwd (ADR 0031) — defaults to
                           the process's own resolved cwd (`koine.fs/real-path`
                           on \".\"), which is always absolute.
     :mcp-servers          the `mcpServers` array on `session/new` (default

@@ -12,7 +12,7 @@ The surface, once, so every port implements the same thing:
 - [x] Spec delta at `specs/subagents/spec.md`
 - [x] `openspec validate add-in-process-subagents --strict`
 - [ ] `SPEC.md` — the sub-agent section names the in-process option
-- [x] `docs/adr/0024` revised to record the falsified parity assumption
+- [x] `docs/adr/0030` revised to record the falsified parity assumption
 
 ## Per-language parity checklist
 

@@ -1,4 +1,4 @@
-"""Gate: prove a CLI-backed `generate` (ADR 0026 envelope shape) drives the
+"""Gate: prove a CLI-backed `generate` (ADR 0032 envelope shape) drives the
 REAL python/ `create_in_process_client` end to end and returns a tool call.
 
 Run: cd spikes/portability/python && ../.venv/bin/python -m pytest -v test_climodel.py

@@ -733,7 +733,7 @@ defmodule Toolnexus.Client do
 
   This is the adapter `create_in_process/1` builds for itself, exported so any other
   caller that needs a `:transport`-shaped seam wired to a semantic in-process model —
-  e.g. `Toolnexus.Agents.Runtime`'s `:in_process` option (ADR 0024) — reuses the SAME
+  e.g. `Toolnexus.Agents.Runtime`'s `:in_process` option (ADR 0030) — reuses the SAME
   code rather than hand-rolling a second wire adapter. `generate` and its
   request/response shapes are exactly those documented on `create_in_process/1`.
   """

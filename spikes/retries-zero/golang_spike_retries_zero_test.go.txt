@@ -1,6 +1,6 @@
 package toolnexus
 
-// SPIKE FILE — ADR-0023. Lives here only long enough to `go test` against the
+// SPIKE FILE — ADR-0029. Lives here only long enough to `go test` against the
 // real package internals (retries(), llmFetch's attempt loop, backoff());
 // copied into spikes/retries-zero/ and removed from this package afterward.
 // See spikes/retries-zero/SPIKE.md for the write-up.

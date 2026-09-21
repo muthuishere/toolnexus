@@ -82,7 +82,7 @@ const inProcessBaseURL = "http://in-process.invalid/v1"
 // InProcessTransport builds the SAME round tripper CreateInProcessClient uses, as a
 // plain http.RoundTripper — for a host that needs to hand a sub-agent runtime
 // (agents.Options.Transport) the identical in-process model a top-level client was
-// built with, without re-implementing the wire assembly (ADR 0024 / issue #95).
+// built with, without re-implementing the wire assembly (ADR 0030 / issue #95).
 func InProcessTransport(generate func(InProcessRequest) (InProcessResponse, error)) http.RoundTripper {
 	return &inProcessRoundTripper{generate: generate}
 }
@@ -193,7 +193,7 @@ func CreateInProcessClient(opts InProcessOptions) *Client {
 	if opts.Generate == nil {
 		panic("toolnexus: CreateInProcessClient requires a Generate function")
 	}
-	// SPIKE (ADR-0023): every failure is FINAL by default via the GENERAL
+	// SPIKE (ADR-0029): every failure is FINAL by default via the GENERAL
 	// Retries mechanism now that -1 is a real "explicit zero" spelling --
 	// no more forcing OnError=TierFail as a workaround. opts.OnError (nil
 	// unless the host sets one) passes through untouched; it is moot when the

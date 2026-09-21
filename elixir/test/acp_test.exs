@@ -1,6 +1,6 @@
 defmodule Toolnexus.AcpTest do
   @moduledoc """
-  ACP (Agent Client Protocol) model source — issue #96, ADR 0025,
+  ACP (Agent Client Protocol) model source — issue #96, ADR 0031,
   `openspec/changes/add-acp-model-source`. Hermetic: drives a fake ACP
   server (`test/support/fake_acp_server.exs`) over REAL OS pipes, ported
   from `spikes/acp/fakeagent/main.go` / `spikes/acp/SPIKE.md`.

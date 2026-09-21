@@ -326,7 +326,7 @@ class LlmClientResilienceTest {
         assertEquals(1, attemptsFor(501, cloudflare), "a status in neither set stays terminal");
     }
 
-    // ------------------------------------------------------------------ ADR-0023: retries=0 must mean zero
+    // ------------------------------------------------------------------ ADR-0029: retries=0 must mean zero
     // LlmClient.Options.retries is a boxed Integer (LlmClient.java:92); the defaulting method
     // `private int retries()` (LlmClient.java:2166) is a null-check (`opts.retries != null ? opts.retries : 2`),
     // not a truthiness/`> 0` check, so an explicit 0 already survives distinctly from "unset".

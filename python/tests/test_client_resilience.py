@@ -446,11 +446,11 @@ async def test_on_error_fail_overrides_a_status_the_host_listed():
 
 
 # --------------------------------------------------------------------------- #
-# ADR-0023 — `retries` must be able to mean zero (exactly one attempt), and the
+# ADR-0029 — `retries` must be able to mean zero (exactly one attempt), and the
 # default (unset) must still mean 2 retries (3 total attempts). Python's keyword
 # default (`retries: int = 2`) is not a 0-as-sentinel, so `retries=0` and an
 # omitted `retries` are already distinct code paths — pin that here so it can't
-# silently regress. See docs/adr/0023-retries-must-be-able-to-mean-zero.md and
+# silently regress. See docs/adr/0029-retries-must-be-able-to-mean-zero.md and
 # spikes/retries-zero/SPIKE.md.
 # --------------------------------------------------------------------------- #
 class _FailingTransport:

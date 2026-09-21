@@ -3,7 +3,7 @@ using Toolnexus.Acp;
 namespace Toolnexus.Examples;
 
 /// <summary>
-/// ACP (Agent Client Protocol) as the model behind the unified client (issue #96, ADR 0025):
+/// ACP (Agent Client Protocol) as the model behind the unified client (issue #96, ADR 0031):
 /// a local coding-agent CLI — <c>devin acp</c> or <c>opencode acp</c> — is spawned ONCE, and
 /// every turn below reuses that same warm session instead of paying process-startup cost again.
 ///

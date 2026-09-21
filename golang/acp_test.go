@@ -6,7 +6,7 @@ package toolnexus
 // os/exec TestHelperProcess pattern) — so there is no `go build` subprocess
 // step and no extra testdata binary to maintain. It speaks the same
 // JSON-RPC-2.0-one-object-per-line framing as spikes/acp/fakeagent, scripted
-// per ACP_SCENARIO to exercise exactly the ADR 0025 gate items / spec
+// per ACP_SCENARIO to exercise exactly the ADR 0031 gate items / spec
 // scenarios this file covers, and reports what it observed by appending
 // newline-delimited JSON events to ACP_OUT_FILE for the parent test to read
 // back after ACPClient.Close().
@@ -404,7 +404,7 @@ func TestACP_WarmSessionReuse(t *testing.T) {
 }
 
 // `session/new` params carry an absolute cwd and a (possibly empty) mcpServers
-// array — the exact trap real `devin acp` enforces (ADR 0025).
+// array — the exact trap real `devin acp` enforces (ADR 0031).
 func TestACP_SessionNewCarriesAbsoluteCwdAndMcpServers(t *testing.T) {
 	outFile := filepath.Join(t.TempDir(), "events.ndjson")
 	c, err := LoadACP(context.Background(), acpTestOptions(t, "warm", outFile))

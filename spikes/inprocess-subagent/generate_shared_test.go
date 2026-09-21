@@ -1,4 +1,4 @@
-// Spike for issue #95 / ADR 0024: does ONE semantic `Generate` function serve
+// Spike for issue #95 / ADR 0030: does ONE semantic `Generate` function serve
 // both a top-level CreateInProcessClient AND a sub-agent runtime, with no
 // copied round-tripper code, while the global turn gate still holds?
 //
@@ -101,7 +101,7 @@ func TestSharedGenerate_SubAgentRuntime(t *testing.T) {
 	t.Logf("sub-agent result: %+v, calls=%d", r, m.calls)
 }
 
-// TestGateHolds_ConcurrencyOne is the falsifiable gate test (ADR 0024 gate
+// TestGateHolds_ConcurrencyOne is the falsifiable gate test (ADR 0030 gate
 // item 2): MaxConcurrentTurns=1, five workers woken concurrently. If
 // gatedTransport (runtime.go:872) stopped wrapping the Transport this spike
 // wires in, scriptedModel would observe >1 in flight and this test fails.

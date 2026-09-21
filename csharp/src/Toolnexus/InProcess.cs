@@ -114,7 +114,7 @@ public static class InProcess
 
     /// <summary>
     /// The adapter that turns a semantic <c>Generate</c> function into an
-    /// <see cref="HttpMessageHandler"/> (SPEC §8 Gap 2, ADR 0024). Public so ANY caller that needs
+    /// <see cref="HttpMessageHandler"/> (SPEC §8 Gap 2, ADR 0030). Public so ANY caller that needs
     /// an in-process handler — not only <see cref="CreateClient"/> — can construct the same
     /// adapter instead of duplicating this translation; the agent runtime's semantic in-process
     /// option (<c>RuntimeOptions.InProcess</c>) is built by calling this constructor directly.

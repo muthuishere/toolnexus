@@ -1,6 +1,6 @@
-# Spike — ADR 0026: CLI-backed model source
+# Spike — ADR 0032: CLI-backed model source
 
-Spikes ADR 0026's Gate (`docs/adr/0026-cli-backed-model-source-the-envelope-is-the-contract.md`)
+Spikes ADR 0032's Gate (`docs/adr/0032-cli-backed-model-source-the-envelope-is-the-contract.md`)
 against issue #97. Go only, hermetic, no network, no real agent CLI invoked. Everything lives
 under `spikes/cli-model/` and is self-contained (its own `go.mod`, `replace` pointing at
 `../../golang`).
@@ -191,7 +191,7 @@ Two ways to close the gap, neither free:
    usage to sum, so this would be simulated rather than demonstrated, and the ADR's gate asks what
    the run *currently* reports, not what a future enhancement could report.
 
-**Recommendation:** if ADR 0026 ships, it should explicitly document that repair-attempt cost is
+**Recommendation:** if ADR 0032 ships, it should explicitly document that repair-attempt cost is
 NOT counted by `toolnexus`'s own metrics on this seam, and ship (2) as a built-in behavior of the
 CLI-backed `Generate` (accumulate a per-launch token/cost estimate and report it as the final
 `Usage`) rather than leaving it to every host to remember to wire `OnLaunch` themselves.
@@ -225,7 +225,7 @@ argues for it harder than the ADR's stated reason:
   Go-only per the task, so it says nothing about the other six ports.
 - Drift 1c's exact real-world shape (see the interpretation note above) — needs a concrete example
   from the reporter's live `devin` run before this is pinned in a real OpenSpec change.
-- The "retries off" interaction from ADR 0023 was not exercised here: `CreateInProcessClient`
+- The "retries off" interaction from ADR 0029 was not exercised here: `CreateInProcessClient`
   already forces `OnError -> TierFail` (see `golang/inprocess.go`), so `Client.Run` never retries a
   failed `Generate` call regardless of this adapter — that part is inherited, not something this
   spike needed to prove.

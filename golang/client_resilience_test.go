@@ -85,7 +85,7 @@ func TestClientRetryExhausted(t *testing.T) {
 	}
 }
 
-// TestClientRetriesExplicitZeroMeansOneAttempt pins ADR-0023: Retries: -1 is
+// TestClientRetriesExplicitZeroMeansOneAttempt pins ADR-0029: Retries: -1 is
 // the "explicit zero" sentinel and must make exactly one backend call, never
 // retrying and never skipping the first attempt.
 func TestClientRetriesExplicitZeroMeansOneAttempt(t *testing.T) {

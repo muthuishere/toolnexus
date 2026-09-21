@@ -1,4 +1,4 @@
-# ACP spike — ADR 0025 gate
+# ACP spike — ADR 0031 gate
 
 Ran against a **fake ACP server**, a Go binary (`spikes/acp/fakeagent/`) spoken to
 over real OS pipes (`exec.Cmd.StdinPipe`/`StdoutPipe`) with JSON-RPC 2.0, one object
@@ -135,7 +135,7 @@ reports is a property of `devin`'s real startup latency, not of the ACP protocol
 itself.** Swapping in a fast backing model/agent (or, as the live check below shows, a
 genuinely warm real session) would shrink the win to roughly what this fake-server run
 shows — single-digit milliseconds of process bookkeeping — because ACP's win **is**
-process-startup amortization, exactly as ADR 0025 already says ("the entire per-turn
+process-startup amortization, exactly as ADR 0031 already says ("the entire per-turn
 cost is process startup"). This spike does not discover a *second*, protocol-level
 speedup; it confirms there isn't one to find against a fast backend.
 
@@ -146,15 +146,15 @@ speedup; it confirms there isn't one to find against a fast backend.
 and the `skill` tool's byte-exact output, the three provider adapters (schema
 mapping), `native`/`http` tool sources, the unified client's system-prompt assembly
 and loop, built-in tools, suspension (`Pending`/`waitFor`), and single-turn
-`translate`. ACP, per ADR 0025's own proposed decision, ships as a `Generate` — the
+`translate`. ACP, per ADR 0031's own proposed decision, ships as a `Generate` — the
 exact seam `InProcessOptions.Generate` already defines in `golang/inprocess.go`
 (`func(InProcessRequest) (InProcessResponse, error)`, used by
 `CreateInProcessClient`). Everything ACP-specific (the JSON-RPC session, chunk
 filtering, permission handling, the supersedes marker) lives entirely **inside** that
 one `Generate` closure; from the loop's perspective it is indistinguishable from any
 other in-process model. None of §0's 13 points describe a model source's internals —
-`onnx-in-process` (a local model) and a CLI-backed `Generate` (ADR 0026) don't touch
-§0 either, for the same reason. **This confirms ADR 0025's own framing** ("the
+`onnx-in-process` (a local model) and a CLI-backed `Generate` (ADR 0032) don't touch
+§0 either, for the same reason. **This confirms ADR 0031's own framing** ("the
 smallest framing: ACP is a model source, not a new tool source and not a new
 client") — a `LoadACP(...) -> acp.Generate` helper is Go-local, ships in `golang/`
 only or as an `examples/` recipe, and needs zero cross-port work unless/until another
@@ -204,7 +204,7 @@ things are true at once:
    because that logic is opaque and agent-specific (this is exactly the ADR's own
    framing: "a prompt-level hack holding a protocol-level mismatch together").
 
-Given that, and given that ADR 0025 itself already prefers full-request-every-turn for
+Given that, and given that ADR 0031 itself already prefers full-request-every-turn for
 a real, independent reason — **matching every other toolnexus model source's
 stateless contract**, and avoiding a shadow transcript that can drift from
 `ConversationStore` — my recommendation is: **keep full-request-every-turn as the

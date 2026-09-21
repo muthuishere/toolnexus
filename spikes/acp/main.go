@@ -1,5 +1,5 @@
 // Command acp-spike drives the fake ACP agent (fakeagent/) through a minimal
-// ACP client (client/) to settle the ADR-0025 gate with running code, printed
+// ACP client (client/) to settle the ADR-0031 gate with running code, printed
 // verbatim so SPIKE.md can quote it.
 //
 //	go run . stale        - gate item 1: stale answer + supersedes fix

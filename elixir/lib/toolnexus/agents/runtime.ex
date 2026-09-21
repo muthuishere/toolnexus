@@ -28,7 +28,7 @@ defmodule Toolnexus.Agents.Runtime do
     * `:registry` — map of agent name → definition (see `Toolnexus.Agents.registry/1`)
     * `:transport` — the LLM transport function (see `Toolnexus.Client` `:transport`);
       the runtime wraps it with the turn gate
-    * `:in_process` — a model running IN THIS PROCESS (ADR 0024): a bare `generate`
+    * `:in_process` — a model running IN THIS PROCESS (ADR 0030): a bare `generate`
       function (see `Toolnexus.Client.create_in_process/1`), the semantic counterpart
       to `:transport`, for a host whose model is an Elixir function rather than a
       wire endpoint. Internally this is turned into a transport by calling the SAME
@@ -63,7 +63,7 @@ defmodule Toolnexus.Agents.Runtime do
   end
 
   # Construction-time validation, never precedence: `:in_process` is mutually
-  # exclusive with `:transport` and `:llm` (ADR 0024 — mirrors
+  # exclusive with `:transport` and `:llm` (ADR 0030 — mirrors
   # Toolnexus.Client.create_in_process/1's own reserved-key style).
   defp validate_transport_opts!(opts) do
     if opts[:in_process] && opts[:transport] do

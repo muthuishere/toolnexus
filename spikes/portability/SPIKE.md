@@ -7,7 +7,7 @@ seam genuinely adds no cross-language conformance surface) but incomplete about 
 repo's own prime directive: *"A behavior change lands in all seven ports, or it is not
 done… silent drift is the one bug this repo exists to prevent"* (`CLAUDE.md`). A
 capability that only Go users get is exactly that drift, SPEC-invisible or not. This
-spike does not re-litigate the Go findings (ADR 0025/0026 gates 1–5, already proven with
+spike does not re-litigate the Go findings (ADR 0031/0026 gates 1–5, already proven with
 running code) — it asks the question those spikes explicitly did not: **can the other
 six ports build the same thing, and what would it cost.**
 
@@ -42,7 +42,7 @@ speaking its protocol require new infrastructure." That's §2.
 working, newline-delimited-JSON-over-pipes subprocess machinery, in its shipped code,
 today — because MCP's local `command`⇒stdio transport (SPEC §2) already requires
 exactly that shape.** ACP is JSON-RPC 2.0 over stdin/stdout, one object per line, framed
-identically to MCP stdio. The CLI-backed source (ADR 0026) is a strictly simpler
+identically to MCP stdio. The CLI-backed source (ADR 0032) is a strictly simpler
 one-shot exec + file I/O. Neither needs a new third-party dependency in any of the seven
 ports — the dependency already ships, because MCP local servers made it mandatory.
 
@@ -94,7 +94,7 @@ Per the task, the two highest-risk candidates from §2 were **Python** (the only
 with a real, non-hypothetical seam constraint — forced synchronicity) and **Clojure**
 (the only port with a second host to prove, per the task's explicit instruction, and the
 one place this audit found real friction — project configuration, not subprocess
-capability). Both spikes build the **CLI-backed model source** (ADR 0026 shape:
+capability). Both spikes build the **CLI-backed model source** (ADR 0032 shape:
 one-shot subprocess, prompt/response via files) — the shared fake CLI proves the
 envelope contract works identically driven from two different host languages.
 
@@ -169,7 +169,7 @@ forced by a real finding, not convenience — see the friction point below.
 **Bug caught by the spike, not by inspection:** the first version used
 `(get parsed "choices")` (string key) on the client's JSON response. It silently
 returned `nil` and fell through to an empty-content answer — no exception, just a wrong
-answer, exactly the "confidently wrong" failure class ADR 0026 warns about for a
+answer, exactly the "confidently wrong" failure class ADR 0032 warns about for a
 different reason. Cause: `koine.json/read-str` **keywordizes** keys (matching every
 other call site in the real port, e.g. `client.cljc`'s own
 `in-process-http-client`), so the fix was switching to keyword access
@@ -236,11 +236,11 @@ ports. ACP (bidirectional, stateful, long-lived) is the more expensive of the tw
 features per port; the CLI source (one-shot) is materially cheaper everywhere because
 neither the async-demux question nor the process-lifetime question exists for it.
 
-| Port | CLI source (ADR 0026) | ACP (ADR 0025) | Why |
+| Port | CLI source (ADR 0032) | ACP (ADR 0031) | Why |
 |---|---|---|---|
 | Go | done (reference) | done (reference, spiked) | Both already spiked with running code. |
 | JS/TS | **Low** | **Low** | `Promise`-typed seam natively fits an async JSON-RPC demux loop; `node:child_process` + `readline` is idiomatic for line-framed protocols; this is arguably the *easiest* non-Go port for ACP. |
-| Elixir | **Low** | **Low–Medium** | `Port` + `GenServer` is the textbook shape for "long-lived child, async notifications, request/response by correlation id" — less adaptation than translation. Existing MCP stdio transport (`stdio.ex`) is close to a template. Medium only because permission-request timeout/hang semantics (ADR 0025 gate 2) need an explicit `GenServer` timeout, not a language gap. |
+| Elixir | **Low** | **Low–Medium** | `Port` + `GenServer` is the textbook shape for "long-lived child, async notifications, request/response by correlation id" — less adaptation than translation. Existing MCP stdio transport (`stdio.ex`) is close to a template. Medium only because permission-request timeout/hang semantics (ADR 0031 gate 2) need an explicit `GenServer` timeout, not a language gap. |
 | Java | **Low** | **Medium** | `ProcessBuilder` + a reader thread is unremarkable; ACP's demux-by-JSON-RPC-id needs a small dedicated dispatcher (a `Map<Object, CompletableFuture<...>>`), more boilerplate than risk. |
 | C# | **Low** | **Medium** | Same shape as Java — `Process` + `async`/`Task`-based reader; C#'s `async`/`await` is a good fit for ACP's request/notification interleaving, more code than novelty. |
 | Python | **Low** (proven here) | **Medium–High** | The forced-sync `generate` contract (§2) means ACP's background-reader-plus-blocking-wait needs `threading`+`queue` explicitly, where five other ports get it closer to free from their concurrency primitives. Not a blocker — proven tractable for the simpler CLI case here — but the port needing the most deliberate design work for ACP specifically. |
@@ -287,7 +287,7 @@ only the inference that "no SPEC change" meant "Go-only is fine." It does not.
 
 ## Files
 
-- `spikes/portability/fakecli/fakecli.py` — shared hermetic fake CLI (ADR 0026 envelope
+- `spikes/portability/fakecli/fakecli.py` — shared hermetic fake CLI (ADR 0032 envelope
   shape, two-turn tool-call loop), used by both proofs.
 - `spikes/portability/python/climodel.py`, `test_climodel.py` — Proof A. Run:
   `cd spikes/portability/python && .venv/bin/python -m pytest -v test_climodel.py`

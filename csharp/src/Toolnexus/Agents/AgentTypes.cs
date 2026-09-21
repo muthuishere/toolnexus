@@ -126,7 +126,7 @@ public sealed class RuntimeOptions
     public HttpMessageHandler? Handler { get; set; }
 
     /// <summary>
-    /// A model running IN THIS PROCESS (ADR 0024): the semantic counterpart to
+    /// A model running IN THIS PROCESS (ADR 0030): the semantic counterpart to
     /// <see cref="Handler"/>, so a host whose model is a C# function doesn't have to hand-build an
     /// <see cref="HttpMessageHandler"/> to reach the sub-agent runtime. Internally this is turned
     /// into a <see cref="Toolnexus.InProcess.GenerateBackedHandler"/> — the SAME public adapter

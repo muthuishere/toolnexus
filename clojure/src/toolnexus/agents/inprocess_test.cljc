@@ -1,4 +1,4 @@
-;; ADR 0024 — the in-process seam stops at the top-level client, and the fix:
+;; ADR 0030 — the in-process seam stops at the top-level client, and the fix:
 ;; `toolnexus.client/in-process-http-client` is now PUBLIC so `create-runtime`'s
 ;; new `:in-process` option can call it directly (zero duplicated adapter
 ;; logic). Mirrors golang/agents/inprocess_test.go — the reference port.

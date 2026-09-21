@@ -1,5 +1,5 @@
 /**
- * ACP (Agent Client Protocol) model source — issue #96, ADR 0025
+ * ACP (Agent Client Protocol) model source — issue #96, ADR 0031
  * ("ACP: the warm session is the feature, and it breaks the stateless request"),
  * openspec/changes/add-acp-model-source.
  *
@@ -102,7 +102,7 @@ function renderContent(content: any): string {
 
 /** Renders the FULL assembled request as one prompt string — role + content
  *  per message — then appends the supersedes marker naming the latest user
- *  turn, per ADR 0025's proposed (and spike-confirmed) default: full request
+ *  turn, per ADR 0031's proposed (and spike-confirmed) default: full request
  *  every turn, not a delta, so this stays stateless like every other
  *  toolnexus model source and never risks a shadow transcript drifting from
  *  the caller's own conversation state. */

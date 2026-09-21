@@ -6,7 +6,7 @@ namespace Toolnexus.Tests;
 
 /// <summary>
 /// Hermetic tests for <see cref="AcpClient"/> (issue #96, openspec/changes/add-acp-model-source,
-/// docs/adr/0025). Everything runs over REAL OS pipes against <c>FakeAcpServer</c> (a sibling
+/// docs/adr/0031). Everything runs over REAL OS pipes against <c>FakeAcpServer</c> (a sibling
 /// test-helper console app, tests/FakeAcpServer/), spawned as a real child process via
 /// <c>dotnet &lt;FakeAcpServer.dll&gt; --scenario=&lt;name&gt;</c> — no network, no real ACP
 /// agent. FakeAcpServer mirrors spikes/acp/fakeagent/main.go's five scenarios.

@@ -156,7 +156,7 @@ from .types import (
 )
 
 __all__ = [
-    # acp (ADR 0025, issue #96)
+    # acp (ADR 0031, issue #96)
     "ACPClient",
     "ACPError",
     "ACPOptions",

@@ -1,9 +1,9 @@
 /**
- * Tests for the ACP (Agent Client Protocol) model source — issue #96, ADR 0025,
+ * Tests for the ACP (Agent Client Protocol) model source — issue #96, ADR 0031,
  * openspec/changes/add-acp-model-source. Hermetic: no network, no real ACP
  * agent. Drives `test/fixtures/acp-fake-server.mjs`, a small built-ins-only
  * Node script that speaks the same JSON-RPC-over-stdio protocol a real agent
- * (devin acp, Gemini CLI, Zed) does, scripted per ADR 0025's gate items.
+ * (devin acp, Gemini CLI, Zed) does, scripted per ADR 0031's gate items.
  *
  * Run: npm run build && node --experimental-strip-types --test test/acp.test.ts
  */

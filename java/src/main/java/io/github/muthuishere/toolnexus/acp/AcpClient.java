@@ -28,7 +28,7 @@ import java.util.function.Function;
 /**
  * A client for an ACP (Agent Client Protocol) agent, spoken over a child process's
  * stdin/stdout as JSON-RPC 2.0, one object per line — the semantic counterpart, for a whole
- * agent, of what {@code McpSource} is for one tool server (issue #96, ADR 0025,
+ * agent, of what {@code McpSource} is for one tool server (issue #96, ADR 0031,
  * {@code openspec/changes/add-acp-model-source}).
  *
  * <p>{@link #start} spawns the agent, negotiates {@code initialize}, and opens ONE
@@ -36,7 +36,7 @@ import java.util.function.Function;
  * an ACP session is stateful and toolnexus assembles a complete request every turn, each
  * {@code generate} appends an explicit {@code SUPERSEDES-ALL-PRIOR:} marker naming the current
  * turn, so a stateful agent answers the fresh prompt rather than a near-duplicate earlier one
- * (ADR 0025's spike gate).
+ * (ADR 0031's spike gate).
  *
  * <p>Implements {@code Function<InProcess.Request, InProcess.Response>} so an instance plugs
  * directly into {@link InProcess.Options#generate} or {@code RuntimeOptions.inProcess} with no
@@ -72,7 +72,7 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
     /**
      * When true (the default), {@code session/request_permission} is answered immediately with
      * the first option whose {@code kind} starts with {@code allow}. An unanswered permission
-     * request hangs the turn forever — see ADR 0025 gate item #2. Set false only to reproduce
+     * request hangs the turn forever — see ADR 0031 gate item #2. Set false only to reproduce
      * that hang deliberately (tests).
      */
     public volatile boolean autoAnswerPermission = true;
@@ -131,7 +131,7 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
 
         // A real `devin acp` rejects session/new with -32602 unless cwd is ABSOLUTE and an
         // mcpServers array (empty is fine) is present. Never produced by a fake that doesn't
-        // validate params, only by the real thing (ADR 0025 spike).
+        // validate params, only by the real thing (ADR 0031 spike).
         String cwd = new File(System.getProperty("user.dir")).getAbsoluteFile().getPath();
         Map<String, Object> sessionParams = new LinkedHashMap<>();
         sessionParams.put("cwd", cwd);
@@ -170,7 +170,7 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
 
     /**
      * One {@code session/prompt} on the already-open, warm session — never spawns, never
-     * re-initializes, never opens a new session. Assembles the FULL request (per ADR 0025's
+     * re-initializes, never opens a new session. Assembles the FULL request (per ADR 0031's
      * chosen default: stateless-by-default, matching every other toolnexus model source) plus
      * the supersedes marker, then returns the accumulated {@code agent_message_chunk} text.
      *

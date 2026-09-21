@@ -7,7 +7,7 @@ index c2a9944..d4c00c6 100644
  	endpoint := strings.TrimRight(c.opts.BaseURL, "/") + "/systemone"
  	retries := c.opts.Retries
 -	if retries <= 0 {
-+	if retries == -1 { // SPIKE (ADR-0023): explicit-zero sentinel
++	if retries == -1 { // SPIKE (ADR-0029): explicit-zero sentinel
 +		retries = 0
 +	} else if retries <= 0 {
  		retries = 2
@@ -21,7 +21,7 @@ index 39101b7..74060e6 100644
  }
  
  func (c *Client) retries() int {
-+	// SPIKE (ADR-0023): -1 is the "explicit zero" sentinel. It must resolve to
++	// SPIKE (ADR-0029): -1 is the "explicit zero" sentinel. It must resolve to
 +	// the ACTUAL retry budget (0), never be handed to the loop bound as -1 --
 +	// `for attempt := 0; attempt <= -1; attempt++` would never execute even
 +	// the FIRST attempt, which is a worse bug than the one being fixed.
@@ -51,7 +51,7 @@ index 0fd92e3..60c55b7 100644
 -	if onError == nil {
 -		onError = func(ErrorInfo) Tier { return TierFail }
 -	}
-+	// SPIKE (ADR-0023): every failure is FINAL by default via the GENERAL
++	// SPIKE (ADR-0029): every failure is FINAL by default via the GENERAL
 +	// Retries mechanism now that -1 is a real "explicit zero" spelling --
 +	// no more forcing OnError=TierFail as a workaround. opts.OnError (nil
 +	// unless the host sets one) passes through untouched; it is moot when the

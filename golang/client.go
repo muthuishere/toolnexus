@@ -519,7 +519,7 @@ func (c *Client) maxTurns() int {
 }
 
 func (c *Client) retries() int {
-	// SPIKE (ADR-0023): -1 is the "explicit zero" sentinel. It must resolve to
+	// SPIKE (ADR-0029): -1 is the "explicit zero" sentinel. It must resolve to
 	// the ACTUAL retry budget (0), never be handed to the loop bound as -1 --
 	// `for attempt := 0; attempt <= -1; attempt++` would never execute even
 	// the FIRST attempt, which is a worse bug than the one being fixed.

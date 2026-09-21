@@ -1,4 +1,4 @@
-"""ADR 0024 — the in-process seam stops at the top-level client, ported to Python.
+"""ADR 0030 — the in-process seam stops at the top-level client, ported to Python.
 
 ``InProcessTransport`` (public, ``toolnexus.InProcessTransport``) is the ONE
 adapter that turns a semantic ``generate(request) -> {...}`` function into the

@@ -1,6 +1,6 @@
-# Spike: ADR-0023 gate — "Retries must be able to mean zero"
+# Spike: ADR-0029 gate — "Retries must be able to mean zero"
 
-Attacking the gate in `docs/adr/0023-retries-must-be-able-to-mean-zero.md`, not
+Attacking the gate in `docs/adr/0029-retries-must-be-able-to-mean-zero.md`, not
 confirming it. Everything below was **run**, not just read.
 
 ## TL;DR verdict
@@ -18,7 +18,7 @@ plus the `CreateInProcessClient` cleanup. **Do not touch JS, Python, Java, C#, o
 Elixir** — they need no code change, and adding a `-1` sentinel to them would be
 pure noise (or, worse, a second way to spell the same thing next to the one that
 already works). Clojure needs a *different* fix entirely (see below) — filing
-that as a separate, non-ADR-0023 issue is the honest move.
+that as a separate, non-ADR-0029 issue is the honest move.
 
 ---
 
@@ -131,14 +131,14 @@ ELIXIR VERDICT: retries: 0 != unset. Keyword-list presence + truthy-0 `||` alrea
 ```
 calls with :retries 0 -> 1
 calls with :retries UNSET -> 1
-CLOJURE VERDICT: explicit 0 and unset are indistinguishable in EFFECT here only because this port's shipped default is already 0 (not the documented 2) -- a pre-existing parity deviation, unrelated to ADR-0023's `0 => 2` premise. `(or 0 0)` is truthy-safe either way; no -1 sentinel is needed to make retries=0 work.
+CLOJURE VERDICT: explicit 0 and unset are indistinguishable in EFFECT here only because this port's shipped default is already 0 (not the documented 2) -- a pre-existing parity deviation, unrelated to ADR-0029's `0 => 2` premise. `(or 0 0)` is truthy-safe either way; no -1 sentinel is needed to make retries=0 work.
 ```
 
 **This is a real, separate parity bug** — Clojure silently ships a materially
 different default (0 retries) from the other six ports (2 retries), which
 means an unset `:retries` client in Clojure makes 1/3 the LLM calls on a
-transient failure that every other port makes. It is NOT what ADR-0023 is
-about (ADR-0023 is about `0` colliding with `2`; Clojure's problem is that its
+transient failure that every other port makes. It is NOT what ADR-0029 is
+about (ADR-0029 is about `0` colliding with `2`; Clojure's problem is that its
 `2` never existed). Recommend filing it separately rather than folding it into
 this ADR's scope.
 

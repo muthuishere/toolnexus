@@ -138,7 +138,7 @@ public final class InProcess {
      */
     /** Public so a caller building its own adapter around {@link GenerateBackedHttpClient}
      * (e.g. an agent runtime's in-process option) can reuse the exact same sentinel — see
-     * ADR 0024. */
+     * ADR 0030. */
     public static final String BASE_URL = "http://in-process.invalid/v1";
 
     /** Build a client backed by a model running IN THIS PROCESS. */
@@ -171,7 +171,7 @@ public final class InProcess {
     // ---- the HTTP shim the host no longer has to write ---------------------------
 
     /**
-     * Public per ADR 0024 (the in-process seam stops at the top-level client): the only
+     * Public per ADR 0030 (the in-process seam stops at the top-level client): the only
      * adapter turning a semantic {@code generate} function into an {@link HttpClient} lives
      * here. {@link #createClient} and {@code AgentRuntime}'s {@code RuntimeOptions.inProcess}
      * option both build this SAME class — zero duplicated logic.

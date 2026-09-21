@@ -1,6 +1,6 @@
 defmodule Toolnexus.Acp do
   @moduledoc """
-  ACP (Agent Client Protocol) model source — issue #96, ADR 0025, proposal
+  ACP (Agent Client Protocol) model source — issue #96, ADR 0031, proposal
   `openspec/changes/add-acp-model-source`.
 
   Connects to a running agent (`devin acp`, Gemini CLI, Zed's agents, ...) over
@@ -9,7 +9,7 @@ defmodule Toolnexus.Acp do
   reuses `Toolnexus.Mcp.Transport.Stdio` to spawn the child rather than
   hand-rolling a second port-spawning path.
 
-  A **warm session** (ADR 0025 — "the warm session is the feature"): the
+  A **warm session** (ADR 0031 — "the warm session is the feature"): the
   process is spawned once via `connect/2`, `initialize` and `session/new`
   happen once, and every subsequent turn is one `session/prompt` against that
   same session. Concretely:
@@ -43,7 +43,7 @@ defmodule Toolnexus.Acp do
   `:in_process` option already accept, so the tool-calling loop, skills, MCP
   and sub-agents are completely unmodified — ACP is a model source, not a new
   tool source and not a new client. See `spikes/acp/SPIKE.md` for the
-  reference Go client this ports, and `docs/adr/0025-acp-a-warm-session-is-the-feature.md`.
+  reference Go client this ports, and `docs/adr/0031-acp-a-warm-session-is-the-feature.md`.
   """
 
   use GenServer, restart: :temporary, shutdown: 10_000
@@ -138,7 +138,7 @@ defmodule Toolnexus.Acp do
 
   # --------------------------------------------------------------------------
   # prompt assembly — full request every turn + the library-built supersedes
-  # marker (ADR 0025's proposed default; spikes/acp/SPIKE.md gate 1).
+  # marker (ADR 0031's proposed default; spikes/acp/SPIKE.md gate 1).
   # --------------------------------------------------------------------------
 
   @doc false

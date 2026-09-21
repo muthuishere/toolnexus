@@ -1162,7 +1162,7 @@ export type InProcessOptions = Omit<ClientOptions, "baseUrl" | "apiKey" | "style
 const IN_PROCESS_BASE_URL = "http://in-process.invalid/v1"
 
 /**
- * Build a `fetch`-shaped adapter over a semantic `generate` function (ADR 0024):
+ * Build a `fetch`-shaped adapter over a semantic `generate` function (ADR 0030):
  * the reusable piece of {@link createInProcessClient} — assembles the wire request,
  * calls `generate`, and re-encodes its answer as an OpenAI-shaped `Response`. Every
  * caller that wants an in-process model behind a `fetch` slot (the top-level client,

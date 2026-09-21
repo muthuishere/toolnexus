@@ -1,11 +1,11 @@
-# ADR 0026 — CLI-backed model source: pass the body through byte-for-byte
+# ADR 0032 — CLI-backed model source: pass the body through byte-for-byte
 
 - **Status:** Proposed — 2026-09-21. Spike gate below.
 - **Date:** 2026-09-21
 - **Driver:** issue #97. Working implementation in a consumer's tree: 53 offline tests
   plus a live `devin` run choosing its own calls across native, built-in, skill and
   MCP tools.
-- **Related:** ADR 0025 (the warm-session sibling), ADR 0023 (retries must be off here).
+- **Related:** ADR 0031 (the warm-session sibling), ADR 0029 (retries must be off here).
 
 ## Context
 
@@ -52,10 +52,10 @@ wrong answer.*
 
 ## Decision (proposed)
 
-Ship a CLI model source as a **`Generate`** (same seam as ADR 0025), with an argv
+Ship a CLI model source as a **`Generate`** (same seam as ADR 0031), with an argv
 template, a file-or-argv prompt channel, a stdout-or-file response channel, the
 verbatim-body envelope, strict parse + bounded repair, and retries **off** by default
-(ADR 0023).
+(ADR 0029).
 
 The open question this ADR does **not** settle: whether the four presets ship in the
 library or as an example. A preset is a compatibility promise about someone else's CLI

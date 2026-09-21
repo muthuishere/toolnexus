@@ -323,7 +323,7 @@ public class LlmClientResilienceTests
     public async Task IntegerRetryAfterIsHonoredOverBackoff()
         => Assert.True(await RetryDelayMsAsync("1", 5) >= 900);
 
-    // ---- ADR-0023: Retries must be able to mean zero ----
+    // ---- ADR-0029: Retries must be able to mean zero ----
 
     /// <summary><c>Retries = 0</c> means exactly one attempt — no retries at all — against a
     /// persistently failing backend. Pins the nullable-int + `?? 2` defaulting in

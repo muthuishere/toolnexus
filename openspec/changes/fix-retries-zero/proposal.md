@@ -16,7 +16,7 @@ documented path for a local model — gets no such hatch and no signpost to it.
 
 ## What a spike found (`spikes/retries-zero/SPIKE.md`)
 
-The first draft of ADR 0023 proposed a `-1` sentinel in all seven ports. **That premise was
+The first draft of ADR 0029 proposed a `-1` sentinel in all seven ports. **That premise was
 falsified for six of them.** JS, Python, Java, C# and Elixir already distinguish "unset"
 from "explicit 0" through native mechanisms (`??`, nullable boxed types, keyword presence
 plus Elixir's truthy zero, Python's literal default) — each proven with a real client

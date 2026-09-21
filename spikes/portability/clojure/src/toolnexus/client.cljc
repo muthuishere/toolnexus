@@ -208,7 +208,7 @@
   "Turns a semantic `generate` into the shipped `:http-client` seam: the host returns
   ONE assistant message and this builds the provider envelope.
 
-  Public (ADR 0024) so a caller OTHER than `create-in-process-client` — the
+  Public (ADR 0030) so a caller OTHER than `create-in-process-client` — the
   agent runtime's `:in-process` option, in particular — can build the exact
   same `:http-client` from a `generate` function with zero duplicated logic.
   `create-in-process-client` itself is unchanged: it still calls this."

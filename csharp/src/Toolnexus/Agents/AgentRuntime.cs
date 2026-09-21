@@ -60,7 +60,7 @@ public sealed class AgentRuntime
         _store = opts.Store ?? new InMemoryConversationStore();
         _clock = opts.Clock ?? TimeProvider.System;
         _turnGate = new SemaphoreSlim(opts.MaxConcurrentTurns);
-        // InProcess (ADR 0024) is turned into a handler by calling the SAME public adapter the
+        // InProcess (ADR 0030) is turned into a handler by calling the SAME public adapter the
         // top-level InProcess.CreateClient uses — zero duplicated logic — before any other wiring,
         // so the global turn gate below wraps it exactly as it would wrap Handler.
         var innerHandler = opts.InProcess is not null

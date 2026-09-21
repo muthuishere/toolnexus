@@ -365,7 +365,7 @@ test("client: onError has the final say over retryableStatuses", async () => {
   server.close()
 })
 
-test("client: retries: 0 means exactly one attempt, not the default of 3 (ADR-0023)", async () => {
+test("client: retries: 0 means exactly one attempt, not the default of 3 (ADR-0029)", async () => {
   let hits = 0
   const server = http.createServer((req, res) => { hits++; res.writeHead(503); res.end("busy") })
   await new Promise<void>((r) => server.listen(0, r))
@@ -378,7 +378,7 @@ test("client: retries: 0 means exactly one attempt, not the default of 3 (ADR-00
   server.close()
 })
 
-test("client: omitted retries default to 2 retries -> 3 total attempts (ADR-0023)", async () => {
+test("client: omitted retries default to 2 retries -> 3 total attempts (ADR-0029)", async () => {
   let hits = 0
   const server = http.createServer((req, res) => { hits++; res.writeHead(503); res.end("busy") })
   await new Promise<void>((r) => server.listen(0, r))

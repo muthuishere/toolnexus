@@ -60,4 +60,4 @@
   (println "FAIL: expected 1 call (this port's own default is 0, not 2), got" @calls)
   (System/exit 1))
 
-(println "CLOJURE VERDICT: explicit 0 and unset are indistinguishable in EFFECT here only because this port's shipped default is already 0 (not the documented 2) -- a pre-existing parity deviation, unrelated to ADR-0023's `0 => 2` premise. `(or 0 0)` is truthy-safe either way; no -1 sentinel is needed to make retries=0 work.")
+(println "CLOJURE VERDICT: explicit 0 and unset are indistinguishable in EFFECT here only because this port's shipped default is already 0 (not the documented 2) -- a pre-existing parity deviation, unrelated to ADR-0029's `0 => 2` premise. `(or 0 0)` is truthy-safe either way; no -1 sentinel is needed to make retries=0 work.")

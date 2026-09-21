@@ -1,4 +1,4 @@
-// Tests for ADR 0024 / issue #95: agents.Options.InProcess, the semantic
+// Tests for ADR 0030 / issue #95: agents.Options.InProcess, the semantic
 // counterpart to Options.Transport, so a host whose model is a Go function
 // doesn't have to hand-build an http.RoundTripper to reach the sub-agent
 // runtime. Ported from the spike at spikes/inprocess-subagent/SPIKE.md.
@@ -125,7 +125,7 @@ func TestNewRuntime_InProcessAndLLMConflict(t *testing.T) {
 }
 
 // TestInProcessOption_GateHoldsAtConcurrencyOne is the falsifiable gate test
-// (ADR 0024 gate item 2): MaxConcurrentTurns=1, five workers woken
+// (ADR 0030 gate item 2): MaxConcurrentTurns=1, five workers woken
 // concurrently on the NEW Options.InProcess path. If the global turn gate
 // (gatedTransport, runtime.go) stopped wrapping the transport built from
 // Options.InProcess, scriptedModel would observe >1 in flight and this test

@@ -283,7 +283,7 @@ export interface RuntimeOptions {
   /** HTTP transport for LLM requests (§8 Gap 2) — the hermetic-test seam.
    * Mutually exclusive with `inProcess` — `new AgentRuntime(...)` throws if both are set. */
   fetch?: typeof fetch
-  /** A model running IN THIS PROCESS (ADR 0024): the semantic counterpart to
+  /** A model running IN THIS PROCESS (ADR 0030): the semantic counterpart to
    * `fetch`, so a host whose model is a plain function never has to build its own
    * `fetch`-shaped adapter. Internally this is turned into a `createInProcessFetch`
    * adapter and wrapped by the SAME global turn gate as `fetch` — there is no second
@@ -351,7 +351,7 @@ export class AgentRuntime {
       )
     }
     if (opts.inProcess) {
-      // Reuse the SAME adapter createInProcessClient builds on (ADR 0024) — the
+      // Reuse the SAME adapter createInProcessClient builds on (ADR 0030) — the
       // runtime's in-process wiring is a CALLER of that export, not a second copy
       // of the request/response assembly.
       opts = { ...opts, fetch: createInProcessFetch(opts.inProcess) }

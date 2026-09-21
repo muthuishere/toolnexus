@@ -69,7 +69,7 @@ fixtures are the same ones all seven ports run against.
 
 `src/examples/acp_demo.cljc` puts an ACP (Agent Client Protocol) agent CLI —
 `devin acp` or `opencode acp` — behind the unified client as its model
-(issue #96, ADR 0025), reusing one warm session across a couple of turns and
+(issue #96, ADR 0031), reusing one warm session across a couple of turns and
 printing each turn's elapsed time. It needs that CLI installed and
 authenticated on the machine, so unlike the seven above it is **not
 hermetic** and is deliberately left out of `clj/run.sh` / `cljgo/run.sh` —

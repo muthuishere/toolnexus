@@ -1,4 +1,4 @@
-# ADR 0023 — `Retries` must be able to mean zero
+# ADR 0029 — `Retries` must be able to mean zero
 
 - **Status:** **Accepted — REVISED 2026-09-22 after a spike. Its central premise was
   falsified for six of seven ports.** The first draft proposed a `-1` sentinel everywhere.

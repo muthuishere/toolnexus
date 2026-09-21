@@ -10,7 +10,7 @@ index 0fd92e3..4b17874 100644
 +// as a plain http.RoundTripper — for a host that needs to hand a sub-agent
 +// runtime (agents.Options.Transport) the identical in-process model a
 +// top-level client was built with, without re-implementing the wire assembly.
-+// SPIKE (issue #95 / ADR 0024): not yet a committed export.
++// SPIKE (issue #95 / ADR 0030): not yet a committed export.
 +func InProcessTransport(generate func(InProcessRequest) (InProcessResponse, error)) http.RoundTripper {
 +	return &inProcessRoundTripper{generate: generate}
 +}

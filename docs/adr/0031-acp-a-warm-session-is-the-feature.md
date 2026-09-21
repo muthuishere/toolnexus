@@ -1,4 +1,4 @@
-# ADR 0025 — ACP: the warm session is the feature, and it breaks the stateless request
+# ADR 0031 — ACP: the warm session is the feature, and it breaks the stateless request
 
 - **Status:** **Accepted — REVISED 2026-09-22 after a spike, and SHIPPED in all seven
   ports.** The mechanism survived intact. **The headline number did not, and is corrected
@@ -9,7 +9,7 @@
   narrower than the draft claimed.
 - **Date:** 2026-09-21
 - **Driver:** issue #96. A working `devin acp` client exists in a consumer's tree today.
-- **Related:** ADR 0024 (the seam it plugs into), ADR 0026 (the one-shot sibling).
+- **Related:** ADR 0030 (the seam it plugs into), ADR 0032 (the one-shot sibling).
 
 ## Context
 

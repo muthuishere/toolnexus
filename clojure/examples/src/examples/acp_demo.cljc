@@ -1,5 +1,5 @@
 ;; ACP (Agent Client Protocol) as the model behind the unified client — issue
-;; #96, ADR 0025, openspec/changes/add-acp-model-source. A local coding-agent
+;; #96, ADR 0031, openspec/changes/add-acp-model-source. A local coding-agent
 ;; CLI (`devin acp` or `opencode acp`) is spawned ONCE by `toolnexus.acp/connect`
 ;; and every turn below reuses that same warm session, instead of paying the
 ;; CLI's process-startup cost again per turn.

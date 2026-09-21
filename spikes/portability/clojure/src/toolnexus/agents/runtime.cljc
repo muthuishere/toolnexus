@@ -358,7 +358,7 @@
     :http-client          the LLM transport (fn [url headers body] response) —
                           the hermetic-test seam, and the thing the turn gate
                           wraps. Same shape as `koine.http/post-json`
-    :in-process           a model running IN THIS PROCESS (ADR 0024): a semantic
+    :in-process           a model running IN THIS PROCESS (ADR 0030): a semantic
                           `generate` function, `(fn [req] answer)` — same shape
                           `toolnexus.client/create-in-process-client` takes. It
                           is turned into an `:http-client` by calling that same
@@ -415,7 +415,7 @@
                     {:option :in-process})))
   (let [opts  (if (:in-process opts)
                 ;; The exact same adapter `create-in-process-client` calls,
-                ;; now reused here (ADR 0024) — built BEFORE anything else is
+                ;; now reused here (ADR 0030) — built BEFORE anything else is
                 ;; wired, so the existing global turn gate (`gated-http-client`,
                 ;; which wraps `(:http-client (:opts rt))`) picks it up with NO
                 ;; new code path.

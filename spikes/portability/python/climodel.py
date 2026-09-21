@@ -1,5 +1,5 @@
 """A CLI-backed `generate` for toolnexus's Python `create_in_process_client`
-(ADR 0026 shape), wired into the REAL `python/` port unmodified.
+(ADR 0032 shape), wired into the REAL `python/` port unmodified.
 
 This is deliberately the smallest slice needed to answer the portability
 question the task set: does Python's forced-SYNCHRONOUS `generate` contract
@@ -13,7 +13,7 @@ in the sync seam; ACP long-lived session: would need real thought) is itself
 the portability finding worth recording.
 
 Envelope: `<openai_request>{body}</openai_request>` written to a prompt FILE
-(never argv, matching ADR 0026's stated preference and the Go spike's argv
+(never argv, matching ADR 0032's stated preference and the Go spike's argv
 E2BIG measurement), CLI writes `<openai_response>{...}</openai_response>` to
 an --out FILE. Response is strictly parsed: dispatch on whether
 `message.tool_calls` is populated, never on `finish_reason`.
@@ -79,7 +79,7 @@ def make_cli_generate(
         message = choice.get("message") or {}
 
         # Strict: dispatch on WHAT THE MESSAGE CONTAINS, never on finish_reason/kind
-        # (ADR 0026, "what the message contains must win").
+        # (ADR 0032, "what the message contains must win").
         tool_calls = message.get("tool_calls") or []
         if tool_calls:
             out_calls = []

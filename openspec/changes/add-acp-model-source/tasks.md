@@ -17,7 +17,7 @@ The surface, once, so every port implements the same thing:
 
 - [x] Spec delta at `specs/acp-model-source/spec.md`
 - [x] `openspec validate add-acp-model-source --strict`
-- [x] `docs/adr/0025` revised — the warm-session claim scoped to real CLI startup cost
+- [x] `docs/adr/0031` revised — the warm-session claim scoped to real CLI startup cost
 - [x] Confirm no `SPEC.md` §0 change is required — confirmed
 
 ## Portability gate — settle BEFORE implementing
@@ -50,4 +50,4 @@ stale-answer prevented by the supersedes marker · turn serialisation · idempot
 ## Deliberately out of scope
 
 - Delta mode (send only the new turn) — opt-in, a later change
-- The one-shot CLI model source — issue #97, ADR 0026, its own change
+- The one-shot CLI model source — issue #97, ADR 0032, its own change

@@ -1,16 +1,16 @@
 ;; A CLI-backed `generate` for toolnexus's Clojure `create-in-process-client`
-;; (ADR 0026 shape), wired into the REAL clojure/ port unmodified — same
+;; (ADR 0032 shape), wired into the REAL clojure/ port unmodified — same
 ;; single `.cljc` source, NO reader conditionals, loaded on BOTH hosts (JVM
 ;; Clojure and cljgo) to answer the task's explicit dual-host question.
 ;;
 ;; Uses `koine.process/sh` — the ONE-SHOT form (koine also ships `spawn` for a
 ;; long-lived piped child, which is what an ACP adapter would need instead;
-;; ADR 0026's CLI source is one-shot-per-turn, so `sh` is the right primitive
+;; ADR 0032's CLI source is one-shot-per-turn, so `sh` is the right primitive
 ;; here, already proven dual-host by the port's own `bash` builtin tool,
 ;; clojure/src/toolnexus/builtin.cljc).
 ;;
 ;; Envelope: `<openai_request>{body}</openai_request>` written to a prompt
-;; FILE (never argv — matches ADR 0026's stated preference), CLI writes
+;; FILE (never argv — matches ADR 0032's stated preference), CLI writes
 ;; `<openai_response>{...}</openai_response>` to an --out FILE. Response is
 ;; strictly parsed: dispatch on whether `message.tool_calls` is populated,
 ;; never on `finish_reason`.

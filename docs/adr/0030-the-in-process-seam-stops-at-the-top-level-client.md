@@ -1,4 +1,4 @@
-# ADR 0024 — the in-process seam stops at the top-level client
+# ADR 0030 — the in-process seam stops at the top-level client
 
 - **Status:** **Accepted — REVISED 2026-09-22 after a spike, and SHIPPED in all seven
   ports.** The spike falsified the ADR's hopeful case: it asked whether the other six ports

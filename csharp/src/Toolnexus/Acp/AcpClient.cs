@@ -12,7 +12,7 @@ namespace Toolnexus.Acp;
 /// <c>Func&lt;InProcess.Request, InProcess.Response&gt;</c> that plugs directly into
 /// <see cref="InProcess.Options.Generate"/> or <c>RuntimeOptions.InProcess</c>.
 ///
-/// <para>openspec/changes/add-acp-model-source. Design: docs/adr/0025 (why a warm session is
+/// <para>openspec/changes/add-acp-model-source. Design: docs/adr/0031 (why a warm session is
 /// the feature, and why the client assembles a full request every turn plus a supersedes
 /// marker instead of sending only the delta). Spike/reference: spikes/acp/client/client.go —
 /// this is the same shape, ported to idiomatic C#.</para>
@@ -44,7 +44,7 @@ public sealed class AcpClient : IDisposable
     public TimeSpan PromptTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>The marker the library appends to every assembled prompt, naming the current
-    /// turn as authoritative over anything earlier in this stateful session (ADR 0025).</summary>
+    /// turn as authoritative over anything earlier in this stateful session (ADR 0031).</summary>
     public const string SupersedesMarker = "SUPERSEDES-ALL-PRIOR:";
 
     private readonly Process _process;
@@ -180,7 +180,7 @@ public sealed class AcpClient : IDisposable
     }
 
     /// <summary>
-    /// Builds the deterministic full-request prompt text (ADR 0025): every message rendered as
+    /// Builds the deterministic full-request prompt text (ADR 0031): every message rendered as
     /// <c>role: content</c> on its own line, followed by the library-assembled supersedes marker
     /// naming the freshest user turn as authoritative.
     /// </summary>
@@ -249,7 +249,7 @@ public sealed class AcpClient : IDisposable
             if (!upd.TryGetProperty("sessionUpdate", out var kindEl) || kindEl.ValueKind != JsonValueKind.String) return;
             // ONLY agent_message_chunk forms the reply — agent_thought_chunk and any
             // tool_call/tool_call_update notification are dropped, or they wrap prose around
-            // structured output (ADR 0025 gate item 3 / spec scenario "Only agent message
+            // structured output (ADR 0031 gate item 3 / spec scenario "Only agent message
             // chunks form the reply").
             if (kindEl.GetString() != "agent_message_chunk") return;
             if (!upd.TryGetProperty("content", out var contentEl)) return;

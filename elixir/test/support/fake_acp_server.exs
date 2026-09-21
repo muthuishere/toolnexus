@@ -1,5 +1,5 @@
 # Hermetic fake ACP (Agent Client Protocol) server, ported from the Go
-# reference at spikes/acp/fakeagent/main.go (ADR 0025 gate). JSON-RPC 2.0,
+# reference at spikes/acp/fakeagent/main.go (ADR 0031 gate). JSON-RPC 2.0,
 # one object per line, over its own stdin/stdout — the same shape a real
 # `devin acp` speaks.
 #

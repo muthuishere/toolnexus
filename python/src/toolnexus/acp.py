@@ -1,9 +1,9 @@
-"""ACP (Agent Client Protocol) as a model source — ADR 0025, issue #96.
+"""ACP (Agent Client Protocol) as a model source — ADR 0031, issue #96.
 
 ACP is to *agents* what MCP is to *tools*: JSON-RPC 2.0, one object per line, over a
 child process's stdin/stdout — the exact framing MCP local stdio already uses
 (``mcp_source.py``). `devin acp`, Gemini CLI and Zed's agents speak it. This module
-ships ACP as the *smallest* possible framing per ADR 0025: a ``generate(request) ->
+ships ACP as the *smallest* possible framing per ADR 0031: a ``generate(request) ->
 dict`` function with the shape ``create_in_process_client(generate=...)`` already
 wants (``client.py`` around ``InProcessTransport``/``create_in_process_client``), so
 the tool-calling loop, skills, MCP tools, adapters and sub-agents are untouched. ACP
@@ -24,7 +24,7 @@ notifications interleave with responses). It's two behaviors the spike at
 
 toolnexus assembles a *complete* request every turn (the full message array), but an
 ACP session is *stateful* — it already holds the transcript. Sending the whole thing
-every turn makes a session accumulate near-duplicate history, and ADR 0025's reporter
+every turn makes a session accumulate near-duplicate history, and ADR 0031's reporter
 observed the agent answering a stale copy. The mitigation (kept as the *library's*
 responsibility, not left to the caller) is an explicit marker naming the current turn
 as superseding everything earlier — see ``_SUPERSEDES_MARKER`` and
@@ -94,7 +94,7 @@ class ACPPermissionTimeoutError(ACPError):
     """A turn did not receive its ``session/prompt`` reply within
     ``ACPOptions.permission_timeout``.
 
-    This is the safety net for the trap ADR 0025 names explicitly: an unanswered
+    This is the safety net for the trap ADR 0031 names explicitly: an unanswered
     ``session/request_permission`` hangs a turn forever. This client always answers
     permission requests itself (see module docstring), so in the normal path this
     timeout never fires — it exists only so a broken or non-conformant agent cannot
@@ -146,11 +146,11 @@ def _content_to_text(content: Any) -> str:
 
 
 def _render_prompt(request: dict[str, Any]) -> str:
-    """Render the full accumulated transcript as one prompt string, per ADR 0025's
+    """Render the full accumulated transcript as one prompt string, per ADR 0031's
     chosen default (full request every turn, not a delta), and append the
     supersedes marker naming the latest user turn.
 
-    This is deliberately the library's job, not the caller's — ADR 0025 rejected
+    This is deliberately the library's job, not the caller's — ADR 0031 rejected
     leaving the marker to be bolted on by hand ("ship the supersedes marker as part
     of the default `Generate`'s prompt assembly (not left to the caller)",
     ``spikes/acp/SPIKE.md``).
@@ -300,7 +300,7 @@ class ACPClient:
         if update.get("sessionUpdate") != "agent_message_chunk":
             # agent_thought_chunk and tool_call/tool_call_update narration are
             # dropped here, on purpose — mixing them into the reply is exactly the
-            # corruption ADR 0025 gate item 3 proves against structured output.
+            # corruption ADR 0031 gate item 3 proves against structured output.
             return
         content = update.get("content") or {}
         text = content.get("text")
@@ -396,7 +396,7 @@ class ACPClient:
     def close(self) -> None:
         """Terminate the child process. Idempotent — safe to call more than once,
         and safe to call regardless of any in-flight turn's outcome (process
-        lifetime is independent of any one turn's cancellation, per ADR 0025)."""
+        lifetime is independent of any one turn's cancellation, per ADR 0031)."""
         with self._close_lock:
             if self._closed:
                 return

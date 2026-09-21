@@ -1,4 +1,4 @@
-// ACP (Agent Client Protocol) model source (ADR 0025, issue #96).
+// ACP (Agent Client Protocol) model source (ADR 0031, issue #96).
 //
 // ACP is to *agents* what MCP is to *tools*: JSON-RPC 2.0, one object per
 // line, over a child process's stdin/stdout — the exact framing local stdio
@@ -6,9 +6,9 @@
 // (LoadACP(...).Generate has the exact shape of InProcessOptions.Generate,
 // see inprocess.go), so the tool-calling loop, skills, MCP, adapters and
 // sub-agents are untouched. It is NOT a new tool source and NOT a new
-// client — see ADR 0025 and openspec/changes/add-acp-model-source.
+// client — see ADR 0031 and openspec/changes/add-acp-model-source.
 //
-// The warm session is the feature (ADR 0025's measurements): the agent
+// The warm session is the feature (ADR 0031's measurements): the agent
 // process and its ACP session are created once by LoadACP and then serve
 // every turn as a `session/prompt` on that same session — amortising the
 // process-startup cost that dominates a cold `devin -p` call.
@@ -17,7 +17,7 @@
 // (the full message array), while an ACP session is STATEFUL — it already
 // has the transcript. Sending the whole thing again each turn makes a naive
 // agent answer a stale, near-duplicate prompt from its own history. The
-// mitigation (default, per ADR 0025): render the full transcript into the
+// mitigation (default, per ADR 0031): render the full transcript into the
 // prompt text every turn, and append an explicit "this supersedes every
 // earlier prompt" marker naming the latest turn — see renderACPPrompt.
 //
@@ -99,7 +99,7 @@ type ACPOptions struct {
 
 	// Cwd is the absolute working directory handed to `session/new`. A real
 	// `devin acp` REJECTS session/new with -32602 without an absolute cwd
-	// (ADR 0025) — if left empty, LoadACP resolves os.Getwd() and requires
+	// (ADR 0031) — if left empty, LoadACP resolves os.Getwd() and requires
 	// that it is absolute (it always is on every supported OS).
 	Cwd string
 
@@ -151,7 +151,7 @@ type ACPClient struct {
 // LoadACP spawns the ACP agent as a child process, completes `initialize` +
 // `session/new` (+ optional `session/set_mode`), and returns a live,
 // warm ACPClient. ctx bounds only this setup handshake — once LoadACP
-// returns, the child process's lifetime is independent of ctx (ADR 0025:
+// returns, the child process's lifetime is independent of ctx (ADR 0031:
 // "process lifetime independent of any one turn's cancellation").
 func LoadACP(ctx context.Context, opts ACPOptions) (*ACPClient, error) {
 	if opts.Command == "" {
@@ -289,7 +289,7 @@ func (c *ACPClient) readLoop() {
 		case msg.Method == "session/request_permission" && len(msg.ID) > 0:
 			// Answered inline, from the read loop itself, so it can never be
 			// held up behind whatever sendPrompt is doing — an unanswered
-			// permission request hangs the turn forever (ADR 0025).
+			// permission request hangs the turn forever (ADR 0031).
 			c.answerPermissionFirstAllow(msg)
 
 		default:
@@ -408,7 +408,7 @@ func (c *ACPClient) sendPrompt(text string) (string, error) {
 		// Only agent_message_chunk forms the reply: agent_thought_chunk and
 		// tool-call narration (tool_call / tool_call_update, which carry no
 		// "content" field this struct decodes anyway) are dropped entirely —
-		// mixing them corrupts structured output (ADR 0025 gate item #3).
+		// mixing them corrupts structured output (ADR 0031 gate item #3).
 		if upd.Update.SessionUpdate != "agent_message_chunk" {
 			return
 		}
@@ -477,7 +477,7 @@ func (c *ACPClient) Generate(req InProcessRequest) (InProcessResponse, error) {
 // delta would make the client a second, shadow copy of conversation state)
 // and appends the supersedes marker naming the latest user turn, so a
 // stateful agent answers the current request rather than an earlier
-// near-duplicate already sitting in its own session history (ADR 0025).
+// near-duplicate already sitting in its own session history (ADR 0031).
 func renderACPPrompt(req InProcessRequest) string {
 	var b strings.Builder
 	lastUser := ""

@@ -3,7 +3,7 @@
 portability spikes so the same subprocess contract is exercised from two
 different host languages.
 
-Shape matches ADR 0026's CLI-backed model source: one-shot process, prompt
+Shape matches ADR 0032's CLI-backed model source: one-shot process, prompt
 delivered via a FILE (never argv, per the ADR's own file-channel preference),
 response delivered via a FILE (the codex `--output-last-message` shape) so the
 caller never has to scrape stdout.
@@ -74,7 +74,7 @@ def main() -> int:
             "function": {
                 "name": "echo_marker",
                 # OpenAI wire contract: arguments is a JSON-ENCODED STRING, not a
-                # bare object (this is the ADR 0026 gate-1c drift the Go spike
+                # bare object (this is the ADR 0032 gate-1c drift the Go spike
                 # flagged as ambiguous; this fakecli emits the real wire shape).
                 "arguments": json.dumps({"received_marker": marker, "model": body.get("model")}),
             },

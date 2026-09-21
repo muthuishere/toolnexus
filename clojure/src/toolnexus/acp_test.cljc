@@ -1,4 +1,4 @@
-;; ACP (Agent Client Protocol) model source — issue #96, ADR 0025,
+;; ACP (Agent Client Protocol) model source — issue #96, ADR 0031,
 ;; openspec/changes/add-acp-model-source. Hermetic: no network, no real
 ;; devin/gemini/zed agent. The "fake ACP agent" is THIS PORT ITSELF,
 ;; re-invoked as a subprocess with ACP_FAKE_SERVER=1 — the classic
@@ -12,7 +12,7 @@
 ;; ACP_FAKE_SERVER BEFORE its usual TN_EXAMPLES gate and, when set, calls
 ;; `run-fake-server!` below instead of the suite.
 ;;
-;; Scripted per ACP_SCENARIO to exercise exactly the ADR 0025 gate items /
+;; Scripted per ACP_SCENARIO to exercise exactly the ADR 0031 gate items /
 ;; spec scenarios this file covers, reporting what it observed by rewriting
 ;; ACP_OUT_FILE (newline-delimited JSON) after each event, for the parent
 ;; test to read back once the child is closed.

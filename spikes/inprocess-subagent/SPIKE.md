@@ -1,6 +1,6 @@
-# Spike: ADR 0024 — the in-process seam stops at the top-level client
+# Spike: ADR 0030 — the in-process seam stops at the top-level client
 
-Spike for issue #95 / `docs/adr/0024-the-in-process-seam-stops-at-the-top-level-client.md`.
+Spike for issue #95 / `docs/adr/0030-the-in-process-seam-stops-at-the-top-level-client.md`.
 Attacks the ADR's own Gate. Verdict per item below; recommendation at the end.
 
 Everything here lives under `spikes/inprocess-subagent/`. The repo is otherwise
@@ -42,7 +42,7 @@ unexported, but a JVM host still cannot import it across packages/modules withou
 This means: **this is not a Go bug to be sized alone** — it is the same shaped gap,
 independently reproduced, in all seven ports. The fix belongs at the spec/contract level
 (an OpenSpec change touching all seven `tasks.md` parity checklists), exactly the class of
-change `CLAUDE.md` says needs one before code. ADR 0024's own decision (prefer shape 2,
+change `CLAUDE.md` says needs one before code. ADR 0030's own decision (prefer shape 2,
 expressed as one semantic field, shape 1 as Go-local convenience) is validated by this
 audit, not undermined by it.
 
@@ -83,7 +83,7 @@ Diff (saved at `spikes/inprocess-subagent/inprocess-shape1.patch`):
 +// as a plain http.RoundTripper — for a host that needs to hand a sub-agent
 +// runtime (agents.Options.Transport) the identical in-process model a
 +// top-level client was built with, without re-implementing the wire assembly.
-+// SPIKE (issue #95 / ADR 0024): not yet a committed export.
++// SPIKE (issue #95 / ADR 0030): not yet a committed export.
 +func InProcessTransport(generate func(InProcessRequest) (InProcessResponse, error)) http.RoundTripper {
 +	return &inProcessRoundTripper{generate: generate}
 +}
@@ -234,7 +234,7 @@ per-port convenience, not a Go-only one.
 
 ## Recommended shape
 
-Confirms ADR 0024's proposed decision, refined by this audit:
+Confirms ADR 0030's proposed decision, refined by this audit:
 
 1. **Cross-language contract (goes in `SPEC.md` / an OpenSpec change):** every port's agent
    runtime options gain a semantic in-process field — Go `Options.InProcess`, JS

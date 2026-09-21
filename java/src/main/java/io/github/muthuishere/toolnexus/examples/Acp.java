@@ -15,7 +15,7 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * ACP (Agent Client Protocol) as the model behind the unified client (issue #96, ADR 0025):
+ * ACP (Agent Client Protocol) as the model behind the unified client (issue #96, ADR 0031):
  * a local coding-agent CLI — {@code devin acp} or {@code opencode acp} — is spawned ONCE, and
  * every turn below reuses that same warm session instead of paying process-startup cost again.
  *

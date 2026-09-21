@@ -358,7 +358,7 @@ class AgentRuntime:
         hooks: Optional[Any] = None,
         on_metric: Optional[Callable[[dict[str, Any]], None]] = None,
     ) -> None:
-        # ``in_process`` (ADR 0024 / issue #95) is a model running IN THIS PROCESS —
+        # ``in_process`` (ADR 0030 / issue #95) is a model running IN THIS PROCESS —
         # no wire, no `llm` endpoint to dial. Mutually exclusive with `transport`
         # (both configure the HTTP seam) and with `llm` (there is no endpoint an
         # in-process model could dial). Resolved LOUDLY at construction, never by
@@ -381,7 +381,7 @@ class AgentRuntime:
         self._hooks = hooks
         self._on_metric = on_metric
         if in_process is not None:
-            # Reuses create_in_process_client's own adapter (ADR 0024) — zero
+            # Reuses create_in_process_client's own adapter (ADR 0030) — zero
             # duplicated request/response-assembly logic between the top-level
             # client and the sub-agent runtime.
             transport = InProcessTransport(in_process)

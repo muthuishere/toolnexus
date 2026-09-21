@@ -1,6 +1,6 @@
 defmodule Toolnexus.Agents.InProcessTest do
   @moduledoc """
-  ADR 0024 / issue #95: `Toolnexus.Agents.Runtime`'s `:in_process` option, the
+  ADR 0030 / issue #95: `Toolnexus.Agents.Runtime`'s `:in_process` option, the
   semantic counterpart to `:transport`, so a host whose model is an Elixir function
   doesn't have to hand-build a `:transport` to reach the sub-agent runtime. Ported
   from the Go reference (`golang/agents/inprocess_test.go`) and the spike at

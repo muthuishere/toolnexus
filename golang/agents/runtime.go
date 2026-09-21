@@ -271,7 +271,7 @@ type Options struct {
 	// zero network). Nil ⇒ http.DefaultTransport. The global turn gate wraps it.
 	// Mutually exclusive with InProcess — NewRuntime panics if both are set.
 	Transport http.RoundTripper
-	// InProcess is a model running IN THIS PROCESS (ADR 0024 / issue #95): the
+	// InProcess is a model running IN THIS PROCESS (ADR 0030 / issue #95): the
 	// semantic counterpart to Transport, so a host whose model is a Go function
 	// doesn't have to hand-build an http.RoundTripper to reach the sub-agent
 	// runtime. Internally this is turned into a tn.InProcessTransport and wrapped
@@ -376,7 +376,7 @@ func NewRuntime(opts Options) *Runtime {
 		// Build the transport ONCE, here, by calling the exported per-port
 		// convenience — CreateInProcessClient's own adapter — so there is zero
 		// duplicated wire-assembly logic between the top-level client and the
-		// sub-agent runtime (ADR 0024).
+		// sub-agent runtime (ADR 0030).
 		opts.Transport = tn.InProcessTransport(opts.InProcess)
 	}
 	store := opts.Store

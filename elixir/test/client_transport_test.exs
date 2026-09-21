@@ -145,7 +145,7 @@ defmodule Toolnexus.ClientTransportTest do
     assert retry_delay_ms("Wed, 21 Oct 2015 07:28:00 GMT", 5) < 1_000
   end
 
-  # ADR-0023: `retries` must be able to mean "zero retries" (exactly one attempt).
+  # ADR-0029: `retries` must be able to mean "zero retries" (exactly one attempt).
   # `struct!/2` (create/1) only takes keys PRESENT in opts, so `retries: 0` is stored
   # as 0 (not the defstruct default of 2), and `client.retries || 2` keeps 0 as 0
   # since Elixir's `||` only falls through on nil/false. Pins that against a real

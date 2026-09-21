@@ -4,7 +4,7 @@ using Toolnexus.Agents;
 namespace Toolnexus.Tests;
 
 /// <summary>
-/// Tests for ADR 0024 (docs/adr/0024-the-in-process-seam-stops-at-the-top-level-client.md):
+/// Tests for ADR 0030 (docs/adr/0030-the-in-process-seam-stops-at-the-top-level-client.md):
 /// <c>RuntimeOptions.InProcess</c>, the semantic counterpart to <c>RuntimeOptions.Handler</c>, so
 /// a host whose model is a C# function doesn't have to hand-build an
 /// <see cref="System.Net.Http.HttpMessageHandler"/> to reach the sub-agent runtime. Mirrors
@@ -114,7 +114,7 @@ public class InProcessAgentRuntimeTests
     }
 
     /// <summary>
-    /// The falsifiable gate test (ADR 0024 gate item 2): MaxConcurrentTurns=1, five workers woken
+    /// The falsifiable gate test (ADR 0030 gate item 2): MaxConcurrentTurns=1, five workers woken
     /// concurrently on the NEW <see cref="RuntimeOptions.InProcess"/> path. If the global turn
     /// gate (GateHandler, AgentRuntime.cs) stopped wrapping the handler built from
     /// RuntimeOptions.InProcess, ScriptedModel would observe &gt;1 in flight and this test fails.

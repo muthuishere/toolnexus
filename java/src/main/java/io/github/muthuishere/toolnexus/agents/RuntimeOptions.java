@@ -26,9 +26,9 @@ public final class RuntimeOptions {
     /** The pre-gate LLM HTTP transport (a scripted {@link HttpClient} in fixtures — zero
      * network). {@code null} = {@code HttpClient.newHttpClient()}. The global turn gate wraps
      * whatever this resolves to. Mutually exclusive with {@link #inProcess} — the
-     * {@link AgentRuntime} constructor throws if both are set (ADR 0024). */
+     * {@link AgentRuntime} constructor throws if both are set (ADR 0030). */
     public HttpClient httpClient;
-    /** A model running IN THIS PROCESS (ADR 0024) — the semantic counterpart to
+    /** A model running IN THIS PROCESS (ADR 0030) — the semantic counterpart to
      * {@link #httpClient}, so a host whose model is a Java function doesn't have to hand-build an
      * {@link HttpClient} to reach the sub-agent runtime. Internally this is turned into an
      * {@link InProcess.GenerateBackedHttpClient} — the SAME public adapter

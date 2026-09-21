@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * ADR 0024 (docs/adr/0024-the-in-process-seam-stops-at-the-top-level-client.md) + its spike
+ * ADR 0030 (docs/adr/0030-the-in-process-seam-stops-at-the-top-level-client.md) + its spike
  * (spikes/inprocess-subagent/SPIKE.md), Java port. Mirrors {@code golang/agents/inprocess_test.go}.
  *
  * <p>Proves: (1) ONE {@code generate} function serves BOTH the top-level
