@@ -110,6 +110,8 @@ measurements each task is verified against.
 - [x] all seven ports pass all scenarios, clojure on both hosts
 - [x] the parity break it found — elixir and clojure sleeping through the grace window — fixed in
       both, pinned by a test in **all seven** ports and stated in `SPEC.md §4A`
+- [x] the forceful arm (a job that traps SIGTERM must still die after the window) — pinned in
+      **golang and elixir**; the other five have the return-promptly arm only
 - [ ] the Windows stress harness (`stress/win/`) — written, NOT RUN: the agentbus listener on the
       Windows box went down during the attempt and needs restarting there
 

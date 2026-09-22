@@ -88,6 +88,44 @@ defmodule Toolnexus.HostBoundaryTest do
     assert elapsed < 1500, "a 300 ms timeout took #{elapsed} ms — the caller waited out the grace window"
   end
 
+  test "a job that IGNORES the polite signal is killed after the grace window" do
+    # The other half of the contract: TERM first, and only after the window is
+    # the job killed. A shell that traps TERM cannot be asked to leave, so this
+    # is the arm that exercises the forceful step — and it must still end with no
+    # survivors.
+    dir = tmp_dir()
+    marker = Path.join(dir, "stubborn.marker")
+    command = "trap '' TERM; sleep 0.2; sh -c 'sleep 5; touch #{marker}' & wait"
+
+    started = System.monotonic_time(:millisecond)
+    result = run(nil, "bash", %{"command" => command, "timeout" => 300})
+    elapsed = System.monotonic_time(:millisecond) - started
+
+    assert result.is_error
+    assert result.metadata[:timedOut] == true
+    # It took the grace window, because TERM was ignored — but not much more.
+    assert elapsed >= 2000, "a TERM-ignoring job should have used the grace window, took #{elapsed} ms"
+    assert elapsed < 4000, "the kill overran the grace window: #{elapsed} ms"
+
+    Process.sleep(2000)
+    refute File.exists?(marker), "the job survived the forceful kill"
+  end
+
+  test "a shell that does not resolve is reported, not spawned" do
+    assert {:error, message} = Builtin.shell(%{"shell" => ["definitely-not-a-real-shell-xyz"]})
+    assert message =~ "does not resolve"
+
+    result = run(%{"shell" => ["definitely-not-a-real-shell-xyz"]}, "bash", %{"command" => "echo hi"})
+    assert result.is_error
+    assert result.output =~ "does not resolve"
+  end
+
+  test "confinement with no base_dir is a reported error, not a silent pass" do
+    result = run(%{"confine_to_base_dir" => true}, "read", %{"path" => "anything.txt"})
+    assert result.is_error
+    assert result.output =~ "base_dir is empty"
+  end
+
   # ---------------------------------------------------------------------------
   # #100 — the interpreter is chosen, and reported
   # ---------------------------------------------------------------------------

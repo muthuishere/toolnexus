@@ -154,6 +154,36 @@ func TestTimeoutReturnsAsSoonAsTheJobIsGone(t *testing.T) {
 	}
 }
 
+// TestAJobThatIgnoresTermIsKilledAfterTheGraceWindow — the other half of the
+// contract. A shell that traps SIGTERM cannot be asked to leave, so this is the
+// arm that exercises the forceful step, and it must still end with no survivors.
+func TestAJobThatIgnoresTermIsKilledAfterTheGraceWindow(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signals")
+	}
+	marker := filepath.Join(t.TempDir(), "stubborn.marker")
+	command := "trap '' TERM; sleep 0.2; sh -c 'sleep 5; touch " + marker + "' & wait"
+
+	bash := builtinNamed(t, nil, "bash")
+	start := time.Now()
+	res := runTool(t, bash, map[string]any{"command": command, "timeout": 300})
+	elapsed := time.Since(start)
+
+	if !res.IsError || res.Metadata["timedOut"] != true {
+		t.Fatalf("expected a timeout; got isError=%v meta=%v", res.IsError, res.Metadata)
+	}
+	if elapsed < 2*time.Second {
+		t.Fatalf("a TERM-ignoring job should have used the grace window; took %v", elapsed)
+	}
+	if elapsed > 4*time.Second {
+		t.Fatalf("the kill overran the grace window: %v", elapsed)
+	}
+	time.Sleep(2 * time.Second)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("the job survived the forceful kill")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // #100 — the interpreter is chosen, and reported
 // ---------------------------------------------------------------------------
