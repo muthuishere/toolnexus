@@ -66,10 +66,26 @@ walk-root-relative path and emitted the joined one — absolute on POSIX
 requires the `/`-separated walk-root-relative path, and *"SORT ON THE SAME STRING you emit"*. The
 other ports were already correct.
 
+**Verified on native Windows, not just reasoned about.** The go, js and python ports were
+cross-compiled or copied onto a real Windows machine and run there with their shipped code: the
+interpreter detected as `cmd /d /s /c`, a relative write landing in `baseDir`, `..\..` and `CON`
+refused, no orphan left after a timeout, and `grep` emitting `sub/a.txt:1:x` where it previously
+emitted `tree\sub\a.txt:1:x`. Doing that found two Windows-only defects that every POSIX test
+suite passed straight through: js invoked `taskkill` **without `/PID`**, so every kill failed
+silently, and a "graceful" first step turned out to be actively harmful there — `taskkill /T`
+without `/F` refuses every console process in the tree while still being able to take the *parent*
+down, reparenting the grandchild. All seven ports now stop the job outright on Windows, and the
+TERM → 2000 ms → KILL sequence is documented as a POSIX effect.
+
 **What is not done.** Java, C#, Elixir and Clojure are **unverified on Windows** — those runtimes
 are not installed on the Windows machine available to us; their implementations follow documented
 platform APIs and the gap is real until someone runs them. Nothing here confines commands run by
-`bash`. Nothing here ran on Linux: the POSIX measurements are macOS, plus one `dash` data point.
+`bash`. Nothing here ran on Linux: the POSIX measurements are macOS, plus one `dash` data point —
+which is the one that refuted a `set -m` process-group trick this change originally planned to use
+(under dash it reports "job control turned off", the kill fails, and the job survives). Clojure's
+canonical paths are lower-cased because koine's `real-path` disagrees between the JVM and cljgo on
+case; a koine fix is the better home and is not yet filed. Per-port READMEs still describe the
+builtins without these options.
 
 ## 0.19.0 — 2026-09-22
 
