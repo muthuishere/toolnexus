@@ -8,6 +8,69 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### The builtins stop closing over the host process — the interpreter, the root, and what a kill reaches
+
+Three consumer issues (#100, #101, #102) against `golang` 0.19.0, all from one host running agents
+on Linux, WSL and Windows. They read as three bugs in one file; spikes measured them as one defect
+in three places, **present in all seven ports**. The decisions are in `docs/adr/0034`, every
+measurement (with controls, on macOS and on a native Windows box) in
+`spikes/builtin-host-boundary/SPIKE.md`, and the change is
+`openspec/changes/fix-builtin-host-boundary`.
+
+**`bash` runs on native Windows, and you can say which interpreter it uses.** The new
+`builtins.shell` is an argv prefix — `["sh","-c"]`, `["bash","-lc"]`, `["cmd","/d","/s","/c"]`,
+`["powershell","-NoProfile","-Command"]` — used verbatim when you set it. When you do not, an
+interpreter is **detected at toolkit construction**: `sh -c` on POSIX, and on Windows `%COMSPEC%`
+first, then `pwsh`, `powershell`, and a POSIX `bash` if one resolves. `%COMSPEC%` leads because
+PowerShell is routinely blocked by execution or application-control policy on a managed machine.
+Before this, `bash` on native Windows either failed with `"sh": executable file not found` (go,
+java, csharp, elixir, clojure) or **silently became cmd.exe** (js, python, via `shell:true`), where
+`echo $HOME` prints the literal `$HOME` and exits 0 — one call, two wrong answers. The resolved
+interpreter is reported on every result as `metadata.shell`; if nothing resolves and `bash` is
+enabled, **construction fails naming what it tried**, instead of failing on turn fourteen of a paid
+run. Disable `bash` through `builtins.tools` to run on a box with no shell at all.
+
+**You can scope the file builtins to a directory.** `builtins.baseDir` is what a *relative* path
+means for `read`, `write`, `edit`, `glob`, `grep`, for the file paths **inside `apply_patch`'s patch
+text**, and as `bash`'s default `workdir`. Absolute paths are unaffected, and an unset `baseDir`
+means the host process working directory — exactly today's behaviour. This existed as an incident
+before it existed as an option: an agent asked to write tests into a run's git worktree used the
+ordinary relative path `apps/api/…_test.go`, and 18 KB landed in the *host platform's own
+repository*, reported as success. A host could pin `bash` with `workdir` but had nothing for the
+file tools, so the workaround was rewriting tool arguments in a `BeforeTool` hook — and parsing
+`apply_patch`'s grammar, because those paths are content, not arguments. The host knows which
+directory; only the library knows which arguments are paths.
+
+**Opt into refusing paths that leave it.** `builtins.confineToBaseDir` refuses anything whose
+**canonical** form is outside `baseDir`. Canonical, not lexical: symlinks, Windows **directory
+junctions** (which need no privilege to create) and 8.3 short names are resolved on both sides, and
+a file that does not exist yet is resolved through its deepest existing ancestor — otherwise it is
+not a check for `write` at all. Windows reserved device names (`CON`, `NUL`, `COM1`…) are refused
+outright: measured, writing to `CON` inside a directory succeeds, creates no file, and passes any
+containment check built on path comparison. **This is a guarantee about path resolution in the file
+builtins, not a sandbox**: a command run by `bash` still reaches the whole filesystem (`cd ..`,
+`env -C`, an absolute path — all measured), which is a different problem, tracked in
+`docs/adr/0033`.
+
+**A `bash` timeout now stops the work instead of reporting that it did.** Every port killed only
+the interpreter, so `{"command":"go test ./...","timeout":30000}` returned "timed out" at 30 s while
+the compiler and test binaries carried on, reparented, still writing into the workspace after the
+step was recorded as finished — and cancelling a run left the machine loaded. The command now runs
+in its own process group (POSIX) or Job Object (Windows), and a timeout or cancellation stops the
+whole job: ask (SIGTERM), wait **2000 ms**, insist (SIGKILL). `metadata.timedOut` and
+`metadata.killedTree` distinguish the two outcomes; `output` is unchanged.
+
+**Fixed: `grep` in the Go port printed a path it had not sorted by.** It ordered matches by the
+walk-root-relative path and emitted the joined one — absolute on POSIX
+(`/tmp/x/tree/sub/a.txt:1:…`), backslash-separated on Windows (`tree\sub\a.txt:1:…`). `SPEC.md §4A`
+requires the `/`-separated walk-root-relative path, and *"SORT ON THE SAME STRING you emit"*. The
+other ports were already correct.
+
+**What is not done.** Java, C#, Elixir and Clojure are **unverified on Windows** — those runtimes
+are not installed on the Windows machine available to us; their implementations follow documented
+platform APIs and the gap is real until someone runs them. Nothing here confines commands run by
+`bash`. Nothing here ran on Linux: the POSIX measurements are macOS, plus one `dash` data point.
+
 ## 0.19.0 — 2026-09-22
 
 ### Eight things that went wrong for people building on 0.18.x, fixed in all seven ports
