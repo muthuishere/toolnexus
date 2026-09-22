@@ -456,9 +456,15 @@ test("#92 MUST NOT REGRESS: ClassifierUsage.cost is OPTIONAL — absent is not z
 })
 
 test("#92 the run timeout NAMES the budget it blew", async () => {
+  // A timeout this short can fire BEFORE this mock is even called, so the signal may already
+  // be aborted on arrival. Real fetch rejects immediately in that case; a mock that only
+  // registers a listener would hang forever, and — because the run-timeout timer is unref'd —
+  // take the whole event loop down with it rather than failing this one test.
   const never: any = (_u: string, init: any) =>
     new Promise((_res, rej) => {
-      init.signal?.addEventListener("abort", () => rej(init.signal.reason), { once: true })
+      const s: AbortSignal | undefined = init.signal
+      if (s?.aborted) return rej(s.reason)
+      s?.addEventListener("abort", () => rej(s.reason), { once: true })
     })
   const client = createClient(baseOpts(never, { timeoutMs: 1 }))
   await assert.rejects(() => client.run("hi"), /run timeout after 1ms/)
@@ -780,7 +786,12 @@ test("#90 A18 INVARIANT: a limit stop names its limit; a non-limit stop leaves i
   // 5. wait-deadline `timeout` — a LIMIT stop, and the instance that shipped broken in 3 ports.
   {
     const hang: any = (_u: string, init: any) =>
-      new Promise((_res, rej) => init.signal?.addEventListener("abort", () => rej(init.signal.reason), { once: true }))
+      new Promise((_res, rej) => {
+        // Honour an ALREADY-aborted signal, as real fetch does — see the note on `never` above.
+        const s: AbortSignal | undefined = init.signal
+        if (s?.aborted) return rej(s.reason)
+        s?.addEventListener("abort", () => rej(s.reason), { once: true })
+      })
     const rt = new AgentRuntime({ fetch: hang, registry: { w: { name: "w", does: "x", model: "m" } } })
     const h = rt.spawn(rt.root, "w")
     rt.wake(h, "go")

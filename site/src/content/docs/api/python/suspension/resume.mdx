@@ -12,7 +12,7 @@ import { Aside } from '@astrojs/starlight/components';
 </p>
 
 ```python
-async def resume(self, answer: Answer) -> None
+async def resume(self, answer: Answer) -> TaskResult
 ```
 
 <Aside type="caution" title="Manifest correction">
@@ -233,12 +233,12 @@ async def main():
 asyncio.run(main())
 ```
 
-### 3. The full surface — a `TaskResult`'s numbers are per-call; the handle's are cumulative
+### 3. The full surface — a resumed run's counters keep growing, they never reset
 
-`TaskResult.turns`/`.total_tokens` report the ask() call that just finished — for the resumed
-call, that means the *replay's own* turns (the repeated tool call plus its continuation), not
-a running total since spawn. For a lifetime total, read `runtime.inspect(handle).tokens` — the
-`Handle`'s own counters, which really do only grow, across every turn since spawn.
+`TaskResult.turns`/`.total_tokens` report the **handle's own cumulative** totals since spawn, on
+every status alike (SPEC §7D): a resume continues from its checkpoint, so the suspended attempt's
+turn stays counted and the replay's turns are added on top. `runtime.inspect(handle).tokens` reads
+the same lifetime token figure straight off the `Handle`.
 
 ```python test
 import asyncio
@@ -304,10 +304,13 @@ async def main():
     final = await r.runtime.wait(handle)
 
     assert final.status == "done"
-    assert final.turns == 2  # the resumed replay's OWN two turns — not a running total
+    # 1 turn for the attempt that suspended + 2 for the replay = the handle's lifetime count.
+    assert final.turns == 3
+    assert final.total_tokens > 0
 
     tokens_after = r.runtime.inspect(handle).tokens
     assert tokens_after > tokens_before  # the Handle's lifetime counter really does only grow
+    assert final.total_tokens == tokens_after  # same number, read two ways
 
     await r.runtime.close(r.runtime.root)
     print("ok: handle tokens", tokens_before, "->", tokens_after, "| resumed turns:", final.turns)
@@ -323,7 +326,7 @@ asyncio.run(main())
 | `status` | `str` | `"pending"` when durably suspended — one of the closed §7D vocabulary (`done`/`pending`/`incomplete`/`interrupted`/`closed`/`timeout`/`error`). |
 | `pending` | `Request \| None` | Set iff `status == "pending"`. `Request.data["path"]` carries the suspended subtree's id path. |
 | `runtime` | `AgentRuntime \| None` | Set by `Agent.run()` — hold onto it to call `resume` later. |
-| `turns` / `total_tokens` | `int` | The ask() call that just completed — the resumed replay's own numbers, not a running total. Use `runtime.inspect(handle).tokens` for the handle's lifetime total. |
+| `turns` / `total_tokens` | `int` | The handle's own cumulative totals since spawn — a resume grows them from the checkpoint, never resets them. `runtime.inspect(handle).tokens` reads the same token figure off the `Handle`. |
 
 ## See also
 

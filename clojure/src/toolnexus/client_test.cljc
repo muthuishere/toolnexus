@@ -1408,7 +1408,7 @@
         d     (ex-data e)]
     (is (= :provider (:toolnexus/error d)))
     (is (= 402 (:status d)))
-    (is (= 3000 (:retry-after d)) "Retry-After lands on the typed error")
+    (is (= "3" (:retry-after d)) "the RAW Retry-After header lands on the typed error")
     (testing "every account identifier is REDACTED, in the typed body AND the message"
       (doseq [leak ["u-42" "17" "acme" "o-9"]]
         (is (not (str/includes? (:body d) leak)) (str "typed body leaks " leak))
@@ -1416,6 +1416,19 @@
     (testing "the failure itself is still legible — a cap is not redaction"
       (is (str/includes? (:body d) "no credit"))
       (is (str/includes? (ex-message e) "no credit")))))
+
+(deftest a-non-delay-seconds-retry-after-still-reaches-the-host-verbatim
+  ;; The point of the raw field: the WAITING rule ignores an HTTP-date and falls back to
+  ;; backoff, but the response really supplied it, so the typed error carries it intact.
+  (let [raw   "Wed, 21 Oct 2026 07:28:00 GMT"
+        [f _] (stub-http [{:status 503 :body "{\"error\":\"later\"}"
+                           :headers {"retry-after" raw}}])
+        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+                                     :retries 0 :http-client f})
+        e     (try (client/run c "hi" {}) nil (catch Throwable e e))]
+    (is (= raw (:retry-after (ex-data e))))
+    (is (nil? (#'client/retry-after-ms {:headers {"retry-after" raw}}))
+        "waiting rule unchanged: an HTTP-date falls back to backoff")))
 
 (deftest the-cap-is-message-only
   (let [body  (str "{\"error\":\"" (apply str (repeat 400 "x")) "\"}")

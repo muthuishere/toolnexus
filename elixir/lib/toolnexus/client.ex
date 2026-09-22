@@ -1264,9 +1264,10 @@ defmodule Toolnexus.Client do
   # §8 failure as a VALUE (ADR 0027 / D5): status + body + Retry-After on the exception,
   # and a message that is redacted then capped — never the raw provider body.
   defp provider_error(%Req.Response{status: status, body: body} = resp) do
+    # The RAW header verbatim — the waiting rule parses it separately and is unchanged.
     retry_after =
       case Req.Response.get_header(resp, "retry-after") do
-        [v | _] -> parse_retry_after(v)
+        [v | _] -> v
         _ -> nil
       end
 

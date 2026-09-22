@@ -517,10 +517,26 @@ def test_d5_two_status_vocabularies_are_both_named():
 
 
 def test_d5_provider_error_is_typed():
-    e = ProviderError(429, "slow down", 2.0)
+    e = ProviderError(429, "slow down", "2")
     assert e.status == 429
     assert e.body == "slow down"
-    assert e.retry_after == 2.0
+    # The RAW header verbatim, not a parsed number — identical in all seven ports.
+    assert e.retry_after == "2"
+
+
+def test_d5_provider_error_carries_a_non_delay_seconds_retry_after_verbatim():
+    """The point of the raw field: a value the WAITING rule ignores still reaches the host.
+
+    An HTTP-date is a legitimate ``Retry-After``; the library falls back to backoff for it
+    (``_parse_retry_after`` answers None), but the response really supplied it, so the typed
+    error carries it byte for byte rather than nulling it out.
+    """
+    from toolnexus.client import _parse_retry_after
+
+    raw = "Wed, 21 Oct 2026 07:28:00 GMT"
+    e = ProviderError(503, "later", raw)
+    assert e.retry_after == raw
+    assert _parse_retry_after(raw) is None  # waiting rule unchanged: falls back to backoff
 
 
 def test_d5_account_identifiers_are_redacted_not_merely_capped():

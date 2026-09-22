@@ -1,6 +1,6 @@
 ---
 title: "toolnexus.client/provider-error"
-description: "A non-2xx response from the model endpoint raises a typed provider error carrying the status code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception. — Clojure."
+description: "A non-2xx response from the model endpoint raises a typed provider error carrying the status code, a redacted+capped body, and the raw `Retry-After` header — never a bare unstructured exception. — Clojure."
 sidebar:
   label: "toolnexus.client/provider-error"
 ---
@@ -17,7 +17,7 @@ import { Aside } from '@astrojs/starlight/components';
 ;;    {:toolnexus/error :provider
 ;;     :status       402                 ; the HTTP status, verbatim
 ;;     :body         "…"                 ; redacted, UNCAPPED — the cap is message-only
-;;     :retry-after  3000}               ; ms — present only when the header parsed; omitted otherwise
+;;     :retry-after  "3"}                ; the RAW Retry-After header, verbatim; omitted when absent
 ;; and whose MESSAGE is "LLM 402: <redacted body, capped at 200 chars>"
 
 ;; catch it with ex-data, the idiomatic Clojure way — there is no exception CLASS to catch
@@ -29,7 +29,7 @@ import { Aside } from '@astrojs/starlight/components';
 ```
 
 A non-2xx response from the model endpoint raises a typed provider error carrying the status
-code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception.
+code, a redacted+capped body, and the raw `Retry-After` header — never a bare unstructured exception.
 `provider-error` is the constructor `run` calls internally the moment an HTTP attempt exhausts its
 retry budget on a terminal status; you do not normally call it yourself, but its shape is exactly
 what your `catch` sees.
@@ -65,6 +65,21 @@ not a behavioral one, and it is called out here rather than hidden.
   the budget is already exhausted and the call has thrown.
 
 ## Why this and not the alternative
+
+<Aside type="note" title="`:retry-after` is the RAW header — not a parsed number">
+`:retry-after` is the `Retry-After` header value **exactly as the provider sent it**, and is absent
+from the data map when the response sent no such header. It is deliberately not pre-parsed:
+`Retry-After` may legitimately be an HTTP-date, or fractional, signed, out-of-range or
+unparseable, and a numeric field would have to drop every one of those — destroying information
+the response actually supplied and which a host may well want to log or handle itself. The field is
+for the HOST.
+
+The library's own **waiting** rule is separate and unchanged: internally the client still honours
+only the delay-seconds form (RFC 9110 §10.2.3 — a run of ASCII digits, `0`…`2147483647`, waited as
+whole seconds, `0` meaning "retry now") and falls back to exponential backoff for anything else.
+So `Retry-After: Wed, 21 Oct 2026 07:28:00 GMT` still produces a backoff wait *and* still arrives
+verbatim on `:retry-after`. This port previously carried milliseconds here — see the changelog.
+</Aside>
 
 <Aside type="tip" title="Use :on-error when you want to react DURING the retry budget">
 `provider-error` (and the exception it builds) is what you get **after** the retry budget in
@@ -128,7 +143,7 @@ surface this port avoids.
         (if (= :provider (:toolnexus/error d))
           {:status       "provider-error"
            :http-status  (:status d)
-           :retry-after  (:retry-after d)   ; ms, or nil if the header didn't parse
+           :retry-after  (:retry-after d)   ; the raw header, or nil if none was sent
            :detail       (:body d)}          ; already redacted, safe to log or show
           (throw e))))))
 
@@ -144,7 +159,7 @@ surface this port avoids.
 
 (assert (= "provider-error" (:status report)))
 (assert (= 429 (:http-status report)))
-(assert (= 2000 (:retry-after report)))
+(assert (= "2" (:retry-after report)))
 (println "OK")
 ```
 
@@ -179,12 +194,12 @@ is blanked to `""` entirely rather than redacted, per the credentials guarantee 
         (when (= :provider (:toolnexus/error d))
           {:status      (:status d)          ; e.g. 402 — verbatim HTTP status
            :body        (:body d)            ; redacted, UNCAPPED — the full body, minus identifiers
-           :retry-after (:retry-after d)     ; ms, present only if the header parsed and was in range
+           :retry-after (:retry-after d)     ; the raw header verbatim, present only if one was sent
            :message     (ex-message e)       ; "LLM 402: <redacted body>", CAPPED at 200 chars + "…"
            :message-len (count (ex-message e))})))))
 
 (assert (= 402 (:status surface)))
-(assert (= 3000 (:retry-after surface)))
+(assert (= "3" (:retry-after surface)))
 (assert (str/includes? (:body surface) "«redacted»"))
 (assert (not (str/includes? (:body surface) "acct_9")))
 (assert (str/starts-with? (:message surface) "LLM 402:"))

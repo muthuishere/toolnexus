@@ -33,13 +33,19 @@ defmodule Toolnexus.ProviderError do
     * the rendered cause is capped at 200 bytes, with an ellipsis
 
   A cap is NOT redaction: the cap runs LAST, after the keys are replaced.
+
+  `retry_after` is the raw `Retry-After` header verbatim, or `nil` when the response
+  did not send one. It is deliberately NOT pre-parsed: an HTTP-date, fractional or
+  out-of-range value is information the response really supplied, and a numeric field
+  would have to null it out. The library's own waiting rule (delay-seconds only,
+  falling back to backoff) is separate and unchanged.
   """
   defexception [:status, :body, :retry_after, :message]
 
   @type t :: %__MODULE__{
           status: non_neg_integer() | nil,
           body: term(),
-          retry_after: non_neg_integer() | nil,
+          retry_after: String.t() | nil,
           message: String.t()
         }
 

@@ -598,8 +598,14 @@
 
 (defn provider-error
   "The typed §8 provider failure: an ex-info whose DATA carries `:status`,
-  `:body` (fully redacted) and `:retry-after` (ms), and whose MESSAGE carries
+  `:body` (fully redacted) and `:retry-after` (the RAW `Retry-After` header
+  verbatim, absent when the response sent none), and whose MESSAGE carries
   the capped, redacted body.
+
+  `:retry-after` is deliberately NOT pre-parsed: an HTTP-date, fractional or
+  out-of-range value is information the response really supplied, and a numeric
+  field would have to drop it. The library's waiting rule (`retry-after-ms`,
+  delay-seconds only, falling back to backoff) is separate and unchanged.
 
   Before this, a host could only regex the message — and the message was the raw
   body, account identifiers and all (#91/#92, ADR 0027)."
@@ -731,7 +737,7 @@
                                             {:toolnexus/error :transport :error (:error res)}))
 
                             :else
-                            (throw (provider-error status (:body res) (retry-after-ms res)))))]
+                            (throw (provider-error status (:body res) (http/header res "retry-after")))))]
             (if (and (= :retry verdict) (< attempt budget))
               (do (ktime/sleep! (or (retry-after-ms res)
                                     ;; exponential backoff + jitter, identical to

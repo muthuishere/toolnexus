@@ -302,11 +302,14 @@ class ProviderError(Exception):
 
     Typed so a host can branch without string-matching: ``status`` (the HTTP
     status), ``body`` (the provider's FULL text, redacted per :func:`safe_error_body`;
-    only the message form is capped — addendum A5) and ``retry_after`` (seconds parsed from the header, or None). ``text`` is a
+    only the message form is capped — addendum A5) and ``retry_after`` (the raw
+    ``Retry-After`` header verbatim, or None when the response did not send one —
+    deliberately NOT pre-parsed, so an HTTP-date or otherwise un-honourable value
+    still reaches the host intact). ``text`` is a
     deprecated alias for ``body``.
     """
 
-    def __init__(self, status: int, text: str, retry_after: Optional[float]) -> None:
+    def __init__(self, status: int, text: str, retry_after: Optional[str]) -> None:
         body = safe_error_body(status, text)
         shown = capped_error_body(status, text)
         super().__init__(f"LLM {status}: {shown}" if shown else f"LLM {status}")
@@ -329,7 +332,7 @@ def _open(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: f
     except urllib.error.HTTPError as e:
         text = e.read().decode("utf-8", errors="replace")
         ra = e.headers.get("Retry-After") if e.headers else None
-        raise _HttpError(e.code, text, _parse_retry_after(ra)) from None
+        raise _HttpError(e.code, text, ra) from None
 
 
 def _post(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float) -> dict[str, Any]:
@@ -1137,10 +1140,13 @@ class Client:
                 tier = classify({"status": e.status, "attempt": attempt, "retryable": retryable})
                 if tier == "fail" or attempt == self.retries:
                     raise
-                # `is not None`, not truthiness: `Retry-After: 0` means retry now.
+                # The field carries the RAW header; the waiting rule parses it here and
+                # is unchanged. `is not None`, not truthiness: `Retry-After: 0` means
+                # retry now.
+                delay = _parse_retry_after(e.retry_after)
                 wait = (
-                    e.retry_after
-                    if e.retry_after is not None
+                    delay
+                    if delay is not None
                     else base * (2 ** attempt) + random.random() * 0.1
                 )
                 await self._sleep(wait, deadline, cancel)

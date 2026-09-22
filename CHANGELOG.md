@@ -8,6 +8,71 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**`retryAfter` on the typed provider error now means the same thing in all seven ports — the raw
+`Retry-After` header, verbatim.** *Breaking for python, elixir, csharp and clojure hosts that read
+this field.* 0.19.0 shipped the field without pinning its representation, and the seven ports
+promptly picked three: js, golang and java carried the raw header string; python and elixir carried
+parsed seconds; csharp and clojure carried milliseconds — csharp under a different name again
+(`RetryAfterMs`). A host porting retry-handling between ports got a number that was off by 1000, or
+a string where it expected a float. Now every port carries the header exactly as the provider sent
+it, on a field spelled `retryAfter` / `RetryAfter` / `retry_after` / `:retry-after`, and the port's
+natural absent (`undefined` / `null` / `nil` / `None`) when the response sent no such header.
+
+What changed per port: **python** `retry_after: float | None` → `str | None`; **elixir**
+`retry_after: non_neg_integer() | nil` → `String.t() | nil`; **csharp** `RetryAfterMs: long?` →
+`RetryAfter: string?` (the member is renamed, deliberately); **clojure** `:retry-after` was
+milliseconds, now the raw header. js, golang and java are unchanged — they were already right.
+
+The raw header wins because it is **lossless**. `Retry-After` may legitimately be an HTTP-date, or
+fractional, signed, out-of-range or unparseable; a numeric field has to null all of those out,
+throwing away something the response really did supply and that a host may well want to log or act
+on itself. The field is for the host, not for the library. **The library's own retry/backoff
+behaviour is untouched**: internally every port still honours only the `delay-seconds` form (whole
+seconds, `0` means "retry now") and falls back to exponential backoff for anything else — so
+`Retry-After: Wed, 21 Oct 2026 07:28:00 GMT` still produces a backoff wait *and* now still reaches
+you verbatim on the field. Each changed port has a test pinning exactly that case. `SPEC.md` §8 now
+states the representation outright so it cannot drift again, and `docs/adr/0027` carries a note on
+what D3 left unsaid.
+
+**Java can now parse an `mcp.json` without connecting to anything.**
+`McpSource.parseConfig(Object)` is public, closing the last availability gap in the seven-port MCP
+config parser — Java was the only port where validating config meant either calling `load` (which
+spawns processes and opens connections) or reimplementing the wrapper-key rules yourself. It takes a
+file path, a raw JSON string, or an already-parsed `Map`, unwraps `mcpServers` / `servers` / `mcp`,
+and returns server name → server config. Use it to fail fast on a typo at startup, to filter or
+rewrite config before handing it to `load`, or to accept config from somewhere that is not a file.
+The change is purely additive: the method's behaviour is unchanged, and it is the same one `load`
+and `listMcpTools` have always called. As in the JS and Go references the returned map is not a
+defensive copy — copy it before mutating. One difference survives and is documented: C# and Java
+spell it `McpSource.ParseConfig` / `McpSource.parseConfig`, where the other five ports expose a free
+function (`parseMcpConfig`, `parse_mcp_config`, `ParseMcpConfig`, `parse_config`, `parse-config`).
+
+**Four API-reference pages documented signatures that do not exist, and one documented the wrong
+rule.** No library behaviour changed here — but if you copied these, you got code that would not
+compile, or a wrong mental model, so they are worth naming. `resume` was written up as returning
+nothing in Go (`suspension/resume`, `runtime/handle`) and Python (`suspension/resume`); it returns
+the result of the topmost handle the cascade re-ran (`SPEC.md` §7D) — `(TaskResult, error)` in Go, a
+`TaskResult` in Python, a result map in Elixir. Go's page also claimed `Resume` errors on an
+`answer.ID` mismatch; it never inspects `answer.ID`, and errors only when no handle in the tree is
+suspended. Python's `suspension/resume` claimed a resumed `TaskResult`'s counters are per-call; they
+are the handle's **own cumulative** totals and grow across a resume, never reset (`SPEC.md`:1078).
+Elixir's `client/resilience` still rescued `RuntimeError`, which 0.19.0's typed provider errors
+replaced with `Toolnexus.ProviderError`. And the Go and C# `skills/list` pages said a skill is
+`malformed-frontmatter` when YAML fails to parse — it is malformed only when YAML refuses it **and**
+the lenient line-wise rescue also recovers no `name` (`SPEC.md`:409-416, ADR 0028); both pages
+illustrated the rule with a fixture the rescue happily recovers, so they documented the opposite of
+what the ports do.
+
+**The API reference now has a coverage gate, and it blocks CI.** `site/scripts/coverage-gate.mjs`
+(new `docs-coverage` job) fails the build when a manifest entry has no page in some port, when a
+page is still an unfilled generator scaffold, when a page is an orphan nothing points at, or when a
+declared parity gap does not say it is one. It also runs `verify-symbols.mjs --strict`, which
+existed but ran nowhere, so a renamed export used to surface as a broken page rather than a failed
+build. This is the check that was missing when fifteen pages — `client/create` and `toolkit/create`
+among them, in five ports — sat as empty `TODO` scaffolds without anything noticing. Page *depth*
+(when-to-use / why / three examples) is reported but not yet blocking; the gate prints the
+outstanding count on every run.
+
 ## 0.19.0 — 2026-09-22
 
 ### Eight things that went wrong for people building on 0.18.x, fixed in all seven ports
