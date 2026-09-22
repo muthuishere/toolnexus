@@ -1,0 +1,4 @@
+;; cljgo needs the koine dep declared here (deps.edn is the JVM's half).
+(defn build [b]
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.11.0"})
+  (install b (exe b {:name "probe" :main "probe.cljc"})))

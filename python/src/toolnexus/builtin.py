@@ -14,7 +14,11 @@ import base64
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
+import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Awaitable, Callable, Optional, Union
@@ -23,8 +27,158 @@ from .content import MEDIA_TYPES
 from .types import JSONSchema, Tool, ToolContext, ToolResult, pending
 
 # A single global builtin toggle (mirrors MCP is_enabled precedence). The dict
-# form also allows a ``tools`` name→bool map for per-tool enable/disable.
+# form also allows a ``tools`` name→bool map for per-tool enable/disable, plus
+# the host boundary (SPEC §4A, ADR 0034):
+#
+#   shell              argv prefix for ``bash`` — used VERBATIM when set, detected
+#                      at construction when absent
+#   base_dir           what a RELATIVE path means for every builtin that touches
+#                      the filesystem, incl. the paths inside apply_patch's text
+#                      and as bash's default workdir; "" ⇒ the process cwd
+#   confine_to_base_dir  opt-in refusal of anything whose CANONICAL form leaves
+#                      base_dir, plus Windows reserved device names
 BuiltinsConfig = Union[bool, dict]
+
+# How long a job gets between "please stop" and "stop". Fixed, and identical in
+# every port, so a timeout means the same thing everywhere.
+KILL_GRACE_MS = 2000
+
+_WIN_RESERVED = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+def _shell_candidates() -> list[list[str]]:
+    """The interpreters tried when the host names none. ``%COMSPEC%`` leads on
+    Windows because PowerShell is routinely blocked by execution or
+    application-control policy, while ``%COMSPEC%`` is always present.
+    """
+    if sys.platform != "win32":
+        # ``/bin/sh`` first, then a PATH lookup: ``shell=True`` means literally
+        # ``/bin/sh``, while spawning the bare name ``sh`` is a PATH lookup —
+        # two different binaries on a machine that has both. Naming the absolute
+        # path first is what makes dropping ``shell=True`` byte-identical here.
+        return [["/bin/sh", "-c"], ["sh", "-c"]]
+    out: list[list[str]] = []
+    comspec = os.environ.get("COMSPEC")
+    if comspec:
+        out.append([comspec, "/d", "/s", "/c"])
+    out += [
+        ["cmd.exe", "/d", "/s", "/c"],
+        ["pwsh", "-NoProfile", "-Command"],
+        ["powershell", "-NoProfile", "-Command"],
+        ["bash", "-lc"],
+    ]
+    return out
+
+
+def _canonical_path(p: str) -> str:
+    """Resolve a path for comparison. Symlinks — and, on Windows, directory
+    junctions and 8.3 short names — are resolved on the DEEPEST EXISTING
+    ancestor and the remaining segments re-attached, because a file ``write`` is
+    about to create has no real path, and a check that only works on existing
+    files is not a check for ``write``.
+
+    ``normcase`` is not decoration: ``os.path.realpath`` does NOT normalise case
+    on Windows, so two spellings of one directory would compare unequal.
+    """
+    absolute = os.path.abspath(p)
+    cur, tail = absolute, ""
+    while True:
+        if os.path.exists(cur):
+            resolved = os.path.realpath(cur)
+            return os.path.normcase(os.path.join(resolved, tail) if tail else resolved)
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return os.path.normcase(absolute)
+        tail = os.path.join(os.path.basename(cur), tail) if tail else os.path.basename(cur)
+        cur = parent
+
+
+class _BuiltinEnv:
+    """What the builtins may know about the host: which interpreter to run,
+    which directory relative paths mean, and whether to refuse the ones that
+    leave it. Resolved once, at toolkit construction — a missing interpreter is
+    a configuration fact, and turn fourteen of a paid run is the expensive place
+    to learn it.
+    """
+
+    def __init__(self, cfg: Optional[BuiltinsConfig] = None) -> None:
+        obj = cfg if isinstance(cfg, dict) else {}
+        self.base_dir: str = str(obj.get("base_dir") or obj.get("baseDir") or "")
+        self.confine: bool = bool(obj.get("confine_to_base_dir") or obj.get("confineToBaseDir"))
+        given = obj.get("shell")
+        self.shell_error: Optional[Exception] = None
+        if given:
+            self.shell: list[str] = [str(x) for x in given]
+            return
+        tried: list[str] = []
+        for argv in _shell_candidates():
+            tried.append(argv[0])
+            if shutil.which(argv[0]) or os.path.exists(argv[0]):
+                self.shell = argv
+                return
+        self.shell = []
+        self.shell_error = RuntimeError(
+            "no shell interpreter found (tried: " + ", ".join(tried) + "); set builtins['shell'], "
+            "or disable the bash builtin with builtins['tools']['bash'] = False"
+        )
+
+    def shell_argv(self) -> list[str]:
+        if self.shell_error is not None:
+            raise self.shell_error
+        return self.shell
+
+    @property
+    def shell_label(self) -> str:
+        return " ".join(self.shell)
+
+    def dir(self) -> str:
+        return self.base_dir or os.getcwd()
+
+    def resolve_path(self, p: str) -> str:
+        """Map a tool-supplied path onto the filesystem: relative to
+        ``base_dir`` (or, with none, exactly as before), and refused when
+        confinement is on and the canonical target is outside the base.
+        """
+        if self.confine and not self.base_dir:
+            raise ValueError("confine_to_base_dir is set but base_dir is empty")
+        full = os.path.join(self.base_dir, p) if self.base_dir and not os.path.isabs(p) else p
+        if not self.confine:
+            return full
+        if sys.platform == "win32":
+            stem = os.path.basename(full).split(".")[0].strip().upper()
+            if stem in _WIN_RESERVED:
+                raise ValueError(
+                    f"{p} names a reserved device, which is not a file inside {self.base_dir}"
+                )
+        base = _canonical_path(self.base_dir)
+        target = _canonical_path(full)
+        if target != base and not target.startswith(base.rstrip(os.sep) + os.sep):
+            raise ValueError(f"{p} resolves outside baseDir {self.base_dir}")
+        return full
+
+
+def _kill_job(proc: "Optional[subprocess.Popen[bytes]]", graceful: bool) -> bool:
+    """Stop the command AND everything it started. On POSIX the child is its own
+    session leader (``start_new_session``), so the negated pid is the group; on
+    Windows there is no signalable group at all, and ``taskkill /T`` walks the
+    tree instead.
+    """
+    if proc is None or proc.poll() is not None:
+        return False
+    try:
+        if sys.platform == "win32":
+            args = ["taskkill", "/T", "/PID", str(proc.pid)] if graceful else [
+                "taskkill", "/T", "/F", "/PID", str(proc.pid)
+            ]
+            return subprocess.run(args, capture_output=True).returncode == 0
+        os.killpg(proc.pid, signal.SIGTERM if graceful else signal.SIGKILL)
+        return True
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
 
 
 def builtins_enabled(cfg: Optional[BuiltinsConfig]) -> bool:
@@ -51,10 +205,16 @@ def select_builtins(cfg: Optional[BuiltinsConfig]) -> list[Tool]:
     if not builtins_enabled(cfg):
         return []
     tools_map = cfg.get("tools") if isinstance(cfg, dict) else None
-    all_tools = create_builtin_tools()
-    if not tools_map:
-        return all_tools
-    return [t for t in all_tools if tools_map.get(t.name) is not False]
+    all_tools = create_builtin_tools(cfg)
+    selected = all_tools if not tools_map else [
+        t for t in all_tools if tools_map.get(t.name) is not False
+    ]
+    # A missing interpreter is a construction-time failure, and only when `bash`
+    # survived the toggles: a host that disabled it should run fine on a box with
+    # no shell at all (ADR 0034 D1).
+    if any(t.name == "bash" for t in selected):
+        builtin_shell(cfg)
+    return selected
 
 
 def _err(output: str, metadata: Optional[dict[str, Any]] = None) -> ToolResult:
@@ -172,39 +332,68 @@ def _walk_files(root: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 # individual tools
 # --------------------------------------------------------------------------- #
-def _bash_tool() -> Tool:
+def _bash_tool(env: _BuiltinEnv) -> Tool:
     async def run(args: dict[str, Any], ctx: Optional[ToolContext]) -> ToolResult:
         command = str(args.get("command") or "")
         if not command:
             return _err("bash: command is required")
-        workdir = str(args["workdir"]) if args.get("workdir") else None
+        try:
+            argv = env.shell_argv()
+            workdir = env.resolve_path(str(args["workdir"])) if args.get("workdir") else env.dir()
+        except Exception as e:  # a builtin reports, it never raises across the boundary
+            return _err(f"bash: {e}")
         timeout_ms = _num(args.get("timeout"))
         if timeout_ms is None:
             timeout_ms = 60_000
+        meta: dict[str, Any] = {"shell": env.shell_label}
+        holder: dict[str, Any] = {}
 
         def do() -> ToolResult:
+            # NOT subprocess.run(shell=True): it hides WHICH interpreter ran —
+            # and on Windows it silently means cmd.exe while other ports fail
+            # loudly — and its timeout kills the interpreter only, leaving the
+            # real command running, reparented (ADR 0034 D1/D4).
+            proc = subprocess.Popen(
+                [*argv, command],
+                cwd=workdir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                start_new_session=sys.platform != "win32",
+            )
+            holder["proc"] = proc
             try:
-                proc = subprocess.run(
-                    command,
-                    shell=True,
-                    cwd=workdir,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    timeout=timeout_ms / 1000,
-                )
-            except subprocess.TimeoutExpired as e:
-                out = e.output.decode("utf-8", "replace") if e.output else ""
-                return _err(f"bash: command timed out after {int(timeout_ms)}ms\n{out}")
-            out = proc.stdout.decode("utf-8", "replace")
+                out_bytes, _ = proc.communicate(timeout=timeout_ms / 1000)
+            except subprocess.TimeoutExpired:
+                # Ask, wait out the grace window, then insist. A runner that gets
+                # SIGTERM removes its temp directories; one that gets SIGKILL does not.
+                killed = _kill_job(proc, True)
+                try:
+                    out_bytes, _ = proc.communicate(timeout=KILL_GRACE_MS / 1000)
+                except subprocess.TimeoutExpired:
+                    killed = _kill_job(proc, False) or killed
+                    out_bytes, _ = proc.communicate()
+                meta["timedOut"] = True
+                meta["killedTree"] = killed
+                out = out_bytes.decode("utf-8", "replace") if out_bytes else ""
+                return _err(f"bash: command timed out after {int(timeout_ms)}ms\n{out}", meta)
+            out = out_bytes.decode("utf-8", "replace") if out_bytes else ""
             code = proc.returncode
+            meta["exitCode"] = code
             if code != 0:
-                return _err(
-                    f"{out}\nbash: command exited with code {code}",
-                    {"exitCode": code},
-                )
-            return _ok(out, {"exitCode": code})
+                return _err(f"{out}\nbash: command exited with code {code}", meta)
+            return _ok(out, meta)
 
-        return await asyncio.to_thread(do)
+        task = asyncio.ensure_future(asyncio.to_thread(do))
+        try:
+            return await task
+        except asyncio.CancelledError:
+            # to_thread cannot be interrupted, but the JOB can: killing it makes
+            # communicate() return and the thread finish, instead of leaving the
+            # machine loaded with work from a run that was cancelled.
+            _kill_job(holder.get("proc"), True)
+            await asyncio.sleep(KILL_GRACE_MS / 1000)
+            _kill_job(holder.get("proc"), False)
+            raise
 
     return _builtin(
         "bash",
@@ -224,16 +413,20 @@ def _bash_tool() -> Tool:
     )
 
 
-def _read_tool() -> Tool:
+def _read_tool(env: _BuiltinEnv) -> Tool:
     async def run(args: dict[str, Any], ctx: Optional[ToolContext]) -> ToolResult:
         p = str(args.get("path") or "")
         if not p:
             return _err("read: path is required")
-        media = MEDIA_TYPES.get(os.path.splitext(p)[1].lstrip(".").lower())
+        try:
+            full = env.resolve_path(p)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"read: {e}")
+        media = MEDIA_TYPES.get(os.path.splitext(full)[1].lstrip(".").lower())
         if media is not None:
             mime, part_type = media
             try:
-                with open(p, "rb") as f:
+                with open(full, "rb") as f:
                     raw = f.read()
             except OSError as e:
                 return _err(f"read: {e}")
@@ -250,7 +443,7 @@ def _read_tool() -> Tool:
                 ],
             )
         try:
-            with open(p, "r", encoding="utf-8") as f:
+            with open(full, "r", encoding="utf-8") as f:
                 content = f.read()
         except OSError as e:
             return _err(f"read: {e}")
@@ -293,14 +486,18 @@ def _coerce_str(value: Any) -> str:
     return "" if value is None else str(value)
 
 
-def _write_tool() -> Tool:
+def _write_tool(env: _BuiltinEnv) -> Tool:
     async def run(args: dict[str, Any], ctx: Optional[ToolContext]) -> ToolResult:
         p = str(args.get("path") or "")
         if not p:
             return _err("write: path is required")
         content = _coerce_str(args.get("content"))
-        os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
+        try:
+            full = env.resolve_path(p)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"write: {e}")
+        os.makedirs(os.path.dirname(os.path.abspath(full)), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as f:
             f.write(content)
         byte_len = len(content.encode("utf-8"))
         return _ok(f"Wrote {byte_len} bytes to {p}", {"bytes": byte_len})
@@ -321,7 +518,7 @@ def _write_tool() -> Tool:
     )
 
 
-def _edit_tool() -> Tool:
+def _edit_tool(env: _BuiltinEnv) -> Tool:
     async def run(args: dict[str, Any], ctx: Optional[ToolContext]) -> ToolResult:
         p = str(args.get("path") or "")
         if not p:
@@ -331,7 +528,11 @@ def _edit_tool() -> Tool:
             return _err("edit: oldString is required")
         new = _coerce_str(args.get("newString"))
         try:
-            with open(p, "r", encoding="utf-8") as f:
+            full = env.resolve_path(p)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"edit: {e}")
+        try:
+            with open(full, "r", encoding="utf-8") as f:
                 content = f.read()
         except OSError as e:
             return _err(f"edit: {e}")
@@ -348,7 +549,7 @@ def _edit_tool() -> Tool:
                 )
             nxt = content.replace(old, new, 1)
             n = 1
-        with open(p, "w", encoding="utf-8") as f:
+        with open(full, "w", encoding="utf-8") as f:
             f.write(nxt)
         plural = "" if n == 1 else "s"
         return _ok(f"Edited {p} ({n} replacement{plural})", {"replacements": n})
@@ -371,7 +572,7 @@ def _edit_tool() -> Tool:
     )
 
 
-def _grep_tool() -> Tool:
+def _grep_tool(env: _BuiltinEnv) -> Tool:
     async def run(args: dict[str, Any], ctx: Optional[ToolContext]) -> ToolResult:
         pattern = str(args.get("pattern") or "")
         if not pattern:
@@ -380,7 +581,10 @@ def _grep_tool() -> Tool:
             regex = re.compile(pattern)
         except re.error as e:
             return _err(f"grep: invalid regex: {e}")
-        root = str(args["path"]) if args.get("path") else os.getcwd()
+        try:
+            root = env.resolve_path(str(args["path"])) if args.get("path") else env.dir()
+        except Exception as e:  # noqa: BLE001
+            return _err(f"grep: {e}")
         include = str(args["include"]) if args.get("include") else None
         lim = _num(args.get("limit"))
         limit = int(lim) if lim is not None else 100
@@ -428,12 +632,15 @@ def _grep_tool() -> Tool:
     )
 
 
-def _glob_tool() -> Tool:
+def _glob_tool(env: _BuiltinEnv) -> Tool:
     async def run(args: dict[str, Any], ctx: Optional[ToolContext]) -> ToolResult:
         pattern = str(args.get("pattern") or "")
         if not pattern:
             return _err("glob: pattern is required")
-        root = str(args["path"]) if args.get("path") else os.getcwd()
+        try:
+            root = env.resolve_path(str(args["path"])) if args.get("path") else env.dir()
+        except Exception as e:  # noqa: BLE001
+            return _err(f"glob: {e}")
         lim = _num(args.get("limit"))
         limit = int(lim) if lim is not None else 100
         found: list[str] = []
@@ -707,13 +914,22 @@ def _apply_update(content: str, body: list[str]) -> str:
     return result
 
 
-def _apply_patch_tool() -> Tool:
+def _apply_patch_tool(env: _BuiltinEnv) -> Tool:
     async def run(args: dict[str, Any], ctx: Optional[ToolContext]) -> ToolResult:
         patch_text = str(args.get("patchText") or "")
         if not patch_text:
             return _err("apply_patch: patchText is required")
         try:
             ops = _parse_patch(patch_text)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"apply_patch: {e}")
+
+        # The paths live INSIDE the patch text, not in the arguments, so a host
+        # cannot rewrite them from a hook — the one case that genuinely needs the
+        # base directory to be library-side (ADR 0034 D2).
+        try:
+            for op in ops:
+                op["path"] = env.resolve_path(op["path"])
         except Exception as e:  # noqa: BLE001
             return _err(f"apply_patch: {e}")
 
@@ -772,20 +988,29 @@ def _apply_patch_tool() -> Tool:
     )
 
 
-def create_builtin_tools() -> list[Tool]:
+def create_builtin_tools(cfg: Optional[BuiltinsConfig] = None) -> list[Tool]:
     """Build the ten built-in tools (each ``source="builtin"``). The order is
     fixed for parity: bash, read, write, edit, grep, glob, webfetch, question,
     apply_patch, todowrite.
     """
+    env = _BuiltinEnv(cfg)
     return [
-        _bash_tool(),
-        _read_tool(),
-        _write_tool(),
-        _edit_tool(),
-        _grep_tool(),
-        _glob_tool(),
+        _bash_tool(env),
+        _read_tool(env),
+        _write_tool(env),
+        _edit_tool(env),
+        _grep_tool(env),
+        _glob_tool(env),
         _webfetch_tool(),
         _question_tool(),
-        _apply_patch_tool(),
+        _apply_patch_tool(env),
         _todowrite_tool(),
     ]
+
+
+def builtin_shell(cfg: Optional[BuiltinsConfig] = None) -> list[str]:
+    """The interpreter the builtins resolved for ``bash`` — what a host prints,
+    and what ``metadata["shell"]`` carries on every bash result. Raises the same
+    error ``select_builtins`` fails construction with when nothing resolves.
+    """
+    return _BuiltinEnv(cfg).shell_argv()

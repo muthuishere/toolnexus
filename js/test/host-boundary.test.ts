@@ -81,7 +81,7 @@ test("bash: aborting the surrounding call stops the work", { skip: isWindows }, 
 test("bash: the resolved interpreter is reported on every result", async () => {
   const res = await run(toolNamed(undefined, "bash"), { command: isWindows ? "echo hi" : "echo hi" })
   assert.ok(res.metadata?.shell, "metadata.shell must name the interpreter that ran")
-  if (!isWindows) assert.equal(res.metadata?.shell, "sh -c")
+  if (!isWindows) assert.equal(res.metadata?.shell, "/bin/sh -c")
 })
 
 test("bash: a host-supplied shell is used verbatim", { skip: isWindows }, async () => {

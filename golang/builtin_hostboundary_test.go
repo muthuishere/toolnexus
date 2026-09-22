@@ -141,8 +141,8 @@ func TestBashReportsTheResolvedInterpreter(t *testing.T) {
 	if shell == "" {
 		t.Fatalf("metadata.shell must name the interpreter that ran; got %#v", res.Metadata)
 	}
-	if runtime.GOOS != "windows" && shell != "sh -c" {
-		t.Fatalf("POSIX default should be `sh -c`; got %q", shell)
+	if runtime.GOOS != "windows" && shell != "/bin/sh -c" {
+		t.Fatalf("POSIX default should be `/bin/sh -c`; got %q", shell)
 	}
 }
 

@@ -50,3 +50,4 @@ clojure/examples/cljgo-ex1/chat
 # before this rule existed; ignoring the pattern stops new ones landing without
 # rewriting history for the old ones — untracking those is a separate decision.
 clojure/examples/cljgo/ex-*
+python/.venv/

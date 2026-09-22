@@ -295,6 +295,10 @@ public class Probe {
         h("O4 KILL THE JOB — orphan marker (control/naive/tree) and TERM -> grace -> KILL");
 
         for (String mode : List.of("control", "naive", "tree")) orphan(mode);
+        // the full sequence against a job whose GRANDCHILD ignores TERM: snapshot ->
+        // destroy (TERM) -> 2000 ms grace -> destroyForcibly (KILL).
+        treeIgnoresTerm("tree_grace");
+        treeIgnoresTerm("control_term_only");   // TERM only, no forceful follow-up
 
         // Does destroy() actually deliver SIGTERM, and destroyForcibly() SIGKILL?
         // Measured with a shell trap, not asserted from the javadoc.
@@ -355,6 +359,29 @@ public class Probe {
             Thread.sleep(1500);
             kv("reparent_marker_written", Files.exists(m2));
         }
+    }
+
+    static void treeIgnoresTerm(String mode) throws Exception {
+        Path marker = tmp.resolve("ignore-" + mode + ".marker");
+        Files.deleteIfExists(marker);
+        ProcessBuilder pb = new ProcessBuilder("sh", "-c",
+                "sleep 0.2; sh -c \"trap '' TERM; sleep 1; touch " + marker + "\"");
+        pb.redirectErrorStream(true).redirectOutput(new File("/dev/null"));
+        Process p = pb.start();
+        p.waitFor(400, TimeUnit.MILLISECONDS);
+        List<ProcessHandle> kids = p.descendants().toList();      // snapshot FIRST
+        kids.forEach(ProcessHandle::destroy);
+        p.destroy();
+        boolean inGrace = p.waitFor(2000, TimeUnit.MILLISECONDS)
+                && kids.stream().noneMatch(ProcessHandle::isAlive);
+        if (!inGrace && mode.equals("tree_grace")) {
+            kids.forEach(ProcessHandle::destroyForcibly);
+            p.destroyForcibly();
+        }
+        p.waitFor();
+        Thread.sleep(1500);
+        kv("grace_" + mode, (Files.exists(marker) ? "ORPHAN_SURVIVED" : "killed_whole_job")
+                + " DESCENDANTS=" + kids.size() + " exited_in_grace=" + inGrace);
     }
 
     static void termTrap(String how) throws Exception {

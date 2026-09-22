@@ -16,7 +16,12 @@ import (
 // what every port has always meant on POSIX, so detection changes nothing here
 // — it exists so the Windows list has a peer rather than a special case.
 func shellCandidates() [][]string {
-	return [][]string{{"sh", "-c"}}
+	// `/bin/sh` first, then a PATH lookup. Measured (SPIKE ports/js-python): the
+	// `shell:true` / `shell=True` the js and python ports used to pass means
+	// literally `/bin/sh`, while spawning the bare name `sh` is a PATH lookup —
+	// two different binaries on a machine that has both. Naming the absolute
+	// path first is what makes this change byte-identical for those two ports.
+	return [][]string{{"/bin/sh", "-c"}, {"sh", "-c"}}
 }
 
 // startJob starts cmd in its own process group, so a later signal can reach the

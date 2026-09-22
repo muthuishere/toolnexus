@@ -83,7 +83,11 @@ function resolvesOnPath(name: string): boolean {
  * policy, while %COMSPEC% is always present.
  */
 function shellCandidates(): string[][] {
-  if (process.platform !== "win32") return [["sh", "-c"]]
+  // `/bin/sh` first, then a PATH lookup: `shell: true` means literally
+  // `/bin/sh`, while spawning the bare name `sh` is a PATH lookup — two
+  // different binaries on a machine that has both. Naming the absolute path
+  // first is what makes dropping `shell: true` byte-identical here.
+  if (process.platform !== "win32") return [["/bin/sh", "-c"], ["sh", "-c"]]
   const out: string[][] = []
   if (process.env.COMSPEC) out.push([process.env.COMSPEC, "/d", "/s", "/c"])
   out.push(
