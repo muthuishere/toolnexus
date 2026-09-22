@@ -91,6 +91,35 @@
   See `code-points` for why this delegates."
   text/compare-strings)
 
+(defn last-index-of-char
+  "Index of the last `ch` in `s`, or nil — scanned with `count`/`nth` instead of
+  `clojure.string/last-index-of`.
+
+  THIS IS A HOST DIVERGENCE, and it belongs in the seam beside `compare-strings`
+  for the same reason that one does. On the cljgo host `last-index-of` returns a
+  BYTE offset while `subs`, `count` and `nth` work in RUNES, so for any string
+  containing a non-ASCII character the index and the slice disagree and the cut
+  lands mid-character-sequence:
+
+      (parent-dir \"/base/\\uE000dir/SKILL.md\")  =>  \"/base/\\uE000dir/S\"   on cljgo
+      (base-name  \"/docs/\\uD83D\\uDE00.pdf\")       =>  \".pdf\" mis-sliced   on cljgo
+
+  U+E000 is 3 UTF-8 bytes and 1 rune, so the index runs 2 too high; an astral
+  character is 4 bytes and 1 rune, so it runs 3 too high. On the JVM host
+  `last-index-of` agrees with `subs` and nothing is wrong, which is exactly why
+  this survived: every path in every fixture was ASCII. `classifier.cljc` had
+  already recorded that `last-index-of` was never proven on cljgo.
+
+  `count`, `nth` and `subs` are all in the SAME units as each other on each host
+  (UTF-16 units on the JVM, runes on cljgo), so a scan is correct on both
+  without either host needing to know which unit it is in."
+  [s ch]
+  (let [s (str s)]
+    (loop [i (dec (count s))]
+      (cond (neg? i)         nil
+            (= ch (nth s i)) i
+            :else            (recur (dec i))))))
+
 (defn sort-strings
   "`coll` sorted by `compare-strings` — `koine.text/sort-strings`, returned as a
   vector because every caller here treats tool lists as vectors."

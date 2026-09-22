@@ -89,6 +89,34 @@ def pending(
     )
 
 
+def answer_output(id: str, output: str) -> Answer:  # noqa: A002 — wire key
+    """Build the §10 ``Answer`` that supplies a RESULT for an outstanding call (D4,
+    #89, ADR 0026).
+
+    ``Answer.data`` is a free-form dict, so hosts have been guessing which key the
+    library reads (``value``? ``answers``? ``output``?) and a wrong guess was
+    SILENT — the model was handed a fabricated result and the host was told
+    ``done``. This constructor is the one spelling, and it refuses a non-string
+    ``output`` loudly rather than degrading it to ``""``.
+    """
+    if not isinstance(output, str):
+        raise TypeError(f"toolnexus: Answer output must be a str, got {type(output).__name__}")
+    return Answer(id=id, ok=True, data={"output": output})
+
+
+def answer_declined(id: str, reason: str = "declined") -> Answer:  # noqa: A002 — wire key
+    """Build the §10 ``Answer`` that REFUSES an outstanding request (addendum A9).
+
+    ``reason`` is the advisory §10 vocabulary — ``declined`` | ``cancelled`` |
+    ``expired``; the loop rule itself branches only on ``ok``.
+    """
+    if reason not in ("declined", "cancelled", "expired"):
+        raise ValueError(
+            f'toolnexus: Answer reason must be "declined", "cancelled" or "expired", got {reason!r}'
+        )
+    return Answer(id=id, ok=False, reason=reason)  # type: ignore[arg-type]
+
+
 def auth_required(url: str, prompt: str = "Authorization required to continue") -> ToolResult:
     """Sugar for the common case (§10): ``kind="authorization"`` at a login URL."""
     return pending(kind="authorization", prompt=prompt, url=url)

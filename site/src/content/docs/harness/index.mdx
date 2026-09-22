@@ -234,8 +234,54 @@ Every run returns an **Outcome**. The field that matters most is the one that is
 
 <Aside type="caution" title="A loop never stops silently">
 If `status` is not `done`, `stoppedBy` says why — in words. `result.limit` says which limit, as a
-value you can branch on (`"maxTurns"`, `"completion"`). A stop you cannot explain to a user is a
-bug, not a state.
+value you can branch on. Those values are a **closed vocabulary, identical in all seven ports** —
+`maxTurns` · `maxTokens` · `maxToolCalls` · `maxWallMs` · `maxChildren` · `maxConcurrent` ·
+`maxDepth` · `completion` · `timeout` — each naming the budget field that stopped the run, spelled
+as the `Budget` spells it, and each reachable as a **named public constant** so you never hard-code
+a string. A port never leaks its own internal name for a pool. The pairing is a contract too: **a
+limit stop names its limit, a non-limit stop leaves it empty** — a status that says "stopped" beside
+an empty `limit` was a real bug, and is now an invariant every port tests. A stop you cannot explain
+to a user is a bug, not a state.
+</Aside>
+
+<Aside type="danger" title="Two closed sets are both called `status` — check which one you are reading">
+They are **not** the same vocabulary, and the overlap is what has bitten people:
+
+| where | closed set |
+|---|---|
+| client `RunResult.status` (§8/§10) | `done` · `pending` · `incomplete` — **three values; `timeout` is not one of them** |
+| agent `TaskResult.status` (§7D) | `done` · `pending` · `incomplete` · `interrupted` · `closed` · `timeout` · `error` |
+
+`timeout` belongs to the agent runtime, where it means a `wait(handle, timeout)` expired. A **client
+run** that hits its own deadline is `status: "incomplete"` with `limit: "timeout"`, and it keeps the
+turns and usage it accumulated before the deadline. Branch on the **named constants** your port
+ships for each set rather than on a string you read in the other section.
+</Aside>
+
+## What the loop carries over from the harness — and what it cannot
+
+An agent has **two doors**: `agent.run(...)` goes through the agent runtime; `agent.loop(...)` is a
+driver over a client and a toolkit **you** built. They honour different halves of the spec, and the
+half a loop drops is worth knowing before you put a policy in one:
+
+| harness field | `agent.run` | `agent.loop(...).run` |
+|---|---|---|
+| `soul` / `soulFile` | system prompt | **carried** — but **your `systemPrompt` wins** when you set one |
+| `model` | default | **carried as the loop's default**; a per-call override still wins |
+| `budget.maxTurns` | enforced, hierarchically | **carried as the loop's `maxTurns`** |
+| `guardrails`, `hooks`, `completion` | honoured | **carried** |
+| `tools` | honoured | **ignored** — you hand the loop a built toolkit |
+| `team` | honoured | **ignored — a loop-driven agent has no `task` tool and cannot delegate at all** |
+| `budget` beyond `maxTurns` | honoured | **ignored** |
+| `waitFor`, `onMetric` | honoured | **ignored** |
+
+<Aside type="caution" title="Ask the loop what it is about to drop">
+`loopUnsupported(spec)` returns the canonical names — `"tools"`, `"team"`, `"waitFor"`,
+`"onMetric"` — of the fields this harness declares that a loop will discard. Same strings in all
+seven ports. Constructing the loop is still legal (making it an error would break every existing
+caller), so print or assert on that list in your own startup path. The reason this exists: a
+guardrail that silently does not run is worse than no guardrail API — you write the policy, see it
+in code review, and ship with none.
 </Aside>
 
 ## Where the loop deliberately stops short

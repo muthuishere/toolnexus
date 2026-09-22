@@ -117,7 +117,7 @@ public sealed class Agent
     {
         var rt = new AgentRuntime(rtOpts.CloneWithRegistry(Registry()));
         var spawned = rt.Spawn(rt.Root, Name);
-        if (spawned.Error != null) return new AgentResult(spawned.Error, true, "error", 0, 0);
+        if (spawned.Error != null) return new AgentResult(spawned.Error, true, AgentStatus.Error, 0, 0);
         var wait = rt.WaitAsync(spawned.Handle!);
         rt.Wake(spawned.Handle!, prompt);
         var r = await wait.ConfigureAwait(false);

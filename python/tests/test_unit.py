@@ -844,8 +844,10 @@ def test_frontmatter_empty_description():
 
 
 def test_frontmatter_malformed_yaml_does_not_crash():
-    # Unterminated quote → malformed YAML. Discovery must not crash; the skill is
-    # skipped (no `name` survives) or has an empty description.
+    # Unterminated quote → YAML refuses the block. Discovery must not crash, and
+    # since D6 (#93) the line-wise fallback RESCUES the file: `name` survives, so a
+    # skill Claude Code reads is no longer invisible to toolnexus. The value is the
+    # file's literal text — never an invented description.
     with tempfile.TemporaryDirectory() as root:
         _write_skill(
             root,
@@ -853,7 +855,8 @@ def test_frontmatter_malformed_yaml_does_not_crash():
             '---\nname: s\ndescription: "unterminated\n---\nbody\n',
         )
         src = load_skills(root)  # must not raise
-        assert "s" not in src.skills or (src.skills["s"].description or "") == ""
+        assert "s" in src.skills
+        assert src.skills["s"].content == "body\n"
 
 
 def test_frontmatter_real_folded_example_huddle():

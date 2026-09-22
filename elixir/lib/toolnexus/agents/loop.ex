@@ -71,7 +71,7 @@ defmodule Toolnexus.Agents.Loop do
   def run(%__MODULE__{} = loop, prompt, opts \\ []) do
     spec = loop.agent.spec
     completion = spec[:completion]
-    client = Client.create(client_options(loop, spec, opts[:model]))
+    client = Client.create(client_options(loop, spec, effective_model(opts[:model], spec[:model])))
 
     state = %{loop: %{loop | status: "running"}, attempts: 0, client: client}
 
@@ -118,6 +118,16 @@ defmodule Toolnexus.Agents.Loop do
     end
   end
 
+  # A8: the spec's model is a Loop DEFAULT. It applies when the caller's model is
+  # ABSENT, and equally when the caller passes the sentinel `"inherit"` — otherwise
+  # a caller holding a real model plus a spec model behaves differently per port.
+  @inherit "inherit"
+
+  defp effective_model(nil, spec_model), do: spec_model
+  defp effective_model("", spec_model), do: spec_model
+  defp effective_model(@inherit, spec_model), do: spec_model
+  defp effective_model(model, _spec_model), do: model
+
   # Applies a per-call model override via `:request_params` (`model` is not in the
   # forbidden set — the client forbids only messages/tools/stream).
   defp client_options(loop, spec, model) do
@@ -128,6 +138,14 @@ defmodule Toolnexus.Agents.Loop do
         do: Map.put(opts, :system_prompt, spec[:soul]),
         else: opts
 
+    # D2: the spec's budget is a Loop DEFAULT — a caller-supplied `:max_turns` still wins.
+    max_turns = (spec[:budget] || %{})[:max_turns]
+
+    opts =
+      if max_turns && !opts[:max_turns],
+        do: Map.put(opts, :max_turns, max_turns),
+        else: opts
+
     opts = Map.put(opts, :hooks, guarded_hooks(spec[:guardrails], spec[:hooks] || opts[:hooks]))
 
     if model && model != "" do
@@ -136,6 +154,34 @@ defmodule Toolnexus.Agents.Loop do
     else
       opts
     end
+  end
+
+  @doc """
+  The spec fields a DRIVER cannot honour (§7D, ADR 0024). A Loop drives ONE client
+  over ONE conversation, so it cannot own a tool wiring, a team, a §10 interpreter or
+  a metric sink — those belong to the Runtime. Additive and advisory: pass a spec, get
+  back the names of the fields this loop will IGNORE, in a stable order. An empty list
+  means the spec is fully honoured.
+
+      iex> Toolnexus.Agents.Loop.loop_unsupported(%{does: "x"})
+      []
+      iex> Toolnexus.Agents.Loop.loop_unsupported(%{team: [%{}], wait_for: fn _ -> nil end})
+      ["team", "waitFor"]
+  """
+  @spec loop_unsupported(keyword() | map()) :: [String.t()]
+  def loop_unsupported(spec) do
+    spec = if is_list(spec), do: Map.new(spec), else: spec || %{}
+
+    # A6: ONE canonical vocabulary, identical in all seven ports — these STRINGS, in
+    # this order. Not atoms, not the local spelling of the option key.
+    for {field, name} <- [
+          {:tools, "tools"},
+          {:team, "team"},
+          {:wait_for, "waitFor"},
+          {:on_metric, "onMetric"}
+        ],
+        Map.get(spec, field) not in [nil, [], %{}],
+        do: name
   end
 
   @doc """
@@ -269,13 +315,14 @@ defmodule Toolnexus.Agents.Loop do
     {%{
        last
        | status: "incomplete",
-         limit: "completion",
+         limit: Toolnexus.Status.Limit.completion(),
          text: "completion.verify failed #{completion.max_attempts}x: #{reason}"
      }, state}
   end
 
   defp gate_loop(ask, prompt, completion, state, attempt, accumulated, reason, _last) do
     text = if attempt == 1, do: prompt, else: "Your work did not verify: #{reason}. Fix it and finish."
+
     {r, state} = ask.(text, state)
 
     # The gate judges the ACCUMULATED work, so an agent cannot escape it by

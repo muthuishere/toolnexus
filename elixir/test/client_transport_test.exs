@@ -79,7 +79,7 @@ defmodule Toolnexus.ClientTransportTest do
 
   test "non-retryable status via transport surfaces as LLM error" do
     transport = fn _req -> {:ok, %{status: 401, headers: %{}, body: %{"error" => "bad key"}}} end
-    assert_raise RuntimeError, ~r/LLM 401/, fn -> Client.run(client(transport), "go", []) end
+    assert_raise Toolnexus.ProviderError, ~r/LLM 401/, fn -> Client.run(client(transport), "go", []) end
   end
 
   test "streaming rides the transport too (SSE body as binary)" do
@@ -158,7 +158,7 @@ defmodule Toolnexus.ClientTransportTest do
       {:ok, %{status: 500, headers: %{}, body: %{"error" => "boom"}}}
     end
 
-    assert_raise RuntimeError, ~r/LLM 500/, fn ->
+    assert_raise Toolnexus.ProviderError, ~r/LLM 500/, fn ->
       Client.run(client(transport, retries: 0, retry_base_ms: 1), "go", [])
     end
 
@@ -173,7 +173,7 @@ defmodule Toolnexus.ClientTransportTest do
       {:ok, %{status: 500, headers: %{}, body: %{"error" => "boom"}}}
     end
 
-    assert_raise RuntimeError, ~r/LLM 500/, fn ->
+    assert_raise Toolnexus.ProviderError, ~r/LLM 500/, fn ->
       Client.run(client(transport, retry_base_ms: 1), "go", [])
     end
 

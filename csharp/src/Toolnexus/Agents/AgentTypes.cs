@@ -96,11 +96,108 @@ public sealed class AgentDef
 /// boundary as <c>IsError</c> results — never exceptions; only the root may throw to the host.
 /// <see cref="Status"/> is the CLOSED seven-string vocabulary (SPEC §7D):
 /// <c>done | pending | incomplete | interrupted | closed | timeout | error</c> — identical strings
-/// in every port; a failed run is <c>error</c>, never <c>done</c> + <c>IsError</c>.
+/// in every port; a failed run is <c>error</c>, never <c>done</c> + <c>IsError</c>. The constants
+/// are <see cref="AgentStatus"/>; note they are a DIFFERENT vocabulary from the §8 client's
+/// three-value <see cref="RunStatus"/> (ADR 0027 — <c>timeout</c> is in this set and not in that
+/// one, which is the name collision behind #92.1).
 /// </summary>
+/// <param name="Turns">(ADR 0025 D1 / A13) The handle's CUMULATIVE round trips, on EVERY status.
+/// It used to be the single run's turns on done/pending/incomplete and the handle's total on
+/// error/closed/timeout — the same two-meanings defect #88 reports for tokens, one field over, so
+/// a second turn on a handle could report fewer turns than the first. Unlike
+/// <paramref name="TotalTokens"/> it does NOT include a delegated child's round trips: turns are
+/// not billed, and a parent's turn count is its own. There is deliberately no <c>OwnTurns</c>.</param>
+/// <param name="TotalTokens">(ADR 0025) The CUMULATIVE TREE TOTAL for this handle — coordinator
+/// plus every worker plus anything they delegated to — on EVERY status. This is the number you
+/// bill from. Before this fix it was the single run's usage on done/pending/incomplete and the
+/// tree total on error/closed/timeout/settled, so its meaning depended on which status came back.</param>
+/// <param name="OwnTokens">(ADR 0025) What THIS turn alone spent, excluding delegated children —
+/// the figure <see cref="TotalTokens"/> used to carry on three of the seven statuses.</param>
+/// <param name="Limit">(ADR 0025) WHICH limit stopped the run, as a value to branch on rather than
+/// prose in <see cref="Text"/>: <c>"maxTurns"</c> | <c>"completion"</c> | a budget pool name
+/// (<c>"tokens"</c>, <c>"toolCalls"</c>, <c>"wallMs"</c>). Empty when nothing was hit.</param>
 public sealed record AgentResult(
     string Text, bool IsError, string Status, int Turns, long TotalTokens,
-    Request? Pending = null);
+    Request? Pending = null, long OwnTokens = 0, string Limit = "");
+
+/// <summary>
+/// (ADR 0027) The §7D agent status vocabulary, by name. SEVEN values. This is NOT the §8 client's
+/// <see cref="RunStatus"/> set — the two share the field name <c>status</c> and are distinct
+/// vocabularies; <c>Timeout</c> exists only here, <c>Pending</c>/<c>Incomplete</c>/<c>Done</c> in both.
+/// </summary>
+public static class AgentStatus
+{
+    public const string Done = "done";
+    public const string Pending = "pending";
+    public const string Incomplete = "incomplete";
+    public const string Interrupted = "interrupted";
+    public const string Closed = "closed";
+    public const string Timeout = "timeout";
+    public const string Error = "error";
+
+    /// <summary>All seven, in SPEC order.</summary>
+    public static readonly IReadOnlyList<string> All =
+        new[] { Done, Pending, Incomplete, Interrupted, Closed, Timeout, Error };
+}
+
+/// <summary>
+/// (ADR 0027) The §8 CLIENT status vocabulary, by name. THREE values — <c>timeout</c> is NOT one
+/// of them: a §8 run that exceeds its budget throws <see cref="LlmClient.RunTimeoutException"/>.
+/// Distinct from <see cref="AgentStatus"/> despite the shared field name.
+/// </summary>
+public static class RunStatus
+{
+    public const string Done = "done";
+    public const string Pending = "pending";
+    public const string Incomplete = "incomplete";
+
+    /// <summary>All three, in SPEC order.</summary>
+    public static readonly IReadOnlyList<string> All = new[] { Done, Pending, Incomplete };
+}
+
+/// <summary>(ADR 0025) The values <see cref="AgentResult.Limit"/> and
+/// <see cref="LlmClient.RunResult.Limit"/> take.</summary>
+public static class StopLimit
+{
+    // The seven budget fields, spelled exactly as SPEC.md spells them on `Budget`.
+    public const string MaxTurns = "maxTurns";
+    public const string MaxTokens = "maxTokens";
+    public const string MaxToolCalls = "maxToolCalls";
+    public const string MaxWallMs = "maxWallMs";
+    public const string MaxChildren = "maxChildren";
+    public const string MaxConcurrent = "maxConcurrent";
+    public const string MaxDepth = "maxDepth";
+
+    // The two non-budget stops.
+    public const string Completion = "completion";
+    public const string Timeout = "timeout";
+
+    /// <summary>The CLOSED vocabulary, in SPEC order. Nothing outside this may reach
+    /// <see cref="AgentResult.Limit"/>.</summary>
+    public static readonly IReadOnlyList<string> All = new[]
+    {
+        MaxTurns, MaxTokens, MaxToolCalls, MaxWallMs, MaxChildren, MaxConcurrent, MaxDepth,
+        Completion, Timeout,
+    };
+
+    /// <summary>
+    /// (A14) Maps this runtime's INTERNAL pool name onto the canonical spelling. An internal name
+    /// is an implementation detail and may not leak into a field hosts branch on — "which limit
+    /// stopped me" is only answerable if the answer is the same word in every port. The mapping
+    /// happens AT THE BOUNDARY: internal names and the existing <c>"budget exhausted (…)"</c> text
+    /// are left exactly as they were, so no prose changes.
+    /// </summary>
+    internal static string FromPool(string pool) => pool switch
+    {
+        "tokens" => MaxTokens,
+        "toolCalls" => MaxToolCalls,
+        "wallMs" => MaxWallMs,
+        "children" => MaxChildren,
+        "concurrent" => MaxConcurrent,
+        "depth" => MaxDepth,
+        _ => pool,
+    };
+}
 
 /// <summary>Spawn outcome: a handle, or a uniform error naming the refused limit.</summary>
 public sealed record SpawnResult(Handle? Handle, string? Error);

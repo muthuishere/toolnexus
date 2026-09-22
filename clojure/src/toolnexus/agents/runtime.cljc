@@ -140,8 +140,13 @@
   "root")
 
 (def statuses
-  "The CLOSED result-status vocabulary (§7D). Identical strings in every port —
-  a host that switches on these must never meet a seventh value.
+  "The CLOSED TaskResult status vocabulary (§7D). Identical strings in every
+  port — a host that switches on these must never meet an eighth value.
+
+  IT IS NOT `toolnexus.client/statuses`, which has THREE values for a §8
+  RunResult and does NOT contain `\"timeout\"`. Two vocabularies on two fields
+  both spelled `status` is the collision behind #92.1; both are named so a host
+  can tell which one it is holding (D5).
 
     done         the turn produced a final answer
     pending      a §10 durable suspension; resume with `resume`
@@ -151,6 +156,52 @@
     timeout      a `wait` deadline expired — the child KEEPS RUNNING
     error        the run failed; failures cross a handle boundary as results"
   #{"done" "pending" "incomplete" "interrupted" "closed" "timeout" "error"})
+
+;; The A14 limit vocabulary, as named values. A `limit` that is not portable
+;; defeats the whole point of the field — #90's own complaint re-created inside
+;; its own fix — so the spelling is pinned here rather than written as a string
+;; literal at each site.
+(def limit-max-turns      "maxTurns")
+(def limit-max-tokens     "maxTokens")
+(def limit-max-tool-calls "maxToolCalls")
+(def limit-max-wall-ms    "maxWallMs")
+(def limit-max-children   "maxChildren")
+(def limit-max-concurrent "maxConcurrent")
+(def limit-max-depth      "maxDepth")
+(def limit-completion     "completion")
+(def limit-timeout        "timeout")
+
+(def limits
+  "The CLOSED `TaskResult.limit` vocabulary (addendum A14) — WHICH limit stopped
+  the run, spelled exactly as `SPEC.md` spells the `Budget` field, plus the two
+  non-budget stops. Identical strings in every port, like the `loopUnsupported`
+  names.
+
+      maxTurns · maxTokens · maxToolCalls · maxWallMs
+      maxChildren · maxConcurrent · maxDepth
+      completion · timeout
+
+  A port MUST MAP its internal pool/dimension name onto these; an internal name
+  is an implementation detail and may not leak into the field. This port's pools
+  are keyed `:tokens` / `:tool-calls` / `:deadline` and are mapped at the
+  boundary in `pool-limit`, which is why those spellings never reach a host.
+
+  ACCEPTED ASYMMETRY (A17): `maxChildren`, `maxConcurrent` and `maxDepth` are
+  SPAWN/ADMISSION refusals here, and an admission refusal surfaces as a throw
+  from the verb, not as a settled TaskResult — so there is no `limit` field to
+  carry them. This batch deliberately does NOT invent a settle path to make
+  those strings appear; the vocabulary pins the spelling for wherever a port
+  does report such a stop. Tracked as a follow-up, because it lives in the
+  verb's return type rather than in the vocabulary."
+  #{limit-max-turns limit-max-tokens limit-max-tool-calls limit-max-wall-ms
+    limit-max-children limit-max-concurrent limit-max-depth
+    limit-completion limit-timeout})
+
+(def ^:private limit-statuses
+  "The statuses that ARE limit stops, and therefore the only ones that may carry
+  `:limit`. Every other status must leave it empty — both halves of the rule,
+  enforced in one place (`result`)."
+  #{"incomplete" "timeout"})
 
 ;; ---------------------------------------------------------------------------
 ;; Small helpers
@@ -227,9 +278,9 @@
   [st clock-now id]
   (some (fn [a]
           (cond
-            (and (:tokens (:pool a)) (<= (:tokens (:pool a)) 0))         "maxTokens"
-            (and (:tool-calls (:pool a)) (<= (:tool-calls (:pool a)) 0)) "maxToolCalls"
-            (and (:deadline a) (>= clock-now (:deadline a)))             "maxWallMs"
+            (and (:tokens (:pool a)) (<= (:tokens (:pool a)) 0))         limit-max-tokens
+            (and (:tool-calls (:pool a)) (<= (:tool-calls (:pool a)) 0)) limit-max-tool-calls
+            (and (:deadline a) (>= clock-now (:deadline a)))             limit-max-wall-ms
             :else nil))
         (ancestors-of st id)))
 
@@ -239,7 +290,7 @@
   from being a free turn machine."
   [st id]
   (let [h (h-of st id)]
-    (when (>= (:turns-total h) (get-in h [:eff :max-turns])) "maxTurns")))
+    (when (>= (:turns-total h) (get-in h [:eff :max-turns])) limit-max-turns)))
 
 (defn- roll-up
   "Usage roll-up IS the budget ledger: a child's spend drains every ancestor's
@@ -266,9 +317,52 @@
 ;; layer in the one place a rename is forbidden.
 
 (defn- result
-  [status text err? turns total-tokens]
-  {:text text :isError (boolean err?) :status status
-   :turns turns :total-tokens total-tokens})
+  "One TaskResult (§7D).
+
+  `:total-tokens` is the CUMULATIVE TREE TOTAL on EVERY status — the figure that
+  answers \"what did this cost\", which is the only question a host asks of it.
+  It used to be the tree total on error/closed/timeout/settled and the FINISHED
+  TURN'S OWN figure on done/pending/incomplete: one field with two meanings and
+  nothing in the type saying which you had (issue #88/#90, ADR 0025).
+  `:own-tokens` is the per-agent figure, added so nothing is lost by unifying.
+
+  `:limit` names WHICH limit stopped an `incomplete` run — the RunResult's own
+  limit, and the budget name on a budget stop — rather than leaving the host to
+  read it out of English prose."
+  ([status text err? turns total-tokens]
+   (result status text err? turns total-tokens total-tokens nil))
+  ([status text err? turns total-tokens own-tokens]
+   (result status text err? turns total-tokens own-tokens nil))
+  ([status text err? turns total-tokens own-tokens limit]
+   (let [base {:text text :isError (boolean err?) :status status
+               :turns turns :total-tokens total-tokens :own-tokens own-tokens}]
+     ;; A18/A21 — THE NORMALISER. Every TaskResult in this namespace is built
+     ;; here, and `:limit` is decided here rather than `assoc`ed on afterwards
+     ;; by each caller. That is what makes the invariant STRUCTURAL instead of
+     ;; per-site: a NEW construction site cannot reintroduce the contradiction,
+     ;; even by forwarding a limit it was handed, because a non-limit status
+     ;; never grows the key and a limit status never lacks it.
+     ;;
+     ;; The bug class this closes: a settle that sets a STATUS without its
+     ;; corresponding LIMIT — `status "timeout"` beside an empty `:limit` — so
+     ;; the two fields a host branches on contradict each other, inside the very
+     ;; feature (#90's `limit`) added so hosts could branch. Three of five
+     ;; finished ports had it, and audits then found FOUR latent instances that
+     ;; the reported bug never touched: sites forwarding a limit straight
+     ;; through. A per-site fix plus an instance test would have missed all four.
+     (if (contains? limit-statuses status)
+       (assoc base :limit (if (contains? limits (str limit))
+                            (str limit)
+                            ;; A limit stop that did not name its limit still
+                            ;; has to say something TRUE. `timeout` names itself;
+                            ;; anything else ended without a final answer and no
+                            ;; budget did it, which is A14's `completion`. It is
+                            ;; never a hardcoded `maxTurns` — that was the
+                            ;; original "stop lying about what stopped it" bug,
+                            ;; one level up.
+                            (if (= "timeout" status) limit-timeout limit-completion)))
+       ;; …and a NON-limit stop is explicitly empty, never a forwarded value.
+       base))))
 
 (defn- closed-result [h]
   (result "closed" "closed" true (:turns-total h) (:usage-total h)))
@@ -288,7 +382,8 @@
   [st id limit]
   (let [h    (h-of st id)
         text (str "budget exhausted (" limit "); partial work preserved")
-        r    (result "incomplete" text true (:turns-total h) (:usage-total h))]
+        r    (result "incomplete" text true (:turns-total h) (:usage-total h)
+                     (:usage-total h) (str limit))]
     [(update-in st [:handles id] assoc :last-result r :waiters [] :state "idle")
      text
      (:waiters h)]))
@@ -329,6 +424,19 @@
      :deadline         deadline
      :usage-total      0
      :tool-calls-total 0
+     ;; The handle's LIFETIME turn count — never reset by a resume, and the
+     ;; ledger `turn-cap` spends. It is also what EVERY TaskResult reports
+     ;; (addendum A13): done/pending/incomplete used to report the finished
+     ;; RUN's turns while the other four statuses reported this, one field with
+     ;; two meanings — the same defect as total-tokens, one field over. There is
+     ;; no own-turns: tokens get an own figure because they are billed, turns do
+     ;; not.
+     ;;
+     ;; NOT rolled up into ancestors, deliberately: a parent's `maxTurns` must
+     ;; never be consumed by its children, and this same counter is the cap.
+     ;; See the note in the report — `examples/subagent-fanout/fixture.json`
+     ;; pins `parentTurns: 2` for a parent whose subtree ran 6, so a TREE total
+     ;; would break the shared §0 fixture in all seven ports.
      :turns-total      0
      :pending-request  nil
      ;; `:on-budget` bookkeeping (§7D). `:budget-grant` is a ONE-SHOT permit — an
@@ -862,23 +970,37 @@
                                      :drained [])
                           (trace-in (str id ": running→suspended (pending \""
                                          (:kind stamped) "\")")))
-                      (assoc (result "pending" (:text r) false (:turns r) tokens)
+                      (assoc (result "pending" (:text r) false (:turns-total h)
+                                     (:usage-total h) tokens)
                              :pending stamped)])
 
                    (= "incomplete" (:status r))
-                   [(-> st
-                        (assoc-in [:handles id :state] "idle")
-                        (trace-in (str id ": running→idle (incomplete: "
-                                       (or (:limit r) "maxTurns") ")")))
-                    (result "incomplete" "hit maxTurns without a final answer" true
-                            (:turns r) tokens)]
+                   ;; The limit is REPORTED, never assumed. This said "hit
+                   ;; maxTurns" whatever stopped the run, so a contentPart or a
+                   ;; timeout stop was mislabelled to every host reading the text
+                   ;; (ADR 0025).
+                   ;; A18 (latent instance). Forwarding the client's limit
+                   ;; straight through is the branch golang found by auditing
+                   ;; all of its status-construction sites — an `incomplete`
+                   ;; arriving with no limit would otherwise contradict itself.
+                   ;; It is unreachable today (§8 `run-result` always names one),
+                   ;; so the fallback is pure defence — but the fallback used to
+                   ;; be a hardcoded `maxTurns`, which is a stop LYING about what
+                   ;; stopped it. `completion` is A14's name for exactly this:
+                   ;; the loop ended without a final answer and no budget did it.
+                   (let [limit (or (:limit r) limit-completion)]
+                     [(-> st
+                          (assoc-in [:handles id :state] "idle")
+                          (trace-in (str id ": running→idle (incomplete: " limit ")")))
+                      (result "incomplete" (str "hit " limit " without a final answer") true
+                              (:turns-total h) (:usage-total h) tokens limit)])
 
                    :else
                    [(-> st
                         (assoc-in [:handles id :state] "idle")
                         (trace-in (str id ": running→idle (done, turns=" (:turns r)
                                        ", tokens=" tokens ")")))
-                    (result "done" (:text r) false (:turns r) tokens)]))))]
+                    (result "done" (:text r) false (:turns-total h) (:usage-total h) tokens)]))))]
         (when (= "pending" (:status final))
           ;; Rewind AFTER the state commit, so an observer that sees `suspended`
           ;; can never read a transcript that still holds the halted turn.
@@ -1196,10 +1318,16 @@
                                            [(update-in st [:handles id :waiters]
                                                        (fn [ws] (vec (remove #(= p %) ws))))
                                             nil]))
+                           ;; `:limit` BESIDE the status, never one without the
+                           ;; other. This settled `status "timeout"` with no
+                           ;; `:limit` at all — the two fields a host branches
+                           ;; on contradicting each other, and the same defect
+                           ;; js found in its own wait deadline (A14/A17).
                            (deliver p (result "timeout"
                                               (str "wait timeout after " timeout-ms
                                                    "ms (child still " (:state h) ")")
-                                              true (:turns-total h) (:usage-total h)))))
+                                              true (:turns-total h) (:usage-total h)
+                                              (:usage-total h) limit-timeout))))
                        timeout-ms))
              r @p]
          (when cancel (cancel))
@@ -1381,23 +1509,30 @@
   reattaches to the child that already resumed and never spawns a duplicate.
   Parked levels burn zero tokens while they wait.
 
+  Returns the TaskResult of the topmost handle the cascade re-ran (A4).
+
   Throws only when there is nothing suspended — the root is the one place §7D
   permits a throw to the host."
   [rt answer]
-  (let [leaf (deepest-suspended @(:state rt) root)]
+  (let [answer (client/as-answer answer)
+        leaf   (deepest-suspended @(:state rt) root)]
     (when-not leaf (throw (ex-info "no suspended handle to resume" {})))
     (transact! rt (fn [st]
                     [(trace-in st (str leaf ": resume with Answer(ok=" (boolean (:ok answer))
                                        ") at checkpoint (turns so far: "
                                        (:turns-total (h-of st leaf)) ")"))
                      nil]))
-    (resume-suspended! rt leaf answer false)
-    (loop [p (:parent (h-of @(:state rt) leaf))]
-      (when (and p (not= p root) (= "suspended" (:state (h-of @(:state rt) p))))
-        (transact! rt (fn [st] [(trace-in st (str p ": cascade resume (reattaching delegated work)")) nil]))
-        (resume-suspended! rt p nil false)
-        (recur (:parent (h-of @(:state rt) p)))))
-    nil))
+    (loop [r (resume-suspended! rt leaf answer false)
+           p (:parent (h-of @(:state rt) leaf))]
+      (if (and p (not= p root) (= "suspended" (:state (h-of @(:state rt) p))))
+        (do (transact! rt (fn [st] [(trace-in st (str p ": cascade resume (reattaching delegated work)")) nil]))
+            (let [r* (resume-suspended! rt p nil false)]
+              (recur r* (:parent (h-of @(:state rt) p)))))
+        ;; ADR 0025 / addendum A4 — the TaskResult of the TOPMOST handle the
+        ;; cascade re-ran. `resume` used to return nil, so a host had no way to
+        ;; learn the outcome of the work it had just unblocked except by
+        ;; `wait`ing on a handle it may not even hold.
+        r))))
 
 ;; ---------------------------------------------------------------------------
 ;; The model surface: the `task` tool

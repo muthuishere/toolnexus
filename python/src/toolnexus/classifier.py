@@ -35,7 +35,16 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Literal, Mapping, Optional, Protocol, Union
 
-from .client import Client, ErrorClassifier, ErrorInfo, MetricEvent, OnMetric, _parse_retry_after, _is_retryable_status
+from .client import (
+    Client,
+    ErrorClassifier,
+    ErrorInfo,
+    MetricEvent,
+    OnMetric,
+    _is_retryable_status,
+    _parse_retry_after,
+    capped_error_body,
+)
 from .toolkit import Toolkit
 
 __all__ = [
@@ -109,6 +118,29 @@ _DEFAULT_RETRIES = 2
 _DEFAULT_RETRY_BASE_MS = 500
 
 ClassifierStyle = Literal["systemone", "llm", "custom", "static"]
+
+#: A BACKEND is where the System One wire is served. Picking one sets base_url,
+#: model and api_key_env AS A UNIT (D5, #91, ADR 0027) — mixing TypeSafe's model
+#: alias with OpenRouter's base URL is the documented 404 in issue #91, and it
+#: used to be discoverable only at request time.
+ClassifierBackend = Literal["typesafe", "openrouter"]
+
+CLASSIFIER_BACKENDS: dict[str, dict[str, str]] = {
+    "typesafe": {
+        "base_url": DEFAULT_CLASSIFIER_BASE_URL,
+        "model": DEFAULT_CLASSIFIER_MODEL,
+        "api_key_env": DEFAULT_CLASSIFIER_API_KEY_ENV,
+    },
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "model": "typesafe/jev-1.13",
+        "api_key_env": "OPENROUTER_API_KEY",
+    },
+}
+
+#: The one mismatch worth failing at construction: a model alias only TypeSafe
+#: serves, pointed at OpenRouter.
+_TYPESAFE_ONLY_MODELS = ("jev-latest",)
 
 
 class ClassifierError(Exception):
@@ -863,13 +895,13 @@ def _first_json_object(s: str) -> str:
 def _cause(status: int, body: bytes) -> str:
     """Surface a backend's reported cause intact, EXCEPT on an authentication
     status: a 401/403 body routinely reflects the credential or the header that
-    was sent, so it never reaches a log, a metric, an error or a return value."""
-    if status in (401, 403):
-        return ""
-    s = body.decode("utf-8", errors="replace").strip()
-    if not s:
-        return ""
-    return ": " + (s[:200] + "…" if len(s) > 200 else s)
+    was sent, so it never reaches a log, a metric, an error or a return value.
+
+    The policy now lives in :func:`toolnexus.client.safe_error_body` — the same
+    cap, the same 401/403 blanking and the same account-identifier redaction on
+    the §8 client path, which had none of it (D5)."""
+    text = capped_error_body(status, body.decode("utf-8", errors="replace"))
+    return ": " + text if text else ""
 
 
 def _static_key(model: str, state: Any, questions: Mapping[str, Question]) -> bytes:
@@ -881,6 +913,7 @@ def _static_key(model: str, state: Any, questions: Mapping[str, Question]) -> by
 def create_classifier(
     *,
     style: ClassifierStyle = "systemone",
+    backend: Optional[ClassifierBackend] = None,
     base_url: Optional[str] = None,
     model: Optional[str] = None,
     api_key_env: Optional[str] = None,
@@ -906,14 +939,31 @@ def create_classifier(
     """
     if style not in ("systemone", "llm", "custom", "static"):
         raise ClassifierError(f"classifier: unknown style {style!r}")
+    if backend is not None:
+        if backend not in CLASSIFIER_BACKENDS:
+            raise ClassifierError(
+                f"classifier: unknown backend {backend!r} (known: {', '.join(sorted(CLASSIFIER_BACKENDS))})"
+            )
+        preset = CLASSIFIER_BACKENDS[backend]
+        # The preset is a UNIT; an explicit field still wins over it.
+        base_url = base_url or preset["base_url"]
+        model = model or preset["model"]
+        api_key_env = api_key_env or preset["api_key_env"]
+    effective_base = base_url or DEFAULT_CLASSIFIER_BASE_URL
+    effective_model = model or DEFAULT_CLASSIFIER_MODEL
+    if "openrouter.ai" in effective_base and effective_model in _TYPESAFE_ONLY_MODELS:
+        raise ClassifierError(
+            f'classifier: model "{effective_model}" is TypeSafe\'s spelling; '
+            'on openrouter.ai use "typesafe/jev-1.13"'
+        )
     if style == "llm" and client is None:
         raise ClassifierError(f"classifier: style {style!r} requires client")
     if style == "custom" and evaluate is None:
         raise ClassifierError(f"classifier: style {style!r} requires evaluate")
     return Classifier(
         style=style,
-        base_url=base_url or DEFAULT_CLASSIFIER_BASE_URL,
-        model=model or DEFAULT_CLASSIFIER_MODEL,
+        base_url=effective_base,
+        model=effective_model,
         api_key_env=api_key_env or DEFAULT_CLASSIFIER_API_KEY_ENV,
         headers=headers,
         timeout=timeout if timeout else DEFAULT_CLASSIFIER_TIMEOUT,

@@ -47,6 +47,22 @@
   "The NAME of the environment variable holding the credential, never a value."
   "TYPESAFE_API_KEY")
 
+(def backends
+  "§8B `:backend` — a PRESET that sets base-url + model + api-key-env AS A UNIT
+  (D5 / ADR 0027).
+
+  The three travel together and were three independent options, so the obvious
+  half-configuration — TypeSafe's model spelling pointed at openrouter.ai — was
+  expressible, and produced a 404 whose body said nothing about the model. A
+  preset makes the working combination the short path and the broken one
+  impossible to reach by accident."
+  {"typesafe"   {:base-url "https://api.typesafe.ai/v1"
+                 :model    "jev-latest"
+                 :api-key-env "TYPESAFE_API_KEY"}
+   "openrouter" {:base-url "https://openrouter.ai/api/v1"
+                 :model    "typesafe/jev-1.13"
+                 :api-key-env "OPENROUTER_API_KEY"}})
+
 (def default-timeout-ms
   "Bounds ONE request. A classifier has no loop to bound."
   10000)
@@ -424,8 +440,24 @@
   A style whose required option is missing, and an unknown style, are rejected
   HERE rather than at the first call."
   [opts]
-  (let [style (str (or (:style opts) "systemone"))
-        opts  (assoc opts
+  (let [style   (str (or (:style opts) "systemone"))
+        backend (when (some? (:backend opts)) (str (:backend opts)))
+        _       (when (and backend (not (contains? backends backend)))
+                  (throw (ex-info (str "classifier: unknown backend " (pr-str backend)
+                                       " — expected one of " (pr-str (vec (sort (keys backends)))))
+                                  {:backend backend})))
+        preset  (get backends backend)
+        opts    (merge preset opts)
+        ;; The KNOWN mismatch, refused at construction rather than at the first
+        ;; 404: `jev-latest` is TypeSafe's own spelling of the floating alias and
+        ;; openrouter.ai does not serve it under that name.
+        _       (let [url   (str (or (:base-url opts) default-base-url))
+                      model (str (or (:model opts) default-model))]
+                  (when (and (str/includes? url "openrouter.ai") (= "jev-latest" model))
+                    (throw (ex-info (str "classifier: model \"jev-latest\" is TypeSafe's spelling; "
+                                         "on openrouter.ai use \"typesafe/jev-1.13\"")
+                                    {:base-url url :model model}))))
+        opts  (assoc (dissoc opts :backend)
                      :style       style
                      :base-url    (or (:base-url opts) default-base-url)
                      :model       (or (:model opts) default-model)
@@ -518,19 +550,16 @@
       (seq (str credential)) (assoc "authorization" (str "Bearer " credential)))))
 
 (defn- safe-cause
-  "A backend's reported cause, surfaced INTACT so a caller can tell a limit error
-  from a transport fault — EXCEPT on an authentication status. A 401/403 body
-  routinely reflects the credential or the header that was sent (measured: a
-  gateway echoing the whole Authorization value), so it never reaches a log, a
-  metric, an error or a return value."
+  "A backend's reported cause, surfaced so a caller can tell a limit error from a
+  transport fault — blanked on an authentication status, REDACTED of account
+  identifiers otherwise, and capped at 200 characters in the message.
+
+  The policy itself now lives in `toolnexus.client` and is CALLED, not copied:
+  D5 lifts this rule to the §8 path, and two implementations of one policy is
+  how they stop being the same policy."
   [status body]
-  (if (or (= 401 status) (= 403 status))
-    ""
-    (let [s (str/trim (str body))]
-      (cond
-        (str/blank? s) ""
-        (> (count s) 200) (str ": " (subs s 0 200) "…")
-        :else (str ": " s)))))
+  (let [s (client/cap-message (client/safe-body status body))]
+    (if (str/blank? s) "" (str ": " s))))
 
 (defn- post!
   "The one POST, with the §8 retry loop around it — `toolnexus.client/classify`
@@ -568,9 +597,12 @@
                                 {:url url :error (:error res)})
                        ;; The status and the ENDPOINT, and — on an auth status —
                        ;; nothing else.
+                       ;; The typed error carries the FULL redacted body; only the
+                       ;; message is capped (addendum A5).
                        (ex-info (str "classifier: POST " url " HTTP " status
                                      (safe-cause status (:body res)))
-                                {:url url :status status}))))))))))
+                                {:toolnexus/error :provider :url url :status status
+                                 :body (client/safe-body status (:body res))}))))))))))
 
 (defn- evaluate-static
   "Recorded decisions. THIS IS WHAT CI RUNS: no network, no credential. It is not

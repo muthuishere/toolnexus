@@ -126,13 +126,26 @@
        ;; tool/sort-strings, not `sort` — glob output must not depend on the host.
        tool/sort-strings))
 
-(defn- rel-path [root p]
-  (let [root (str root)
+(defn- rel-path
+  "`p` relative to `root`, always `/`-separated (A28).
+
+  The separator is normalised because this string is BOTH the sort key and the
+  emitted output: a port that orders by one string and displays another is
+  ordering by one thing and showing another, and cross-port byte-identity needs
+  the separator to match on every platform. The JS host emits `/` natively while
+  a JVM host on Windows would emit `\\`, so without this the two hosts of THIS
+  PORT could disagree on shipped text. js does the same thing, explicitly
+  (`toPosixPath(path.relative(root, file), path.sep)`)."
+  [root p]
+  (let [root (str/replace (str root) "\\" "/")
+        p    (str/replace (str p) "\\" "/")
         pfx  (if (str/ends-with? root "/") root (str root "/"))]
-    (if (str/starts-with? (str p) pfx) (subs (str p) (count pfx)) (str p))))
+    (if (str/starts-with? p pfx) (subs p (count pfx)) p)))
 
 (defn- parent-of [p]
-  (let [i (str/last-index-of (str p) "/")]
+  ;; the text seam — `clojure.string/last-index-of` is a BYTE offset on cljgo,
+  ;; so a non-ASCII directory path was cut mid-name there.
+  (let [i (tool/last-index-of-char p \/)]
     (when i (subs (str p) 0 (long i)))))
 
 ;; ---------------------------------------------------------------------------
@@ -355,11 +368,24 @@
             (tool/success (str "Replaced " (if (true? (:replaceAll args)) (count hits) 1)
                           " occurrence(s) in " p))))))))
 
-(defn- grep-file-hits [pat f]
-  (let [lines (str/split-lines (str (fs/read-file f)))]
+(defn- grep-file-hits
+  "`rel:line:text` for every matching line in `f`, in ASCENDING LINE ORDER.
+
+  The path emitted is the `/`-separated path RELATIVE to the walk root — the
+  SAME string `t-grep` orders on. It used to emit the absolute path while
+  ordering on the walked one: ordering by one thing and displaying another, and
+  leaking a machine path into model-visible output. The same defect was found in
+  golang, csharp and python, and js already emits `path.relative(root, file)`.
+
+  Line order is NUMERIC because the hits are produced in line order and never
+  re-sorted as strings — sorting the rendered `path:line:text` would put line 10
+  before line 2."
+  [pat root f]
+  (let [rel   (rel-path root f)
+        lines (str/split-lines (str (fs/read-file f)))]
     (->> (map-indexed (fn [i line] [(inc i) line]) lines)
          (filter (fn [pair] (some? (re-find pat (nth pair 1)))))
-         (map (fn [pair] (str f ":" (nth pair 0) ":" (nth pair 1))))
+         (map (fn [pair] (str rel ":" (nth pair 0) ":" (nth pair 1))))
          vec)))
 
 (defn- t-grep
@@ -373,7 +399,12 @@
         files (->> (files-under root)
                    (filter (fn [f] (or (nil? inc-g)
                                        (glob-match? inc-g (rel-path root f))))))
-        hits  (vec (mapcat (fn [f] (grep-file-hits pat f)) files))]
+        ;; COLLECT every hit, THEN cap (A25/A26). `files-under` has already
+        ;; ordered the walk portably, and the hits of each file come out in
+        ;; ascending line order, so the concatenation is exactly "by relative
+        ;; path, then line number ascending" — with the cap applied LAST, so the
+        ;; filesystem never decides WHICH hits the model sees.
+        hits  (vec (mapcat (fn [f] (grep-file-hits pat root f)) files))]
     (tool/success (str/join "\n" (take limit hits)))))
 
 (defn- t-glob [args _ctx]

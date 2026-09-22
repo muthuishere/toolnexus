@@ -69,6 +69,20 @@ public final class Classifier {
     public static final String METRIC_EVALUATE = "classifier.evaluate";
     public static final String METRIC_WARNING = "classifier.warning";
 
+    /**
+     * The two SERVABLE backend presets (ADR 0027). {@code baseUrl}, {@code model} and
+     * {@code apiKeyEnv} are only JOINTLY valid — #91 was TypeSafe's model spelling sent to
+     * OpenRouter's endpoint — so a preset sets all three AS A UNIT rather than leaving a host to
+     * discover the coupling from a 400.
+     */
+    public static final String BACKEND_TYPESAFE = "typesafe";
+    public static final String BACKEND_OPENROUTER = "openrouter";
+
+    /** OpenRouter's base, its spelling of {@link #DEFAULT_MODEL}, and its credential env name. */
+    public static final String OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+    public static final String OPENROUTER_MODEL = "typesafe/jev-1.13";
+    public static final String OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY";
+
     /** The four backends. */
     public static final String STYLE_SYSTEMONE = "systemone";
     public static final String STYLE_LLM = "llm";
@@ -474,6 +488,10 @@ public final class Classifier {
     public static final class Options {
         /** {@code "systemone" | "llm" | "custom" | "static"}. Null ⇒ {@code "systemone"}. */
         public String style;
+        /** {@code "typesafe" | "openrouter"} — sets {@link #baseUrl}, {@link #model} and
+         * {@link #apiKeyEnv} AS A UNIT. An explicitly-set field still wins over the preset, so a
+         * host can pin a model on either backend. Null ⇒ the TypeSafe defaults, as before. */
+        public String backend;
         /** The API base. Null ⇒ {@link #DEFAULT_BASE_URL}. OpenRouter serves this wire today. */
         public String baseUrl;
         /** Null ⇒ {@link #DEFAULT_MODEL}. Pin it once thresholds are tuned. */
@@ -530,6 +548,7 @@ public final class Classifier {
         Function<String, String> env;
 
         public Options style(String v) { this.style = v; return this; }
+        public Options backend(String v) { this.backend = v; return this; }
         public Options baseUrl(String v) { this.baseUrl = v; return this; }
         public Options model(String v) { this.model = v; return this; }
         public Options apiKeyEnv(String v) { this.apiKeyEnv = v; return this; }
@@ -568,9 +587,22 @@ public final class Classifier {
     private Classifier(Options opts, Map<String, String> staticCorpus) {
         this.opts = opts;
         this.style = opts.style == null ? STYLE_SYSTEMONE : opts.style;
-        this.baseUrl = opts.baseUrl == null ? DEFAULT_BASE_URL : opts.baseUrl;
-        this.model = opts.model == null ? DEFAULT_MODEL : opts.model;
-        this.apiKeyEnv = opts.apiKeyEnv == null ? DEFAULT_API_KEY_ENV : opts.apiKeyEnv;
+        boolean openrouter = BACKEND_OPENROUTER.equals(opts.backend);
+        if (opts.backend != null && !openrouter && !BACKEND_TYPESAFE.equals(opts.backend)) {
+            throw new ClassifierException("classifier: unknown backend \"" + opts.backend
+                    + "\" (expected \"" + BACKEND_TYPESAFE + "\" or \"" + BACKEND_OPENROUTER + "\")");
+        }
+        this.baseUrl = opts.baseUrl != null ? opts.baseUrl
+                : (openrouter ? OPENROUTER_BASE_URL : DEFAULT_BASE_URL);
+        this.model = opts.model != null ? opts.model : (openrouter ? OPENROUTER_MODEL : DEFAULT_MODEL);
+        this.apiKeyEnv = opts.apiKeyEnv != null ? opts.apiKeyEnv
+                : (openrouter ? OPENROUTER_API_KEY_ENV : DEFAULT_API_KEY_ENV);
+        // The known mismatch, caught at CONSTRUCTION rather than as a 400 three layers away:
+        // the defaults are only JOINTLY valid, and nothing else said so (#91).
+        if (DEFAULT_MODEL.equals(this.model) && this.baseUrl.contains("openrouter.ai")) {
+            throw new ClassifierException("classifier: model \"" + DEFAULT_MODEL
+                    + "\" is TypeSafe's spelling; on openrouter.ai use \"" + OPENROUTER_MODEL + "\"");
+        }
         this.timeoutMs = opts.timeoutMs == null ? DEFAULT_TIMEOUT_MS : opts.timeoutMs;
         this.retries = opts.retries == null || opts.retries <= 0 ? 2 : opts.retries;
         this.retryBaseMs = opts.retryBaseMs == null || opts.retryBaseMs <= 0 ? 500L : opts.retryBaseMs;
@@ -825,11 +857,11 @@ public final class Classifier {
      * credential or the header that was sent.
      */
     private static String cause(int status, String body) {
-        if (status == 401 || status == 403 || body == null) return "";
-        String s = body.strip();
-        if (s.isEmpty()) return "";
-        if (s.length() > 200) s = s.substring(0, 200) + "…";
-        return ": " + s;
+        // ONE policy, defined on the §8 path and reused here: 401/403 blanked, ACCOUNT
+        // IDENTIFIERS REDACTED, then capped. The cap alone never helped — the leaking body in
+        // the #92 reproduction is 96 bytes (ADR 0027).
+        String s = LlmClient.safeErrorBody(status, body);
+        return s.isEmpty() ? "" : ": " + s;
     }
 
     /**

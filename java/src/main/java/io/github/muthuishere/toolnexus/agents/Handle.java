@@ -63,6 +63,10 @@ public final class Handle {
     final Deque<String> wakeQueue = new ArrayDeque<>();
     /** Items consumed by the in-flight turn — restored on abort (transactional drain). */
     List<InboxItem> drained = List.of();
+    /** The input of the turn that SUSPENDED (prompt + the items it drained), kept so a durable
+     * resume replays that turn instead of a literal {@code "continue"} — which lost both the
+     * caller's prompt and the drained inbox (ADR 0025). Cleared when consumed. */
+    String suspendedInput;
     /** Set when spawned via the {@code task} tool: {@code agent + ":" + prompt} (reattachment key). */
     String taskKey;
     /** Last completed turn result — what {@code wait} answers immediately on a settled handle. */

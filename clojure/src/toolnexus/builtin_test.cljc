@@ -238,7 +238,50 @@
         (doseq [n ["a.txt" "\uE000.txt" "😀.txt" "z.txt"]]
           (run "write" {:path (str nb "/" n) :content "x\n"}))
         (is (= "a.txt\nz.txt\n\uE000.txt\n😀.txt"
-               (:output (run "glob" {:pattern "*.txt" :path nb}))))))))
+               (:output (run "glob" {:pattern "*.txt" :path nb}))))))
+    ;; A26/A27d — a CAPPED listing is a CONTENT question, not a cosmetic one.
+    ;; The rule for every capped listing of filesystem entries that reaches the
+    ;; model: COLLECT, SORT by the path relative to the walk root in plain code
+    ;; point, THEN truncate. Never break at the cap mid-walk — js's `glob` did,
+    ;; so the FILESYSTEM chose which files the model saw and the sort only
+    ;; ordered the survivors.
+    ;;
+    ;; THE FIXTURE PROVES ITSELF (A27d). A hand-probed fixture can discriminate
+    ;; on one host and be vacuous on the other, silently — and this port has
+    ;; MEASURED that its two hosts walk differently for the same directory:
+    ;;
+    ;;   JVM   : mß.txt, n.txt, a-dir, a-dir/zz.txt   (root files, then dirs)
+    ;;   cljgo : a-dir, a-dir/zz.txt, mß.txt, n.txt   (per-level, sorted)
+    ;;
+    ;; That divergence IS the bug this rule removes, and it is also why the
+    ;; precondition below is computed at run time on whichever host is running
+    ;; rather than asserted from a table. If first-N-by-walk and first-N-by-sort
+    ;; are the same SET here, the fixture cannot tell the two implementations
+    ;; apart and says so, instead of passing for the wrong reason.
+    (testing "A26 — the cap selects by SORT, not by walk; fixture self-proves"
+      (let [cap  (p "globs-cap")]
+        ;; `a-dir/zz.txt` sorts FIRST of all, but a walk that visits root files
+        ;; first reaches it LAST; `alpha-b.txt` vs `alpha/f.txt` separates a flat
+        ;; relative sort ('-' 0x2D < '/' 0x2F) from a per-level walk (dir `alpha`
+        ;; before file `alpha-b.txt`). Between them the two host walk orders are
+        ;; both distinguished from the sorted order.
+        (doseq [r ["n.txt" "mß.txt" "alpha-b.txt" "alpha/f.txt" "a-dir/zz.txt"]]
+          (run "write" {:path (str cap "/" r) :content "x\n"}))
+        (let [walk   (->> (fs/list-tree cap)
+                          (map str)
+                          (remove fs/directory?)
+                          (map (fn [f] (str/replace (str f) (str cap "/") ""))))
+              sorted (tool/sort-strings walk)
+              n      2
+              by-walk (set (take n walk))
+              by-sort (set (take n sorted))]
+          (is (not= by-walk by-sort)
+              (str "fixture is vacuous on this filesystem — first-" n
+                   " by walk " by-walk " equals first-" n " by sort " by-sort))
+          (is (= (vec (take n sorted))
+                 (str/split-lines (:output (run "glob" {:pattern "**/*.txt"
+                                                        :path cap :limit n}))))
+              "the capped output is the sorted prefix, on whichever host is running"))))))
 
 (deftest grep-tool
   (let [d (p "greps")]
@@ -249,15 +292,40 @@
         (is (false? (:isError r)))
         ;; The FULL line, not `ends-with?`. Asserting only the tail left the
         ;; `file:` half of "file:line:text" unproven — emitting an empty
-        ;; filename passed just as well. js pushes the walked path verbatim
-        ;; (`matches.push(\`${file}:${i+1}:${lines[i]}\`)`, js/src/builtin.ts:329)
-        ;; where `glob` pushes `path.relative(root,file)` (:360), so grep being
-        ;; ABSOLUTE while glob is RELATIVE is faithful parity, not a slip.
-        ;; §4A pins neither; reported upward rather than quietly normalised.
+        ;; filename passed just as well.
+        ;;
+        ;; THE PATH IS RELATIVE AND `/`-SEPARATED (A26/A28), and it is the SAME
+        ;; string the tool orders on. grep used to emit the ABSOLUTE path while
+        ;; ordering on the walked one — ordering by one thing and displaying
+        ;; another, and leaking a machine path into model-visible output. That
+        ;; was found in golang, csharp and python too; js emits
+        ;; `toPosixPath(path.relative(root, file), path.sep)` in BOTH builtins
+        ;; (js/src/builtin.ts:344, :388). The older note here — that grep being
+        ;; absolute while glob was relative was "faithful parity" with js:329 —
+        ;; described js BEFORE it was fixed, and is why this drift survived.
         (let [lines (str/split-lines (:output r))]
           (is (= 2 (count lines)))
-          (is (= (str (p "greps") "/a.txt:1:TODO: alpha") (nth lines 0)))
-          (is (= (str (p "greps") "/a.txt:3:TODO: omega") (nth lines 1))))))
+          (is (= "a.txt:1:TODO: alpha" (nth lines 0)))
+          (is (= "a.txt:3:TODO: omega" (nth lines 1)))
+          (testing "asserted STRUCTURALLY too, which a literal comparison on one
+                    fixture cannot do: no separator from another platform, and
+                    never an absolute path"
+            (doseq [l lines]
+              (is (not (str/includes? l "\\")) "no backslash separator reaches the output")
+              (is (not (str/starts-with? l "/")) "not an absolute path")
+              (is (not (str/includes? l (p "greps"))) "no machine path leaks to the model"))))))
+    (testing "line order is NUMERIC, not lexicographic — 10 must not precede 2.
+              Sorting the rendered `path:line:text` as one string is how that
+              happens, so the hits are produced in line order and never re-sorted."
+      (let [many (p "grepmany")
+            body (str/join "\n" (map (fn [i] (if (>= i 1) (str "TODO " i) "x"))
+                                     (range 1 13)))]
+        (run "write" {:path (str many "/m.txt") :content (str body "\n")})
+        (let [ls (str/split-lines (:output (run "grep" {:pattern "TODO" :path many})))]
+          (is (= 12 (count ls)))
+          (is (= "m.txt:1:TODO 1" (first ls)))
+          (is (= "m.txt:2:TODO 2" (nth ls 1)) "line 2 comes second, not after line 10")
+          (is (= "m.txt:12:TODO 12" (last ls))))))
     (testing "an include that matches nothing ⇒ empty"
       (is (= "" (:output (run "grep" {:pattern "TODO" :path d
                                       :include "**/nomatch/*.txt"})))))

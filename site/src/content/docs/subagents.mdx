@@ -287,7 +287,8 @@ A durable pending leaves the tree parked — the result carries the live runtime
 const r = await coder.run("refund order 812", { llm })
 if (r.status === "pending") {
   // ... later, possibly after human approval:
-  const resumed = await r.runtime.resume(answer)   // routes to the DEEPEST suspended handle
+  // routes to the DEEPEST suspended handle; returns the result of the TOPMOST handle re-run
+  const resumed = await r.runtime.resume(answer)
 }
 ```
 
@@ -301,6 +302,20 @@ On resume the deepest handle continues from its checkpoint (turns and usage grow
 and each re-run parent's `task` call **reattaches to the existing child by task key**
 (agent + prompt): settled ⇒ its recorded result, suspended ⇒ its pending, running ⇒ await.
 Never a duplicate spawn.
+
+<Aside type="caution" title="Reattachment covers `task` calls — not your own tools">
+"Continues from its checkpoint" means the suspended turn is **rewound to its pre-turn snapshot and
+replayed**, so **every tool that ran in that turn runs again**. Reattachment by task key is what
+keeps a re-run *parent* from spawning duplicate children; a leaf agent's own `git push`, payment or
+`POST` has no equivalent protection. The rule to design against:
+
+> **Any tool reachable in a turn that can suspend must be idempotent, or guarded by you.**
+
+This is true on the inline path too — §10 resolves a suspension by re-executing the suspended tool
+with `ctx.answer`, so at least one tool is always called twice across a resume. Replaying the
+suspended leaf's stored transcript instead of rewinding it is deferred to its own change
+(`openspec/changes/fix-consumer-issues-86-93`, D3).
+</Aside>
 
 ## Budgets — and the `"incomplete"` status
 

@@ -261,13 +261,13 @@ public final class AgentRuntime {
             if (h.state == Handle.State.IDLE && h.lastResult != null) return h.lastResult;
             if (h.state == Handle.State.SUSPENDED && h.pendingReq != null) {
                 // A suspended handle is settled-with-a-pending: wait answers immediately.
-                return new TaskResult(h.pendingReq.prompt(), false, "pending",
+                return new TaskResult(h.pendingReq.prompt(), false, TaskResult.STATUS_PENDING,
                         withPath(h.pendingReq, pathOf(h)), pathOf(h), h.turnsTotal, h.usageTotal);
             }
             if (h.state == Handle.State.CLOSED) {
                 // Closed-but-settled: close ≠ loss — the recorded result stays queryable.
                 return h.lastResult != null ? h.lastResult
-                        : new TaskResult("closed", true, "closed", null, null, h.turnsTotal, h.usageTotal);
+                        : new TaskResult("closed", true, TaskResult.STATUS_CLOSED, null, null, h.turnsTotal, h.usageTotal);
             }
             f = new CompletableFuture<>();
             h.waiters.add(f);
@@ -277,12 +277,13 @@ public final class AgentRuntime {
         } catch (java.util.concurrent.TimeoutException e) {
             // The child keeps running on a wait timeout (unless the waiter then interrupts it).
             return new TaskResult("wait timeout after " + timeoutMs + "ms (child still " + h.state.label() + ")",
-                    true, "timeout", null, null, h.turnsTotal, h.usageTotal);
+                    true, TaskResult.STATUS_TIMEOUT, null, null, h.turnsTotal, h.usageTotal,
+                    0L, "timeout");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return new TaskResult("wait interrupted", true, "interrupted", null, null, h.turnsTotal, h.usageTotal);
+            return new TaskResult("wait interrupted", true, TaskResult.STATUS_INTERRUPTED, null, null, h.turnsTotal, h.usageTotal);
         } catch (ExecutionException e) {
-            return new TaskResult(String.valueOf(e.getCause()), true, "error", null, null, h.turnsTotal, h.usageTotal);
+            return new TaskResult(String.valueOf(e.getCause()), true, TaskResult.STATUS_ERROR, null, null, h.turnsTotal, h.usageTotal);
         }
     }
 
@@ -351,7 +352,7 @@ public final class AgentRuntime {
         if (h.def.onClose != null) h.def.onClose.accept(h, rsn); // pre-final-checkpoint
         synchronized (lock) {
             h.state = Handle.State.CLOSED;
-            flushWaitersLocked(h, new TaskResult("closed", true, "closed", null, null, h.turnsTotal, h.usageTotal));
+            flushWaitersLocked(h, new TaskResult("closed", true, TaskResult.STATUS_CLOSED, null, null, h.turnsTotal, h.usageTotal));
         }
         t(h.id + ": →closed (" + rsn + ")");
     }
@@ -374,7 +375,7 @@ public final class AgentRuntime {
     /** Resume a durable pending: the Answer routes to the DEEPEST suspended handle, which resumes
      * at its checkpoint (turns/usage grow, never reset); the upward cascade re-runs each parent,
      * whose re-invoked {@code task} REATTACHES to the existing child by task key. */
-    public void resume(Answer answer) {
+    public TaskResult resume(Answer answer) {
         Handle leaf = findSuspendedLeaf(root);
         if (leaf == null) throw new IllegalStateException("no suspended handle");
         t(leaf.id + ": resume with Answer(ok=" + answer.ok() + ") at checkpoint (turns so far: "
@@ -386,7 +387,11 @@ public final class AgentRuntime {
             // idle→running (the replay wake) — never a direct suspended→running.
             t(leaf.id + ": suspended→idle (Answer accepted, checkpoint restored)");
         }
-        runTurn(leaf, "continue", req -> answer, false);
+        // Replay the SUSPENDED TURN's own input, never a literal. `drainLocked` will append any
+        // items that arrived while the handle was suspended, so nothing is lost and nothing is
+        // double-counted (the items this turn drained are already inside `suspendedInput`).
+        String replay = takeSuspendedInput(leaf);
+        TaskResult result = runTurn(leaf, replay, req -> answer, false);
         Handle p = leaf.parent;
         while (p != null && p != root && p.state == Handle.State.SUSPENDED) {
             synchronized (lock) {
@@ -395,8 +400,19 @@ public final class AgentRuntime {
                 t(p.id + ": suspended→idle (Answer accepted, checkpoint restored)");
             }
             t(p.id + ": cascade resume (replay reattaches by task key)");
-            runTurn(p, "continue", null, false);
+            result = runTurn(p, takeSuspendedInput(p), null, false);
             p = p.parent;
+        }
+        return result;
+    }
+
+    /** The input of the turn that suspended, consumed once. Null/absent ⇒ {@code "continue"},
+     * the pre-fix behaviour, so a handle suspended by an older path still resumes. */
+    private String takeSuspendedInput(Handle h) {
+        synchronized (lock) {
+            String in = h.suspendedInput;
+            h.suspendedInput = null;
+            return in == null || in.isEmpty() ? "continue" : in;
         }
     }
 
@@ -496,13 +512,13 @@ public final class AgentRuntime {
         Admission adm = new Admission();
         if (h.state == Handle.State.CLOSED) {
             if (slotHeld && h.parent != null) h.parent.runningChildren--;
-            adm.early = new TaskResult("closed", true, "closed", null, null, h.turnsTotal, h.usageTotal);
+            adm.early = new TaskResult("closed", true, TaskResult.STATUS_CLOSED, null, null, h.turnsTotal, h.usageTotal);
             return adm;
         }
         if (h.state == Handle.State.RUNNING || h.state == Handle.State.SUSPENDED) {
             // Busy-guard: check-then-run must be atomic under the lock (heartbeats race wakes).
             if (slotHeld && h.parent != null) h.parent.runningChildren--;
-            adm.early = new TaskResult("busy (" + h.state.label() + ")", true, "error", null, null,
+            adm.early = new TaskResult("busy (" + h.state.label() + ")", true, TaskResult.STATUS_ERROR, null, null,
                     h.turnsTotal, h.usageTotal);
             return adm;
         }
@@ -510,7 +526,8 @@ public final class AgentRuntime {
         if (exhausted != null) {
             if (slotHeld && h.parent != null) h.parent.runningChildren--;
             TaskResult r = new TaskResult("budget exhausted (" + exhausted + "); partial work preserved",
-                    true, "incomplete", null, null, h.turnsTotal, h.usageTotal);
+                    true, TaskResult.STATUS_INCOMPLETE, null, null, h.turnsTotal, h.usageTotal,
+                    0L, exhausted);
             h.lastResult = r;
             flushWaitersLocked(h, r);
             t(h.id + ": wake refused SETTLED incomplete (budget " + exhausted + ")");
@@ -600,21 +617,34 @@ public final class AgentRuntime {
                         List<String> path = pathOf(h);
                         h.pendingReq = r.pending;
                         h.pendingPath = path;
+                        // The turn's OWN input — prompt + the inbox items this turn drained — is
+                        // kept so `resume` replays THIS turn, not the word "continue". Replaying
+                        // a literal dropped the caller's prompt and the drained inbox on the
+                        // floor: a §0 break, Java only (ADR 0025).
+                        h.suspendedInput = input;
                         t(h.id + ": running→suspended DURABLE (pending \"" + r.pending.kind()
                                 + "\", path preserved)");
-                        result = new TaskResult(r.text, false, "pending", withPath(r.pending, path), path,
-                                r.turns, r.usage.totalTokens);
+                        // A13a: `turns` is the handle's OWN CUMULATIVE round trips, reported
+                        // identically on EVERY status — never the single run's figure on three
+                        // statuses and the cumulative one on the other three. It is NOT rolled up
+                        // the ancestor chain (that is tokens; `examples/subagent-fanout` pins
+                        // parentTurns=2 beside parentUsageTotal=240).
+                        result = new TaskResult(r.text, false, TaskResult.STATUS_PENDING,
+                                withPath(r.pending, path), path, h.turnsTotal,
+                                h.usageTotal, r.usage.totalTokens, null);
                     } else if ("incomplete".equals(r.status)) {
                         if (h.state != Handle.State.CLOSED) h.state = Handle.State.IDLE;
                         String limit = r.limit != null ? r.limit : "maxTurns";
-                        result = new TaskResult("hit " + limit + " without a final answer", true, "incomplete",
-                                null, null, r.turns, r.usage.totalTokens);
+                        result = new TaskResult("hit " + limit + " without a final answer", true,
+                                TaskResult.STATUS_INCOMPLETE, null, null, h.turnsTotal,
+                                h.usageTotal, r.usage.totalTokens, limit);
                         t(h.id + ": running→idle (INCOMPLETE at " + limit + " " + h.effMaxTurns + ")");
                     } else {
                         if (h.state != Handle.State.CLOSED) h.state = Handle.State.IDLE;
                         t(h.id + ": running→idle (done, turns=" + r.turns + ", tokens=" + r.usage.totalTokens + ")");
                         h.drained = List.of(); // the completed turn consumed the drained items
-                        result = new TaskResult(r.text, false, "done", null, null, r.turns, r.usage.totalTokens);
+                        result = new TaskResult(r.text, false, TaskResult.STATUS_DONE, null, null,
+                                h.turnsTotal, h.usageTotal, r.usage.totalTokens, null);
                     }
                 }
             }
@@ -635,7 +665,7 @@ public final class AgentRuntime {
                 t(h.id + ": running→idle (" + (abort != null ? abort + "; inbox intact" : "error: " + msg) + ")");
                 // Closed status vocabulary: a failed run is "error" — never "done" + isError.
                 result = new TaskResult(abort != null ? abort : msg, true,
-                        abort != null ? abort : "error", null, null, h.turnsTotal, h.usageTotal);
+                        abort != null ? abort : TaskResult.STATUS_ERROR, null, null, h.turnsTotal, h.usageTotal);
             }
         } finally {
             Thread.interrupted(); // clear any leftover cancel interrupt before post-processing
@@ -760,10 +790,10 @@ public final class AgentRuntime {
                                 && (child.state == Handle.State.IDLE || child.state == Handle.State.CLOSED)) {
                             r = child.lastResult;
                         } else if (child.state == Handle.State.CLOSED) {
-                            r = new TaskResult("closed", true, "closed", null, null,
+                            r = new TaskResult("closed", true, TaskResult.STATUS_CLOSED, null, null,
                                     child.turnsTotal, child.usageTotal);
                         } else if (child.state == Handle.State.SUSPENDED) {
-                            r = new TaskResult(child.pendingReq.prompt(), false, "pending",
+                            r = new TaskResult(child.pendingReq.prompt(), false, TaskResult.STATUS_PENDING,
                                     withPath(child.pendingReq, pathOf(child)), pathOf(child),
                                     child.turnsTotal, child.usageTotal);
                         }

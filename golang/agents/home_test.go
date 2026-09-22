@@ -342,8 +342,10 @@ func TestHomeH5Heartbeat(t *testing.T) {
 		rt.Wake(h, hb)
 		r2 := rt.Wait(h, 0)
 		rt.Close(rt.Root, nil)
-		if r2.Turns != 1 {
-			t.Errorf("H5.3 queued ticks did not coalesce to one turn (turns=%d)", r2.Turns)
+		// TaskResult.Turns is CUMULATIVE (DECISIONS A13), so coalescing is the
+		// DELTA between the two beats — which is what this ever meant.
+		if r2.Turns-r1.Turns != 1 {
+			t.Errorf("H5.3 queued ticks did not coalesce to one turn (turns=%d after %d)", r2.Turns, r1.Turns)
 		}
 		if !rec.saw("tick (x3 coalesced)") {
 			t.Errorf("H5.3 three in-flight ticks did not coalesce into one turn's input; saw %v", rec.inputs)

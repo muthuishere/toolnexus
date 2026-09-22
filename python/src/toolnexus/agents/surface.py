@@ -26,7 +26,16 @@ from typing import Any, Callable, Optional
 from ..client import ConversationStore, HttpTransport
 from ..types import Tool, ToolResult
 from .loop import Loop, guarded_hooks
-from .runtime import AgentDef, AgentRuntime, Budget, Clock, Handle, InboxItem, TaskResult
+from .runtime import (
+    TASK_STATUS_ERROR,
+    AgentDef,
+    AgentRuntime,
+    Budget,
+    Clock,
+    Handle,
+    InboxItem,
+    TaskResult,
+)
 
 # Bootstrap discovery order for agent_from_dir (all files optional). Each found
 # file is injected as a named ``## <file>`` section at session start (§7E).
@@ -263,7 +272,7 @@ class Agent:
         rt = self._runtime(**rt_opts)
         h = rt.spawn(rt.root, self.name)
         if not isinstance(h, Handle):
-            return TaskResult(text=h.error, is_error=True, status="error", runtime=rt)
+            return TaskResult(text=h.error, is_error=True, status=TASK_STATUS_ERROR, runtime=rt)
         rt.wake(h, prompt)
         r = await rt.wait(h)
         if r.status != "pending":

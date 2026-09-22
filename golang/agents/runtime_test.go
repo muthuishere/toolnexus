@@ -109,7 +109,7 @@ func TestDurableResumeCascadeReattaches(t *testing.T) {
 		}
 	}
 
-	if err := rt.Resume(tn.Answer{ID: r1.Pending.ID, Ok: true}); err != nil {
+	if _, err := rt.Resume(tn.Answer{ID: r1.Pending.ID, Ok: true}); err != nil {
 		t.Fatal(err)
 	}
 	tr := strings.Join(rt.Trace(), "\n")
@@ -361,7 +361,7 @@ func TestTranscriptRewindsOnPending(t *testing.T) {
 			t.Errorf("suspended %s must stay at its pre-turn checkpoint (no halted placeholder persisted), stored %d messages", row.ID, len(msgs))
 		}
 	}
-	if err := rt.Resume(tn.Answer{ID: r.Pending.ID, Ok: true}); err != nil {
+	if _, err := rt.Resume(tn.Answer{ID: r.Pending.ID, Ok: true}); err != nil {
 		t.Fatal(err)
 	}
 	if !traceHas(rt, "task replay → REATTACH") {

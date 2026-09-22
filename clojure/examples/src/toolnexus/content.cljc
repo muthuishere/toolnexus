@@ -30,7 +30,8 @@
   (:require [clojure.string :as str]
             [koine.codec :as codec]
             [koine.fs :as fs]
-            [koine.text :as text]))
+            [koine.text :as text]
+            [toolnexus.tool :as tool]))
 
 ;; ---------------------------------------------------------------------------
 ;; the media extension table (§6 `read`)
@@ -56,8 +57,12 @@
   path does not come back whole on a POSIX host."
   [p]
   (let [s (str p)
-        i (max (or (str/last-index-of s "/") -1)
-               (or (str/last-index-of s "\\") -1))]
+        ;; the text seam, never clojure.string/last-index-of — that returns a
+        ;; BYTE offset on the cljgo host, so a non-ASCII filename (\"报告.pdf\")
+        ;; sliced wrong there and took `extension-of`, and therefore the part's
+        ;; mimeType, with it.
+        i (max (or (tool/last-index-of-char s \/) -1)
+               (or (tool/last-index-of-char s \\) -1))]
     (if (neg? i) s (subs s (inc i)))))
 
 (defn extension-of
@@ -66,7 +71,7 @@
   one."
   [p]
   (let [b (base-name p)
-        i (str/last-index-of b ".")]
+        i (tool/last-index-of-char b \.)]
     (if (or (nil? i) (zero? i) (= i (dec (count b))))
       ""
       (str/lower-case (subs b (inc i))))))

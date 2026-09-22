@@ -436,9 +436,16 @@ public final class BuiltinTools {
                     Path root = Path.of(args.get("path") != null ? str(args.get("path")) : ".");
                     String include = args.get("include") != null ? str(args.get("include")) : null;
                     long limit = isNumber(args.get("limit")) ? truncToLong(args.get("limit")) : 100;
-                    List<String> matches = new ArrayList<>();
+                    // A25/A26/K1: COLLECT every match, SORT, and only THEN truncate. Breaking at
+                    // the cap mid-walk let the filesystem decide WHICH matches the model saw —
+                    // a content bug, not a cosmetic one, and `Files.list` is explicitly unordered.
+                    // The sort key is the relative `/`-path in CODE POINT order, then the line
+                    // number NUMERICALLY (sorting the rendered "path:line:text" as one string puts
+                    // line 10 before line 2). A28: the emitted string is the same relative
+                    // `/`-path the sort ran on — ordering by one thing and showing another is how
+                    // a port displays an order it does not have.
+                    List<String[]> hits = new ArrayList<>(); // [rel, lineNo, text]
                     for (Path file : walkFiles(root)) {
-                        if (matches.size() >= limit) break;
                         String rel = relativize(root, file);
                         if (include != null && !matchGlob(rel, include)) continue;
                         String text;
@@ -449,11 +456,19 @@ public final class BuiltinTools {
                         }
                         String[] lines = text.split("\n", -1);
                         for (int i = 0; i < lines.length; i++) {
-                            if (matches.size() >= limit) break;
                             if (re.matcher(lines[i]).find()) {
-                                matches.add(file + ":" + (i + 1) + ":" + lines[i]);
+                                hits.add(new String[] {rel, String.valueOf(i + 1), lines[i]});
                             }
                         }
+                    }
+                    hits.sort((a, b) -> {
+                        int c = compareCodePoints(a[0], b[0]);
+                        return c != 0 ? c : Integer.compare(Integer.parseInt(a[1]), Integer.parseInt(b[1]));
+                    });
+                    List<String> matches = new ArrayList<>();
+                    for (String[] hit : hits) {
+                        if (matches.size() >= limit) break;
+                        matches.add(hit[0] + ":" + hit[1] + ":" + hit[2]);
                     }
                     return ok(String.join("\n", matches), meta("count", matches.size()));
                 });
@@ -477,13 +492,16 @@ public final class BuiltinTools {
                     if (pattern.isEmpty()) return err("glob: pattern is required");
                     Path root = Path.of(args.get("path") != null ? str(args.get("path")) : ".");
                     long limit = isNumber(args.get("limit")) ? truncToLong(args.get("limit")) : 100;
+                    // A25/A26/K1: the cap used to break the WALK, so the sort below only
+                    // ordered whatever the filesystem happened to reach first. Collect every
+                    // match, sort by the relative `/`-path in CODE POINT order (Collections.sort
+                    // is String.compareTo, i.e. UTF-16 code units), and truncate last.
                     List<String> found = new ArrayList<>();
                     for (Path file : walkFiles(root)) {
-                        if (found.size() >= limit) break;
                         String rel = relativize(root, file);
                         if (matchGlob(rel, pattern)) found.add(rel);
                     }
-                    Collections.sort(found);
+                    found.sort(BuiltinTools::compareCodePoints);
                     int end = (int) Math.min((long) found.size(), limit);
                     List<String> out = found.subList(0, end);
                     return ok(String.join("\n", out), meta("count", (int) Math.min(found.size(), limit)));
@@ -864,6 +882,12 @@ public final class BuiltinTools {
             } catch (IOException e) {
                 continue;
             }
+            // A24: `Files.list` is explicitly unordered. Nothing downstream may depend on a
+            // filesystem's iteration order, so read each directory level in code-point order by
+            // name. (The listings above sort globally as well — this only removes the ambient
+            // nondeterminism so a refactor cannot quietly reintroduce it.)
+            entries.sort((x, y) -> compareCodePoints(
+                    x.getFileName().toString(), y.getFileName().toString()));
             for (Path entry : entries) {
                 String fn = entry.getFileName().toString();
                 if (Files.isDirectory(entry)) {
@@ -877,8 +901,30 @@ public final class BuiltinTools {
         return out;
     }
 
+    /**
+     * A28: a relative path emitted to (and sorted by) the model uses {@code /} on EVERY platform.
+     * {@code Path.toString()} yields {@code \} on Windows, which would make the java port's
+     * listings differ byte-for-byte from the other six and, worse, make the sort key differ from
+     * the emitted string.
+     */
     private static String relativize(Path root, Path file) {
-        return root.toAbsolutePath().relativize(file.toAbsolutePath()).toString();
+        String rel = root.toAbsolutePath().relativize(file.toAbsolutePath()).toString();
+        return rel.replace(java.io.File.separatorChar, '/');
+    }
+
+    /** Unicode CODE-POINT comparison — NOT {@code String.compareTo}, which orders UTF-16 code
+     * units and disagrees above U+FFFF. Same rule as the skill module's (A1c/A22). */
+    static int compareCodePoints(String a, String b) {
+        int i = 0;
+        int j = 0;
+        while (i < a.length() && j < b.length()) {
+            int ca = a.codePointAt(i);
+            int cb = b.codePointAt(j);
+            if (ca != cb) return Integer.compare(ca, cb);
+            i += Character.charCount(ca);
+            j += Character.charCount(cb);
+        }
+        return Integer.compare(a.length() - i, b.length() - j);
     }
 
     // -----------------------------------------------------------------------

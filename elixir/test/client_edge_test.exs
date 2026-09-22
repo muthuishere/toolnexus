@@ -299,7 +299,7 @@ defmodule Toolnexus.ClientEdgeTest do
     {url, _} = start_stub([])
 
     c = client(url, timeout_ms: 0)
-    assert_raise RuntimeError, ~r/run timeout after 0ms/, fn -> Client.run(c, "x", []) end
+    assert_raise Toolnexus.TimeoutError, ~r/run timeout after 0ms/, fn -> Client.run(c, "x", []) end
 
     {url2, _} = start_stub([openai_text("fast") |> then(fn resp -> fn _ -> resp end end)])
     c2 = client(url2, timeout_ms: 5_000)
@@ -337,14 +337,14 @@ defmodule Toolnexus.ClientEdgeTest do
   test "non-2xx with a text body raises with the raw body text" do
     {url, _} = start_stub([fn _ -> {:text, 400, "bad request body"} end])
     c = client(url)
-    assert_raise RuntimeError, ~r/LLM 400: bad request body/, fn -> Client.run(c, "x", []) end
+    assert_raise Toolnexus.ProviderError, ~r/LLM 400: bad request body/, fn -> Client.run(c, "x", []) end
   end
 
   test "streaming non-2xx raises the LLM error" do
     {url, _} = start_stub([fn _ -> {:json, 400, %{"error" => "nope"}} end])
     c = client(url)
 
-    assert_raise RuntimeError, ~r/LLM 400/, fn ->
+    assert_raise Toolnexus.ProviderError, ~r/LLM 400/, fn ->
       Client.stream(c, "x", []) |> Enum.to_list()
     end
   end

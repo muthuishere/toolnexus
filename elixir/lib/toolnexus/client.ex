@@ -383,7 +383,7 @@ defmodule Toolnexus.Client do
   `opts`: `:history` — a prior transcript to continue.
   """
   @spec run(t(), String.t() | [ContentPart.t() | map()], term(), keyword()) :: RunResult.t()
-  def run(client, prompt, toolkit, opts \\ [])
+  def run(client, prompt, toolkit \\ nil, opts \\ [])
 
   def run(%__MODULE__{} = client, prompt, toolkit, opts)
       when is_binary(prompt) or is_list(prompt) do
@@ -580,7 +580,7 @@ defmodule Toolnexus.Client do
   deltas while still returning the final `%RunResult{}`.
   """
   @spec ask(t(), String.t(), term(), keyword() | String.t()) :: RunResult.t()
-  def ask(client, prompt, toolkit, opts \\ [])
+  def ask(client, prompt, toolkit \\ nil, opts \\ [])
 
   def ask(%__MODULE__{} = client, prompt, toolkit, id) when is_binary(id),
     do: ask(client, prompt, toolkit, id: id)
@@ -626,7 +626,7 @@ defmodule Toolnexus.Client do
   transcript is saved back to the store on the terminal `done` event.
   """
   @spec stream(t(), String.t(), term(), keyword()) :: Enumerable.t()
-  def stream(%__MODULE__{} = client, prompt, toolkit, opts \\ []) do
+  def stream(%__MODULE__{} = client, prompt, toolkit \\ nil, opts \\ []) do
     Stream.resource(
       fn ->
         parent = self()
@@ -1000,7 +1000,7 @@ defmodule Toolnexus.Client do
       usage: usage,
       model: client.model,
       status: status,
-      limit: if(status == "incomplete", do: "maxTurns")
+      limit: if(status == "incomplete", do: Toolnexus.Status.Limit.max_turns())
     }
   end
 
@@ -1080,7 +1080,9 @@ defmodule Toolnexus.Client do
   defp check_deadline(%{deadline: nil}), do: :ok
 
   defp check_deadline(%{deadline: deadline} = client) do
-    if now_ms() >= deadline, do: raise("run timeout after #{client.timeout_ms}ms"), else: :ok
+    if now_ms() >= deadline,
+      do: raise(Toolnexus.TimeoutError, timeout_ms: client.timeout_ms),
+      else: :ok
   end
 
   defp llm_request(client, url, headers, body), do: llm_request(client, url, headers, body, 0)
@@ -1208,7 +1210,6 @@ defmodule Toolnexus.Client do
     end
   end
 
-  defp error_text(body) when is_binary(body), do: body
   defp error_text(body), do: Jason.encode!(body)
 
   # One non-streaming LLM call, with an `llm` metric event (ok/error + per-call tokens + ms).
@@ -1231,8 +1232,8 @@ defmodule Toolnexus.Client do
 
           data
 
-        {:ok, %Req.Response{status: status, body: data}} ->
-          raise "LLM #{status}: #{error_text(data)}"
+        {:ok, %Req.Response{} = resp} ->
+          raise provider_error(resp)
       end
     rescue
       e ->
@@ -1255,9 +1256,26 @@ defmodule Toolnexus.Client do
       {:ok, %Req.Response{status: status, body: data}} when status in 200..299 ->
         if is_binary(data), do: data, else: error_text(data)
 
-      {:ok, %Req.Response{status: status, body: data}} ->
-        raise "LLM #{status}: #{error_text(data)}"
+      {:ok, %Req.Response{} = resp} ->
+        raise provider_error(resp)
     end
+  end
+
+  # §8 failure as a VALUE (ADR 0027 / D5): status + body + Retry-After on the exception,
+  # and a message that is redacted then capped — never the raw provider body.
+  defp provider_error(%Req.Response{status: status, body: body} = resp) do
+    retry_after =
+      case Req.Response.get_header(resp, "retry-after") do
+        [v | _] -> parse_retry_after(v)
+        _ -> nil
+      end
+
+    Toolnexus.ProviderError.exception(
+      status: status,
+      body: body,
+      retry_after: retry_after,
+      prefix: "LLM"
+    )
   end
 
   # ---- hooks ----
@@ -1378,7 +1396,7 @@ defmodule Toolnexus.Client do
       wait_for ->
         answer = wait_for.(request)
 
-        if match?(%{ok: true}, answer) do
+        if Answer.ok?(answer) do
           t0 = now_ms()
           answer = as_answer(answer)
           result = execute_tool(toolkit, name, args, %Context{call_id: id, answer: answer})
@@ -1416,10 +1434,9 @@ defmodule Toolnexus.Client do
     end
   end
 
-  defp as_answer(%Answer{} = a), do: a
-
-  defp as_answer(%{ok: ok} = m),
-    do: %Answer{id: Map.get(m, :id), ok: ok, data: Map.get(m, :data), reason: Map.get(m, :reason)}
+  # §10 keys are fixed across ports, so an answer that made a JSON round-trip
+  # (string keys) must be accepted exactly like an atom-keyed one (ADR 0026 / D4).
+  defp as_answer(a), do: Answer.coerce(a)
 
   # Execute all tool calls of a turn concurrently; results come back in original call order.
   defp exec_calls(client, toolkit, calls, turn) do

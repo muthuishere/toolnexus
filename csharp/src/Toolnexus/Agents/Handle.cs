@@ -31,7 +31,11 @@ public sealed class Handle
     /// <summary>Wall-clock deadline (from <c>maxWallMs</c> at spawn, min'd with the parent's).</summary>
     public DateTimeOffset? WallDeadline { get; }
 
+    /// <summary>Cumulative tree total: a child's usage drains every ancestor (see the rollup).</summary>
     public long UsageTotal { get; internal set; }
+
+    /// <summary>(A13) This handle's cumulative round trips across all its turns. Deliberately NOT
+    /// rolled up the ancestor chain the way <see cref="UsageTotal"/> is.</summary>
     public int TurnsTotal { get; internal set; }
     public long ToolCallsTotal { get; internal set; }
 

@@ -11,7 +11,7 @@ import type { PromptInput } from "../content.js"
 import fs from "node:fs"
 import { defineTool } from "../native.js"
 import type { Answer, Request, Tool } from "../types.js"
-import { AgentRuntime, isVerbError, type AgentDef, type Budget, type Handle, type RuntimeOptions, type TaskResult } from "./runtime.js"
+import { AgentRuntime, isVerbError, S, type AgentDef, type Budget, type Handle, type RuntimeOptions, type TaskResult } from "./runtime.js"
 import { Loop, guardedHooks, type Completion, type Guardrail } from "./loop.js"
 import type { ClientOptions } from "../client.js"
 import type { Toolkit } from "../toolkit.js"
@@ -32,7 +32,18 @@ export interface AgentSpec {
   budget?: Budget
   /** Model id; default "inherit" (the runtime's `llm.model`). */
   model?: string
-  /** §10 interpreter authority for this agent's subtree. */
+  /** §10 interpreter authority for this agent's subtree.
+   *
+   * IDEMPOTENCY CONTRACT (SPEC §7D rewind-to-checkpoint). A durable resume REPLAYS the suspended
+   * turn from its PRE-TURN checkpoint: "continues from its checkpoint" means the transcript is
+   * REWOUND, not carried. EVERY tool that ran in that turn RUNS AGAIN, and the suspended tool
+   * itself is always re-executed (with `ctx.answer`) — that is §10's resolution mechanism, not a
+   * bug. Reattachment by task key makes a re-run `task` call idempotent; a leaf agent's own
+   * side-effecting tools (`git push`, a charge, a delete) have NO equivalent and are the host's
+   * responsibility. Any tool reachable in a suspendable turn must be idempotent.
+   * Replaying the leaf's stored transcript instead is DEFERRED to its own change; it would not
+   * remove this requirement anyway.
+   */
   waitFor?: (request: Request) => Promise<Answer>
   onSpawn?: AgentDef["onSpawn"]
   onClose?: AgentDef["onClose"]
@@ -118,7 +129,8 @@ export class Agent {
     const runtime = this.createRuntime(opts)
     const h = runtime.spawn(runtime.root, this.name)
     if (isVerbError(h)) {
-      return { text: h.error, isError: true, status: "error", turns: 0, totalTokens: 0, runtime }
+      // A spawn refusal is an ERROR, not a limit stop: it names no `limit` (A18).
+      return { text: h.error, isError: true, status: S.error, turns: 0, totalTokens: 0, ownTokens: 0, runtime }
     }
     const woke = runtime.wake(h, prompt)
     if (!woke.ok) {

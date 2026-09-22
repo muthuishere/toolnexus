@@ -198,3 +198,98 @@
           [_ lp2] (tnloop/run lp1 "two")]
       (is (> (:turns lp2) (:turns lp1)) "turns accumulate across runs")
       (is (= "idle" (:status lp2))))))
+
+;; ===========================================================================
+;; #87 / ADR 0024 — the Loop honours the Spec, and says what it cannot honour
+;; ===========================================================================
+
+(defn- capture-system
+  "An http-client that records the system prompt each request carried."
+  []
+  (let [seen (atom [])]
+    [(fn [_url _headers body]
+       (let [payload (json/read-str (if (string? body) body (json/write-str body)))]
+         (swap! seen conj (or (:system payload)
+                              (->> (:messages payload)
+                                   (filter #(= "system" (:role %)))
+                                   first :content)))
+         {:status 200 :headers {"content-type" "application/json"}
+          :body (json/write-str {:choices [{:index 0 :message (say "ok") :finish_reason "stop"}]
+                                 :usage {:prompt_tokens 1 :completion_tokens 1 :total_tokens 2}})}))
+     (fn [] @seen)]))
+
+(deftest the-soul-is-applied-and-the-caller-still-wins
+  (testing "the def's soul becomes the system prompt when the caller set none"
+    (let [[http seen] (capture-system)
+          lp (tnloop/create {:name "souled" :does "x" :soul "You are SOULFUL."}
+                            (base-opts http) (bare-toolkit))]
+      (tnloop/run lp "hi")
+      (is (re-find #"You are SOULFUL\." (str (first (seen)))))))
+  (testing "CALLER-WINS: an explicit :system-prompt is never overridden by the soul.
+            js let the soul win; that is the drift this pins."
+    (let [[http seen] (capture-system)
+          lp (tnloop/create {:name "souled" :does "x" :soul "You are SOULFUL."}
+                            (assoc (base-opts http) :system-prompt "CALLER PROMPT")
+                            (bare-toolkit))]
+      (tnloop/run lp "hi")
+      (is (re-find #"CALLER PROMPT" (str (first (seen)))))
+      (is (not (re-find #"SOULFUL" (str (first (seen)))))))))
+
+(deftest the-defs-model-and-max-turns-are-loop-defaults
+  (let [[http models] (scripted [(say "hi")])
+        lp (tnloop/create {:name "m" :does "x" :model "def-model" :budget {:max-turns 3}}
+                          (dissoc (base-opts http) :model) (bare-toolkit))]
+    (tnloop/run lp "hi")
+    (is (= "def-model" (first (models)))))
+  (testing "A8 — the sentinel is on the CALLER's side: \"inherit\" means ABSENT,
+            so the DEF's model lands and the sentinel never reaches the wire.
+            A port honouring only absence would send \"inherit\" as a model name."
+    (let [[http models] (scripted [(say "hi")])
+          lp (tnloop/create {:name "m" :does "x" :model "def-model"}
+                            (assoc (base-opts http) :model "inherit") (bare-toolkit))]
+      (tnloop/run lp "hi")
+      (is (= "def-model" (first (models))) "the def's model fills the sentinel")
+      (is (not= "inherit" (first (models))) "the sentinel is never a model name on the wire")))
+  (testing "A8 — a DEF whose own model is the sentinel has nothing to inherit"
+    (let [[http models] (scripted [(say "hi")])
+          lp (tnloop/create {:name "m" :does "x" :model "inherit"}
+                            (base-opts http) (bare-toolkit))]
+      (tnloop/run lp "hi")
+      (is (= "test-model" (first (models))) "the caller's model stands")))
+  (testing "caller-wins here too"
+    (let [[http models] (scripted [(say "hi")])
+          lp (tnloop/create {:name "m" :does "x" :model "def-model"}
+                            (base-opts http) (bare-toolkit))]
+      (tnloop/run lp "hi")
+      (is (= "test-model" (first (models)))))))
+
+(deftest loop-unsupported-names-what-a-driver-cannot-honour
+  ;; A6 — the CANONICAL vocabulary, identical strings in all seven ports, NOT
+  ;; this language's own spelling of the fields.
+  (is (= [] (tnloop/loop-unsupported {:name "plain" :does "x"})))
+  (is (= ["tools" "team" "waitFor" "onMetric"]
+         (tnloop/loop-unsupported {:tools [:t] :team ["a"] :wait-for [identity]
+                                   :on-metric [identity]})))
+  (is (= ["team"] (tnloop/loop-unsupported {:team ["researcher"]})))
+  (is (= ["tools" "team" "waitFor" "onMetric"] tnloop/loop-unsupported-fields)))
+
+(deftest a-guardrail-denial-never-enters-the-tool
+  ;; The regression test asserts the DENIED TOOL'S EXECUTE IS NEVER ENTERED —
+  ;; never the text. A model that says "I won't" makes a text assertion pass
+  ;; while the tool ran anyway.
+  (let [entered (atom 0)
+        tk (toolnexus/build
+            {:builtins false
+             :tools [{:name "danger" :description "does damage"
+                      :execute (fn [_args] (swap! entered inc)
+                                 {:output "DID IT" :isError false})}]})
+        [http _] (scripted [{:role "assistant"
+                             :tool_calls [{:id "d1" :type "function"
+                                           :function {:name "danger" :arguments "{}"}}]}
+                            (say "stopped")])
+        lp (tnloop/create {:name "guarded" :does "x"
+                           :guardrails [(fn [ev] (if (= "danger" (:name ev)) "nope" "allow"))]}
+                          (base-opts http) tk)
+        [out _] (tnloop/run lp "do it")]
+    (is (= 0 @entered) "the denied tool's execute must NEVER be entered")
+    (is (= "done" (:status out)))))

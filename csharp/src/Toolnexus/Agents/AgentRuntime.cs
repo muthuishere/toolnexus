@@ -189,8 +189,8 @@ public sealed class AgentRuntime
             {
                 if (d.IsCompletedSuccessfully)
                     tcs.TrySetResult(new AgentResult(
-                        $"wait timeout after {t}ms (child still {h.State})", true, "timeout",
-                        h.TurnsTotal, h.UsageTotal));
+                        $"wait timeout after {t}ms (child still {h.State})", true, AgentStatus.Timeout,
+                        h.TurnsTotal, h.UsageTotal, null, 0, StopLimit.Timeout));
             }, TaskScheduler.Default);
             _ = tcs.Task.ContinueWith(_ => cancelTimer.Cancel(), TaskScheduler.Default);
         }
@@ -200,9 +200,10 @@ public sealed class AgentRuntime
     /// <summary>Settled = closed, suspended (its pending), or idle with a recorded result.</summary>
     private static AgentResult? SettledResultLocked(Handle h) => h.State switch
     {
-        "closed" => h.LastResult ?? new AgentResult("closed", true, "closed", h.TurnsTotal, h.UsageTotal),
+        "closed" => h.LastResult ?? new AgentResult("closed", true, AgentStatus.Closed,
+            h.TurnsTotal, h.UsageTotal),
         "suspended" when h.PendingRequest != null => new AgentResult(
-            h.PendingRequest.Prompt, false, "pending", h.TurnsTotal, h.UsageTotal, h.PendingRequest),
+            h.PendingRequest.Prompt, false, AgentStatus.Pending, h.TurnsTotal, h.UsageTotal, h.PendingRequest),
         "idle" when h.LastResult != null => h.LastResult,
         _ => null,
     };
@@ -228,7 +229,7 @@ public sealed class AgentRuntime
                 h.InboxItems.InsertRange(0, h.Drained); // the halted turn never completed
                 h.Drained.Clear();
                 h.State = "idle";
-                var r = new AgentResult("interrupted", true, "interrupted", h.TurnsTotal, h.UsageTotal);
+                var r = new AgentResult("interrupted", true, AgentStatus.Interrupted, h.TurnsTotal, h.UsageTotal);
                 h.LastResult = r;
                 FlushWaitersLocked(h, r);
                 return;
@@ -283,7 +284,7 @@ public sealed class AgentRuntime
             T($"{h.Id}: →closed ({why})");
         }
         foreach (var w in waiters)
-            w.TrySetResult(new AgentResult("closed", true, "closed", h.TurnsTotal, h.UsageTotal));
+            w.TrySetResult(new AgentResult("closed", true, AgentStatus.Closed, h.TurnsTotal, h.UsageTotal));
     }
 
     // ---- views -------------------------------------------------------------
@@ -316,8 +317,19 @@ public sealed class AgentRuntime
     /// stored transcript was never advanced past the checkpoint). The upward cascade re-runs each
     /// suspended parent, whose re-invoked <c>task</c> REATTACHES to the existing child by task key
     /// — never a duplicate spawn.
+    ///
+    /// <para><b>THE IDEMPOTENCY CONTRACT, stated loudly (ADR 0025).</b> "Continues from its
+    /// checkpoint" means the halted turn is REWOUND and REPLAYED, not carried forward. The declared
+    /// idempotency mechanism is task-key REATTACHMENT, and it covers <c>task</c> calls and NOTHING
+    /// ELSE: <b>a resumed turn RE-RUNS the leaf's own tools from the start of that turn</b>. A
+    /// tool with an irreversible side effect (a payment, a <c>git push</c>, an email) must be made
+    /// idempotent BY THE HOST — key it, or check before acting. Transcript replay on resume, which
+    /// would remove this, is DEFERRED to its own change: rewind-to-checkpoint is SPEC'd by name
+    /// (§7D), so changing it is a §0 decision and not a bugfix.</para>
     /// </summary>
-    public async Task ResumeAsync(Answer answer)
+    /// <returns>(ADR 0025) The resumed leaf's result — previously this returned nothing at all and
+    /// the agent's final answer after a resume was unreachable through the public API.</returns>
+    public async Task<AgentResult> ResumeAsync(Answer answer)
     {
         Handle? leaf;
         lock (_sync) leaf = FindSuspendedLeaf(Root);
@@ -334,7 +346,7 @@ public sealed class AgentRuntime
             // restored) then idle→running (the replay wake) — never a direct suspended→running.
             T($"{leaf.Id}: suspended→idle (Answer accepted, checkpoint restored)");
         }
-        await RunTurnAsync(leaf, input, _ => Task.FromResult(answer)).ConfigureAwait(false);
+        var resumed = await RunTurnAsync(leaf, input, _ => Task.FromResult(answer)).ConfigureAwait(false);
         // Cascade: each suspended ancestor re-runs its halted turn; the re-invoked task reattaches.
         var p = leaf.Parent;
         while (p != null && p != Root && p.State == "suspended")
@@ -349,9 +361,12 @@ public sealed class AgentRuntime
                 T($"{p.Id}: suspended→idle (Answer accepted, checkpoint restored)");
                 T($"{p.Id}: cascade resume (replay reattaches by task key)");
             }
-            await RunTurnAsync(p, pin).ConfigureAwait(false);
+            // The nearest ancestor's own result supersedes the leaf's: it is the one that saw the
+            // reattached child's answer and produced the run's final text.
+            resumed = await RunTurnAsync(p, pin).ConfigureAwait(false);
             p = p.Parent;
         }
+        return resumed;
     }
 
     private Handle? FindSuspendedLeaf(Handle h)
@@ -466,11 +481,22 @@ public sealed class AgentRuntime
     /// </summary>
     private Task<AgentResult> StartTurnLocked(Handle h, string? prompt, Func<Request, Task<Answer>>? oneShot)
     {
-        if (h.State == "closed") return Task.FromResult(new AgentResult("closed", true, "closed", 0, 0));
+        // A turn started on an already-closed handle reported literal 0 turns and 0 tokens, so a
+        // host that closes a handle and reads the result BILLS ZERO for work that happened — the
+        // same under-reporting as #88, on the closed path. The other closed-state branches
+        // (SettledResultLocked, the waiter flush) always reported the handle's totals; this one
+        // now matches them.
+        if (h.State == "closed")
+            return Task.FromResult(new AgentResult("closed", true, AgentStatus.Closed,
+                h.TurnsTotal, h.UsageTotal));
         if (ExhaustedLimitLocked(h) is string limit)
         {
-            var r = new AgentResult($"budget exhausted ({limit}); partial work preserved", true, "incomplete",
-                h.TurnsTotal, h.UsageTotal);
+            // ADR 0025: the pool that stopped it is now a FIELD, not only prose in Text.
+            // (A14) The FIELD carries the canonical spelling; the TEXT keeps the internal pool
+            // name it always had, so the prose is byte-identical and only the structured value is
+            // new. Mapping at the boundary is golang's pattern and costs one call.
+            var r = new AgentResult($"budget exhausted ({limit}); partial work preserved", true,
+                AgentStatus.Incomplete, h.TurnsTotal, h.UsageTotal, null, 0, StopLimit.FromPool(limit));
             h.LastResult = r;
             FlushWaitersLocked(h, r);
             return Task.FromResult(r);
@@ -484,7 +510,9 @@ public sealed class AgentRuntime
     }
 
     /// <summary>Live ancestor-chain budget walk (carve alone misses sibling spend). Returns the
-    /// name of the exhausted limit, or null.</summary>
+    /// INTERNAL pool name of the exhausted limit, or null. Callers that surface it on
+    /// <see cref="AgentResult.Limit"/> map it through <see cref="StopLimit.FromPool"/> first (A14);
+    /// the internal names stay as they are, which is what keeps the existing prose unchanged.</summary>
     private string? ExhaustedLimitLocked(Handle h)
     {
         var now = _clock.GetUtcNow();
@@ -547,6 +575,9 @@ public sealed class AgentRuntime
 
             lock (_sync)
             {
+                // (A13) Turns accumulate ON THE HANDLE across its own turns; unlike tokens they do
+                // NOT roll up the ancestor chain — a parent's Turns is its own round trips, which
+                // AgentRuntimeTests.Fanout_…_UsageRollup pins by name in every port.
                 h.TurnsTotal += r.Turns;
                 RollupLocked(h, r.Usage.TotalTokens, r.ToolCalls.Count);
                 if (r.Status == "pending")
@@ -556,22 +587,40 @@ public sealed class AgentRuntime
                     h.PendingRequest = stamped;
                     h.PendingInput = input; // checkpoint: the halted turn re-runs with this input
                     T($"{h.Id}: running→suspended DURABLE (pending \"{stamped.Kind}\", path preserved)");
-                    result = new AgentResult(r.Text, false, "pending", r.Turns, r.Usage.TotalTokens, stamped);
+                    // ADR 0025 + A13: TotalTokens AND Turns are the CUMULATIVE TREE TOTAL on
+                    // every status (post-rollup); OwnTokens keeps the per-run token figure.
+                    // (A18) `pending` is a NON-LIMIT stop, so its limit is EMPTY — never
+                    // `r.Limit` forwarded through. Forwarding is the latent class golang's audit
+                    // found: it reproduces the status/limit contradiction for any result that
+                    // arrives carrying a limit the status does not claim.
+                    result = new AgentResult(r.Text, false, AgentStatus.Pending, h.TurnsTotal, h.UsageTotal,
+                        stamped, r.Usage.TotalTokens, "");
                 }
                 else if (r.Status == "incomplete")
                 {
                     h.State = "idle";
                     h.Drained.Clear();
-                    result = new AgentResult("hit maxTurns without a final answer", true, "incomplete",
-                        r.Turns, r.Usage.TotalTokens);
-                    T($"{h.Id}: running→idle (INCOMPLETE at maxTurns {h.EffMaxTurns})");
+                    // ADR 0025 (C#-specific defect): this sentence used to say "maxTurns"
+                    // whatever actually stopped the run, so a COMPLETION-GATE stop was reported as
+                    // a turn-cap stop. Report the real limit, and carry it as a field.
+                    var limit = string.IsNullOrEmpty(r.Limit) ? StopLimit.MaxTurns : r.Limit!;
+                    var why = limit == StopLimit.Completion
+                        ? r.Text
+                        : $"hit {limit} without a final answer";
+                    result = new AgentResult(why, true, AgentStatus.Incomplete,
+                        h.TurnsTotal, h.UsageTotal, null, r.Usage.TotalTokens, limit);
+                    T($"{h.Id}: running→idle (INCOMPLETE at {limit}"
+                      + (limit == StopLimit.MaxTurns ? $" {h.EffMaxTurns})" : ")"));
                 }
                 else
                 {
                     h.State = "idle";
                     T($"{h.Id}: running→idle (done, turns={r.Turns}, tokens={r.Usage.TotalTokens})");
                     h.Drained.Clear(); // turn completed; drained items are consumed
-                    result = new AgentResult(r.Text, false, "done", r.Turns, r.Usage.TotalTokens);
+                    // (A18) `done` is a NON-LIMIT stop: nothing stopped it, so the limit is
+                    // EMPTY. Same forwarding hazard as the pending branch above.
+                    result = new AgentResult(r.Text, false, AgentStatus.Done, h.TurnsTotal, h.UsageTotal,
+                        null, r.Usage.TotalTokens, "");
                 }
             }
         }
@@ -587,7 +636,7 @@ public sealed class AgentRuntime
                 if (h.State == "running") h.State = "idle"; // never resurrect a concurrently closed handle
                 T($"{h.Id}: running→{h.State switch { "closed" => "closed", _ => "idle" }} ({(interrupted ? "interrupted; inbox intact" : $"error: {e.Message}")})");
                 result = new AgentResult(interrupted ? "interrupted" : e.Message, true,
-                    interrupted ? "interrupted" : "error", h.TurnsTotal, h.UsageTotal);
+                    interrupted ? AgentStatus.Interrupted : AgentStatus.Error, h.TurnsTotal, h.UsageTotal);
             }
         }
         finally

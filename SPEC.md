@@ -53,6 +53,12 @@ A new language port is "correct" iff these hold. Run it against the shared
    audio⇒`audio`, `resource_link`⇒`file{url}`, `resource` blob⇒`file{data}`, `resource` text⇒
    appended to `output`. Nothing is dropped silently.
 5. **Skills**: glob `**/SKILL.md`, YAML frontmatter (`name` required), body=content, first name wins.
+   **Order is normative** — roots in the order the caller passed them, then by DEPTH (path segment
+   count) ASCENDING, with Unicode CODE POINT over the relative path as the tie-break within a depth
+   (sort explicitly; never inherit filesystem order, never a UTF-16 code-UNIT default). Depth first
+   is what makes a top-level skill beat a nested copy for EVERY name, not just the ones sorting
+   before the nested directory, so "first" is the same file in every port. Strict YAML first, guarded line-wise fallback only on
+   frontmatter YAML refused; skips come back as data (`location`, `reason`, `detail`). §3.
 6. **`skill` tool** output is byte-exact:
    ```
    <skill_content name="NAME">
@@ -70,7 +76,8 @@ A new language port is "correct" iff these hold. Run it against the shared
    </skill_content>
    ```
    `skillsPrompt()` (when ≥1 described skill) = the instruction preamble (§3) + `\n\n` +
-   `## Available Skills\n- **name**: description` (sorted, described only); empty/"no skills" otherwise.
+   `## Available Skills\n- **name**: description` (sorted by Unicode CODE POINT over the name —
+   never a locale-sensitive comparator — described only); empty/"no skills" otherwise.
 7. **Adapters** (schema only): OpenAI `{type:"function",function:{name,description,parameters}}` ·
    Anthropic `{name,description,input_schema}` · Gemini `[{functionDeclarations:[{name,description,parameters}]}]`.
 8. **native** tool (`source:"native"`): fn→Tool; string return⇒output, throw/err⇒isError.
@@ -398,8 +405,69 @@ byte-identical behavior.
   byte-identical). Malformed YAML fails gracefully (empty frontmatter, skill skipped for missing
   `name`), never crashing discovery. Require `name` (string), optional `description` (string). Body
   after frontmatter = `content`.
+- **Lenient fallback, in this order and only this order.** A real-world skills corpus contains
+  frontmatter the YAML spec refuses but every skill-writing tool emits (an unquoted `description`
+  containing a `:`, a stray tab). So: **strict YAML first**; only on frontmatter the standard
+  parser has already *refused* does a line-wise `key: rest-of-line` read run, and it is guarded —
+  keys at **column 0 only**, **first wins**, and any value opening with `|`, `>`, `&`, `*`, `[`,
+  `{` or `!` is **refused** rather than read literally. Line-wise-first is forbidden: it misparses
+  block scalars, which strict YAML resolves correctly. A file the fallback cannot rescue is still
+  skipped, and the fallback never invents a `description`.
+- **What counts as "YAML refused it"** — the rescue runs when the parse THROWS, **or** yields a
+  non-mapping, **or** yields a mapping whose `name`/`description` is present but **not a SCALAR**.
+  Ports' YAML libraries disagree about inputs like `description: [unterminated` (some throw, some
+  recover it into a sequence), so the trigger is defined by the OUTCOME, not by whether an
+  exception was raised. **A scalar COERCES** to its trimmed string form — `name: 123` loads as
+  `"123"`, `description: true` as `"true"` — and only a **mapping or a sequence** is structurally
+  wrong. "Not a string" would be a stricter reading and would break parity against behaviour the
+  cross-port tests already pin. The invariant that decides every case: a file never gains an
+  **invented** description, and never silently keeps a structurally wrong one.
+- **Skips are returned data, not a log line.** The skill-loading result carries the skipped files:
+  `{ location, reason, detail }`, where `reason` is the byte-identical stable string and `detail`
+  carries the native parser's own error message for a human. A host must not have to call the
+  inventory surface to learn that six of eighty-seven skills vanished. A port that also has a warn
+  slot MAY call it; the returned data is what conformance compares.
 - Skill `Info { name, description, location (abs path to SKILL.md), content }`.
 - Duplicate names: first wins, log a warning.
+- **Discovery order is normative, not each ecosystem's directory walk.** "First wins" only decides
+  a duplicate if every port agrees which file comes first, and it did not: on a corpus where
+  `docx`/`pdf`/`pptx` each exist twice, `js`/`golang`/`elixir` kept a nested copy while
+  `python`/`java`/`csharp` kept the top-level one — same catalog *names*, different winning file,
+  therefore different `content` and `location` handed to the model. The order is:
+  1. **Roots in the order the host supplied them.** Root 1 is searched wholly before root 2.
+  2. **Within a root, by DEPTH — the number of path segments — ASCENDING.** A path relative to the
+     root's logical base with fewer segments sorts first, so `xlsx/SKILL.md` (2) precedes
+     `synced/6636…/xlsx/SKILL.md` (4). **This is the whole reason a top-level skill beats a nested
+     copy of the same name, uniformly, for every name.**
+  3. **Then, WITHIN a depth, by Unicode CODE POINT** over that same relative path, compared as one
+     string (`/` as the separator, as the comparison character). **Code-point order wins — not
+     code-unit order, not locale collation, not case folding, not a segment-aware compare.** The
+     two agree for every ASCII and BMP path, so no real corpus moves; the clause exists so a
+     divergence is not planted that fires only on an astral-plane (> U+FFFF) filename. **A UTF-16
+     host must compare explicitly**, because the platform default is code-UNIT order, which sorts
+     surrogate pairs before `U+E000..U+FFFF`: `String.compareTo` (java, and clojure's JVM host),
+     `string.CompareOrdinal` (csharp) and `<` on JS strings are all insufficient, and
+     `localeCompare` is doubly so. Ports that iterate runes/code points natively (golang, python,
+     elixir) are correct by construction but still sort explicitly.
+
+  **Depth is a separate key, not a consequence of the code-point compare — do not fold the two
+  into one comparison.** A single code-point sort of the whole path does NOT deliver shallower-wins,
+  and the counterexample is in the real corpus: `docx`, `pdf` and `pptx` begin with letters before
+  `s`, so they beat `synced/<uuid>/…` and look correct; `xlsx` begins with `x`, so under a pure
+  code-point sort it **LOSES** to `synced/<uuid>/xlsx/SKILL.md`. The winner would depend on the
+  skill's first letter relative to a sibling directory's name. A fixture that only exercises `docx`
+  passes under both rules, which is why this survived six ports and a spec review; a conformance
+  fixture MUST carry a name sorting after the nested directory's first segment (`xlsx` vs
+  `synced/`) or it proves nothing.
+  3. Symlinked entries sort under the path they were discovered at, not their resolved real path.
+  **Every port sorts explicitly and never inherits filesystem order** — a walk that happens to be
+  sorted (Node's `readdirSync`) satisfies this by accident, not by contract. **An ABSENT sort over
+  a directory read is invisible to a search for comparators, and is the same defect class as a
+  wrong one**: auditing for `sort`/`OrderBy`/`compare` cannot see a site that never ordered
+  anything. Audit the directory READS — `readdir`, `os.listdir`, `os.walk`, `filepath.WalkDir`,
+  `Files.list`, `File.ls`, `EnumerateFileSystemEntries` — and confirm every one that feeds
+  user- or model-visible output is explicitly ordered. The order is
+  observable in `ListSkills` inventory output as well as in duplicate resolution.
 
 ### The `skill` tool (mirrors opencode `tool/skill.ts`)
 
@@ -414,7 +482,8 @@ inputSchema: { type:"object", properties:{ name:{type:"string",
 
 `execute({name})`:
 1. Look up the skill; if missing ⇒ `ToolResult{isError:true, output:"Skill \"x\" not found. Available: ..."}`.
-2. Sample up to 10 sibling files (everything except `SKILL.md`) in the skill dir.
+2. Sample up to 10 sibling files (everything except `SKILL.md`) in the skill dir, by the
+   **collect → sort → truncate** rule below.
 3. Return progressive-disclosure block:
 
 ```
@@ -434,6 +503,33 @@ Note: file list is sampled.
 </skill_content>
 ```
 
+**The sample is COLLECT → SORT → TRUNCATE, in that order.** Collect every candidate under the
+skill dir, **sort by the path RELATIVE to the skill directory in plain Unicode CODE POINT order**,
+*then* cut to the cap. Three things this rule is deliberately NOT:
+
+- **Not the discovery depth rule (§3).** Depth ordering exists to decide which FILE a duplicate
+  NAME resolves to; it has no business ordering a flat listing, where it interleaves
+  `a-root.txt, z-root.txt, alpha/f.txt` instead of `a-root.txt, alpha/f.txt, z-root.txt`.
+- **Not a per-directory sort during traversal.** That makes the result a function of the
+  TRAVERSAL, so every port would have to reproduce the same stack discipline to agree — per-level
+  ordering is only expressible with a recursive walk, and a port with a plain LIFO stack that
+  merely sorts each directory read emits subdirectories in reverse while looking sorted. A global
+  sort over relative paths is a function of the FILE SET and the cap alone; there is nothing left
+  for six other languages to get subtly wrong. (The case that separates the two: a directory
+  `alpha/` beside a file `alpha-b.txt` — flat gives `alpha-b.txt` first, since `-` (0x2D) precedes
+  `/` (0x2F); per-level gives `alpha/f.txt` first. Flat wins.)
+- **Not a cap applied mid-walk.** Truncating during traversal lets the FILESYSTEM choose which
+  files the model sees — a different sample on a different machine, and on some filesystems
+  between two runs. Sorting only the survivors of an early `break` is the same bug with a
+  comparator in front of it.
+
+> **Emitted paths in this block remain ABSOLUTE**, and that is a deliberate carve-out from the
+> `/`-separated relative rule below: §3 pins the block's shape, and because every entry shares the
+> skill-directory prefix, ordering by relative path and by the emitted absolute path are the SAME
+> order — there is no sort-key/emitted-string mismatch here. Whether it *should* emit relative
+> paths is an open seven-port question, not a port-local fix: changing one port alone would break
+> §3 byte-identity.
+
 ### System-prompt helper
 
 `skillsPrompt()` returns the markdown catalog to inject into the system prompt so
@@ -452,6 +548,14 @@ Use the skill tool to load a skill when a task matches its description.
 
 When no described skill exists, the output is the existing empty/"No skills are currently
 available." result with **no** preamble.
+
+**The list is sorted by Unicode CODE POINT over the skill NAME** — the same comparison rule as §3's
+discovery tie-break, applied to the second place it was needed, with the same UTF-16 caveat (a
+code-UNIT comparator diverges above U+FFFF). **`localeCompare` and any other locale-sensitive
+comparator is forbidden here**: this prompt is pinned byte-identical across ports by §0.10, and a
+locale-dependent order is not even stable across two MACHINES running the same port. The `skill`
+tool's not-found `"Available: …"` list takes the same rule — it is the same loader's model-visible
+text.
 
 ### skill.txt (loader description, verbatim from opencode)
 
@@ -579,8 +683,8 @@ The ten tools (`skill` is its own source, §3, and is not part of this set; the 
 | `read` | `path:string`, `offset?:number(1-based line)`, `limit?:number(lines)` | Read a file. If the extension is in the **media table** below, `output` = a one-line description naming the file and its mime type and `parts` = one part carrying its base64 bytes. Otherwise read as UTF-8 text; with `offset`/`limit`, return that line window. Missing file ⇒ `isError:true`. Undecodable bytes ⇒ `isError:true` naming the file — **never a raised exception escaping into the loop**. |
 | `write` | `path:string`, `content:string` | Write `content` to `path` (create/overwrite), creating parent dirs. Output = confirmation w/ byte count. |
 | `edit` | `path:string`, `oldString:string`, `newString:string`, `replaceAll?:boolean` | Exact-string replace in `path`. Default replaces the single occurrence; `oldString` absent OR (without `replaceAll`) non-unique ⇒ `isError:true`. `replaceAll:true` replaces all. |
-| `grep` | `pattern:string(regex)`, `path?:string(dir,default cwd)`, `include?:string(glob)`, `limit?:number` | Search file contents by regex under `path`, optionally filtered by `include` glob. Output = `file:line:text` matches, capped at `limit` (default 100). |
-| `glob` | `pattern:string`, `path?:string(dir,default cwd)`, `limit?:number` | List files matching the glob under `path`. Output = newline-joined relative paths, capped at `limit` (default 100). |
+| `grep` | `pattern:string(regex)`, `path?:string(dir,default cwd)`, `include?:string(glob)`, `limit?:number` | Search file contents by regex under `path`, optionally filtered by `include` glob. Output = `rel:line:text` matches — the path **RELATIVE to the walk root**, `/`-separated — collected, sorted, then capped at `limit` (default 100). See the listing rule below. |
+| `glob` | `pattern:string`, `path?:string(dir,default cwd)`, `limit?:number` | List files matching the glob under `path`. Output = newline-joined `/`-separated relative paths, collected, sorted, then capped at `limit` (default 100). See the listing rule below. |
 | `webfetch` | `url:string`, `format?:"text"\|"markdown"\|"html"(default markdown)`, `timeout?:number(s,default 30)` | HTTP GET `url`; return body as text/markdown/html. Non-2xx ⇒ `isError:true` w/ `HTTP <status>`. |
 
 **The media extension table** — fixed, shared with §1B's edge constructors, identical in every
@@ -603,6 +707,24 @@ Enable/disable (§4 assembly): the whole source is gated by the `builtins` toggl
 `{disabled:true}` / `{enabled:false}` ⇒ none of the ten appear anywhere). Individual tools are
 gated by `builtins.tools` — a name→bool map on the all-on baseline (`{tools:{bash:false,write:false}}`
 drops those two, the rest stay). Whole-source-off wins over the map.
+
+**The capped-listing rule — every listing of filesystem entries that reaches the model.** The
+`<skill_files>` sample (§3), `glob` and `grep` all obey one rule, and so does anything else that
+walks a tree and truncates:
+
+1. **COLLECT** every candidate. Never `break` at the cap mid-walk — truncating during traversal
+   hands the FILESYSTEM the decision about which entries the model sees, which differs by machine
+   and, on some filesystems, between two runs of the same code. Sorting only what survived an early
+   break is the same defect with a comparator in front of it.
+2. **SORT** by the path relative to the walk root, in plain Unicode code point order.
+3. **TRUNCATE** to the cap.
+
+**Emit `/` as the separator on every platform, and SORT ON THE SAME STRING you emit.** A port whose
+sort key differs from its emitted string is ordering by one thing and displaying another — which is
+how an absolute path came to be printed beside a relative-path ordering. POSIX-only ports get the
+separator for free; java, csharp and clojure's JVM host convert explicitly. (The `<skill_files>`
+block's absolute paths are the one carve-out, and only because its sort key and emitted string
+order identically — see §3.)
 
 Safety: `bash`, `write`, `edit`, `apply_patch` execute commands / mutate the filesystem. Command
 output and `${ENV}`-expanded values are **never logged**; no secret value is written into any spec,
@@ -886,6 +1008,55 @@ convert in `onBudget`). Any limit stop ⇒ `status:"incomplete"` with the limit 
 never silent `"done"`, never a crash; partial work + transcript preserved. Optional
 `onBudget(info) → "stop"|"extend"|"suspend"` ("suspend" routes §10 as an approval).
 
+**The `limit` vocabulary is CLOSED and canonical.** `limit` names the `Budget` field that stopped
+the run, **spelled exactly as this document spells it**, plus the two non-budget stops:
+
+```
+maxTurns · maxTokens · maxToolCalls · maxWallMs · maxChildren · maxConcurrent · maxDepth
+completion · timeout
+```
+
+Identical strings in all seven ports, like the `loopUnsupported` vocabulary. **A port MAPS its
+internal pool or dimension name onto these at the boundary** — an internal spelling (`tokens`,
+`wallMs`, `maxWall`) is an implementation detail and MUST NOT leak into the field. The field exists
+so a host can *branch*; a value that differs per port defeats the field entirely, which is the
+original complaint re-created inside its own fix. A timeout settle sets **both** the status and the
+`limit` — a `"timeout"` status with an empty `limit` is a contradiction, not an omission.
+
+`maxChildren`, `maxConcurrent` and `maxDepth` are **spawn/admission** refusals. Where they surface
+is NOT pinned here: a port may report one as a verb error rather than a settled result, and no port
+invents a settle path to make the string appear. The spelling is pinned *wherever* a port reports
+such a stop; a port that only ever raises simply never emits those three.
+
+**The status/limit invariant — normative, and it binds every construction site, not one branch:**
+
+> **A limit stop NAMES its limit. A non-limit stop leaves `limit` EMPTY.**
+
+A result whose status says it was stopped while the field a host branches on is empty is a
+contradiction, not an omission — the two fields disagreeing inside the very field that exists so a
+stop can be branched on. It is stated as an invariant rather than as a list of cases because the
+cases are where it was lost: a branch that forwards an upstream `limit` straight through reproduces
+the contradiction for any stopped result that arrives without one, and a construction site that
+happens to pass the right constant is correct by accident. Every status value and every limit value
+is written at its construction site as a **named constant, never a string literal**, so a rename
+cannot silently desync the two. Where a language allows it, close the hole **by construction** — a
+mapper whose return type cannot express an internal pool name is a stronger guarantee than a test.
+
+**Both vocabularies are PUBLIC API in all seven ports.** A host must branch on `limit` and on
+`status` without hard-coding strings, which is the entire reason the field exists; every value in
+each closed set is reachable as a named public constant. The holder's *name* stays port-local (as
+above). Two things that are deliberately NOT public: the **invariant predicate** — it exists so the
+ports' own tests can assert the rule, and a rule a test can hold does not become permanent API in
+seven languages — and the **internal pool-name mapper**, whose export would leak exactly the
+internal spellings the mapping obligation exists to keep out of the field.
+
+Public visibility is verified **from outside the module boundary** — by reflection, an
+out-of-package test, or (where a language encodes visibility in the name) the spelling itself —
+never from a test suite's ambient access. Every port has an escape hatch that makes a suite a bad
+witness here: `InternalsVisibleTo` in csharp, same-package test access in golang and java,
+convention rather than enforcement in python, elixir and clojure. A constant demoted to internal
+would keep every suite green while breaking every real consumer.
+
 ### Model surface: the `task` tool (team tools opt-in, default OFF)
 
 `task { agent:string, prompt:string }` = spawn→wake→wait→close fused. Child runs on a
@@ -896,6 +1067,27 @@ agent's `does` — the §3 skillsPrompt pattern); out-of-team targets ⇒ error 
 names. Children get no `task` unless their own def declares a team (recursion opt-in).
 The registry = transitive closure of the entry agent's team graph.
 
+**A `TaskResult`'s counters mean ONE thing on EVERY status** — `done`, `pending`, `incomplete`,
+`interrupted`, `closed`, `timeout` and `error` alike. A field that means one thing on three
+statuses and another on the other three is unreadable by construction, and that — nothing more —
+is the defect being closed. What each counter means:
+
+- **`totalTokens` is ROLLED UP**: the handle's cumulative subtree total, descendants included.
+  A parent therefore never reports fewer tokens than a child it delegated to. `ownTokens` carries
+  the per-handle figure excluding descendants, for a host attributing spend.
+- **`turns` is NOT rolled up**: it is the handle's OWN cumulative LLM round trips. A delegated
+  subtree's turns are not added to its parent's. **A parent CAN report fewer turns than its
+  child** — one turn spent delegating to a child that takes five is the ordinary case — so no
+  `parent >= child` relation holds for turns, and none may be spec'd. (It holds in a specific
+  one-delegation fixture, where it is a fixture assertion and not a guarantee.)
+
+That difference is deliberate and is the interesting part: tokens are *cost*, which a parent owns
+for everything spent beneath it; turns are *this handle's control flow*, which stays its own. **No
+port adds a turns roll-up** — that would be new behaviour, not a parity fix, and none does it today.
+
+**There is no `ownTurns`.** With no roll-up, `turns` already IS the own-figure; a second spelling
+of the same number would only invite a roll-up to justify it.
+
 ### Suspension escalation & durable resume
 
 A suspending child agent presents to its parent EXACTLY as a suspending tool — §10
@@ -904,10 +1096,29 @@ verbatim, no new pending type. Nearest interpreter wins, strict one-hop: child's
 (+ `data.path`, §10) → parent's `waitFor` → … → root returns `status:"pending"`. Parked
 levels burn zero tokens. Resume: the Answer routes to the **deepest** suspended handle,
 which resumes at its checkpoint (turns/usage grow, never reset); the upward cascade
-re-runs each parent, and a re-invoked `task` **REATTACHES to the existing child by task
+re-runs each parent — and `resume` returns the result of the **topmost handle the cascade re-ran**,
+not the deepest one that accepted the Answer — and a re-invoked `task` **REATTACHES to the existing child by task
 key** (agent+prompt) — settled ⇒ its recorded result; suspended ⇒ its pending; running ⇒
 await — and never spawns a duplicate. Reattachment (not transcript inspection, not a
 completion cache) is the required idempotency mechanism.
+
+**Reattachment covers `task` calls and nothing else — read this before you resume anything.**
+A durable resume replays the suspended turn **from its pre-turn checkpoint**: the handle's
+persisted transcript is rewound, and **every tool that ran in that turn runs again**. Reattachment
+by task key makes a re-run *parent* idempotent with respect to its children; a leaf agent's own
+side-effecting tools — `git push`, a payment, an email, a `POST` — have no equivalent protection
+and are the **host's responsibility**. The rule to design against:
+
+> **Any tool reachable in a turn that can suspend must be idempotent, or must be guarded by the
+> host.** This is true on the inline path too: §10's resolution mechanism re-executes the
+> suspended tool itself with `Context.answer` set, so at least one tool is always called twice
+> across a resume.
+
+Replaying the suspended leaf's stored transcript instead of rewinding it — which would remove the
+re-run for everything except the suspended tool — is **deferred to its own change**
+(`openspec/changes/fix-consumer-issues-86-93`, D3). It is a §0 conformance change, not a bugfix,
+because the placeholder's shape would become a byte-identical obligation in all seven ports.
+Today's behaviour is the rewind described above, in every port.
 
 Three pins the first implementations forced: (1) **rewind-to-checkpoint** — on a durable
 pending the runtime restores the handle's PERSISTED transcript to its pre-turn snapshot
@@ -917,7 +1128,14 @@ inline resume traces `suspended→running` (the Run never ended); durable resume
 `suspended→idle` (Answer accepted, checkpoint restored) then `idle→running` (the replay
 wake); the Answer remains the only exit from `suspended` in both; (3) **result status
 vocabulary is closed**: `"done" | "pending" | "incomplete" | "interrupted" | "closed" |
-"timeout" | "error"` — identical strings in all six ports.
+"timeout" | "error"` — identical strings in all seven ports.
+
+**This seven-value set is NOT the client's.** §8's `RunResult.status` is a *different*, three-value
+closed set (`"done" | "pending" | "incomplete"`) that does **not** contain `"timeout"`, `"closed"`,
+`"interrupted"` or `"error"`. The two fields share a name and nothing else; `"timeout"` here means
+a `wait(handle, timeout)` expired, and a client run that hits its own deadline reports
+`"incomplete"` + `limit:"timeout"` instead. Every port ships named constants for both sets, and
+prose that names a status value must say which vocabulary it is drawing from (issue #92).
 
 ### Errors: one boundary rule
 
@@ -997,6 +1215,39 @@ Only abort **latency** may differ; the observable outcome is identical everywher
 waitFor?, onSpawn?, onClose?, hooks?, onMetric? })` → `.run(prompt)` (one-shot) and
 `.asTool()` (the bridge into `extraTools` — the axiom's other direction). `serve(agent)` =
 §7B unchanged.
+
+### Two doors on one agent: `Agent.Run` vs `Agent.Loop(...).Run`
+
+An agent has two public entry points and they honour **different subsets of its spec**. `Run` goes
+through the runtime (handle, budget carve, conversation store, escalating `waitFor`). `Loop` is a
+driver over a client and a toolkit the **caller** already built — so anything the spec expresses
+*through* the runtime cannot reach it. Which is which is normative:
+
+| spec field | `Agent.Run` (runtime) | `Agent.Loop(...).Run` |
+|---|---|---|
+| `soul` / `soulFile` | honoured → system prompt | **honoured** — but the **caller's `systemPrompt` WINS when set** |
+| `model` | honoured as the default | **honoured as a Loop default**; a per-call model override still wins |
+| `budget.maxTurns` | honoured, plus the live ancestor walk | **honoured as the Loop's `maxTurns` default** — the rest of `budget` is not |
+| `guardrails` | honoured (compiled into hooks) | **honoured** |
+| `hooks` / `completion` | honoured | **honoured** |
+| `tools` | honoured | **ignored** — the caller hands `Loop` a built toolkit |
+| `team` | honoured (`task` tool composed from it) | **ignored — a Loop-driven agent has no `task` tool and CANNOT DELEGATE AT ALL** |
+| `budget` (beyond `maxTurns`) | honoured, hierarchical | **ignored** |
+| `waitFor` | honoured (the §7D escalator) | **ignored** — suspension resolves through the caller's own client option |
+| `onMetric` | honoured | **ignored** |
+| `onSpawn` / `onClose` | honoured | n/a — a Loop has no handle lifecycle |
+
+Two rules make the ignored half detectable rather than silent:
+
+1. **Caller-wins precedence, one sentence for all seven ports:** where both the spec and the
+   caller's client options set the system prompt, **the caller's value wins**; the soul is the
+   default, not an override.
+2. **`loopUnsupported(spec)`** (idiomatic per port) returns the names of the spec fields this
+   agent's Loop will discard. The returned strings are a **CLOSED canonical vocabulary, identical in
+   all seven ports** — `"tools"`, `"team"`, `"waitFor"`, `"onMetric"` — not each language's own
+   spelling of the field, exactly as the `limit` strings are. It is additive and non-fatal: constructing a Loop with such a spec is not an error
+   (that would be a breaking change), but a host can print or assert on the list. A guardrail that
+   silently does not run is the failure this exists to prevent (issue #87).
 
 ---
 
@@ -1266,6 +1517,29 @@ and are never retried.
 **Cancellation** beyond `timeoutMs`/abort: the per-port cancellation contract used by the
 agent runtime's `interrupt` is tabled in §7D — ports differ only in abort latency, never in
 observable outcome.
+
+**Provider failures are values, and the credentials guarantee reaches them.** A non-2xx from the
+LLM endpoint surfaces as a **typed** error carrying `status`, `body` and, where the response
+supplied one, `retryAfter` as **fields** — not as a sentence a host has to parse out of a message
+string. On top of that, one policy, identical in all seven ports and identical to the one §8B's
+classifier already applies:
+
+- **Account identifiers are redacted before the body is interpolated into any message**:
+  `user_id`, `account_id`, `org_id` and `organization` are replaced with `«redacted»` — replaced,
+  not dropped, so the shape of the body survives for debugging. Redaction applies to **both** the
+  message and the typed error's `body` field; there is no unredacted copy anywhere.
+- **`401` and `403` bodies are blanked** in the message, because an auth failure body routinely
+  echoes the credential or the header that was sent.
+- **The message's body excerpt is capped at 200 characters — the MESSAGE only.** The typed error's
+  `body` field carries the whole redacted body, because a host that reached for a typed error asked
+  for the whole thing. A cap is a truncation, not a redaction, and it is listed third because it
+  protects nothing on its own: a 96-byte body carrying an account id passes a 200-character cap
+  untouched. Redaction is what does the work.
+
+This extends the guarantee stated for headers and `apiKeyEnv` throughout this document — *"never
+logged", "no credential value … appears in any log, metric, error message or returned value"* — to
+the failure path, which is where a host previously had to re-implement it (issue #91). An
+authentication failure names the status and the endpoint and nothing else.
 
 ### Conversation memory
 
@@ -1913,12 +2187,36 @@ When a tool call returns a suspension (`metadata.pending` = `request`):
 RunResult {
   ...                          // as §8
   status:   "done" | "pending" | "incomplete"
-  limit?:   string             // set ONLY when status="incomplete": which limit stopped it ("maxTurns", …)
+  limit?:   string             // set ONLY when status="incomplete": which limit stopped it.
+                               // CLOSED vocabulary, spelled as §7D's Budget spells it:
+                               // maxTurns · maxTokens · maxToolCalls · maxWallMs · maxChildren ·
+                               // maxConcurrent · maxDepth · completion · timeout
                                // "pending" ⇒ a tool suspended and no waitFor was set
                                // "incomplete" ⇒ a §7D limit stopped the run (loud, named in `limit`)
   pending:  Request?           // present iff status == "pending"
 }
 ```
+
+**Two closed vocabularies are both spelled `status` — they are DISTINCT and must not be
+conflated.** This collision is what misled a consumer into branching on `"timeout"` on a client
+result (issue #92):
+
+| field | defined in | closed set |
+|---|---|---|
+| client `RunResult.status` | §8 / §10 (here) | `"done"` · `"pending"` · `"incomplete"` — **three values; `"timeout"` is NOT one of them** |
+| agent `TaskResult.status` | §7D | `"done"` · `"pending"` · `"incomplete"` · `"interrupted"` · `"closed"` · `"timeout"` · `"error"` — seven values |
+
+`"timeout"` belongs exclusively to the agent runtime, where it is the outcome of
+`wait(handle, timeout)` — a *wait* expiring, not a run. A client run that hits its own deadline is
+reported as `status:"incomplete"` with `limit:"timeout"`, reusing the mechanism `"maxTurns"`
+already uses, and MUST preserve the turns and usage accumulated before the deadline rather than
+handing back a zero value. Every port ships **named constants for both sets**, so a host branches
+on a symbol rather than on a string it read in the wrong section. **What conforms is the VALUES,
+never the type name that holds them** — a port whose ecosystem already owns the obvious name
+spells it locally (csharp calls the seven-value agent set `AgentStatus`, because
+`System.Threading.Tasks.TaskStatus` is in scope in every file there). That is a legitimate
+port-local spelling, not drift; no other port renames on account of it. The public field names do not
+change — renaming either one would break every host to fix a documentation failure.
 
 **A suspension is never a tool error.** A `Pending` result is a distinct state, not a failure: the
 `tool` observability event for a suspended call carries `isError:false` and a `pending:true` marker
@@ -1945,10 +2243,13 @@ channel handler can push the link in real time:
 - **In-process** host: provide `waitFor` (block, poll, retry). Simplest; state lives on
   the live process. Rule 1.
 - **Durable** host: omit `waitFor`; take the `status:"pending"` `RunResult`, persist the
-  `request`, deliver it however (file, HTTP, channel, another agent), and later call
-  `run` again once the world has changed. Rule 2. Because `request`/`answer` are plain
-  serializable data, this survives restarts and lets a *different* process/agent resolve
-  it. No extra core machinery.
+  `request`, deliver it however (file, HTTP, channel, another agent), and later come back
+  through the **answer-carrying entry point** with the `Answer` in hand. Rule 2. Because
+  `request`/`answer` are plain serializable data, this survives restarts and lets a
+  *different* process/agent resolve it. No extra core machinery. **Two cautions:** calling
+  `run`/`ask` again on the stored conversation is NOT a resume (the halt placeholder is already
+  in the transcript, so the tool never re-runs), and the answer-carrying entry point is a
+  **`golang`-only preview** today — see the durable-resume subsection below.
 
 ### Agent escalation addendum (§7D)
 
@@ -1973,7 +2274,7 @@ channel handler can push the link in real time:
 ### Relay (declaration-only) tools — §10 addendum
 
 > **STATUS: `golang` only — a preview, NOT part of the §0 conformance contract.** Relay ships in
-> `golang/` as of 0.12.0; `js`, `python`, `java`, `csharp` and `elixir` do **not** implement it yet
+> `golang/` as of 0.12.0; `js`, `python`, `java`, `csharp`, `elixir` and `clojure` do **not** implement it yet
 > (tracked in `openspec/changes/add-tool-relay-mode/tasks.md`). Do not treat this subsection or the
 > durable-resume subsection below as a porting obligation until they are promoted into §0. A caller
 > that needs cross-port behaviour today should use §11 translation instead — see ADR-0011, which
@@ -2027,16 +2328,66 @@ is no relay loop mode and no second suspension mechanism.
 ### Durable resume — the answer-carrying entry point
 
 > **STATUS: `golang` only — a preview**, same caveat as the relay subsection above.
+> `js`, `python`, `java`, `csharp`, `elixir` and `clojure` ship **no answer-carrying entry point**
+> at all. Everything in this subsection describes one port.
 
-The durable path above (`waitFor` absent → `status:"pending"`) needs a way back in. Every
-port provides:
+**What IS at parity, in all seven ports, is the inline `waitFor` path** (Loop rule 1 above): the
+whole `Answer` reaches the re-executed tool as `Context.answer`, unfiltered, so the tool reads
+whatever keys the host put in `answer.data` and no key is reserved. A host that wants
+human-in-the-loop behaviour portable across the seven ports uses `waitFor`. The durable halt
+(`status:"pending"`) is also at parity — what is golang-only is the *resume*.
+
+The durable path above (`waitFor` absent → `status:"pending"`) needs a way back in. `golang`
+provides:
 
 ```
 runWithAnswer(toolkit, history, pending: Request, answer: Answer) -> RunResult
 askWithAnswer(toolkit, conversationId, pending: Request, answer: Answer) -> RunResult
 ```
 
-(idiomatic naming per port; `askWithAnswer` loads and saves through the conversation store).
+(`askWithAnswer` loads and saves through the conversation store). A port that implements this
+preview later MUST use these names, idiomatically cased, and MUST satisfy the rules below.
+
+**Replaying a stored conversation is NOT a resume.** Calling `ask` again on the same
+conversation id after a durable halt replays a transcript that already contains the halted call's
+placeholder result; the tool is never re-invoked, `waitFor` is never called, and the run returns
+`status:"done"` with the model answering off the placeholder. The answer-carrying entry point is
+the only durable way back in.
+
+#### `Answer.data` on a durable resume — the keys are part of the contract
+
+On this path the host's `answer.data` is read for a **result per outstanding tool call**, and only
+two keys are recognised, in this precedence:
+
+```
+answer.data.results  : [ { id: string, output: string, isError: boolean } ]   // one entry per call
+answer.data.output   : string          // single-call shorthand
+answer.data.isError  : boolean         // optional, pairs with `output`
+```
+
+- The keys are **string-keyed and fixed across ports**, exactly like the rest of `Request`/`Answer`
+  — not atom-keyed, not keyword-keyed, not idiomatic-cased. A host that round-trips an `Answer`
+  through JSON (the entire point of the durable path) must get the same behaviour in every port.
+- `output` MUST be a string. A non-string `output` is an **error**, never silently coerced to `""`.
+- **`ok == true` with no recognised key is an ERROR TO THE HOST.** The engine does not fabricate a
+  result and does not hand the model an invented tool error while reporting `status:"done"` to the
+  caller. This is the same class of caller mistake as a mismatched `pending.id`, which already
+  errors; the asymmetry was the bug (issue #89).
+- The one surviving use of a fabricated `"no result supplied on resume for <name>"` filler is a
+  **genuine partial relay answer** — at least one recognised key present, some calls of a
+  multi-call relay turn deliberately left unanswered, and the transcript must stay balanced. It is
+  never the response to a wholly unrecognised map.
+- Hosts are pointed at the typed constructors — `answerOutput(id, output)`,
+  `answerDeclined(id, reason)` and `relayAnswer(id, results)`, idiomatic per port and shipped in
+  **all seven** — rather than hand-building the map. `answerDeclined` is the natural pair of
+  `answerOutput`: a human who says no produces `ok:false` + `reason`, which is a resolution, not an
+  error.
+- **Recipient note.** On this path the recognised payload is spliced into the transcript as the
+  call's result — the tool is **not** re-executed and never sees `ctx.answer`. That is relay
+  semantics, and applying it to non-relay kinds (`input`, `approval`, `authorization`) diverges
+  from the inline path, where the tool *is* re-executed. Making the durable resume re-execute a
+  non-relay tool with `ctx.answer` is **deferred to its own change**
+  (`openspec/changes/fix-consumer-issues-86-93`, D4) and is the higher-value of the two.
 
 - The `Answer` **must echo** `pending.id`; a mismatch is an **error**, not a silent
   continue, so a stale or misrouted answer cannot corrupt a conversation.

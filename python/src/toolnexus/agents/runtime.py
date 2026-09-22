@@ -22,7 +22,7 @@ Pinned behaviors (§7D):
 * **Hierarchical budgets** — carve at spawn (``min(own, parent remaining)``) plus a
   LIVE ancestor-chain walk before each turn and spawn (carve alone misses sibling
   spend); usage rolls up to every ancestor (the roll-up IS the ledger). Any limit
-  stop is ``status="incomplete"`` with the limit named — never a silent done, never
+  stop is ``status=TASK_STATUS_INCOMPLETE`` with the limit named — never a silent done, never
   a crash.
 * **Transactional drain** — inbox items are consumed only by a completed turn;
   aborted turns restore them, suspended turns replay them via the preserved input.
@@ -66,6 +66,81 @@ from ..toolkit import create_toolkit
 from ..types import Answer, Request, Tool, ToolResult
 
 HandleState = str  # "idle" | "running" | "suspended" | "closed"
+
+# --------------------------------------------------------------------------- #
+# The §7D TASK status vocabulary — SEVEN values. It is NOT the §8 run vocabulary
+# (three values, `toolnexus.client.RUN_STATUSES`): this one contains `timeout`
+# and `interrupted`/`closed`/`error`, which a RunResult never carries. The two
+# share a field NAME (`status`) and nothing else — D5 (#92.1, ADR 0027) names
+# both vocabularies rather than renaming either public field.
+TASK_STATUS_DONE = "done"
+TASK_STATUS_PENDING = "pending"
+TASK_STATUS_INCOMPLETE = "incomplete"
+TASK_STATUS_INTERRUPTED = "interrupted"
+TASK_STATUS_CLOSED = "closed"
+TASK_STATUS_TIMEOUT = "timeout"
+TASK_STATUS_ERROR = "error"
+#: The closed set, in SPEC order.
+# Addendum A14 — the `limit` vocabulary is CLOSED and CANONICAL: it names the
+# Budget FIELD that stopped the run, spelled as SPEC spells it. Internal dimension
+# names and the human `text` are left untouched; the mapping happens at the
+# boundary where a TaskResult is built, so a host can BRANCH on `limit` and get the
+# same string from every port — which is the whole point of the field #90 asked for.
+LIMIT_MAX_TURNS = "maxTurns"
+LIMIT_MAX_TOKENS = "maxTokens"
+LIMIT_MAX_TOOL_CALLS = "maxToolCalls"
+LIMIT_MAX_WALL_MS = "maxWallMs"
+LIMIT_MAX_CHILDREN = "maxChildren"
+LIMIT_MAX_CONCURRENT = "maxConcurrent"
+LIMIT_MAX_DEPTH = "maxDepth"
+LIMIT_COMPLETION = "completion"
+LIMIT_TIMEOUT = "timeout"
+#: The closed set, in Budget field order.
+LIMITS = (
+    LIMIT_MAX_TURNS,
+    LIMIT_MAX_TOKENS,
+    LIMIT_MAX_TOOL_CALLS,
+    LIMIT_MAX_WALL_MS,
+    LIMIT_MAX_CHILDREN,
+    LIMIT_MAX_CONCURRENT,
+    LIMIT_MAX_DEPTH,
+    LIMIT_COMPLETION,
+    LIMIT_TIMEOUT,
+)
+
+#: python's internal dimension names → the canonical spelling. Anything already
+#: canonical (``maxTurns``, ``completion``) passes through unchanged.
+_CANONICAL_LIMIT = {
+    "tokens": LIMIT_MAX_TOKENS,
+    "toolCalls": LIMIT_MAX_TOOL_CALLS,
+    "wallMs": LIMIT_MAX_WALL_MS,
+    "children": LIMIT_MAX_CHILDREN,
+    "concurrent": LIMIT_MAX_CONCURRENT,
+    "depth": LIMIT_MAX_DEPTH,
+    "turns": LIMIT_MAX_TURNS,
+}
+
+
+def _canonical_limit(name: Optional[str]) -> Optional[str]:
+    """Map an internal dimension name onto the closed §7D ``limit`` vocabulary.
+
+    PRIVATE by A20: exporting it would leak exactly the internal names ("tokens",
+    "wallMs", …) that A14 exists to keep out of the public ``limit`` field.
+    """
+    if name is None:
+        return None
+    return _CANONICAL_LIMIT.get(name, name)
+
+
+TASK_STATUSES = (
+    TASK_STATUS_DONE,
+    TASK_STATUS_PENDING,
+    TASK_STATUS_INCOMPLETE,
+    TASK_STATUS_INTERRUPTED,
+    TASK_STATUS_CLOSED,
+    TASK_STATUS_TIMEOUT,
+    TASK_STATUS_ERROR,
+)
 
 # Defaults for unset budget dimensions (per handle).
 DEFAULT_MAX_TURNS = 6
@@ -191,8 +266,22 @@ class TaskResult:
     # failed run is "error", never "done" + is_error.
     status: str  # "done" | "pending" | "incomplete" | "interrupted" | "closed" | "timeout" | "error"
     pending: Optional[Request] = None
+    # Addendum A13a: this handle's OWN cumulative round trips, reported identically
+    # on EVERY status — it used to be this turn's figure on done/pending/incomplete
+    # and the cumulative one elsewhere, the same two-meanings defect as #88 one field
+    # over. It does NOT roll up to ancestors (A13b), so there is no own_turns: with
+    # no roll-up, turns already IS the own figure.
     turns: int = 0
+    # D3 (#88, ADR 0025): the CUMULATIVE TREE TOTAL for this handle, on EVERY status.
+    # It used to mean "this run's own usage" on done/pending/incomplete and "the tree
+    # total" on error/closed/timeout — one field with two meanings. It is now the tree
+    # total everywhere, and never shrinks between two waits on the same handle.
     total_tokens: int = 0
+    # The per-agent figure: this handle's OWN cumulative usage, excluding children.
+    own_tokens: int = 0
+    # Machine-readable stop reason (#90.1) — "maxTurns" | "completion" | a budget
+    # dimension name such as "max_tokens". None on a clean stop. Text stays prose.
+    limit: Optional[str] = None
     # Set by Agent.run() so a durable host can resume: ``await r.runtime.resume(answer)``.
     runtime: Optional["AgentRuntime"] = field(default=None, repr=False, compare=False)
 
@@ -242,6 +331,8 @@ class Handle:
         self.inbox: list[InboxItem] = []
         self.children: list[Handle] = []
         self.usage_total = 0
+        self.own_total = 0  # this handle's own usage, excluding children (D3 own_tokens)
+        # This handle's OWN cumulative round trips. It does NOT roll up (A13b).
         self.turns_total = 0
         self.pending_req: Optional[Request] = None
         self.task_key: Optional[str] = None  # set when spawned via the task tool (reattachment)
@@ -508,9 +599,14 @@ class AgentRuntime:
                     TaskResult(
                         text=f"wait timeout after {timeout_ms}ms (child still {h.state})",
                         is_error=True,
-                        status="timeout",
+                        status=TASK_STATUS_TIMEOUT,
+                        # A17: the status and the limit must never contradict each
+                        # other — a host branching on `limit` saw empty while
+                        # `status` said the run timed out.
+                        limit=LIMIT_TIMEOUT,
                         turns=h.turns_total,
                         total_tokens=h.usage_total,
+                        own_tokens=h.own_total,
                     )
                 ),
             )
@@ -526,16 +622,22 @@ class AgentRuntime:
             # Closed-but-settled: close ≠ loss — the recorded result stays queryable
             # (reattachment by task key relies on it; no completion cache).
             return h.last_result if h.last_result is not None else TaskResult(
-                text="closed", is_error=True, status="closed", turns=h.turns_total, total_tokens=h.usage_total
+                text="closed",
+                is_error=True,
+                status=TASK_STATUS_CLOSED,
+                turns=h.turns_total,
+                total_tokens=h.usage_total,
+                own_tokens=h.own_total,
             )
         if h.state == "suspended" and h.pending_req is not None:
             return TaskResult(
                 text=h.pending_req.prompt,
                 is_error=False,
-                status="pending",
+                status=TASK_STATUS_PENDING,
                 pending=_with_path(h.pending_req, h.id),
                 turns=h.turns_total,
                 total_tokens=h.usage_total,
+                own_tokens=h.own_total,
             )
         if h.state == "idle" and h.last_result is not None and not h.wake_queue:
             return h.last_result
@@ -595,7 +697,12 @@ class AgentRuntime:
         prior = h.state
         h.state = "closed"
         final = TaskResult(
-            text="closed", is_error=True, status="closed", turns=h.turns_total, total_tokens=h.usage_total
+            text="closed",
+            is_error=True,
+            status=TASK_STATUS_CLOSED,
+            turns=h.turns_total,
+            total_tokens=h.usage_total,
+            own_tokens=h.own_total,
         )
         if h.last_result is None:
             h.last_result = final  # a settled result stays queryable (closed-but-settled reattachment)
@@ -618,12 +725,26 @@ class AgentRuntime:
         return HandleView(id=h.id, state=h.state, tokens=h.usage_total, inbox=len(h.inbox))
 
     # ---- durable resume: Answer → deepest suspended handle, cascade up ------- #
-    async def resume(self, answer: Answer) -> None:
+    async def resume(self, answer: Answer) -> TaskResult:
         """Route the Answer to the DEEPEST suspended handle; it resumes at its
         checkpoint (turns/usage grow, never reset — its suspended turn's transcript
         was rolled back, its input preserved and replayed). The upward cascade
         re-runs each suspended parent; a re-invoked ``task`` REATTACHES to the
-        existing child by task key — never a duplicate spawn (§7D)."""
+        existing child by task key — never a duplicate spawn (§7D).
+
+        Returns the RESUMED result (D3, #90) — the outermost turn the cascade ran, so
+        the final answer is reachable without a second ``wait``. Previously this
+        returned ``None`` and the answer was unreachable through the public API.
+
+        IDEMPOTENCY CONTRACT (read this before you suspend inside a side-effecting
+        tool): the suspended turn is REWOUND to its checkpoint, so the resumed turn
+        RE-RUNS that leaf's own tools from the start of the turn. Reattachment by
+        task key protects ``task`` delegations only — it does not protect a leaf's
+        own tools. Make tools that may suspend idempotent (an idempotency key, a
+        read-before-write), or suspend BEFORE the irreversible step. Replaying the
+        checkpointed transcript instead is DEFERRED to its own change: §0 pins
+        rewind-to-checkpoint by name, so changing it is a spec decision, not a fix.
+        """
         leaf = self._find_suspended_leaf(self.root)
         if leaf is None:
             raise RuntimeError("no suspended handle")
@@ -639,7 +760,7 @@ class AgentRuntime:
         async def one_shot(_req: Request) -> Answer:
             return answer
 
-        await self.run_turn(leaf, self._take_pending_input(leaf), one_shot)
+        resumed = await self.run_turn(leaf, self._take_pending_input(leaf), one_shot)
         # Cascade: each suspended ancestor re-runs; its retried task call REATTACHES.
         p = leaf.parent
         while p is not None and p is not self.root and p.state == "suspended":
@@ -647,8 +768,9 @@ class AgentRuntime:
             p.state = "idle"
             self._t(f"{p.id}: suspended→idle (Answer accepted, checkpoint restored)")
             self._t(f"{p.id}: cascade resume (replay reattaches by task key)")
-            await self.run_turn(p, self._take_pending_input(p))
+            resumed = await self.run_turn(p, self._take_pending_input(p))
             p = p.parent
+        return resumed
 
     @staticmethod
     def _take_pending_input(h: Handle) -> str:
@@ -765,15 +887,17 @@ class AgentRuntime:
         (``asyncio.create_task`` alone would start nothing until the loop yields).
         Returns ``(immediate_result, None)`` or ``(None, coroutine)``."""
         if h.state == "closed":
-            return TaskResult(text="closed", is_error=True, status="closed"), None
+            return TaskResult(text="closed", is_error=True, status=TASK_STATUS_CLOSED), None
         limit = self._exhausted_limit(h)
         if limit is not None:
             r = TaskResult(
                 text=f"budget exhausted ({limit}); partial work preserved",
                 is_error=True,
-                status="incomplete",
+                status=TASK_STATUS_INCOMPLETE,
                 turns=h.turns_total,
                 total_tokens=h.usage_total,
+                own_tokens=h.own_total,
+                limit=_canonical_limit(limit),
             )
             h.last_result = r
             self._flush_waiters(h, r)
@@ -848,21 +972,26 @@ class AgentRuntime:
                 result = TaskResult(
                     text=r.text,
                     is_error=False,
-                    status="pending",
+                    status=TASK_STATUS_PENDING,
                     pending=_with_path(r.pending, h.id),
-                    turns=r.turns,
-                    total_tokens=r.usage["total_tokens"],
+                    turns=h.turns_total,
+                    total_tokens=h.usage_total,
+                    own_tokens=h.own_total,
                 )
             elif r.status == "incomplete":
                 h.state = "idle"
                 h.drained = []  # the turn ran to its cap; drained items are consumed
-                limit_name = getattr(r, "limit", None) or "maxTurns"
+                # A18: never forward an empty limit through — an `incomplete` that
+                # arrives without one would contradict its own status downstream.
+                limit_name = getattr(r, "limit", None) or LIMIT_MAX_TURNS
                 result = TaskResult(
                     text=f"hit {limit_name} without a final answer",
                     is_error=True,
-                    status="incomplete",
-                    turns=r.turns,
-                    total_tokens=r.usage["total_tokens"],
+                    status=TASK_STATUS_INCOMPLETE,
+                    turns=h.turns_total,
+                    total_tokens=h.usage_total,
+                    own_tokens=h.own_total,
+                    limit=_canonical_limit(limit_name),
                 )
                 self._t(f'{h.id}: running→idle (INCOMPLETE at maxTurns {h.eff["max_turns"]})')
             else:
@@ -870,7 +999,12 @@ class AgentRuntime:
                 self._t(f'{h.id}: running→idle (done, turns={r.turns}, tokens={r.usage["total_tokens"]})')
                 h.drained = []  # turn completed; drained items are consumed
                 result = TaskResult(
-                    text=r.text, is_error=False, status="done", turns=r.turns, total_tokens=r.usage["total_tokens"]
+                    text=r.text,
+                    is_error=False,
+                    status=TASK_STATUS_DONE,
+                    turns=h.turns_total,
+                    total_tokens=h.usage_total,
+                    own_tokens=h.own_total,
                 )
         except asyncio.CancelledError:
             # §7D one boundary rule: failures cross the handle boundary as isError
@@ -886,9 +1020,14 @@ class AgentRuntime:
             result = TaskResult(
                 text=msg,
                 is_error=True,
-                status=msg if msg in ("interrupted", "closed") else "interrupted",
+                status=(
+                    msg
+                    if msg in (TASK_STATUS_INTERRUPTED, TASK_STATUS_CLOSED)
+                    else TASK_STATUS_INTERRUPTED
+                ),
                 turns=h.turns_total,
                 total_tokens=h.usage_total,
+                own_tokens=h.own_total,
             )
         except Exception as e:  # noqa: BLE001 — uniform isError boundary
             msg = str(e)
@@ -896,7 +1035,14 @@ class AgentRuntime:
                 h.state = "idle"
             self._t(f"{h.id}: running→idle (error: {msg})")
             # Closed vocabulary: a failed run is "error" — never "done" + is_error.
-            result = TaskResult(text=msg, is_error=True, status="error", turns=h.turns_total, total_tokens=h.usage_total)
+            result = TaskResult(
+                text=msg,
+                is_error=True,
+                status=TASK_STATUS_ERROR,
+                turns=h.turns_total,
+                total_tokens=h.usage_total,
+                own_tokens=h.own_total,
+            )
         finally:
             h._ask_task = None
             if h.parent is not None:
@@ -919,7 +1065,10 @@ class AgentRuntime:
             w(r)
 
     def _rollup(self, h: Handle, tokens: int, tool_calls: int = 0) -> None:
-        """Usage roll-up IS the budget ledger (§7D): every ancestor's pool drains."""
+        """Usage roll-up IS the budget ledger (§7D): every ancestor's pool drains.
+        TURNS DO NOT ROLL UP (addendum A13b) — no port does that, and a parent can
+        delegate in one turn to a child that spends five."""
+        h.own_total += tokens
         p: Optional[Handle] = h
         while p is not None:
             p.usage_total += tokens

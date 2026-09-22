@@ -352,8 +352,8 @@ func main() {
 Separately from `Runtime.Resume` above, Go ships `Client.RunWithAnswer`/`Client.AskWithAnswer` —
 SPEC §10's "Durable resume — the answer-carrying entry point," which resumes a **bare-client** run
 (no agent runtime involved) across a **process restart**, not just across time within one running
-process. The other five ports do not implement this yet
-(tracked in `openspec/changes/add-tool-relay-mode/tasks.md`). See
+process. The other six ports — `js`, `python`, `java`, `csharp`, `elixir` and `clojure` — do not
+implement this yet (tracked in `openspec/changes/add-tool-relay-mode/tasks.md`). See
 [`suspension/relay`](/api/go/suspension/relay/), which typically resumes via this same pair.
 </Aside>
 
@@ -370,6 +370,23 @@ halted assistant turn — not just the halted call's — replacing the halt's pl
 appending alongside it, so the transcript sent to the provider is balanced (one `tool_result` per
 `tool_use`/`tool_call`) and replayable. The resume continues from the transcript and appends **no
 new user turn**.
+
+**`Answer.Data` has exactly two recognised keys on this path**, in this precedence:
+`"results"` (`[]any` of `{id, output, isError}`, one per outstanding call) and the single-call
+shorthand `"output"` (a **string**, with optional `"isError"`) — `toolnexus.RelayResultsKey` and
+`toolnexus.RelayOutputKey`. Build them with `toolnexus.AnswerOutput(id, output)` or
+`toolnexus.RelayAnswer(id, results)` rather than by hand — and use
+`toolnexus.AnswerDeclined(id, reason)` for the human who said no, which is a resolution
+(`Ok: false` + `Reason`), not an error. All three ship in all seven ports. Any other shape — `{"answers": […]}`,
+`{"value": "staging"}` — is **not** a recognised payload: `Ok: true` with no determinable result
+for an outstanding call returns an **error to you**, never a fabricated tool result handed to the
+model alongside `Status: "done"` (issue #89). A non-string `output` is an error too, not a silent
+`""`.
+
+One asymmetry to know before building on this: the recognised payload is spliced into the
+transcript as the call's result — the tool is **not** re-executed and never sees `ctx.Answer`,
+unlike the inline `WaitFor` path. Making a non-relay durable resume re-execute the tool is deferred
+to its own change (`openspec/changes/fix-consumer-issues-86-93`, D4).
 
 ### 1. The smallest useful call — halt, then resume with `RunWithAnswer`
 

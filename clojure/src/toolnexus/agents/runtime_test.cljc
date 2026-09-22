@@ -884,6 +884,8 @@
       (let [r @got]
         (is (= "timeout" (:status r)))
         (is (str/includes? (:text r) "wait timeout after 500ms"))
+        (is (= "timeout" (:limit r))
+            "A14/A17: `limit` is set BESIDE the status — this settled a timeout status with no limit at all, the two fields a host branches on contradicting each other")
         (is (str/includes? (:text r) "child still running")))
       (is (= "running" (state-of rt h)) "the child was NOT cancelled by the waiter's deadline")
       (deliver gate true)
@@ -1119,6 +1121,42 @@
 ;; The closed status vocabulary
 ;; ===========================================================================
 
+(deftest every-limit-this-runtime-produces-is-in-the-closed-vocabulary
+  ;; Addendum A14. The whole point of `limit` is that a host can BRANCH on it,
+  ;; which only works if the answer is the same word in every port — four ports
+  ;; had already drifted (`maxWall`, `tokens`, `wallMs`) inside the fix that
+  ;; added the field. So the vocabulary is closed, and this port's internal
+  ;; pool keys (`:tokens`, `:tool-calls`, `:deadline`) are mapped at the
+  ;; boundary and must never leak out.
+  (is (= #{"maxTurns" "maxTokens" "maxToolCalls" "maxWallMs"
+           "maxChildren" "maxConcurrent" "maxDepth" "completion" "timeout"}
+         rt/limits)
+      "CLOSED and identical in every port, spelled as SPEC spells Budget")
+  (testing "the budget stops each report their OWN limit, never a blanket maxTurns"
+    (doseq [[budget expected script]
+            [[{:max-turns 1}      "maxTurns"     [{:calls [{:id "c" :name "noop" :args {}}]}
+                                                  {:calls [{:id "c" :name "noop" :args {}}]}]]
+             [{:max-tokens 10}    "maxTokens"    [{:calls [{:id "c" :name "noop" :args {}}]}
+                                                  {:calls [{:id "c" :name "noop" :args {}}]}]]
+             [{:max-tool-calls 1} "maxToolCalls" [{:calls [{:id "c" :name "noop" :args {}}]}
+                                                  {:calls [{:id "c" :name "noop" :args {}}]}]]]]
+      (let [noop (tool/tool {:name "noop" :description "n"
+                             :execute (fn ([_a] (tool/success "ok")) ([_a _c] (tool/success "ok")))})
+            {:keys [rt]} (runtime-with {"w" (adef "w" "wm" :budget budget :tools [noop])}
+                                       {"wm" script})
+            h (rt/spawn rt rt/root "w")]
+        (rt/wake rt h "x")
+        (rt/wait rt h)
+        (rt/wake rt h "y")
+        (let [r (rt/wait rt h)]
+          (when (= "incomplete" (:status r))
+            (is (contains? rt/limits (:limit r))
+                (str expected ": the reported limit is in the closed vocabulary"))
+            (is (= expected (:limit r))
+                (str "the stop names ITS OWN budget field, not a hardcoded maxTurns")))))))
+  (testing "no internal pool key ever reaches the field"
+    (is (not-any? #(contains? rt/limits %) ["tokens" "toolCalls" "wallMs" "maxWall" "tool-calls" "deadline"]))))
+
 (deftest every-status-this-runtime-produces-is-in-the-closed-vocabulary
   (is (= #{"done" "pending" "incomplete" "interrupted" "closed" "timeout" "error"} rt/statuses)
       "the vocabulary is CLOSED and identical in every port")
@@ -1203,3 +1241,216 @@
           (is (not (str/includes? sys "EDITED AFTER SPAWN"))
               "resolved once at spawn — the frozen-snapshot rule")))
       (finally (fs/delete-tree! dir)))))
+
+;; ===========================================================================
+;; #88 / #90 / ADR 0025 — the runtime path is as legible as the loop
+;; ===========================================================================
+
+(deftest task-result-fields-mean-one-thing-on-every-status
+  (testing "done: total-tokens is the CUMULATIVE TREE total, own-tokens the
+            per-agent figure, turns the handle's own cumulative count"
+    (let [{:keys [rt]} (runtime-with {"w" (adef "w" "wm")}
+                                     {"wm" [{:text "one"} {:text "two"}]})
+          h (rt/spawn rt rt/root "w")]
+      (rt/wake rt h "go")
+      (let [r1 (rt/wait rt h)]
+        (is (= 15 (:total-tokens r1)))
+        (is (= 15 (:own-tokens r1)))
+        (is (= 1 (:turns r1))))
+      (rt/wake rt h "again")
+      (let [r2 (rt/wait rt h)]
+        (testing "turns and total-tokens ACCUMULATE across turns on every status —
+                  they used to report the finished RUN's figures on done/pending/
+                  incomplete and the cumulative ones on the other four"
+          (is (= 2 (:turns r2)))
+          (is (= 30 (:total-tokens r2)))
+          (is (= 15 (:own-tokens r2)) "own-tokens is this turn's spend")))))
+  (testing "the tree total is what total-tokens carries: a parent reports its
+            children's spend, and >= its own"
+    (let [{:keys [rt]} (runtime-with
+                        {"boss" (adef "boss" "bm" :team ["w"] :budget {:max-depth 5})
+                         "w"    (adef "w" "wm")}
+                        {"bm" [{:calls [{:id "c1" :name "task"
+                                         :args {:agent "w" :prompt "sub"}}]}
+                               {:text "coordinated"}]
+                         "wm" [{:text "child done"}]})
+          boss (rt/spawn rt rt/root "boss")]
+      (rt/wake rt boss "delegate")
+      (let [r (rt/wait rt boss)]
+        (is (= "done" (:status r)))
+        (is (>= (:total-tokens r) (:own-tokens r))
+            "the parent's total includes the child's spend")
+        (testing "A13a/A13b — TURNS are NOT rolled up, and `parent >= child` is
+                  NOT a general guarantee. Tokens roll up because they are
+                  billed; turns do not, because a parent can delegate in ONE
+                  turn to a child that takes five. An earlier wording of A13
+                  said turns were a cumulative TREE total `exactly like
+                  TotalTokens`; it was wrong, two ports acted on it, and
+                  `examples/subagent-fanout/fixture.json` — which pins
+                  `parentTurns: 2` beside `parentUsageTotal: 240` — is the
+                  arbiter that caught it. This assertion is the local guard
+                  against that roll-up being re-introduced."
+          (is (= 2 (:turns r))
+              "the parent's OWN cumulative round trips — one to delegate, one
+               to answer. A roll-up would make this 3, and that is the reading
+               two ports shipped before the fixture caught it."))))))
+
+(deftest both-vocabularies-are-public-api-and-branchable-without-string-literals
+  ;; Addendum A19a/A20. The point of shipping the vocabularies as values is that
+  ;; a HOST can branch on `:status` and `:limit` without hard-coding strings. So
+  ;; the thing to assert is REACHABILITY, not merely that this suite compiles —
+  ;; csharp found that its own test project is granted access to internals, so a
+  ;; demoted constant would have kept every test green while breaking real
+  ;; consumers. Clojure's equivalent trap is that `^:private` is metadata: a var
+  ;; that lost its publicness is invisible to `ns-publics` but a same-namespace
+  ;; reference would still resolve. `ns-publics` is therefore the check, because
+  ;; it sees exactly what a consumer sees.
+  (let [pub (ns-publics 'toolnexus.agents.runtime)]
+    (testing "both enumerable sets are public"
+      (doseq [v ['statuses 'limits]]
+        (is (contains? pub v) (str "toolnexus.agents.runtime/" v " must be PUBLIC API"))))
+    (testing "and every value in the limit set is ALSO reachable as a NAMED var,
+              so a host branches on a name and never writes a string literal"
+      (let [named (into {} (keep (fn [[sym v]]
+                                   (when (str/starts-with? (name sym) "limit-")
+                                     [@v sym]))
+                                 pub))]
+        (doseq [l rt/limits]
+          (is (contains? named l)
+              (str "the limit \"" l "\" has no public named var — a host would have to type it")))
+        (is (= rt/limits (set (keys named)))
+            "the named vars and the enumerable set are the SAME closed vocabulary")))
+    (testing "A20 — the internal pool-name MAPPER stays private. Exporting it
+              would leak `:tokens`/`:tool-calls`/`:deadline`, the exact internal
+              names A14 exists to keep out of the public field."
+      (is (not (contains? pub 'pool-limit)))
+      (is (not (contains? pub 'turn-cap)))
+      (is (not (contains? pub 'budget-limit-of))))
+    (testing "A19b — the invariant PREDICATE is test-only and is not exported"
+      (is (not-any? (fn [sym] (str/includes? (name sym) "invariant")) (keys pub))))))
+
+(deftest a-stop-always-tells-the-truth-about-what-stopped-it
+  ;; Addendum A18, as an INVARIANT rather than three instance tests. The class
+  ;; of bug: a settle that sets a STATUS without its corresponding LIMIT, so
+  ;; the two fields a host branches on contradict each other — inside the very
+  ;; feature (#90's `limit`) that was added so hosts could branch. js and
+  ;; elixir each hit it; a sweep caught golang and python; golang then found a
+  ;; LATENT SECOND INSTANCE by auditing every construction site, which is why
+  ;; this is written as a rule over whatever results the runtime actually
+  ;; produces rather than as a list of the cases someone remembered.
+  ;;
+  ;; THE RULE, both directions:
+  ;;   a LIMIT stop (incomplete, timeout) MUST name its limit
+  ;;   every other stop MUST leave `:limit` absent
+  ;;   and every value must be a member of its OWN closed vocabulary
+  (letfn [(check! [label r]
+            (is (contains? rt/statuses (:status r))
+                (str label ": the status is in the 7-value TaskResult vocabulary"))
+            (if (contains? #{"incomplete" "timeout"} (:status r))
+              (do (is (some? (:limit r))
+                      (str label ": a LIMIT stop must NAME its limit — a status of \""
+                           (:status r) "\" with an empty limit is the A18 contradiction"))
+                  (is (contains? rt/limits (:limit r))
+                      (str label ": …and the name is in the closed A14 vocabulary")))
+              (is (nil? (:limit r))
+                  (str label ": a NON-limit stop (" (:status r) ") must leave :limit empty"))))]
+    (testing "done — a clean finish names no limit"
+      (let [{:keys [rt]} (runtime-with {"w" (adef "w" "wm")} {"wm" [{:text "ok"}]})
+            h (rt/spawn rt rt/root "w")]
+        (rt/wake rt h "go")
+        (let [r (rt/wait rt h)]
+          (is (= "done" (:status r)))
+          (check! "done" r))))
+    (testing "incomplete — a budget stop names the budget field that stopped it"
+      (let [{:keys [rt]} (runtime-with {"w" (adef "w" "wm" :budget {:max-turns 1})}
+                                       {"wm" [{:text "one"} {:text "two"}]})
+            h (rt/spawn rt rt/root "w")]
+        (rt/wake rt h "first") (rt/wait rt h)
+        (rt/wake rt h "second")
+        (let [r (rt/wait rt h)]
+          (is (= "incomplete" (:status r)))
+          (is (= "maxTurns" (:limit r)))
+          (check! "incomplete/budget" r))))
+    (testing "timeout — the wait deadline names `timeout`, not nothing.
+              This is the reported instance: the status said timeout while the
+              field a host branches on was empty.
+
+              Driven on the VIRTUAL CLOCK, never a short real deadline. csharp
+              lost this row to flakiness first: a real-time deadline racing the
+              scheduler starves the assertion instead of failing cleanly, and it
+              has to hold on BOTH of this port's hosts, where the scheduling is
+              not even the same machinery."
+      (let [gate    (promise)
+            entered (promise)
+            clock   (rt/virtual-clock)
+            {:keys [rt]} (runtime-with {"w" (adef "w" "wm")} {"wm" [{:text "eventually"}]}
+                                       {:clock clock
+                                        :on-call (fn [_b _n] (deliver entered true) @gate)})
+            h   (rt/spawn rt rt/root "w")
+            got (promise)]
+        (rt/wake rt h "go")
+        (is (until! #(realized? entered)))
+        (proc/run-async! (fn [] (deliver got (rt/wait rt h {:timeout-ms 500}))))
+        (is (until! #(do ((:advance! clock) 600) (realized? got)))
+            "the timeout fired off the injected clock, not off wall time")
+        (let [r @got]
+          (is (= "timeout" (:status r)) "the timeout branch really was driven")
+          (check! "timeout" r))
+        (deliver gate true)))
+
+    (testing "closed — a non-limit stop, driven EXPLICITLY.
+              Waiting on a handle with a zero timeout after a close returns the
+              SETTLED LAST result, not a fresh closed one (golang's warning), so
+              the closed branch is reached by closing an IDLE handle that has
+              never run and reading what close itself settles."
+      (let [{:keys [rt]} (runtime-with {"w" (adef "w" "wm")} {"wm" [{:text "ok"}]})
+            h (rt/spawn rt rt/root "w")]
+        (rt/close rt h)
+        (let [r (rt/wait rt h)]
+          (is (= "closed" (:status r)) "the closed branch really was driven")
+          (check! "closed" r))))
+    (testing "error — a failure names no limit either"
+      (let [{:keys [rt]} (runtime-with {"w" (adef "w" "wm")} {"wm" [{:text "ok"}]})]
+        (check! "error/unknown-handle" (rt/wait rt "root/nope.1"))))))
+
+(deftest an-incomplete-result-names-the-real-limit
+  ;; It said "hit maxTurns" whatever stopped the run, so a budget stop, a
+  ;; contentPart stop and a timeout were all mislabelled to every host reading
+  ;; the text — and :limit did not exist to read instead.
+  (let [{:keys [rt]} (runtime-with {"w" (adef "w" "wm" :budget {:max-turns 1})}
+                                   {"wm" [{:text "one"} {:text "two"}]})
+        h (rt/spawn rt rt/root "w")]
+    (rt/wake rt h "first")
+    (rt/wait rt h)
+    (rt/wake rt h "second")
+    (let [r (rt/wait rt h)]
+      (is (= "incomplete" (:status r)))
+      (is (= "maxTurns" (:limit r)) "STRUCTURED, so a host never parses English")
+      (is (= 1 (:turns r))))))
+
+(deftest resume-returns-the-resumed-result
+  ;; A4 — the TaskResult of the topmost handle the cascade re-ran. `resume`
+  ;; returned nil, so a host had no way to learn the outcome of the work it had
+  ;; just unblocked except by waiting on a handle it may not hold.
+  (let [asked (atom 0)
+        ask   (tool/tool {:name "ask_city" :description "asks"
+                          :execute (fn ([_args] (swap! asked inc)
+                                         (client/suspend
+                                          (client/make-request "input" "Which city?")))
+                                     ([_args ctx]
+                                      (if (:ok (:answer ctx))
+                                        (tool/success "Chennai")
+                                        (client/suspend
+                                         (client/make-request "input" "Which city?")))))})
+        {:keys [rt]} (runtime-with {"w" (adef "w" "wm" :tools [ask])}
+                                   {"wm" [{:calls [{:id "c1" :name "ask_city" :args {}}]}
+                                          {:text "the city is Chennai"}]})
+        h (rt/spawn rt rt/root "w")]
+    (rt/wake rt h "where?")
+    (until! (fn [] (= "suspended" (state-of rt h))))
+    (let [r (rt/resume rt {"id" "any" "ok" true})]
+      (is (map? r) "resume returns a TaskResult, not nil")
+      (is (= "done" (:status r)))
+      (is (= "the city is Chennai" (:text r)))
+      (testing "and a STRING-KEYED Answer is honoured — it used to read as a decline"
+        (is (= 0 (count (filter #(str/includes? % "declined") (rt/trace rt)))))))))

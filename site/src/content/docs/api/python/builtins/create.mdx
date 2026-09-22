@@ -166,7 +166,7 @@ asyncio.run(main())
 | `read` | Read a file. A recognised media file (`png jpg jpeg gif webp pdf mp3 wav`) comes back as a description plus one [content part](/api/python/types/content-part/); anything else is read as UTF-8, optionally windowed by `offset`/`limit` (1-based lines). A missing file or undecodable bytes is an `is_error` result, never a raised exception. |
 | `write` | Create or overwrite a file, making parent directories as needed. |
 | `edit` | Exact-string replace; unique by default, `replaceAll` for every occurrence. |
-| `grep` | Regex search over file contents under a directory; `file:line:text` matches. |
+| `grep` | Regex search over file contents under a directory; `rel:line:text` matches, where `rel` is the `/`-separated path relative to the search root. |
 | `glob` | List files matching a glob under a directory; sorted relative paths. |
 | `webfetch` | HTTP GET a URL; `text`/`markdown`(default)/`html` output. |
 | `question` | Suspend via a `kind:"question"` `Request` (§10); the host's `wait_for` resolves it. |

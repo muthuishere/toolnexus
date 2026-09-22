@@ -84,22 +84,94 @@ func (a *Agent) Loop(opts tn.ClientOptions, tk *tn.Toolkit) *Loop {
 	return &Loop{agent: a, opts: opts, toolkit: tk, status: "idle"}
 }
 
-// clientFor returns the client for this call, applying a per-run Model override
-// via RequestParams (`model` is NOT in the forbidden set — client.go forbids only
-// messages/tools/stream — and the merge reaches the wire; spiked).
+// clientFor returns the client for this call, HONOURING THE SPEC. Everything a
+// Spec declares that a driver over a caller-built client and toolkit *can* carry
+// is applied here, so the Loop door and the runtime door agree on the same agent
+// (ADR 0024). Concretely:
+//
+//   - Soul becomes SystemPrompt — but a CALLER-SUPPLIED SystemPrompt WINS.
+//     (The caller built this ClientOptions on purpose; the soul is the default.)
+//   - Guardrails + Hooks become guardedHooks(Spec) — the SAME compiled
+//     first-deny-wins BeforeTool the registry path installs. A guardrail that is
+//     enforced through one door and not the other is a security hole, not a gap.
+//   - Model is the agent's default; RunOpts.Model still overrides it per call.
+//   - Budget.MaxTurns is the agent's default turn cap.
+//
+// The per-run Model override rides RequestParams (`model` is NOT in the forbidden
+// set — client.go forbids only messages/tools/stream — and the merge reaches the
+// wire; spiked).
+//
+// What it deliberately does NOT do is listed by loopUnsupported.
 func (l *Loop) clientFor(o RunOpts) *tn.Client {
-	if o.Model == "" {
-		return tn.CreateClient(l.opts)
-	}
 	opts := l.opts
-	rp := map[string]any{}
-	for k, v := range opts.RequestParams {
-		rp[k] = v
+	sp := l.agent.Spec
+
+	if opts.SystemPrompt == "" && sp.Soul != "" {
+		opts.SystemPrompt = sp.Soul
 	}
-	rp["model"] = o.Model
-	opts.RequestParams = rp
+	if h := guardedHooks(sp); h != nil {
+		opts.Hooks = h
+	}
+	// "inherit" is the registry's sentinel for "no model of my own"; a caller
+	// passing it means exactly what passing nothing means, and both spellings
+	// must behave identically in every port (DECISIONS A8).
+	if (opts.Model == "" || opts.Model == "inherit") && sp.Model != "" && sp.Model != "inherit" {
+		opts.Model = sp.Model
+	}
+	if opts.MaxTurns == 0 && sp.Budget != nil && sp.Budget.MaxTurns > 0 {
+		opts.MaxTurns = sp.Budget.MaxTurns
+	}
+
+	if o.Model != "" {
+		rp := map[string]any{}
+		for k, v := range opts.RequestParams {
+			rp[k] = v
+		}
+		rp["model"] = o.Model
+		opts.RequestParams = rp
+	}
 	return tn.CreateClient(opts)
 }
+
+// loopUnsupported names the Spec fields THIS agent declares that the Loop door
+// cannot honour, in a stable order. Empty ⇒ the Loop carries the whole Spec.
+//
+// The names are the CANONICAL vocabulary — "tools", "team", "waitFor",
+// "onMetric" — identical in all seven ports, exactly as the limit strings are,
+// and deliberately not Go's own spelling of the fields.
+//
+// These four are not an oversight: a Loop is a driver over a toolkit and client
+// the CALLER built, so it has nowhere to put a tool view (Tools), no task tool to
+// delegate through (Team), no handle to suspend (WaitFor) and no per-agent metric
+// sink the caller did not already install (OnMetric). They are unhonourable in
+// every port, which is why this reports rather than refuses: making the
+// constructor error would break callers for a limitation the runtime door already
+// solves (ADR 0024; DECISIONS D2).
+//
+// Use it as a pre-flight:
+//
+//	if missing := agents.LoopUnsupported(a.Spec); len(missing) > 0 {
+//	    // drive this agent through agents.Runtime instead
+//	}
+func LoopUnsupported(sp Spec) []string {
+	var out []string
+	if len(sp.Tools) > 0 {
+		out = append(out, "tools")
+	}
+	if len(sp.Team) > 0 {
+		out = append(out, "team")
+	}
+	if sp.WaitFor != nil {
+		out = append(out, "waitFor")
+	}
+	if sp.OnMetric != nil {
+		out = append(out, "onMetric")
+	}
+	return out
+}
+
+// Unsupported is LoopUnsupported for this live Loop's agent.
+func (l *Loop) Unsupported() []string { return LoopUnsupported(l.agent.Spec) }
 
 // Status is observed, never set by the caller.
 func (l *Loop) Status() string { return l.status }

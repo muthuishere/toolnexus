@@ -71,6 +71,47 @@
      (some? data)                  (assoc :data data)
      (and (not ok) (some? reason)) (assoc :reason reason))))
 
+(defn as-answer
+  "§10 `Answer`, normalised so a STRING-KEYED map means what it says.
+
+  §10 pins `Answer`'s keys because they cross the wire, and that is precisely
+  why a host round-tripping an Answer through JSON — a database column, a
+  webhook body, a queue — hands this port `{\"id\" … \"ok\" true}`. Before this,
+  `(:ok answer)` read nil from such a map and the run treated a GRANTED answer
+  as DECLINED: no error, no log, the opposite outcome (issue #89, ADR 0026 §5).
+  It is the worst failure mode in that batch precisely because it is silent.
+
+  Only the TOP-LEVEL keys are normalised. `:data` is the host's own payload and
+  is handed to the tool untouched."
+  [answer]
+  (when (map? answer)
+    (reduce (fn [m e]
+              (let [k (key e)]
+                (assoc m (if (keyword? k) k (keyword (str k))) (val e))))
+            {} answer)))
+
+(defn answer-output
+  "§10 `Answer` carrying ONE tool output for a durable resume (ADR 0026: the
+  constructor exists so the map stops being hand-built and there is no key left
+  to get wrong). Recognised payload keys are `results` then `output`, in that
+  precedence (addendum A3); this builds the `output` shape.
+
+  A non-string `output` THROWS. Degrading it to \"\" is how a wrong answer
+  reaches the model quietly, which is the whole defect this constructor closes."
+  ([id output] (answer-output id output false))
+  ([id output is-error]
+   (when-not (string? output)
+     (throw (ex-info "toolnexus: Answer output must be a string" {:output output})))
+   (make-answer id true (cond-> {:output output}
+                          is-error (assoc :isError true)))))
+
+(defn answer-declined
+  "§10 `Answer` for a request the host will NOT grant (addendum A9, shipped in
+  all seven ports beside `answer-output`). R1: `reason` is carried only here,
+  because the loop rule branches on `ok` alone."
+  ([id] (answer-declined id nil))
+  ([id reason] (make-answer id false nil reason)))
+
 (defn suspend
   "A `ToolResult` whose `metadata.pending` is a `Request` IS a suspension
   (§0.12). `execute`'s signature is untouched — suspension is data on the
@@ -94,6 +135,35 @@
 ;; ---------------------------------------------------------------------------
 ;; client options
 ;; ---------------------------------------------------------------------------
+
+(def statuses
+  "The §8 `RunResult` status vocabulary — THREE values, and the ONLY three a
+  `run` can return:
+
+    done         the model produced a final answer
+    pending      a §10 durable suspension; the Request is on `:pending`
+    incomplete   a limit stopped the run, and `:limit` NAMES which
+
+  IT IS NOT THE SAME VOCABULARY as `toolnexus.agents.runtime/statuses`, which
+  has SEVEN values for a TaskResult and includes `\"timeout\"`. Two different
+  sets on two fields both spelled `status` is the collision behind #92.1, and
+  the fix is to name both rather than rename either (D5): a host switching on a
+  status must know WHICH vocabulary it holds. A §8 run never returns
+  `\"timeout\"` — a whole-run deadline throws `timeout-error`.
+
+  RESIDUAL GAP, stated rather than implied (addendum A7): these constants pin
+  the VALUES; nothing pins the invariant that a third vocabulary can never land
+  on a third field called `status`. Tracked as a follow-up conformance row."
+  #{"done" "pending" "incomplete"})
+
+(def limits
+  "The §8 `RunResult.limit` vocabulary — which limit stopped an `incomplete`
+  run. Identical strings in every port.
+
+    maxTurns     the turn budget was exhausted
+    contentPart  a content part could not be sent (§8A)
+    timeout      the whole-run `:timeout-ms` deadline expired"
+  #{"maxTurns" "contentPart" "timeout"})
 
 (def ^:private default-max-turns 10)
 (def ^:private default-retries 2)
@@ -483,6 +553,86 @@
     (when (and n (<= 0 n retry-after-max-seconds))
       (* 1000 n))))
 
+(def ^:private account-identifier-keys
+  "The fields an upstream routinely echoes back in an error body that identify
+  the ACCOUNT rather than the failure. §8's credentials guarantee now covers
+  error messages too (D5): a body is diagnostics, not a place to learn who is
+  paying."
+  ["user_id" "account_id" "org_id" "organization"])
+
+(def ^:private redacted-marker "«redacted»")
+
+(defn ^:no-doc redact-body
+  "An upstream error body with every account identifier's VALUE replaced.
+
+  A CAP IS NOT REDACTION — the leaking body measured in #91 is 96 bytes, so
+  truncating at 200 hid nothing. Redaction is applied to the typed `:body` AND
+  to the message; the 200-character cap applies to the MESSAGE ONLY (addendum
+  A5), because a host that opted into a typed error asked for the whole thing.
+
+  INTERNAL (`^:no-doc`): public only because §8B's classifier applies the SAME
+  policy and must not carry a second copy of it."
+  [body]
+  (reduce (fn [acc k]
+            (str/replace acc
+                         (re-pattern (str "(\"" k "\"\\s*:\\s*)(\"[^\"]*\"|[^,}\\s]+)"))
+                         (fn [m] (str (nth m 1) "\"" redacted-marker "\""))))
+          (str body)
+          account-identifier-keys))
+
+(defn ^:no-doc safe-body
+  "The body as it may be SEEN: blank on an authentication status, redacted
+  otherwise. A 401/403 body routinely reflects the credential or the header that
+  was sent, so it never reaches a log, a metric, an error or a return value —
+  the classifier's rule, lifted to the §8 path (D5)."
+  [status body]
+  (if (or (= 401 status) (= 403 status)) "" (redact-body body)))
+
+(defn ^:no-doc cap-message
+  "The 200-character cap, MESSAGE ONLY (addendum A5)."
+  [s]
+  (let [s (str/trim (str s))]
+    (cond (str/blank? s) ""
+          (> (count s) 200) (str (subs s 0 200) "…")
+          :else s)))
+
+(defn provider-error
+  "The typed §8 provider failure: an ex-info whose DATA carries `:status`,
+  `:body` (fully redacted) and `:retry-after` (ms), and whose MESSAGE carries
+  the capped, redacted body.
+
+  Before this, a host could only regex the message — and the message was the raw
+  body, account identifiers and all (#91/#92, ADR 0027)."
+  [status body retry-after]
+  (let [safe (safe-body status body)]
+    (ex-info (str "LLM " status (when (seq (cap-message safe)) (str ": " (cap-message safe))))
+             (cond-> {:toolnexus/error :provider :status status :body safe}
+               retry-after (assoc :retry-after retry-after)))))
+
+(defn timeout-error
+  "The typed whole-run deadline failure. `:timeout-ms` is the WHOLE-RUN deadline
+  §8 specifies, and the message NAMES the budget that stopped the run."
+  [timeout-ms elapsed-ms]
+  (ex-info (str "LLM run timeout after " elapsed-ms "ms (timeoutMs budget " timeout-ms "ms)")
+           {:toolnexus/error :timeout :limit "timeout" :timeout-ms timeout-ms}))
+
+(defn ^:no-doc with-deadline
+  "Stamp the whole-run deadline onto the client for this run. Absent
+  `:timeout-ms` ⇒ the client is returned untouched and nothing changes."
+  [client]
+  (if-let [ms (:timeout-ms client)]
+    (assoc client ::deadline (+ (ktime/now-ms) ms))
+    client))
+
+(defn- remaining-ms
+  "Milliseconds left on the run deadline, or nil when there is none. A stamped
+  deadline is the ONLY source; an unstamped client (a single `call-provider`,
+  say) still bounds the one call by the raw `:timeout-ms`."
+  [client]
+  (if-let [d (::deadline client)]
+    (- d (ktime/now-ms))
+    (:timeout-ms client)))
+
 (defn- post-llm
   "The one HTTP call. `:http-client` lets a host supply the transport — for a
   proxy, mTLS, or credentials this library must never see — and it takes the
@@ -498,8 +648,12 @@
     ;; :timeout-ms. koine classifies a timeout as DATA ({:status nil :error
     ;; :timeout}), never a throw, which is what lets the retry loop below treat
     ;; it as one more retryable failure instead of a host-specific exception.
-    (http/request (cond-> {:method :post :url url :headers headers :body body}
-                    (:timeout-ms client) (assoc :timeout-ms (:timeout-ms client))))))
+    ;; The per-call timeout is the REMAINING run budget, never the whole budget
+    ;; again: `:timeout-ms` is the WHOLE-RUN deadline (§8 `timeoutMs`), and
+    ;; handing it to every attempt turned a 30s budget into 30s PER RETRY.
+    (let [remaining (remaining-ms client)]
+      (http/request (cond-> {:method :post :url url :headers headers :body body}
+                      remaining (assoc :timeout-ms (max 1 remaining)))))))
 
 (defn ^:no-doc classify
   "§resilience-policy — retry | fail, and NOTHING ELSE.
@@ -532,6 +686,15 @@
   (let [budget  (or (:retries client) 0)
         base-ms (or (:retry-base-ms client) 500)]
     (loop [attempt 0]
+      ;; §8 — the WHOLE-RUN deadline, checked before every attempt. This port had
+      ;; no run-level deadline at all: `:timeout-ms` bounded ONE http call and a
+      ;; timed-out call was then RETRIED, so a client asking for a 30s budget
+      ;; could spend `retries × 30s` (#91/#92, ADR 0027). An abort is never
+      ;; retried, and it bypasses `:on-error` — a deadline is not a classifiable
+      ;; upstream failure, it is the caller's own limit arriving.
+      (when-let [left (and (::deadline client) (remaining-ms client))]
+        (when (<= left 0)
+          (throw (timeout-error (:timeout-ms client) (:timeout-ms client)))))
       (let [t0      (ktime/now-ms)
             res     (post-llm client url headers body)
             failed? (http/failed? res)
@@ -544,20 +707,31 @@
                                :prompt_tokens (get-in res [:usage :prompt_tokens])
                                :completion_tokens (get-in res [:usage :completion_tokens])}))
               (json/read-str (:body res)))
-          (let [info    {:error     (if failed? (:error res) (:body res))
+          (let [timed-out? (= :timeout (:error res))
+                info    {:error     (if failed? (:error res) (safe-body status (:body res)))
                          :status    status
                          :attempt   attempt
-                         ;; a transport failure has no status and is retryable
-                         :retryable? (boolean (or failed?
-                                                   (retryable-status?
-                                                    status (:retryable-statuses client))))}
-                verdict (classify client info)
+                         ;; A transport failure has no status and is retryable —
+                         ;; EXCEPT a timeout, which is the run's own deadline
+                         ;; expiring. Retrying it is retrying past the budget the
+                         ;; caller set (D5).
+                         :retryable? (boolean (and (not timed-out?)
+                                                   (or failed?
+                                                       (retryable-status?
+                                                        status (:retryable-statuses client)))))}
+                verdict (if timed-out? :fail (classify client info))
                 throw!  (fn []
-                          (if failed?
+                          (cond
+                            timed-out?
+                            (throw (timeout-error (:timeout-ms client)
+                                                  (- (ktime/now-ms) t0)))
+
+                            failed?
                             (throw (ex-info (str "LLM transport " (name (:error res)))
-                                            {:error (:error res)}))
-                            (throw (ex-info (str "LLM " status ": " (:body res))
-                                            {:status status}))))]
+                                            {:toolnexus/error :transport :error (:error res)}))
+
+                            :else
+                            (throw (provider-error status (:body res) (retry-after-ms res)))))]
             (if (and (= :retry verdict) (< attempt budget))
               (do (ktime/sleep! (or (retry-after-ms res)
                                     ;; exponential backoff + jitter, identical to
@@ -821,7 +995,7 @@
   [client toolkit call request on-event turn]
   (emit! on-event {:type "pending" :request request})   ; BEFORE wait-for runs
   (if-let [wait-for (:wait-for client)]
-    (let [answer (wait-for request)]
+    (let [answer (as-answer (wait-for request))]
       (if-not (:ok answer)
         {:result {:output (str "declined/expired: " (:prompt request)) :isError true}}
         ;; §8: the RESOLVED result is a real result, so `:after-tool` sees it
@@ -911,7 +1085,10 @@
   would be a lie. Real SSE streaming is a separate seam (`koine.stream/sse-post`
   exists and is proven on both hosts) and is NOT implemented in this namespace."
   [client prompt {:keys [toolkit history on-event conversation-id]}]
-  (let [anthropic? (= "anthropic" (:style client))
+  ;; §8 `timeoutMs` is a WHOLE-RUN deadline, so it is stamped ONCE here and every
+  ;; attempt in every turn is measured against that one instant.
+  (let [client     (with-deadline client)
+        anthropic? (= "anthropic" (:style client))
         system     (system-message client toolkit)
         ;; §0.7 schema comes from toolnexus.adapter — one source of truth for
         ;; the provider shapes, never a second copy in the loop.

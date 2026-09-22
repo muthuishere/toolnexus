@@ -178,9 +178,31 @@ type TaskResult struct {
 	Status string
 	// Pending is the unresolved §10 Request (Status "pending"); its
 	// Data["path"] carries the suspended handle's id path segments.
-	Pending     *tn.Request
-	Turns       int
+	Pending *tn.Request
+	// Turns is CUMULATIVE — the handle's total LLM round trips since it was
+	// spawned, on EVERY status, never the last run's figure. It used to be
+	// per-run on done/pending/incomplete and cumulative on
+	// error/closed/timeout: the same two-meanings defect as TotalTokens, one
+	// field over (ADR 0025 D1, DECISIONS A13). There is deliberately no
+	// OwnTurns — tokens get an own-figure because they are billed; turns are
+	// not.
+	Turns int
+	// TotalTokens is the handle's CUMULATIVE SUBTREE spend — this agent plus
+	// every agent it delegated to, rolled up — on EVERY status. It is the number
+	// budgets are enforced against, so the host's number and the runtime's number
+	// are the same number (ADR 0025 D1).
 	TotalTokens int
+	// OwnTokens is this handle's own accumulated spend, EXCLUDING children. It is
+	// the per-agent figure; TotalTokens - OwnTokens is what the subtree cost.
+	OwnTokens int
+	// Limit names the limit that stopped the run, when one did — a CLOSED
+	// vocabulary naming the Budget field, spelled as SPEC spells it:
+	// "maxTurns" | "maxTokens" | "maxToolCalls" | "maxWallMs" | "maxChildren" |
+	// "maxConcurrent" | "maxDepth", plus "completion" and "timeout".
+	// Empty otherwise. Populated from RunResult.Limit and from budget refusals,
+	// so a host never has to string-match the message to learn WHY it stopped
+	// (ADR 0025 D2). The strings are identical in all seven ports.
+	Limit string
 }
 
 // PostResult is the loud, synchronous outcome of Post/Wake — backpressure is
@@ -223,7 +245,8 @@ type Handle struct {
 	eff       eff
 	spawnedAt time.Time
 
-	usageTokens int
+	usageTokens int // rolled-up subtree total (this handle + descendants)
+	ownTokens   int // this handle's own spend, excluding children
 	turnsTotal  int
 
 	pendingReq *tn.Request
@@ -640,14 +663,20 @@ func (rt *Runtime) Wait(h *Handle, timeout time.Duration) TaskResult {
 		case <-rt.clock.After(timeout):
 			rt.mu.Lock()
 			st := h.state
-			turns, tokens := h.turnsTotal, h.usageTokens
+			turns, tokens, own := h.turnsTotal, h.usageTokens, h.ownTokens
 			rt.mu.Unlock()
 			return TaskResult{
-				Text:        fmt.Sprintf("wait timeout after %s (child still %s)", timeout, st),
-				IsError:     true,
-				Status:      "timeout",
+				Text:    fmt.Sprintf("wait timeout after %s (child still %s)", timeout, st),
+				IsError: true,
+				Status:  TaskStatusTimeout,
+				// The status and the limit must never contradict each other: a
+				// host branching on Limit used to see "" while Status said the
+				// wait had timed out. Three of five ports had an instance of
+				// exactly this (DECISIONS A17).
+				Limit:       LimitTimeout,
 				Turns:       turns,
 				TotalTokens: tokens,
+				OwnTokens:   own,
 			}
 		}
 	}
@@ -750,7 +779,7 @@ func (rt *Runtime) Close(h *Handle, opts *CloseOptions) {
 	ws := h.waiters
 	h.waiters = nil
 	rt.t(fmt.Sprintf("%s: →closed (%s)", h.ID, reason))
-	r := TaskResult{Text: "closed", IsError: true, Status: "closed", Turns: h.turnsTotal, TotalTokens: h.usageTokens}
+	r := TaskResult{Text: "closed", IsError: true, Status: "closed", Turns: h.turnsTotal, TotalTokens: h.usageTokens, OwnTokens: h.ownTokens}
 	rt.mu.Unlock()
 	for _, w := range ws {
 		w <- r
@@ -801,12 +830,26 @@ func (rt *Runtime) viewLocked(h *Handle) HandleView {
 // REATTACHES to the existing child by task key — never spawning a duplicate.
 // Reattachment (not transcript inspection, not a completion cache) is the
 // idempotency mechanism (§7D durable resume).
-func (rt *Runtime) Resume(answer tn.Answer) error {
+//
+// It returns the settled result of the TOPMOST handle the cascade re-ran — i.e.
+// what the host would have got from Agent.Run had the suspension never happened
+// — so a host can write `res, err := rt.Resume(ans)` and be done (ADR 0025 D3).
+//
+// # The idempotency contract
+//
+// A durable resume REPLAYS THE SUSPENDED TURN FROM ITS PRE-TURN CHECKPOINT.
+// Every tool that ran in that turn runs AGAIN. Only `task` calls are covered by
+// reattachment; a leaf agent's own side-effecting tools are not. **Any tool
+// reachable in a turn that can suspend must be idempotent.** Replaying the
+// leaf's stored transcript instead is DEFERRED to its own change; it would not
+// remove this requirement anyway, because §10 resolves a suspension by
+// re-executing the suspended tool with ToolContext.Answer set.
+func (rt *Runtime) Resume(answer tn.Answer) (TaskResult, error) {
 	rt.mu.Lock()
 	leaf := findSuspendedLeaf(rt.Root)
 	if leaf == nil {
 		rt.mu.Unlock()
-		return errors.New("no suspended handle")
+		return TaskResult{Text: "no suspended handle", IsError: true, Status: "error"}, errors.New("no suspended handle")
 	}
 	// Durable resume transitions suspended→idle, then the re-admitted turn
 	// traces idle→running (SPEC §7D pin; inline escalation alone traces
@@ -816,7 +859,7 @@ func (rt *Runtime) Resume(answer tn.Answer) error {
 	leaf.state = StateIdle
 	input := leaf.lastInput
 	rt.mu.Unlock()
-	rt.runSync(leaf, input, func(tn.Request) (tn.Answer, error) { return answer, nil })
+	top := rt.runSync(leaf, input, func(tn.Request) (tn.Answer, error) { return answer, nil })
 	rt.mu.Lock()
 	p := leaf.parent
 	for p != nil && p != rt.Root && p.state == StateSuspended {
@@ -825,12 +868,12 @@ func (rt *Runtime) Resume(answer tn.Answer) error {
 		p.state = StateIdle
 		pin := p.lastInput
 		rt.mu.Unlock()
-		rt.runSync(p, pin, nil)
+		top = rt.runSync(p, pin, nil) // the topmost re-run wins — that is the host's answer
 		rt.mu.Lock()
 		p = p.parent
 	}
 	rt.mu.Unlock()
-	return nil
+	return top, nil
 }
 
 // findSuspendedLeaf returns the deepest suspended handle (children first).
@@ -972,7 +1015,7 @@ type admission struct {
 // "incomplete"); the caller settles the handle with it.
 func (rt *Runtime) admitLocked(h *Handle, prompt string) (admission, *TaskResult) {
 	if h.state == StateClosed {
-		r := TaskResult{Text: "closed", IsError: true, Status: "closed", Turns: h.turnsTotal, TotalTokens: h.usageTokens}
+		r := TaskResult{Text: "closed", IsError: true, Status: "closed", Turns: h.turnsTotal, TotalTokens: h.usageTokens, OwnTokens: h.ownTokens}
 		return admission{}, &r
 	}
 	if limit := rt.budgetRefusalLocked(h); limit != "" {
@@ -983,8 +1026,10 @@ func (rt *Runtime) admitLocked(h *Handle, prompt string) (admission, *TaskResult
 			Text:        fmt.Sprintf("budget exhausted (%s); partial work preserved", limit),
 			IsError:     true,
 			Status:      "incomplete",
+			Limit:       budgetLimitName(limit),
 			Turns:       h.turnsTotal,
 			TotalTokens: h.usageTokens,
+			OwnTokens:   h.ownTokens,
 		}
 		return admission{}, &r
 	}
@@ -1031,10 +1076,14 @@ func (rt *Runtime) RunTurn(h *Handle, prompt string) TaskResult {
 	rt.mu.Lock()
 	if st := h.state; st != StateIdle {
 		rt.mu.Unlock()
+		// Even a refusal carries the accumulated figures: a result beside an
+		// error is never the zero value (ADR 0027's principle, ADR 0025 D1).
 		if st == StateClosed {
-			return TaskResult{Text: "closed", IsError: true, Status: "closed"}
+			return TaskResult{Text: "closed", IsError: true, Status: "closed",
+				Turns: h.turnsTotal, TotalTokens: h.usageTokens, OwnTokens: h.ownTokens}
 		}
-		return TaskResult{Text: "handle is " + string(st), IsError: true, Status: "error"}
+		return TaskResult{Text: "handle is " + string(st), IsError: true, Status: "error",
+			Turns: h.turnsTotal, TotalTokens: h.usageTokens, OwnTokens: h.ownTokens}
 	}
 	rt.mu.Unlock()
 	return rt.runSync(h, prompt, nil)
@@ -1061,6 +1110,23 @@ func (rt *Runtime) budgetRefusalLocked(h *Handle) string {
 		}
 	}
 	return ""
+}
+
+// budgetLimitName maps the refusal's internal pool name onto the SHARED Limit
+// vocabulary (identical strings in all seven ports). The refusal's own wording
+// stays in TaskResult.Text unchanged — the structured field is the addition, not
+// a rename (ADR 0025 D2).
+func budgetLimitName(pool string) string {
+	switch pool {
+	case "tokens":
+		return LimitMaxTokens
+	case "toolCalls":
+		return LimitMaxToolCalls
+	case "wallMs":
+		return LimitMaxWallMs
+	default:
+		return pool
+	}
 }
 
 // perform runs one admitted turn: client loop (§8) with the escalator as
@@ -1201,7 +1267,7 @@ func (rt *Runtime) execute(runCtx context.Context, h *Handle, def Def, input str
 		}
 		// A failed Run crosses the handle boundary as a uniform error result —
 		// never an exception (§7D errors).
-		return TaskResult{Text: text, IsError: true, Status: status, Turns: h.turnsTotal, TotalTokens: h.usageTokens}
+		return TaskResult{Text: text, IsError: true, Status: status, Turns: h.turnsTotal, TotalTokens: h.usageTokens, OwnTokens: h.ownTokens}
 	}
 
 	rt.mu.Lock()
@@ -1225,7 +1291,7 @@ func (rt *Runtime) execute(runCtx context.Context, h *Handle, def Def, input str
 		req.Data = data
 		h.pendingReq = &req
 		rt.t(fmt.Sprintf("%s: running→suspended DURABLE (pending %q, path preserved)", h.ID, req.Kind))
-		return TaskResult{Text: r.Text, Status: "pending", Pending: &req, Turns: r.Turns, TotalTokens: r.Usage.TotalTokens}
+		return TaskResult{Text: r.Text, Status: "pending", Pending: &req, Turns: h.turnsTotal, TotalTokens: h.usageTokens, OwnTokens: h.ownTokens}
 	case "incomplete":
 		// The turn cap stopped the run mid-flight: loud, never a silent done.
 		if h.state != StateClosed {
@@ -1241,7 +1307,16 @@ func (rt *Runtime) execute(runCtx context.Context, h *Handle, def Def, input str
 		if r.Limit == "completion" {
 			msg = r.Text
 		}
-		return TaskResult{Text: msg, IsError: true, Status: "incomplete", Turns: r.Turns, TotalTokens: r.Usage.TotalTokens}
+		// Same invariant as the wait deadline above: an "incomplete" that cannot
+		// name its limit is a contradiction. §8 always sets RunResult.Limit on an
+		// incomplete run; if it ever did not, the message above has already
+		// committed to maxTurns, so the field says the same thing rather than
+		// leaving the host with a stop it cannot branch on.
+		limit := r.Limit
+		if limit == "" {
+			limit = LimitMaxTurns
+		}
+		return TaskResult{Text: msg, IsError: true, Status: TaskStatusIncomplete, Limit: limit, Turns: h.turnsTotal, TotalTokens: h.usageTokens, OwnTokens: h.ownTokens}
 	default:
 		if h.state != StateClosed {
 			h.state = StateIdle
@@ -1249,13 +1324,16 @@ func (rt *Runtime) execute(runCtx context.Context, h *Handle, def Def, input str
 		h.drained = nil // the completed turn consumed its drained items
 		_ = rt.store.Save(h.ID, r.Messages)
 		rt.t(fmt.Sprintf("%s: running→idle (done, turns=%d, tokens=%d)", h.ID, r.Turns, r.Usage.TotalTokens))
-		return TaskResult{Text: r.Text, Status: "done", Turns: r.Turns, TotalTokens: r.Usage.TotalTokens}
+		return TaskResult{Text: r.Text, Status: "done", Turns: h.turnsTotal, TotalTokens: h.usageTokens, OwnTokens: h.ownTokens}
 	}
 }
 
 // rollupLocked rolls usage up to EVERY ancestor — the roll-up is the budget
 // ledger (§7D budgets; rt.mu held).
 func (rt *Runtime) rollupLocked(h *Handle, tokens, toolCalls int) {
+	// OwnTokens is incremented OUTSIDE the ancestor walk — that is the whole
+	// difference between the two counters.
+	h.ownTokens += tokens
 	for p := h; p != nil; p = p.parent {
 		p.usageTokens += tokens
 		p.pool.tokens -= int64(tokens)
@@ -1346,6 +1424,7 @@ func (rt *Runtime) runTask(parent *Handle, agentName, prompt, key string) (TaskR
 				Pending:     existing.pendingReq,
 				Turns:       existing.turnsTotal,
 				TotalTokens: existing.usageTokens,
+				OwnTokens:   existing.ownTokens,
 			}
 			rt.mu.Unlock()
 		case existing.state != StateRunning && len(existing.wakeQueue) == 0 && existing.lastResult != nil:

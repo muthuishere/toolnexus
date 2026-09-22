@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --experimental-strip-types --test test/unit.test.ts test/agents.test.ts test/agent-hooks.test.ts test/agent-inprocess.test.ts test/home.test.ts test/compaction.test.ts test/loop.test.ts test/in-process.test.ts test/translate.test.ts test/multimodal.test.ts test/classifier.test.ts test/acp.test.ts",
+    "test": "npm run build && node --experimental-strip-types --test test/unit.test.ts test/agents.test.ts test/agent-hooks.test.ts test/agent-inprocess.test.ts test/home.test.ts test/compaction.test.ts test/loop.test.ts test/in-process.test.ts test/translate.test.ts test/multimodal.test.ts test/classifier.test.ts test/acp.test.ts test/issues.test.ts",
     "example": "node --experimental-strip-types examples/basic.ts",
     "example:judge": "node --experimental-strip-types examples/judge.ts",
     "example:multimodal": "node --experimental-strip-types examples/multimodal.ts"

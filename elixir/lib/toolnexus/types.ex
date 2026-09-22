@@ -71,7 +71,78 @@ defmodule Toolnexus.Answer do
   def from_map(m) do
     %__MODULE__{id: m["id"], ok: m["ok"], data: m["data"], reason: m["reason"]}
   end
+
+  @doc """
+  The answer to a §10 `kind: "input"` suspension: the resolution IS the payload.
+
+  Hand-building `%{id: id, ok: true, data: %{"output" => value}}` is the one place a
+  host had to know an unwritten required key (ADR 0026); this constructor removes it.
+  `output` must be a STRING — anything else raises rather than degrading to `""`.
+
+      iex> Toolnexus.Answer.answer_output("req-1", "42").data
+      %{"output" => "42"}
+  """
+  @spec answer_output(String.t(), String.t()) :: t()
+  def answer_output(id, output) when is_binary(output),
+    do: %__MODULE__{id: id, ok: true, data: %{"output" => output}}
+
+  def answer_output(_id, output),
+    do:
+      raise(
+        ArgumentError,
+        "Answer.answer_output/2: output must be a string, got: #{inspect(output)}"
+      )
+
+  @doc """
+  The answer to a §10 suspension the human REFUSED (addendum A9). `reason` is
+  carried verbatim; `"declined"` is the spelling an MCP elicitation maps back to a
+  `decline` action, anything else maps to `cancel`.
+
+      iex> Toolnexus.Answer.answer_declined("req-1", "declined").ok
+      false
+  """
+  @spec answer_declined(String.t(), String.t() | nil) :: t()
+  def answer_declined(id, reason \\ "declined")
+
+  def answer_declined(id, reason) when is_binary(reason) or is_nil(reason),
+    do: %__MODULE__{id: id, ok: false, reason: reason}
+
+  def answer_declined(_id, reason),
+    do:
+      raise(
+        ArgumentError,
+        "Answer.answer_declined/2: reason must be a string, got: #{inspect(reason)}"
+      )
+
+  @doc """
+  Read a §10 answer's fields from an `%Answer{}` OR a plain map with ATOM or STRING
+  keys. §10 fixes the key spelling across every port, so a host resuming out of a
+  JSON column must not crash on `%{"ok" => true}` (ADR 0026 / D4).
+  """
+  @spec get(t() | map(), :id | :ok | :data | :reason) :: term()
+  def get(%__MODULE__{} = a, key), do: Map.get(a, key)
+
+  def get(m, key) when is_map(m), do: Map.get(m, key, Map.get(m, Atom.to_string(key)))
+
+  def get(_, _), do: nil
+
+  @doc "True when this answer resolves the request affirmatively (atom or string keys)."
+  @spec ok?(t() | map() | term()) :: boolean()
+  def ok?(a), do: get(a, :ok) == true
+
+  @doc "Coerce an `%Answer{}` or a plain atom/string-keyed map into an `%Answer{}`."
+  @spec coerce(t() | map()) :: t()
+  def coerce(%__MODULE__{} = a), do: a
+
+  def coerce(m) when is_map(m),
+    do: %__MODULE__{
+      id: get(m, :id),
+      ok: get(m, :ok),
+      data: get(m, :data),
+      reason: get(m, :reason)
+    }
 end
+
 defmodule Toolnexus.Tool do
   @moduledoc """
   The uniform tool: a named, described, JSON-Schema'd callable (SPEC §1).
@@ -149,4 +220,3 @@ defmodule Toolnexus.Context do
           signal: (-> boolean()) | pid() | nil
         }
 end
-

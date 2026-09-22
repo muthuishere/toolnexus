@@ -1,0 +1,4 @@
+runners/java/out/
+runners/csharp/bin/
+runners/csharp/obj/
+__pycache__/

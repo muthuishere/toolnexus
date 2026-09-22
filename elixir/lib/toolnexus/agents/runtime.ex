@@ -257,20 +257,35 @@ defmodule Toolnexus.Agents.Runtime do
   Route an Answer to the DEEPEST suspended handle; it resumes from its checkpoint
   (turns/usage grow, never reset), then the upward cascade re-runs each suspended
   parent — whose re-invoked `task` REATTACHES to the existing child by task key.
+
+  Returns the TaskResult of the TOPMOST handle the cascade re-ran (ADR 0025 / D3,
+  addendum A4) — the outermost work the answer unblocked; the resumed leaf's own
+  result when nothing above it was suspended. A host no longer has to `wait` a second
+  time to learn what the answer produced. The `answer` may be an
+  `%Toolnexus.Answer{}` or a plain map with atom OR string keys (§10).
+
+  IDEMPOTENCY: a resumed turn REPLAYS the suspended turn's own input against the
+  pre-turn checkpoint, so that leaf's own tools RE-RUN. Tools reachable from a
+  `wait_for` suspension must be idempotent. Transcript replay on resume is tracked
+  as its own change and is NOT implemented here.
   """
   def resume(rt, answer) do
     ctx = ctx(rt)
     leaf = find_suspended_leaf(root(rt)) || raise "no suspended handle"
     snap = Handle.snapshot(leaf)
-    ok = Map.get(answer, :ok)
+    ok = Toolnexus.Answer.ok?(answer)
+
     Trace.add(ctx.trace, "#{snap.id}: resume with Answer(ok=#{ok}) at checkpoint (turns so far: #{snap.turns_total})")
     GenServer.call(leaf, :cancel_pending)
-    Handle.run_now(leaf, nil, fn _req -> answer end, :resume)
+    result = Handle.run_now(leaf, nil, fn _req -> answer end, :resume)
 
-    cascade(ctx, snap.parent)
-    :ok
+    # A4: the host gets the result of the TOPMOST handle the cascade re-ran — the
+    # outermost work the answer unblocked — falling back to the leaf when nothing
+    # above it was suspended.
+    cascade(ctx, snap.parent) || result
   end
 
+  # Returns the TOPMOST re-run handle's result, or nil when nothing cascaded.
   defp cascade(ctx, pid) do
     if pid != nil and pid != ctx.root do
       snap = Handle.snapshot(pid)
@@ -278,8 +293,8 @@ defmodule Toolnexus.Agents.Runtime do
       if snap.state == :suspended do
         Trace.add(ctx.trace, "#{snap.id}: cascade resume (child result cached)")
         GenServer.call(pid, :cancel_pending)
-        Handle.run_now(pid, nil, nil, :resume)
-        cascade(ctx, snap.parent)
+        result = Handle.run_now(pid, nil, nil, :resume)
+        cascade(ctx, snap.parent) || result
       end
     end
   end

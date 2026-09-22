@@ -152,15 +152,58 @@
   {:def agent-def :options options :toolkit toolkit
    :status "idle" :turns 0 :history []})
 
+(def loop-unsupported-fields
+  "The CANONICAL vocabulary (addendum A6) — identical strings in all seven ports,
+  exactly as the `limit` strings are, and deliberately NOT this language's own
+  spelling of the fields (`:wait-for`, `:on-metric`)."
+  ["tools" "team" "waitFor" "onMetric"])
+
+(defn loop-unsupported
+  "Which fields of `agent-def` a LOOP cannot honour, by name (ADR 0024 / D2).
+
+  A Loop is a driver over one client: it has no child agents to delegate to, no
+  suspension host to route a §10 Request to, and no metric sink of its own. Those
+  fields are not IGNORED QUIETLY any more — a host asks this and finds out, which
+  is additive and breaks nobody. Running an agent def whose `:team` matters
+  belongs on `toolnexus.agents.runtime`, which honours all four.
+
+  Returns only the fields actually PRESENT on the def, in the canonical order."
+  [agent-def]
+  (vec (keep (fn [[k nm]] (when (seq (vec (get agent-def k))) nm))
+             [[:tools "tools"] [:team "team"] [:wait-for "waitFor"] [:on-metric "onMetric"]])))
+
 (defn- client-options
-  "Apply a per-call model override via `:request-params` (`model` is not in the
-  forbidden set — the client forbids only messages/tools/stream)."
+  "Apply the def's own settings as DEFAULTS, and the per-call model override via
+  `:request-params` (`model` is not in the forbidden set — the client forbids only
+  messages/tools/stream).
+
+  PRECEDENCE IS CALLER-WINS, on every field (ADR 0024 / D2): a caller who set
+  `:system-prompt`, `:model` or `:max-turns` on the client options keeps it, and
+  the def's `:soul`, `:model` and `:budget.max-turns` fill in only what the caller
+  left open. The soul overriding an explicit system prompt was the drift js had."
   [lp model]
   (let [d    (:def lp)
         opts (:options lp)
         opts (if (and (:soul d) (not (:system-prompt opts)))
                (assoc opts :system-prompt (:soul d))
                opts)
+        ;; A8: the def's model applies when the CALLER's model is ABSENT **or**
+        ;; equal to the sentinel `"inherit"`. The sentinel is on the CALLER's
+        ;; side, not the def's — a port that honoured only absence would give a
+        ;; caller who passes `"inherit"` alongside a def model a DIFFERENT model
+        ;; from every other port, which is the whole reason A8 was written. One
+        ;; rule, both spellings.
+        ;;
+        ;; A def whose OWN model is the sentinel has nothing to inherit, so it
+        ;; is not propagated as if it were a real model name.
+        opts (let [dm (str (:model d))
+                   cm (str (:model opts))]
+               (if (and (seq dm) (not= "inherit" dm)
+                        (or (not (seq cm)) (= "inherit" cm)))
+                 (assoc opts :model dm)
+                 opts))
+        opts (let [mt (:max-turns (:budget d))]
+               (if (and mt (nil? (:max-turns opts))) (assoc opts :max-turns mt) opts))
         opts (assoc opts :hooks (guarded-hooks (:guardrails d) (or (:hooks d) (:hooks opts))))]
     (if (and model (seq (str model)))
       (assoc opts :request-params (assoc (or (:request-params opts) {}) "model" model))

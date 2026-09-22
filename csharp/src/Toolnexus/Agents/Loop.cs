@@ -58,6 +58,10 @@ public sealed record Outcome(
 /// </summary>
 public sealed class Loop
 {
+    /// <summary>The sentinel meaning "no opinion — take the default" (SPEC §7D). It is a VALUE a
+    /// caller can pass, not only an absence, so it is honoured on both sides (A8).</summary>
+    public const string InheritModel = "inherit";
+
     private readonly Agent _agent;
     private readonly LlmClient.Options _options;
     private readonly Toolkit _toolkit;
@@ -77,6 +81,10 @@ public sealed class Loop
 
     /// <summary>Model round trips this loop has spent.</summary>
     public int Turns => _turns;
+
+    /// <summary>The agent-spec fields this Loop cannot honour, named (ADR 0024). Empty ⇒ the whole
+    /// spec is honoured. See <see cref="LoopSupport.LoopUnsupported"/>.</summary>
+    public IReadOnlyList<string> Unsupported => LoopSupport.LoopUnsupported(_agent.Spec);
 
     public async Task<Outcome> RunAsync(string prompt, LoopRunOptions? opts = null)
     {
@@ -123,9 +131,22 @@ public sealed class Loop
     private LlmClient.Options ClientOptionsFor(LoopRunOptions? opts)
     {
         var o = CloneOptions(_options);
+        // Spec-vs-caller precedence (ADR 0024): the CALLER WINS. A `SystemPrompt` the caller put on
+        // the client options is an explicit override and is never displaced by the agent's soul.
         if (!string.IsNullOrEmpty(_agent.Spec.Soul) && string.IsNullOrEmpty(o.SystemPrompt))
             o.SystemPrompt = _agent.Spec.Soul;
         o.Hooks = LoopSupport.GuardedHooks(_agent.Spec.Guardrails, _agent.Spec.Hooks ?? o.Hooks);
+        // ADR 0024 item 3: `Spec.Model` and `Spec.Budget.MaxTurns` are DEFAULTS on the Loop path
+        // too — both are on the spec because they are meant to travel with the agent. Caller wins.
+        // (A8) ONE RULE, BOTH SPELLINGS: the spec's model applies when the caller's model is
+        // ABSENT *or* equal to the sentinel "inherit". Honouring only absence would mean a caller
+        // who passes "inherit" plus a spec model gets a different model in this port than in the
+        // six that treat the sentinel as "no opinion".
+        var callerHasModel = !string.IsNullOrEmpty(o.Model) && o.Model != InheritModel;
+        if (!string.IsNullOrEmpty(_agent.Spec.Model) && _agent.Spec.Model != InheritModel && !callerHasModel)
+            o.Model = _agent.Spec.Model!;
+        if (_agent.Spec.Budget?.MaxTurns is int specTurns && specTurns > 0 && o.MaxTurns is null)
+            o.MaxTurns = specTurns;
 
         if (string.IsNullOrEmpty(opts?.Model)) return o;
         var rp = o.RequestParams is null
@@ -251,6 +272,35 @@ public static class LoopSupport
             return prior?.Invoke(ev);
         };
         return merged;
+    }
+
+    /// <summary>
+    /// (ADR 0024 item 4) The spec fields a <see cref="Loop"/> genuinely CANNOT honour, named.
+    ///
+    /// <para>The returned strings are a FIXED CANONICAL VOCABULARY, identical in all seven ports
+    /// exactly as the limit strings are — <c>"tools"</c>, <c>"team"</c>, <c>"waitFor"</c>,
+    /// <c>"onMetric"</c> — never this language's own spelling of the field (so <c>Uses</c> reports
+    /// as <c>"tools"</c>).</para>
+    ///
+    /// <para><c>Uses</c>, <c>Team</c>, <c>WaitFor</c> and <c>OnMetric</c> describe a toolkit and a
+    /// runtime the Loop does not own — it is driven over a toolkit and client the CALLER built, so
+    /// a <c>Team</c> declared on a spec means a Loop-driven agent silently cannot delegate. This is
+    /// ADDITIVE and advisory by decision: no signature changed and nothing throws at construction,
+    /// because a construction-time error would break every existing caller. Hosts that care call
+    /// this and decide. An empty result means the Loop honours the whole spec.</para>
+    ///
+    /// <para>Honoured on the Loop path: <c>Soul</c>/<c>SoulFile</c>, <c>Guardrails</c>,
+    /// <c>Hooks</c>, <c>Completion</c>, <c>Model</c>, <c>Budget.MaxTurns</c>.</para>
+    /// </summary>
+    public static IReadOnlyList<string> LoopUnsupported(AgentSpec? spec)
+    {
+        var missed = new List<string>();
+        if (spec is null) return missed;
+        if (spec.Uses is { Count: > 0 }) missed.Add("tools");
+        if (spec.Team is { Count: > 0 }) missed.Add("team");
+        if (spec.WaitFor != null) missed.Add("waitFor");
+        if (spec.OnMetric != null) missed.Add("onMetric");
+        return missed;
     }
 
     /// <summary>

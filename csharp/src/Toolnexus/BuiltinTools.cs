@@ -472,22 +472,34 @@ public static partial class BuiltinTools
             var include = args.Get("include") is string inc && inc.Length > 0 ? inc : null;
             var limit = (int)(NumOrNull(args.Get("limit")) ?? 100);
 
-            var matches = new List<string>();
+            // (A26) COLLECT → SORT → TRUNCATE. This used to break at the cap MID-WALK and never
+            // sort at all, so the FILESYSTEM chose which matches the model saw. Never break at the
+            // cap during the walk: truncating an unordered collection is a CONTENT bug, not a
+            // cosmetic one.
+            var hits = new List<(string Rel, int Line, string Text)>();
             foreach (var file in WalkFiles(root))
             {
-                if (matches.Count >= limit) break;
                 var rel = RelPath(root, file);
                 if (include != null && !MatchGlob(rel, include)) continue;
                 string text;
                 try { text = File.ReadAllText(file); }
                 catch { continue; }
                 var lines = text.Split('\n');
+                // (A28) The emitted path is the RELATIVE, `/`-separated one — the SAME string the
+                // sort keys on. Emitting the native absolute path while sorting on the relative
+                // one would order by one thing and display another, and `\` on Windows would
+                // break byte-identity with the other six ports.
                 for (var i = 0; i < lines.Length; i++)
-                {
-                    if (matches.Count >= limit) break;
-                    if (re.IsMatch(lines[i])) matches.Add($"{file}:{i + 1}:{lines[i]}");
-                }
+                    if (re.IsMatch(lines[i])) hits.Add((rel, i + 1, $"{rel}:{i + 1}:{lines[i]}"));
             }
+            // Relative path in plain code point, then line number NUMERICALLY — sorting the whole
+            // rendered line as text would put line 10 before line 2.
+            hits.Sort((a, b) =>
+            {
+                var c = SkillSource.CompareCodePoints(a.Rel, b.Rel);
+                return c != 0 ? c : a.Line.CompareTo(b.Line);
+            });
+            var matches = hits.Take(limit).Select(h => h.Text).ToList();
             var meta = new Dictionary<string, object?> { ["count"] = (long)matches.Count };
             return Task.FromResult(ToolResult.Ok(string.Join("\n", matches), meta));
         });
@@ -508,14 +520,17 @@ public static partial class BuiltinTools
             var root = args.Get("path") is string rp && rp.Length > 0 ? rp : Directory.GetCurrentDirectory();
             var limit = (int)(NumOrNull(args.Get("limit")) ?? 100);
 
+            // (A26) COLLECT → SORT → TRUNCATE. The mid-walk break used to run UPSTREAM of the
+            // sort, so the filesystem picked the survivors and the sort merely ordered them.
             var found = new List<string>();
             foreach (var file in WalkFiles(root))
             {
-                if (found.Count >= limit) break;
                 var rel = RelPath(root, file);
                 if (MatchGlob(rel, pattern)) found.Add(rel);
             }
-            found.Sort(StringComparer.Ordinal);
+            // Code point, not StringComparer.Ordinal — the latter is UTF-16 CODE-UNIT order and
+            // disagrees above U+FFFF (A22).
+            found.Sort(SkillSource.CompareCodePoints);
             var capped = found.Take(limit).ToList();
             var meta = new Dictionary<string, object?> { ["count"] = (long)capped.Count };
             return Task.FromResult(ToolResult.Ok(string.Join("\n", capped), meta));

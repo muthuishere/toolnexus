@@ -273,6 +273,87 @@ public final class LlmClient {
         public TimeoutException(String message) { super(message); }
     }
 
+    // ---- what we hand back when the provider fails (ADR 0027) -------------
+
+    /** The token an account identifier is replaced with in any error text that leaves this library. */
+    public static final String REDACTED = "\u00ABredacted\u00BB";
+
+    /** Account identifiers a provider routinely echoes into its own 4xx body. */
+    private static final java.util.List<String> ACCOUNT_KEYS =
+            java.util.List.of("user_id", "account_id", "org_id", "organization");
+
+    /** The cap on a provider body carried out of this library. A CAP IS NOT REDACTION — the
+     * leaking OpenRouter body is 96 bytes, well inside it — so the two policies are separate. */
+    static final int ERROR_BODY_CAP = 200;
+
+    /**
+     * The ONE error-body policy, shared by the §8 client path and the §8B classifier path so
+     * there is not one rule in each. Three independent steps, in order:
+     * <ol>
+     *   <li>a {@code 401}/{@code 403} body is BLANKED — a gateway happily reflects the
+     *       Authorization header it rejected into its own error text;</li>
+     *   <li>account identifiers ({@code user_id}, {@code account_id}, {@code org_id},
+     *       {@code organization}) are replaced with {@link #REDACTED};</li>
+     *   <li>the remainder is capped at {@link #ERROR_BODY_CAP} characters.</li>
+     * </ol>
+     */
+    static String redactErrorBody(int status, String body) {
+        if (status == 401 || status == 403 || body == null) return "";
+        String out = body.strip();
+        if (out.isEmpty()) return "";
+        for (String key : ACCOUNT_KEYS) {
+            // JSON shape: "key" : "value" | 123 | null — the VALUE goes, the key stays, so a
+            // reader can still see WHICH identifier was withheld.
+            out = out.replaceAll("(?i)(\"" + key + "\"\\s*:\\s*)(\"[^\"]*\"|-?[0-9.]+|null)",
+                    "$1\"" + REDACTED + "\"");
+            // Bare `key=value` / `key: value` shapes (some gateways answer text/plain).
+            out = out.replaceAll("(?i)\\b(" + key + "\\s*[=:]\\s*)([^\\s,;}\"]+)", "$1" + REDACTED);
+        }
+        return out;
+    }
+
+    /**
+     * {@link #redactErrorBody} plus the {@link #ERROR_BODY_CAP} cap. The cap is a MESSAGE policy
+     * only: a host that opted into the typed error asked for the whole (redacted) body, so
+     * {@link ProviderException#body} is never truncated.
+     */
+    static String safeErrorBody(int status, String body) {
+        String out = redactErrorBody(status, body);
+        if (out.length() > ERROR_BODY_CAP) out = out.substring(0, ERROR_BODY_CAP) + "\u2026";
+        return out;
+    }
+
+    /**
+     * A non-2xx from the model provider, as DATA rather than a parsed message: the {@code status},
+     * the {@code body} (already through {@link #safeErrorBody}) and the raw {@code Retry-After}
+     * header when the provider sent one. A host that wants to branch on 402-vs-429 no longer has
+     * to regex {@code getMessage()}.
+     */
+    public static final class ProviderException extends RuntimeException {
+        /** The HTTP status the provider answered with. */
+        public final int status;
+        /** The provider's body, blanked on 401/403 and with account identifiers redacted.
+         * NOT capped — the cap is a message policy (A5); this is the whole thing. */
+        public final String body;
+        /** The raw {@code Retry-After} header value, or null. */
+        public final String retryAfter;
+
+        ProviderException(int status, String body, String message, String retryAfter) {
+            super(message);
+            this.status = status;
+            this.body = body == null ? "" : body;
+            this.retryAfter = retryAfter;
+        }
+    }
+
+    /** Build a {@link ProviderException} from a response, applying {@link #safeErrorBody}. */
+    private static ProviderException providerError(int status, String rawBody, String retryAfter) {
+        // A5: the typed field carries the FULL redacted body; only the message is capped.
+        String capped = safeErrorBody(status, rawBody);
+        return new ProviderException(status, redactErrorBody(status, rawBody),
+                "LLM " + status + (capped.isEmpty() ? "" : ": " + capped), retryAfter);
+    }
+
     /**
      * §7D cancellation seam (Java row of the per-port contract table): a <b>cooperative cancel
      * token</b> backed by virtual-thread interruption. Pass one to
@@ -501,6 +582,16 @@ public final class LlmClient {
     }
 
     public static final class RunResult {
+        // The CLIENT status vocabulary — THREE values (SPEC §8). It is NOT the agent-runtime
+        // vocabulary, which has seven and includes "timeout" (SPEC §7D). The two sets share a
+        // field name and nothing else; naming both is the fix for that collision (ADR 0027).
+        /** The run finished and the model answered. */
+        public static final String STATUS_DONE = "done";
+        /** A tool suspended (§10) and no {@code waitFor} was configured. */
+        public static final String STATUS_PENDING = "pending";
+        /** A limit stopped the run loudly; see {@link #limit}. */
+        public static final String STATUS_INCOMPLETE = "incomplete";
+
         public final String text;
         public final List<Object> messages;
         /** Every tool call made, with its output, error flag, and metadata. */
@@ -891,6 +982,27 @@ public final class LlmClient {
         return run(prompt, toolkit, (List<Object>) null);
     }
 
+    // ---- toolkit-less shapes (ADR 0023) -----------------------------------
+    // EXACTLY three, and no more. Java has no default arguments and no nullable types, and
+    // LlmClient already carries ~15 run/ask/stream signatures, so every extra overload is
+    // permanent surface. These three cover the shapes a toolkit-less caller actually asks for:
+    // one-shot, remembered, and streamed-as-text. Anything else passes `null` explicitly.
+
+    /** A completion with NO tools and NO skills — {@code run(prompt, (Toolkit) null)}. */
+    public RunResult run(String prompt) {
+        return run(prompt, (Toolkit) null, (List<Object>) null);
+    }
+
+    /** {@link #run(String)} with conversation memory under {@code id}. */
+    public RunResult ask(String prompt, String id) {
+        return ask(prompt, (Toolkit) null, id, (Consumer<String>) null);
+    }
+
+    /** {@link #run(String)} streamed: each assistant text delta is handed to {@code onText}. */
+    public RunResult ask(String prompt, Consumer<String> onText) {
+        return ask(prompt, (Toolkit) null, null, onText);
+    }
+
     /**
      * §1B multimodal entry: the prompt as a list of {@link ContentPart}, in the SAME first
      * position, so the caller's text/image ordering is preserved (ordering is semantic to a
@@ -1277,12 +1389,29 @@ public final class LlmClient {
         return null;
     }
 
+    /**
+     * §0.10 system message. ADR 0023: this is the ONE site that made a toolkit-less completion
+     * impossible — the skills prompt was dereferenced before anything touched tools, so
+     * {@code run(prompt, null)} compiled and then threw NPE. A null toolkit contributes no skills
+     * section and no tools; it is NOT an empty toolkit (there is deliberately no
+     * {@code Toolkit.empty()} — {@code builtins(false)} already spells "no tools").
+     */
     private String system(Toolkit toolkit) {
         List<String> parts = new ArrayList<>();
         if (opts.systemPrompt != null && !opts.systemPrompt.isEmpty()) parts.add(opts.systemPrompt);
-        String sp = toolkit.skillsPrompt();
+        String sp = toolkit == null ? null : toolkit.skillsPrompt();
         if (sp != null && !sp.isEmpty()) parts.add(sp);
         return String.join("\n\n", parts);
+    }
+
+    /** The declared tool list for a run; a null toolkit declares none (ADR 0023). */
+    private static List<Map<String, Object>> declaredOpenAI(Toolkit toolkit) {
+        return toolkit == null ? new ArrayList<>() : toolkit.toOpenAI();
+    }
+
+    /** The declared tool list for a run; a null toolkit declares none (ADR 0023). */
+    private static List<Map<String, Object>> declaredAnthropic(Toolkit toolkit) {
+        return toolkit == null ? new ArrayList<>() : toolkit.toAnthropic();
     }
 
     private int maxTurns() {
@@ -1341,7 +1470,7 @@ public final class LlmClient {
             if (!system.isEmpty()) messages.add(msg("system", system));
         }
         messages.add(msg("user", seed(prompt)));
-        List<Map<String, Object>> tools = toolkit.toOpenAI();
+        List<Map<String, Object>> tools = declaredOpenAI(toolkit);
         List<ToolCall> toolCalls = new ArrayList<>();
         Usage usage = new Usage();
         int turns = 0;
@@ -1470,7 +1599,7 @@ public final class LlmClient {
         // so continuing history just means appending to the prior transcript.
         if (history != null && !history.isEmpty()) messages.addAll(history);
         messages.add(msg("user", seed(prompt)));
-        List<Map<String, Object>> tools = toolkit.toAnthropic();
+        List<Map<String, Object>> tools = declaredAnthropic(toolkit);
         List<ToolCall> toolCalls = new ArrayList<>();
         Usage usage = new Usage();
         int turns = 0;
@@ -1607,7 +1736,7 @@ public final class LlmClient {
             if (!system.isEmpty()) messages.add(msg("system", system));
         }
         messages.add(msg("user", seed(prompt)));
-        List<Map<String, Object>> tools = toolkit.toOpenAI();
+        List<Map<String, Object>> tools = declaredOpenAI(toolkit);
         List<ToolCall> toolCalls = new ArrayList<>();
         Usage usage = new Usage();
         int turns = 0;
@@ -1656,7 +1785,8 @@ public final class LlmClient {
                             llmSend(url, headers, body, deadline, HttpResponse.BodyHandlers.ofLines());
                     if (res.statusCode() < 200 || res.statusCode() >= 300) {
                         String b = res.body() == null ? "" : res.body().collect(Collectors.joining("\n"));
-                        throw new RuntimeException("LLM " + res.statusCode() + ": " + b);
+                        throw providerError(res.statusCode(), b,
+                                res.headers().firstValue("retry-after").orElse(null));
                     }
                     try (Stream<String> lines = res.body()) {
                         for (String line : (Iterable<String>) lines::iterator) {
@@ -1807,7 +1937,7 @@ public final class LlmClient {
         List<Object> messages = new ArrayList<>();
         if (history != null && !history.isEmpty()) messages.addAll(history);
         messages.add(msg("user", seed(prompt)));
-        List<Map<String, Object>> tools = toolkit.toAnthropic();
+        List<Map<String, Object>> tools = declaredAnthropic(toolkit);
         List<ToolCall> toolCalls = new ArrayList<>();
         Usage usage = new Usage();
         int turns = 0;
@@ -1849,7 +1979,8 @@ public final class LlmClient {
                             llmSend(endpoint, headers, body, deadline, HttpResponse.BodyHandlers.ofLines());
                     if (res.statusCode() < 200 || res.statusCode() >= 300) {
                         String b = res.body() == null ? "" : res.body().collect(Collectors.joining("\n"));
-                        throw new RuntimeException("LLM " + res.statusCode() + ": " + b);
+                        throw providerError(res.statusCode(), b,
+                                res.headers().firstValue("retry-after").orElse(null));
                     }
                     try (Stream<String> lines = res.body()) {
                         for (String line : (Iterable<String>) lines::iterator) {
@@ -2192,9 +2323,18 @@ public final class LlmClient {
         void check() {
             if (cancelled()) throw new CancelledException("run cancelled");
             if (endNanos != null && System.nanoTime() >= endNanos) {
-                throw new TimeoutException("run timeout after " + timeoutMs + "ms");
+                throw new TimeoutException(timeoutMessage(timeoutMs));
             }
         }
+    }
+
+    /**
+     * The one timeout wording. It NAMES THE BUDGET that expired: a caller reading
+     * {@code "run timeout after 1ms"} could not tell a run deadline from a cancellation or a
+     * socket timeout, which is the half of #92 that is a message defect rather than a shape one.
+     */
+    static String timeoutMessage(long timeoutMs) {
+        return "run timeout after " + timeoutMs + "ms (budget: Options.timeoutMs=" + timeoutMs + ")";
     }
 
     private Deadline newDeadline() { return newDeadline(null); }
@@ -2213,7 +2353,7 @@ public final class LlmClient {
         // Per-request timeout = remaining run budget (capped > 0); JS sets request timeout from the signal.
         if (deadline.bounded()) {
             long remain = deadline.remainingMs();
-            if (remain <= 0) throw new TimeoutException("run timeout after " + deadline.timeoutMs + "ms");
+            if (remain <= 0) throw new TimeoutException(timeoutMessage(deadline.timeoutMs));
             rb.timeout(Duration.ofMillis(remain));
         }
         return rb.build();
@@ -2244,7 +2384,7 @@ public final class LlmClient {
                 long wait = retryAfterMs(res).orElse((long) (base * Math.pow(2, attempt) + Math.random() * 100));
                 sleep(wait, deadline);
             } catch (HttpTimeoutException e) {
-                throw new TimeoutException("run timeout after " + deadline.timeoutMs + "ms"); // not retried
+                throw new TimeoutException(timeoutMessage(deadline.timeoutMs)); // not retried
             } catch (IOException e) {
                 lastErr = new RuntimeException("LLM request failed: " + e.getMessage(), e);
                 // §8 Resilience: a network throw is retryable=true by default; the host may FAIL it.
@@ -2331,7 +2471,8 @@ public final class LlmClient {
                                          Map<String, Object> body, Deadline deadline) {
         HttpResponse<String> res = llmSend(url, headers, body, deadline, HttpResponse.BodyHandlers.ofString());
         if (res.statusCode() < 200 || res.statusCode() >= 300) {
-            throw new RuntimeException("LLM " + res.statusCode() + ": " + res.body());
+            throw providerError(res.statusCode(), res.body(),
+                    res.headers().firstValue("retry-after").orElse(null));
         }
         return Json.toMap(res.body());
     }

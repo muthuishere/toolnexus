@@ -137,7 +137,17 @@ def _match_glob(rel: str, glob: str) -> bool:
 
 
 def _walk_files(root: str) -> list[str]:
-    """Recursively list files under ``root`` (skips node_modules/.git)."""
+    """Recursively list files under ``root`` (skips node_modules/.git).
+
+    DETERMINISTIC ORDER (A24), in the shape A25 ruled for the skill sample list:
+    collect every file, then sort by path RELATIVE TO ``root`` in plain Unicode
+    code-point order. Both callers — ``grep`` and ``glob`` — stop at their ``limit``,
+    so this decides WHICH results the model is shown, not merely their arrangement.
+    Reading raw ``os.scandir`` order made that selection arbitrary per machine, and on
+    some filesystems unstable between runs. A global sort over relative paths depends
+    only on the file set, so nothing about this traversal has to be reproduced
+    elsewhere to agree with it.
+    """
     out: list[str] = []
     stack = [root]
     while stack:
@@ -153,6 +163,9 @@ def _walk_files(root: str) -> list[str]:
                 stack.append(entry.path)
             elif entry.is_file(follow_symlinks=False):
                 out.append(entry.path)
+    # A28: order by the SAME string the callers emit — the path relative to `root`
+    # with `/` as the separator on every platform.
+    out.sort(key=lambda p: os.path.relpath(p, root).replace(os.sep, "/"))
     return out
 
 
@@ -372,10 +385,16 @@ def _grep_tool() -> Tool:
         lim = _num(args.get("limit"))
         limit = int(lim) if lim is not None else 100
         matches: list[str] = []
+        # A28: the emitted path and the ORDERING key are the SAME string — the path
+        # relative to `root` with `/` as the separator on every platform — so the tool
+        # can never order by one thing and display another. Files come out of
+        # `_walk_files` in that order already; within a file, `enumerate` yields lines
+        # in LINE-NUMBER ASCENDING order, so the whole `file:line:text` sequence is
+        # pinned, not just which files appear.
         for file in _walk_files(root):
             if len(matches) >= limit:
                 break
-            rel = os.path.relpath(file, root)
+            rel = os.path.relpath(file, root).replace(os.sep, "/")
             if include and not _match_glob(rel, include):
                 continue
             try:
@@ -388,7 +407,7 @@ def _grep_tool() -> Tool:
                 if len(matches) >= limit:
                     break
                 if regex.search(line):
-                    matches.append(f"{file}:{i + 1}:{line}")
+                    matches.append(f"{rel}:{i + 1}:{line}")
         return _ok("\n".join(matches), {"count": len(matches)})
 
     return _builtin(
@@ -421,7 +440,8 @@ def _glob_tool() -> Tool:
         for file in _walk_files(root):
             if len(found) >= limit:
                 break
-            rel = os.path.relpath(file, root)
+            # A28: `/` on every platform, and this same string is what gets sorted.
+            rel = os.path.relpath(file, root).replace(os.sep, "/")
             if _match_glob(rel, pattern):
                 found.append(rel)
         found.sort()

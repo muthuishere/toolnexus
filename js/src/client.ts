@@ -56,7 +56,18 @@ export interface ClientOptions {
   /** §10 Suspension resolver. When a tool returns Pending (metadata.pending), the client calls
    * this, then retries the tool with Context.answer = the resolution. Its interior is unconstrained
    * (open a browser, message a channel, watch a file, forward to another agent). Omit for a durable
-   * host: run() does not hang — it returns { status:"pending", pending:request } to resume later. */
+   * host: run() does not hang — it returns { status:"pending", pending:request } to resume later.
+   *
+   * IDEMPOTENCY CONTRACT (SPEC §7D rewind-to-checkpoint). A durable resume REPLAYS the suspended
+   * turn from its PRE-TURN checkpoint: "continues from its checkpoint" means the transcript is
+   * REWOUND, not carried. EVERY tool that ran in that turn RUNS AGAIN, and the suspended tool
+   * itself is always re-executed (with `ctx.answer`) — that is §10's resolution mechanism, not a
+   * bug. Reattachment by task key makes a re-run `task` call idempotent; a leaf agent's own
+   * side-effecting tools (`git push`, a charge, a delete) have NO equivalent and are the host's
+   * responsibility. Any tool reachable in a suspendable turn must be idempotent.
+   * Replaying the leaf's stored transcript instead is DEFERRED to its own change; it would not
+   * remove this requirement anyway.
+   */
   waitFor?: (request: Request) => Promise<Answer>
   /** §8 Gap 1. Extra top-level keys shallow-merged into EVERY LLM body after the client builds
    * its own — a requestParams key WINS on collision (e.g. max_tokens overrides the anthropic
@@ -82,6 +93,77 @@ export interface ClientOptions {
    * cannot represent (attached or tool-derived), `"text"` degrades every one of them to a
    * text placeholder. Unset ⇒ attached parts error, derived parts degrade. */
   onUnsupportedPart?: UnsupportedPartMode
+}
+
+/**
+ * The §8 CLIENT status vocabulary, as a value. It is a DIFFERENT, smaller closed set than the
+ * §7D AGENT vocabulary (`agents.TASK_STATUSES`), which also contains `"timeout"`, `"closed"`,
+ * `"interrupted"` and `"error"`. Two fields are called `status`; they are not interchangeable.
+ * A run that fails at a deadline THROWS here — it never comes back as a `RunResult`.
+ */
+export const RUN_STATUSES = ["done", "pending", "incomplete"] as const
+export type RunStatus = (typeof RUN_STATUSES)[number]
+
+/** Account-identifier keys blanked out of a provider error body before it reaches a message,
+ *  a log or a metric. The shape survives; the value does not (ADR 0027 D3.2). */
+export const REDACTED_BODY_KEYS = ["user_id", "account_id", "org_id", "organization"] as const
+/** What a redacted value is replaced with — identical in all seven ports. */
+export const REDACTION_PLACEHOLDER = "\u00abredacted\u00bb"
+/** A redacted body is capped at this many characters IN THE MESSAGE ONLY. The typed `body`
+ *  field carries the full redacted body — a host that opted into a typed error asked for the
+ *  whole thing (ADR 0027 D3 / addendum A5). */
+export const ERROR_BODY_CAP = 200
+
+/**
+ * Redact known account identifiers, then cap. A CAP IS NOT REDACTION: the body that leaked
+ * `user_2…` in issue #92 was 96 bytes, well inside the cap, so both steps are needed and
+ * redaction runs FIRST (capping first could split a key/value pair and hide it from the regex).
+ */
+export function redactErrorBody(body: string): string {
+  let out = body
+  for (const key of REDACTED_BODY_KEYS) {
+    // JSON ("key": "value" / "key": 123) and form/query (key=value) spellings alike.
+    out = out.replace(new RegExp(`("${key}"\\s*:\\s*)("(?:[^"\\\\]|\\\\.)*"|-?\\d+(?:\\.\\d+)?|true|false|null)`, "g"), `$1"${REDACTION_PLACEHOLDER}"`)
+    out = out.replace(new RegExp(`\\b${key}=([^&\\s]+)`, "g"), `${key}=${REDACTION_PLACEHOLDER}`)
+  }
+  return out.trim()
+}
+
+/** Cap a already-redacted body for interpolation into a MESSAGE. Redaction is not a cap and a
+ *  cap is not redaction: they are independent and both are needed. */
+export function capErrorBody(body: string): string {
+  return body.length > ERROR_BODY_CAP ? body.slice(0, ERROR_BODY_CAP) + "\u2026" : body
+}
+
+/**
+ * A provider failure carried as a VALUE, not a sentence (ADR 0027 D3.1). A host that must
+ * decide what to log can read `status` / `retryAfter` instead of parsing a message.
+ *
+ * `body` is ALREADY redacted and capped, and is `""` on 401/403 — an auth body routinely
+ * reflects the credential or the header that was sent. `rawBody` is never populated by the
+ * library; the SPEC credentials guarantee now covers error messages too.
+ */
+export class LlmHttpError extends Error {
+  readonly name = "LlmHttpError"
+  constructor(
+    /** The HTTP status the provider answered with. */
+    readonly status: number,
+    /** The provider's FULL redacted body; `""` on 401/403 and when empty. Uncapped — the cap
+     *  applies to `message` only. */
+    readonly body: string,
+    /** The `Retry-After` header verbatim, when the provider sent one. */
+    readonly retryAfter?: string,
+  ) {
+    super(`LLM ${status}${body ? ": " + capErrorBody(body) : ""}`)
+  }
+}
+
+/** Build the typed error from a non-2xx provider response (reads the body once). */
+export async function llmHttpError(res: Response): Promise<LlmHttpError> {
+  const raw = await res.text().catch(() => "")
+  // 401/403: never echo the body — see `Classifier.cause`, now one policy, not two.
+  const body = res.status === 401 || res.status === 403 ? "" : redactErrorBody(raw)
+  return new LlmHttpError(res.status, body, res.headers.get("retry-after") ?? undefined)
 }
 
 /** §8 Resilience. What to do with a failed LLM call. */
@@ -443,11 +525,17 @@ export class Client {
     this.emit({ event: "run", model: this.opts.model, turns, toolCalls: toolCalls.length, totalTokens: usage.totalTokens, ms: Date.now() - runStart, error: e instanceof Error ? e.message : String(e) })
   }
 
-  async run(prompt: PromptInput, ctx: { toolkit: Toolkit; signal?: AbortSignal; history?: any[] }): Promise<RunResult> {
+  /**
+   * Run the loop. `ctx` — and `ctx.toolkit` inside it — are OPTIONAL: an absent toolkit is a
+   * COMPLETION (SPEC §0.10). The system message is then the system prompt alone, and the
+   * request body carries no `tools` and no `tool_choice` key (not an empty array). An empty
+   * toolkit and no toolkit are observably identical on the wire.
+   */
+  async run(prompt: PromptInput, ctx?: { toolkit?: Toolkit; signal?: AbortSignal; history?: any[] }): Promise<RunResult> {
     checkPromptParts(prompt, this.wireOpts())
     return this.opts.style === "anthropic"
-      ? this.runAnthropic(prompt, ctx.toolkit, ctx.signal, ctx.history)
-      : this.runOpenAI(prompt, ctx.toolkit, ctx.signal, ctx.history)
+      ? this.runAnthropic(prompt, ctx?.toolkit, ctx?.signal, ctx?.history)
+      : this.runOpenAI(prompt, ctx?.toolkit, ctx?.signal, ctx?.history)
   }
 
   /**
@@ -609,10 +697,10 @@ export class Client {
    * the answer — so the next `ask` with the same `id` continues it. Without an
    * `id` it is a stateless one-shot (identical to `run`).
    */
-  async ask(prompt: PromptInput, ctx: { toolkit: Toolkit; id?: string; on_text?: (delta: string) => void; signal?: AbortSignal }): Promise<RunResult> {
+  async ask(prompt: PromptInput, ctx?: { toolkit?: Toolkit; id?: string; on_text?: (delta: string) => void; signal?: AbortSignal }): Promise<RunResult> {
     // Block-style streaming: run the streaming loop, forward text deltas, still return the
     // final RunResult. Memory (id load/save) is handled by stream() itself, so no duplication.
-    if (ctx.on_text) {
+    if (ctx?.on_text) {
       let result: RunResult | undefined
       for await (const ev of this.stream(prompt, { toolkit: ctx.toolkit, id: ctx.id, signal: ctx.signal })) {
         if (ev.type === "text") ctx.on_text(ev.delta)
@@ -620,7 +708,7 @@ export class Client {
       }
       return result!
     }
-    if (!ctx.id) return this.run(prompt, { toolkit: ctx.toolkit, signal: ctx.signal })
+    if (!ctx?.id) return this.run(prompt, { toolkit: ctx?.toolkit, signal: ctx?.signal })
     const history = (await this.store.get(ctx.id)) ?? []
     const result = await this.run(prompt, { toolkit: ctx.toolkit, signal: ctx.signal, history })
     await this.store.save(ctx.id, result.messages)
@@ -628,8 +716,8 @@ export class Client {
   }
 
   /** A stateful multi-turn conversation that retains history across sends. */
-  conversation(ctx: { toolkit: Toolkit; signal?: AbortSignal }): Conversation {
-    return new Conversation(this, ctx.toolkit, ctx.signal)
+  conversation(ctx?: { toolkit?: Toolkit; signal?: AbortSignal }): Conversation {
+    return new Conversation(this, ctx?.toolkit, ctx?.signal)
   }
 
   /**
@@ -637,20 +725,22 @@ export class Client {
    * With an `id`, it is stateful (like `ask`): the thread's transcript is loaded as history before
    * streaming, and saved back to the ConversationStore on the terminal `done` event. No `id` ⇒ stateless.
    */
-  async *stream(prompt: PromptInput, ctx: { toolkit: Toolkit; id?: string; signal?: AbortSignal }): AsyncGenerator<StreamEvent, void, unknown> {
+  async *stream(prompt: PromptInput, ctx?: { toolkit?: Toolkit; id?: string; signal?: AbortSignal }): AsyncGenerator<StreamEvent, void, unknown> {
     checkPromptParts(prompt, this.wireOpts())
-    const history = ctx.id ? (await this.store.get(ctx.id)) ?? [] : undefined
+    const history = ctx?.id ? (await this.store.get(ctx.id)) ?? [] : undefined
     const gen = this.opts.style === "anthropic"
-      ? this.streamAnthropic(prompt, ctx.toolkit, ctx.signal, history)
-      : this.streamOpenAI(prompt, ctx.toolkit, ctx.signal, history)
+      ? this.streamAnthropic(prompt, ctx?.toolkit, ctx?.signal, history)
+      : this.streamOpenAI(prompt, ctx?.toolkit, ctx?.signal, history)
     for await (const ev of gen) {
-      if (ev.type === "done" && ctx.id) await this.store.save(ctx.id, ev.result.messages)
+      if (ev.type === "done" && ctx?.id) await this.store.save(ctx.id, ev.result.messages)
       yield ev
     }
   }
 
-  private system(toolkit: Toolkit): string {
-    return [this.opts.systemPrompt ?? "", toolkit.skillsPrompt()].filter(Boolean).join("\n\n")
+  /** §0.10 system message. The toolkit is OPTIONAL — with none there is no skills prompt and
+   *  the system message is the system prompt alone. This deref was issue #86 (ADR 0023). */
+  private system(toolkit?: Toolkit): string {
+    return [this.opts.systemPrompt ?? "", toolkit?.skillsPrompt() ?? ""].filter(Boolean).join("\n\n")
   }
 
   /** Build a run-scoped abort signal from the optional run-level timeout + an external signal. */
@@ -699,9 +789,9 @@ export class Client {
   }
 
   /** Run one tool through beforeTool/afterTool hooks (mutate args, short-circuit, transform result). */
-  private async runTool(toolkit: Toolkit, name: string, args: Record<string, unknown>, id: string | undefined, turn: number) {
+  private async runTool(toolkit: Toolkit | undefined, name: string, args: Record<string, unknown>, id: string | undefined, turn: number) {
     const h = this.opts.hooks
-    const source = toolkit.get(name)?.source ?? "custom"
+    const source = toolkit?.get(name)?.source ?? "custom"
     const t0 = Date.now()
     let a = args
     if (h?.beforeTool) {
@@ -714,7 +804,10 @@ export class Client {
       }
       if (ov?.args) a = ov.args
     }
-    let result = await toolkit.execute(name, a)
+    // No toolkit ⇒ nothing was declared, so a tool call is the provider inventing one.
+    let result: ToolResult = toolkit
+      ? await toolkit.execute(name, a)
+      : { output: `unknown tool: ${name}`, isError: true }
     // A suspension (§10) is not a real result: skip afterTool's failure path on it — the resolved
     // result (post-waitFor) still flows through afterTool in resolvePending — and never count it as
     // a tool error.
@@ -737,7 +830,7 @@ export class Client {
     const t0 = Date.now()
     try {
       const res = await this.llmFetch(url, init, signal)
-      if (!res.ok) throw new Error(`LLM ${res.status}: ${await res.text()}`)
+      if (!res.ok) throw await llmHttpError(res)
       const data: any = await res.json()
       const tok = perCall(data.usage, style)
       this.emit({ event: "llm", model: this.opts.model, status: "ok", ms: Date.now() - t0, promptTokens: tok.prompt, completionTokens: tok.completion })
@@ -749,7 +842,7 @@ export class Client {
   }
 
   // ---- OpenAI-style: POST {baseUrl}/chat/completions ----
-  private async runOpenAI(prompt: PromptInput, toolkit: Toolkit, external?: AbortSignal, history?: any[]): Promise<RunResult> {
+  private async runOpenAI(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[]): Promise<RunResult> {
     const key = resolveKey(this.opts)
     const signal = this.makeSignal(external)
     const runStart = Date.now()
@@ -759,7 +852,7 @@ export class Client {
       if (system) messages.push({ role: "system", content: system })
     }
     messages.push({ role: "user", content: prompt })
-    let tools = toolkit.toOpenAI()
+    let tools = toolkit?.toOpenAI() ?? []
     const toolCalls: ToolCallRecord[] = []
     const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
     let turns = 0
@@ -832,24 +925,26 @@ export class Client {
    * no `waitFor` is configured (the run should stop and surface the request).
    */
   private async resolvePending(
-    toolkit: Toolkit, name: string, args: Record<string, unknown>, request: Request, id: string | undefined, turn: number,
+    toolkit: Toolkit | undefined, name: string, args: Record<string, unknown>, request: Request, id: string | undefined, turn: number,
   ): Promise<{ result: ToolResult; halted?: Request }> {
     if (!this.opts.waitFor) return { result: { output: request.prompt, isError: true }, halted: request }
     const answer = await this.opts.waitFor(request)
     if (!answer?.ok) return { result: { output: `declined/expired: ${request.prompt}`, isError: true } }
     const t0 = Date.now()
-    let result = await toolkit.execute(name, args, { answer })
+    let result: ToolResult = toolkit
+      ? await toolkit.execute(name, args, { answer })
+      : { output: `unknown tool: ${name}`, isError: true }
     if (this.opts.hooks?.afterTool) {
       const ov = await this.opts.hooks.afterTool({ name, args, result, id, turn })
       if (ov?.result) result = ov.result
     }
-    this.emitTool(name, toolkit.get(name)?.source ?? "custom", result, t0)
+    this.emitTool(name, toolkit?.get(name)?.source ?? "custom", result, t0)
     if (pendingOf(result)) result = { output: `unresolved: ${request.prompt}`, isError: true } // never loop forever
     return { result }
   }
 
   // ---- Anthropic-style: POST {baseUrl}/messages ----
-  private async runAnthropic(prompt: PromptInput, toolkit: Toolkit, external?: AbortSignal, history?: any[]): Promise<RunResult> {
+  private async runAnthropic(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[]): Promise<RunResult> {
     const key = resolveKey(this.opts)
     const signal = this.makeSignal(external)
     const base = this.opts.baseUrl.replace(/\/$/, "")
@@ -857,7 +952,7 @@ export class Client {
     const system = this.system(toolkit)
     const runStart = Date.now()
     let messages: any[] = history && history.length ? [...history, { role: "user", content: prompt }] : [{ role: "user", content: prompt }]
-    let tools = toolkit.toAnthropic()
+    let tools = toolkit?.toAnthropic() ?? []
     const toolCalls: ToolCallRecord[] = []
     const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
     let turns = 0
@@ -923,7 +1018,7 @@ export class Client {
   }
 
   // ---- Streaming: OpenAI-style ----
-  private async *streamOpenAI(prompt: PromptInput, toolkit: Toolkit, external?: AbortSignal, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
+  private async *streamOpenAI(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
     const key = resolveKey(this.opts)
     const signal = this.makeSignal(external)
     const runStart = Date.now()
@@ -933,7 +1028,7 @@ export class Client {
       if (system) messages.push({ role: "system", content: system })
     }
     messages.push({ role: "user", content: prompt })
-    let tools = toolkit.toOpenAI()
+    let tools = toolkit?.toOpenAI() ?? []
     const toolCalls: ToolCallRecord[] = []
     const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
     let turns = 0
@@ -956,7 +1051,7 @@ export class Client {
             headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
             body: JSON.stringify(this.openaiBody(messages, tools, true)),
           }, signal)
-          if (!res.ok || !res.body) throw new Error(`LLM ${res.status}: ${await res.text()}`)
+          if (!res.ok || !res.body) throw await llmHttpError(res)
           for await (const line of sseLines(res.body)) {
             if (!line.startsWith("data:")) continue
             const payload = line.slice(5).trim()
@@ -1019,7 +1114,7 @@ export class Client {
   }
 
   // ---- Streaming: Anthropic-style ----
-  private async *streamAnthropic(prompt: PromptInput, toolkit: Toolkit, external?: AbortSignal, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
+  private async *streamAnthropic(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
     const key = resolveKey(this.opts)
     const signal = this.makeSignal(external)
     const runStart = Date.now()
@@ -1027,7 +1122,7 @@ export class Client {
     const endpoint = base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`
     const system = this.system(toolkit)
     let messages: any[] = history && history.length ? [...history, { role: "user", content: prompt }] : [{ role: "user", content: prompt }]
-    let tools = toolkit.toAnthropic()
+    let tools = toolkit?.toAnthropic() ?? []
     const toolCalls: ToolCallRecord[] = []
     const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
     let turns = 0
@@ -1050,7 +1145,7 @@ export class Client {
             headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json", ...this.opts.headers },
             body: JSON.stringify(this.anthropicBody(system, messages, tools, true)),
           }, signal)
-          if (!res.ok || !res.body) throw new Error(`LLM ${res.status}: ${await res.text()}`)
+          if (!res.ok || !res.body) throw await llmHttpError(res)
           for await (const line of sseLines(res.body)) {
             if (!line.startsWith("data:")) continue
             const j = safeParse(line.slice(5).trim())
@@ -1267,7 +1362,7 @@ export function createInProcessClient(opts: InProcessOptions): Client {
 export class Conversation {
   /** Full running transcript (system + user + assistant + tool messages). */
   messages: any[] = []
-  constructor(private readonly client: Client, private readonly toolkit: Toolkit, private readonly signal?: AbortSignal) {}
+  constructor(private readonly client: Client, private readonly toolkit?: Toolkit, private readonly signal?: AbortSignal) {}
 
   /** Send the next user turn; prior history is retained automatically. */
   async send(prompt: PromptInput): Promise<RunResult> {

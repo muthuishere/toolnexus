@@ -197,7 +197,10 @@ defmodule Toolnexus.Agents.HomeTest do
     # (ticks dedupe to one counted entry) — not one turn per tick
     Runtime.wake(rt, h)
     r2 = Runtime.wait(rt, h)
-    assert r2.turns == 1, "three coalesced ticks = one turn, got #{r2.turns}"
+    # A13a: `turns` is the handle's OWN CUMULATIVE round trips, reported identically
+    # on every status — so the coalesce claim is the DELTA over the first turn, not
+    # the absolute. Three ticks added ONE turn, not one turn per tick.
+    assert r2.turns - r1.turns == 1, "three coalesced ticks = one turn, got #{r2.turns - r1.turns}"
     assert r2.text == "processed 1 items", "three ticks coalesced to one item: #{r2.text}"
 
     Runtime.shutdown(rt)

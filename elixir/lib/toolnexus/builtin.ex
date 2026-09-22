@@ -158,18 +158,31 @@ defmodule Toolnexus.Builtin do
     if String.contains?(glob, "/"), do: Regex.match?(re, rel), else: Regex.match?(re, Path.basename(rel))
   end
 
-  # Recursively list files under root (skips node_modules/.git).
-  defp walk_files(root) do
-    case File.ls(root) do
+  # Recursively list files under root (skips node_modules/.git), returned in ONE
+  # global order: the path RELATIVE to the walk root, plain Unicode code point.
+  #
+  # A26 (same rule as A25 in the skill sample): a per-directory sort during traversal
+  # is a function of the WALK — every port must reproduce the same stack discipline to
+  # agree, and a nested tree interleaves differently from a global relative-path sort.
+  # Both callers below are CAPPED, so this ordering decides WHICH files the model sees,
+  # not merely their sequence: collect, sort, THEN truncate — never break at the cap
+  # mid-walk (ADR-0004 K1, sort-before-sample).
+  # A28: the sort key is the path relative to the walk root with `/` separators — the
+  # same string `glob` EMITS. `grep` prints absolute paths, which order identically
+  # because they are that same relative path under one constant root prefix.
+  defp walk_files(root), do: walk_files(root, root) |> Enum.sort_by(&Path.relative_to(&1, root))
+
+  defp walk_files(root, dir) do
+    case File.ls(dir) do
       {:error, _} ->
         []
 
       {:ok, entries} ->
-        Enum.flat_map(Enum.sort(entries), fn name ->
-          full = Path.join(root, name)
+        Enum.flat_map(entries, fn name ->
+          full = Path.join(dir, name)
 
           cond do
-            File.dir?(full) -> if name in @ignore_dirs, do: [], else: walk_files(full)
+            File.dir?(full) -> if name in @ignore_dirs, do: [], else: walk_files(root, full)
             File.regular?(full) -> [full]
             true -> []
           end
@@ -433,11 +446,17 @@ defmodule Toolnexus.Builtin do
               limit = args["limit"] |> num(100) |> trunc()
 
               matches =
+                # A26: the fold halts at the cap, which is only correct because
+                # `walk_files/1` hands back ONE globally sorted list — the halt then
+                # truncates a sorted sequence instead of letting the walk decide.
                 walk_files(root)
                 |> Enum.reduce_while([], fn file, acc ->
                   if length(acc) >= limit do
                     {:halt, acc}
                   else
+                    # A28/A27c: grep EMITS the same relative `/`-path it sorts on.
+                    # Sorting on one string and displaying another orders by one
+                    # thing and shows the reader another.
                     rel = Path.relative_to(file, root)
 
                     if include && not match_glob?(rel, include) do
@@ -453,7 +472,14 @@ defmodule Toolnexus.Builtin do
                             |> String.split("\n")
                             |> Enum.with_index(1)
                             |> Enum.filter(fn {line, _i} -> Regex.match?(re, line) end)
-                            |> Enum.map(fn {line, i} -> "#{file}:#{i}:#{line}" end)
+                            # A27c: line numbers stay in NUMERIC order. They are
+                            # never re-sorted as part of the rendered
+                            # `path:line:text` string, which would put line 10
+                            # before line 2. `with_index` already ascends and the
+                            # filter preserves it, so numeric order holds by
+                            # construction — the files above it are ordered by
+                            # relative path, giving (path, line) overall.
+                            |> Enum.map(fn {line, i} -> "#{rel}:#{i}:#{line}" end)
                             |> Enum.take(max(limit - length(acc), 0))
 
                           {:cont, acc ++ hits}
@@ -496,8 +522,10 @@ defmodule Toolnexus.Builtin do
             walk_files(root)
             |> Enum.map(&Path.relative_to(&1, root))
             |> Enum.filter(&match_glob?(&1, pattern))
+            # A26: `walk_files/1` is ALREADY globally sorted, so this cap takes a
+            # PREFIX of the sorted set. Capping first and sorting the survivors let
+            # the filesystem choose which matches the model saw.
             |> Enum.take(limit)
-            |> Enum.sort()
 
           ok(Enum.join(found, "\n"), %{count: length(found)})
         end

@@ -1272,3 +1272,188 @@
                         (- (ktime/now-ms) t0)))))]
     (is (> (count (set samples)) 1) "identical waits every time means no jitter term")
     (is (every? #(>= % 200) samples) "jitter is additive — it never shortens the backoff")))
+
+;; ===========================================================================
+;; #86 / ADR 0023 — a completion with NO toolkit at all
+;; ===========================================================================
+
+(deftest toolkit-less-completion
+  ;; The port already works (nil-punning), which is exactly why it needs a test:
+  ;; the six ports it is at parity with were all broken here, and nothing pinned
+  ;; the behaviour that keeps this one right.
+  (with-llm "openai" [{:text "no tools needed"}]
+    (fn [{:keys [base requests]}]
+      (let [c (client-for "openai" base {})]
+        (is (= "no tools needed" (:text (client/run c "hello" {}))))
+        (testing "`ask` too — the toolkit-less path is not run-only"
+          (is (= "done" (:status (client/ask c "hello" {})))))
+        (testing "the request body carries NO tools and NO tool_choice key —
+                  ABSENT, not an empty array: a provider that sees `tools: []`
+                  may answer differently from one that sees neither key"
+          (doseq [b @requests]
+            (is (not (contains? b :tools)))
+            (is (not (contains? b :tool_choice)))))))))
+
+(deftest toolkit-less-completion-anthropic
+  (with-llm "anthropic" [{:text "fine"}]
+    (fn [{:keys [base requests]}]
+      (let [c (client-for "anthropic" base {})]
+        (is (= "fine" (:text (client/run c "hello" {}))))
+        (doseq [b @requests] (is (not (contains? b :tools))))))))
+
+;; ===========================================================================
+;; #89 / ADR 0026 — the Answer payload contract
+;; ===========================================================================
+
+(deftest a-string-keyed-answer-is-not-a-decline
+  ;; §10 pins Answer's keys because they cross the wire; a host resuming from a
+  ;; JSON column therefore hands us string keys. This used to read `nil` for
+  ;; `ok` and DECLINE a granted answer — silently, with the opposite outcome.
+  (with-llm "openai"
+    [{:calls [{:id "c1" :name "login" :args {}}]}
+     {:text "in"}]
+    (fn [{:keys [base]}]
+      (let [c (client-for "openai" base
+                          {:wait-for (fn [req] {"id" (:id req) "ok" true})})
+            r (client/run c "log me in" {:toolkit toolkit})]
+        (is (= "done" (:status r)))
+        (is (= ["session valid"] (outputs-of r)))))))
+
+(deftest a-string-keyed-decline-still-declines
+  (with-llm "openai"
+    [{:calls [{:id "c1" :name "login" :args {}}]}
+     {:text "ok"}]
+    (fn [{:keys [base]}]
+      (let [c (client-for "openai" base
+                          {:wait-for (fn [req] {"id" (:id req) "ok" false "reason" "no"})})
+            r (client/run c "log me in" {:toolkit toolkit})]
+        (is (= ["declined/expired: Log in to continue"] (outputs-of r)))))))
+
+(deftest answer-constructors
+  (let [a (client/answer-output "sus-1" "the output")]
+    (is (= "sus-1" (:id a)))
+    (is (true? (:ok a)))
+    (is (= {:output "the output"} (:data a)))
+    (is (= {:output "boom" :isError true} (:data (client/answer-output "sus-1" "boom" true)))))
+  (testing "a non-string output ERRORS — degrading it to \"\" is how a wrong
+            answer reaches the model quietly"
+    (is (thrown? Throwable (client/answer-output "sus-1" {:city "Chennai"}))))
+  (let [d (client/answer-declined "sus-2" "not today")]
+    (is (false? (:ok d)))
+    (is (= "not today" (:reason d)))
+    (testing "R1 — reason is carried only on a decline"
+      (is (nil? (:reason (client/answer-output "sus-3" "x")))))))
+
+(deftest as-answer-normalises-only-the-top-level
+  (let [a (client/as-answer {"id" "x" "ok" true "data" {"city" "Chennai"}})]
+    (is (= "x" (:id a)))
+    (is (true? (:ok a)))
+    (testing ":data is the host's own payload and is handed to the tool untouched"
+      (is (= {"city" "Chennai"} (:data a)))))
+  (is (nil? (client/as-answer nil))))
+
+;; ===========================================================================
+;; #91 / #92 / ADR 0027 — what the library hands back when it fails
+;; ===========================================================================
+
+(defn- stub-http
+  "An `:http-client` that answers every call from `responses`, in order, and
+  records the attempts. No socket, no server, no sleep worth waiting on."
+  [responses]
+  (let [n (atom 0)]
+    [(fn [_url _headers _body] (let [i (swap! n inc)] (nth responses (dec i) (last responses))))
+     n]))
+
+(deftest a-timeout-is-not-retried
+  ;; `:timeout-ms` is the WHOLE-RUN deadline (§8 `timeoutMs`). It used to bound
+  ;; ONE http call, and a timed-out call was then RETRIED — so a 30s budget
+  ;; could spend retries × 30s. An abort is never retried and never reaches
+  ;; `:on-error`.
+  (let [[f n] (stub-http [{:status nil :error :timeout}])
+        seen  (atom 0)
+        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+                                     :timeout-ms 50 :retries 3
+                                     :on-error (fn [_] (swap! seen inc) :retry)
+                                     :http-client f})
+        e     (try (client/run c "hi" {}) nil (catch Throwable e e))]
+    (is (some? e))
+    (is (= :timeout (:toolnexus/error (ex-data e))))
+    (is (= "timeout" (:limit (ex-data e))))
+    (is (str/includes? (ex-message e) "timeoutMs budget 50ms") "the message NAMES the budget")
+    (is (= 1 @n) "exactly one attempt")
+    (is (= 0 @seen) "an abort bypasses :on-error")))
+
+(deftest the-run-deadline-is-whole-run-not-per-call
+  ;; Two turns, each slow enough that the SECOND starts past the deadline. A
+  ;; per-call timeout would let the run go on forever one call at a time.
+  (let [c (client/create-client
+           {:base-url "http://127.0.0.1:1" :model "m" :timeout-ms 40 :retries 0
+            :http-client (fn [_u _h _b]
+                           (ktime/sleep! 60)
+                           {:status 200
+                            :body (json/write-str
+                                   {:choices [{:message {:role "assistant" :content "hi"}}]})})})
+        e (try (client/run c "hi" {}) nil (catch Throwable e e))]
+    ;; the first call answers 200 AFTER the budget, so the run ends at the next
+    ;; deadline check rather than issuing another request
+    (is (or (nil? e) (= :timeout (:toolnexus/error (ex-data e)))))))
+
+(deftest provider-errors-are-typed-and-redacted
+  (let [body (str "{\"error\":\"no credit\",\"user_id\":\"u-42\",\"account_id\":17,"
+                  "\"organization\":\"acme\",\"org_id\":\"o-9\"}")
+        [f _] (stub-http [{:status 402 :body body :headers {"retry-after" "3"}}])
+        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+                                     :retries 0 :http-client f})
+        e     (try (client/run c "hi" {}) nil (catch Throwable e e))
+        d     (ex-data e)]
+    (is (= :provider (:toolnexus/error d)))
+    (is (= 402 (:status d)))
+    (is (= 3000 (:retry-after d)) "Retry-After lands on the typed error")
+    (testing "every account identifier is REDACTED, in the typed body AND the message"
+      (doseq [leak ["u-42" "17" "acme" "o-9"]]
+        (is (not (str/includes? (:body d) leak)) (str "typed body leaks " leak))
+        (is (not (str/includes? (ex-message e) leak)) (str "message leaks " leak))))
+    (testing "the failure itself is still legible — a cap is not redaction"
+      (is (str/includes? (:body d) "no credit"))
+      (is (str/includes? (ex-message e) "no credit")))))
+
+(deftest the-cap-is-message-only
+  (let [body  (str "{\"error\":\"" (apply str (repeat 400 "x")) "\"}")
+        [f _] (stub-http [{:status 500 :body body}])
+        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+                                     :retries 0 :http-client f})
+        e     (try (client/run c "hi" {}) nil (catch Throwable e e))]
+    (is (< (count (ex-message e)) 260) "the message is capped")
+    (is (str/includes? (ex-message e) "…"))
+    (testing "a host that opted into a typed error asked for the WHOLE thing"
+      (is (= (count body) (count (:body (ex-data e))))))))
+
+(deftest an-auth-body-is-blanked-entirely
+  (let [[f _] (stub-http [{:status 401 :body "{\"authorization\":\"Bearer sk-live-SECRET\"}"}])
+        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+                                     :retries 0 :http-client f})
+        e     (try (client/run c "hi" {}) nil (catch Throwable e e))]
+    (is (= "" (:body (ex-data e))))
+    (is (not (str/includes? (ex-message e) "SECRET")))
+    (is (not (str/includes? (ex-message e) "Bearer")))))
+
+(deftest fail-fast-on-a-non-retryable-4xx
+  ;; MUST NOT REGRESS: the retryable set is an ENUMERATION.
+  (let [[f n] (stub-http [{:status 400 :body "{\"error\":\"bad request\"}"}])
+        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+                                     :retries 3 :retry-base-ms 1 :http-client f})]
+    (is (thrown? Throwable (client/run c "hi" {})))
+    (is (= 1 @n) "400 is terminal on the first attempt"))
+  (doseq [status [429 500 502 503 504 529]]
+    (let [[f n] (stub-http [{:status status :body "{}"}])
+          c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+                                       :retries 2 :retry-base-ms 1 :http-client f})]
+      (is (thrown? Throwable (client/run c "hi" {})))
+      (is (= 3 @n) (str status " is retryable")))))
+
+(deftest the-two-status-vocabularies-are-both-named
+  ;; #92.1 — two different closed sets on two fields both spelled `status`.
+  (is (= #{"done" "pending" "incomplete"} client/statuses))
+  (is (= #{"maxTurns" "contentPart" "timeout"} client/limits))
+  (is (not (contains? client/statuses "timeout"))
+      "a §8 run never returns \"timeout\"; the agents' 7-value set does"))

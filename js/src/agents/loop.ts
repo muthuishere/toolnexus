@@ -177,6 +177,33 @@ export async function runGated(
   }
 }
 
+/**
+ * The spec fields a Loop drive CANNOT honour, named rather than dropped silently.
+ *
+ * A `Loop` is one client run: it has no runtime, so it has no handle tree to spawn a `team`
+ * into, no §10 suspension ledger for `waitFor`, and no per-agent metric sink routing. Those
+ * fields are honoured by `Agent.run` / `AgentRuntime` only. `uses.tools` is not honoured either
+ * — a Loop is handed its toolkit by the caller.
+ *
+ * Returns a FIXED CANONICAL vocabulary — `"tools"`, `"team"`, `"waitFor"`, `"onMetric"` —
+ * identical in all seven ports, exactly as the `limit` strings are, and NOT this language's own
+ * spelling of the field. Empty ⇒ nothing is lost.
+ * Additive and advisory: a Loop never refuses to run because of it (that would be breaking).
+ */
+export function loopUnsupported(spec: {
+  uses?: { tools?: unknown[] }
+  team?: unknown[]
+  waitFor?: unknown
+  onMetric?: unknown
+}): string[] {
+  const out: string[] = []
+  if (spec.uses?.tools && spec.uses.tools.length > 0) out.push("tools")
+  if (spec.team && spec.team.length > 0) out.push("team")
+  if (spec.waitFor) out.push("waitFor")
+  if (spec.onMetric) out.push("onMetric")
+  return out
+}
+
 /** A live execution of an Agent. Its only verbs are `run` and reading state. */
 export class Loop {
   #status: Outcome["status"] | "idle" | "running" = "idle"
@@ -234,10 +261,21 @@ export class Loop {
   /** Applies a per-call model override via `requestParams` (`model` is not in the
    *  forbidden set — the client forbids only messages/tools/stream). */
   #clientOptions(opts: LoopRunOptions): ClientOptions {
+    const spec = this.agent.spec
     const base: ClientOptions = {
       ...this.options,
-      systemPrompt: this.agent.spec.soul ?? this.options.systemPrompt,
-      hooks: guardedHooks(this.agent.spec.guardrails, this.agent.spec.hooks ?? this.options.hooks),
+      // CALLER-WINS (ADR 0024 / issue #87). A `systemPrompt` the caller put on the client
+      // options is an explicit instruction for THIS drive; the soul is the agent's default.
+      // js used to let the soul override it, which python and csharp never did.
+      systemPrompt: this.options.systemPrompt ?? spec.soul,
+      // The spec's model and turn ceiling become Loop DEFAULTS — the same spec drives both
+      // doors. `ClientOptions.model` is REQUIRED in js, so "the caller did not choose" is
+      // spelled the way the runtime already spells it: absent, or the `"inherit"` sentinel.
+      model: !this.options.model || this.options.model === "inherit"
+        ? (spec.model && spec.model !== "inherit" ? spec.model : this.options.model)
+        : this.options.model,
+      maxTurns: this.options.maxTurns ?? spec.budget?.maxTurns,
+      hooks: guardedHooks(spec.guardrails, spec.hooks ?? this.options.hooks),
     }
     if (!opts.model) return base
     return { ...base, requestParams: { ...(base.requestParams ?? {}), model: opts.model } }

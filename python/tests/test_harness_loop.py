@@ -160,8 +160,10 @@ async def test_guardrails_first_deny_wins():
 
     hooks = guarded_hooks([first, second], None)
     denied = await hooks["before_tool"]({"name": "danger", "args": {}, "turn": 1})
-    assert denied["result"]["is_error"] is True
-    assert "policy: no" in denied["result"]["output"]
+    # A ToolResult, not a dict — the §8 short-circuit path reads `result.metadata`,
+    # so a dict here meant the DENIED tool still ran (D2, #87).
+    assert denied["result"].is_error is True
+    assert "policy: no" in denied["result"].output
     assert seen == [], "a later guardrail never runs after a denial"
 
     allowed = await hooks["before_tool"]({"name": "safe", "args": {}, "turn": 1})

@@ -114,12 +114,43 @@ public final class Loop {
     private final Completion completion;
     private final List<Guardrail> guardrails;
     private final LlmClient.Hooks hooks;
+    /** The agent's model default; {@code null} when the loop was built from loose fields. */
+    private final String specModel;
+    /** The agent's {@code Budget.maxTurns} default; {@code null} when unset. */
+    private final Integer specMaxTurns;
     private int turns;
     private String status = "idle";
 
     /**
+     * The SPEC-AWARE constructor (ADR 0024). The loop used to receive four loose fields, so the
+     * rest of the agent spec — its model, its turn budget — was silently dropped the moment a
+     * host drove the agent through {@code loop()} instead of {@code run()}. Passing the spec
+     * itself is what makes "one agent, two entry points" true rather than aspirational.
+     *
+     * <p>What it applies: {@code soul} (never over a caller-supplied {@code systemPrompt} — the
+     * caller wins), {@code guardrails} compiled into {@code beforeTool}, {@code hooks},
+     * {@code completion}, {@code model} as the client's default, and {@code budget.maxTurns} as
+     * the loop's default. What it CANNOT apply is named by {@link #loopUnsupported}.
+     */
+    public Loop(LlmClient.Options options, Toolkit toolkit,
+                io.github.muthuishere.toolnexus.agents.Agents.AgentSpec spec) {
+        this.options = options;
+        this.toolkit = toolkit;
+        this.soul = spec == null ? null : spec.soul;
+        this.guardrails = spec == null ? null : spec.guardrails;
+        this.hooks = spec == null ? null : spec.hooks;
+        this.completion = spec == null ? null : spec.completion;
+        String m = spec == null ? null : spec.model;
+        this.specModel = (m == null || m.isEmpty() || "inherit".equals(m)) ? null : m;
+        this.specMaxTurns = (spec == null || spec.budget == null) ? null : spec.budget.maxTurns;
+    }
+
+    /**
      * Takes client OPTIONS rather than a built client, because a per-call {@code model} override
      * must be able to change the model — which is fixed when a client is constructed.
+     *
+     * <p>The loose-field form, kept for hosts that build a loop without an {@code AgentSpec}.
+     * It carries no model or turn-budget default; prefer the spec-aware constructor above.
      */
     public Loop(LlmClient.Options options, Toolkit toolkit, String soul,
                 List<Guardrail> guardrails, LlmClient.Hooks hooks, Completion completion) {
@@ -129,6 +160,27 @@ public final class Loop {
         this.guardrails = guardrails;
         this.hooks = hooks;
         this.completion = completion;
+        this.specModel = null;
+        this.specMaxTurns = null;
+    }
+
+    /**
+     * The spec fields a DRIVER genuinely cannot honour, by name — additive, never a construction
+     * error (that would break every host that already passes one of them) and never a signature
+     * change. {@code tools} needs a toolkit the loop is handed rather than builds; {@code team},
+     * {@code waitFor} and {@code onMetric} need the §7D runtime's handle tree, escalation chain
+     * and per-agent sinks. Drive the agent with {@code run()} / {@code asTool()} to get them.
+     *
+     * @return the set field names, in declaration order; empty when the loop honours the whole spec
+     */
+    public static List<String> loopUnsupported(io.github.muthuishere.toolnexus.agents.Agents.AgentSpec spec) {
+        List<String> out = new ArrayList<>();
+        if (spec == null) return out;
+        if (spec.tools != null && !spec.tools.isEmpty()) out.add("tools");
+        if (spec.team != null && !spec.team.isEmpty()) out.add("team");
+        if (spec.waitFor != null) out.add("waitFor");
+        if (spec.onMetric != null) out.add("onMetric");
+        return out;
     }
 
     /** Observed, never set by the caller. */
@@ -203,6 +255,17 @@ public final class Loop {
             o.systemPrompt = soul;
         }
         o.hooks = guardedHooks(guardrails, hooks != null ? hooks : o.hooks);
+        // Spec defaults: the agent's model and turn budget, applied ONLY where the caller left a
+        // hole. A per-call RunOptions.model still wins below, and an explicit client option wins
+        // here — the spec is a default, never an override.
+        // A8: the caller's model is "absent" when it is null/empty OR the sentinel "inherit" —
+        // both spell "use the agent's". Honouring only one spelling makes a caller who passes a
+        // real model plus a spec model behave differently per port.
+        if (specModel != null
+                && (o.model == null || o.model.isEmpty() || "inherit".equals(o.model))) {
+            o.model = specModel;
+        }
+        if (specMaxTurns != null && o.maxTurns == null) o.maxTurns = specMaxTurns;
         if (opts != null && opts.model != null && !opts.model.isEmpty()) {
             Map<String, Object> rp = new java.util.LinkedHashMap<>();
             if (o.requestParams != null) rp.putAll(o.requestParams);

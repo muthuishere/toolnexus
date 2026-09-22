@@ -183,7 +183,7 @@ func TestLevel1DurableRunResume(t *testing.T) {
 	if r.Status != "pending" || r.Pending == nil {
 		t.Fatalf("no interpreter anywhere should park durably, got %q", r.Status)
 	}
-	if err := rt.Resume(tn.Answer{ID: r.Pending.ID, Ok: true}); err != nil {
+	if _, err := rt.Resume(tn.Answer{ID: r.Pending.ID, Ok: true}); err != nil {
 		t.Fatal(err)
 	}
 	if !traceHas(rt, "task replay → REATTACH") {

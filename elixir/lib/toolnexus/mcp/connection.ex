@@ -361,7 +361,7 @@ defmodule Toolnexus.Mcp.Connection do
             try do
               request = Protocol.elicitation_to_request(params)
               answer = wait_for.(request)
-              {:result, Protocol.answer_to_elicit_result(answer)}
+              {:result, Protocol.answer_to_elicit_result(Toolnexus.Answer.coerce(answer))}
             rescue
               e -> {:error, Exception.message(e)}
             catch

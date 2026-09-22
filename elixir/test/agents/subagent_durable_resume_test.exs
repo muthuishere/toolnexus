@@ -34,7 +34,14 @@ defmodule Toolnexus.Agents.DurableResumeTest do
            "suspended leaf turn did not advance the stored transcript"
 
     before = Enum.find(Runtime.list(rt), &String.contains?(&1.id, "asker")).tokens
-    Runtime.resume(rt, %{id: r1.pending.id, ok: true})
+    # D3 / A4: resume RETURNS the TaskResult of the topmost handle the cascade
+    # re-ran — the host no longer has to `wait` a second time. And the Answer may
+    # arrive STRING-keyed, straight out of a JSON column (D4).
+    resumed = Runtime.resume(rt, %{"id" => r1.pending.id, "ok" => true})
+    assert is_map(resumed)
+    assert resumed.status in ["done", "incomplete", "pending"]
+    assert Map.has_key?(resumed, :total_tokens) and Map.has_key?(resumed, :own_tokens)
+
     tr = Runtime.trace(rt)
     joined = Enum.join(tr, "\n")
 

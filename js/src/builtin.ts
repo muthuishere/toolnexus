@@ -10,6 +10,7 @@
 import { spawn } from "node:child_process"
 import fs from "node:fs/promises"
 import { existsSync, readdirSync } from "node:fs"
+import { compareCodePoints, sortEntriesByName, toPosixPath } from "./order.js"
 import path from "node:path"
 import type { JSONSchema, Tool, ToolContext, ToolResult } from "./types.js"
 import { pending } from "./types.js"
@@ -115,7 +116,9 @@ function walkFiles(root: string): string[] {
     const dir = stack.pop()!
     let entries
     try {
-      entries = readdirSync(dir, { withFileTypes: true })
+      // EXPLICIT (A24). `glob` breaks at its cap, so an unsorted read changes WHICH files the
+      // model is shown, not merely their order — the same content bug as <skill_files> had.
+      entries = sortEntriesByName(readdirSync(dir, { withFileTypes: true }))
     } catch {
       continue
     }
@@ -332,10 +335,13 @@ function grepTool(): Tool {
       const root = args.path ? String(args.path) : process.cwd()
       const include = args.include ? String(args.include) : undefined
       const limit = typeof args.limit === "number" ? args.limit : 100
-      const matches: string[] = []
+      // Was the worse of the two builtins: capped MID-WALK and never sorted at all, so both the
+      // CONTENT and the order of the results were whatever the walk happened to reach first.
+      // Now: collect every match, order by relative path (code point) then line number ascending,
+      // and truncate last. The emitted path and the sort key are the same string (A28).
+      const hits: Array<{ rel: string; line: number; text: string }> = []
       for (const file of walkFiles(root)) {
-        if (matches.length >= limit) break
-        const rel = path.relative(root, file)
+        const rel = toPosixPath(path.relative(root, file), path.sep)
         if (include && !matchGlob(rel, include)) continue
         let text: string
         try {
@@ -345,10 +351,11 @@ function grepTool(): Tool {
         }
         const lines = text.split("\n")
         for (let i = 0; i < lines.length; i++) {
-          if (matches.length >= limit) break
-          if (re.test(lines[i])) matches.push(`${file}:${i + 1}:${lines[i]}`)
+          if (re.test(lines[i])) hits.push({ rel, line: i + 1, text: lines[i] })
         }
       }
+      hits.sort((a, b) => compareCodePoints(a.rel, b.rel) || a.line - b.line)
+      const matches = hits.slice(0, limit).map((h) => `${h.rel}:${h.line}:${h.text}`)
       return ok(matches.join("\n"), { count: matches.length })
     },
   )
@@ -373,13 +380,15 @@ function globTool(): Tool {
       if (!pattern) return err("glob: pattern is required")
       const root = args.path ? String(args.path) : process.cwd()
       const limit = typeof args.limit === "number" ? args.limit : 100
+      // Collect ALL matches, order them, THEN cap (A24/A25): breaking the walk at the cap let
+      // the filesystem decide WHICH files the model sees, not merely their order. The emitted
+      // string and the sort key are the SAME `/`-separated relative path (A28).
       const found: string[] = []
       for (const file of walkFiles(root)) {
-        if (found.length >= limit) break
-        const rel = path.relative(root, file)
+        const rel = toPosixPath(path.relative(root, file), path.sep)
         if (matchGlob(rel, pattern)) found.push(rel)
       }
-      found.sort()
+      found.sort(compareCodePoints)
       return ok(found.slice(0, limit).join("\n"), { count: Math.min(found.length, limit) })
     },
   )
