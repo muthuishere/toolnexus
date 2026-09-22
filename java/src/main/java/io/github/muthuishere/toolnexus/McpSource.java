@@ -136,9 +136,40 @@ public final class McpSource implements AutoCloseable {
         }
     }
 
-    /** Accept a path, a raw JSON string, or a parsed config map. */
+    /**
+     * Parse MCP configuration into a flat map of <em>server name → server config</em>, without
+     * connecting to anything — no child process is spawned and no HTTP request is made. This is the
+     * cheap check to run before paying for {@link #load}.
+     *
+     * <p>Accepts three input shapes:
+     * <ul>
+     *   <li>a filesystem path to an {@code mcp.json} (anything {@link Files#isRegularFile} accepts) —
+     *       read from disk and parsed;</li>
+     *   <li>a raw JSON string — parsed directly (a {@code String} that is not an existing regular
+     *       file is treated as JSON);</li>
+     *   <li>an already-parsed {@code Map<String, Object>} — normalized only.</li>
+     * </ul>
+     * Any other object is coerced with {@link String#valueOf} and then treated as above.
+     *
+     * <p>The wrapper keys {@code mcpServers}, {@code servers} and {@code mcp} are all unwrapped (in
+     * that order of precedence). A bare map of servers is accepted too, with the sibling top-level
+     * toolnexus keys {@code builtins} / {@code agents} / {@code a2a} / {@code mcpServer} stripped so
+     * they are never mistaken for MCP servers. Parsing does <b>not</b> filter: a server with
+     * {@code enabled:false} / {@code disabled:true} is still present in the result, and is honoured
+     * later by {@link #load}.
+     *
+     * @param input a config file path, a raw JSON string, or a parsed config map
+     * @return the servers map. This is <b>not</b> a defensive copy: when a wrapper key is present the
+     *         caller's own nested map is returned as-is (matching the JS/Go reference
+     *         {@code parseMcpConfig}), and the bare-map form returns a shallow copy so the input is
+     *         left untouched. toolnexus itself only ever reads this map. If you intend to mutate the
+     *         result — to inject a header or drop a server — copy it first.
+     * @throws RuntimeException if the file cannot be read, or if the JSON is malformed
+     *         ({@code "Invalid JSON: …"})
+     * @throws ClassCastException if the config parses but the wrapper key does not hold an object
+     */
     @SuppressWarnings("unchecked")
-    static Map<String, Object> parseConfig(Object input) {
+    public static Map<String, Object> parseConfig(Object input) {
         Map<String, Object> raw;
         if (input instanceof Map) {
             raw = (Map<String, Object>) input;

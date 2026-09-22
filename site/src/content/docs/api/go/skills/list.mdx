@@ -121,8 +121,9 @@ func main() {
 	defer os.RemoveAll(root)
 
 	write(root, "good", "---\nname: good\ndescription: Fine.\n---\n\nBody.\n")
-	// Fences present, YAML invalid — an unterminated quoted scalar.
-	write(root, "broken", "---\nname: \"oops\n---\n\nBody.\n")
+	// Fences present, YAML invalid — and `[` opens a construct the lenient
+	// rescue refuses, so no name can be recovered.
+	write(root, "broken", "---\nname: [oops\n---\n\nBody.\n")
 	// Parses, but has no name — nothing to call it by.
 	write(root, "unnamed", "---\ndescription: No name here.\n---\n\nBody.\n")
 
@@ -153,8 +154,10 @@ func main() {
 
 <Aside type="caution">
 A file with **no** frontmatter fences at all is not "malformed" — it parses to an empty header and
-is skipped as `missing-name`. `malformed-frontmatter` means the fences were there and the YAML
-inside them failed to parse.
+is skipped as `missing-name`. `malformed-frontmatter` means the fences were there, the YAML
+inside them failed to parse, **and** the lenient line-wise rescue could not recover a `name`
+either. A near-miss like `name: "oops` is rescued and loads (as `"oops`); only a value that opens
+a YAML construct the rescue declines — `| > & * [ { !` — leaves nothing to recover.
 </Aside>
 
 ### 3. Every source, duplicate detection, and authoring the allowlist

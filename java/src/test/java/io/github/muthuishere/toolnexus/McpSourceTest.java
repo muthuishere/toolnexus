@@ -9,6 +9,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * Tests the MCP config parser and the env-header expander. No live connect.
@@ -49,6 +50,34 @@ class McpSourceTest {
         String json = "{\"mcpServers\":{\"foo\":{\"command\":[\"x\"]}}}";
         Map<String, Object> parsed = McpSource.parseConfig(json);
         assertEquals(true, parsed.containsKey("foo"));
+    }
+
+    /**
+     * The public parser against the shared cross-language fixture {@code examples/mcp.json} —
+     * the same file every port is tested against — plus the malformed-input rejection the
+     * other ports do (a bad JSON string throws rather than returning an empty config).
+     */
+    @Test
+    void parseConfigReadsSharedFixtureAndRejectsMalformedInput() {
+        Map<String, Object> config = McpSource.parseConfig(TestFixtures.fixture("mcp.json"));
+
+        assertEquals(java.util.List.of("everything", "example-remote"),
+                config.keySet().stream().sorted().toList());
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> everything = (Map<String, Object>) config.get("everything");
+        assertEquals("local", everything.get("type"));
+
+        // Parsing does not filter: the disabled remote server is still present.
+        @SuppressWarnings("unchecked")
+        Map<String, Object> remote = (Map<String, Object>) config.get("example-remote");
+        assertEquals(Boolean.FALSE, remote.get("enabled"));
+        assertEquals("https://example.com/mcp", remote.get("url"));
+
+        // Malformed JSON is a hard failure, not a silently empty config.
+        RuntimeException e = assertThrows(RuntimeException.class,
+                () -> McpSource.parseConfig("{\"mcpServers\": {"));
+        assertEquals(true, e.getMessage().startsWith("Invalid JSON"));
     }
 
     @Test

@@ -142,7 +142,7 @@ raised? =
     Client.run(client, "hi", [])
     false
   rescue
-    e in RuntimeError -> String.contains?(Exception.message(e), "LLM 429")
+    e in Toolnexus.ProviderError -> String.contains?(Exception.message(e), "LLM 429")
   end
 
 true = raised?
@@ -183,7 +183,7 @@ raised? =
     Client.run(client, "hi", [])
     false
   rescue
-    e in RuntimeError -> String.contains?(Exception.message(e), "LLM 500")
+    e in Toolnexus.ProviderError -> String.contains?(Exception.message(e), "LLM 500")
   end
 
 true = raised?

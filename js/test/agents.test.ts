@@ -137,6 +137,9 @@ const mockFetch: typeof fetch = async (_url, init) => {
       slowCtl.started.resolve()
       await new Promise<void>((resolve, reject) => {
         slowCtl.gate.promise.then(resolve)
+        // An already-aborted signal must reject here and now: a listener registered after the
+        // event has dispatched never fires, and this promise would hang forever.
+        if (signal?.aborted) return reject(signal.reason ?? new Error("aborted"))
         signal?.addEventListener("abort", () => reject(signal.reason ?? new Error("aborted")), { once: true })
       })
       return openaiResponse({ content: "slow-done" })

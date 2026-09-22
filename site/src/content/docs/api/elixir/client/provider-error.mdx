@@ -1,6 +1,6 @@
 ---
 title: "Toolnexus.ProviderError"
-description: "A non-2xx response from the model endpoint raises a typed provider error carrying the status code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception. — Elixir."
+description: "A non-2xx response from the model endpoint raises a typed provider error carrying the status code, a redacted+capped body, and the raw `Retry-After` header — never a bare unstructured exception. — Elixir."
 sidebar:
   label: "Toolnexus.ProviderError"
 ---
@@ -17,14 +17,14 @@ defexception [:status, :body, :retry_after, :message]
 @type t :: %Toolnexus.ProviderError{
         status: non_neg_integer() | nil,
         body: term(),
-        retry_after: non_neg_integer() | nil,
+        retry_after: String.t() | nil,
         message: String.t()
       }
 
 # raised as: raise Toolnexus.ProviderError, status: status, body: body, retry_after: retry_after
 ```
 
-A non-2xx response from the model endpoint raises a typed provider error carrying the status code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception.
+A non-2xx response from the model endpoint raises a typed provider error carrying the status code, a redacted+capped body, and the raw `Retry-After` header — never a bare unstructured exception.
 
 `Toolnexus.ProviderError` is a `defexception`
 (`elixir/lib/toolnexus/errors.ex:20-58`), so a caller `rescue`s it like any other Elixir
@@ -38,15 +38,29 @@ literals directly, because the callback is where redaction happens.
 - **You need to branch on the HTTP status a provider returned** — `429` to back off harder than
   the built-in retry policy, `401`/`403` to prompt for a new key, anything else to surface as a
   hard failure. `status` is the typed field; nothing here requires parsing a message string.
-- **You want the `Retry-After` signal without re-parsing headers** — `retry_after` carries it
-  as an already-parsed integer of seconds (elixir is the one port that parses eagerly here; see
-  [`Toolnexus.Client.create`](/api/elixir/client/resilience/) for how the client's own retry loop
-  already consumes this before a caller ever sees the exception).
+- **You want the `Retry-After` signal without digging through headers** — `retry_after` carries
+  the header **verbatim**, exactly as in every other port (see the note below; the client's own
+  retry loop parses it separately and consumes it before a caller ever sees the exception — see
+  [`Toolnexus.Client.create`](/api/elixir/client/resilience/)).
 - **You want to log or display the body safely** — `body` is already redacted (never raw), so a
   caller can log it, show it in an error banner, or ship it to an error tracker without a second
   redaction pass.
 
 ## Why this and not the alternative
+
+<Aside type="note" title="`retry_after` is the RAW header — not a parsed number">
+`retry_after` is the `Retry-After` header value **exactly as the provider sent it**, or `nil`
+when the response sent no such header. It is deliberately not pre-parsed: `Retry-After` may
+legitimately be an HTTP-date, or fractional, signed, out-of-range or unparseable, and a numeric
+field would have to null out every one of those — destroying information the response actually
+supplied and which a host may well want to log or handle itself. The field is for the HOST.
+
+The library's own **waiting** rule is separate and unchanged: internally the client still honours
+only the delay-seconds form (RFC 9110 §10.2.3 — a run of ASCII digits, `0`…`2147483647`, waited as
+whole seconds, `0` meaning "retry now") and falls back to exponential backoff for anything else.
+So `Retry-After: Wed, 21 Oct 2026 07:28:00 GMT` still produces a backoff wait *and* still arrives
+verbatim on `retry_after`. This port previously carried parsed seconds here — see the changelog.
+</Aside>
 
 <Aside type="tip" title="A 200-char cap that is inlined, not a named constant — a real, minor drift">
 Every other port that carries this exact error names its 200-character message cap as a module
@@ -115,7 +129,7 @@ false = inspect(body) =~ "u_123"
 IO.puts("ok: ProviderError status=400 body=#{inspect(body)}")
 ```
 
-### 2. `retry_after` — read as an already-parsed integer of seconds
+### 2. `retry_after` — the raw header, verbatim
 
 ```elixir test
 alias Toolnexus.{Client, ProviderError}
@@ -139,7 +153,7 @@ client =
     http_options: [plug: plug]
   )
 
-{:raised, 30} =
+{:raised, "30"} =
   try do
     Client.run(client, "hi", [])
     :not_raised
@@ -147,7 +161,7 @@ client =
     e in ProviderError -> {:raised, e.retry_after}
   end
 
-IO.puts("ok: ProviderError retry_after=30")
+IO.puts("ok: ProviderError retry_after=\"30\"")
 ```
 
 ### 3. `401`/`403` never echo the body, no matter what it contains

@@ -334,15 +334,21 @@ public sealed class LlmClient
         /// </summary>
         public string Body { get; }
 
-        /// <summary>The honoured <c>Retry-After</c> delay in ms, when the provider sent one.</summary>
-        public long? RetryAfterMs { get; }
+        /// <summary>
+        /// The raw <c>Retry-After</c> header verbatim, or <c>null</c> when the response did not
+        /// send one. Deliberately NOT pre-parsed: an HTTP-date, fractional or out-of-range value
+        /// is information the response really supplied, and a numeric field would have to null it
+        /// out. The library's own waiting rule (delay-seconds only, falling back to backoff) is
+        /// separate and unchanged — see <see cref="RetryAfterMs"/>.
+        /// </summary>
+        public string? RetryAfter { get; }
 
-        public ProviderException(int status, string body, long? retryAfterMs, string message)
+        public ProviderException(int status, string body, string? retryAfter, string message)
             : base(message)
         {
             Status = status;
             Body = body ?? "";
-            RetryAfterMs = retryAfterMs;
+            RetryAfter = retryAfter;
         }
     }
 
@@ -1754,13 +1760,16 @@ public sealed class LlmClient
     /// </summary>
     internal static long? RetryAfterMs(HttpResponseMessage res)
     {
-        if (!res.Headers.TryGetValues("retry-after", out var values)) return null;
-        var v = values.FirstOrDefault()?.Trim();
+        var v = RawRetryAfter(res)?.Trim();
         if (string.IsNullOrEmpty(v)) return null;
         foreach (var c in v) if (c < '0' || c > '9') return null;
         if (!long.TryParse(v, out var secs) || secs > RetryAfterMaxSeconds) return null;
         return secs * 1000L;
     }
+
+    /// <summary>The raw <c>Retry-After</c> header, verbatim and unparsed, or null.</summary>
+    internal static string? RawRetryAfter(HttpResponseMessage res)
+        => res.Headers.TryGetValues("retry-after", out var values) ? values.FirstOrDefault() : null;
 
     private static async Task SleepAsync(long ms, Deadline deadline, CancellationToken external)
     {
@@ -1797,7 +1806,7 @@ public sealed class LlmClient
         if ((int)res.StatusCode is < 200 or >= 300)
         {
             var st = (int)res.StatusCode;
-            throw new ProviderException(st, RedactBody(st, text, cap: false), RetryAfterMs(res),
+            throw new ProviderException(st, RedactBody(st, text, cap: false), RawRetryAfter(res),
                 ProviderMessage(st, text));
         }
         return Json.ToMap(text);
@@ -1812,7 +1821,7 @@ public sealed class LlmClient
         {
             var b = await res.Content.ReadAsStringAsync(external).ConfigureAwait(false);
             var st = (int)res.StatusCode;
-            throw new ProviderException(st, RedactBody(st, b, cap: false), RetryAfterMs(res),
+            throw new ProviderException(st, RedactBody(st, b, cap: false), RawRetryAfter(res),
                 ProviderMessage(st, b));
         }
         await using var stream = await res.Content.ReadAsStreamAsync(external).ConfigureAwait(false);

@@ -660,8 +660,28 @@ defmodule Toolnexus.Issues8693Test do
         end
 
       assert err.status == 429
-      assert err.retry_after == 7
+      # The RAW header verbatim, not a parsed number — identical in all seven ports.
+      assert err.retry_after == "7"
       assert err.body == %{"error" => "slow down"}
+    end
+
+    test "a non-delay-seconds Retry-After still reaches the host verbatim" do
+      # The point of the raw field: the WAITING rule ignores an HTTP-date and falls back to
+      # backoff, but the response really supplied it, so the typed error carries it intact.
+      raw = "Wed, 21 Oct 2026 07:28:00 GMT"
+
+      transport = fn _req ->
+        {:ok, %{status: 503, headers: %{"retry-after" => [raw]}, body: %{"error" => "later"}}}
+      end
+
+      err =
+        assert_raise ProviderError, fn ->
+          Client.run(client(transport, %{retries: 0}), "x", [])
+        end
+
+      assert err.retry_after == raw
+      # waiting rule unchanged: not honourable, so backoff
+      assert Toolnexus.Client.parse_retry_after(raw) == nil
     end
 
     test "account identifiers are REDACTED in BOTH the typed body and the message (A5)" do

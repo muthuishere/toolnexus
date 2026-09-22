@@ -100,8 +100,9 @@ description: I forgot to name myself.
 Do the thing.
 """);
 
-// Fences are present but the YAML inside them does not parse.
-Skill("broken", "---\nname: \"unterminated\ndescription: nope\n---\n\nDo the thing.\n");
+// Fences are present but the YAML inside them does not parse — and `[` opens a
+// construct the lenient rescue refuses, so no name can be recovered.
+Skill("broken", "---\nname: [unterminated\ndescription: nope\n---\n\nDo the thing.\n");
 
 try
 {
@@ -127,9 +128,10 @@ finally
 ```
 
 <Aside type="caution" title="A body with no frontmatter at all is not 'malformed'">
-`malformed-frontmatter` means the `---` fences were there and the YAML inside them failed to parse.
-A `SKILL.md` with no fences parses fine, has no `name`, and is reported as `missing-name`. The
-distinction is deliberate — it points at the actual mistake.
+`malformed-frontmatter` means the `---` fences were there, the YAML inside them failed to parse,
+**and** the lenient line-wise rescue could not recover a `name` either — a near-miss like
+`name: "oops` is rescued and loads. A `SKILL.md` with no fences parses fine, has no `name`, and is
+reported as `missing-name`. The distinction is deliberate — it points at the actual mistake.
 </Aside>
 
 ### 3. Full surface — disk plus data, and authoring an allowlist

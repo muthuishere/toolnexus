@@ -16,17 +16,17 @@ class ProviderError(Exception):
     status: int                  # the HTTP status the provider answered with
     body: str                    # the FULL provider body, redacted, never capped
     text: str                    # deprecated alias of `body` — kept for back-compat
-    retry_after: float | None    # seconds, parsed from Retry-After; None if absent
+    retry_after: str | None      # the RAW Retry-After header, verbatim; None if absent
 
 # raised in place of a bare exception on any non-2xx LLM response
-def __init__(self, status: int, text: str, retry_after: float | None) -> None: ...
+def __init__(self, status: int, text: str, retry_after: str | None) -> None: ...
 
 # back-compat alias — the type was private before it was worth catching
 _HttpError = ProviderError
 ```
 
 A non-2xx response from the model endpoint raises a typed `ProviderError` carrying the status
-code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception.
+code, a redacted+capped body, and the raw `Retry-After` header — never a bare unstructured exception.
 `str(error)` is the capped, presentational message (`"LLM {status}: {shown}"`); `error.body`
 (and its deprecated alias `error.text`) carries the *whole* redacted body, uncapped, for a host
 that caught the typed error and asked for all of it.
@@ -51,9 +51,24 @@ well under any reasonable cap.
   webhook) — `error.body` is already safe to persist and display; it does not need its own
   redaction pass before it leaves the process.
 - **Reading `retry_after`** to decide how long to back off yourself, when you have disabled the
-  built-in retry (`retries=0`) and are driving resilience from the outside.
+  built-in retry (`retries=0`) and are driving resilience from the outside. It is the header
+  **verbatim** — see the note below.
 
 ## Why this and not the alternative
+
+<Aside type="note" title="`retry_after` is the RAW header — not a parsed number">
+`retry_after` is the `Retry-After` header value **exactly as the provider sent it**, or `None`
+when the response sent no such header. It is deliberately not pre-parsed: `Retry-After` may
+legitimately be an HTTP-date, or fractional, signed, out-of-range or unparseable, and a numeric
+field would have to null out every one of those — destroying information the response actually
+supplied and which a host may well want to log or handle itself. The field is for the HOST.
+
+The library's own **waiting** rule is separate and unchanged: internally the client still honours
+only the delay-seconds form (RFC 9110 §10.2.3 — a run of ASCII digits, `0`…`2147483647`, waited as
+whole seconds, `0` meaning "retry now") and falls back to exponential backoff for anything else.
+So `Retry-After: Wed, 21 Oct 2026 07:28:00 GMT` still produces a backoff wait *and* still arrives
+verbatim on `retry_after`.
+</Aside>
 
 <Aside type="tip" title="Don't redact the message yourself">
 Before this, a caller who wanted to log provider errors safely had to parse `str(exc)` and
@@ -297,7 +312,7 @@ def _send(req, status, payload, headers=None):
 async def main():
     tk = await create_toolkit()
 
-    # --- retry_after: parsed from the header, in seconds ---
+    # --- retry_after: the RAW header, verbatim ---
     def rate_limited(req):
         _send(req, 429, {"error": "slow down"}, headers={"Retry-After": "2"})
 
@@ -312,7 +327,7 @@ async def main():
                 raised = None
             except ProviderError as e:
                 raised = e
-        assert raised.retry_after == 2.0
+        assert raised.retry_after == "2"
 
         # --- the 200-byte cap applies to the MESSAGE only, never to `.body` ---
         long_body = json.dumps({"error": "x" * 600})
@@ -365,7 +380,7 @@ asyncio.run(main())
 | `status` | `int` | The HTTP status the provider answered with. |
 | `body` | `str` | The FULL provider body, account identifiers redacted to `«redacted»`, never capped. Empty for `401`/`403`. |
 | `text` | `str` | Deprecated alias of `body` — identical value, kept for back-compat. |
-| `retry_after` | `float \| None` | Seconds, parsed from the `Retry-After` header. `None` if the header was absent or unparseable. |
+| `retry_after` | `str \| None` | The raw `Retry-After` header, verbatim. `None` only when the response sent no such header — an un-honourable value like an HTTP-date still arrives intact. Identical in all seven ports. |
 
 `str(error)` is `"LLM {status}: {shown}"` where `shown` is `body` capped at 200 characters
 (`MAX_ERROR_BODY`) with a trailing `…` — the presentational form. Reach into `.body` (or the

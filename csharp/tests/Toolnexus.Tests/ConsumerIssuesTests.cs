@@ -844,7 +844,8 @@ public class ConsumerIssuesTests
             async () => await client.RunAsync("p", (Toolkit?)null));
 
         Assert.Equal(402, e.Status);
-        Assert.Equal(3000, e.RetryAfterMs);
+        // The RAW header verbatim, not ms — identical in all seven ports.
+        Assert.Equal("3", e.RetryAfter);
         // (A5) The typed field is REDACTED TOO — a typed error is not a hole in the guarantee —
         // but UNCAPPED, because a host that opted into it asked for the whole thing.
         Assert.DoesNotContain("user_2abcdefghijkl", e.Body);
@@ -857,6 +858,24 @@ public class ConsumerIssuesTests
         Assert.Contains("no credit", e.Message); // the shape and the real cause survive
         // Still an InvalidOperationException, so existing catch blocks keep working.
         Assert.IsAssignableFrom<InvalidOperationException>(e);
+    }
+
+    /// <summary>
+    /// The point of carrying the RAW header: a value the WAITING rule ignores still reaches the
+    /// host. An HTTP-date is a legitimate <c>Retry-After</c>; the library falls back to backoff
+    /// for it, but the response really supplied it, so the typed error carries it verbatim.
+    /// </summary>
+    [Fact]
+    public async Task ProviderErrorCarriesANonDelaySecondsRetryAfterVerbatim()
+    {
+        const string raw = "Wed, 21 Oct 2026 07:28:00 GMT";
+        var rec = new Recorder { Failure = (503, "{\"error\":\"later\"}"), RetryAfter = raw };
+        var client = LlmClient.Create(Opts(rec, o => o.Retries = 0));
+
+        var e = await Assert.ThrowsAsync<LlmClient.ProviderException>(
+            async () => await client.RunAsync("p", (Toolkit?)null));
+
+        Assert.Equal(raw, e.RetryAfter);
     }
 
     /// <summary>A 401/403 body routinely reflects the credential that was sent, so it never

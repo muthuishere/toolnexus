@@ -20,6 +20,27 @@ jobs:
       # (the drift class that hid the JS disableTools/disableSkills gap). No deps.
       - run: python3 conformance/check_options_parity.py
 
+  docs-coverage:
+    name: API reference coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      # Two checks that need no toolchain and finish in seconds, so drift in the API reference
+      # is caught long before the 20-minute docs-examples job gets to it.
+      #
+      # 1. Every symbol the manifest NAMES exists in the port it claims. This script already
+      #    existed but ran nowhere, so a renamed export would have surfaced as a broken page
+      #    rather than a failed build.
+      - run: node site/scripts/verify-symbols.mjs --strict
+      # 2. Every manifest entry HAS a page, no page is an unfilled scaffold, and no page is an
+      #    orphan. The absence class: on 2026-09-22 fifteen pages sat as `{/* TODO */}` stubs —
+      #    including client/create and toolkit/create in five ports — with nothing to catch it.
+      #    Content depth (when/why/3 examples) is reported but not yet blocking; see the
+      #    script header for the outstanding backlog and why it is tiered.
+      - run: node site/scripts/coverage-gate.mjs --strict
+
   js:
     name: JS (node)
     runs-on: ubuntu-latest

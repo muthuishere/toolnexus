@@ -20,7 +20,7 @@ different question than this manifest entry: this page's PRIMARY symbol is `Runt
 </Aside>
 
 ```go
-func (rt *Runtime) Resume(answer tn.Answer) error
+func (rt *Runtime) Resume(answer tn.Answer) (TaskResult, error)
 ```
 
 Routes an `Answer` to the **deepest suspended** handle in the runtime's tree, resumes it from its
@@ -143,7 +143,7 @@ func main() {
 	}
 
 	// The out-of-band Answer resumes the DEEPEST suspended handle.
-	if err := rt.Resume(tn.Answer{ID: r.Pending.ID, Ok: true}); err != nil {
+	if _, err := rt.Resume(tn.Answer{ID: r.Pending.ID, Ok: true}); err != nil {
 		log.Fatal(err)
 	}
 	if rt.StateOf(h) != agents.StateIdle {
@@ -231,7 +231,7 @@ func main() {
 		log.Fatalf("expected pending, got %q", r.Status)
 	}
 
-	if err := rt.Resume(tn.Answer{ID: r.Pending.ID, Ok: false, Reason: "declined"}); err != nil {
+	if _, err := rt.Resume(tn.Answer{ID: r.Pending.ID, Ok: false, Reason: "declined"}); err != nil {
 		log.Fatal(err)
 	}
 
@@ -327,7 +327,7 @@ func main() {
 	}
 
 	last := rt.Wait(h, 0) // fast-path: returns the cached pending TaskResult, does not block
-	if err := rt.Resume(tn.Answer{ID: last.Pending.ID, Ok: true}); err != nil {
+	if _, err := rt.Resume(tn.Answer{ID: last.Pending.ID, Ok: true}); err != nil {
 		log.Fatal(err)
 	}
 	settled := rt.Wait(h, 0)
@@ -343,8 +343,8 @@ func main() {
 
 | Parameter | Type | What it is |
 |---|---|---|
-| `answer` | `tn.Answer` | Must echo the `ID` of the pending `Request` — routed to the deepest suspended handle. |
-| returns | `error` | Non-nil when `answer.ID` doesn't match any suspended handle's pending request. |
+| `answer` | `tn.Answer` | Should echo the `ID` of the pending `Request` — routed to the deepest suspended handle. |
+| returns | `(TaskResult, error)` | The topmost re-run's `TaskResult`. The `error` is non-nil when no handle in the tree is suspended — there is nothing to resume. |
 
 ## Go also has a durable, cross-restart resume (preview)
 

@@ -259,3 +259,36 @@ Before this moves past Proposed:
 - A fixture body containing `user_id` is shown to survive the 200-char cap and be caught by the
   key redaction — the two are independent and both are needed.
 - Q2 is answered, because D2.2 cannot be written until it is.
+
+## Addendum — 2026-09-22: D3 left `retryAfter`'s representation unpinned
+
+D3 named `retryAfter` as a field on the typed provider error but never said *what the field
+holds*. `SPEC.md` inherited the same silence ("where the response supplied one"). Seven ports
+implementing an unpinned field produced exactly the drift this repo exists to prevent — three
+incompatible shapes within hours of 0.19.0 shipping:
+
+- **raw `Retry-After` header string** — js, golang, java
+- **parsed seconds** — python, elixir
+- **milliseconds**, on a differently-named field (`RetryAfterMs`) — csharp, clojure
+
+Decided: **the canonical representation is the raw `Retry-After` header value, verbatim**, on a
+field named `retryAfter` (idiomatic casing per port), with the port's natural *absent* when the
+response sent no such header. python, elixir, csharp and clojure were corrected to it; js, golang
+and java were already correct.
+
+Why the raw string:
+
+1. js is the reference port and already used it, and it is the majority shape (3 of 7).
+2. It is **lossless**. `Retry-After` may legitimately be an HTTP-date, or fractional, signed,
+   out-of-range or unparseable. The library honours only the `delay-seconds` form when it *waits*
+   — but that is the waiting rule, computed internally. The field exists for the HOST, and a
+   numeric field must null out every non-`delay-seconds` value, destroying information the
+   response actually supplied and which a host may want to log or handle itself.
+3. SPEC's own wording is "where the response **supplied** one" — what a response supplies is a
+   header value, i.e. a string.
+
+**The retry/backoff waiting rule is unchanged** and stays byte-identical across all seven ports:
+`delay-seconds` only, whole seconds, `0` means retry now, everything else falls back to
+exponential backoff. Each port still parses the header internally for that decision; the typed
+error simply carries the raw header alongside it. `SPEC.md` §8 now pins the representation
+explicitly so it cannot drift again.
