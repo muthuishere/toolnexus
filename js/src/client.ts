@@ -575,7 +575,7 @@ export class Client {
     if (req.maxTokens) body.max_tokens = req.maxTokens
 
     const signal = this.makeSignal(req.signal)
-    {
+    try {
       const data = await this.llmCallJson(
         `${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`,
         {
@@ -603,6 +603,8 @@ export class Client {
         model: this.opts.model,
         raw: data,
       }
+    } finally {
+      this.releaseSignal(signal)
     }
   }
 
@@ -637,7 +639,7 @@ export class Client {
     if (tc) body.tool_choice = tc
 
     const signal = this.makeSignal(req.signal)
-    {
+    try {
       const data = await this.llmCallJson(
         endpoint,
         {
@@ -676,6 +678,8 @@ export class Client {
         model: this.opts.model,
         raw: data,
       }
+    } finally {
+      this.releaseSignal(signal)
     }
   }
 
@@ -743,12 +747,30 @@ export class Client {
     return [this.opts.systemPrompt ?? "", toolkit?.skillsPrompt() ?? ""].filter(Boolean).join("\n\n")
   }
 
-  /** Build a run-scoped abort signal from the optional run-level timeout + an external signal. */
+  /** Run-scoped timeout timers, cleared by `releaseSignal` when the run settles. */
+  private readonly runTimers = new WeakMap<AbortSignal, ReturnType<typeof setTimeout>>()
+
+  /** Drop a run's timeout timer. Idempotent, and safe on a signal that never had one. */
+  private releaseSignal(signal: AbortSignal): void {
+    const t = this.runTimers.get(signal)
+    if (t !== undefined) {
+      clearTimeout(t)
+      this.runTimers.delete(signal)
+    }
+  }
+
+  /** Build a run-scoped abort signal from the optional run-level timeout + an external signal.
+   *
+   * The timer is deliberately NOT `unref()`d. An unref'd timer cannot keep the event loop
+   * alive, so a run whose only pending work is a request that never settles — an injected
+   * `fetch`, an in-process transport, a stalled stream — drains the loop and the timeout never
+   * fires at all, which is the one case `timeoutMs` exists for. It is RELEASED instead: the
+   * caller clears it however the run leaves, so a finished run holds nothing open. */
   private makeSignal(external?: AbortSignal): AbortSignal {
     const ctrl = new AbortController()
     if (this.opts.timeoutMs) {
       const t = setTimeout(() => ctrl.abort(new Error(`run timeout after ${this.opts.timeoutMs}ms`)), this.opts.timeoutMs)
-      ;(t as any).unref?.()
+      this.runTimers.set(ctrl.signal, t)
     }
     if (external) {
       if (external.aborted) ctrl.abort(external.reason)
@@ -841,10 +863,47 @@ export class Client {
     }
   }
 
-  // ---- OpenAI-style: POST {baseUrl}/chat/completions ----
+  // The run-scoped timeout timer is owned by these four wrappers, so it is cleared however the
+  // run leaves: return, throw, or a consumer abandoning the stream half-way.
   private async runOpenAI(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[]): Promise<RunResult> {
-    const key = resolveKey(this.opts)
     const signal = this.makeSignal(external)
+    try {
+      return await this.runOpenAIWithSignal(signal, prompt, toolkit, history)
+    } finally {
+      this.releaseSignal(signal)
+    }
+  }
+
+  private async runAnthropic(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[]): Promise<RunResult> {
+    const signal = this.makeSignal(external)
+    try {
+      return await this.runAnthropicWithSignal(signal, prompt, toolkit, history)
+    } finally {
+      this.releaseSignal(signal)
+    }
+  }
+
+  private async *streamOpenAI(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
+    const signal = this.makeSignal(external)
+    try {
+      yield* this.streamOpenAIWithSignal(signal, prompt, toolkit, history)
+    } finally {
+      this.releaseSignal(signal)
+    }
+  }
+
+  private async *streamAnthropic(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
+    const signal = this.makeSignal(external)
+    try {
+      yield* this.streamAnthropicWithSignal(signal, prompt, toolkit, history)
+    } finally {
+      this.releaseSignal(signal)
+    }
+  }
+
+  // ---- OpenAI-style: POST {baseUrl}/chat/completions ----
+  private async runOpenAIWithSignal(signal: AbortSignal, prompt: PromptInput, toolkit: Toolkit | undefined, history?: any[]): Promise<RunResult> {
+    const key = resolveKey(this.opts)
     const runStart = Date.now()
     let messages: any[] = history && history.length ? [...history] : []
     if (!messages.length) {
@@ -944,9 +1003,8 @@ export class Client {
   }
 
   // ---- Anthropic-style: POST {baseUrl}/messages ----
-  private async runAnthropic(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[]): Promise<RunResult> {
+  private async runAnthropicWithSignal(signal: AbortSignal, prompt: PromptInput, toolkit: Toolkit | undefined, history?: any[]): Promise<RunResult> {
     const key = resolveKey(this.opts)
-    const signal = this.makeSignal(external)
     const base = this.opts.baseUrl.replace(/\/$/, "")
     const endpoint = base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`
     const system = this.system(toolkit)
@@ -1018,9 +1076,8 @@ export class Client {
   }
 
   // ---- Streaming: OpenAI-style ----
-  private async *streamOpenAI(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
+  private async *streamOpenAIWithSignal(signal: AbortSignal, prompt: PromptInput, toolkit: Toolkit | undefined, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
     const key = resolveKey(this.opts)
-    const signal = this.makeSignal(external)
     const runStart = Date.now()
     let messages: any[] = history && history.length ? [...history] : []
     if (!messages.length) {
@@ -1114,9 +1171,8 @@ export class Client {
   }
 
   // ---- Streaming: Anthropic-style ----
-  private async *streamAnthropic(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
+  private async *streamAnthropicWithSignal(signal: AbortSignal, prompt: PromptInput, toolkit: Toolkit | undefined, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
     const key = resolveKey(this.opts)
-    const signal = this.makeSignal(external)
     const runStart = Date.now()
     const base = this.opts.baseUrl.replace(/\/$/, "")
     const endpoint = base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`
