@@ -7,19 +7,192 @@
  * ToolResult{isError:true}, never a thrown exception across the boundary. Paths
  * resolve relative to the process working directory unless absolute.
  */
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import fs from "node:fs/promises"
-import { existsSync, readdirSync } from "node:fs"
+import { existsSync, readdirSync, realpathSync } from "node:fs"
 import { compareCodePoints, sortEntriesByName, toPosixPath } from "./order.js"
 import path from "node:path"
 import type { JSONSchema, Tool, ToolContext, ToolResult } from "./types.js"
 import { pending } from "./types.js"
 import { mediaTypeFor } from "./content.js"
 
-/** Config for the single global builtin toggle (mirrors MCP isEnabled precedence). */
+/**
+ * Config for the single global builtin toggle (mirrors MCP isEnabled precedence),
+ * plus the host boundary: which interpreter `bash` runs, what a relative path
+ * resolves against, and whether paths leaving it are refused (SPEC §4A, ADR 0034).
+ */
 export type BuiltinsConfig =
   | boolean
-  | { enabled?: boolean; disabled?: boolean; tools?: Record<string, boolean> }
+  | {
+      enabled?: boolean
+      disabled?: boolean
+      tools?: Record<string, boolean>
+      /**
+       * The argv prefix `bash` runs a command with — `["sh","-c"]`,
+       * `["cmd","/d","/s","/c"]`, `["powershell","-NoProfile","-Command"]`. Set,
+       * it is used verbatim. Absent, an interpreter is DETECTED at toolkit
+       * construction (POSIX `sh -c`; Windows %COMSPEC% → pwsh → powershell → bash).
+       */
+      shell?: string[]
+      /**
+       * What a RELATIVE path means, for every builtin that touches the
+       * filesystem — including the paths inside apply_patch's patch text, and as
+       * bash's default workdir. Empty ⇒ the process cwd, i.e. today's behaviour.
+       */
+      baseDir?: string
+      /**
+       * Refuse any path whose CANONICAL form leaves baseDir (symlinks, Windows
+       * junctions and short names resolved on both sides), and Windows reserved
+       * device names. Default off. A guarantee about path resolution in the file
+       * builtins, NOT a sandbox — `bash` still reaches the whole filesystem.
+       */
+      confineToBaseDir?: boolean
+    }
+
+/**
+ * How long a job gets between "please stop" and "stop". Fixed, and identical in
+ * every port, so a timeout means the same thing everywhere.
+ */
+const KILL_GRACE_MS = 2000
+
+const WIN_RESERVED = new Set([
+  "CON", "PRN", "AUX", "NUL",
+  "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+  "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+])
+
+/** Does `name` resolve as an executable on PATH? (PATHEXT-aware on Windows.) */
+function resolvesOnPath(name: string): boolean {
+  if (name.includes(path.sep) || name.includes("/")) return existsSync(name)
+  const dirs = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean)
+  const exts =
+    process.platform === "win32"
+      ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)
+      : [""]
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      if (existsSync(path.join(dir, name + ext))) return true
+    }
+  }
+  return false
+}
+
+/**
+ * The interpreters tried when the host names none. %COMSPEC% leads on Windows
+ * because PowerShell is routinely blocked by execution or application-control
+ * policy, while %COMSPEC% is always present.
+ */
+function shellCandidates(): string[][] {
+  if (process.platform !== "win32") return [["sh", "-c"]]
+  const out: string[][] = []
+  if (process.env.COMSPEC) out.push([process.env.COMSPEC, "/d", "/s", "/c"])
+  out.push(
+    ["cmd.exe", "/d", "/s", "/c"],
+    ["pwsh", "-NoProfile", "-Command"],
+    ["powershell", "-NoProfile", "-Command"],
+    ["bash", "-lc"],
+  )
+  return out
+}
+
+/**
+ * The host boundary the builtins are allowed to know about. Constructed once,
+ * at toolkit construction: a missing interpreter is a configuration fact, and
+ * turn fourteen of a paid run is the expensive place to learn it.
+ */
+class BuiltinEnv {
+  readonly shell: string[]
+  readonly shellError?: Error
+  readonly baseDir: string
+  readonly confine: boolean
+
+  constructor(cfg?: BuiltinsConfig) {
+    const obj = typeof cfg === "object" && cfg !== null ? cfg : {}
+    this.baseDir = obj.baseDir ?? ""
+    this.confine = obj.confineToBaseDir === true
+    if (obj.shell && obj.shell.length > 0) {
+      this.shell = obj.shell
+      return
+    }
+    const tried: string[] = []
+    for (const argv of shellCandidates()) {
+      tried.push(argv[0])
+      if (resolvesOnPath(argv[0])) {
+        this.shell = argv
+        return
+      }
+    }
+    this.shell = []
+    this.shellError = new Error(
+      `no shell interpreter found (tried: ${tried.join(", ")}); set builtins.shell, or disable the bash builtin with builtins.tools.bash = false`,
+    )
+  }
+
+  /** The interpreter argv, or the detection error when there is none. */
+  shellArgv(): string[] {
+    if (this.shellError) throw this.shellError
+    return this.shell
+  }
+
+  get shellLabel(): string {
+    return this.shell.join(" ")
+  }
+
+  /** The directory a command or a walk starts from. */
+  dir(): string {
+    return this.baseDir || process.cwd()
+  }
+
+  /**
+   * Map a tool-supplied path onto the filesystem: relative to baseDir (or, with
+   * none, exactly as before), and refused when confinement is on and the
+   * canonical target is outside the base.
+   */
+  resolvePath(p: string): string {
+    if (this.confine && !this.baseDir) {
+      throw new Error("confineToBaseDir is set but baseDir is empty")
+    }
+    const full = this.baseDir && !path.isAbsolute(p) ? path.join(this.baseDir, p) : p
+    if (!this.confine) return full
+    if (process.platform === "win32") {
+      const base = path.basename(full).split(".")[0].trim().toUpperCase()
+      if (WIN_RESERVED.has(base)) {
+        throw new Error(`${p} names a reserved device, which is not a file inside ${this.baseDir}`)
+      }
+    }
+    const canonBase = canonicalPath(this.baseDir)
+    const canonTarget = canonicalPath(full)
+    const rel = path.relative(canonBase, canonTarget)
+    if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+      throw new Error(`${p} resolves outside baseDir ${this.baseDir}`)
+    }
+    return full
+  }
+}
+
+/**
+ * Resolve a path for comparison. Symlinks — and, on Windows, directory
+ * junctions and 8.3 short names — are resolved on the DEEPEST EXISTING
+ * ancestor and the remaining segments re-attached, because a file `write` is
+ * about to create has no real path, and a check that only works on existing
+ * files is not a check for `write`.
+ */
+function canonicalPath(p: string): string {
+  const abs = path.resolve(p)
+  let cur = abs
+  let tail = ""
+  for (;;) {
+    try {
+      const resolved = realpathSync.native(cur)
+      return tail ? path.join(resolved, tail) : resolved
+    } catch {
+      const parent = path.dirname(cur)
+      if (parent === cur) return abs
+      tail = tail ? path.join(path.basename(cur), tail) : path.basename(cur)
+      cur = parent
+    }
+  }
+}
 
 /**
  * Whether the builtin source is on. Default ON. Same precedence as MCP:
@@ -42,9 +215,13 @@ export function builtinsEnabled(cfg: BuiltinsConfig | undefined): boolean {
 export function selectBuiltins(cfg: BuiltinsConfig | undefined): Tool[] {
   if (!builtinsEnabled(cfg)) return []
   const map = typeof cfg === "object" ? cfg.tools : undefined
-  const all = createBuiltinTools()
-  if (!map) return all
-  return all.filter((t) => map[t.name] !== false)
+  const all = createBuiltinTools(cfg)
+  const selected = map ? all.filter((t) => map[t.name] !== false) : all
+  // A missing interpreter is a construction-time failure, and only when `bash`
+  // survived the toggles: a host that disabled it should run fine on a box with
+  // no shell at all (ADR 0034 D1).
+  if (selected.some((t) => t.name === "bash")) builtinShell(cfg)
+  return selected
 }
 
 const err = (output: string, metadata?: Record<string, unknown>): ToolResult => ({ output, isError: true, metadata })
@@ -139,7 +316,7 @@ function walkFiles(root: string): string[] {
 // individual tools
 // ---------------------------------------------------------------------------
 
-function bashTool(): Tool {
+function bashTool(env: BuiltinEnv): Tool {
   return builtin(
     "bash",
     "Run a shell command and return its combined stdout+stderr. Non-zero exit is an error.",
@@ -154,38 +331,101 @@ function bashTool(): Tool {
       required: ["command"],
       additionalProperties: false,
     },
-    (args) =>
+    (args, ctx) =>
       new Promise<ToolResult>((resolve) => {
         const command = String(args.command ?? "")
         if (!command) return resolve(err("bash: command is required"))
-        const workdir = args.workdir ? String(args.workdir) : process.cwd()
+        let argv: string[]
+        let workdir: string
+        try {
+          argv = env.shellArgv()
+          workdir = args.workdir ? env.resolvePath(String(args.workdir)) : env.dir()
+        } catch (e) {
+          return resolve(err(`bash: ${(e as Error).message}`))
+        }
         const timeout = typeof args.timeout === "number" ? args.timeout : 60_000
-        const child = spawn(command, { shell: true, cwd: workdir })
+        const meta: Record<string, unknown> = { shell: env.shellLabel }
+
+        // NOT `shell: true`: on Windows that silently means cmd.exe while every
+        // other port fails loudly, and it hides WHICH interpreter ran. `detached`
+        // puts the child in its own process group so a kill reaches the command
+        // AND everything it started — without it the kill reaches the
+        // interpreter only and the real work runs on, reparented (ADR 0034 D4).
+        const child = spawn(argv[0], [...argv.slice(1), command], {
+          cwd: workdir,
+          detached: process.platform !== "win32",
+        })
         let out = ""
-        let timedOut = false
-        const timer = setTimeout(() => {
-          timedOut = true
-          child.kill("SIGKILL")
-        }, timeout)
+        let stopped: "" | "timeout" | "cancelled" = ""
+        let killedTree = false
+        let settled = false
+
+        const killJob = (graceful: boolean): boolean => {
+          if (child.pid === undefined) return false
+          try {
+            if (process.platform === "win32") {
+              const args = graceful ? ["/T", "/PID", String(child.pid)] : ["/T", "/F", String(child.pid)]
+              const r = spawnSync("taskkill", args)
+              return r.status === 0
+            }
+            process.kill(-child.pid, graceful ? "SIGTERM" : "SIGKILL")
+            return true
+          } catch {
+            return false
+          }
+        }
+
+        // Ask, wait out the grace window, then insist. A runner that gets
+        // SIGTERM removes its temp directories; one that gets SIGKILL does not.
+        const stop = (why: "timeout" | "cancelled") => {
+          if (stopped) return
+          stopped = why
+          killedTree = killJob(true)
+          graceTimer = setTimeout(() => {
+            if (killJob(false)) killedTree = true
+          }, KILL_GRACE_MS)
+        }
+
+        let graceTimer: NodeJS.Timeout | undefined
+        const timer = setTimeout(() => stop("timeout"), timeout)
+        const signal = ctx?.signal
+        const onAbort = () => stop("cancelled")
+        signal?.addEventListener?.("abort", onAbort, { once: true })
+
+        const finish = (result: ToolResult) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          if (graceTimer) clearTimeout(graceTimer)
+          signal?.removeEventListener?.("abort", onAbort)
+          resolve(result)
+        }
+
         child.stdout?.on("data", (d) => (out += d.toString()))
         child.stderr?.on("data", (d) => (out += d.toString()))
-        child.on("error", (e) => {
-          clearTimeout(timer)
-          resolve(err(`bash: ${e.message}`))
-        })
+        child.on("error", (e) => finish(err(`bash: ${e.message}`, meta)))
         child.on("close", (code) => {
-          clearTimeout(timer)
-          if (timedOut) return resolve(err(`bash: command timed out after ${timeout}ms\n${out}`))
-          if (code !== 0) {
-            return resolve(err(`${out}\nbash: command exited with code ${code}`, { exitCode: code }))
+          if (stopped) {
+            meta.timedOut = stopped === "timeout"
+            meta.killedTree = killedTree
+            return finish(
+              err(
+                stopped === "timeout"
+                  ? `bash: command timed out after ${timeout}ms\n${out}`
+                  : `bash: command cancelled\n${out}`,
+                meta,
+              ),
+            )
           }
-          resolve(ok(out, { exitCode: code }))
+          meta.exitCode = code
+          if (code !== 0) return finish(err(`${out}\nbash: command exited with code ${code}`, meta))
+          finish(ok(out, meta))
         })
       }),
   )
 }
 
-function readTool(): Tool {
+function readTool(env: BuiltinEnv): Tool {
   return builtin(
     "read",
     "Read a file. Recognised media (png/jpg/jpeg/gif/webp/pdf/mp3/wav) comes back as a content part; anything else is read as UTF-8 text, with offset/limit returning that line window.",
@@ -203,14 +443,16 @@ function readTool(): Tool {
       const p = String(args.path ?? "")
       if (!p) return err("read: path is required")
       let bytes: Buffer
+      let full: string
       try {
-        bytes = await fs.readFile(p)
+        full = env.resolvePath(p)
+        bytes = await fs.readFile(full)
       } catch (e) {
         return err(`read: ${e instanceof Error ? e.message : String(e)}`)
       }
       // §6: a recognised media extension comes back as a part. The table is fixed — no magic-byte
       // sniffing and no platform mime database, whose contents vary per machine.
-      const media = mediaTypeFor(p)
+      const media = mediaTypeFor(full)
       if (media) {
         return {
           output: `${p} (${media.mimeType}, ${bytes.length} bytes)`,
@@ -237,7 +479,7 @@ function readTool(): Tool {
   )
 }
 
-function writeTool(): Tool {
+function writeTool(env: BuiltinEnv): Tool {
   return builtin(
     "write",
     "Write content to a file (create/overwrite), creating parent directories.",
@@ -254,15 +496,21 @@ function writeTool(): Tool {
       const p = String(args.path ?? "")
       if (!p) return err("write: path is required")
       const content = typeof args.content === "string" ? args.content : String(args.content ?? "")
-      await fs.mkdir(path.dirname(path.resolve(p)), { recursive: true })
-      await fs.writeFile(p, content, "utf8")
+      let full: string
+      try {
+        full = env.resolvePath(p)
+      } catch (e) {
+        return err(`write: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      await fs.mkdir(path.dirname(path.resolve(full)), { recursive: true })
+      await fs.writeFile(full, content, "utf8")
       const bytes = Buffer.byteLength(content, "utf8")
       return ok(`Wrote ${bytes} bytes to ${p}`, { bytes })
     },
   )
 }
 
-function editTool(): Tool {
+function editTool(env: BuiltinEnv): Tool {
   return builtin(
     "edit",
     "Exact-string replace in a file. Default replaces a single unique occurrence; replaceAll replaces all.",
@@ -286,8 +534,10 @@ function editTool(): Tool {
       const oldString = args.oldString
       const newString = typeof args.newString === "string" ? args.newString : String(args.newString ?? "")
       let content: string
+      let full: string
       try {
-        content = await fs.readFile(p, "utf8")
+        full = env.resolvePath(p)
+        content = await fs.readFile(full, "utf8")
       } catch (e) {
         return err(`edit: ${e instanceof Error ? e.message : String(e)}`)
       }
@@ -308,7 +558,7 @@ function editTool(): Tool {
   )
 }
 
-function grepTool(): Tool {
+function grepTool(env: BuiltinEnv): Tool {
   return builtin(
     "grep",
     "Search file contents by regex under a directory. Output is file:line:text matches.",
@@ -332,7 +582,12 @@ function grepTool(): Tool {
       } catch (e) {
         return err(`grep: invalid regex: ${e instanceof Error ? e.message : String(e)}`)
       }
-      const root = args.path ? String(args.path) : process.cwd()
+      let root: string
+      try {
+        root = args.path ? env.resolvePath(String(args.path)) : env.dir()
+      } catch (e) {
+        return err(`grep: ${e instanceof Error ? e.message : String(e)}`)
+      }
       const include = args.include ? String(args.include) : undefined
       const limit = typeof args.limit === "number" ? args.limit : 100
       // Was the worse of the two builtins: capped MID-WALK and never sorted at all, so both the
@@ -361,7 +616,7 @@ function grepTool(): Tool {
   )
 }
 
-function globTool(): Tool {
+function globTool(env: BuiltinEnv): Tool {
   return builtin(
     "glob",
     "List files matching a glob under a directory. Output is newline-joined relative paths.",
@@ -378,7 +633,12 @@ function globTool(): Tool {
     async (args) => {
       const pattern = String(args.pattern ?? "")
       if (!pattern) return err("glob: pattern is required")
-      const root = args.path ? String(args.path) : process.cwd()
+      let root: string
+      try {
+        root = args.path ? env.resolvePath(String(args.path)) : env.dir()
+      } catch (e) {
+        return err(`glob: ${e instanceof Error ? e.message : String(e)}`)
+      }
       const limit = typeof args.limit === "number" ? args.limit : 100
       // Collect ALL matches, order them, THEN cap (A24/A25): breaking the walk at the cap let
       // the filesystem decide WHICH files the model sees, not merely their order. The emitted
@@ -617,7 +877,7 @@ function applyUpdate(content: string, body: string[]): string {
   return result
 }
 
-function applyPatchTool(): Tool {
+function applyPatchTool(env: BuiltinEnv): Tool {
   return builtin(
     "apply_patch",
     "Apply a patch (Begin/End Patch grammar: Add/Update/Delete File). Atomic — a non-matching hunk aborts with no writes.",
@@ -635,6 +895,14 @@ function applyPatchTool(): Tool {
       let ops: PatchOp[]
       try {
         ops = parsePatch(patchText)
+      } catch (e) {
+        return err(`apply_patch: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      // The paths live INSIDE the patch text, not in the arguments, so a host
+      // cannot rewrite them from a hook — this is the one case that genuinely
+      // needs the base directory to be library-side (ADR 0034 D2).
+      try {
+        for (const op of ops) op.path = env.resolvePath(op.path)
       } catch (e) {
         return err(`apply_patch: ${e instanceof Error ? e.message : String(e)}`)
       }
@@ -678,17 +946,27 @@ function applyPatchTool(): Tool {
  * for parity: bash, read, write, edit, grep, glob, webfetch, question,
  * apply_patch, todowrite.
  */
-export function createBuiltinTools(): Tool[] {
+export function createBuiltinTools(cfg?: BuiltinsConfig): Tool[] {
+  const env = new BuiltinEnv(cfg)
   return [
-    bashTool(),
-    readTool(),
-    writeTool(),
-    editTool(),
-    grepTool(),
-    globTool(),
+    bashTool(env),
+    readTool(env),
+    writeTool(env),
+    editTool(env),
+    grepTool(env),
+    globTool(env),
     webfetchTool(),
     questionTool(),
-    applyPatchTool(),
+    applyPatchTool(env),
     todowriteTool(),
   ]
+}
+
+/**
+ * The interpreter the builtins resolved for `bash` — what a host prints, and
+ * what `metadata.shell` carries on every bash result. Throws the same error
+ * `selectBuiltins` fails construction with when nothing resolves.
+ */
+export function builtinShell(cfg?: BuiltinsConfig): string[] {
+  return new BuiltinEnv(cfg).shellArgv()
 }
