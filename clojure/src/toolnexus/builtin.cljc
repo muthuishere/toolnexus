@@ -434,10 +434,11 @@
   [pids sig]
   (doseq [pid pids]
     (if (windows?)
-      (proc/sh (if (= sig "-KILL")
-                 ["taskkill" "/T" "/F" "/PID" (str pid)]
-                 ["taskkill" "/T" "/PID" (str pid)])
-               {:timeout-ms 5000})
+      ;; Windows has NO graceful termination for a console process: `taskkill /T`
+      ;; without `/F` refuses every console process in the tree while still being
+      ;; able to take the PARENT down, which reparents the grandchild. Both steps
+      ;; force there; the grace window is a POSIX effect.
+      (proc/sh ["taskkill" "/T" "/F" "/PID" (str pid)] {:timeout-ms 5000})
       (proc/sh ["kill" sig (str pid)] {:timeout-ms 5000}))))
 
 (defn- t-bash

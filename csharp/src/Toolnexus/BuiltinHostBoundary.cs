@@ -235,9 +235,13 @@ internal static class JobControl
     {
         if (OperatingSystem.IsWindows())
         {
-            // No graceful termination for a console process here; taskkill without
-            // /F posts a close request, which is the nearest equivalent.
-            return RunTaskkill(proc.Id, force: false);
+            // Windows has NO graceful termination for a console process, and asking
+            // anyway is worse than not asking: measured on a native Windows box,
+            // `taskkill /T` without `/F` refuses every console process in the tree
+            // while still being able to take the PARENT down — which reparents the
+            // grandchild and leaves it running. Terminate at once there; the grace
+            // window is a POSIX effect.
+            return RunTaskkill(proc.Id, force: true);
         }
         var ok = false;
         foreach (var pid in descendants)

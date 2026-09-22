@@ -132,16 +132,26 @@ func startJob(cmd *exec.Cmd) error {
 }
 
 // signalJob stops the whole tree. Windows has no SIGTERM, so `graceful` cannot
-// mean "ask nicely" the way it does on POSIX: the first attempt is taskkill
-// WITHOUT /F (which posts a close request to processes that have a window),
-// and the forceful one closes the Job Object — or falls back to taskkill /T /F.
+// mean "ask nicely" the way it does on POSIX — both paths therefore stop the job
+// outright, by closing the Job Object (which kills every process in it) or, if
+// no job could be created, with `taskkill /T /F`.
 func signalJob(cmd *exec.Cmd, graceful bool) error {
 	if cmd.Process == nil {
 		return nil
 	}
 	pid := fmt.Sprint(cmd.Process.Pid)
 	if graceful {
-		return exec.Command("taskkill", "/T", "/PID", pid).Run()
+		// Windows has NO graceful termination for a console process, and asking
+		// anyway is worse than not asking: measured on a native Windows box,
+		// `taskkill /T` without `/F` refuses every console process in the tree
+		// while still being able to take the PARENT down, which reparents the
+		// grandchild. Closing the Job Object stops the whole job at once; the
+		// grace window is a POSIX effect.
+		if job, ok := jobs[cmd]; ok {
+			delete(jobs, cmd)
+			return syscall.CloseHandle(job)
+		}
+		return exec.Command("taskkill", "/T", "/F", "/PID", pid).Run()
 	}
 	if job, ok := jobs[cmd]; ok {
 		delete(jobs, cmd)

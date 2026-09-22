@@ -768,8 +768,11 @@ same `builtins` config object as the toggles (`builtins.shell`, `builtins.baseDi
 **Killing a command kills the job.** `bash` starts its command such that the command and everything
 it starts can be stopped together — a new **process group** on POSIX, a **Job Object** (or
 `taskkill /T /F`) on Windows — and a timeout or a cancellation stops that whole set: ask first
-(SIGTERM or the platform equivalent), wait a fixed grace window of **2000 ms**, then insist
-(SIGKILL). Killing only the direct child leaves the real command running, reparented, still writing
+(SIGTERM), wait a fixed grace window of **2000 ms**, then insist (SIGKILL). **The grace window is
+a POSIX effect.** Windows has no graceful termination for a console process, and asking anyway is
+worse than not asking: `taskkill /T` without `/F` refuses every console process in the tree while
+still being able to take the PARENT down, which reparents the grandchild and leaves it running. A
+port therefore stops the job outright on Windows — one Job Object close, or one `taskkill /T /F`. Killing only the direct child leaves the real command running, reparented, still writing
 to the workspace after the call has been reported as finished; that was the behaviour of every port
 and is now the behaviour of none. Where a port must enumerate descendants instead of signalling a
 group, it captures that enumeration **before** terminating the parent — after it, the children have

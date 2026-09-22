@@ -232,3 +232,36 @@ needs OS confinement of the child, which is that ADR's subject, not this one's.
   above is the one Linux-shaped data point, and it came from `dash` on macOS.
 - **Whether `ConfineToBaseDir` should be the default.** It is not, and this spike does not
   argue it should be: default-off keeps every existing host byte-identical (ADR 0034 D3).
+
+---
+
+## 6. After the fix — the shipped ports, re-run on the same machines
+
+The sections above measured the defects. This one measures the fix, with the same probes, on the
+same native Windows box, against **the shipped port code** rather than a reimplementation.
+
+| probe | go (`win/goreal`) | js (`win/jsreal`) | python (`win/pyreal`) |
+|---|---|---|---|
+| interpreter detected | `cmd.exe /d /s /c` | `cmd.exe /d /s /c` | `cmd.exe /d /s /c` |
+| `bash` runs | `hello-from-bash-builtin` | same | same |
+| relative write | `RELATIVE_LANDED_IN=baseDir` | same | same |
+| `..\..\escape.txt` with confinement | refused | refused | refused |
+| `CON` with confinement | refused | refused | refused |
+| timeout | `ORPHAN=none` | `ORPHAN=none`, `KILLEDTREE=true` | `ORPHAN=none`, `KILLEDTREE=true` |
+| `glob` | `sub/a.txt` | `sub/a.txt` | `sub/a.txt` |
+| `grep` | `sub/a.txt:1:x` (was `tree\sub\a.txt:1:x`) | `sub/a.txt:1:x` | `sub/a.txt:1:x` |
+
+**Two defects were found by running there, both invisible to every POSIX suite:**
+
+1. **js called `taskkill` without `/PID`.** `taskkill /T /F <pid>` is not a valid command line —
+   `ERROR: Invalid argument/option - '7668'` — so every kill failed, silently, and the job
+   survived. The line never executes on POSIX, so 308 green js tests said nothing about it.
+2. **A "graceful" first step is actively harmful on Windows.** `taskkill /T` without `/F` refuses
+   every console process in the tree (*"can only be terminated forcefully"*) while still being
+   able to take the **parent** down — which reparents the grandchild and leaves it running. All
+   seven ports now go straight to a forceful stop there; the TERM → 2000 ms → KILL sequence is a
+   POSIX effect, and `SPEC.md §4A` says so.
+
+**java, csharp, elixir and clojure are still unverified on Windows** — those four runtimes are not
+installed on the box, which is stated here, in ADR 0034, in the change's tasks, and in
+`CHANGELOG.md`, rather than being left for a reader to notice.

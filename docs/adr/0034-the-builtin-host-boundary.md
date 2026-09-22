@@ -151,6 +151,12 @@ Two findings are load-bearing:
 - **`SIGTERM` then `SIGKILL`, with a grace window.** A test runner that gets TERM removes its
   temp directories; one that gets KILL does not. The window is fixed and spec'd so the seven
   ports agree.
+- **The grace window is POSIX-only, and that too was measured rather than reasoned.** The first
+  Windows implementation asked politely with `taskkill /T` (no `/F`) and it made things *worse*:
+  every console process in the tree refuses ("can only be terminated forcefully") while the
+  parent can still go down, which reparents the grandchild and leaves it running. Measured on the
+  Windows box against the shipped js port: `KILLEDTREE=false`, `ORPHAN=SURVIVED`. All seven ports
+  now stop the job outright there — a Job Object close, or one `taskkill /T /F`.
 
 **Correction, and it is the reason the per-port spikes exist.** This ADR first endorsed a `set -m`
 job-control wrapper for the ports with no native process-group call. The per-port probes refuted
@@ -214,6 +220,15 @@ code on a real Windows machine, which is the argument for having done that.
   instead of a report.
 - Per-platform files enter the repo. Seven ports × two platform paths is the maintenance
   cost, and it is paid where CI can see it: the spike's probes become tests.
+- **Three ports are verified on native Windows, with their shipped code.** go, js and python were
+  run on the Windows box (`spikes/builtin-host-boundary/win/{goreal,jsreal,pyreal}`): the
+  interpreter detected as `cmd /d /s /c`, a relative write landing in `baseDir`, `..\..` and `CON`
+  refused, no orphan after a timeout, and `grep` emitting `sub/a.txt:1:x` where it used to emit
+  `tree\sub\a.txt:1:x`.
+- **Running them there paid for itself immediately**: it found a Windows-only defect in the js
+  implementation — `taskkill` invoked without `/PID`, so every kill failed silently and the job
+  survived — which every POSIX test suite passed straight through, because that line never runs on
+  POSIX.
 - **Java, C#, Elixir and Clojure remain unverified on Windows** — those runtimes are not
   installed on the box we have. That is named in `CHANGELOG.md` and in the change's tasks,
   because an omission that stops being mentioned is indistinguishable from something that was

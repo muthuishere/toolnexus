@@ -368,8 +368,14 @@ function bashTool(env: BuiltinEnv): Tool {
           if (child.pid === undefined) return false
           try {
             if (process.platform === "win32") {
-              const args = graceful ? ["/T", "/PID", String(child.pid)] : ["/T", "/F", String(child.pid)]
-              const r = spawnSync("taskkill", args)
+              // Windows has NO graceful termination for a console process, and
+              // asking anyway is worse than not asking: measured on a native
+              // Windows box, `taskkill /T` without `/F` refuses every console
+              // process in the tree ("can only be terminated forcefully") while
+              // still being able to take the parent down — which reparents the
+              // grandchild and leaves it running. So the job is terminated at
+              // once there, and the grace window is a POSIX effect (ADR 0034 D4).
+              const r = spawnSync("taskkill", ["/T", "/F", "/PID", String(child.pid)])
               return r.status === 0
             }
             process.kill(-child.pid, graceful ? "SIGTERM" : "SIGKILL")
@@ -410,6 +416,13 @@ function bashTool(env: BuiltinEnv): Tool {
         child.on("error", (e) => finish(err(`bash: ${e.message}`, meta)))
         child.on("close", (code) => {
           if (stopped) {
+            // The direct child closing does NOT mean the job is gone: on Windows
+            // a detached grandchild outlives it, and the graceful `taskkill /T`
+            // (no /F) is refused for a console process — measured on a native
+            // Windows box, where this path reported killedTree=false and the
+            // grandchild wrote its marker anyway. So insist here rather than
+            // relying on a grace timer that `finish` is about to clear.
+            if (!killedTree) killedTree = killJob(false)
             meta.timedOut = stopped === "timeout"
             meta.killedTree = killedTree
             return finish(

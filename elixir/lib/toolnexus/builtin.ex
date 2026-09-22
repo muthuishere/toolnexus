@@ -522,9 +522,12 @@ defmodule Toolnexus.Builtin do
 
   defp signal(pids, sig) do
     if windows?() do
+      # Windows has NO graceful termination for a console process: `taskkill /T`
+      # without `/F` refuses every console process in the tree while still being
+      # able to take the PARENT down, which reparents the grandchild. Both steps
+      # therefore force there; the grace window is a POSIX effect.
       Enum.each(pids, fn pid ->
-        args = if sig == "-KILL", do: ["/T", "/F", "/PID", Integer.to_string(pid)], else: ["/T", "/PID", Integer.to_string(pid)]
-        System.cmd("taskkill", args, stderr_to_stdout: true)
+        System.cmd("taskkill", ["/T", "/F", "/PID", Integer.to_string(pid)], stderr_to_stdout: true)
       end)
     else
       Enum.each(pids, fn pid ->
