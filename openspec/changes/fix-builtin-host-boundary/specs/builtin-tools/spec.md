@@ -121,6 +121,16 @@ Termination SHALL be graceful before it is forceful: the job is asked to termina
 or the platform equivalent), given a fixed grace window of **2000 ms**, and only then killed
 (SIGKILL, or the platform equivalent). The window is identical in every port.
 
+The window bounds how long the **kill** may take, not how long the **caller** waits: a port SHALL
+wait for the job to be gone for at most the window and return as soon as it is gone. Sleeping
+through the window regardless SHALL NOT occur — it turns a one-second timeout into a three-second
+call.
+
+#### Scenario: A timeout returns as soon as the job is gone
+
+- **WHEN** a `bash` call times out and the job ends as soon as it is asked to stop
+- **THEN** the call returns without waiting out the remaining grace window
+
 Where a port must enumerate descendants rather than signal a group, it SHALL capture that
 enumeration **before** terminating the parent: once the parent dies its children are reparented
 and are no longer reachable from its process id.

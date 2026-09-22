@@ -768,8 +768,11 @@ same `builtins` config object as the toggles (`builtins.shell`, `builtins.baseDi
 **Killing a command kills the job.** `bash` starts its command such that the command and everything
 it starts can be stopped together — a new **process group** on POSIX, a **Job Object** (or
 `taskkill /T /F`) on Windows — and a timeout or a cancellation stops that whole set: ask first
-(SIGTERM), wait a fixed grace window of **2000 ms**, then insist (SIGKILL). **The grace window is
-a POSIX effect.** Windows has no graceful termination for a console process, and asking anyway is
+(SIGTERM), wait a fixed grace window of **2000 ms**, then insist (SIGKILL). **The window bounds how long the KILL
+may take, not how long the CALLER waits**: a port waits for the job to be gone, up to the window,
+and returns as soon as it is — sleeping through the window whether or not the job already died
+turns a 1 s timeout into a 3 s call, which two ports did until it was measured. **The grace window
+is also a POSIX effect.** Windows has no graceful termination for a console process, and asking anyway is
 worse than not asking: `taskkill /T` without `/F` refuses every console process in the tree while
 still being able to take the PARENT down, which reparents the grandchild and leaves it running. A
 port therefore stops the job outright on Windows — one Job Object close, or one `taskkill /T /F`. Killing only the direct child leaves the real command running, reparented, still writing

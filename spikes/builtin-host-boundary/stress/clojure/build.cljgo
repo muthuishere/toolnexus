@@ -1,0 +1,5 @@
+;; cljgo half. `src` is a SYMLINK to ../../../../clojure/src, so this compiles
+;; the SHIPPED toolnexus.builtin, never a copy.
+(defn build [b]
+  (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.11.0"})
+  (install b (exe b {:name "tn-stress" :main "stress.cljc"})))

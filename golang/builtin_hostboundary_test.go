@@ -130,6 +130,30 @@ func TestBashCancellationStopsTheWork(t *testing.T) {
 	}
 }
 
+// TestTimeoutReturnsAsSoonAsTheJobIsGone — the 2000 ms window bounds how long
+// the KILL may take, not how long the CALLER waits. Two ports used to sleep
+// through it whether or not the job had already died, turning a 300 ms timeout
+// into a 2.3 s call (spikes/builtin-host-boundary/stress/STRESS.md §3).
+func TestTimeoutReturnsAsSoonAsTheJobIsGone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX command shape")
+	}
+	marker := filepath.Join(t.TempDir(), "grace.marker")
+	command := "sleep 0.2; sh -c 'sleep 5; touch " + marker + "'"
+
+	bash := builtinNamed(t, nil, "bash")
+	start := time.Now()
+	res := runTool(t, bash, map[string]any{"command": command, "timeout": 300})
+	elapsed := time.Since(start)
+
+	if !res.IsError {
+		t.Fatalf("expected a timeout error; got %q", res.Output)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Fatalf("a 300ms timeout took %v — the caller waited out the grace window", elapsed)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // #100 — the interpreter is chosen, and reported
 // ---------------------------------------------------------------------------

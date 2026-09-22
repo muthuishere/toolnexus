@@ -74,6 +74,19 @@ test("bash: aborting the surrounding call stops the work", { skip: isWindows }, 
   assert.equal(fs.existsSync(marker), false, "cancellation left the job running")
 })
 
+test("bash: a timeout returns as soon as the job is gone, not after the grace window", { skip: isWindows }, async () => {
+  // The 2000 ms window bounds how long the KILL may take, not how long the
+  // CALLER waits. Two ports used to sleep through it regardless, turning a
+  // 300 ms timeout into a 2.3 s call (stress/STRESS.md §3).
+  const marker = path.join(tmp(), "grace.marker")
+  const started = Date.now()
+  const res = await run(toolNamed(undefined, "bash"), { command: orphanCommand(marker), timeout: 300 })
+  const elapsed = Date.now() - started
+
+  assert.equal(res.isError, true)
+  assert.ok(elapsed < 1500, `a 300ms timeout took ${elapsed}ms — the caller waited out the grace window`)
+})
+
 // ---------------------------------------------------------------------------
 // #100 — the interpreter is chosen, and reported
 // ---------------------------------------------------------------------------

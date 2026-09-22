@@ -77,6 +77,17 @@ without `/F` refuses every console process in the tree while still being able to
 down, reparenting the grandchild. All seven ports now stop the job outright on Windows, and the
 TERM → 2000 ms → KILL sequence is documented as a POSIX effect.
 
+**Stress-tested in all seven ports, and it found one more parity break.** A harness per port
+(`spikes/builtin-host-boundary/stress/`) throws 30 concurrent timeouts, 40 interleaved
+success/timeout calls, a 5 MB-output command that times out (the shape that used to deadlock),
+repeated rounds watching threads/children/file descriptors, and 500+ concurrent path resolutions
+at the confinement check. All seven pass, including clojure on both of its hosts — 0 orphans of
+30, no leak, no crossed results, no escape allowed and no legal path refused. What it caught:
+**elixir and clojure slept through the whole 2 s kill grace whether or not the job had already
+died**, so a 1 s timeout cost the caller 3 s where the other five returned in 1 s. Both now wait
+for the job to be gone rather than sleeping, `SPEC.md §4A` says which of the two it is, and all
+seven ports have a test pinning it.
+
 **What is not done.** Java, C#, Elixir and Clojure are **unverified on Windows** — those runtimes
 are not installed on the Windows machine available to us; their implementations follow documented
 platform APIs and the gap is real until someone runs them. Nothing here confines commands run by

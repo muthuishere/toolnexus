@@ -62,6 +62,19 @@
     (is (fs/exists? marker)
         "the command cannot write the marker at all — the orphan test proves nothing")))
 
+(deftest a-timeout-returns-as-soon-as-the-job-is-gone
+  ;; The 2000 ms window bounds how long the KILL may take, not how long the
+  ;; CALLER waits. This port used to sleep through it whether or not the job had
+  ;; already died, turning a 300 ms timeout into a 2.3 s call — measured against
+  ;; five other ports at ~1.0 s (spikes/builtin-host-boundary/stress/STRESS.md §3).
+  (let [marker  (str (fresh-dir "grace") "/grace.marker")
+        started (ktime/mono-ms)
+        r       (run nil "bash" {:command (orphan-command marker) :timeout 300})
+        elapsed (- (ktime/mono-ms) started)]
+    (is (:isError r))
+    (is (< elapsed 1500)
+        (str "a 300 ms timeout took " elapsed " ms — the caller waited out the grace window"))))
+
 ;; ---------------------------------------------------------------------------
 ;; #100 — the interpreter is chosen, and reported
 ;; ---------------------------------------------------------------------------

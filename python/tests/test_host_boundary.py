@@ -85,6 +85,21 @@ async def test_cancelling_the_call_stops_the_work(tmp_path):
     assert not os.path.exists(marker), "cancellation left the job running"
 
 
+@posix_only
+@pytest.mark.asyncio
+async def test_timeout_returns_as_soon_as_the_job_is_gone(tmp_path):
+    """The 2000 ms window bounds how long the KILL may take, not how long the
+    CALLER waits. Two ports used to sleep through it regardless, turning a 300 ms
+    timeout into a 2.3 s call (spikes/builtin-host-boundary/stress/STRESS.md §3)."""
+    marker = str(tmp_path / "grace.marker")
+    started = time.monotonic()
+    res = await run(tool_named(None, "bash"), {"command": orphan_command(marker), "timeout": 300})
+    elapsed = (time.monotonic() - started) * 1000
+
+    assert res.is_error is True
+    assert elapsed < 1500, f"a 300 ms timeout took {elapsed:.0f} ms — the caller waited out the grace window"
+
+
 # --------------------------------------------------------------------------- #
 # #100 — the interpreter is chosen, and reported
 # --------------------------------------------------------------------------- #

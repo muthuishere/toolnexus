@@ -514,10 +514,46 @@ defmodule Toolnexus.Builtin do
   defp kill_job(port, os_pid) do
     pids = [os_pid | descendants(os_pid)]
     signal(pids, "-TERM")
-    Process.sleep(@kill_grace_ms)
-    signal(pids, "-KILL")
+    # WAIT for the job to go, up to the grace window — do not SLEEP through it.
+    # The window bounds how long the kill may take, not how long the caller
+    # waits: a command that dies on SIGTERM in 5 ms must not cost its caller two
+    # seconds. Measured parity break — five ports returned a 1 s timeout in
+    # ~1.0 s while this one took ~3.05 s.
+    unless await_exit(pids, @kill_grace_ms) do
+      signal(pids, "-KILL")
+    end
+
     if Port.info(port), do: Port.close(port)
     true
+  end
+
+  # Poll until every pid is gone or the deadline passes. `kill -0` is the
+  # portable liveness test; it signals nothing.
+  defp await_exit(pids, budget_ms) do
+    deadline = System.monotonic_time(:millisecond) + budget_ms
+
+    Enum.reduce_while(Stream.cycle([:tick]), false, fn _, _ ->
+      if Enum.all?(pids, &(not alive_pid?(&1))) do
+        {:halt, true}
+      else
+        if System.monotonic_time(:millisecond) >= deadline do
+          {:halt, false}
+        else
+          Process.sleep(20)
+          {:cont, false}
+        end
+      end
+    end)
+  end
+
+  defp alive_pid?(pid) do
+    if windows?() do
+      case System.cmd("tasklist", ["/FI", "PID eq #{pid}"], stderr_to_stdout: true) do
+        {out, _} -> String.contains?(out, to_string(pid))
+      end
+    else
+      match?({_, 0}, System.cmd("kill", ["-0", to_string(pid)], stderr_to_stdout: true))
+    end
   end
 
   defp signal(pids, sig) do

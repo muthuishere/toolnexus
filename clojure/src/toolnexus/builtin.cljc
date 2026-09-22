@@ -441,6 +441,26 @@
       (proc/sh ["taskkill" "/T" "/F" "/PID" (str pid)] {:timeout-ms 5000})
       (proc/sh ["kill" sig (str pid)] {:timeout-ms 5000}))))
 
+(defn- alive-pid?
+  "Is `pid` still running? `kill -0` is the portable liveness test; it signals
+  nothing. On Windows `tasklist` is the equivalent question."
+  [pid]
+  (if (windows?)
+    (let [r (proc/sh ["tasklist" "/FI" (str "PID eq " pid)] {:timeout-ms 5000})]
+      (str/includes? (str (:out r)) (str pid)))
+    (= 0 (long (or (:exit (proc/sh ["kill" "-0" (str pid)] {:timeout-ms 5000})) -1)))))
+
+(defn- await-exit
+  "Poll until every pid is gone, or `budget-ms` passes. Returns true if the job
+  ended within the budget."
+  [pids budget-ms]
+  (let [deadline (+ (ktime/mono-ms) budget-ms)]
+    (loop []
+      (cond
+        (every? (fn [p] (not (alive-pid? p))) pids) true
+        (>= (ktime/mono-ms) deadline) false
+        :else (do (ktime/sleep! 20) (recur))))))
+
 (defn- t-bash
   "Combined stdout+stderr. Non-zero exit ⇒ isError with the exit code appended.
   A timeout kills THE WHOLE JOB ⇒ isError.
@@ -498,8 +518,14 @@
                 (let [pid  (when (fs/exists? pidfile) (parse-pid (fs/read-file pidfile)))
                       pids (when pid (into [pid] (child-pids pid)))]
                   (when (seq pids) (signal-job pids "-TERM"))
-                  (ktime/sleep! kill-grace-ms)
-                  (when (seq pids) (signal-job pids "-KILL"))
+                  ;; WAIT for the job to go, up to the grace window — do not
+                  ;; SLEEP through it. The window bounds how long the kill may
+                  ;; take, not how long the caller waits: a command that dies on
+                  ;; SIGTERM in 5 ms must not cost its caller two seconds.
+                  ;; Measured parity break — five ports returned a 1 s timeout in
+                  ;; ~1.0 s while this one took ~3.05 s.
+                  (when (and (seq pids) (not (await-exit pids kill-grace-ms)))
+                    (signal-job pids "-KILL"))
                   (tool/failure (str "command timed out after " ms "ms")
                                 (assoc meta :timedOut true :killedTree (boolean (seq pids)))))
                 (let [out (str (:out r) (:err r))]

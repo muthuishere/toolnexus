@@ -74,6 +74,20 @@ defmodule Toolnexus.HostBoundaryTest do
     refute File.exists?(marker), "cancelling the caller left the job running"
   end
 
+  test "a timeout returns as soon as the job is gone, not after the whole grace window" do
+    # The 2000 ms window bounds how long the KILL may take, not how long the
+    # CALLER waits. This port used to sleep through it whether or not the job had
+    # already died, turning a 300 ms timeout into a 2.3 s call — measured against
+    # five other ports at ~1.0 s (spikes/builtin-host-boundary/stress/STRESS.md §3).
+    marker = Path.join(tmp_dir(), "grace.marker")
+    started = System.monotonic_time(:millisecond)
+    result = run(nil, "bash", %{"command" => orphan_command(marker), "timeout" => 300})
+    elapsed = System.monotonic_time(:millisecond) - started
+
+    assert result.is_error
+    assert elapsed < 1500, "a 300 ms timeout took #{elapsed} ms — the caller waited out the grace window"
+  end
+
   # ---------------------------------------------------------------------------
   # #100 — the interpreter is chosen, and reported
   # ---------------------------------------------------------------------------

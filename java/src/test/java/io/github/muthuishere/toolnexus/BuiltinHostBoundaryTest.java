@@ -78,6 +78,26 @@ class BuiltinHostBoundaryTest {
                 "the command cannot write the marker at all — the orphan test proves nothing");
     }
 
+    /**
+     * The 2000 ms window bounds how long the KILL may take, not how long the
+     * CALLER waits. Two ports used to sleep through it whether or not the job had
+     * already died, turning a 300 ms timeout into a 2.3 s call
+     * (spikes/builtin-host-boundary/stress/STRESS.md §3).
+     */
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void aTimeoutReturnsAsSoonAsTheJobIsGone(@TempDir Path dir) {
+        Path marker = dir.resolve("grace.marker");
+        long started = System.currentTimeMillis();
+        ToolResult res = run(tool(null, "bash"),
+                Map.of("command", orphanCommand(marker), "timeout", 300));
+        long elapsed = System.currentTimeMillis() - started;
+
+        assertTrue(res.isError());
+        assertTrue(elapsed < 1500,
+                "a 300ms timeout took " + elapsed + "ms — the caller waited out the grace window");
+    }
+
     // -----------------------------------------------------------------------
     // #100 — the interpreter is chosen, and reported
     // -----------------------------------------------------------------------

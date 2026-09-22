@@ -102,6 +102,17 @@ measurements each task is verified against.
 - A pluggable exec/filesystem backend — ADR 0033, still proposed and unspiked
 - Java/C#/Elixir/Clojure Windows verification — needs a box with those runtimes installed
 
+## 8B. Stress (added after the first pass)
+
+- [x] a stress harness per port: concurrent timeouts, mixed load, 5 MB output + timeout, leak
+      rounds, confinement under load (`spikes/builtin-host-boundary/stress/`, summary in
+      `STRESS.md`)
+- [x] all seven ports pass all scenarios, clojure on both hosts
+- [x] the parity break it found — elixir and clojure sleeping through the grace window — fixed in
+      both, pinned by a test in **all seven** ports and stated in `SPEC.md §4A`
+- [ ] the Windows stress harness (`stress/win/`) — written, NOT RUN: the agentbus listener on the
+      Windows box went down during the attempt and needs restarting there
+
 ## 9. Verified where, and where not
 
 **Measured on native Windows with the shipped port code** (`spikes/builtin-host-boundary/win/`):
