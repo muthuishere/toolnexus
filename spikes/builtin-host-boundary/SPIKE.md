@@ -54,17 +54,27 @@ workarounds were measured:
   without a live parent. **Works** (`PGID=34447`, tree killed), but the probe used
   `perl -e 'setpgrp(0,0)'`, and perl is not a dependency this library may acquire.
 
-A perl-free version of the same idea was measured separately and works on POSIX:
+A perl-free version of the same idea was measured and **then refuted**. `set -m` (job control)
+does put a background compound command in its own process group on bash:
 
 ```
 $ sh -c 'set -m; { sleep 0.2; sh -c "sleep 1; touch /tmp/m2"; } & echo $! > /tmp/pg2; wait $!'
-$ kill -TERM -$(cat /tmp/pg2)        # marker never appears
+$ kill -TERM -$(cat /tmp/pg2)        # marker never appears — on macOS /bin/sh, i.e. bash
 ```
 
-`set -m` (job control) puts the background compound command in **its own process group**
-whose pgid equals its pid, and that pid is written out before anything can be killed. So
-clojure can fix this in-port with one shell wrapper and no koine change; a `:kill-tree?`
-option in koine would be cleaner and is the follow-up worth opening.
+**Under `dash` it does not work at all**, measured in the per-port probes
+(`ports/elixir-clojure-findings.md`): `set: can't access tty; job control turned off`, then
+`kill: -PGID: No such process`, then `ORPHAN_SURVIVED`. `/bin/sh` **is** dash on Debian-family
+Linux — the platform issue #100 is about — so a fix that depends on `set -m` fails exactly where
+the shell question was raised. Plain `set -m` also appends bash's job notifications (`[1]+ Done …`)
+into the combined output, moving `output` for every command; only the `wait $! 2>/dev/null` and
+`set +m`-before-`wait` spellings are byte-identical to the control.
+
+**What replaces it, for every port with no native process-group call** (clojure, csharp, elixir):
+the command writes its own pid (`sh -c 'echo $$ > pidfile; exec <command>'`; `exec` keeps the pid),
+and the descendants are **snapshotted from that pid while the parent is still alive**, then
+signalled. That is the same rule the java and elixir fixes already obey, and it needs no job
+control, no `perl`, and no koine release.
 
 ## 2. S2 — which interpreter actually runs? (#100)
 

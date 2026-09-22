@@ -137,9 +137,9 @@ Per platform, using each runtime's real mechanism rather than a lowest common de
 | js | `detached:true`, `process.kill(-pid)` | `taskkill /T /F /PID` |
 | python | `start_new_session=True`, `os.killpg` | `taskkill /T /F /PID` |
 | java | `ProcessHandle.descendants()` snapshot → destroy → destroyForcibly | same API (unverified on Windows) |
-| csharp | `Process.Kill(entireProcessTree: true)` | same (unverified on Windows) |
+| csharp | descendant snapshot + `kill(2)` via libc P/Invoke for the TERM step, then `Process.Kill(entireProcessTree: true)` | `Process.Kill(entireProcessTree: true)` (unverified on Windows) |
 | elixir | `ps` descendant walk from `Port.info(:os_pid)`, then `kill` | `taskkill /T /F` (unverified) |
-| clojure | `set -m` job-control wrapper: the child is a group leader and its pgid is written out before anything is killed | `taskkill /T /F` (unverified) |
+| clojure | pid file + descendant snapshot taken while the parent is alive, then signalled | `taskkill /T /F` (unverified) |
 
 Two findings are load-bearing:
 
@@ -147,12 +147,24 @@ Two findings are load-bearing:
   parent is killed its children are reparented and `REACHABLE_AFTER_KILL=0` — a post-hoc
   tree walk finds nothing. The java and elixir fixes capture first, then kill; clojure cannot
   capture at all through koine's internal kill, which is why it gets a process group up front.
+- **.NET has no graceful kill.** Measured: both `Process.Kill()` and `Process.Kill(entireProcessTree: true)` send **SIGKILL**, and `CloseMainWindow()` returns `False` and does nothing. The TERM step in that port therefore costs a `DllImport("libc") kill(2)` — platform-guarded, no third-party dependency — and it must reach the **job**: TERM'ing the direct child alone kills the shell instantly, leaving the tree reparented and the "graceful" step self-defeating (measured: `gracetree_kill_child_only=ORPHAN_SURVIVED`).
 - **`SIGTERM` then `SIGKILL`, with a grace window.** A test runner that gets TERM removes its
   temp directories; one that gets KILL does not. The window is fixed and spec'd so the seven
   ports agree.
 
-Clojure's wrapper is in-port and needs no koine release; a `:kill-tree?` option in koine is
-the better long-term home and is a follow-up, not a blocker.
+**Correction, and it is the reason the per-port spikes exist.** This ADR first endorsed a `set -m`
+job-control wrapper for the ports with no native process-group call. The per-port probes refuted
+it: under **dash** `set -m` reports `can't access tty; job control turned off`, the pgid kill then
+fails, and the job survives — and `/bin/sh` is dash on the Debian-family Linux that issue #100 is
+about. It also appends bash job notifications into the combined output, which moves `output`.
+The replacement is the rule the java and elixir fixes already follow: **write the child's pid,
+snapshot its descendants while it is still alive, then signal them.** No job control, no `perl`,
+no koine release.
+
+A further finding, also from the probes: **koine's `real-path` disagrees between the two clojure
+hosts on case** — the JVM normalises it, cljgo does not — so one path yields two confinement
+verdicts. That is a §0 break inside koine, visible only because clojure has two hosts; the port
+folds case itself rather than waiting for a koine release.
 
 ### D5 — The two timeout outcomes are different facts, and `output` still does not move.
 
