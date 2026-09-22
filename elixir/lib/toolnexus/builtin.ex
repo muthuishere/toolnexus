@@ -47,7 +47,7 @@ defmodule Toolnexus.Builtin do
   def load(cfg \\ nil) do
     if enabled?(cfg) do
       map = if is_map(cfg), do: cfg_get(cfg, :tools), else: nil
-      all = tools()
+      all = tools(cfg)
 
       case map do
         m when is_map(m) -> Enum.filter(all, fn t -> Map.get(m, t.name) != false end)
@@ -65,20 +65,197 @@ defmodule Toolnexus.Builtin do
   for parity: bash, read, write, edit, grep, glob, webfetch, question,
   apply_patch, todowrite.
   """
-  @spec tools() :: [Tool.t()]
-  def tools do
+  @spec tools(nil | boolean() | map()) :: [Tool.t()]
+  def tools(cfg \\ nil) do
+    e = env(cfg)
+
     [
-      bash_tool(),
-      read_tool(),
-      write_tool(),
-      edit_tool(),
-      grep_tool(),
-      glob_tool(),
+      bash_tool(e),
+      read_tool(e),
+      write_tool(e),
+      edit_tool(e),
+      grep_tool(e),
+      glob_tool(e),
       webfetch_tool(),
       question_tool(),
-      apply_patch_tool(),
+      apply_patch_tool(e),
       todowrite_tool()
     ]
+  end
+
+  # ---------------------------------------------------------------------------
+  # the host boundary: interpreter, base directory, confinement (SPEC §4A, ADR 0034)
+  # ---------------------------------------------------------------------------
+
+  # How long a job gets between "please stop" and "stop". Fixed, and identical in
+  # every port, so a timeout means the same thing everywhere.
+  @kill_grace_ms 2000
+
+  @win_reserved ~w(CON PRN AUX NUL COM1 COM2 COM3 COM4 COM5 COM6 COM7 COM8 COM9
+                   LPT1 LPT2 LPT3 LPT4 LPT5 LPT6 LPT7 LPT8 LPT9)
+
+  @doc false
+  # The interpreters tried when the host names none. `%COMSPEC%` leads on Windows
+  # because PowerShell is routinely blocked by execution or application-control
+  # policy, while `%COMSPEC%` is always present.
+  def shell_candidates do
+    if windows?() do
+      comspec = System.get_env("COMSPEC")
+
+      (if comspec, do: [[comspec, "/d", "/s", "/c"]], else: []) ++
+        [
+          ["cmd.exe", "/d", "/s", "/c"],
+          ["pwsh", "-NoProfile", "-Command"],
+          ["powershell", "-NoProfile", "-Command"],
+          ["bash", "-lc"]
+        ]
+    else
+      [["/bin/sh", "-c"], ["sh", "-c"]]
+    end
+  end
+
+  defp windows?, do: match?({:win32, _}, :os.type())
+
+  # `Port.open({:spawn_executable, exe})` needs an ABSOLUTE path and reports the
+  # same `:enoent` for a bare name as for a program that does not exist, so the
+  # name is resolved here rather than at spawn time.
+  defp resolve_exe(name) do
+    cond do
+      String.contains?(name, "/") or String.contains?(name, "\\") ->
+        if File.exists?(name), do: name, else: nil
+
+      true ->
+        case :os.find_executable(String.to_charlist(name)) do
+          false -> nil
+          path -> List.to_string(path)
+        end
+    end
+  end
+
+  @doc false
+  # The host boundary, resolved once at load time: a missing interpreter is a
+  # configuration fact, and turn fourteen of a paid run is the expensive place to
+  # learn it.
+  def env(cfg) do
+    map = if is_map(cfg), do: cfg, else: %{}
+    base_dir = cfg_get(map, :base_dir) || cfg_get(map, :baseDir) || ""
+    confine = cfg_get(map, :confine_to_base_dir) == true or cfg_get(map, :confineToBaseDir) == true
+
+    {shell, shell_error} =
+      case cfg_get(map, :shell) do
+        [_ | _] = given ->
+          argv = Enum.map(given, &to_string/1)
+          exe = resolve_exe(hd(argv))
+
+          if exe,
+            do: {[exe | tl(argv)], nil},
+            else: {[], "shell #{hd(argv)} does not resolve"}
+
+        _ ->
+          detect_shell()
+      end
+
+    %{shell: shell, shell_error: shell_error, base_dir: to_string(base_dir), confine: confine}
+  end
+
+  defp detect_shell do
+    tried = Enum.map(shell_candidates(), &hd/1)
+
+    found =
+      Enum.find_value(shell_candidates(), fn argv ->
+        case resolve_exe(hd(argv)) do
+          nil -> nil
+          exe -> [exe | tl(argv)]
+        end
+      end)
+
+    if found do
+      {found, nil}
+    else
+      {[],
+       "no shell interpreter found (tried: #{Enum.join(tried, ", ")}); set builtins shell, " <>
+         "or disable the bash builtin with builtins tools bash: false"}
+    end
+  end
+
+  @doc false
+  # The interpreter the builtins resolved for `bash` — what a host prints, and
+  # what `metadata.shell` carries on every bash result.
+  def shell(cfg \\ nil) do
+    case env(cfg) do
+      %{shell_error: nil, shell: argv} -> {:ok, argv}
+      %{shell_error: message} -> {:error, message}
+    end
+  end
+
+  defp env_dir(%{base_dir: ""}), do: File.cwd!()
+  defp env_dir(%{base_dir: base}), do: base
+
+  # Map a tool-supplied path onto the filesystem: relative to base_dir (or, with
+  # none, exactly as before), and refused when confinement is on and the canonical
+  # target is outside the base.
+  defp resolve_path(%{base_dir: base, confine: confine}, p) do
+    cond do
+      confine and base == "" ->
+        {:error, "confine_to_base_dir is set but base_dir is empty"}
+
+      true ->
+        full = if base != "" and not absolute?(p), do: Path.join(base, p), else: p
+
+        cond do
+          not confine ->
+            {:ok, full}
+
+          windows?() and reserved_device?(full) ->
+            {:error, "#{p} names a reserved device, which is not a file inside #{base}"}
+
+          true ->
+            canon_base = canonical(base)
+            canon_target = canonical(full)
+
+            if canon_target == canon_base or String.starts_with?(canon_target, canon_base <> "/") do
+              {:ok, full}
+            else
+              {:error, "#{p} resolves outside baseDir #{base}"}
+            end
+        end
+    end
+  end
+
+  defp absolute?(p), do: Path.type(p) != :relative
+
+  defp reserved_device?(p) do
+    stem = p |> Path.basename() |> String.split(".") |> hd() |> String.trim() |> String.upcase()
+    stem in @win_reserved
+  end
+
+  # Resolve a path for comparison. Every COMPONENT is resolved, not just the last
+  # one: a link in the middle of a path is the escape a leaf-only check misses —
+  # `base/link/secret.txt` exists, is not itself a link, and lives outside. A
+  # component that does not exist yet is kept as written, because a file `write`
+  # is about to create has no real path and a check that only works on existing
+  # files is not a check for `write`.
+  defp canonical(p) do
+    p
+    |> Path.expand()
+    |> Path.split()
+    |> Enum.reduce("", fn segment, acc ->
+      joined = if acc == "", do: segment, else: Path.join(acc, segment)
+      follow_link(joined, 0)
+    end)
+  end
+
+  defp follow_link(_path, depth) when depth > 40, do: "/"
+
+  defp follow_link(path, depth) do
+    case File.read_link(path) do
+      {:ok, target} ->
+        resolved = if absolute?(target), do: target, else: Path.expand(target, Path.dirname(path))
+        follow_link(resolved, depth + 1)
+
+      _ ->
+        path
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -194,7 +371,7 @@ defmodule Toolnexus.Builtin do
   # individual tools
   # ---------------------------------------------------------------------------
 
-  defp bash_tool do
+  defp bash_tool(env) do
     builtin(
       "bash",
       "Run a shell command and return its combined stdout+stderr. Non-zero exit is an error.",
@@ -212,60 +389,183 @@ defmodule Toolnexus.Builtin do
       fn args, _ctx ->
         command = str(args["command"])
 
-        if command == "" do
-          err("bash: command is required")
-        else
-          workdir = if args["workdir"], do: str(args["workdir"]), else: File.cwd!()
-          timeout = args["timeout"] |> num(60_000) |> round()
-          # Run the port loop in its own task so port messages never leak into
-          # the caller's mailbox; the port dies with the task.
-          Task.async(fn -> run_shell(command, workdir, timeout) end) |> Task.await(:infinity)
+        cond do
+          command == "" ->
+            err("bash: command is required")
+
+          env.shell_error != nil ->
+            err("bash: #{env.shell_error}")
+
+          true ->
+            workdir_result =
+              if args["workdir"], do: resolve_path(env, str(args["workdir"])), else: {:ok, env_dir(env)}
+
+            case workdir_result do
+              {:error, message} ->
+                err("bash: #{message}")
+
+              {:ok, workdir} ->
+                timeout = args["timeout"] |> num(60_000) |> round()
+                run_job(env, command, workdir, timeout)
+            end
         end
       end
     )
   end
 
-  defp run_shell(command, workdir, timeout) do
+  # The port is owned by a process that TRAPS EXITS, and the caller only waits on
+  # it. That structure is the fix, not decoration: measured
+  # (spikes/builtin-host-boundary/ports/elixir), `Port.close/1` does not kill the
+  # OS process, `Task.shutdown(:brutal_kill)` kills nothing outside the BEAM, and
+  # killing the port owner leaks the whole job — so a kill written INSIDE the task
+  # never runs when the task is the thing being cancelled. Trapping exits here
+  # means the job is stopped on the way out, whichever way the caller leaves.
+  defp run_job(env, command, workdir, timeout) do
+    caller = self()
+
+    {owner, ref} =
+      spawn_monitor(fn ->
+        Process.flag(:trap_exit, true)
+        caller_ref = Process.monitor(caller)
+        run_shell(env, command, workdir, timeout, caller, caller_ref)
+      end)
+
+    receive do
+      {:DOWN, ^ref, :process, ^owner, _reason} ->
+        receive do
+          {:job_result, ^owner, result} -> result
+        after
+          0 -> err("bash: command owner exited without a result")
+        end
+
+      {:job_result, ^owner, result} ->
+        Process.demonitor(ref, [:flush])
+        result
+    end
+  end
+
+  defp run_shell(env, command, workdir, timeout, caller, caller_ref) do
+    [exe | prefix] = env.shell
+
     port =
-      Port.open({:spawn_executable, "/bin/sh"}, [
+      Port.open({:spawn_executable, exe}, [
         :binary,
         :exit_status,
         :stderr_to_stdout,
-        args: ["-c", command],
+        args: prefix ++ [command],
         cd: workdir
       ])
 
+    os_pid =
+      case Port.info(port, :os_pid) do
+        {:os_pid, pid} -> pid
+        _ -> nil
+      end
+
     deadline = System.monotonic_time(:millisecond) + timeout
-    collect_shell(port, "", deadline, timeout)
-  rescue
-    e -> err("bash: #{Exception.message(e)}")
+    meta = %{shell: Enum.join(env.shell, " ")}
+    result = collect_shell(port, "", deadline, timeout, os_pid, meta, caller, caller_ref)
+    send(caller, {:job_result, self(), result})
   end
 
-  defp collect_shell(port, out, deadline, timeout) do
+  defp collect_shell(port, out, deadline, timeout, os_pid, meta, caller, caller_ref) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {^port, {:data, d}} ->
-        collect_shell(port, out <> d, deadline, timeout)
+        collect_shell(port, out <> d, deadline, timeout, os_pid, meta, caller, caller_ref)
 
       {^port, {:exit_status, 0}} ->
-        ok(out, %{exitCode: 0})
+        ok(out, Map.put(meta, :exitCode, 0))
 
       {^port, {:exit_status, code}} ->
-        err("#{out}\nbash: command exited with code #{code}", %{exitCode: code})
+        err("#{out}\nbash: command exited with code #{code}", Map.put(meta, :exitCode, code))
+
+      # The caller went away — cancelled, crashed, or shut down. Stop the job on
+      # the way out; nobody is left to receive a result.
+      {:DOWN, ^caller_ref, :process, _pid, _reason} ->
+        kill_job(port, os_pid)
+        err("bash: command cancelled\n#{out}", Map.merge(meta, %{timedOut: false, killedTree: true}))
+
+      {:EXIT, _from, _reason} ->
+        kill_job(port, os_pid)
+        err("bash: command cancelled\n#{out}", Map.merge(meta, %{timedOut: false, killedTree: true}))
     after
       remaining ->
-        case Port.info(port, :os_pid) do
-          {:os_pid, os_pid} -> System.cmd("kill", ["-9", Integer.to_string(os_pid)], stderr_to_stdout: true)
-          _ -> :ok
-        end
+        killed = kill_job(port, os_pid)
 
-        if Port.info(port), do: Port.close(port)
-        err("bash: command timed out after #{timeout}ms\n#{out}")
+        err(
+          "bash: command timed out after #{timeout}ms\n#{out}",
+          Map.merge(meta, %{timedOut: true, killedTree: killed})
+        )
     end
   end
 
-  defp read_tool do
+  # Stop the command AND everything it started. There is no Setpgid option on
+  # `Port.open` (measured: it rejects one), so the tree is enumerated with `ps`
+  # WHILE THE PARENT IS STILL ALIVE — after it dies its children are reparented
+  # and are no longer reachable from its pid. Ask first, wait out the grace
+  # window, then insist.
+  defp kill_job(port, nil) do
+    if Port.info(port), do: Port.close(port)
+    false
+  end
+
+  defp kill_job(port, os_pid) do
+    pids = [os_pid | descendants(os_pid)]
+    signal(pids, "-TERM")
+    Process.sleep(@kill_grace_ms)
+    signal(pids, "-KILL")
+    if Port.info(port), do: Port.close(port)
+    true
+  end
+
+  defp signal(pids, sig) do
+    if windows?() do
+      Enum.each(pids, fn pid ->
+        args = if sig == "-KILL", do: ["/T", "/F", "/PID", Integer.to_string(pid)], else: ["/T", "/PID", Integer.to_string(pid)]
+        System.cmd("taskkill", args, stderr_to_stdout: true)
+      end)
+    else
+      Enum.each(pids, fn pid ->
+        System.cmd("kill", [sig, Integer.to_string(pid)], stderr_to_stdout: true)
+      end)
+    end
+  end
+
+  defp descendants(root) do
+    case System.cmd("ps", ["-eo", "pid=,ppid="], stderr_to_stdout: true) do
+      {out, 0} ->
+        pairs =
+          out
+          |> String.split("\n", trim: true)
+          |> Enum.flat_map(fn line ->
+            case String.split(String.trim(line), ~r/\s+/) do
+              [p, pp] ->
+                with {pid, ""} <- Integer.parse(p), {ppid, ""} <- Integer.parse(pp) do
+                  [{pid, ppid}]
+                else
+                  _ -> []
+                end
+
+              _ ->
+                []
+            end
+          end)
+
+        walk = fn walk, frontier, acc ->
+          kids = for {p, pp} <- pairs, pp in frontier, p not in acc, do: p
+          if kids == [], do: acc, else: walk.(walk, kids, acc ++ kids)
+        end
+
+        walk.(walk, [root], [])
+
+      _ ->
+        []
+    end
+  end
+
+  defp read_tool(env) do
     builtin(
       "read",
       "Read a UTF-8 text file. With offset/limit, return only that line window.",
@@ -287,7 +587,10 @@ defmodule Toolnexus.Builtin do
             err("read: path is required")
 
           true ->
-            case File.read(p) do
+            case with({:ok, full} <- resolve_path(env, p), do: File.read(full)) do
+              {:error, reason} when is_binary(reason) ->
+                err("read: #{reason}")
+
               {:error, reason} ->
                 err("read: #{p}: #{:file.format_error(reason)}")
 
@@ -329,7 +632,7 @@ defmodule Toolnexus.Builtin do
     )
   end
 
-  defp write_tool do
+  defp write_tool(env) do
     builtin(
       "write",
       "Write content to a file (create/overwrite), creating parent directories.",
@@ -349,16 +652,23 @@ defmodule Toolnexus.Builtin do
           err("write: path is required")
         else
           content = str(args["content"])
-          File.mkdir_p!(Path.dirname(Path.expand(p)))
-          File.write!(p, content)
-          bytes = byte_size(content)
-          ok("Wrote #{bytes} bytes to #{p}", %{bytes: bytes})
+
+          case resolve_path(env, p) do
+            {:error, message} ->
+              err("write: #{message}")
+
+            {:ok, full} ->
+              File.mkdir_p!(Path.dirname(Path.expand(full)))
+              File.write!(full, content)
+              bytes = byte_size(content)
+              ok("Wrote #{bytes} bytes to #{p}", %{bytes: bytes})
+          end
         end
       end
     )
   end
 
-  defp edit_tool do
+  defp edit_tool(env) do
     builtin(
       "edit",
       "Exact-string replace in a file. Default replaces a single unique occurrence; replaceAll replaces all.",
@@ -386,8 +696,15 @@ defmodule Toolnexus.Builtin do
 
           true ->
             new_string = str(args["newString"])
+            full = case resolve_path(env, p) do
+              {:ok, resolved} -> resolved
+              {:error, _} -> nil
+            end
 
-            case File.read(p) do
+            case (if full, do: File.read(full), else: {:error, elem(resolve_path(env, p), 1)}) do
+              {:error, reason} when is_binary(reason) ->
+                err("edit: #{reason}")
+
               {:error, reason} ->
                 err("edit: #{p}: #{:file.format_error(reason)}")
 
@@ -404,7 +721,7 @@ defmodule Toolnexus.Builtin do
 
                   true ->
                     next = String.replace(content, old_string, new_string, global: replace_all)
-                    File.write!(p, next)
+                    File.write!(full, next)
                     n = if replace_all, do: count, else: 1
                     plural = if n == 1, do: "", else: "s"
                     ok("Edited #{p} (#{n} replacement#{plural})", %{replacements: n})
@@ -415,7 +732,7 @@ defmodule Toolnexus.Builtin do
     )
   end
 
-  defp grep_tool do
+  defp grep_tool(env) do
     builtin(
       "grep",
       "Search file contents by regex under a directory. Output is file:line:text matches.",
@@ -441,7 +758,12 @@ defmodule Toolnexus.Builtin do
               err("grep: invalid regex: #{reason} (at #{at})")
 
             {:ok, re} ->
-              root = if args["path"], do: str(args["path"]), else: File.cwd!()
+              root =
+                case (if args["path"], do: resolve_path(env, str(args["path"])), else: {:ok, env_dir(env)}) do
+                  {:ok, r} -> r
+                  {:error, _} -> nil
+                end
+
               include = if args["include"], do: str(args["include"])
               limit = args["limit"] |> num(100) |> trunc()
 
@@ -495,7 +817,7 @@ defmodule Toolnexus.Builtin do
     )
   end
 
-  defp glob_tool do
+  defp glob_tool(env) do
     builtin(
       "glob",
       "List files matching a glob under a directory. Output is newline-joined relative paths.",
@@ -515,7 +837,11 @@ defmodule Toolnexus.Builtin do
         if pattern == "" do
           err("glob: pattern is required")
         else
-          root = if args["path"], do: str(args["path"]), else: File.cwd!()
+          root =
+            case (if args["path"], do: resolve_path(env, str(args["path"])), else: {:ok, env_dir(env)}) do
+              {:ok, r} -> r
+              {:error, _} -> nil
+            end
           limit = args["limit"] |> num(100) |> trunc()
 
           found =
@@ -813,7 +1139,7 @@ defmodule Toolnexus.Builtin do
     Enum.reverse(hunks)
   end
 
-  defp apply_patch_tool do
+  defp apply_patch_tool(env) do
     builtin(
       "apply_patch",
       "Apply a patch (Begin/End Patch grammar: Add/Update/Delete File). Atomic — a non-matching hunk aborts with no writes.",
@@ -834,7 +1160,20 @@ defmodule Toolnexus.Builtin do
           # Stage every write/delete first; only touch the filesystem once all
           # hunks apply. Any raise while staging aborts with no writes.
           try do
-            ops = parse_patch(patch_text)
+            # The paths live INSIDE the patch text, not in the arguments, so a host
+            # cannot rewrite them from a hook — the one case that genuinely needs
+            # the base directory to be library-side (ADR 0034 D2).
+            ops =
+              patch_text
+              |> parse_patch()
+              |> Enum.map(fn op ->
+                p = elem(op, 1)
+
+                case resolve_path(env, p) do
+                  {:ok, full} -> put_elem(op, 1, full)
+                  {:error, message} -> raise message
+                end
+              end)
 
             {writes, deletes} =
               Enum.reduce(ops, {[], []}, fn op, {writes, deletes} ->

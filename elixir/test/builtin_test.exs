@@ -213,7 +213,10 @@ defmodule Toolnexus.BuiltinTest do
       result = run("bash", %{"command" => "printf out; exit 3"})
       assert result.is_error
       assert result.output == "out\nbash: command exited with code 3"
-      assert result.metadata == %{exitCode: 3}
+      # metadata also carries the resolved interpreter now (SPEC §4A, ADR 0034),
+      # so the assertion is on the exit code rather than on the whole map.
+      assert result.metadata[:exitCode] == 3
+      assert is_binary(result.metadata[:shell])
     end
 
     test "missing command is an error" do
