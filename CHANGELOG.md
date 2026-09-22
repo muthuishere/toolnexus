@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.20.0 — 2026-09-22
+
 **`retryAfter` on the typed provider error now means the same thing in all seven ports — the raw
 `Retry-After` header, verbatim.** *Breaking for python, elixir, csharp and clojure hosts that read
 this field.* 0.19.0 shipped the field without pinning its representation, and the seven ports
