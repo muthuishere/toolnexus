@@ -105,7 +105,7 @@ Python: workflows, RAG, evals, a playground, deployers, all in one framework. to
 deliberately is not that — it is a focused, portable *core*. Mastra wraps the Vercel AI SDK and
 adds its own agent/processor layers, which is why it lands heaviest per call here; that overhead
 buys the platform breadth. The honest tradeoff — platform breadth vs a portable, low-overhead core
-that runs byte-identically in six languages — is written up in full (capability matrix +
+that runs byte-identically in seven languages — is written up in full (capability matrix +
 who-wins-where) in
 [`benchmarks/mastra-comparison.md`](https://github.com/muthuishere/toolnexus/blob/main/benchmarks/mastra-comparison.md).
 </Aside>
@@ -200,8 +200,8 @@ nothing over native here (0.602 either way).
 </TabItem>
 <TabItem label="Clojure">
 Clojure is the seventh port and the newest. It appears on this page for the first time because a
-runner for it now exists — this page stayed six-language for exactly that reason, and it would
-still be six-language if the numbers were unflattering. **They are unflattering. Here they are.**
+runner for it now exists — this page stayed seven-language for exactly that reason, and it would
+still be seven-language if the numbers were unflattering. **They are unflattering. Here they are.**
 
 **One source file, two hosts.** `benchmarks/run_toolnexus_clojure/src/bench.cljc` is loaded by
 `clojure -M` on the JVM and compiled to a native Go binary by

@@ -1,0 +1,332 @@
+---
+title: "Loop"
+description: "Agent.Loop(...).Run drives the agent under a Guardrail policy that vets every tool call and a Completion check that decides when the task is done — the gated door beside the plain Agent.Run, with unsupported spec fields (tools, team, waitFor, onMetric) named explicitly rather than silently dropped. — Python."
+sidebar:
+  label: "Loop"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/agents/loop.py">python/src/toolnexus/agents/loop.py</a>
+</p>
+
+```python
+from toolnexus.agents import (
+    Completion, Guardrail, Loop, Outcome, Verdict,
+    agent, all_todos_done, harness, loop_unsupported,
+)
+
+def harness(**spec: Any) -> dict[str, Any]  # a NAME, not a type — identity function
+
+# A POLICY check on a tool call — "may it?", never "is it right?".
+# Return "allow" (or None) to permit; any other string DENIES with that reason.
+Guardrail = Callable[[Any], Optional[str]]
+
+@dataclass
+class Verdict:
+    ok: bool
+    reason: str = ""
+
+@dataclass
+class Completion:
+    verify: Callable[[Any], Union[Verdict, Awaitable[Verdict]]]  # judges ACCUMULATED tool calls
+    max_attempts: int = 0                                        # REQUIRED — bounds the retry loop
+
+@dataclass
+class Outcome:
+    text: str = ""
+    status: str = "done"     # done | incomplete | pending | error
+    stopped_by: str = ""     # named whenever status != "done"
+    attempts: int = 0
+    turns: int = 0
+    result: Any = None
+
+def all_todos_done(result: Any) -> Verdict          # the built-in Completion.verify
+def loop_unsupported(spec: Any) -> list[str]         # canonical: "tools" "team" "waitFor" "onMetric"
+
+class Loop:
+    def __init__(self, agent: Agent, options: dict[str, Any], toolkit: Any) -> None: ...
+    async def run(self, prompt: str, model: str = "") -> Outcome: ...
+    status: str   # idle | running | done | incomplete | pending | error
+    turns: int    # model round trips this loop has spent
+
+# built with Agent.loop(...):
+# agent(...).loop(client_options: dict, toolkit) -> Loop
+```
+
+`Agent.Loop(...).Run` drives the agent under a `Guardrail` policy that vets every tool call and a
+`Completion` check that decides when the task is done — the gated door beside the plain
+`Agent.Run`, with unsupported spec fields (`tools`, `team`, `waitFor`, `onMetric`) named
+explicitly via `loop_unsupported` rather than silently dropped. `Loop` sits over the shipped §8
+client and changes nothing about its behavior; it answers **"did it?"** (status, turns,
+attempts) — a distinct question from what the `Agent` spec answers (**"may it?"** — capability,
+ceilings) and what per-call `RunOptions`/`model` answer (**"with what?"**). None of them answer
+"is it right?" for a single tool, skill or agent call — that stays the caller's own judgment,
+expressed as a `Guardrail` or a `Completion.verify`.
+
+`harness(**spec)` is a name, not a wrapper: it is the identity function, so
+`agent("x", **harness(does="..."))` and `agent("x", does="...")` are indistinguishable. The spec
+*is* the harness (tools, soul, team, budget, model, policy, ceilings) — the word exists so the
+API has one to use, not because a second concept sits behind it. See the narrative
+[harness/loop overview](/harness/) for the conceptual split this page assumes.
+
+## When to use it
+
+- **You want the standalone §8 client loop for one `Agent`, without spinning up the full §7D
+  `AgentRuntime`** — `agent(...).loop(options, toolkit).run(prompt)` is a single conversation,
+  gated the same way a runtime-driven turn is.
+- **A tool call needs a policy veto that is not "is the model allowed to call this tool at all"**
+  (that's a toolkit-level filter) but "should THIS call, with these args, go through right now" —
+  a `Guardrail` denies with a reason string and the model sees the denial as the tool's own
+  result, never a silent block.
+- **"Done" needs to mean something more than the model stopped talking"** — a `Completion` with
+  `all_todos_done` (or your own `verify`) re-prompts the model with the failure reason, bounded
+  by `max_attempts`, and reports `status="incomplete"` with `result.limit == "completion"` if it
+  never passes — never a silent `"done"` on unverified work.
+- **You are about to hand a spec to a `Loop` and need to know what it will ignore** —
+  `loop_unsupported(spec)` names exactly which of `tools`/`team`/`waitFor`/`onMetric` this spec
+  sets that a `Loop` cannot honour (they need the full §7D runtime instead), so a caller can
+  decide up front rather than discover the gap at runtime.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Loop vs AgentRuntime">
+Reach for `Loop` when one `Agent` drives one conversation and you don't need delegation to a
+`team`, cross-agent suspension escalation, or `on_metric`/`wait_for` at the runtime level —
+`loop_unsupported` tells you exactly which of those a given spec would lose under `Loop`. Reach
+for [`AgentRuntime`](/api/python/runtime/runtime/) when you need any of them: it is the full §7D
+substrate (spawn/post/wake/wait/interrupt/close) that `Loop` deliberately does not reimplement.
+</Aside>
+
+<Aside type="caution" title="Guardrail answers 'may it', Completion answers 'did it' — neither answers 'is it right'">
+A `Guardrail` returning anything but `"allow"`/`None` denies a call before it runs — it is a
+policy gate, not a correctness check. A `Completion.verify` judges the tool calls the run has
+accumulated so far, and `all_todos_done` is deliberately structural (it counts unchecked
+`todowrite` items, never inspecting what a todo *means*). Neither one substitutes for a human or
+model review of whether the work is actually right — that judgment stays outside this layer.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — `Loop.run` with no guardrails or completion gate
+
+```python test
+import asyncio
+
+from toolnexus import create_toolkit
+from toolnexus.agents import agent, harness
+
+
+class Scripted:
+    """A transport that replays scripted assistant messages."""
+
+    def __init__(self, messages):
+        self.messages = messages
+        self._i = 0
+
+    def post(self, url, headers, payload, timeout):
+        message = self.messages[min(self._i, len(self.messages) - 1)]
+        self._i += 1
+        return {
+            "choices": [{"message": message, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    def open(self, url, headers, payload, timeout):  # noqa: A003
+        raise NotImplementedError
+
+
+async def main():
+    tk = await create_toolkit(builtins=False)
+    try:
+        # harness() is the identity function — a name, not a wrapper.
+        spec = harness(does="answers plainly")
+        a = agent("plain", **spec)
+        opts = {
+            "base_url": "http://scripted.invalid", "style": "openai", "model": "test-model",
+            "api_key": "unused",
+            "http_transport": Scripted([{"role": "assistant", "content": "hello"}]),
+        }
+        out = await a.loop(opts, tk).run("hi")
+
+        assert out.status == "done"
+        assert out.text == "hello"
+        assert out.attempts == 1
+        assert out.stopped_by == "", "a done run names no stop reason"
+
+        print("ok:", out.status, "|", out.text, "in", out.attempts, "attempt(s)")
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — a `Completion` gate that retries until `all_todos_done` passes
+
+```python test
+import asyncio
+import json
+
+from toolnexus import create_toolkit
+from toolnexus.agents import Completion, agent, all_todos_done
+
+
+class Scripted:
+    def __init__(self, messages):
+        self.messages = messages
+        self._i = 0
+
+    def post(self, url, headers, payload, timeout):
+        message = self.messages[min(self._i, len(self.messages) - 1)]
+        self._i += 1
+        return {
+            "choices": [{
+                "message": message,
+                "finish_reason": "tool_calls" if "tool_calls" in message else "stop",
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    def open(self, url, headers, payload, timeout):  # noqa: A003
+        raise NotImplementedError
+
+
+def say(content):
+    return {"role": "assistant", "content": content}
+
+
+def call_todo(todos):
+    return {
+        "role": "assistant",
+        "tool_calls": [{
+            "id": "t1", "type": "function",
+            "function": {"name": "todowrite", "arguments": json.dumps({"todos": todos})},
+        }],
+    }
+
+
+async def main():
+    # Attempt 1 ends with an open item; attempt 2's todowrite closes it.
+    transport = Scripted([
+        call_todo([{"id": "1", "text": "draft", "completed": True},
+                   {"id": "2", "text": "proofread", "completed": False}]),
+        say("I think I am finished"),
+        call_todo([{"id": "1", "text": "draft", "completed": True},
+                   {"id": "2", "text": "proofread", "completed": True}]),
+        say("all done"),
+    ])
+    tk = await create_toolkit(builtins={"tools": {
+        "todowrite": True, "bash": False, "read": False, "write": False, "edit": False,
+        "glob": False, "grep": False, "webfetch": False, "apply_patch": False, "question": False,
+    }})
+    try:
+        a = agent("gated", does="plans", completion=Completion(verify=all_todos_done, max_attempts=3))
+        opts = {
+            "base_url": "http://scripted.invalid", "style": "openai", "model": "test-model",
+            "api_key": "unused", "http_transport": transport,
+        }
+        out = await a.loop(opts, tk).run("do the thing")
+
+        assert out.status == "done"
+        assert out.attempts >= 2, f"expected a retry, got {out.attempts}"
+
+        print("ok:", out.status, "after", out.attempts, "attempt(s)")
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — a `Guardrail` denial, an exhausted `Completion`, and `loop_unsupported`
+
+```python test
+import asyncio
+
+from toolnexus import create_toolkit
+from toolnexus.agents import Completion, Verdict, agent, loop_unsupported
+
+
+class Scripted:
+    def __init__(self, messages):
+        self.messages = messages
+        self._i = 0
+
+    def post(self, url, headers, payload, timeout):
+        message = self.messages[min(self._i, len(self.messages) - 1)]
+        self._i += 1
+        return {
+            "choices": [{"message": message, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    def open(self, url, headers, payload, timeout):  # noqa: A003
+        raise NotImplementedError
+
+
+async def main():
+    # --- a Completion that never verifies stops loudly, bounded by max_attempts ---
+    tk = await create_toolkit(builtins=False)
+    try:
+        a = agent(
+            "never", does="never verifies",
+            completion=Completion(verify=lambda r: Verdict(False, "always red"), max_attempts=2),
+        )
+        opts = {
+            "base_url": "http://scripted.invalid", "style": "openai", "model": "test-model",
+            "api_key": "unused", "http_transport": Scripted([{"role": "assistant", "content": "done!"}]),
+        }
+        out = await a.loop(opts, tk).run("go")
+
+        assert out.status == "incomplete", "never a silent done"
+        assert out.attempts == 2, "bounded by max_attempts"
+        assert "always red" in out.stopped_by, "the reason is named"
+        assert out.result.limit == "completion", "structured, so a caller can tell WHICH limit"
+
+        # --- loop_unsupported names what this spec would lose under a bare Loop ---
+        spec_with_team = agent("delegator", does="x", uses={"tools": []}, team=[a])
+        missing = loop_unsupported(spec_with_team)
+        assert missing == ["team"], "an EMPTY uses={'tools': []} is a no-op filter, so only team is lost"
+
+        print("ok: incomplete after", out.attempts, "attempts | loop_unsupported:", missing)
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+## `Outcome` fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `text` | `str` | The model's final text. |
+| `status` | `str` | `"done"` \| `"incomplete"` \| `"pending"` \| `"error"` — reuses the shipped §7D vocabulary, no new strings minted. |
+| `stopped_by` | `str` | Named whenever `status` is not `"done"` — never a silent stop. |
+| `attempts` | `int` | How many times `Completion.verify` was consulted (1 if no `Completion` is set). |
+| `turns` | `int` | Model round trips this `Loop` has spent. |
+| `result` | `Any` | The underlying `RunResult`/`TaskResult` — e.g. `result.limit == "completion"` when the gate exhausts `max_attempts`. |
+
+## `loop_unsupported` — the canonical vocabulary
+
+| Spec field | Canonical name | Why `Loop` cannot honour it |
+|---|---|---|
+| `uses` | `"tools"` | Only flagged when `uses["tools"]` is a NON-empty filter list — the `Loop`'s actual toolkit view comes from whatever `toolkit` is passed to `.loop(options, toolkit)`, so an agent spec that tries to narrow it via `uses` loses that narrowing. An empty/absent `uses` is a no-op filter and is never flagged. |
+| `team` | `"team"` | Delegation needs the runtime's `task` builtin. |
+| `wait_for` | `"waitFor"` | A runtime-wide §8 seam, not a per-`Loop` one. |
+| `on_metric` | `"onMetric"` | Same — runtime-wide, not per-`Loop`. |
+
+Everything else on an `Agent` spec — `soul`, `model`, `budget.max_turns`, `hooks`, `guardrails`,
+`completion` — IS honoured by `Loop`. `loop_unsupported(spec)` returns the canonical strings
+above, in that order, for whichever fields the given spec actually sets; an empty list means
+nothing is lost by driving that spec through a `Loop` instead of the full `AgentRuntime`.
+
+## See also
+
+- [`Agent`](/api/python/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`AgentRuntime`](/api/python/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`Handle`](/api/python/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`Budget`](/api/python/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+- [Harness &amp; Loop overview](/harness/) — the narrative page: harness = capability, loop = observed execution.

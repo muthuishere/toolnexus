@@ -1,0 +1,182 @@
+---
+title: "AgentStatus.All / RunStatus.All / StopLimit.All / StopLimit.FromPool"
+description: "The canonical, byte-identical-across-ports string constants a host branches on: task statuses, run statuses, and the nine stop-limit reasons a task can end on, plus the helper that canonicalizes a limit name. — C#."
+sidebar:
+  label: "AgentStatus.All / RunStatus.All / StopLimit.All / StopLimit.FromPool"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+</p>
+
+```csharp
+// The §7D agent/task status vocabulary — SEVEN values.
+public static class AgentStatus
+{
+    public const string Done = "done";
+    public const string Pending = "pending";
+    public const string Incomplete = "incomplete";
+    public const string Interrupted = "interrupted";
+    public const string Closed = "closed";
+    public const string Timeout = "timeout";
+    public const string Error = "error";
+    public static readonly IReadOnlyList<string> All; // all seven, in SPEC order
+}
+
+// The §8 CLIENT status vocabulary — THREE values. Distinct from AgentStatus despite sharing the
+// field name "status": a §8 run that exceeds its budget throws RunTimeoutException instead of
+// ever reporting "timeout" here.
+public static class RunStatus
+{
+    public const string Done = "done";
+    public const string Pending = "pending";
+    public const string Incomplete = "incomplete";
+    public static readonly IReadOnlyList<string> All; // all three, in SPEC order
+}
+
+// The values AgentResult.Limit and LlmClient.RunResult.Limit take — NINE values, closed vocabulary.
+public static class StopLimit
+{
+    public const string MaxTurns = "maxTurns";
+    public const string MaxTokens = "maxTokens";
+    public const string MaxToolCalls = "maxToolCalls";
+    public const string MaxWallMs = "maxWallMs";
+    public const string MaxChildren = "maxChildren";
+    public const string MaxConcurrent = "maxConcurrent";
+    public const string MaxDepth = "maxDepth";
+    public const string Completion = "completion";
+    public const string Timeout = "timeout";
+    public static readonly IReadOnlyList<string> All; // all nine, in SPEC order
+
+    internal static string FromPool(string pool); // maps an internal pool name onto the canonical spelling
+}
+```
+
+The canonical, byte-identical-across-ports string constants a host branches on: task statuses, run
+statuses, and the nine stop-limit reasons a task can end on, plus the helper that canonicalizes a
+limit name. `AgentStatus`, `RunStatus` and `StopLimit` are all **public**, and every value in each
+`.All` list is also a public named constant — so a host writes `StopLimit.MaxWallMs` rather than the
+bare string `"maxWallMs"`, and can still assert against `.All` when it wants the whole closed set.
+
+## When to use it
+
+Branch on `AgentResult.Status`/`AgentRuntime` results against `AgentStatus.*` (the seven-value
+§7D vocabulary — task-level: spawn, run turn, resume, close). Branch on `LlmClient.RunResult.Status`
+against `RunStatus.*` (the three-value §8 vocabulary — a single client run). Read
+`AgentResult.Limit`/`RunResult.Limit` against `StopLimit.*` to learn *which* budget field, or which
+non-budget reason, actually stopped a run — never by parsing the human-readable `Text`. Use
+`StopLimit.FromPool` only if you are implementing a runtime-level integration that talks in this
+port's *internal* pool names (`"tokens"`, `"toolCalls"`, `"wallMs"`, `"children"`, `"concurrent"`,
+`"depth"`) and needs the canonical spelling a host actually branches on.
+
+## Why this and not the alternative
+
+<Aside type="caution" title="AgentStatus and RunStatus share the field name `status` but are NOT the same vocabulary">
+This is the exact collision issue #92.1 reported: `AgentStatus` has **seven** values and includes
+`"timeout"`; `RunStatus` has **three** values (`done`/`pending`/`incomplete`) and never includes
+`"timeout"` — a §8 client run that exceeds `Options.TimeoutMs` throws
+[`LlmClient.RunTimeoutException`](/api/csharp/client/resilience/) instead. Every value in
+`RunStatus.All` also appears in `AgentStatus.All` (the three-value set is a subset of the seven),
+but the reverse is not true — do not assume a `RunResult.Status` and an `AgentResult.Status` are
+interchangeable just because both are typed `string`.
+</Aside>
+
+<Aside type="tip" title="No public invariant-predicate helper is shipped on purpose">
+There is deliberately no `StopLimit.IsValid(string)` or similar. Shipping a predicate would make the
+library's own closed-vocabulary rule a *dependency* a host has to call correctly; instead the
+invariant — every `.All` value has a matching named constant, and nothing outside `.All` ever
+reaches `AgentResult.Limit`/`RunResult.Limit` — is enforced inside the library itself and verified
+by this port's own test suite, not exposed as API surface.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — branch on a closed vocabulary, not a string literal
+
+```csharp test
+using Toolnexus.Agents;
+
+string DescribeStatus(string status) => status switch
+{
+    var s when s == AgentStatus.Done => "finished",
+    var s when s == AgentStatus.Pending => "waiting on a human",
+    var s when s == AgentStatus.Timeout => "ran out of wall-clock time",
+    _ => $"other: {status}",
+};
+
+if (DescribeStatus(AgentStatus.Done) != "finished") throw new Exception("Done");
+if (DescribeStatus(AgentStatus.Timeout) != "ran out of wall-clock time") throw new Exception("Timeout");
+
+Console.WriteLine($"ok: {AgentStatus.All.Count} agent statuses, {RunStatus.All.Count} run statuses");
+```
+
+### 2. The realistic case — the two vocabularies are distinct despite the shared field name
+
+```csharp test
+using Toolnexus.Agents;
+
+// Seven agent/task statuses; three client/run statuses; "timeout" is agent-only.
+if (AgentStatus.All.Count != 7) throw new Exception(AgentStatus.All.Count.ToString());
+if (RunStatus.All.Count != 3) throw new Exception(RunStatus.All.Count.ToString());
+if (!AgentStatus.All.Contains(AgentStatus.Timeout)) throw new Exception("Timeout must be an agent status");
+if (RunStatus.All.Contains("timeout")) throw new Exception("\"timeout\" must NOT be a run status — the #92.1 collision");
+
+// Every RunStatus value is also a valid AgentStatus value — the three-value set is a subset.
+foreach (var s in RunStatus.All)
+    if (!AgentStatus.All.Contains(s)) throw new Exception($"{s} missing from AgentStatus.All");
+
+Console.WriteLine($"ok: RunStatus {{{string.Join(", ", RunStatus.All)}}} ⊂ AgentStatus {{{string.Join(", ", AgentStatus.All)}}}");
+```
+
+### 3. Full surface — the nine-value limit vocabulary and `FromPool`'s internal→canonical mapping
+
+```csharp test
+using Toolnexus.Agents;
+
+// The CLOSED vocabulary, in SPEC order.
+var expected = new[]
+{
+    "maxTurns", "maxTokens", "maxToolCalls", "maxWallMs", "maxChildren",
+    "maxConcurrent", "maxDepth", "completion", "timeout",
+};
+if (!expected.SequenceEqual(StopLimit.All)) throw new Exception(string.Join(",", StopLimit.All));
+
+// Every named constant matches a value in .All — a host can write StopLimit.MaxWallMs safely.
+if (StopLimit.MaxWallMs != "maxWallMs") throw new Exception(StopLimit.MaxWallMs);
+if (!StopLimit.All.Contains(StopLimit.MaxWallMs)) throw new Exception("constant/list mismatch");
+
+// FromPool is INTERNAL — this illustrates the mapping it performs, not a call your own code makes.
+// (tokens -> maxTokens, toolCalls -> maxToolCalls, wallMs -> maxWallMs, children -> maxChildren,
+//  concurrent -> maxConcurrent, depth -> maxDepth). An unrecognised pool name passes through
+// unchanged rather than throwing, so a caller can still see what stopped the run.
+var mapping = new Dictionary<string, string>
+{
+    ["tokens"] = "maxTokens", ["toolCalls"] = "maxToolCalls", ["wallMs"] = "maxWallMs",
+    ["children"] = "maxChildren", ["concurrent"] = "maxConcurrent", ["depth"] = "maxDepth",
+};
+foreach (var (pool, canonical) in mapping)
+    if (!StopLimit.All.Contains(canonical)) throw new Exception($"{pool} -> {canonical} not in StopLimit.All");
+
+Console.WriteLine($"ok: {StopLimit.All.Count} canonical limit strings, {mapping.Count} internal pool names mapped");
+```
+
+## Fields
+
+| Type | Member | Value |
+|---|---|---|
+| `AgentStatus` | `Done` / `Pending` / `Incomplete` / `Interrupted` / `Closed` / `Timeout` / `Error` | `"done"` / `"pending"` / `"incomplete"` / `"interrupted"` / `"closed"` / `"timeout"` / `"error"` |
+| `AgentStatus.All` | — | all seven, in SPEC order |
+| `RunStatus` | `Done` / `Pending` / `Incomplete` | `"done"` / `"pending"` / `"incomplete"` |
+| `RunStatus.All` | — | all three, in SPEC order — never `"timeout"` |
+| `StopLimit` | `MaxTurns` / `MaxTokens` / `MaxToolCalls` / `MaxWallMs` / `MaxChildren` / `MaxConcurrent` / `MaxDepth` / `Completion` / `Timeout` | the seven `Budget` fields plus the two non-budget stops |
+| `StopLimit.All` | — | all nine, in SPEC order — the only values `AgentResult.Limit`/`RunResult.Limit` may carry |
+| `StopLimit.FromPool(pool)` | `internal` | maps this runtime's internal pool name (`"tokens"`, `"toolCalls"`, `"wallMs"`, `"children"`, `"concurrent"`, `"depth"`) onto the canonical spelling; an unrecognised name passes through unchanged |
+
+## See also
+
+- [`Agent`](/api/csharp/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`AgentRuntime`](/api/csharp/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`Handle`](/api/csharp/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`Budget`](/api/csharp/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

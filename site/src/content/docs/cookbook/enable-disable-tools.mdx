@@ -1,6 +1,6 @@
 ---
 title: Enable / disable tools
-description: Scope exactly which tools and skills an agent sees — per-server MCP allowlists, built-in toggles, and drop-lists — in all six languages.
+description: Scope exactly which tools and skills an agent sees — per-server MCP allowlists, built-in toggles, and drop-lists — in all seven languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -19,7 +19,7 @@ Four controls, smallest blast radius first:
 
 In `mcp.json`, a per-server `tools` map is an **allowlist** when it has any `true` entry (only those
 load), a **drop-list** when it has only `false` entries, and "all tools" when absent/empty. Keys are
-the server's original tool names. This is config, identical across all six ports:
+the server's original tool names. This is config, identical across all seven ports:
 
 ```json
 {

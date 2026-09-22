@@ -20,7 +20,7 @@ def answer_to_elicit_result(answer: Answer) -> ElicitResult
 The MCP elicitation bridge: an MCP server can send a **reverse request** mid-`tools/call` — "I need
 a value from the user" (form mode) or "go authorize at this URL" (URL mode). toolnexus does not
 invent a second suspension mechanism for that; it maps the server's `elicitation/create` onto the
-same [§10 `Request`/`Answer`](/api/python/types/request/) contract every other suspension uses, so
+same [§10 `Request`/`Answer`](/api/python/suspension/pending/) contract every other suspension uses, so
 one `wait_for` handles a `question` builtin, an MCP elicitation, and anything else that suspends,
 identically. `elicitation_to_request` does the forward mapping; `answer_to_elicit_result` maps the
 resolved `Answer` back to what the MCP SDK expects.

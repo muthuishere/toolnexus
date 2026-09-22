@@ -1,16 +1,17 @@
 ---
 title: API Reference — JavaScript
-description: The toolnexus (npm) public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other five ports.
+description: The toolnexus (npm) public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other six ports.
 ---
 
 Package **`toolnexus`** (npm). See the [combined API Reference](/api/) for every symbol shown in
-six-language synced tabs.
+seven-language synced tabs.
 
 ## Toolkit
 
 - `createToolkit(opts: ToolkitOptions): Promise<Toolkit>` — the aggregator.
 - `ToolkitOptions`: `mcpConfig`, `skillsDir`, `skills`, `skillProvider`, `skillsFilter`,
-  `skillSampleLimit`, `builtins`, `agents`, `extraTools`, `waitFor`.
+  `skillSampleLimit`, `builtins`, `agents`, `extraTools`, `waitFor`, `disableTools`,
+  `disableSkills`, `signal`.
 - Equivalents: `create_toolkit` (py) · `CreateToolkit` (go) · `Toolkit.create` (java) ·
   `Toolkit.CreateAsync` (c#) · `Toolnexus.create_toolkit` (elixir).
 

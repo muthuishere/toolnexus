@@ -12,13 +12,20 @@ import { Aside } from '@astrojs/starlight/components';
 </p>
 
 ```ts
-run(prompt: string, ctx: { toolkit: Toolkit; signal?: AbortSignal; history?: any[] }): Promise<RunResult>
+run(prompt: PromptInput, ctx?: { toolkit?: Toolkit; signal?: AbortSignal; history?: any[] }): Promise<RunResult>
+// PromptInput = string | ContentPart[]
 ```
 
 One turn of the host loop, non-streaming. Send a prompt, and the client calls the model,
 executes whatever tools it asks for — in parallel where requested, chained where the model needs
 a result before asking for more — feeds results back, and repeats until the model stops asking or
 `maxTurns` is hit. You get one `RunResult` back at the end.
+
+As of 0.19.0, **`ctx` and `ctx.toolkit` are both optional**: `run` can be called with no toolkit
+at all, in which case the turn is a plain completion — the system message is the system prompt
+alone, and the request body carries **no `tools` and no `tool_choice` key**, not an empty array.
+An empty toolkit and no toolkit are observably identical on the wire. See `CHANGELOG.md` "##
+0.19.0" and `js/src/client.ts:534`.
 
 ## When to use it
 
@@ -197,8 +204,9 @@ console.log("ok:", res.status, res.limit)
 
 | Field | Type | What it does |
 |---|---|---|
-| `prompt` | `string` | The user turn to send. **Required.** |
-| `ctx.toolkit` | `Toolkit` | Tools available to the model this turn. **Required.** |
+| `prompt` | `PromptInput` (`string \| ContentPart[]`) | The user turn to send. **Required.** |
+| `ctx` | `{ toolkit?; signal?; history? }` | Optional. Omit entirely for a toolkit-less, history-less run. |
+| `ctx.toolkit` | `Toolkit` | Tools available to the model this turn. **Optional** — absent (or `null`) ⇒ a completion-only call: no `tools`/`tool_choice` key on the wire at all, not an empty array (0.19.0). |
 | `ctx.signal` | `AbortSignal` | Aborts the run (and any in-flight request), combined with `timeoutMs`. |
 | `ctx.history` | `any[]` | Prior transcript to continue from — the mechanism `ask`/`Conversation` use. |
 

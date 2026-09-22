@@ -1,0 +1,330 @@
+---
+title: "ProviderException"
+description: "A non-2xx response from the model endpoint raises a typed provider error carrying the status code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception. — C#."
+sidebar:
+  label: "ProviderException"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```csharp
+public sealed class ProviderException : InvalidOperationException
+{
+    public int Status { get; }              // the HTTP status the provider returned
+    public string Body { get; }              // REDACTED but UNCAPPED — the raw shape, minus account ids
+    public long? RetryAfterMs { get; }       // the honoured Retry-After delay, in MILLISECONDS
+
+    public ProviderException(int status, string body, long? retryAfterMs, string message);
+}
+
+// Shared redaction policy (ADR 0027), also usable directly:
+public static readonly IReadOnlyList<string> RedactedBodyKeys; // user_id, account_id, org_id, organization
+public const string RedactionToken = "«redacted»";
+public const int ErrorBodyCap = 200;
+```
+
+A non-2xx response from the model endpoint raises a typed `ProviderException` carrying the status
+code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception.
+Before this type existed the only interface to a failed call was `InvalidOperationException.Message`,
+so a host that wanted to log the status or honor a retry delay had to parse prose. `ProviderException`
+still derives from `InvalidOperationException`, so existing `catch` blocks and message matching
+keep working unchanged.
+
+## When to use it
+
+Catch it wherever a run against a live provider can fail with a non-2xx response — a 429 rate
+limit, a 402 out of credit, a 500 upstream outage — and you need the *status* or the *raw body* as
+data rather than a formatted sentence. `Message` is the redacted, capped rendering that is safe to
+log by default; `Body` and `Status` are there for a host that genuinely wants the whole thing (an
+alerting rule keyed on status, a support tool that needs the provider's real error payload).
+
+## Why this and not the alternative
+
+<Aside type="caution" title="RetryAfterMs is MILLISECONDS — and that is a documented divergence from the other six ports">
+Every other port (js, python, golang, java, elixir, clojure) keeps the `Retry-After` signal as the
+**raw header string** (or, in elixir's case, parsed seconds as an integer). **C# is the one port
+that converts it to milliseconds** on a `long?` field named `RetryAfterMs`. This is not a bug and
+not something this doc papers over: it is a real, existing behavioral difference, present because
+the C# client's own backoff math (`SleepAsync`) already works in milliseconds end to end, and
+`ProviderException` reuses the same parsed value rather than re-deriving it from a string a second
+time. A host porting retry-handling logic from another language's example must convert: `long?
+retryAfterMs = e.RetryAfterMs` where another port would read `e.retryAfter` as seconds or as the
+literal header text. Only the delay-seconds form of `Retry-After` (RFC 9110 §10.2.3 — a run of
+ASCII digits, `0`…`2147483647`) is honoured; a fractional, signed, HTTP-date, or out-of-range value
+returns `null` rather than a guess, and `0` is returned as `0` (not `null`) because "retry now" is a
+real answer.
+</Aside>
+
+<Aside type="tip" title="Prefer OnError (client/resilience) for retry-vs-fail policy — ProviderException is the escape hatch">
+Most callers never need to catch `ProviderException` directly: the default retry classifier and
+`Options.OnError` (see [`LlmClient.ErrorInfo`](/api/csharp/client/resilience/)) already see every
+failed attempt and decide `Retry` or `Fail` before an exception ever reaches your code. Catch
+`ProviderException` when you need the raw status/body *after* the client has given up — logging,
+alerting, or a bespoke UI message — not as a substitute for `OnError`'s classification.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — catch it and read the typed fields
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+using var stub = new Stub(ctx => Stub.Json(ctx, 429, """{"error":{"message":"rate limited"}}"""));
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "openai", Model = "gpt-4o-mini", ApiKey = "test-key",
+    Retries = 0,
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+LlmClient.ProviderException? e = null;
+try { await client.RunAsync("go", tk); }
+catch (LlmClient.ProviderException ex) { e = ex; }
+if (e is null) throw new Exception("expected a ProviderException");
+
+if (e.Status != 429) throw new Exception($"status: {e.Status}");
+Console.WriteLine($"ok: {e.Status} — {e.Message}");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+### 2. The realistic case — Retry-After arrives in milliseconds, and the body is redacted but not capped
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+// A leaking body: 96 bytes, well inside the 200-char message cap, carrying account identifiers.
+const string leaky = "{\"error\":{\"message\":\"no credit\",\"user_id\":\"user_2abcdefghijkl\","
+                     + "\"org_id\":\"org_9\",\"account_id\":\"acct_7\",\"organization\":\"acme\"}}";
+
+using var stub = new Stub(ctx =>
+{
+    ctx.Response.Headers.Add("Retry-After", "3"); // a 3-SECOND header value
+    Stub.Json(ctx, 402, leaky);
+});
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "openai", Model = "gpt-4o-mini", ApiKey = "test-key",
+    Retries = 0,
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+LlmClient.ProviderException? caught = null;
+try { await client.RunAsync("p", tk); }
+catch (LlmClient.ProviderException e) { caught = e; }
+if (caught is null) throw new Exception("expected a ProviderException");
+
+// The header said "3" (seconds) — this port hands it back as 3000 (milliseconds), NOT "3".
+if (caught.RetryAfterMs != 3000) throw new Exception($"RetryAfterMs: {caught.RetryAfterMs}");
+
+// The typed Body field is REDACTED (account keys replaced) but UNCAPPED — the full shape survives.
+if (caught.Body.Contains("user_2abcdefghijkl")) throw new Exception("account id leaked into Body");
+if (!caught.Body.Contains(LlmClient.RedactionToken)) throw new Exception("Body must show the redaction token");
+if (!caught.Body.Contains("no credit")) throw new Exception("the real cause must survive redaction");
+
+// Message is the redacted AND capped rendering — the one that reaches logs by default.
+if (caught.Message.Contains("user_2abcdefghijkl")) throw new Exception("account id leaked into Message");
+
+Console.WriteLine($"ok: status={caught.Status} retryAfterMs={caught.RetryAfterMs} body-len={caught.Body.Length}");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+### 3. Full surface — the 401/403 rule, and the ADR 0027 account-field redaction list
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+// (a) A 401/403 body is NEVER echoed — it routinely reflects the credential that was sent,
+// so it never reaches Message OR Body at all.
+using (var stub401 = new Stub(ctx => Stub.Json(ctx, 401, "{\"error\":\"invalid key sk-live-DEADBEEF\"}")))
+{
+    var client = LlmClient.Create(new LlmClient.Options
+    {
+        BaseUrl = stub401.BaseUrl, Style = "openai", Model = "gpt-4o-mini", ApiKey = "test-key",
+        Retries = 0,
+    });
+    await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+    LlmClient.ProviderException? e = null;
+    try { await client.RunAsync("p", tk); } catch (LlmClient.ProviderException ex) { e = ex; }
+    if (e is null) throw new Exception("expected a ProviderException");
+    if (e.Message != "LLM 401") throw new Exception(e.Message);
+    if (e.Body.Length != 0) throw new Exception("401 body must never be echoed");
+}
+
+// (b) The redacted key list (ADR 0027) is pinned and public — a host can check against it.
+foreach (var key in new[] { "user_id", "account_id", "org_id", "organization" })
+    if (!LlmClient.RedactedBodyKeys.Contains(key)) throw new Exception($"missing key: {key}");
+if (LlmClient.RedactionToken != "«redacted»") throw new Exception(LlmClient.RedactionToken);
+if (LlmClient.ErrorBodyCap != 200) throw new Exception(LlmClient.ErrorBodyCap.ToString());
+
+Console.WriteLine("ok: 401 never echoed; redaction constants pinned");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `Status` | `int` | The HTTP status the provider returned. |
+| `Body` | `string` | The response body, redacted but **uncapped** (ADR 0027 A5). Empty on 401/403, where the body may reflect the credential that was sent. |
+| `RetryAfterMs` | `long?` | The honoured `Retry-After` delay, **in milliseconds** — see the caution above; every other port keeps this as the raw header string (or elixir's parsed seconds). |
+| `Message` (inherited) | `string` | The redacted **and capped** rendering — the one that reaches logs by default. |
+
+## Redaction policy (ADR 0027)
+
+| Member | What it is |
+|---|---|
+| `RedactedBodyKeys` | `user_id`, `account_id`, `org_id`, `organization` — replaced with `RedactionToken`, never dropped, so the body's shape survives. Identical across all seven ports. |
+| `RedactionToken` | `"«redacted»"` — byte-identical across all seven ports. |
+| `ErrorBodyCap` | `200` — applied to `Message` only, never to `Body`. A cap is not redaction: the leaking body that motivated ADR 0027 was 96 bytes and would have sailed through a 200-char cap untouched had redaction not run first. |
+
+## See also
+
+- [`LlmClient.ErrorInfo`](/api/csharp/client/resilience/) — Classify an LLM error into retry/fail — the decision that runs *before* a `ProviderException` ever reaches your `catch` block.
+- [`LlmClient.Create`](/api/csharp/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`LlmClient.RunAsync`](/api/csharp/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`LlmClient.Hooks`](/api/csharp/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

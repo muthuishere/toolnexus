@@ -1,0 +1,173 @@
+---
+title: "attach"
+description: "The authoring side of multimodal content: constructors that turn a path, bytes, a blob, a data URL, or a remote URL into the ContentPart a prompt or tool result carries — the write half of the read-only ContentPart shape. — Clojure."
+sidebar:
+  label: "attach"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/content.cljc">clojure/src/toolnexus/content.cljc</a>
+</p>
+
+```clojure
+(require '[toolnexus.content :as content])
+
+;; the edge: dispatches on the SHAPE of what you hand it
+(content/attach source)         ; a data: URL | an http(s) URL | else: a filesystem path
+(content/attach source opts)    ; opts = {:mimeType "…" :name "…" :max-part-bytes n}
+
+;; the named constructors attach dispatches to internally
+(content/from-file path)        ; read now, base64 now; mime from the fixed extension table
+(content/from-file path opts)
+(content/image-file path)       ; from-file, but errors if the result is not an "image" part
+(content/from-bytes bs mime)    ; byte array | seq of byte values | string (its UTF-8 bytes)
+(content/from-bytes bs mime opts)
+(content/from-data-url u)       ; "data:<mime>;base64,<b64>" -> {:mimeType … :data …}
+(content/from-url u)            ; "http(s)://…" -> {:mimeType … :url …}
+(content/text-part s)           ; {:type "text" :text s} — not attach; there is no non-text part for text
+
+;; a failure is a VALUE, never a throw
+{:type "error" :code "unsupported-source" :error "unsupported byte source: …"}
+
+;; on the CLIENT: what to do when a part's style can't represent it
+(client/create-client {:on-unsupported-part "error"})   ; or "text" — see below
+```
+
+The authoring side of multimodal content: constructors that turn a path, bytes, a blob, a data URL,
+or a remote URL into the `ContentPart` a prompt or tool result carries — the write half of the
+read-only [`ContentPart`](/api/clojure/types/content-part/) shape that page documents in full. This
+page is the dedicated reference for the constructors themselves — `attach` and its five named
+siblings — while `content-part.mdx` covers the *shape* every one of them produces.
+
+<Aside type="note" title="This page and content-part.mdx both document attach — on purpose">
+`toolnexus.content/attach` is small enough that the sibling `content-part.mdx` page already walks
+through it as part of explaining the union type. This page exists as the dedicated per-symbol
+reference (matching the split every other port with a `types/attach.mdx` — python, java, csharp,
+elixir, golang — already has) so `attach` and its five siblings (`from-file`, `image-file`,
+`from-bytes`, `from-data-url`, `from-url`) each get worked examples in one place, without repeating
+the union-type overview. Read `content-part.mdx` first if you have not seen the `ContentPart` shape
+at all; come here once you know the shape and want the constructor that builds it from what you
+actually have in hand.
+</Aside>
+
+`attach` never carries the path or the raw bytes forward into the part — a path is read and
+base64'd *now*, at construction, so the resulting part survives a persisted transcript, an MCP hop,
+or the process boundary of a durable resume, none of which can dereference a filesystem path that
+made sense only on the machine that built it.
+
+## When to use it
+
+- **Attaching a file, image or audio clip to a prompt** — `(client/run c [(content/text-part "…")
+  (content/attach "diagram.png")] {…})`. A prompt is a string *or* a vector of parts; `attach` is
+  how you build the non-text elements of that vector.
+- **You already have bytes in hand** (read from a database blob, downloaded, generated) rather than
+  a path on disk — use `from-bytes` directly with an explicit mime type, since bytes carry no
+  extension to read one from.
+- **You have a remote URL and want the provider to fetch it** rather than downloading and
+  re-uploading the bytes yourself — `from-url` keeps it as a `:url` part.
+- **Not** for turning a string into its own UTF-8 bytes — `attach` on a bare string always reads it
+  as either a `data:`/`http(s):` URL or a filesystem path, never as text-to-encode. Call
+  `from-bytes` directly for that, since `attach` cannot tell a payload from a filename apart.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for the named constructor when you already know the source shape">
+`attach` is a convenience dispatcher for when the source's shape is not yet known (a config value
+that might be a path or a URL, say). If you already know exactly what you have — a `path`, an
+in-memory byte array, a `data:` URL string, a remote URL — call `from-file`, `from-bytes`,
+`from-data-url` or `from-url` directly. It reads the same either way, but skips a shape-sniffing
+step you already know the answer to, and it is the only way to attach a *string* as bytes rather
+than as a path (`from-bytes`) or force a path to be validated as an image specifically
+(`image-file`).
+</Aside>
+
+<Aside type="caution" title="Shorter accepted-source list than the other six ports — structurally, not an oversight">
+SPEC §1B asks every port to accept the file/byte objects its users already hold — `File`/`Blob` in
+js, a `BinaryIO` in python, an `io.Reader` in golang, `InputStream` in java, a `Stream` in csharp,
+`File.Stream` in elixir. This port's list is **shorter**: a filesystem path string, a `data:` URL, an
+`http(s):` URL, a native byte array (JVM `byte[]` / Go `[]byte`), or any sequence of byte values
+(vector, list, lazy seq — the shapes ordinary Clojure code actually produces). The reason is
+structural: this is ONE `.cljc` file, zero reader conditionals, compiled for **two** hosts (the JVM
+and cljgo/Go). Naming `java.io.InputStream` here would make the namespace unloadable on the Go
+host, and koine — the only host-neutral layer available — has no stream/reader abstraction to stand
+in for one. A host object handed to `attach` or `from-bytes` (a `java.io.File`, an `InputStream`, a
+Go `*os.File`) is refused **by name**, as an `{:type "error" :code "unsupported-source" ...}` value
+naming the type and telling you to pass a path or bytes instead — never a cast exception, and never
+a silent misread.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — attach a local file to a prompt
+
+```clojure
+(require '[toolnexus.client :as client]
+         '[toolnexus.content :as content]
+         '[toolnexus.tool :as tool])
+
+(client/run llm
+  [(content/text-part "What is in this image?")
+   (content/attach "screenshot.png")]
+  {:toolkit (tool/toolkit [])})
+```
+
+`attach` sees a string that is neither a `data:` nor an `http(s):` URL, so it reads `screenshot.png`
+off disk now, base64-encodes it, and looks its mime type up in the fixed extension table
+(`image/png`) — the path itself never reaches the resulting part.
+
+### 2. The realistic case — bytes already in hand, from a database or a generated buffer
+
+```clojure
+(require '[toolnexus.content :as content])
+
+(defn attach-generated-chart [png-bytes]
+  ;; bytes carry no extension, so the mime type is required
+  (content/from-bytes png-bytes "image/png"))
+
+;; a byte array, a seq of byte values, or a string are all accepted:
+(content/from-bytes (byte-array [137 80 78 71]) "image/png")
+(content/from-bytes (seq (byte-array [137 80 78 71])) "image/png")
+(content/from-bytes "raw text payload" "text/plain")   ; taken as its UTF-8 bytes
+```
+
+### 3. The full surface — every constructor, plus the unsupported-part policy on the client
+
+```clojure
+(require '[toolnexus.client :as client]
+         '[toolnexus.content :as content])
+
+;; every path attach can take, named explicitly
+(content/from-file "report.pdf")                        ; read + base64'd now
+(content/image-file "logo.png")                         ; from-file, but errors if not an image
+(content/from-data-url "data:image/png;base64,iVBORw0KGgo=")
+(content/from-url "https://example.com/diagram.webp")   ; kept as :url, never downloaded here
+(content/attach {:a 1} {:mimeType "image/png"})         ; unsupported shape -> error part, no throw
+
+;; a client that DECLARES how to handle a part its style cannot send at all
+(def llm
+  (client/create-client
+    {:base-url             "https://api.openai.com/v1"
+     :style                "openai"
+     :model                "gpt-4.1"
+     :max-part-bytes       5000000   ; §1B — reject a part over this many DECODED bytes
+     :on-unsupported-part  "text"})) ; degrade to a text placeholder + warn once, instead of stopping the run
+```
+
+`:on-unsupported-part` governs the provenance rule uniformly: unset, an **attached** part the
+style genuinely cannot represent (say, an OpenAI Chat Completions `file` part with a `:url` rather
+than inline data) stops the run; a **tool-derived** part degrades to a text placeholder and warns
+once either way. Setting `"error"` or `"text"` overrides that default in both directions rather than
+leaving the provenance-dependent behavior in place.
+
+## See also
+
+- [`toolnexus.content/attach`](/api/clojure/types/content-part/) — The non-text half of a message:
+  `text | image | file | audio`, carrying base64 bytes or a URL plus a `mimeType` — never a path.
+  Read this first for the full union-type shape these constructors build.
+- [`toolnexus.tool/tool`](/api/clojure/types/tool/) — The uniform shape every tool source collapses
+  to: name, description, JSON-Schema parameters, execute.
+- [`toolnexus.tool/success`](/api/clojure/types/tool-result/) — The result envelope a tool returns;
+  its `:parts` carries any non-text `ContentPart` a tool hands back, built the same way as a
+  prompt-side attachment.

@@ -1,0 +1,122 @@
+---
+title: "answer-declined"
+description: "Wraps a human's refusal into the Answer a suspended run resumes with, carrying a reason string that defaults to \"declined\". — Clojure."
+sidebar:
+  label: "answer-declined"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+```clojure
+(answer-declined id)              ; :reason defaults to "declined"
+(answer-declined id reason)
+
+;; => {:id id :ok false}                          ; no reason given
+;; => {:id id :ok false :reason "no today"}        ; reason given
+```
+
+Wraps a human's refusal into the `Answer` a suspended run resumes with, carrying a reason string
+that defaults to `"declined"`. It is the decline counterpart to
+[`answer-output`](/api/clojure/suspension/answer-output/), and both are canonical, shipped in all
+seven ports (addendum A9): before these constructors existed, a host hand-built the `Answer` map
+and a mistyped `:ok`/`:reason` key was a silent wrong-outcome bug rather than a construction error.
+
+`:reason` is carried **only** on a decline (R1) — `answer-output` never sets it, because the loop's
+resume rule branches on `:ok` alone and never reads `:reason` to decide anything; it exists purely
+so the model (and any log line) can see *why* the human said no.
+
+## When to use it
+
+- **The human explicitly refuses** a request — "no, don't do that", "cancel", a rejected
+  confirmation.
+- **A suspension times out unanswered** and the host decides to resolve it as a decline rather than
+  leave the run parked forever — pass a reason like `"expired"` or `"no reply within 5m"`.
+- **A `:wait-for` hook that cannot route the request at all** (an unrecognised `:kind`, a channel
+  that is down) should decline with a reason naming the problem, rather than throw or silently
+  grant — the run keeps going and the model sees why the tool call was blocked.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use answer-output when there IS a value to hand back">
+`answer-declined` carries no payload beyond the reason string — `:data` is never set. If the human
+actually supplied something usable (a typed answer, a picked option, a granted login), wrap it with
+[`answer-output`](/api/clojure/suspension/answer-output/) instead, even if the value itself reads
+as negative ("no thanks" typed into a text box is still a string output, not a protocol-level
+decline). Reach for `answer-declined` when there is nothing for the tool to act on at all.
+</Aside>
+
+A declined answer is not a crash: the loop turns it into an error `ToolResult` fed back to the
+model (`"declined/expired: <prompt>"`), and the run continues — the model can explain the situation
+to the user instead of the whole run dying on a refusal.
+
+## Examples
+
+### 1. The smallest useful call — the default reason
+
+```clojure
+(require '[toolnexus.client :as client])
+
+(client/answer-declined "sus-1")
+;; => {:id "sus-1" :ok false}
+```
+
+Note there is no `:reason` key at all here — `make-answer` only assigns it when one is given, so a
+bare decline is not `{:reason "declined"}` on the wire; it is simply `:ok false` with no reason.
+
+### 2. The realistic case — a human explicitly says no, inside :wait-for
+
+```clojure
+(def llm
+  (client/create-client
+    {:base-url "https://api.anthropic.com"
+     :style    "anthropic"
+     :model    "claude-sonnet-4-5"
+     :wait-for (fn [request]
+                 (let [reply (ask-human! (:prompt request))]
+                   (if (:approved? reply)
+                     (client/answer-output (:id request) (:value reply))
+                     (client/answer-declined (:id request) "not today"))))}))
+
+(client/run llm "Should I delete the stale branches?"
+            {:toolkit (tool/toolkit [confirm-delete-tool])})
+```
+
+### 3. The full surface — an unroutable request, declined with a diagnostic reason
+
+```clojure
+(def llm
+  (client/create-client
+    {:base-url "https://api.anthropic.com"
+     :style    "anthropic"
+     :model    "claude-sonnet-4-5"
+     :wait-for (fn [request]
+                 (case (:kind request)
+                   "authorization" (route-to-oauth! request)
+                   "input"         (route-to-form! request)
+                   ;; an unknown kind is declined, not thrown — the run keeps going
+                   (client/answer-declined
+                     (:id request)
+                     (str "unsupported suspension kind: " (:kind request)))))}))
+```
+
+A string-keyed `Answer` a host round-trips through JSON is normalised the same way regardless of
+which constructor built it — `(client/as-answer {"id" "x" "ok" false "reason" "no"})` reads
+`:ok false` correctly, which is exactly the bug (#89, ADR 0026 §5) that made a granted answer look
+declined before normalisation existed.
+
+## See also
+
+- [`toolnexus.client/suspend`](/api/clojure/suspension/pending/) — Return a Pending from a tool to
+  park the run until someone answers.
+- [`answer-output`](/api/clojure/suspension/answer-output/) — The success counterpart: wraps a
+  human's typed string reply into an `Answer`.
+- [`toolnexus.client/auth-required`](/api/clojure/suspension/auth-required/) — The auth-shaped
+  suspension: hand back a URL, resume once the user has granted access.
+- [`toolnexus.client/create-client`](/api/clojure/suspension/wait-for/) — The single hook where the
+  host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`toolnexus.client/pending-of`](/api/clojure/suspension/pending-of/) — Detect that a RunResult is
+  parked rather than finished, and get the Request that parked it.

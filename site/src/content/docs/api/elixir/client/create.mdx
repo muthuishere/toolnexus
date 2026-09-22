@@ -12,49 +12,169 @@ import { Aside } from '@astrojs/starlight/components';
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec create(keyword() | map()) :: Toolnexus.Client.t()
+def create(opts)
+
+Toolnexus.Client.create(
+  base_url: "https://openrouter.ai/api/v1",
+  style: "openai",     # "openai" | "anthropic" — the provider wire format
+  model: "openai/gpt-4o-mini",
+  api_key: System.get_env("OPENROUTER_API_KEY"), # env fallback: OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY
+  headers: %{},
+  system_prompt: nil,        # prepended to the toolkit's skills prompt
+  max_turns: 10,             # default
+  retries: 2,                # default — see client/resilience
+  retry_base_ms: 500,        # default
+  retryable_statuses: nil,   # default — ADDS to the built-in retryable set
+  timeout_ms: nil,           # default — whole-run deadline, nil = none
+  on_error: nil,             # default — see client/resilience
+  hooks: %{},                # before_llm / after_llm / before_tool / after_tool — see client/hooks
+  store: nil,                # ConversationStore struct, default: in-memory — see client/store
+  on_metric: nil,            # (event_map -> any) — see client/metrics
+  wait_for: nil,             # §10 suspension resolver — see suspension/wait-for
+  request_params: nil,       # shallow-merged into every LLM body — §8 Gap 1
+  body_transform: nil,       # run LAST after the request_params merge — §8 Gap 1
+  http_options: [],          # extra Req options for the LLM path — §8 Gap 2
+  transport: nil,            # injectable HTTP transport, replaces the wire call only — §8 Gap 2
+  max_part_bytes: nil,       # cap on a content part's decoded bytes — §1B
+  on_unsupported_part: nil,  # "error" | "text" — §8A provenance rule override
+  registry: nil              # inject a shared MetricsRegistry, nil = a fresh private one
+)
 ```
 
 The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
 
+`Client.create/1` (`elixir/lib/toolnexus/client.ex:345`) is the other half of the "zero to
+agent" pair — a [`Toolnexus.Toolkit`](/api/elixir/toolkit/create/) gives you tools, `Client.create/1`
+gives you the loop that calls them. It takes a keyword list or a map, fills every unset field
+with its documented default (`retries: 2`, `max_turns: 10`, a fresh in-memory conversation store,
+a fresh private metrics registry, …), and returns a plain `%Toolnexus.Client{}` struct — there is
+no process, no supervision tree, nothing to start or stop. Pass the resulting client into
+[`Toolnexus.Client.run/4`](/api/elixir/client/run/) or
+[`Toolnexus.Client.stream/4`](/api/elixir/client/stream/) together with a toolkit (or `nil` for a
+tool-less run) to actually drive a conversation.
+
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **You are wiring up "zero to agent"** — one `Toolnexus.create_toolkit/1` for tools, one
+  `Client.create/1` for the model connection, then `Client.run/4` to send a prompt and get a
+  `RunResult`. This is the entry point every README and example starts from.
+- **You need to point at a different provider or gateway** — `base_url` + `style` is the whole
+  provider surface (`"openai"` covers OpenAI-compatible gateways like OpenRouter; `"anthropic"`
+  covers Claude's native wire shape). Swapping providers is a one-line change to this call, never
+  a different client type.
+- **You want retries, a deadline, hooks, metrics, or a custom conversation store** — all of it is
+  an option on this same call. Nothing here requires a second construction step or a different
+  entry point; the struct just carries more fields.
+- **You need the toolkit's tools mapped to OpenAI/Anthropic/Gemini schema automatically** — pass
+  the toolkit into `run/4`/`stream/4`, not into `create/1`. `Client.create/1` only knows about the
+  provider connection; the toolkit is supplied per-call so the same client can drive different
+  toolkits across calls.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="One options map, not a builder or a family of client types">
+Every option — retries, hooks, store, metrics, resilience, request shaping — is a field on the
+same `keyword()`/`map()` passed to `create/1`, not a separate `WithRetries`/`WithHooks` builder
+chain and not a different struct per provider. That is deliberate: the struct is what every other
+function in this module (`run/4`, `stream/4`, `ask/4`, `metrics/1`) pattern-matches on, so adding
+an option never changes the type callers hold. If you find yourself reaching for two clients that
+differ only in one option (say, one with a shorter `timeout_ms` for a background job), that is the
+right use of two `create/1` calls — the struct is cheap, immutable, and has no attached process.
 </Aside>
+
+The one thing genuinely absent from this surface is a way to change a client's options after
+construction — there is no `Client.update/2`. A different `timeout_ms` or a different `model` is a
+new `create/1` call, not a mutation, which keeps the struct's fields honest: every field you read
+off a `%Toolnexus.Client{}` was set once, at construction, and nothing later in a run loop
+reaches back to change it underneath a caller holding a reference.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — construct and run once
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.Client
+
+client =
+  Client.create(
+    base_url: "https://openrouter.ai/api/v1",
+    style: "openai",
+    model: "openai/gpt-4o-mini",
+    api_key: "test-key"
+  )
+
+%Client{} = client
+true = client.retries == 2
+true = client.max_turns == 10
+
+IO.puts("ok: client created with defaults (retries=#{client.retries}, max_turns=#{client.max_turns})")
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — a toolkit, custom retries, and a deadline
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+```elixir test
+{:ok, toolkit} = Toolnexus.create_toolkit(skills_dir: ["../examples/skills"])
+
+client =
+  Toolnexus.Client.create(
+    base_url: "https://openrouter.ai/api/v1",
+    style: "openai",
+    model: "openai/gpt-4o-mini",
+    api_key: System.get_env("OPENROUTER_API_KEY") || "test-key",
+    retries: 3,
+    retry_base_ms: 250,
+    timeout_ms: 30_000
+  )
+
+# result = Toolnexus.Client.run(client, "What tools do you have?", toolkit)
+# IO.puts(result.text)
+
+IO.puts("ok: client + toolkit wired (#{length(Toolnexus.Toolkit.tools(toolkit))} tools)")
+Toolnexus.Toolkit.close(toolkit)
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — hooks, a custom store, metrics, and a resolver
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+```elixir test
+alias Toolnexus.Client
+alias Toolnexus.Client.InMemoryConversationStore
+
+client =
+  Client.create(
+    base_url: "https://openrouter.ai/api/v1",
+    style: "openai",
+    model: "openai/gpt-4o-mini",
+    api_key: "test-key",
+    system_prompt: "You are a support agent. Be concise.",
+    max_turns: 6,
+    retries: 2,
+    retry_base_ms: 500,
+    retryable_statuses: [520, 521, 522, 523, 524],
+    on_error: fn %{retryable: retryable} -> if retryable, do: :retry, else: :fail end,
+    hooks: %{
+      before_tool: fn %{name: name} -> IO.puts("-> calling #{name}") && nil end
+    },
+    store: InMemoryConversationStore.new(),
+    on_metric: fn ev -> if ev.event == "llm", do: IO.puts("metric: llm status=#{ev.status}") end,
+    request_params: %{"temperature" => 0.2},
+    max_part_bytes: 5_000_000
+  )
+
+%Client{} = client
+true = client.max_turns == 6
+
+IO.puts("ok: full-surface client created (max_turns=#{client.max_turns}, retryable_statuses=#{inspect(client.retryable_statuses)})")
 ```
 
 ## See also
 
 - [`Toolnexus.Client.run`](/api/elixir/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
 - [`Toolnexus.Client.stream`](/api/elixir/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
-- [`Toolnexus.Client.create`](/api/elixir/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+- [`Toolnexus.Client.create` — hooks](/api/elixir/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
 - [`Toolnexus.Client conversation`](/api/elixir/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.
+- [`Toolnexus.Client.create` — resilience](/api/elixir/client/resilience/) — Classify an LLM error into retry / fail, bound a run with a deadline, and cancel cleanly.
+- [`Toolnexus.Client.InMemoryConversationStore`](/api/elixir/client/store/) — Swap in-memory history for your own store so a conversation survives a process restart.
+- [`Toolnexus.Client.MetricsRegistry`](/api/elixir/client/metrics/) — Emit one metric event per model call and per tool call: tokens, latency, outcome.
+- [`Toolnexus.ProviderError`](/api/elixir/client/provider-error/) — The typed exception a non-2xx provider response raises, carrying status/body/retry_after.
+- [`Toolnexus.create_toolkit`](/api/elixir/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.

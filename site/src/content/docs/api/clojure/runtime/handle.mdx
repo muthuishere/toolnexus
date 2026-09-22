@@ -1,71 +1,138 @@
 ---
-title: "Handle — a running sub-agent"
+title: "Handle"
 description: "The state machine for one spawned agent: pending, running, suspended, done. — Clojure."
 sidebar:
-  label: "runtime / handle"
+  label: "Handle"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/agents/runtime.cljc">clojure/src/toolnexus/agents/runtime.cljc:10</a>
 </p>
 
-<Aside type="caution" title="Not available in Clojure">
-There is no §7D handle type here, because there is no sub-agent runtime to hand one out. The nearest
-state machine this port ships is the A2A **Task** — `submitted`, `working`, then `completed`,
-`failed` or `canceled` — read through `GetTask` or straight out of the task store.
+```clojure
+;; a Handle is NOT a value you construct — it is created by `spawn` and
+;; referenced everywhere else by its id string, e.g. "root/coordinator.1/explore.2"
+(require '[toolnexus.agents.runtime :as rt])
+
+(def h (rt/spawn runtime rt/root "writer"))   ; => "root/writer.1", a deterministic, parent-scoped id
+
+;; the two read-only views built on the Handle
+(rt/handles runtime)     ; => tree-order snapshot, every handle under root
+;; => [{:id "root/writer.1" :state "idle" :tokens 15 :inbox 0} ...]
+
+(rt/inspect runtime h)   ; => the full detail view for ONE handle
+;; => {:id "root/writer.1" :state "idle" :tokens 15 :inbox 0
+;;     :turns 2 :pool-tokens 4985 :pending nil}
+```
+
+"A Handle is a live agent: a state machine (`idle → running → idle|suspended|closed`, and
+`suspended → running` ONLY via the Answer to its pending Request), an inbox held as AGENT state
+(never a language mailbox), a carved budget, and a deterministic parent-scoped id"
+(`clojure/src/toolnexus/agents/runtime.cljc:10-13`). A `Handle` is what every
+[`create-runtime`](/api/clojure/runtime/runtime/) verb operates on — `spawn` creates one, `wake`/
+`wait`/`interrupt`/`close`/`resume` act on one by id, and `handles`/`inspect` are the read-only
+windows onto its current state.
+
+## The four states
+
+- **`idle`** — alive, no turn in flight. A freshly spawned handle starts here; a handle that
+  settles (with a `"done"`, `"incomplete"`, `"interrupted"`, or `"error"` result) returns here,
+  never to `"closed"` on its own.
+- **`running`** — a turn is in flight, admitted by `wake` through gate 1 (bounded inbox), gate 2
+  (per-parent concurrency, FIFO-queued past the cap) and gate 3 (a tree-wide cap on LLM calls
+  actually in flight).
+- **`suspended`** — parked on a pending §10 `Request` (or a budget limit routed through
+  `"suspend"`). The **only** way out is `resume` with the matching `Answer` — waking or posting to
+  a suspended handle just buffers, it never moves the state.
+- **`closed`** — torn down by `close`. Still queryable: `inspect` still answers, `wait` still
+  returns the last recorded result, and a fresh handle may be `spawn`ned in its place from the same
+  registry entry. Close ≠ loss.
+
+## What `inspect` returns
+
+`(rt/inspect runtime id)` is the detail view of one handle — `view` (`:id`, `:state`, `:tokens`,
+`:inbox`) plus three extra fields (`clojure/src/toolnexus/agents/runtime.cljc:588-593`):
+
+- **`:turns`** — `:turns-total`, the handle's lifetime turn count (grows across a `resume`, never
+  resets).
+- **`:pool-tokens`** — the token allowance this handle's OWN carved budget pool still holds. This
+  is the handle's local carve, not the live ancestor-chain walk `spawn`/`wake` also check — see
+  [`Budget`](/api/clojure/runtime/budgets/) for why the carve alone is not enough to catch a
+  sibling's overspend.
+- **`:pending`** — the §10 `Request` this handle is parked on, when `:state` is `"suspended"`;
+  `nil` otherwise.
+
+`(rt/handles runtime)` is the coarser, tree-order sibling: every handle under a given root (default
+`rt/root`), each rendered through the same `view` — `:id`, `:state`, `:tokens`, `:inbox` — with no
+`:turns`/`:pool-tokens`/`:pending`. Reach for `handles` to enumerate a tree or build a dashboard;
+reach for `inspect` when you already have one id and want its full detail.
+
+## When to use it
+
+- **Branching on a handle's `:state`** after a verb call, e.g. deciding whether a `"suspended"`
+  handle needs a host to answer its pending request, or a `"running"` one just needs a longer
+  `wait`.
+- **Building an observability view** — a dashboard listing every live sub-agent, its token spend,
+  and its inbox depth, without touching any verb that would change state.
+- **Confirming a handle survived `close`** — `inspect` on a closed handle still answers with its
+  last state and result, which is exactly the guarantee that makes "close ≠ loss" true in practice.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="A handle is an id you hold, not an object you pass around">
+Other ports return a `Handle` object with its own methods (`handle.wait()`, `handle.close()` in
+js/python/java/csharp). This port's `spawn` returns a plain **id string**, and every other verb
+(`wake`, `wait`, `interrupt`, `close`, `inspect`) takes `runtime` and that id as separate
+arguments. That is deliberate: "handles are capabilities — post and wake what you hold, wait only
+on what you spawned" (`runtime.cljc:719-720`), and an id is trivially something you can hold in a
+set, log, or pass across a boundary without smuggling a live reference to the runtime's internal
+state along with it. `wait`'s own `:by` option enforces the capability rule at the verb level — a
+handle waited on by anyone other than its actual spawner settles with an `"error"` result, never a
+silent success.
 </Aside>
 
-The state machine for one spawned agent: pending, running, suspended, done.
+## Examples
 
-A handle is the thing you hold *while* a child is working: it names the child, reports where it is,
-and gives you somewhere to hang a result. Its whole value is that the parent does not have to block.
-
-## What to use instead
-
-An A2A task id is that handle. It is a string rather than an object, and its state lives in the
-store rather than in memory, which is exactly what makes it survive a restart:
+### 1. The smallest useful call — read one handle's state after spawning it
 
 ```clojure
-(require '[toolnexus.serve :as serve])
+(require '[toolnexus.agents.runtime :as rt])
 
-(def store (serve/file-store "./tasks"))
-
-(defn task-state
-  "The handle's state machine, read from wherever the task actually lives."
-  [id]
-  (let [t ((:get store) id)]
-    (case (get-in t [:status :state])
-      "submitted" :queued
-      "working"   :running
-      "completed" {:done (->> (:artifacts t) (mapcat :parts) (map :text))}
-      "failed"    {:failed (get-in t [:status :message :parts 0 :text])}
-      nil         :unknown)))
+(let [h (rt/spawn runtime rt/root "w")]
+  (:state (rt/inspect runtime h)))   ; => "idle" — a fresh handle is idle, not running
 ```
 
-The mapping is close but not complete. `submitted` and `working` cover pending and running;
-`completed` / `failed` / `canceled` cover done. There is no **suspended** state on a task — §10
-suspension is a property of the client loop, not of the serve lifecycle, so a child that needs an
-answer from a human surfaces through the parent's `:wait-for` rather than as a paused handle. And a
-process that dies mid-fulfilment leaves a task saved as `working` with nothing left to finish it;
-treat a long-stale `working` as failed, because nothing else will.
-
-On the parent side there is no handle at all — calling a peer's tool blocks until the task is
-terminal. The `:metadata` on the result is the post-hoc summary a handle would have carried live:
+### 2. The realistic case — watch a handle move through running to idle
 
 ```clojure
-;; => {:agent "researcher" :taskId "3f2c..." :state "completed" :polls 7 :ms 3480}
-(:metadata result)
+(let [h (rt/spawn runtime rt/root "w")]
+  (rt/wake runtime h "go")
+  (let [r (rt/wait runtime h)]
+    (:status r))                    ; => "done"
+  (:state (rt/inspect runtime h)))  ; => "idle" — a settled handle returns to idle, never "closed"
 ```
 
-If you want the parent to keep working while the child runs, hold the task id yourself: POST
-`SendMessage` directly (as in the [`serve`](/api/clojure/serve/a2a/) examples), stash the returned
-`:id`, and poll `GetTask` on your own schedule instead of going through the peer tool.
+### 3. The full surface — inspecting a suspended handle's pending request, then a whole tree
+
+```clojure
+;; after a §10 approval request suspends the handle mid-turn:
+(let [detail (rt/inspect runtime "root/boss.1/worker.1")]
+  (:state detail)                    ; => "suspended"
+  (:pending detail))                 ; => {:kind "approval" :prompt "…" :id "…" :data {...}}
+
+;; enumerate the whole subtree under boss, tree order, root excluded
+(rt/handles runtime "root/boss.1")
+;; => [{:id "root/boss.1/worker.1" :state "suspended" :tokens 30 :inbox 0}]
+```
 
 ## See also
 
-- [`toolnexus.serve/file-store`](/api/clojure/serve/task-store/) — where a task's state actually lives
-- [`toolnexus.serve/serve`](/api/clojure/serve/a2a/) — the `SendMessage` / `GetTask` lifecycle in full
-- [`toolnexus.a2a/remote-agent`](/api/clojure/agents/agent/) — the blocking parent-side call and its metadata
-- [`toolnexus.client/pending-of`](/api/clojure/suspension/pending-of/) — the port's real "paused" state, on the client loop
+- [`create-runtime`](/api/clojure/runtime/runtime/) — The six host verbs (`spawn`, `post`, `wake`,
+  `wait`, `interrupt`, `close`) plus `resume` that create and drive a `Handle`, and the state
+  machine transitions they trigger.
+- [`AgentDef`](/api/clojure/runtime/agent/) — The registry entry a `spawn` call turns into a live
+  `Handle`.
+- [`Budget`](/api/clojure/runtime/budgets/) — What `:pool-tokens` on `inspect`'s view actually
+  measures, and why a live ancestor walk checks more than the local carve.

@@ -1,0 +1,145 @@
+---
+title: "TASK_STATUSES / RUN_STATUSES / TASK_LIMITS / canonicalLimit"
+description: "The canonical, byte-identical-across-ports string constants a host branches on: task statuses, run statuses, and the nine stop-limit reasons a task can end on, plus the helper that canonicalizes a limit name. — JavaScript."
+sidebar:
+  label: "TASK_STATUSES / RUN_STATUSES / TASK_LIMITS / canonicalLimit"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+</p>
+
+```ts
+// under agents.*
+agents.TASK_STATUSES: readonly TaskStatus[]
+agents.TASK_LIMITS: readonly TaskLimit[]
+agents.canonicalLimit(limit: string | undefined): TaskLimit | undefined
+
+// top-level (§8 client, a DIFFERENT closed set — see the table below)
+RUN_STATUSES: readonly RunStatus[]
+```
+
+The canonical, byte-identical-across-ports string constants a host branches on: task statuses,
+run statuses, and the nine stop-limit reasons a task can end on, plus the helper that
+canonicalizes a limit name. Two fields in this library are both called `status`, and they are
+**not interchangeable** — they are different closed sets on different layers (ADR 0027 D2.1):
+
+| vocabulary | export | layer | values |
+|---|---|---|---|
+| **task/agent status** | `agents.TASK_STATUSES` | §7D `TaskResult.status` | `done`, `pending`, `incomplete`, `interrupted`, `closed`, `timeout`, `error` |
+| **run/client status** | `RUN_STATUSES` | §8 `RunResult.status` | `done`, `pending`, `incomplete` |
+| **task limit** | `agents.TASK_LIMITS` | §7D `TaskResult.limit` | `maxTurns`, `maxTokens`, `maxToolCalls`, `maxWallMs`, `maxChildren`, `maxConcurrent`, `maxDepth`, `completion`, `timeout` |
+
+`"timeout"` belongs **only** to the agent vocabulary — it means a `wait(handle, timeoutMs)`
+deadline expired while the child kept running, never that an LLM call itself timed out. The §8
+client never returns `"timeout"` as a `RunResult.status`: a run-level deadline **throws**
+(`LlmHttpError`/an abort error) instead of coming back as a value. Confusing the two is exactly
+the defect issue #92 reported.
+
+A host is meant to branch on these named constants, never on the hardcoded literal — a rename or
+a typo in a string literal desyncs silently; a rename of the exported constant does not compile.
+
+## When to use it
+
+Use these constants wherever your host inspects a `TaskResult.status`/`.limit` or a
+`RunResult.status` and needs to branch, log, or assert against the closed set — a dashboard that
+renders a badge per status, a retry policy keyed on `"incomplete"` + a specific `limit`, or a test
+asserting a stop reason is one of the real values rather than a typo that happens to compile.
+`canonicalLimit` is for the narrower case: normalizing something computed internally (a budget
+pool name) onto the public vocabulary before it is ever handed to a caller.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Don't branch on a string literal you typed yourself">
+`if (result.status === "incomplete")` compiles whether or not `"incomplete"` is really in the
+vocabulary. `agents.TASK_STATUSES.includes(result.status)` (or importing the constant and
+comparing against it) catches a typo, and — more importantly — reads the same list this page
+documents rather than a private copy of it that can drift. The named constants (`S`/`L` records
+internally) exist precisely because a rename desynced `status`/`limit` in three of the seven
+ports before this vocabulary was pinned (addendum A18).
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — read the vocabularies as values
+
+```ts test
+import assert from "node:assert"
+import { agents, RUN_STATUSES } from "toolnexus"
+
+const { TASK_STATUSES, TASK_LIMITS } = agents as any
+
+assert.deepEqual([...RUN_STATUSES], ["done", "pending", "incomplete"])
+assert.equal(TASK_STATUSES.includes("timeout"), true, "timeout is the AGENT vocabulary")
+assert.equal(RUN_STATUSES.includes("timeout" as any), false, "and never the client one")
+assert.ok(TASK_STATUSES.length > RUN_STATUSES.length)
+console.log("ok:", TASK_STATUSES.length, RUN_STATUSES.length)
+```
+
+### 2. The realistic case — an agent run that stops on a budget limit
+
+`incomplete` names the pool that stopped it via `limit`, itself drawn from `TASK_LIMITS` — never
+an internal pool name leaking out.
+
+```ts test
+import assert from "node:assert"
+import { agents, defineTool } from "toolnexus"
+
+const { AgentRuntime, TASK_LIMITS } = agents as any
+
+const noop = defineTool({
+  name: "noop", description: "d", inputSchema: { type: "object", properties: {} },
+  run: () => "again",
+})
+const fetchImpl: any = async () => new Response(
+  JSON.stringify({
+    choices: [{ index: 0, message: { role: "assistant", tool_calls: [{ id: "t1", type: "function", function: { name: "noop", arguments: "{}" } }] }, finish_reason: "tool_calls" }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  }),
+  { status: 200, headers: { "content-type": "application/json" } },
+)
+
+const rt = new AgentRuntime({
+  fetch: fetchImpl,
+  registry: { looper: { name: "looper", does: "never finishes", model: "m", tools: [noop], budget: { maxTurns: 2 } } },
+})
+const h = rt.spawn(rt.root, "looper")
+rt.wake(h, "go")
+const r = await rt.wait(h)
+
+assert.equal(r.status, "incomplete")
+assert.equal(r.limit, "maxTurns")
+assert.ok(TASK_LIMITS.includes(r.limit), "the value is from the CLOSED cross-port vocabulary")
+await rt.close(rt.root)
+console.log("ok:", r.status, r.limit)
+```
+
+### 3. The full surface — `canonicalLimit` refuses anything outside the closed set
+
+```ts test
+import assert from "node:assert"
+import { agents } from "toolnexus"
+
+const { canonicalLimit, TASK_LIMITS } = agents as any
+
+// Every real limit name canonicalizes to itself.
+for (const l of TASK_LIMITS) {
+  assert.equal(canonicalLimit(l), l)
+}
+
+// Anything not in the closed vocabulary — an internal pool name, a typo, undefined — maps to
+// undefined rather than leaking through. A host can trust that a defined value is always real.
+assert.equal(canonicalLimit("someInternalPoolName"), undefined)
+assert.equal(canonicalLimit(undefined), undefined)
+
+console.log("ok:", TASK_LIMITS.length, "canonical limits")
+```
+
+## See also
+
+- [`agents.Agent`](/api/javascript/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`agents.AgentRuntime`](/api/javascript/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`agents.Handle`](/api/javascript/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`agents.Budget`](/api/javascript/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

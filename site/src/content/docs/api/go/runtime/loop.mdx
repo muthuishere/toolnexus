@@ -1,0 +1,285 @@
+---
+title: "Loop"
+description: "Agent.Loop(...).Run drives the agent under a Guardrail policy that vets every tool call and a Completion check that decides when the task is done — the gated door beside the plain Agent.Run, with unsupported spec fields (tools, team, waitFor, onMetric) named explicitly rather than silently dropped. — Go."
+sidebar:
+  label: "Loop"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang/agents</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/agents/loop.go">golang/agents/loop.go</a>
+</p>
+
+```go
+func (a *Agent) Loop(opts tn.ClientOptions, tk *tn.Toolkit) *Loop
+
+type RunOpts struct {
+	Model string // overrides the agent's model for THIS call only; "" ⇒ the agent's
+}
+
+func (l *Loop) Run(ctx context.Context, prompt string, opts RunOpts) (Outcome, error)
+func (l *Loop) Status() string  // "idle" | "running" | done/incomplete/pending/error
+func (l *Loop) Turns() int
+func (l *Loop) Unsupported() []string
+
+type Outcome struct {
+	Text      string
+	Status    string     // done | incomplete | pending | error — the SHIPPED vocabulary, no new strings
+	StoppedBy string     // named whenever Status != "done" — never a silent stop
+	Attempts  int
+	Turns     int
+	Result    tn.RunResult
+}
+
+type Guardrail func(ev tn.BeforeToolEvent) string // "" or "allow" ⇒ permit; anything else ⇒ deny reason
+
+type Completion struct {
+	Verify      func(tn.RunResult) (bool, string) // (ok, reason) — never a named Verdict type in Go
+	MaxAttempts int                                // REQUIRED, >= 1
+}
+
+func AllTodosDone(r tn.RunResult) (bool, string) // the built-in completion verifier
+
+func LoopUnsupported(sp Spec) []string // "tools" | "team" | "waitFor" | "onMetric", stable order
+```
+
+`agents.Loop` is the second of the "two doors on one agent" (SPEC §7D): `Agent.Run` is the plain
+one-shot over a fresh [`Runtime`](/api/go/runtime/runtime/); `Agent.Loop(opts, tk).Run` is the
+**gated** door — the same agent, driven directly over a `ClientOptions`/`Toolkit` the caller
+already built, under a `Guardrail` policy on every tool call and a `Completion` gate that decides
+whether the run is *actually* done rather than just having stopped talking.
+
+The placement law the package encodes: `Spec` (the harness) answers "**may** it?" — capability,
+ceilings, per problem. `RunOpts.Model` answers "with **what**?" — per call. `Loop`/`Outcome` answers
+"**did** it?" — status, turns, observed. None of them answer "is it **right**?" — that's what a
+tool, a skill, or the human reviewing `Outcome.Text` is for.
+
+## When to use it
+
+Reach for `agent.Loop(opts, tk)` when you already have a `ClientOptions`/`*Toolkit` pair built by
+hand — not through the [`agents.Runtime`](/api/go/runtime/runtime/) registry — and want that same
+`Agent`'s `Guardrails` and `Completion` gate enforced over it, without standing up `Spawn`/`Wake`/
+`Wait`. It's the natural fit for a single top-level agent with no delegation: one conversation, one
+completion gate, driven turn by turn.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Need delegation, suspension, or a per-agent metric sink? Use the Runtime instead">
+`Loop` is deliberately a driver over a toolkit and client **the caller built**, so four `Spec`
+fields have nowhere to attach: no tool view to scope (`Tools`), no task tool to delegate through
+(`Team`), no handle to suspend on (`WaitFor`), and no per-agent sink the caller didn't already wire
+in (`OnMetric`). `LoopUnsupported(spec)` reports exactly these four by name rather than silently
+dropping them or refusing to construct — call it as a pre-flight, and if it returns anything, drive
+that agent through [`agents.Runtime`](/api/go/runtime/runtime/) (`Agent.Run` or `Spawn`/`Wake`/
+`Wait`) instead, where all four are honoured.
+</Aside>
+
+<Aside type="note" title="Go idiom: (bool, string), not a named Verdict type">
+Several sibling ports carry a named `Verdict`/`verdict` type for a completion check's result
+(`{ok, reason}`). Go's `Completion.Verify` returns the plain tuple `(bool, string)` instead — this
+is a deliberate per-language idiom difference, not a missing feature: Go multi-value returns make a
+one-off struct for a two-field result unidiomatic. `Completion` itself IS a named struct (unlike the
+verdict), because it also carries `MaxAttempts`. See the narrative
+[harness doc](/harness/) for how `harness`/`Loop`/`Completion` fit together across ports; this page
+covers only the Go API surface.
+</Aside>
+
+## Examples
+
+All three point `ClientOptions.BaseURL` at a local `httptest.Server` — no real network call, no
+real API key.
+
+### 1. The smallest useful call — no Completion, one attempt, done
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hi there"}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`))
+	}))
+	defer srv.Close()
+
+	a := agents.New("plain", agents.Spec{Does: "answers", Soul: "be brief"})
+	tk, err := tn.CreateToolkit(context.Background(), tn.Options{Builtins: false})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	opts := tn.ClientOptions{BaseURL: srv.URL, Style: tn.StyleOpenAI, Model: "m", APIKey: "k"}
+	l := a.Loop(opts, tk)
+
+	out, err := l.Run(context.Background(), "hello", agents.RunOpts{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	// Absent Completion ⇒ byte-identical to no gate at all: one attempt, no StoppedBy.
+	if out.Status != "done" || out.Attempts != 1 || out.StoppedBy != "" {
+		log.Fatalf("got status=%s attempts=%d stoppedBy=%q", out.Status, out.Attempts, out.StoppedBy)
+	}
+	if l.Status() != "idle" {
+		log.Fatalf("Loop.Status() after a done run = %q, want idle", l.Status())
+	}
+
+	fmt.Println("ok:", out.Status, out.Text)
+}
+```
+
+### 2. The realistic case — a Completion gate blocks an early claim of "done", then passes
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func main() {
+	todo := func(id, text string, done bool) any {
+		return map[string]any{"id": id, "text": text, "completed": done}
+	}
+	callTodo := func(todos []any) map[string]any {
+		args, _ := json.Marshal(map[string]any{"todos": todos})
+		return map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+			map[string]any{"id": "t1", "type": "function",
+				"function": map[string]any{"name": "todowrite", "arguments": string(args)}}}}
+	}
+	text := func(s string) map[string]any { return map[string]any{"role": "assistant", "content": s} }
+
+	// attempt 1: claims done with an open item ⇒ gate rejects; attempt 2: all checked ⇒ gate passes.
+	replies := []map[string]any{
+		callTodo([]any{todo("1", "draft", true), todo("2", "proofread", false)}),
+		text("claiming done"),
+		callTodo([]any{todo("1", "draft", true), todo("2", "proofread", true)}),
+		text("really done"),
+	}
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		msg := replies[n]
+		if n < len(replies)-1 {
+			n++
+		}
+		body, _ := json.Marshal(map[string]any{
+			"choices": []any{map[string]any{"message": msg}},
+			"usage":   map[string]any{"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+		})
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	tk, err := tn.CreateToolkit(context.Background(), tn.Options{Builtins: tn.BuiltinsConfig{Tools: map[string]bool{
+		"todowrite": true, "bash": false, "read": false, "write": false, "edit": false,
+		"glob": false, "grep": false, "webfetch": false, "apply_patch": false, "question": false,
+	}}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	a := agents.New("worker", agents.Spec{Does: "works",
+		Completion: &agents.Completion{Verify: agents.AllTodosDone, MaxAttempts: 3}})
+	opts := tn.ClientOptions{BaseURL: srv.URL, Style: tn.StyleOpenAI, Model: "m", APIKey: "k"}
+
+	out, err := a.Loop(opts, tk).Run(context.Background(), "do it", agents.RunOpts{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if out.Status != "done" {
+		log.Fatalf("status=%s stoppedBy=%q", out.Status, out.StoppedBy)
+	}
+	if out.Attempts != 2 {
+		log.Fatalf("expected the gate to force a 2nd attempt, got %d", out.Attempts)
+	}
+
+	fmt.Println("ok: done after", out.Attempts, "attempt(s)")
+}
+```
+
+### 3. The full surface — `LoopUnsupported` names the four fields this door cannot honour
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"sort"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func main() {
+	child := agents.New("helper", agents.Spec{Does: "helps"})
+
+	// A Spec that declares Tools, Team, WaitFor and OnMetric — every one of them
+	// requires the agents.Runtime registry to be honoured; Loop cannot carry them.
+	sp := agents.Spec{
+		Does:    "coordinates",
+		Tools:   []tn.Tool{{Name: "extra", Description: "d"}},
+		Team:    []*agents.Agent{child},
+		WaitFor: func(tn.Request) (tn.Answer, error) { return tn.Answer{}, nil },
+		OnMetric: func(tn.MetricEvent) {},
+	}
+
+	missing := agents.LoopUnsupported(sp)
+	sort.Strings(missing)
+	want := []string{"onMetric", "team", "tools", "waitFor"}
+	if fmt.Sprint(missing) != fmt.Sprint(want) {
+		log.Fatalf("got %v, want %v", missing, want)
+	}
+
+	// Agent.Loop's own Unsupported() reports the same thing for a live Loop.
+	a := agents.New("coordinator", sp)
+	tk, _ := tn.CreateToolkit(nil, tn.Options{Builtins: false})
+	l := a.Loop(tn.ClientOptions{BaseURL: "http://unused", Style: tn.StyleOpenAI, Model: "m", APIKey: "k"}, tk)
+	if len(l.Unsupported()) != 4 {
+		log.Fatalf("Loop.Unsupported() = %v, want 4 entries", l.Unsupported())
+	}
+
+	fmt.Println("ok: unsupported through this door:", missing)
+}
+```
+
+## Signature
+
+| Symbol | What it is |
+|---|---|
+| `Agent.Loop(opts, tk)` | Opens a live `*Loop` for this agent over a caller-built `ClientOptions`/`*Toolkit`. |
+| `Loop.Run(ctx, prompt, RunOpts)` | Runs one request through the gate; `RunOpts.Model` overrides the agent's model for this call only. |
+| `Loop.Status()` / `.Turns()` / `.Unsupported()` | Observed, never set by the caller. |
+| `Guardrail` | Policy check — `"" \| "allow"` permits, anything else denies with that reason. Composed first-deny-wins, ahead of any `Hooks.BeforeTool`. |
+| `Completion{Verify, MaxAttempts}` | The gate: `Verify` reports `(ok, reason)`; `MaxAttempts` bounds the retries a failing gate can force. |
+| `AllTodosDone` | The shipped structural verifier — reads the `todowrite` builtin's last call; no plan declared ⇒ passes. |
+| `LoopUnsupported(spec)` | The four Spec fields (`tools`, `team`, `waitFor`, `onMetric`) this door cannot carry, in stable order. |
+
+## See also
+
+- [`agents.New`](/api/go/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`NewRuntime`](/api/go/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`agents.Handle`](/api/go/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`agents.Budget`](/api/go/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+- [Harness (narrative)](/harness/) — How `harness`/`Loop`/`Completion` fit together as a capability layer, across all seven ports.

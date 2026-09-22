@@ -1,0 +1,223 @@
+---
+title: "File"
+description: "The authoring side of multimodal content: constructors that turn a path, bytes, a blob, a data URL, or a remote URL into the ContentPart a prompt or tool result carries — the write half of the read-only ContentPart shape. — Go."
+sidebar:
+  label: "File"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a>
+</p>
+
+```go
+func Text(s string) ContentPart // a text content part
+
+// Edge constructors — every one reads and base64-encodes NOW, so a path or an
+// unread stream never enters a ContentPart. Errors are deferred onto the
+// returned part (ContentPart.Err()), surfaced when the part is actually used.
+func File(path string) ContentPart                    // reads the path; mime from the fixed extension table
+func Bytes(raw []byte, mimeType string) ContentPart   // native bytes, explicit mime — no hand-base64 tax
+func Reader(r io.Reader, mimeType string) ContentPart // drained eagerly; NOT closed — caller owns it
+func FileHandle(f fs.File) ContentPart                // an already-open *os.File & friends; mime from f.Stat().Name()
+func FSFile(fsys fs.FS, name string) ContentPart      // embed.FS / os.DirFS / fstest.MapFS — a fixture shipped in the binary
+func URLPart(u, mimeType string) ContentPart          // a data: URL is parsed into {mimeType, data}; any other URL is kept as URL
+
+func (p ContentPart) Bytes() int // the DECODED byte length this part carries (0 for text/url)
+
+// ClientOptions.OnUnsupportedPart string // "" (provenance rule) | "error" | "text"
+```
+
+Five constructors and `Text` turn a path, raw bytes, an `io.Reader`, an already-open file, an
+`fs.FS` entry, or a URL into the one wire shape every part collapses to —
+[`ContentPart`](/api/go/types/content-part/): `{Type, Text, MimeType, Data, URL, Name}`. They are
+the **write** half; `ContentPart` itself (and its `Err`/`Bytes`/`EstimatedTokens`/`Validate`
+readers) is the read-only shape a prompt, a tool result, or an MCP response actually carries.
+
+Every constructor reads and base64-encodes **at construction time** — never lazily, never on a
+retained handle — so a `ContentPart` can always be marshalled, persisted, or replayed without
+re-touching whatever it was built from. A construction failure (unreadable file, unknown
+extension, oversize payload) is never a panic: it's deferred onto the returned part and surfaced
+the first time the part is actually used (`RunParts`, `Err()`), so these stay usable as one-liners
+inside a slice literal.
+
+## When to use it
+
+Reach for `File(path)` for the common case — a file already on disk. Reach for `Bytes` when you
+already hold the bytes (a generated screenshot, a downloaded payload) and don't want a temp file.
+Reach for `Reader` for a stream you don't want fully materialised as a `[]byte` yourself first (it
+still gets drained internally — the win is not writing that loop). Reach for `FileHandle` when the
+caller already has an open `*os.File` and would otherwise have to re-derive its path. Reach for
+`FSFile` when the asset ships **inside your binary** via `//go:embed` rather than on the host
+filesystem. Reach for `URLPart` for a remote image/file/audio URL, or a `data:` URL you want
+normalized into `{mimeType, data}` at construction rather than carried as a string.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Building a ContentPart by hand instead?">
+Nothing stops you from writing `ContentPart{Type: "image", MimeType: "image/png", Data: b64}`
+directly — the struct is exported and every field is public. The constructors exist so you never
+hand-derive the mime type from an extension, hand-base64-encode bytes, or hand-parse a `data:` URL
+differently at each call site; `File`/`FSFile`/`FileHandle` also fill `Name` from the source (used
+by `String()`'s human-readable rendering and by providers that display a filename), which a literal
+easily forgets. Reach for [`URLPart`](#) over your own `strings.HasPrefix(u, "data:")` check
+specifically because it's the one place a `data:` URL's two representations — inline vs. remote —
+are guaranteed to decode to the identical bytes downstream.
+</Aside>
+
+<Aside type="caution" title="OnUnsupportedPart — the provenance rule for a part the wire style can't carry">
+Not every `ClientStyle` can represent every part type (Anthropic has no native audio block, for
+one). The default (`ClientOptions.OnUnsupportedPart == ""`) applies a **provenance rule**: a part
+**you attached** (via `RunParts`) fails loudly as a typed `*UnsupportedPartError` before any HTTP
+call — you'll know immediately your prompt can't reach that model. A part **derived from a tool or
+MCP result** instead degrades to a text placeholder (`"[unsupported audio part (audio/mpeg)]"`,
+never the bytes) and warns once, because a remote server returning something your style can't
+render must not fail the whole run. Set `OnUnsupportedPart: "error"` to make both kinds fail loudly,
+or `"text"` to make both kinds degrade — see [`emit.go`](https://github.com/muthuishere/toolnexus/blob/main/golang/emit.go).
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — attach a file from disk
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	// File's fixed extension table covers a closed set of media types
+	// (png/jpg/jpeg/gif/webp/pdf/mp3/wav) — an unknown extension is a typed
+	// error, not a guess. ".pdf" resolves to PartFile, which is also the one
+	// part type File() names from the path (Name is not set for image/audio).
+	dir := os.TempDir()
+	path := filepath.Join(dir, "note.pdf")
+	if err := os.WriteFile(path, []byte("%PDF-1.4 fake pdf bytes"), 0o644); err != nil {
+		log.Fatal(err)
+	}
+	defer os.Remove(path)
+
+	p := toolnexus.File(path)
+	if err := p.Err(); err != nil {
+		log.Fatalf("File: %v", err)
+	}
+	if p.Name != "note.pdf" || p.Bytes() != len("%PDF-1.4 fake pdf bytes") {
+		log.Fatalf("got name=%q bytes=%d", p.Name, p.Bytes())
+	}
+
+	fmt.Println("ok:", p.Name, p.Bytes(), "bytes")
+}
+```
+
+### 2. The realistic case — `Bytes` for generated data, `URLPart` for a `data:` URL, one prompt
+
+```go test
+package main
+
+import (
+	"encoding/base64"
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	// A 1x1 transparent PNG, generated in-memory — no filesystem round trip needed.
+	png := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	screenshot := toolnexus.Bytes(png, "image/png")
+	if err := screenshot.Err(); err != nil {
+		log.Fatalf("Bytes: %v", err)
+	}
+
+	// Same bytes, arriving as a data: URL instead — URLPart normalizes it to the
+	// identical {mimeType, data} shape at construction.
+	dataURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
+	fromURL := toolnexus.URLPart(dataURL, "")
+	if err := fromURL.Err(); err != nil {
+		log.Fatalf("URLPart: %v", err)
+	}
+	if screenshot.Data != fromURL.Data || screenshot.MimeType != fromURL.MimeType {
+		log.Fatal("a data: URL must decode to the identical bytes as Bytes()")
+	}
+
+	parts := []toolnexus.ContentPart{
+		toolnexus.Text("what's in this screenshot?"),
+		screenshot,
+	}
+	fmt.Println("ok:", len(parts), "parts, same image two ways:", screenshot.Bytes() == fromURL.Bytes())
+}
+```
+
+### 3. The full surface — `FSFile` from an embedded asset, and the unsupported-part provenance rule
+
+```go test
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"testing/fstest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	// Stands in for a //go:embed fs.FS shipping a fixture inside the binary.
+	// A non-image source (like File/FileHandle) also gets Name populated —
+	// PartImage/PartAudio parts deliberately don't, since a provider block
+	// never carries a filename for those.
+	fsys := fstest.MapFS{"docs/report.pdf": &fstest.MapFile{Data: []byte("%PDF-1.4")}}
+	report := toolnexus.FSFile(fsys, "docs/report.pdf")
+	if err := report.Err(); err != nil {
+		log.Fatalf("FSFile: %v", err)
+	}
+	if report.Name != "report.pdf" {
+		log.Fatalf("Name = %q, want report.pdf", report.Name)
+	}
+
+	// An attached part the style cannot represent (Anthropic has no audio block)
+	// errors BEFORE any HTTP call reaches the wire — the provenance rule's
+	// "attached" half.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Fatal("no HTTP call should be made for an unrepresentable attached part")
+	}))
+	defer srv.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleAnthropic, Model: "m", APIKey: "k"})
+	audio := toolnexus.Bytes([]byte("fakeaudio"), "audio/mpeg")
+	_, err = client.RunParts(context.Background(), []toolnexus.ContentPart{toolnexus.Text("listen"), audio}, tk)
+
+	var ue *toolnexus.UnsupportedPartError
+	if !errors.As(err, &ue) || ue.PartType != "audio" {
+		log.Fatalf("expected an UnsupportedPartError naming the part type, got %v", err)
+	}
+
+	fmt.Println("ok:", report.Name, "embedded; unsupported attached audio errored:", ue.PartType)
+}
+```
+
+## See also
+
+- [`Tool`](/api/go/types/tool/) — The uniform shape every tool source collapses to: name, description, JSON-Schema parameters, execute.
+- [`ToolResult`](/api/go/types/tool-result/) — The result envelope: output text, optional error flag, optional non-text parts, and optional metadata that can carry a suspension.
+- [`ContentPart`](/api/go/types/content-part/) — The read-only non-text shape these constructors build: text | image | file | audio, carrying base64 bytes or a URL plus a mimeType — never a path.
+- [`ToolContext`](/api/go/types/context/) — Optional per-call context handed to execute: cancellation, identity, and host-supplied state.

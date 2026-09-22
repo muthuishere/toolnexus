@@ -1,0 +1,204 @@
+---
+title: "Toolnexus.Agents.Loop"
+description: "Agent.Loop(...).Run drives the agent under a Guardrail policy that vets every tool call and a Completion check that decides when the task is done — the gated door beside the plain Agent.Run, with unsupported spec fields (tools, team, waitFor, onMetric) named explicitly rather than silently dropped. — Elixir."
+sidebar:
+  label: "Toolnexus.Agents.Loop"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+</p>
+
+```elixir
+def harness(spec), do: spec              # a NAME, not a type — the agent spec already IS it
+
+%Toolnexus.Agents.Loop{agent: agent, options: options, toolkit: toolkit,
+                       status: "idle", turns: 0, history: []}
+
+@type guardrail :: (map() -> String.t() | nil)
+@type verdict :: %{ok: boolean(), reason: String.t()}
+@type completion :: %{required(:verify) => (Client.RunResult.t() -> verdict()),
+                      required(:max_attempts) => pos_integer()}
+
+Toolnexus.Agents.loop(agent_def, client_options, toolkit)     # build a Loop
+Toolnexus.Agents.Loop.run(loop, prompt, opts \\ [])           # {outcome, loop}
+Toolnexus.Agents.Loop.all_todos_done(run_result)              # built-in completion verifier
+Toolnexus.Agents.Loop.loop_unsupported(spec)                  # ["tools", "team", "waitFor", "onMetric"]
+```
+
+Agent.Loop(...).Run drives the agent under a Guardrail policy that vets every tool call and a Completion check that decides when the task is done — the gated door beside the plain Agent.Run, with unsupported spec fields (tools, team, waitFor, onMetric) named explicitly rather than silently dropped.
+
+`Toolnexus.Agents.Loop` is a plain struct, not a process — it threads `turns` and `history`
+through `run/3`'s return value (`{outcome, loop}`), which is what lets the same completion-gate
+machinery serve both a caller driving a `Loop` directly and a sub-agent turn running inside
+[`Toolnexus.Agents.Runtime`](/api/elixir/runtime/runtime/)'s own process
+(`elixir/lib/toolnexus/agents/loop.ex:1-20`). The placement law the module doc states directly:
+the **agent spec** (the harness) answers "MAY it?" — capability, ceilings, per problem; **run
+opts** answer "with WHAT?" — model for this call, per call; **Loop** answers "DID it?" — status,
+turns, observed. None of them answers "is it RIGHT?" — that's the job of a tool, a skill, or an
+agent itself.
+
+`harness/1` (`loop.ex:58`) is a NAME, not a type: `agent("x", harness(does: "..."))` and
+`agent("x", does: "...")` are indistinguishable, because an agent spec already IS the harness —
+tools, soul, team, budget, model, policy, ceilings all live there already. See the narrative
+overview at [`/harness/`](/harness/) for how harness/loop/guardrail/completion fit together
+conceptually; this page documents only the Elixir call shapes.
+
+## When to use it
+
+- **You need a policy gate over tool calls, not just the plain client loop** — a `guardrail`
+  (`@type guardrail :: (map() -> String.t() | nil)`, `loop.ex:27`) inspects every proposed tool
+  call and can deny it by returning a non-empty, non-`"allow"` string; returning `nil` or `""`
+  (or `"allow"`) permits it. Compile a list of guardrails into hooks with `Loop.guarded_hooks/2`
+  — first deny wins, and a later guardrail can never re-allow what an earlier one denied.
+- **"Done" needs to mean something stronger than "the model stopped calling tools"** — a
+  `completion` map (`@type completion`, `loop.ex:36`) pairs a `:verify` function (judging the
+  **accumulated** tool calls across every attempt, not just the latest one) with a required
+  `:max_attempts` ceiling. `Loop.all_todos_done/1` (`loop.ex:242`) is the shipped built-in verify:
+  it reads the `todowrite` builtin's result metadata and requires every declared item checked,
+  passing automatically when no plan was ever declared (so it never punishes an agent that
+  doesn't use the builtin).
+- **A driver needs to know, in advance, which spec fields it can honour** — `Loop.loop_unsupported/1`
+  (`loop.ex:172`) takes a spec and returns, in a fixed order, the names of the fields a `Loop`
+  cannot drive: `tools`, `team`, `waitFor`, `onMetric` — because a `Loop` drives one client over
+  one conversation, so it cannot own a tool wiring, a team, a §10 interpreter, or a metric sink;
+  those belong to [`Toolnexus.Agents.Runtime`](/api/elixir/runtime/runtime/) instead. An empty
+  list means the spec is fully honoured by a bare `Loop`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Two doors on one agent (SPEC §7D)">
+`Toolnexus.Agents.Runtime.spawn/2` runs an agent unconditionally — no guardrail, no completion
+gate, and it owns tools/team/waitFor/onMetric. `Agents.loop(agent, opts, toolkit)` +
+`Loop.run/3` is the OTHER door: it adds the guardrail + completion gate this page documents, at
+the cost of not being able to drive those four runtime-owned fields at all — `loop_unsupported/1`
+exists specifically so a caller finds out which fields it lost, rather than having them silently
+ignored. Reach for the `Runtime` door when you need sub-agents, a team, or durable §10
+suspension; reach for `Loop` when you need a policy gate over a single conversation and don't
+need any of those four.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — no completion, no guardrails, unchanged behavior
+
+```elixir test
+alias Toolnexus.Agents
+alias Toolnexus.Agents.Loop
+
+{:ok, tk} = Toolnexus.create_toolkit(builtins: false)
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  resp = %{"choices" => [%{"message" => %{"role" => "assistant", "content" => "hello"}}],
+           "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}}
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+opts = %{base_url: "http://localhost", style: "openai", model: "gpt-x", api_key: "test-key", http_options: [plug: plug]}
+agent = Agents.agent("plain", does: "answers")
+loop = Agents.loop(agent, opts, tk)
+
+{out, _loop} = Loop.run(loop, "hi")
+
+true = out.status == "done"
+true = out.text == "hello"
+true = out.attempts == 1
+true = out.stopped_by == nil
+
+IO.puts("ok: #{out.status} in #{out.attempts} attempt(s)")
+```
+
+### 2. The realistic case — a completion gate that blocks on an open todo, then passes
+
+```elixir test
+alias Toolnexus.Agents
+alias Toolnexus.Agents.Loop
+
+{:ok, tk} =
+  Toolnexus.create_toolkit(
+    builtins: %{"tools" => %{"todowrite" => true, "bash" => false, "read" => false,
+                              "write" => false, "edit" => false, "glob" => false,
+                              "grep" => false, "webfetch" => false, "apply_patch" => false,
+                              "question" => false}}
+  )
+
+{:ok, turn} = Agent.start_link(fn -> 0 end)
+
+todo = fn id, text, done -> %{"id" => id, "text" => text, "completed" => done} end
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  n = Agent.get_and_update(turn, fn c -> {c, c + 1} end)
+
+  message =
+    case n do
+      0 -> %{"role" => "assistant", "tool_calls" => [%{"id" => "t1", "type" => "function",
+             "function" => %{"name" => "todowrite", "arguments" => Jason.encode!(%{"todos" => [todo.("1", "draft", true), todo.("2", "proofread", false)]})}}]}
+      1 -> %{"role" => "assistant", "content" => "I think I am finished"}
+      2 -> %{"role" => "assistant", "tool_calls" => [%{"id" => "t2", "type" => "function",
+             "function" => %{"name" => "todowrite", "arguments" => Jason.encode!(%{"todos" => [todo.("1", "draft", true), todo.("2", "proofread", true)]})}}]}
+      _ -> %{"role" => "assistant", "content" => "all done"}
+    end
+
+  finish = if Map.has_key?(message, "tool_calls"), do: "tool_calls", else: "stop"
+  resp = %{"choices" => [%{"message" => message, "finish_reason" => finish}],
+           "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}}
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+opts = %{base_url: "http://localhost", style: "openai", model: "gpt-x", api_key: "test-key", http_options: [plug: plug]}
+
+agent =
+  Agents.agent("gated", does: "plans",
+    completion: %{verify: &Loop.all_todos_done/1, max_attempts: 3})
+
+{out, _loop} = Loop.run(Agents.loop(agent, opts, tk), "do the thing")
+
+true = out.status == "done"
+true = out.attempts >= 2
+
+IO.puts("ok: #{out.status} after #{out.attempts} attempt(s) (gate forced a retry)")
+```
+
+### 3. The full surface — guardrails deny-first, and unsupported fields are named explicitly
+
+```elixir test
+alias Toolnexus.Agents.Loop
+
+{:ok, seen} = Agent.start_link(fn -> 0 end)
+
+hooks =
+  Loop.guarded_hooks(
+    [
+      fn ev -> if ev[:name] == "danger", do: "policy: no", else: "allow" end,
+      fn _ -> Agent.update(seen, &(&1 + 1)); "allow" end
+    ],
+    nil
+  )
+
+denied = hooks[:before_tool].(%{name: "danger", args: %{}, turn: 1})
+true = denied.result.is_error
+true = denied.result.output =~ "policy: no"
+true = Agent.get(seen, & &1) == 0, "a later guardrail never runs after a denial"
+
+nil = hooks[:before_tool].(%{name: "safe", args: %{}, turn: 1})
+true = Agent.get(seen, & &1) == 1
+
+# a Loop cannot drive team / waitFor — the driver names them rather than dropping them silently
+unsupported = Loop.loop_unsupported(%{team: [%{}], wait_for: fn _ -> nil end})
+true = unsupported == ["team", "waitFor"]
+true = Loop.loop_unsupported(%{does: "x"}) == []
+
+IO.puts("ok: guardrail denied=#{denied.result.is_error}, unsupported=#{inspect(unsupported)}")
+```
+
+## See also
+
+- [`Toolnexus.Agents`](/api/elixir/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`Toolnexus.Agents.Runtime`](/api/elixir/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`Toolnexus.Agents.Handle`](/api/elixir/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`Toolnexus.Agents budget`](/api/elixir/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+- [Harness &amp; Loop](/harness/) — The narrative overview: what harness/loop/guardrail/completion mean conceptually, across all seven ports.

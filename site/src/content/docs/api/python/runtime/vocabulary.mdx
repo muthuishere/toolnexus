@@ -1,0 +1,200 @@
+---
+title: "TASK_STATUSES"
+description: "The canonical, byte-identical-across-ports string constants a host branches on: task statuses, run statuses, and the nine stop-limit reasons a task can end on, plus the helper that canonicalizes a limit name. — Python."
+sidebar:
+  label: "TASK_STATUSES"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/agents/runtime.py">python/src/toolnexus/agents/runtime.py</a>
+</p>
+
+```python
+from toolnexus.agents import LIMITS, TASK_STATUSES
+
+# §7D — the agent/task status vocabulary (7 values). `TaskResult.status` is always one of these.
+TASK_STATUSES = ("done", "pending", "incomplete", "interrupted", "closed", "timeout", "error")
+
+# §8 — the client/run status vocabulary (3 values). `RunResult.status` is always one of these.
+# Same field NAME as TaskResult.status, a DIFFERENT closed set — note it never contains "timeout".
+from toolnexus.client import RUN_STATUSES
+RUN_STATUSES = ("done", "pending", "incomplete")
+
+# §7D — the nine stop-limit reasons a task can end on, in Budget field order.
+# `TaskResult.limit` is set whenever `status == "incomplete"`.
+LIMITS = (
+    "maxTurns", "maxTokens", "maxToolCalls", "maxWallMs",
+    "maxChildren", "maxConcurrent", "maxDepth", "completion", "timeout",
+)
+
+# private — maps python's internal dimension name ("tokens", "wallMs", ...) onto
+# the canonical LIMITS spelling above; already-canonical names pass through.
+def _canonical_limit(name: str | None) -> str | None: ...
+```
+
+The canonical, byte-identical-across-ports string constants a host branches on: task statuses,
+run statuses, and the nine stop-limit reasons a task can end on, plus the private helper that
+canonicalizes a limit name. Two distinct closed sets share the field name `status` — the §7D
+task/agent vocabulary (seven values, includes `"timeout"`/`"interrupted"`/`"closed"`/`"error"`)
+and the §8 client/run vocabulary (three values, never `"timeout"` — a run deadline raises
+`RunTimeout` instead of reporting a status). `LIMITS` belongs to the task/agent level only: it
+is the exhaustive set of reasons a `TaskResult` can carry `status="incomplete"`, and every port
+ships the identical nine strings in the identical order.
+
+## When to use it
+
+- **Branching on `TaskResult.status`** from a host driving `AgentRuntime` — checking for
+  `"timeout"` or `"interrupted"` without hardcoding a string a future port might spell
+  differently. Import `TASK_STATUSES` to validate a status you read off the wire, or to assert
+  a value is one of the seven in a test.
+- **Branching on `RunResult.limit`** — when a run stops with `status="incomplete"`, `limit`
+  names which of the nine ceilings stopped it (`"maxTokens"`, `"completion"`, ...). `LIMITS` is
+  the closed set to validate against, e.g. `assert result.limit in LIMITS`.
+- **Distinguishing the two `status` vocabularies** — a host that persists both a `TaskResult`
+  and a `RunResult` under one `status` column needs to know `"timeout"` is only ever a task
+  status, never a run status; `TASK_STATUSES`/`RUN_STATUSES` make that check explicit instead of
+  memorized.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Don't hand-roll the string list">
+Before these were named constants, a host had already started re-deriving the vocabulary from
+observed values — which is exactly how a status collision (`"timeout"` appearing to be valid on
+a `RunResult` because it IS valid on a `TaskResult`) went unnoticed until it broke a host's
+persistence layer (ADR 0027). Import `TASK_STATUSES`/`RUN_STATUSES`/`LIMITS` and validate
+against them; don't maintain your own copy of the string list, and don't assume the two `status`
+fields share one vocabulary just because they share a name.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — validate a status and a limit reason
+
+```python test
+from toolnexus.agents import LIMITS, TASK_STATUSES
+from toolnexus.client import RUN_STATUSES
+
+assert len(TASK_STATUSES) == 7
+assert "timeout" in TASK_STATUSES
+assert set(RUN_STATUSES) == {"done", "pending", "incomplete"}
+assert "timeout" not in RUN_STATUSES  # the collision D5/ADR 0027 exists to name
+
+assert len(LIMITS) == 9
+assert "maxTokens" in LIMITS and "completion" in LIMITS
+
+print("ok:", len(TASK_STATUSES), "task statuses,", len(RUN_STATUSES), "run statuses,", len(LIMITS), "limits")
+```
+
+### 2. The realistic case — a budget stop names its limit from the canonical set
+
+```python test
+import asyncio
+
+from toolnexus.agents import LIMIT_MAX_TOKENS, LIMITS, Budget, agent
+
+
+class RecordingTransport:
+    def __init__(self, responses):
+        self._responses = list(responses)
+
+    def post(self, url, headers, payload, timeout):
+        return self._responses.pop(0)
+
+    def open(self, url, headers, payload, timeout):  # noqa: A003
+        raise NotImplementedError
+
+
+async def main():
+    transport = RecordingTransport([
+        {"choices": [{"message": {"role": "assistant", "content": "one"}}], "usage": {"total_tokens": 50}},
+        {"choices": [{"message": {"role": "assistant", "content": "two"}}], "usage": {"total_tokens": 50}},
+    ])
+    a = agent("a", does="x", budget=Budget(max_tokens=1))
+    rt = a._runtime(
+        llm={"base_url": "http://mock.local/v1", "style": "openai", "model": "mock", "api_key": "unused"},
+        transport=transport,
+    )
+    h = rt.spawn(rt.root, "a")
+    await rt.run_turn(h, "go")
+    second = await rt.run_turn(h, "again")
+
+    assert second.status == "incomplete"
+    # The CANONICAL spelling, identical in every port — never python's internal
+    # dimension name ("tokens").
+    assert second.limit == LIMIT_MAX_TOKENS == "maxTokens"
+    assert second.limit in LIMITS
+
+    print("ok: stopped on", second.limit)
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — every named `LIMIT_*` constant and its canonical string
+
+```python test
+from toolnexus.agents import (
+    LIMIT_COMPLETION,
+    LIMIT_MAX_CHILDREN,
+    LIMIT_MAX_CONCURRENT,
+    LIMIT_MAX_DEPTH,
+    LIMIT_MAX_TOKENS,
+    LIMIT_MAX_TOOL_CALLS,
+    LIMIT_MAX_TURNS,
+    LIMIT_MAX_WALL_MS,
+    LIMIT_TIMEOUT,
+    LIMITS,
+    TASK_STATUSES,
+)
+
+named = (
+    LIMIT_MAX_TURNS, LIMIT_MAX_TOKENS, LIMIT_MAX_TOOL_CALLS, LIMIT_MAX_WALL_MS,
+    LIMIT_MAX_CHILDREN, LIMIT_MAX_CONCURRENT, LIMIT_MAX_DEPTH, LIMIT_COMPLETION, LIMIT_TIMEOUT,
+)
+assert named == LIMITS, "the named constants list, in Budget field order, IS the LIMITS tuple"
+
+# The seven TASK_STATUSES, by name:
+assert TASK_STATUSES == (
+    "done", "pending", "incomplete", "interrupted", "closed", "timeout", "error",
+)
+
+print("ok:", LIMITS)
+```
+
+## The two `status` vocabularies
+
+| Field | Where | Values | Count |
+|---|---|---|---|
+| `TaskResult.status` | §7D — `toolnexus.agents.TASK_STATUSES` | `done`, `pending`, `incomplete`, `interrupted`, `closed`, `timeout`, `error` | 7 |
+| `RunResult.status` | §8 — `toolnexus.client.RUN_STATUSES` | `done`, `pending`, `incomplete` | 3 |
+
+`RUN_STATUSES` never contains `"timeout"` — a §8 run deadline raises `RunTimeout` instead of
+reporting a status; only the §7D task/agent level names a `"timeout"` outcome.
+
+## `LIMITS` — the nine stop-limit reasons
+
+| Constant | Value |
+|---|---|
+| `LIMIT_MAX_TURNS` | `"maxTurns"` |
+| `LIMIT_MAX_TOKENS` | `"maxTokens"` |
+| `LIMIT_MAX_TOOL_CALLS` | `"maxToolCalls"` |
+| `LIMIT_MAX_WALL_MS` | `"maxWallMs"` |
+| `LIMIT_MAX_CHILDREN` | `"maxChildren"` |
+| `LIMIT_MAX_CONCURRENT` | `"maxConcurrent"` |
+| `LIMIT_MAX_DEPTH` | `"maxDepth"` |
+| `LIMIT_COMPLETION` | `"completion"` |
+| `LIMIT_TIMEOUT` | `"timeout"` |
+
+`_canonical_limit()` is private (by design — exporting it would leak python's internal
+dimension names like `"tokens"`/`"wallMs"` that this vocabulary exists to keep out of the public
+`limit` field): it maps an internal name onto one of the nine strings above, and passes an
+already-canonical name through unchanged.
+
+## See also
+
+- [`Agent`](/api/python/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`AgentRuntime`](/api/python/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`Handle`](/api/python/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`Budget`](/api/python/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
