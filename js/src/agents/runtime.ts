@@ -39,16 +39,23 @@ import type { Answer, Request, Tool, ToolResult } from "../types.js"
 export interface Clock {
   /** Current time in ms (epoch or virtual). */
   now(): number
-  /** Schedule `fn` after `ms`; returns a cancel function. */
-  setTimeout(fn: () => void, ms: number): () => void
+  /** Schedule `fn` after `ms`; returns a cancel function.
+   *
+   * `keepAlive` defaults to TRUE, and the default is the important half: a timer
+   * that cannot hold the event loop open never fires when it is the only thing
+   * left to do — which is precisely a deadline whose promise nothing else will
+   * settle. Background housekeeping that should never hold a process open (a
+   * heartbeat) passes `false` explicitly. A host's own Clock may ignore the
+   * option; it then behaves as that host's timers always have. */
+  setTimeout(fn: () => void, ms: number, opts?: { keepAlive?: boolean }): () => void
 }
 
-/** The real clock (default). Timers are unref'd so they never hold the process open. */
+/** The real clock (default). See `Clock.setTimeout` for why `keepAlive` defaults to true. */
 export const systemClock: Clock = {
   now: () => Date.now(),
-  setTimeout(fn, ms) {
+  setTimeout(fn, ms, opts) {
     const t = setTimeout(fn, ms)
-    ;(t as { unref?: () => void }).unref?.()
+    if (opts?.keepAlive === false) (t as { unref?: () => void }).unref?.()
     return () => clearTimeout(t)
   },
 }
