@@ -117,17 +117,28 @@ runtime with an ambiguous transport is exactly the kind of drift the ports exist
 
 ### 1. The smallest useful call — spawn, wake, wait
 
-```clojure
-(require '[toolnexus.agents.runtime :as rt])
+```clojure test
+(require '[toolnexus.agents.runtime :as rt]
+         '[koine.json :as json])
+
+(println)
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
 
 (def runtime
   (rt/create-runtime {:registry {"w" {:name "w" :does "writes" :model "wm"}}
-                      :llm {:base-url "http://mock.local" :model "default"}}))
+                      :llm {:base-url "http://mock.local" :model "default"}
+                      :http-client (fn [_url _headers _body]
+                                     {:status 200 :headers {} :body (json/write-str (text-response "done"))})}))
 
 (def h (rt/spawn runtime rt/root "w"))     ; => "root/w.1"
 (rt/wake runtime h "go")                   ; => {:ok true}
 (let [r (rt/wait runtime h)]
-  (:status r))                             ; => "done"
+  (assert (= "root/w.1" h))
+  (assert (= "done" (:status r))))
+(println "OK")
 ```
 
 The full trace for this run is exactly three lines — `"root/w.1: spawned (depth 1, tokens
@@ -136,35 +147,71 @@ tokens=15)"` — an extra transition is as wrong as a missing one.
 
 ### 2. The realistic case — a bounded wait, then interrupt or close
 
-```clojure
+```clojure test
+(require '[toolnexus.agents.runtime :as rt]
+         '[koine.json :as json])
+
+(println)
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(def runtime
+  (rt/create-runtime {:registry {"w" {:name "w" :does "writes" :model "wm"}}
+                      :llm {:base-url "http://mock.local" :model "default"}
+                      :http-client (fn [_url _headers _body]
+                                     {:status 200 :headers {} :body (json/write-str (text-response "done"))})}))
+
 (let [h (rt/spawn runtime rt/root "w")]
   (rt/wake runtime h "start the long job")
   (let [r (rt/wait runtime h {:timeout-ms 5000})]
     (if (= "timeout" (:status r))
       ;; the child keeps running — a wait deadline is the WAITER's deadline
       (rt/interrupt runtime h)               ; abort in place; handle stays idle, alive
-      (println (:text r))))
+      (assert (= "done" (:text r)))))
   ;; tear the whole tree down gracefully when done — leaf-first, :shutdown-ms grace period
   (rt/close runtime rt/root))
+(println "OK")
 ```
 
 ### 3. The full surface — spawn errors, capability checks, and the read-only views
 
-```clojure
-(let [boss (rt/spawn runtime rt/root "boss")   ; assumes "boss" is registered with a :budget
-      a    (rt/spawn runtime boss "w")
-      b    (rt/spawn runtime boss "w")]
+```clojure test
+(require '[toolnexus.agents.runtime :as rt]
+         '[koine.json :as json])
+
+(println)
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(def runtime
+  (rt/create-runtime
+   {:registry {"boss" {:name "boss" :does "coordinates" :model "bm"}
+               "w"    {:name "w"    :does "writes"      :model "wm"}}
+    :llm      {:base-url "http://mock.local" :model "default"}
+    :http-client (fn [_url _headers _body]
+                   {:status 200 :headers {} :body (json/write-str (text-response "done"))})}))
+
+(let [boss (rt/spawn runtime rt/root "boss")
+      a    (rt/spawn runtime boss "w")]
+  (rt/wake runtime a "go")
+
   ;; a spawn past maxDepth/maxChildren, or over a live budget walk, is a verb-error map
-  (rt/verb-error? (rt/spawn runtime boss "unknown-name"))  ; => true
+  (assert (rt/verb-error? (rt/spawn runtime boss "unknown-name")))  ; => true
 
   ;; handles are capabilities: only the spawner may wait on what it spawned
-  (rt/wait runtime a {:by boss})   ; ok — boss spawned a
-  ;; (rt/wait runtime a {:by b})   would settle with :status "error", "only the spawner may wait…"
+  (assert (= "done" (:status (rt/wait runtime a {:by boss}))))   ; ok — boss spawned a
+  ;; only the spawner may wait — anyone else settles with :status "error"
+  (assert (= "error" (:status (rt/wait runtime a {:by a}))))
 
   ;; read-only observability, no verbs involved
-  (rt/handles runtime)             ; => tree-order snapshot of every live handle under boss
-  (rt/inspect runtime a)           ; => {:id :state :tokens :inbox :turns :pool-tokens :pending}
-  (rt/trace runtime))              ; => every transition, refusal and escalation, in commit order
+  (assert (some #(= a (:id %)) (rt/handles runtime boss)))  ; tree-order snapshot under boss
+  (assert (= "idle" (:state (rt/inspect runtime a))))       ; {:id :state :tokens :inbox :turns :pool-tokens :pending}
+  (assert (seq (rt/trace runtime))))                        ; every transition, in commit order
+(println "OK")
 ```
 
 ## See also

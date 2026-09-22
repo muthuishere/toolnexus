@@ -85,7 +85,7 @@ plug = fn conn ->
   {:ok, _raw, conn} = Plug.Conn.read_body(conn)
   conn
   |> Plug.Conn.put_resp_content_type("application/json")
-  |> Plug.Conn.send_resp(400, ~s({"error":{"message":"bad request, user_id=u_123"}}))
+  |> Plug.Conn.send_resp(400, ~s({"error":"bad request","user_id":"u_123"}))
 end
 
 client =
@@ -107,10 +107,12 @@ result =
   end
 
 {:raised, 400, body} = result
-true = body =~ "«redacted»"
-false = body =~ "u_123"
+# The response was auto-decoded to a map — redaction walks it by key, replacing the
+# VALUE at the known account-identifier key, not scanning every string for the pattern.
+"«redacted»" = body["user_id"]
+false = inspect(body) =~ "u_123"
 
-IO.puts("ok: ProviderError status=400 body=#{body}")
+IO.puts("ok: ProviderError status=400 body=#{inspect(body)}")
 ```
 
 ### 2. `retry_after` — read as an already-parsed integer of seconds

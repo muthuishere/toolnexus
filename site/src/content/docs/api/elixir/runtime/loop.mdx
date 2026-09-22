@@ -182,7 +182,9 @@ hooks =
 denied = hooks[:before_tool].(%{name: "danger", args: %{}, turn: 1})
 true = denied.result.is_error
 true = denied.result.output =~ "policy: no"
-true = Agent.get(seen, & &1) == 0, "a later guardrail never runs after a denial"
+unless Agent.get(seen, & &1) == 0 do
+  raise "a later guardrail never runs after a denial"
+end
 
 nil = hooks[:before_tool].(%{name: "safe", args: %{}, turn: 1})
 true = Agent.get(seen, & &1) == 1

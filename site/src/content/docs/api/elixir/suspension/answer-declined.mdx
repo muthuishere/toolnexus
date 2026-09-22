@@ -142,7 +142,9 @@ result = Client.run(client, "delete my account", [delete_account])
 
 true = result.status == "done"
 true = result.text == "understood, cancelled"
-true = Agent.get(invocations, & &1) == 1, "execute never re-runs on a decline"
+unless Agent.get(invocations, & &1) == 1 do
+  raise "execute never re-runs on a decline"
+end
 
 IO.puts("ok: #{result.text}")
 ```

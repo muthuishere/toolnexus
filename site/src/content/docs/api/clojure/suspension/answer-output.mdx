@@ -67,45 +67,101 @@ over hand-rolling the map for exactly the reason ADR 0026 exists.
 
 ### 1. The smallest useful call — answer a plain question
 
-```clojure
+```clojure test
 (require '[toolnexus.client :as client])
 
-(client/answer-output "sus-1" "Chennai")
+(println)
+
+(def a (client/answer-output "sus-1" "Chennai"))
 ;; => {:id "sus-1" :ok true :data {:output "Chennai"}}
+
+(assert (= {:id "sus-1" :ok true :data {:output "Chennai"}} a))
+(println "OK")
 ```
 
 ### 2. The realistic case — inside a :wait-for hook, resolving a queued human reply
 
-```clojure
+```clojure test
+(require '[toolnexus.client :as client]
+         '[toolnexus.tool :as tool]
+         '[koine.json :as json])
+
+(println)
+
+(defn- calls-response [calls]
+  {:choices [{:message {:role "assistant" :content nil
+                        :tool_calls (mapv (fn [c] {:id (:id c) :type "function"
+                                                   :function {:name (:name c)
+                                                              :arguments (json/write-str (or (:args c) {}))}})
+                                          calls)}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(def script (atom [{:calls [{:id "c1" :name "ask_city" :args {}}]}
+                    {:text "The weather in Chennai is sunny."}]))
+
+(defn- mock-http []
+  (let [n (atom 0)]
+    (fn [_url _headers _body]
+      (let [i    (swap! n inc)
+            spec (get @script (dec i))]
+        {:status 200 :headers {}
+         :body (json/write-str (if (seq (:calls spec)) (calls-response (:calls spec)) (text-response (:text spec))))}))))
+
+;; a suspending tool: no answer yet -> park; ctx carries the answer on retry
+(def ask-city-tool
+  (tool/tool {:name "ask_city" :description "which city"
+              :execute (fn ([_args] (client/suspend (client/make-request "input" "Which city?")))
+                         ([_args ctx] (tool/success (str (get-in ctx [:answer :data :output])))))}))
+
+(defn block-until-chat-reply! [_id] "Chennai")
+
 (def llm
   (client/create-client
-    {:base-url "https://api.anthropic.com"
-     :style    "anthropic"
-     :model    "claude-sonnet-4-5"
+    {:base-url "http://mock.local"
+     :style    "openai"
+     :model    "gpt-4o-mini"
+     :http-client (mock-http)
      :wait-for (fn [request]
                  ;; blocks until a human answers via chat, then wraps the reply
                  (let [reply (block-until-chat-reply! (:id request))]
                    (client/answer-output (:id request) reply)))}))
 
-(client/run llm "Which city should I check the weather for?"
-            {:toolkit (tool/toolkit [ask-city-tool])})
+(def rr
+  (client/run llm "Which city should I check the weather for?"
+              {:toolkit (tool/toolkit [ask-city-tool])}))
+
+(assert (= "done" (:status rr)))
+(assert (= "The weather in Chennai is sunny." (:text rr)))
+(println "OK")
 ```
 
 ### 3. The full surface — marking the resumed answer itself as an error result
 
-```clojure
+```clojure test
+(require '[toolnexus.client :as client])
+
+(println)
+
 ;; the tool being resumed will see :isError true on the answer's :data,
 ;; so its retry arity can distinguish "granted, but the value failed validation"
 ;; from "granted, and the value is good"
-(client/answer-output "sus-2" "not-a-real-city" true)
+(def a (client/answer-output "sus-2" "not-a-real-city" true))
 ;; => {:id "sus-2" :ok true :data {:output "not-a-real-city" :isError true}}
+(assert (= {:id "sus-2" :ok true :data {:output "not-a-real-city" :isError true}} a))
 
 ;; a non-string output is refused rather than silently coerced
-(try
-  (client/answer-output "sus-3" 42)
-  (catch Throwable e
-    (ex-message e)))
+(def refused
+  (try
+    (client/answer-output "sus-3" 42)
+    (catch Throwable e
+      (ex-message e))))
 ;; => "toolnexus: Answer output must be a string"
+(assert (= "toolnexus: Answer output must be a string" refused))
+(println "OK")
 ```
 
 ## See also

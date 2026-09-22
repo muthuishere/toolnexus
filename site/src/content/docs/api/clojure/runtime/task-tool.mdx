@@ -117,22 +117,57 @@ a rewound transcript.
 
 ### 1. The smallest useful call — a boss delegating to one teammate
 
-```clojure
-(require '[toolnexus.agents.runtime :as rt])
+```clojure test
+(require '[toolnexus.agents.runtime :as rt]
+         '[koine.json :as json])
+
+(println)
+
+(defn- calls-response [calls]
+  {:choices [{:message {:role "assistant" :content nil
+                        :tool_calls (mapv (fn [c] {:id (:id c) :type "function"
+                                                   :function {:name (:name c)
+                                                              :arguments (json/write-str (or (:args c) {}))}})
+                                          calls)}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+;; scripted per MODEL: boss (bm) delegates once, then reports done;
+;; writer (wm) just answers
+(def script {"bm" [{:calls [{:id "c1" :name "task" :args {:agent "writer" :prompt "the intro"}}]}
+                    {:text "shipped"}]
+             "wm" [{:text "intro written"}]})
+
+(defn- mock-http []
+  (let [counts (atom {})]
+    (fn [_url _headers body]
+      (let [b     (json/read-str body)
+            model (:model b)
+            n     (get (swap! counts update model (fnil inc 0)) model)
+            spec  (get (get script model) (dec n))]
+        {:status 200 :headers {}
+         :body (json/write-str (if (seq (:calls spec)) (calls-response (:calls spec)) (text-response (:text spec))))}))))
 
 (def runtime
   (rt/create-runtime
    {:registry {"boss"   {:name "boss" :does "coordinates" :model "bm"
                          :team ["writer"] :budget {:max-depth 5}}
                "writer" {:name "writer" :does "writes" :model "wm"}}
-    :llm      {:base-url "http://mock.local" :model "default"}}))
+    :llm      {:base-url "http://mock.local" :model "default"}
+    :http-client (mock-http)}))
 
 ;; the model, inside boss's own turn, calls: task {:agent "writer" :prompt "the intro"}
 ;; — the runtime does NOT expose that call to you directly; it happens through the
 ;; client loop when boss's toolkit includes the task tool `toolkit-for` added for it.
 (let [h (rt/spawn runtime rt/root "boss")]
   (rt/wake runtime h "write me a post")
-  (:text (rt/wait runtime h)))     ; => whatever boss's final turn says, e.g. "shipped"
+  (let [r (rt/wait runtime h)]
+    (assert (= "shipped" (:text r))))     ; => whatever boss's final turn says
+  (assert (= "closed" (:state (rt/inspect runtime (str h "/writer.1"))))))
+(println "OK")
 ```
 
 The child appears as `"root/boss.1/writer.1"`, is `"closed"` once its result settles, and its
@@ -140,36 +175,121 @@ token spend is already rolled into `boss`'s own totals by the time `wait` return
 
 ### 2. The realistic case — an out-of-team target is refused, not a silent reach
 
-```clojure
+```clojure test
+(require '[toolnexus.agents.runtime :as rt]
+         '[koine.json :as json])
+
+(println)
+
+(defn- calls-response [calls]
+  {:choices [{:message {:role "assistant" :content nil
+                        :tool_calls (mapv (fn [c] {:id (:id c) :type "function"
+                                                   :function {:name (:name c)
+                                                              :arguments (json/write-str (or (:args c) {}))}})
+                                          calls)}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(def script {"bm" [{:calls [{:id "c1" :name "task" :args {:agent "other" :prompt "sneak"}}]}
+                    {:text "gave up"}]})
+
+(defn- mock-http []
+  (let [counts (atom {})]
+    (fn [_url _headers body]
+      (let [b     (json/read-str body)
+            model (:model b)
+            n     (get (swap! counts update model (fnil inc 0)) model)
+            spec  (get (get script model) (dec n))]
+        {:status 200 :headers {}
+         :body (json/write-str (if (seq (:calls spec)) (calls-response (:calls spec)) (text-response (:text spec))))}))))
+
 ;; boss's :team is ["writer"] only — "other" is registered but not on the team
+(def runtime
+  (rt/create-runtime
+   {:registry {"boss"   {:name "boss" :does "coordinates" :model "bm"
+                         :team ["writer"] :budget {:max-depth 5}}
+               "writer" {:name "writer" :does "writes" :model "wm"}
+               "other"  {:name "other"  :does "?"        :model "om"}}
+    :llm      {:base-url "http://mock.local" :model "default"}
+    :http-client (mock-http)}))
+
 (let [h (rt/spawn runtime rt/root "boss")]
   (rt/wake runtime h "go")     ; the model's turn calls task {:agent "other" :prompt "sneak"}
-  (rt/wait runtime h)
+  (let [r (rt/wait runtime h)]
+    (assert (= "gave up" (:text r))))
   ;; nothing was spawned for "other" at all — the refusal is a plain tool error
   ;; the model sees inline, listing the team it actually has, not a crash
-  (rt/handles runtime))        ; => only ["root/boss.1"], no "other" handle anywhere
+  (assert (= [h] (mapv :id (rt/handles runtime)))))   ; => only ["root/boss.1"], no "other" handle
+(println "OK")
 ```
 
 ### 3. The full surface — a suspending delegation, and `agent-tool` used standalone
 
-```clojure
-(require '[toolnexus.client :as client]
-         '[toolnexus.tool :as tool])
+```clojure test
+(require '[toolnexus.agents.runtime :as rt]
+         '[toolnexus.client :as client]
+         '[toolnexus.tool :as tool]
+         '[koine.json :as json])
+
+(println)
+
+(defn- calls-response [calls]
+  {:choices [{:message {:role "assistant" :content nil
+                        :tool_calls (mapv (fn [c] {:id (:id c) :type "function"
+                                                   :function {:name (:name c)
+                                                              :arguments (json/write-str (or (:args c) {}))}})
+                                          calls)}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(def script {"bm" [{:calls [{:id "c1" :name "task" :args {:agent "worker" :prompt "risky"}}]}]
+             "wm" [{:calls [{:id "w1" :name "approve" :args {}}]}]})
+
+(defn- mock-http []
+  (let [counts (atom {})]
+    (fn [_url _headers body]
+      (let [b     (json/read-str body)
+            model (:model b)
+            n     (get (swap! counts update model (fnil inc 0)) model)
+            spec  (get (get script model) (dec n))]
+        {:status 200 :headers {}
+         :body (json/write-str (if (seq (:calls spec)) (calls-response (:calls spec)) (text-response "done")))}))))
+
+(def approve-tool
+  (tool/tool {:name "approve" :description "needs approval"
+              :execute (fn ([_args] (client/suspend (client/make-request "approval" "Approve the impossible")))
+                         ([_args ctx] (tool/success "approved")))}))
+
+(def runtime
+  (rt/create-runtime
+   {:registry {"boss"   {:name "boss" :does "coordinates" :model "bm"
+                         :team ["worker"] :budget {:max-depth 5}}
+               "worker" {:name "worker" :does "does the risky part" :model "wm" :tools [approve-tool]}}
+    :llm      {:base-url "http://mock.local" :model "default"}
+    :http-client (mock-http)}))
 
 ;; a delegated child whose own tool call suspends on a §10 approval request
 ;; presents to boss (and boss's own caller) as an ordinary pending tool result:
 (let [h (rt/spawn runtime rt/root "boss")]
   (rt/wake runtime h "go")
   (let [r (rt/wait runtime h)]
-    (:status r))              ; => "pending" — not an error; both boss and the child are "suspended"
-  ;; the host answers with the matching Answer id, and the cascade resumes both levels
-  (rt/resume runtime (client/make-answer "r1" true)))
+    (assert (= "pending" (:status r)))   ; not an error; both boss and the child are "suspended"
+    ;; the host answers with the matching Answer id, and the cascade resumes both levels
+    (rt/resume runtime (client/make-answer (:id (:pending r)) true))))
 
 ;; agent-tool: drop ONE named agent into a toolkit as a plain callable, outside any team
-(def writer-as-tool (rt/agent-tool runtime "writer"))
-(def toolkit (tool/toolkit [writer-as-tool]))
-;; a caller of `toolkit` sees a tool named "writer" with {:prompt "…"} — nothing about
+(def worker-as-tool (rt/agent-tool runtime "worker"))
+(def toolkit (tool/toolkit [worker-as-tool]))
+;; a caller of `toolkit` sees a tool named "worker" with {:prompt "…"} — nothing about
 ;; teams, task keys, or reattachment leaks through; it is run-agent under the hood
+(assert (= ["worker"] (tool/tool-names toolkit)))
+(println "OK")
 ```
 
 ## See also
