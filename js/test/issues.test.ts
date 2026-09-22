@@ -458,6 +458,11 @@ test("#92 MUST NOT REGRESS: ClassifierUsage.cost is OPTIONAL — absent is not z
 test("#92 the run timeout NAMES the budget it blew", async () => {
   const never: any = (_u: string, init: any) =>
     new Promise((_res, rej) => {
+      // A 1 ms budget can abort BEFORE this fetch is ever entered, and a
+      // listener added to an already-aborted signal never fires — leaving this
+      // promise unsettled, the event loop with nothing to do, and every later
+      // test in the file cancelled. Check the flag before subscribing.
+      if (init.signal?.aborted) return rej(init.signal.reason)
       init.signal?.addEventListener("abort", () => rej(init.signal.reason), { once: true })
     })
   const client = createClient(baseOpts(never, { timeoutMs: 1 }))
@@ -780,7 +785,11 @@ test("#90 A18 INVARIANT: a limit stop names its limit; a non-limit stop leaves i
   // 5. wait-deadline `timeout` — a LIMIT stop, and the instance that shipped broken in 3 ports.
   {
     const hang: any = (_u: string, init: any) =>
-      new Promise((_res, rej) => init.signal?.addEventListener("abort", () => rej(init.signal.reason), { once: true }))
+      new Promise((_res, rej) => {
+        // Same reason as #92 above: an already-aborted signal never fires.
+        if (init.signal?.aborted) return rej(init.signal.reason)
+        init.signal?.addEventListener("abort", () => rej(init.signal.reason), { once: true })
+      })
     const rt = new AgentRuntime({ fetch: hang, registry: { w: { name: "w", does: "x", model: "m" } } })
     const h = rt.spawn(rt.root, "w")
     rt.wake(h, "go")
