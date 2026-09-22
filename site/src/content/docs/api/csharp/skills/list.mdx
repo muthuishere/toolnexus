@@ -69,7 +69,9 @@ source. Order follows discovery order, so sort it yourself if you are printing i
 
 ### 2. The reason a skill went missing
 
-Three candidate files, one of which is fine.
+Four candidate files: one clean, one rescued from broken YAML, and two genuinely unusable. Broken
+frontmatter only costs you the skill when **no** name can be recovered from the raw lines — a stray
+quote leaves the skill loaded under a strange-looking name rather than silently gone.
 
 ```csharp test
 using Toolnexus;
@@ -100,15 +102,20 @@ description: I forgot to name myself.
 Do the thing.
 """);
 
-// Fences are present but the YAML inside them does not parse.
-Skill("broken", "---\nname: \"unterminated\ndescription: nope\n---\n\nDo the thing.\n");
+// Fences are present and the YAML does not parse — but a line-wise RESCUE read
+// can still see a name, so this one LOADS, under the literal name in the bytes.
+Skill("rescued", "---\nname: \"unterminated\ndescription: nope\n---\n\nDo the thing.\n");
+
+// Fences present, YAML broken, and no name recoverable by any reading.
+Skill("broken", "---\ndescription: [unterminated\n---\n\nDo the thing.\n");
 
 try
 {
     var inv = SkillSource.ListSkills(new SkillSource.LoadOptions { Dirs = new[] { root } });
 
-    if (inv.Skills.Count != 1 || inv.Skills[0].Name != "good")
-        throw new Exception($"skills: {string.Join(",", inv.Skills.Select(s => s.Name))}");
+    var kept = inv.Skills.Select(s => s.Name).OrderBy(n => n, StringComparer.Ordinal).ToList();
+    if (kept.Count != 2 || kept[0] != "\"unterminated" || kept[1] != "good")
+        throw new Exception($"skills: {string.Join(",", kept)}");
 
     var reasons = inv.Skipped.Select(s => s.Reason).OrderBy(r => r, StringComparer.Ordinal).ToList();
     if (reasons.Count != 2) throw new Exception($"skipped: {string.Join(",", reasons)}");
@@ -118,7 +125,11 @@ try
     // Every skip carries the absolute path of the offending file, so you can print it.
     if (!inv.Skipped.All(s => s.Location.EndsWith("SKILL.md"))) throw new Exception("location");
 
-    Console.WriteLine($"ok: kept {inv.Skills[0].Name} | skipped {string.Join(", ", reasons)}");
+    // A malformed skip also carries the native YAML parser's own error.
+    var bad = inv.Skipped.Single(s => s.Reason == SkillSource.SkillSkip.Malformed);
+    if (bad.Detail.Length == 0) throw new Exception("malformed skip must carry Detail");
+
+    Console.WriteLine($"ok: kept {string.Join(", ", kept)} | skipped {string.Join(", ", reasons)}");
 }
 finally
 {
@@ -127,9 +138,11 @@ finally
 ```
 
 <Aside type="caution" title="A body with no frontmatter at all is not 'malformed'">
-`malformed-frontmatter` means the `---` fences were there and the YAML inside them failed to parse.
-A `SKILL.md` with no fences parses fine, has no `name`, and is reported as `missing-name`. The
-distinction is deliberate — it points at the actual mistake.
+`malformed-frontmatter` means the `---` fences were there, the YAML inside them failed to parse
+**and** no `name` could be rescued from the raw lines either. A `SKILL.md` with no fences parses
+fine, has no `name`, and is reported as `missing-name`. Bad YAML with a readable name is not
+reported at all — the skill loads. The distinction is deliberate: it points at the actual mistake,
+and `Detail` on the skip carries the parser's own message.
 </Aside>
 
 ### 3. Full surface — disk plus data, and authoring an allowlist
