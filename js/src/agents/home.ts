@@ -234,9 +234,11 @@ export function startAgent(a: Agent, run: AgentRunOptions, hb: HeartbeatOptions)
         })
       }
     }
-    cancel = runtime.clock.setTimeout(beat, hb.everyMs) // self-reschedule → one live timer
+    // keepAlive:false — a heartbeat is housekeeping and must never be the reason
+    // a host process stays up.
+    cancel = runtime.clock.setTimeout(beat, hb.everyMs, { keepAlive: false }) // self-reschedule → one live timer
   }
-  cancel = runtime.clock.setTimeout(beat, hb.everyMs)
+  cancel = runtime.clock.setTimeout(beat, hb.everyMs, { keepAlive: false })
 
   return {
     runtime,

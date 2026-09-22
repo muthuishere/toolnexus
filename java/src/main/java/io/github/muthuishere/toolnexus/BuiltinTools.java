@@ -10,14 +10,17 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -38,6 +41,196 @@ public final class BuiltinTools {
     private BuiltinTools() {}
 
     private static final List<String> IGNORE_DIRS = List.of("node_modules", ".git");
+
+    /**
+     * How long a job gets between "please stop" and "stop". Fixed, and identical
+     * in every port, so a timeout means the same thing everywhere.
+     */
+    private static final long KILL_GRACE_MS = 2000L;
+
+    private static final java.util.Set<String> WIN_RESERVED = java.util.Set.of(
+            "CON", "PRN", "AUX", "NUL",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9");
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).startsWith("win");
+    }
+
+    /**
+     * The interpreters tried when the host names none. {@code %COMSPEC%} leads on
+     * Windows because PowerShell is routinely blocked by execution or
+     * application-control policy, while {@code %COMSPEC%} is always present.
+     * {@code /bin/sh} leads on POSIX because that is the binary every port has
+     * always run — a bare {@code sh} is a PATH lookup, which is not the same file
+     * on a machine that has both.
+     */
+    private static List<List<String>> shellCandidates() {
+        if (!isWindows()) {
+            return List.of(List.of("/bin/sh", "-c"), List.of("sh", "-c"));
+        }
+        List<List<String>> out = new ArrayList<>();
+        String comspec = System.getenv("COMSPEC");
+        if (comspec != null && !comspec.isEmpty()) out.add(List.of(comspec, "/d", "/s", "/c"));
+        out.add(List.of("cmd.exe", "/d", "/s", "/c"));
+        out.add(List.of("pwsh", "-NoProfile", "-Command"));
+        out.add(List.of("powershell", "-NoProfile", "-Command"));
+        out.add(List.of("bash", "-lc"));
+        return out;
+    }
+
+    /** Does {@code name} resolve as an executable, absolutely or on PATH? */
+    private static boolean resolvesOnPath(String name) {
+        java.nio.file.Path direct = Paths.get(name);
+        if (direct.isAbsolute() || name.contains("/") || name.contains("\\")) {
+            return Files.isExecutable(direct);
+        }
+        String path = System.getenv("PATH");
+        if (path == null) return false;
+        List<String> exts = isWindows()
+                ? Arrays.asList(Optional.ofNullable(System.getenv("PATHEXT")).orElse(".COM;.EXE;.BAT;.CMD").split(";"))
+                : List.of("");
+        for (String dir : path.split(java.io.File.pathSeparator)) {
+            if (dir.isEmpty()) continue;
+            for (String ext : exts) {
+                if (Files.isExecutable(Paths.get(dir, name + ext))) return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The host boundary the builtins are allowed to know about: which interpreter
+     * to run, which directory relative paths mean, and whether to refuse the ones
+     * that leave it. Resolved once, at toolkit construction — a missing
+     * interpreter is a configuration fact, and turn fourteen of a paid run is the
+     * expensive place to learn it. See SPEC §4A and ADR 0034.
+     */
+    static final class Env {
+        final List<String> shell;
+        final RuntimeException shellError;
+        final String baseDir;
+        final boolean confine;
+
+        Env(Object cfg) {
+            Map<?, ?> m = cfg instanceof Map ? (Map<?, ?>) cfg : Map.of();
+            Object base = m.get("baseDir");
+            this.baseDir = base == null ? "" : String.valueOf(base);
+            this.confine = Boolean.TRUE.equals(m.get("confineToBaseDir"));
+
+            Object given = m.get("shell");
+            if (given instanceof List && !((List<?>) given).isEmpty()) {
+                List<String> argv = new ArrayList<>();
+                for (Object part : (List<?>) given) argv.add(String.valueOf(part));
+                this.shell = List.copyOf(argv);
+                this.shellError = null;
+                return;
+            }
+            List<String> tried = new ArrayList<>();
+            for (List<String> argv : shellCandidates()) {
+                tried.add(argv.get(0));
+                if (resolvesOnPath(argv.get(0))) {
+                    this.shell = argv;
+                    this.shellError = null;
+                    return;
+                }
+            }
+            this.shell = List.of();
+            this.shellError = new IllegalStateException(
+                    "no shell interpreter found (tried: " + String.join(", ", tried)
+                            + "); set builtins.shell, or disable the bash builtin with builtins.tools.bash = false");
+        }
+
+        List<String> shellArgv() {
+            if (shellError != null) throw shellError;
+            return shell;
+        }
+
+        String shellLabel() {
+            return String.join(" ", shell);
+        }
+
+        String dir() {
+            return baseDir.isEmpty() ? System.getProperty("user.dir") : baseDir;
+        }
+
+        /**
+         * Map a tool-supplied path onto the filesystem: relative to {@code baseDir}
+         * (or, with none, exactly as before), and refused when confinement is on
+         * and the canonical target lies outside the base.
+         */
+        java.nio.file.Path resolvePath(String p) {
+            if (confine && baseDir.isEmpty()) {
+                throw new IllegalArgumentException("confineToBaseDir is set but baseDir is empty");
+            }
+            java.nio.file.Path given = Paths.get(p);
+            java.nio.file.Path full = (!baseDir.isEmpty() && !given.isAbsolute())
+                    ? Paths.get(baseDir).resolve(given)
+                    : given;
+            if (!confine) return full;
+            if (isWindows()) {
+                String stem = full.getFileName() == null ? "" : full.getFileName().toString();
+                int dot = stem.indexOf('.');
+                if (dot >= 0) stem = stem.substring(0, dot);
+                if (WIN_RESERVED.contains(stem.trim().toUpperCase(java.util.Locale.ROOT))) {
+                    throw new IllegalArgumentException(
+                            p + " names a reserved device, which is not a file inside " + baseDir);
+                }
+            }
+            String base = canonical(Paths.get(baseDir));
+            String target = canonical(full);
+            String sep = java.io.File.separator;
+            if (!target.equals(base) && !target.startsWith(base.endsWith(sep) ? base : base + sep)) {
+                throw new IllegalArgumentException(p + " resolves outside baseDir " + baseDir);
+            }
+            return full;
+        }
+    }
+
+    /**
+     * Resolve a path for comparison. Symlinks — and, on Windows, directory
+     * junctions and 8.3 short names — are resolved on the DEEPEST EXISTING
+     * ancestor and the remaining segments re-attached, because a file
+     * {@code write} is about to create has no real path, and a check that only
+     * works on existing files is not a check for {@code write}.
+     *
+     * <p>The result is case-folded on Windows: {@code Path.equals} does not fold
+     * case even on a case-insensitive filesystem, so two spellings of one
+     * directory would compare unequal.
+     */
+    private static String canonical(java.nio.file.Path p) {
+        java.nio.file.Path absolute = p.toAbsolutePath().normalize();
+        java.nio.file.Path cur = absolute;
+        java.nio.file.Path tail = null;
+        while (cur != null) {
+            try {
+                java.nio.file.Path resolved = cur.toRealPath();
+                java.nio.file.Path full = tail == null ? resolved : resolved.resolve(tail);
+                return isWindows() ? full.toString().toLowerCase(java.util.Locale.ROOT) : full.toString();
+            } catch (IOException e) {
+                java.nio.file.Path name = cur.getFileName();
+                tail = (tail == null || name == null) ? name : name.resolve(tail);
+                cur = cur.getParent();
+            }
+        }
+        return isWindows() ? absolute.toString().toLowerCase(java.util.Locale.ROOT) : absolute.toString();
+    }
+
+    /**
+     * Stop the command AND everything it started. The descendant list is captured
+     * by the caller BEFORE the parent is asked to stop: once the parent dies its
+     * children are reparented and are no longer reachable from its handle
+     * (measured — spikes/builtin-host-boundary/SPIKE.md §1.1).
+     */
+    private static void killJob(Process proc, List<ProcessHandle> descendants, boolean graceful) {
+        if (graceful) {
+            for (ProcessHandle h : descendants) h.destroy();
+            proc.destroy();
+        } else {
+            for (ProcessHandle h : descendants) h.destroyForcibly();
+            proc.destroyForcibly();
+        }
+    }
 
     /**
      * Whether the builtin source is on. Default ON. Same precedence as MCP:
@@ -63,18 +256,38 @@ public final class BuiltinTools {
      * question, apply_patch, todowrite.
      */
     public static List<Tool> create() {
+        return create(null);
+    }
+
+    /**
+     * Build the ten builtins against a host boundary — the interpreter, base
+     * directory and confinement carried on the {@code builtins} config (ADR 0034).
+     * A {@code null} config is the historical behaviour: the detected interpreter,
+     * paths relative to the process working directory, no confinement.
+     */
+    public static List<Tool> create(Object cfg) {
+        Env env = new Env(cfg);
         List<Tool> tools = new ArrayList<>();
-        tools.add(bashTool());
-        tools.add(readTool());
-        tools.add(writeTool());
-        tools.add(editTool());
-        tools.add(grepTool());
-        tools.add(globTool());
+        tools.add(bashTool(env));
+        tools.add(readTool(env));
+        tools.add(writeTool(env));
+        tools.add(editTool(env));
+        tools.add(grepTool(env));
+        tools.add(globTool(env));
         tools.add(webfetchTool());
         tools.add(questionTool());
-        tools.add(applyPatchTool());
+        tools.add(applyPatchTool(env));
         tools.add(todowriteTool());
         return tools;
+    }
+
+    /**
+     * The interpreter the builtins resolved for {@code bash} — what a host prints,
+     * and what {@code metadata.shell} carries on every bash result. Throws the
+     * same error {@link #select} fails construction with when nothing resolves.
+     */
+    public static List<String> shell(Object cfg) {
+        return new Env(cfg).shellArgv();
     }
 
     /**
@@ -91,11 +304,21 @@ public final class BuiltinTools {
             Object t = ((Map<?, ?>) cfg).get("tools");
             if (t instanceof Map) map = (Map<?, ?>) t;
         }
-        List<Tool> all = create();
-        if (map == null) return all;
-        List<Tool> selected = new ArrayList<>();
-        for (Tool tool : all) {
-            if (!Boolean.FALSE.equals(map.get(tool.name()))) selected.add(tool);
+        List<Tool> all = create(cfg);
+        List<Tool> selected;
+        if (map == null) {
+            selected = all;
+        } else {
+            selected = new ArrayList<>();
+            for (Tool tool : all) {
+                if (!Boolean.FALSE.equals(map.get(tool.name()))) selected.add(tool);
+            }
+        }
+        // A missing interpreter is a construction-time failure, and only when
+        // `bash` survived the toggles: a host that disabled it should run fine on
+        // a box with no shell at all (ADR 0034 D1).
+        for (Tool tool : selected) {
+            if ("bash".equals(tool.name())) shell(cfg);
         }
         return selected;
     }
@@ -220,7 +443,7 @@ public final class BuiltinTools {
     // bash
     // -----------------------------------------------------------------------
 
-    private static Tool bashTool() {
+    private static Tool bashTool(Env env) {
         Map<String, Object> props = new LinkedHashMap<>();
         props.put("command", prop("string", "The shell command to run"));
         props.put("workdir", prop("string", "Working directory (default: process cwd)"));
@@ -233,15 +456,29 @@ public final class BuiltinTools {
                 (args, ctx) -> {
                     String command = str(args.get("command"));
                     if (command.isEmpty()) return err("bash: command is required");
+                    List<String> argv;
+                    java.io.File workdir;
+                    try {
+                        argv = env.shellArgv();
+                        workdir = args.get("workdir") != null
+                                ? env.resolvePath(str(args.get("workdir"))).toFile()
+                                : new java.io.File(env.dir());
+                    } catch (RuntimeException e) {
+                        return err("bash: " + e.getMessage());
+                    }
                     long timeout = isNumber(args.get("timeout")) ? truncToLong(args.get("timeout")) : 60_000L;
-                    ProcessBuilder pb = new ProcessBuilder("/bin/sh", "-c", command);
+                    Map<String, Object> metadata = meta("shell", env.shellLabel());
+
+                    List<String> full = new ArrayList<>(argv);
+                    full.add(command);
+                    ProcessBuilder pb = new ProcessBuilder(full);
                     pb.redirectErrorStream(true);
-                    if (args.get("workdir") != null) pb.directory(new java.io.File(str(args.get("workdir"))));
+                    pb.directory(workdir);
                     Process proc;
                     try {
                         proc = pb.start();
                     } catch (IOException e) {
-                        return err("bash: " + e.getMessage());
+                        return err("bash: " + e.getMessage(), metadata);
                     }
                     StringBuilder out = new StringBuilder();
                     Thread reader = new Thread(() -> {
@@ -259,19 +496,34 @@ public final class BuiltinTools {
                     reader.start();
                     boolean finished = proc.waitFor(timeout, TimeUnit.MILLISECONDS);
                     if (!finished) {
-                        proc.destroyForcibly();
+                        // Snapshot the tree BEFORE anything is asked to stop: once the
+                        // parent dies its children are reparented and are unreachable
+                        // from its handle (measured, SPIKE §1.1). Then ask, wait out the
+                        // grace window, and only then insist — a runner that gets
+                        // SIGTERM removes its temp directories, one that gets SIGKILL
+                        // does not. destroy() IS SIGTERM here and destroyForcibly()
+                        // SIGKILL; both were measured rather than assumed.
+                        List<ProcessHandle> descendants = proc.descendants().toList();
+                        killJob(proc, descendants, true);
+                        if (!proc.waitFor(KILL_GRACE_MS, TimeUnit.MILLISECONDS)) {
+                            killJob(proc, descendants, false);
+                            proc.waitFor();
+                        }
                         reader.join(500);
+                        metadata.put("timedOut", true);
+                        metadata.put("killedTree", true);
                         synchronized (out) {
-                            return err("bash: command timed out after " + timeout + "ms\n" + out);
+                            return err("bash: command timed out after " + timeout + "ms\n" + out, metadata);
                         }
                     }
                     reader.join();
                     int code = proc.exitValue();
+                    metadata.put("exitCode", code);
                     synchronized (out) {
                         if (code != 0) {
-                            return err(out + "\nbash: command exited with code " + code, meta("exitCode", code));
+                            return err(out + "\nbash: command exited with code " + code, metadata);
                         }
-                        return ok(out.toString(), meta("exitCode", code));
+                        return ok(out.toString(), metadata);
                     }
                 });
     }
@@ -280,7 +532,7 @@ public final class BuiltinTools {
     // read
     // -----------------------------------------------------------------------
 
-    private static Tool readTool() {
+    private static Tool readTool(Env env) {
         Map<String, Object> props = new LinkedHashMap<>();
         props.put("path", prop("string", "Path to the file to read"));
         props.put("offset", prop("number", "1-based line to start from"));
@@ -294,12 +546,18 @@ public final class BuiltinTools {
                 (args, ctx) -> {
                     String p = str(args.get("path"));
                     if (p.isEmpty()) return err("read: path is required");
+                    Path full;
+                    try {
+                        full = env.resolvePath(p);
+                    } catch (RuntimeException e) {
+                        return err("read: " + e.getMessage());
+                    }
                     // §6 media table — fixed, never sniffed, never a platform mime database.
                     String[] media = ContentPart.mediaFor(p);
                     if (media != null) {
                         byte[] bytes;
                         try {
-                            bytes = Files.readAllBytes(Path.of(p));
+                            bytes = Files.readAllBytes(full);
                         } catch (IOException e) {
                             return err("read: " + e.getMessage());
                         }
@@ -309,7 +567,7 @@ public final class BuiltinTools {
                     }
                     String content;
                     try {
-                        content = Files.readString(Path.of(p));
+                        content = Files.readString(full);
                     } catch (CharacterCodingException e) {
                         // Undecodable bytes are an ERROR RESULT, never an exception escaping
                         // into the loop (§6).
@@ -336,7 +594,7 @@ public final class BuiltinTools {
     // write
     // -----------------------------------------------------------------------
 
-    private static Tool writeTool() {
+    private static Tool writeTool(Env env) {
         Map<String, Object> props = new LinkedHashMap<>();
         props.put("path", prop("string", "Path to write to"));
         props.put("content", prop("string", "Content to write"));
@@ -350,7 +608,12 @@ public final class BuiltinTools {
                     String content = args.get("content") instanceof String
                             ? (String) args.get("content")
                             : str(args.get("content"));
-                    Path pp = Path.of(p);
+                    Path pp;
+                    try {
+                        pp = env.resolvePath(p);
+                    } catch (RuntimeException e) {
+                        return err("write: " + e.getMessage());
+                    }
                     Path parent = pp.toAbsolutePath().getParent();
                     if (parent != null) Files.createDirectories(parent);
                     Files.writeString(pp, content);
@@ -363,7 +626,7 @@ public final class BuiltinTools {
     // edit
     // -----------------------------------------------------------------------
 
-    private static Tool editTool() {
+    private static Tool editTool(Env env) {
         Map<String, Object> props = new LinkedHashMap<>();
         props.put("path", prop("string", "Path to the file to edit"));
         props.put("oldString", prop("string", "Exact string to replace"));
@@ -384,10 +647,12 @@ public final class BuiltinTools {
                     String newString = args.get("newString") instanceof String
                             ? (String) args.get("newString")
                             : str(args.get("newString"));
+                    Path target;
                     String content;
                     try {
-                        content = Files.readString(Path.of(p));
-                    } catch (IOException e) {
+                        target = env.resolvePath(p);
+                        content = Files.readString(target);
+                    } catch (RuntimeException | IOException e) {
                         return err("edit: " + e.getMessage());
                     }
                     int count = countOccurrences(content, oldString);
@@ -403,7 +668,7 @@ public final class BuiltinTools {
                         }
                         next = replaceFirstLiteral(content, oldString, newString);
                     }
-                    Files.writeString(Path.of(p), next);
+                    Files.writeString(target, next);
                     int replacements = replaceAll ? count : 1;
                     return ok("Edited " + p + " (" + replacements + " replacement"
                             + (replacements == 1 ? "" : "s") + ")", meta("replacements", replacements));
@@ -414,7 +679,7 @@ public final class BuiltinTools {
     // grep
     // -----------------------------------------------------------------------
 
-    private static Tool grepTool() {
+    private static Tool grepTool(Env env) {
         Map<String, Object> props = new LinkedHashMap<>();
         props.put("pattern", prop("string", "Regular expression to search for"));
         props.put("path", prop("string", "Directory to search (default: process cwd)"));
@@ -433,7 +698,14 @@ public final class BuiltinTools {
                     } catch (PatternSyntaxException e) {
                         return err("grep: invalid regex: " + e.getMessage());
                     }
-                    Path root = Path.of(args.get("path") != null ? str(args.get("path")) : ".");
+                    Path root;
+                    try {
+                        root = args.get("path") != null
+                                ? env.resolvePath(str(args.get("path")))
+                                : Path.of(env.dir());
+                    } catch (RuntimeException e) {
+                        return err("grep: " + e.getMessage());
+                    }
                     String include = args.get("include") != null ? str(args.get("include")) : null;
                     long limit = isNumber(args.get("limit")) ? truncToLong(args.get("limit")) : 100;
                     // A25/A26/K1: COLLECT every match, SORT, and only THEN truncate. Breaking at
@@ -478,7 +750,7 @@ public final class BuiltinTools {
     // glob
     // -----------------------------------------------------------------------
 
-    private static Tool globTool() {
+    private static Tool globTool(Env env) {
         Map<String, Object> props = new LinkedHashMap<>();
         props.put("pattern", prop("string", "Glob pattern to match"));
         props.put("path", prop("string", "Directory to search (default: process cwd)"));
@@ -490,7 +762,14 @@ public final class BuiltinTools {
                 (args, ctx) -> {
                     String pattern = str(args.get("pattern"));
                     if (pattern.isEmpty()) return err("glob: pattern is required");
-                    Path root = Path.of(args.get("path") != null ? str(args.get("path")) : ".");
+                    Path root;
+                    try {
+                        root = args.get("path") != null
+                                ? env.resolvePath(str(args.get("path")))
+                                : Path.of(env.dir());
+                    } catch (RuntimeException e) {
+                        return err("glob: " + e.getMessage());
+                    }
                     long limit = isNumber(args.get("limit")) ? truncToLong(args.get("limit")) : 100;
                     // A25/A26/K1: the cap used to break the WALK, so the sort below only
                     // ordered whatever the filesystem happened to reach first. Collect every
@@ -665,6 +944,11 @@ public final class BuiltinTools {
         final String content;   // add
         final List<String> body; // update
 
+        /** The same op with its path resolved through the host boundary (ADR 0034 D2). */
+        PatchOp withPath(String newPath) {
+            return new PatchOp(type, newPath, content, body);
+        }
+
         private PatchOp(String type, String path, String content, List<String> body) {
             this.type = type;
             this.path = path;
@@ -772,7 +1056,7 @@ public final class BuiltinTools {
         return result;
     }
 
-    private static Tool applyPatchTool() {
+    private static Tool applyPatchTool(Env env) {
         Map<String, Object> props = new LinkedHashMap<>();
         props.put("patchText", prop("string", "The patch text in Begin/End Patch format"));
         return builtin(
@@ -788,6 +1072,18 @@ public final class BuiltinTools {
                     } catch (RuntimeException e) {
                         return err("apply_patch: " + e.getMessage());
                     }
+                    // The paths live INSIDE the patch text, not in the arguments, so a
+                    // host cannot rewrite them from a hook — the one case that genuinely
+                    // needs the base directory to be library-side (ADR 0034 D2).
+                    List<PatchOp> resolved = new ArrayList<>(ops.size());
+                    try {
+                        for (PatchOp op : ops) {
+                            resolved.add(op.withPath(env.resolvePath(op.path).toString()));
+                        }
+                    } catch (RuntimeException e) {
+                        return err("apply_patch: " + e.getMessage());
+                    }
+                    ops = resolved;
                     // Stage every write/delete first; only touch the filesystem once all hunks apply.
                     List<String[]> writes = new ArrayList<>(); // [path, content]
                     List<String> deletes = new ArrayList<>();

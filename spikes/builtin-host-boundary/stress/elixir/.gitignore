@@ -1,0 +1,4 @@
+# harness scratch: the temp trees the scenarios build, and any captured output
+tmp/
+out/
+*.log

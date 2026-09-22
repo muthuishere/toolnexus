@@ -90,7 +90,11 @@ A new language port is "correct" iff these hold. Run it against the shared
     global toggle (`builtins:false` | `builtins.disabled:true` | `builtins.enabled:false` ⇒ whole source off, MCP
     precedence). **Per-tool** override via `builtins.tools` (a name→bool map on the all-on baseline: `{bash:false}` drops
     `bash`, `{...:true}` keeps it on). Global-off short-circuits the map. Surfaced via the tool-schema array only
-    (like MCP) — **not** the system prompt.
+    (like MCP) — **not** the system prompt. **Host boundary** (§4A): `builtins.shell` (argv prefix, used verbatim;
+    detected at construction when absent — `sh -c` on POSIX, `%COMSPEC%`→`pwsh`→`powershell`→`bash` on Windows),
+    `builtins.baseDir` (what a RELATIVE path means, incl. inside `apply_patch`'s text and as `bash`'s default
+    `workdir`; empty ⇒ process cwd), `builtins.confineToBaseDir` (opt-in, canonical-form refusal). A `bash`
+    timeout or cancellation kills **the whole job** — process group / Job Object — TERM, 2000 ms, KILL.
 12. **Suspension** (§10): a `ToolResult` whose `metadata.pending` is a `Request` is a suspension.
     With a `waitFor` host slot: call `answer = waitFor(request)`; on `ok` re-execute the tool once
     with `Context.answer = answer` and feed that back; on `!ok` (or a second suspension) feed back an
@@ -670,8 +674,9 @@ The default toolset toolnexus ships so an agent can act with zero custom wiring 
 built-ins, ported with **identical tool names and input schemas** across all ports. Every tool
 here has `source:"builtin"` and obeys the uniform `Tool`/`ToolResult` contract (§1): a failure is a
 `ToolResult{isError:true, output:<message>}`, never a thrown exception across the boundary. Paths are
-resolved relative to the process working directory unless absolute. Implementations are **native per
-runtime** (child-process / fs / HTTP of each language) — same behavior, idiomatic shape.
+resolved relative to **`baseDir`** — the process working directory when the host sets none — unless
+absolute. Implementations are **native per runtime** (child-process / fs / HTTP of each language) —
+same behavior, idiomatic shape.
 
 The ten tools (`skill` is its own source, §3, and is not part of this set; the file-backed
 `memory` tool is **opt-in** — a persona surface wired only when an agent home dir is present,
@@ -679,11 +684,11 @@ The ten tools (`skill` is its own source, §3, and is not part of this set; the 
 
 | name | inputSchema (required unless `?`) | behavior |
 |------|-----------------------------------|----------|
-| `bash` | `command:string`, `workdir?:string`, `timeout?:number(ms,default 60000)`, `description?:string` | Run one shell command via the runtime's process API in `workdir` (default cwd). Output = combined stdout+stderr. Non-zero exit ⇒ `isError:true`, output includes the exit code. Timeout kills the child ⇒ `isError:true`. |
+| `bash` | `command:string`, `workdir?:string`, `timeout?:number(ms,default 60000)`, `description?:string` | Run one shell command through the **resolved interpreter** (see the host boundary below) in `workdir` (default `baseDir`). Output = combined stdout+stderr. Non-zero exit ⇒ `isError:true`, output includes the exit code. Timeout or cancellation kills **the whole job, not just the interpreter** ⇒ `isError:true`. |
 | `read` | `path:string`, `offset?:number(1-based line)`, `limit?:number(lines)` | Read a file. If the extension is in the **media table** below, `output` = a one-line description naming the file and its mime type and `parts` = one part carrying its base64 bytes. Otherwise read as UTF-8 text; with `offset`/`limit`, return that line window. Missing file ⇒ `isError:true`. Undecodable bytes ⇒ `isError:true` naming the file — **never a raised exception escaping into the loop**. |
 | `write` | `path:string`, `content:string` | Write `content` to `path` (create/overwrite), creating parent dirs. Output = confirmation w/ byte count. |
 | `edit` | `path:string`, `oldString:string`, `newString:string`, `replaceAll?:boolean` | Exact-string replace in `path`. Default replaces the single occurrence; `oldString` absent OR (without `replaceAll`) non-unique ⇒ `isError:true`. `replaceAll:true` replaces all. |
-| `grep` | `pattern:string(regex)`, `path?:string(dir,default cwd)`, `include?:string(glob)`, `limit?:number` | Search file contents by regex under `path`, optionally filtered by `include` glob. Output = `rel:line:text` matches — the path **RELATIVE to the walk root**, `/`-separated — collected, sorted, then capped at `limit` (default 100). See the listing rule below. |
+| `grep` | `pattern:string(regex)`, `path?:string(dir,default cwd)`, `include?:string(glob)`, `limit?:number` | Search file contents by regex under `path`, optionally filtered by `include` glob. Output = `rel:line:text` matches — the path **RELATIVE to the walk root**, `/`-separated, and **the same string the matches were sorted by** — collected, sorted, then capped at `limit` (default 100). See the listing rule below. |
 | `glob` | `pattern:string`, `path?:string(dir,default cwd)`, `limit?:number` | List files matching the glob under `path`. Output = newline-joined `/`-separated relative paths, collected, sorted, then capped at `limit` (default 100). See the listing rule below. |
 | `webfetch` | `url:string`, `format?:"text"\|"markdown"\|"html"(default markdown)`, `timeout?:number(s,default 30)` | HTTP GET `url`; return body as text/markdown/html. Non-2xx ⇒ `isError:true` w/ `HTTP <status>`. |
 
@@ -725,6 +730,57 @@ how an absolute path came to be printed beside a relative-path ordering. POSIX-o
 separator for free; java, csharp and clojure's JVM host convert explicitly. (The `<skill_files>`
 block's absolute paths are the one carve-out, and only because its sort key and emitted string
 order identically — see §3.)
+
+**The host boundary — the interpreter, the root, and what a kill reaches (ADR 0034).** Three
+properties of the host process that the builtins used to close over are host-settable, each
+defaulting to the pre-0.20 behaviour so a host that sets nothing observes no change. They sit on the
+same `builtins` config object as the toggles (`builtins.shell`, `builtins.baseDir`,
+`builtins.confineToBaseDir`), spelled in each port's idiom.
+
+- **`shell`** — the argv prefix `bash` runs a command with, the command appended as the last
+  argument: `["sh","-c"]`, `["bash","-lc"]`, `["cmd","/d","/s","/c"]`,
+  `["powershell","-NoProfile","-Command"]`. Set, it is used **verbatim**. Absent, an interpreter is
+  **detected at toolkit construction** — `sh -c` on POSIX; on Windows `%COMSPEC%` first, then
+  `pwsh`, `powershell`, and a POSIX `bash` if one resolves. `%COMSPEC%` leads because PowerShell is
+  routinely blocked by execution or application-control policy, while `%COMSPEC%` is always present.
+  The resolved interpreter is reported on every `bash` result as `metadata.shell` and is readable
+  from the toolkit; it is **never** written into the tool's name, description or schema, all of
+  which stay byte-identical across ports and platforms. When nothing resolves **and `bash` is
+  enabled**, construction fails naming every candidate tried — a missing shell is a configuration
+  fact, and turn fourteen of a paid run is the expensive place to learn it. Disabling `bash` via
+  `builtins.tools` is the supported way to run on a box with no interpreter.
+- **`baseDir`** — what a **relative** path means, for `read`, `write`, `edit`, `glob`, `grep`
+  (including their default `path`), **the file paths inside `apply_patch`'s patch text**, and as
+  `bash`'s default `workdir`. Absolute paths are unaffected. Empty ⇒ the host process working
+  directory, i.e. the behaviour before this section existed. The patch-text case is why this lives
+  in the library: those paths are content, not arguments, so no host hook can reach them.
+- **`confineToBaseDir`** (default **off**) — refuse any path whose **canonical** form is neither
+  `baseDir` nor under it, as `ToolResult{isError:true}`. Canonical, not lexical: symlinks, Windows
+  **directory junctions** (which need no privilege to create) and 8.3 short names are resolved on
+  both sides, and a path that does not exist yet is canonicalised through its **deepest existing
+  ancestor** with the tail re-attached — otherwise it is not a check for `write`. On Windows the
+  reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, with or without
+  an extension) are refused outright: they satisfy a containment check and do not write into the
+  directory. **This is a guarantee about path resolution in the file builtins, not a sandbox** — a
+  command run by `bash` still reaches the whole filesystem (`cd ..`, `env -C`, an absolute path),
+  which is a different problem and a different decision.
+
+**Killing a command kills the job.** `bash` starts its command such that the command and everything
+it starts can be stopped together — a new **process group** on POSIX, a **Job Object** (or
+`taskkill /T /F`) on Windows — and a timeout or a cancellation stops that whole set: ask first
+(SIGTERM), wait a fixed grace window of **2000 ms**, then insist (SIGKILL). **The window bounds how long the KILL
+may take, not how long the CALLER waits**: a port waits for the job to be gone, up to the window,
+and returns as soon as it is — sleeping through the window whether or not the job already died
+turns a 1 s timeout into a 3 s call, which two ports did until it was measured. **The grace window
+is also a POSIX effect.** Windows has no graceful termination for a console process, and asking anyway is
+worse than not asking: `taskkill /T` without `/F` refuses every console process in the tree while
+still being able to take the PARENT down, which reparents the grandchild and leaves it running. A
+port therefore stops the job outright on Windows — one Job Object close, or one `taskkill /T /F`. Killing only the direct child leaves the real command running, reparented, still writing
+to the workspace after the call has been reported as finished; that was the behaviour of every port
+and is now the behaviour of none. Where a port must enumerate descendants instead of signalling a
+group, it captures that enumeration **before** terminating the parent — after it, the children have
+been reparented and are unreachable from its pid. The outcome is reported in `metadata`
+(`timedOut`, `killedTree`); **`output` does not change**, so no conformance golden moves.
 
 Safety: `bash`, `write`, `edit`, `apply_patch` execute commands / mutate the filesystem. Command
 output and `${ENV}`-expanded values are **never logged**; no secret value is written into any spec,

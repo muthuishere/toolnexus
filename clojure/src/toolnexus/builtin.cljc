@@ -21,10 +21,12 @@
 ;; core symbol. Zero reader conditionals, zero `java.*`, zero Go interop.
 (ns toolnexus.builtin
   (:require [clojure.string :as str]
+            [koine.env :as kenv]
             [koine.fs :as fs]
             [koine.http :as khttp]
             [koine.json :as json]
             [koine.process :as proc]
+            [koine.time :as ktime]
             [koine.text :as text]
             [toolnexus.content :as content]
             [toolnexus.tool :as tool]))
@@ -238,27 +240,306 @@
 ;; §4A — behaviour
 ;; ---------------------------------------------------------------------------
 
+;; ---------------------------------------------------------------------------
+;; the host boundary — interpreter, base directory, confinement (SPEC §4A, ADR 0034)
+;; ---------------------------------------------------------------------------
+
+(def kill-grace-ms
+  "How long a job gets between \"please stop\" and \"stop\". Fixed, and identical in
+  every port, so a timeout means the same thing everywhere."
+  2000)
+
+(def ^:private win-reserved
+  #{"CON" "PRN" "AUX" "NUL"
+    "COM1" "COM2" "COM3" "COM4" "COM5" "COM6" "COM7" "COM8" "COM9"
+    "LPT1" "LPT2" "LPT3" "LPT4" "LPT5" "LPT6" "LPT7" "LPT8" "LPT9"})
+
+(defn- windows?
+  "Windows is detected from the environment, not from a host API: `os.name` is
+  `java.*` and `runtime.GOOS` is Go interop, and this namespace may use neither.
+  COMSPEC/SystemRoot are set on every Windows and on no POSIX system."
+  []
+  (boolean (or (kenv/get-env "COMSPEC") (kenv/get-env "SystemRoot"))))
+
+(defn- path-sep [] (if (windows?) ";" ":"))
+
+(defn- resolves-on-path?
+  "Does `name` resolve as an executable, absolutely or on PATH? A PATH walk,
+  because there is no portable `which` available from a .cljc."
+  [name]
+  (if (or (str/includes? name "/") (str/includes? name "\\"))
+    (fs/exists? name)
+    (let [exts (if (windows?)
+                 (str/split (or (kenv/get-env "PATHEXT") ".COM;.EXE;.BAT;.CMD") #";")
+                 [""])]
+      (boolean
+       (some (fn [dir]
+               (some (fn [ext] (fs/exists? (str dir "/" name ext))) exts))
+             (remove str/blank? (str/split (or (kenv/get-env "PATH") "") (re-pattern (path-sep)))))))))
+
+(defn shell-candidates
+  "The interpreters tried when the host names none. `%COMSPEC%` leads on Windows
+  because PowerShell is routinely blocked by execution or application-control
+  policy, while `%COMSPEC%` is always present."
+  []
+  (if (windows?)
+    (let [comspec (kenv/get-env "COMSPEC")]
+      (vec (concat (when comspec [[comspec "/d" "/s" "/c"]])
+                   [["cmd.exe" "/d" "/s" "/c"]
+                    ["pwsh" "-NoProfile" "-Command"]
+                    ["powershell" "-NoProfile" "-Command"]
+                    ["bash" "-lc"]])))
+    [["/bin/sh" "-c"] ["sh" "-c"]]))
+
+(defn builtin-env
+  "The host boundary, resolved once: which interpreter to run, which directory
+  relative paths mean, and whether to refuse the ones that leave it. A missing
+  interpreter is a configuration fact, and turn fourteen of a paid run is the
+  expensive place to learn it."
+  [cfg]
+  (let [m        (if (map? cfg) cfg {})
+        base-dir (str (or (:base-dir m) (:baseDir m) ""))
+        confine  (boolean (or (:confine-to-base-dir m) (:confineToBaseDir m)))
+        given    (:shell m)]
+    (if (seq given)
+      {:shell (mapv str given) :shell-error nil :base-dir base-dir :confine confine}
+      (let [cands (shell-candidates)
+            found (first (filter (fn [argv] (resolves-on-path? (first argv))) cands))]
+        {:shell (or found [])
+         :shell-error (when-not found
+                        (str "no shell interpreter found (tried: "
+                             (str/join ", " (map first cands))
+                             "); set :shell on the builtins config, or disable the bash "
+                             "builtin with {:tools {\"bash\" false}}"))
+         :base-dir base-dir
+         :confine confine}))))
+
+(defn shell
+  "The interpreter the builtins resolved for `bash` — what a host prints, and
+  what `metadata.shell` carries on every bash result."
+  ([] (shell nil))
+  ([cfg] (let [e (builtin-env cfg)]
+           (if (:shell-error e) [:error (:shell-error e)] [:ok (:shell e)]))))
+
+(defn- env-dir [e]
+  (if (str/blank? (:base-dir e)) "." (:base-dir e)))
+
+(defn- absolute-path? [p]
+  (or (str/starts-with? p "/")
+      (boolean (re-find #"^[A-Za-z]:[\\/]" p))
+      (str/starts-with? p "\\\\")))
+
+(defn- reserved-device? [p]
+  (let [base (last (str/split p #"[/\\]"))
+        stem (str/upper-case (str/trim (first (str/split (str base) #"\\."))))]
+    (contains? win-reserved stem)))
+
+(defn- canonical
+  "Resolve a path for comparison, component by component — a link in the MIDDLE
+  of a path is the escape a leaf-only check misses. A component that does not
+  exist yet is kept as written, because a file `write` is about to create has no
+  real path and a check that only works on existing files is not a check for
+  `write`.
+
+  `koine.fs/real-path` throws on a missing path, which is exactly the signal the
+  deepest-existing-ancestor walk needs. Its result is LOWER-CASED, because the
+  two clojure hosts disagree on case (the JVM normalises, cljgo does not), and
+  one path yielding two confinement verdicts is the drift this repo exists to
+  prevent."
+  [p]
+  (let [segs (remove str/blank? (str/split (str p) #"[/\\]"))
+        root (if (absolute-path? (str p)) "/" "")]
+    (str/lower-case
+     (reduce (fn [acc seg]
+               (let [joined (if (str/blank? acc) (str root seg) (str acc "/" seg))]
+                 (if (fs/exists? joined) (fs/real-path joined) joined)))
+             root
+             segs))))
+
+(defn- resolve-path
+  "Map a tool-supplied path onto the filesystem: relative to `:base-dir` (or,
+  with none, exactly as before), and refused when confinement is on and the
+  canonical target lies outside the base. Returns `[:ok full]` or
+  `[:error message]` — never throws, because a builtin reports."
+  [e p]
+  (let [base (:base-dir e)]
+    (cond
+      (and (:confine e) (str/blank? base))
+      [:error "confine-to-base-dir is set but base-dir is empty"]
+
+      :else
+      (let [full (if (and (not (str/blank? base)) (not (absolute-path? p)))
+                   (str base "/" p)
+                   p)]
+        (cond
+          (not (:confine e)) [:ok full]
+
+          (and (windows?) (reserved-device? full))
+          [:error (str p " names a reserved device, which is not a file inside " base)]
+
+          :else
+          (let [cb (canonical base)
+                ct (canonical full)]
+            (if (or (= ct cb) (str/starts-with? ct (str cb "/")))
+              [:ok full]
+              [:error (str p " resolves outside baseDir " base)])))))))
+
 (def default-bash-timeout-ms
   "§4A: `timeout?:number(ms, default 60000)`."
   60000)
 
+(def ^:private digit->int
+  {\0 0 \1 1 \2 2 \3 3 \4 4 \5 5 \6 6 \7 7 \8 8 \9 9})
+
+(defn- parse-pid
+  "A pid from a string of digits, or nil. Hand-rolled: `parse-long` is
+  clojure.core 1.11+ on the JVM and unverified on cljgo, and this namespace may
+  not branch per host."
+  [s]
+  (let [cs (seq (str/trim (str s)))]
+    (when (and (seq cs) (every? digit->int cs))
+      (reduce (fn [acc c] (+ (* 10 acc) (digit->int c))) 0 cs))))
+
+(defn- ps-pairs
+  "Every (pid, ppid) on the machine. A `ps` shell-out because neither host
+  exposes a process table to a .cljc, and because the alternative — trusting a
+  process-group trick — was measured to fail under dash (see ADR 0034 D4)."
+  []
+  (let [r (proc/sh ["ps" "-eo" "pid=,ppid="] {:timeout-ms 5000})]
+    (if (and (not (:timed-out? r)) (= 0 (long (or (:exit r) -1))))
+      (->> (str/split-lines (str (:out r)))
+           (keep (fn [line]
+                   (let [parts (remove str/blank? (str/split (str/trim line) #"\s+"))]
+                     (when (= 2 (count parts))
+                       (let [a (parse-pid (first parts)) b (parse-pid (second parts))]
+                         (when (and a b) [a b]))))))
+           (remove (fn [[a b]] (or (nil? a) (nil? b))))
+           vec)
+      [])))
+
+(defn- child-pids
+  "Every live descendant of `root`, captured WHILE THE PARENT IS ALIVE — after it
+  dies its children are reparented and are unreachable from its pid (measured,
+  spikes/builtin-host-boundary/SPIKE.md §1.1)."
+  [root]
+  (let [pairs (ps-pairs)]
+    (loop [frontier [root] acc []]
+      (let [kids (vec (for [[p pp] pairs :when (and (some #(= % pp) frontier)
+                                                    (not (some #(= % p) acc))
+                                                    (not= p root))] p))]
+        (if (empty? kids) acc (recur kids (into acc kids)))))))
+
+(defn- signal-job
+  "Ask (`-TERM`) or insist (`-KILL`) on every pid of the job."
+  [pids sig]
+  (doseq [pid pids]
+    (if (windows?)
+      ;; Windows has NO graceful termination for a console process: `taskkill /T`
+      ;; without `/F` refuses every console process in the tree while still being
+      ;; able to take the PARENT down, which reparents the grandchild. Both steps
+      ;; force there; the grace window is a POSIX effect.
+      (proc/sh ["taskkill" "/T" "/F" "/PID" (str pid)] {:timeout-ms 5000})
+      (proc/sh ["kill" sig (str pid)] {:timeout-ms 5000}))))
+
+(defn- alive-pid?
+  "Is `pid` still running? `kill -0` is the portable liveness test; it signals
+  nothing. On Windows `tasklist` is the equivalent question."
+  [pid]
+  (if (windows?)
+    (let [r (proc/sh ["tasklist" "/FI" (str "PID eq " pid)] {:timeout-ms 5000})]
+      (str/includes? (str (:out r)) (str pid)))
+    (= 0 (long (or (:exit (proc/sh ["kill" "-0" (str pid)] {:timeout-ms 5000})) -1)))))
+
+(defn- await-exit
+  "Poll until every pid is gone, or `budget-ms` passes. Returns true if the job
+  ended within the budget."
+  [pids budget-ms]
+  (let [deadline (+ (ktime/mono-ms) budget-ms)]
+    (loop []
+      (cond
+        (every? (fn [p] (not (alive-pid? p))) pids) true
+        (>= (ktime/mono-ms) deadline) false
+        :else (do (ktime/sleep! 20) (recur))))))
+
 (defn- t-bash
   "Combined stdout+stderr. Non-zero exit ⇒ isError with the exit code appended.
-  Timeout kills the child ⇒ isError.
+  A timeout kills THE WHOLE JOB ⇒ isError.
 
-  `:timed-out?` is checked FIRST and unconditionally: on a kill `:exit` is nil,
-  not a number, so `(zero? (:exit r))` would blow up (or, worse, a port that
-  defaults nil to 0 would read a kill as a clean run)."
-  [args _ctx]
-  (let [ms  (long (or (:timeout args) default-bash-timeout-ms))
-        r   (proc/sh ["sh" "-c" (str (:command args))]
-                     (cond-> {:timeout-ms ms}
-                       (:workdir args) (assoc :dir (str (:workdir args)))))
-        out (str (:out r) (:err r))]
+  The deadline is enforced here rather than by `koine.process/sh`'s `:timeout-ms`,
+  and that is the whole fix: koine performs its kill INSIDE the library, on the
+  direct child only, and exposes no pid — so by the time it returns, the shell is
+  gone, its children have been reparented, and there is nothing left to signal.
+  Running the command on a background thread with our own deadline means the
+  child is still alive when its tree is enumerated (ADR 0034 D4).
+
+  `:timed-out?` is still checked FIRST and unconditionally on koine's result: on
+  a kill `:exit` is nil, not a number, so `(zero? (:exit r))` would blow up (or,
+  worse, a port that defaults nil to 0 would read a kill as a clean run)."
+  [e args _ctx]
+  (let [ms      (long (or (:timeout args) default-bash-timeout-ms))
+        command (str (:command args))]
     (cond
-      (true? (:timed-out? r)) (tool/failure (str out "command timed out after " ms "ms"))
-      (zero? (long (:exit r))) (tool/success out)
-      :else (tool/failure (str out "exit code " (:exit r))))))
+      (str/blank? command)
+      (tool/failure "bash: command is required")
+
+      (:shell-error e)
+      (tool/failure (str "bash: " (:shell-error e)))
+
+      :else
+      (let [[status workdir] (if (:workdir args)
+                               (resolve-path e (str (:workdir args)))
+                               [:ok (env-dir e)])]
+        (if (= status :error)
+          (tool/failure (str "bash: " workdir))
+          (let [pidfile (str (fs/temp-dir! "tn-bash") "/pid")
+                argv    (:shell e)
+                ;; The shell records its OWN pid before doing anything else, so
+                ;; the job can be found without a process group — which is not
+                ;; portable here: `set -m` fails outright under dash.
+                script  (if (windows?)
+                          command
+                          (str "echo $$ > " pidfile "; " command))
+                result  (promise)
+                meta    {:shell (str/join " " argv)}]
+            (proc/run-async!
+             (fn []
+               (deliver result
+                        (proc/sh (conj (vec argv) script)
+                                 (cond-> {} workdir (assoc :dir workdir))))))
+            (let [deadline (+ (ktime/mono-ms) ms)
+                  r (loop []
+                      (cond
+                        (realized? result) @result
+                        (>= (ktime/mono-ms) deadline) nil
+                        :else (do (ktime/sleep! 20) (recur))))]
+              (if (nil? r)
+                ;; Timed out. Snapshot the tree while the shell is STILL ALIVE,
+                ;; then ask, wait out the grace window, and insist.
+                (let [pid  (when (fs/exists? pidfile) (parse-pid (fs/read-file pidfile)))
+                      pids (when pid (into [pid] (child-pids pid)))]
+                  (when (seq pids) (signal-job pids "-TERM"))
+                  ;; WAIT for the job to go, up to the grace window — do not
+                  ;; SLEEP through it. The window bounds how long the kill may
+                  ;; take, not how long the caller waits: a command that dies on
+                  ;; SIGTERM in 5 ms must not cost its caller two seconds.
+                  ;; Measured parity break — five ports returned a 1 s timeout in
+                  ;; ~1.0 s while this one took ~3.05 s.
+                  (when (and (seq pids) (not (await-exit pids kill-grace-ms)))
+                    (signal-job pids "-KILL"))
+                  (tool/failure (str "command timed out after " ms "ms")
+                                (assoc meta :timedOut true :killedTree (boolean (seq pids)))))
+                (let [out (str (:out r) (:err r))]
+                  (cond
+                    (true? (:timed-out? r))
+                    (tool/failure (str out "command timed out after " ms "ms")
+                                  (assoc meta :timedOut true :killedTree false))
+
+                    (zero? (long (:exit r)))
+                    (tool/success out (assoc meta :exitCode 0))
+
+                    :else
+                    (tool/failure (str out "exit code " (:exit r))
+                                  (assoc meta :exitCode (:exit r)))))))))))))
 
 (defn- valid-utf8?
   "Is `bs` a well-formed UTF-8 byte sequence?
@@ -297,12 +578,16 @@
                 false
                 (recur (+ i len))))))))))
 
-(defn- t-read [args _ctx]
-  (let [p     (str (:path args))
-        media (content/media-type-for p)]
+(defn- t-read [e args _ctx]
+  (let [raw   (str (:path args))
+        [st p] (resolve-path e raw)
+        media (content/media-type-for (str p))]
     (cond
+      (= st :error)
+      (tool/failure (str "read: " p))
+
       (not (fs/exists? p))
-      (tool/failure (str "read: file not found: " p))
+      (tool/failure (str "read: file not found: " raw))
 
       ;; §4A + §1B: a recognised media extension comes back as a CONTENT PART.
       ;; The mime type is the fixed table's, never sniffed and never resolved
@@ -337,16 +622,21 @@
                 win   (if lim (take (long lim) win) win)]
             (tool/success (str/join "\n" win))))))))
 
-(defn- t-write [args _ctx]
-  (let [p (str (:path args))
+(defn- t-write [e args _ctx]
+  (let [raw (str (:path args))
+        [st p] (resolve-path e raw)
         c (str (:content args))]
-    (when-let [d (parent-of p)] (fs/mkdirs! d))
-    (fs/write-file p c)
-    (tool/success (str "Wrote " (utf8-count c) " bytes to " p))))
+    (if (= st :error)
+      (tool/failure (str "write: " p))
+      (do (when-let [d (parent-of p)] (fs/mkdirs! d))
+          (fs/write-file p c)
+          (tool/success (str "Wrote " (utf8-count c) " bytes to " raw))))))
 
-(defn- t-edit [args _ctx]
-  (let [p (str (:path args))]
-    (if-not (fs/exists? p)
+(defn- t-edit [e args _ctx]
+  (let [[st p] (resolve-path e (str (:path args)))]
+    (if (= st :error)
+      (tool/failure (str "edit: " p))
+     (if-not (fs/exists? p)
       (tool/failure (str "edit: file not found: " p))
       (let [text (str (fs/read-file p))
             old  (str (:oldString args))
@@ -366,7 +656,7 @@
                       (replace-first-literal text old new))]
             (fs/write-file p out)
             (tool/success (str "Replaced " (if (true? (:replaceAll args)) (count hits) 1)
-                          " occurrence(s) in " p))))))))
+                          " occurrence(s) in " p)))))))))
 
 (defn- grep-file-hits
   "`rel:line:text` for every matching line in `f`, in ASCENDING LINE ORDER.
@@ -391,8 +681,8 @@
 (defn- t-grep
   "`pattern` is a REGEX, and the dialect differs per host (java.util.regex vs Go
   RE2). Only the common subset is portable; that is a §4A limit, not a bug here."
-  [args _ctx]
-  (let [root  (str (or (:path args) "."))
+  [e args _ctx]
+  (let [[rst root] (if (:path args) (resolve-path e (str (:path args))) [:ok (env-dir e)])
         limit (long (or (:limit args) 100))
         inc-g (:include args)
         pat   (re-pattern (str (:pattern args)))
@@ -404,11 +694,13 @@
         ;; ascending line order, so the concatenation is exactly "by relative
         ;; path, then line number ascending" — with the cap applied LAST, so the
         ;; filesystem never decides WHICH hits the model sees.
-        hits  (vec (mapcat (fn [f] (grep-file-hits pat root f)) files))]
-    (tool/success (str/join "\n" (take limit hits)))))
+        hits  (when (= rst :ok) (vec (mapcat (fn [f] (grep-file-hits pat root f)) files)))]
+    (if (= rst :error)
+      (tool/failure (str "grep: " root))
+      (tool/success (str/join "\n" (take limit hits))))))
 
-(defn- t-glob [args _ctx]
-  (let [root  (str (or (:path args) "."))
+(defn- t-glob [e args _ctx]
+  (let [[rst root] (if (:path args) (resolve-path e (str (:path args))) [:ok (env-dir e)])
         limit (long (or (:limit args) 100))
         rels  (->> (files-under root)
                    (map (fn [f] (rel-path root f)))
@@ -420,7 +712,9 @@
                    ;; to the host: the JVM orders by UTF-16 code unit, cljgo by
                    ;; UTF-8 byte, and above the BMP those are opposite answers.
                    tool/sort-strings)]
-    (tool/success (str/join "\n" (take limit rels)))))
+    (if (= rst :error)
+      (tool/failure (str "glob: " root))
+      (tool/success (str/join "\n" (take limit rels))))))
 
 (defn- strip-tags [s]
   (-> (str s)
@@ -584,11 +878,19 @@
 
       :else {:error (str "apply_patch: unknown op " (:op op))})))
 
-(defn- t-apply-patch [args _ctx]
+(defn- t-apply-patch [e args _ctx]
   (let [parsed (parse-patch (:patchText args))]
     (if (:error parsed)
       (tool/failure (:error parsed))
-      (let [plans (mapv plan-op (:ops parsed))
+      ;; The paths live INSIDE the patch text, not in the arguments, so a host
+      ;; cannot rewrite them from a hook — the one case that genuinely needs the
+      ;; base directory to be library-side (ADR 0034 D2).
+      (let [resolved (mapv (fn [op]
+                             (let [[st p] (resolve-path e (str (:path op)))]
+                               (if (= st :error) {:error (str "apply_patch: " p)} (assoc op :path p))))
+                           (:ops parsed))
+            bad-path (first (filter :error resolved))
+            plans (if bad-path [bad-path] (mapv plan-op resolved))
             bad   (first (filter :error plans))]
         (if bad
           ;; Atomic: everything was planned from READS, so nothing has been
@@ -634,22 +936,34 @@
               :execute (fn ([args] (f args nil))
                          ([args ctx] (f args ctx)))}))
 
+(defn builtin-tools-for
+  "The ten §4A builtins, built against a host boundary — the interpreter, base
+  directory and confinement of a builtins config (ADR 0034). A nil config is the
+  historical behaviour: the detected interpreter, paths relative to the process
+  working directory, no confinement."
+  [cfg]
+  (let [e (builtin-env cfg)
+        with-env (fn [f] (fn [args ctx] (f e args ctx)))]
+    [(builtin "bash"        "Run a shell command."                bash-schema        (with-env t-bash))
+     (builtin "read"        (str "Read a file. A known media file (png/jpg/jpeg/gif/webp/pdf/"
+                                 "mp3/wav) comes back as a content part; otherwise it is read "
+                                 "as UTF-8 text, and with offset/limit only that line window "
+                                 "is returned.")
+                                                                  read-schema        (with-env t-read))
+     (builtin "write"       "Write a file, creating parent dirs." write-schema       (with-env t-write))
+     (builtin "edit"        "Exact-string replace in a file."     edit-schema        (with-env t-edit))
+     (builtin "grep"        "Search file contents by regex."      grep-schema        (with-env t-grep))
+     (builtin "glob"        "List files matching a glob."         glob-schema        (with-env t-glob))
+     (builtin "webfetch"    "HTTP GET a URL and return its body." webfetch-schema    t-webfetch)
+     (builtin "question"    "Ask the human one or more questions." question-schema   t-question)
+     (builtin "apply_patch" "Apply an add/update/delete patch."   apply-patch-schema (with-env t-apply-patch))
+     (builtin "todowrite"   "Replace the session todo list."      todowrite-schema   t-todowrite)]))
+
 (def builtin-tools
-  "The ten §4A builtins, in the order of the SPEC table."
-  [(builtin "bash"        "Run a shell command."                bash-schema        t-bash)
-   (builtin "read"        (str "Read a file. A known media file (png/jpg/jpeg/gif/webp/pdf/"
-                               "mp3/wav) comes back as a content part; otherwise it is read "
-                               "as UTF-8 text, and with offset/limit only that line window "
-                               "is returned.")
-                                                                read-schema        t-read)
-   (builtin "write"       "Write a file, creating parent dirs." write-schema       t-write)
-   (builtin "edit"        "Exact-string replace in a file."     edit-schema        t-edit)
-   (builtin "grep"        "Search file contents by regex."      grep-schema        t-grep)
-   (builtin "glob"        "List files matching a glob."         glob-schema        t-glob)
-   (builtin "webfetch"    "HTTP GET a URL and return its body." webfetch-schema    t-webfetch)
-   (builtin "question"    "Ask the human one or more questions." question-schema   t-question)
-   (builtin "apply_patch" "Apply an add/update/delete patch."   apply-patch-schema t-apply-patch)
-   (builtin "todowrite"   "Replace the session todo list."      todowrite-schema   t-todowrite)])
+  "The ten §4A builtins with the default host boundary, in the order of the SPEC
+  table. One definition, not two: the cfg-aware builder is the only place the set
+  is listed, so the two cannot drift."
+  (builtin-tools-for nil))
 
 (def builtin-names (mapv :name builtin-tools))
 
@@ -708,7 +1022,10 @@
     (let [m       (when (map? opt) (:tools opt))
           by-name (when (map? m)
                     (into {} (map (fn [[k v]] [(if (keyword? k) (name k) (str k)) v]) m)))]
-      (vec (filter (fn [t] (not (false? (get by-name (:name t))))) builtin-tools)))))
+      (vec (filter (fn [t] (not (false? (get by-name (:name t)))))
+                   ;; Built against THIS config, so the same object that carries
+                   ;; the toggles also carries the host boundary (ADR 0034).
+                   (builtin-tools-for opt))))))
 
 (defn enabled-builtin-names [opt] (mapv :name (enabled-builtins opt)))
 

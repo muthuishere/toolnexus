@@ -1,0 +1,6 @@
+;; The stress harness runs against the SHIPPED port source — ../../../../clojure/src
+;; is on the classpath, so `toolnexus.builtin` here is the released namespace,
+;; never a copy. koine pinned to the same version clojure/deps.edn declares.
+{:paths ["." "../../../../clojure/src"]
+ :deps  {org.clojure/clojure           {:mvn/version "1.12.5"}
+         net.clojars.muthuishere/koine {:mvn/version "0.11.0"}}}

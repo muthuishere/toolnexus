@@ -650,8 +650,10 @@ export class Classifier {
     let lastErr: unknown
     for (let attempt = 0; ; attempt++) {
       const timer = new AbortController()
+      // NOT unref'd: this watchdog is the only thing that will end a request an
+      // injected `fetch` never settles, and an unref'd timer cannot keep the
+      // loop alive long enough to fire. It is cleared on every exit path below.
       const t = setTimeout(() => timer.abort(new Error(`classifier: request timeout after ${this.timeoutMs}ms`)), this.timeoutMs)
-      ;(t as any).unref?.()
       const onOuter = () => timer.abort(signal!.reason)
       if (signal) {
         if (signal.aborted) {

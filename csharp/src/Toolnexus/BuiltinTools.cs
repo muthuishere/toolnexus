@@ -51,30 +51,54 @@ public static partial class BuiltinTools
     public static List<ITool> Select(object? cfg)
     {
         if (!Enabled(cfg)) return new List<ITool>();
-        var all = Create();
-        if (cfg is IDictionary<string, object?> d && d.Get("tools") is IDictionary<string, object?> map)
-            return all.Where(t => map.Get(t.Name) is not false).ToList();
-        return all;
+        var all = Create(cfg);
+        var selected = cfg is IDictionary<string, object?> d && d.Get("tools") is IDictionary<string, object?> map
+            ? all.Where(t => map.Get(t.Name) is not false).ToList()
+            : all;
+        // A missing interpreter is a construction-time failure, and only when
+        // `bash` survived the toggles: a host that disabled it should run fine on
+        // a box with no shell at all (ADR 0034 D1).
+        if (selected.Any(t => t.Name == "bash")) Shell(cfg);
+        return selected;
     }
+
+    /// <summary>
+    /// The interpreter the builtins resolved for <c>bash</c> — what a host prints, and what
+    /// <c>metadata.shell</c> carries on every bash result. Throws the same error
+    /// <see cref="Select"/> fails construction with when nothing resolves.
+    /// </summary>
+    public static IReadOnlyList<string> Shell(object? cfg) => new BuiltinEnv(cfg).ShellArgv();
 
     /// <summary>
     /// Build the ten built-in tools (each <c>source:"builtin"</c>). The order is fixed for
     /// parity: bash, read, write, edit, grep, glob, webfetch, question, apply_patch,
     /// todowrite.
     /// </summary>
-    public static List<ITool> Create() => new()
+    public static List<ITool> Create() => Create(null);
+
+    /// <summary>
+    /// Build the ten builtins against a host boundary — the interpreter, base directory and
+    /// confinement carried on the <c>builtins</c> config (ADR 0034). A null config is the
+    /// historical behaviour: the detected interpreter, paths relative to the process working
+    /// directory, no confinement.
+    /// </summary>
+    public static List<ITool> Create(object? cfg)
     {
-        BashTool(),
-        ReadTool(),
-        WriteTool(),
-        EditTool(),
-        GrepTool(),
-        GlobTool(),
-        WebfetchTool(),
-        QuestionTool(),
-        ApplyPatchTool(),
-        TodowriteTool(),
-    };
+        var env = new BuiltinEnv(cfg);
+        return new()
+        {
+            BashTool(env),
+            ReadTool(env),
+            WriteTool(env),
+            EditTool(env),
+            GrepTool(env),
+            GlobTool(env),
+            WebfetchTool(),
+            QuestionTool(),
+            ApplyPatchTool(env),
+            TodowriteTool(),
+        };
+    }
 
     // -----------------------------------------------------------------------
     // schema helpers
@@ -238,7 +262,7 @@ public static partial class BuiltinTools
     // individual tools
     // -----------------------------------------------------------------------
 
-    private static ITool BashTool() => Builtin(
+    private static ITool BashTool(BuiltinEnv env) => Builtin(
         "bash",
         "Run a shell command and return its combined stdout+stderr. Non-zero exit is an error.",
         Schema(new()
@@ -248,12 +272,26 @@ public static partial class BuiltinTools
             ["timeout"] = NumProp("Timeout in milliseconds (default 60000)"),
             ["description"] = StrProp("Human-readable description of the command"),
         }, "command"),
-        async (args, _) =>
+        async (args, ctx) =>
         {
             var command = Str(args, "command");
             if (command.Length == 0) return ToolResult.Error("bash: command is required");
-            var workdir = args.Get("workdir") is string w && w.Length > 0 ? w : Directory.GetCurrentDirectory();
+
+            IReadOnlyList<string> argv;
+            string workdir;
+            try
+            {
+                argv = env.ShellArgv();
+                workdir = args.Get("workdir") is string w && w.Length > 0
+                    ? env.ResolvePath(w)
+                    : env.Dir();
+            }
+            catch (Exception e)
+            {
+                return ToolResult.Error($"bash: {e.Message}");
+            }
             var timeout = NumOrNull(args.Get("timeout")) ?? 60_000;
+            var meta = new Dictionary<string, object?> { ["shell"] = env.ShellLabel };
 
             var psi = new ProcessStartInfo
             {
@@ -261,51 +299,74 @@ public static partial class BuiltinTools
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 WorkingDirectory = workdir,
+                FileName = argv[0],
             };
-            if (OperatingSystem.IsWindows())
-            {
-                psi.FileName = "cmd.exe";
-                psi.ArgumentList.Add("/c");
-                psi.ArgumentList.Add(command);
-            }
-            else
-            {
-                psi.FileName = "/bin/sh";
-                psi.ArgumentList.Add("-c");
-                psi.ArgumentList.Add(command);
-            }
+            for (var i = 1; i < argv.Count; i++) psi.ArgumentList.Add(argv[i]);
+            psi.ArgumentList.Add(command);
 
             using var proc = new Process { StartInfo = psi };
             try { proc.Start(); }
-            catch (Exception e) { return ToolResult.Error($"bash: {e.Message}"); }
+            catch (Exception e) { return ToolResult.Error($"bash: {e.Message}", meta); }
 
             var stdoutTask = proc.StandardOutput.ReadToEndAsync();
             var stderrTask = proc.StandardError.ReadToEndAsync();
 
-            var timedOut = false;
-            using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(timeout));
+            var stopped = "";
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(timeout));
+            using var linked = ctx?.CancellationToken is { } outer
+                ? CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, outer)
+                : CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token);
             try
             {
-                await proc.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+                await proc.WaitForExitAsync(linked.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
-                timedOut = true;
-                try { proc.Kill(true); } catch { /* best effort */ }
+                stopped = timeoutCts.IsCancellationRequested ? "timeout" : "cancelled";
+            }
+
+            var killedTree = false;
+            if (stopped.Length > 0)
+            {
+                // Snapshot the tree while the parent is STILL ALIVE — after it dies its
+                // children are reparented and are unreachable from its pid. Then ask,
+                // wait out the grace window, and only then insist. Neither Kill()
+                // overload is graceful on this runtime (both send SIGKILL, measured),
+                // so the asking is kill(2) through libc.
+                var descendants = JobControl.Descendants(proc.Id);
+                killedTree = JobControl.RequestStop(proc, descendants);
+                try
+                {
+                    using var grace = new CancellationTokenSource(BuiltinEnv.KillGraceMs);
+                    await proc.WaitForExitAsync(grace.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    killedTree = JobControl.ForceStop(proc) || killedTree;
+                    try { await proc.WaitForExitAsync().ConfigureAwait(false); } catch { /* already gone */ }
+                }
             }
 
             var combined = (await stdoutTask.ConfigureAwait(false)) + (await stderrTask.ConfigureAwait(false));
-            if (timedOut)
-                return ToolResult.Error($"bash: command timed out after {(long)timeout}ms\n{combined}");
+            if (stopped.Length > 0)
+            {
+                meta["timedOut"] = stopped == "timeout";
+                meta["killedTree"] = killedTree;
+                return ToolResult.Error(
+                    stopped == "timeout"
+                        ? $"bash: command timed out after {(long)timeout}ms\n{combined}"
+                        : $"bash: command cancelled\n{combined}",
+                    meta);
+            }
 
             var code = proc.ExitCode;
-            var meta = new Dictionary<string, object?> { ["exitCode"] = (long)code };
+            meta["exitCode"] = (long)code;
             if (code != 0)
                 return ToolResult.Error($"{combined}\nbash: command exited with code {code}", meta);
             return ToolResult.Ok(combined, meta);
         });
 
-    private static ITool ReadTool() => Builtin(
+    private static ITool ReadTool(BuiltinEnv env) => Builtin(
         "read",
         "Read a file. A recognised media file (png/jpg/jpeg/gif/webp/pdf/mp3/wav) comes back as a content part; otherwise UTF-8 text, and with offset/limit only that line window.",
         Schema(new()
@@ -318,6 +379,9 @@ public static partial class BuiltinTools
         {
             var p = Str(args, "path");
             if (p.Length == 0) return Task.FromResult(ToolResult.Error("read: path is required"));
+            string full;
+            try { full = env.ResolvePath(p); }
+            catch (Exception e) { return Task.FromResult(ToolResult.Error($"read: {e.Message}")); }
 
             // §6 media table — fixed, shared with ContentPart's edge constructors. No magic-byte
             // sniffing and no platform mime database (both vary per machine and break parity).
@@ -326,7 +390,7 @@ public static partial class BuiltinTools
             {
                 try
                 {
-                    var part = ContentPart.FromFile(p, media.Value.MimeType);
+                    var part = ContentPart.FromFile(full, media.Value.MimeType);
                     return Task.FromResult(ToolResult.OkWithParts(
                         $"{p} ({media.Value.MimeType}, {part.ByteLength} bytes)",
                         new[] { part },
@@ -341,7 +405,7 @@ public static partial class BuiltinTools
                 // Decode strictly: File.ReadAllText silently substitutes U+FFFD for undecodable
                 // bytes, which would hand the model plausible garbage instead of an error. A
                 // decoding failure is an isError result, NEVER an exception escaping into the loop.
-                content = new UTF8Encoding(false, throwOnInvalidBytes: true).GetString(File.ReadAllBytes(p));
+                content = new UTF8Encoding(false, throwOnInvalidBytes: true).GetString(File.ReadAllBytes(full));
             }
             catch (DecoderFallbackException)
             {
@@ -369,7 +433,7 @@ public static partial class BuiltinTools
             return Task.FromResult(ToolResult.Ok(string.Join("\n", lines.Skip(start).Take(count))));
         });
 
-    private static ITool WriteTool() => Builtin(
+    private static ITool WriteTool(BuiltinEnv env) => Builtin(
         "write",
         "Write content to a file (create/overwrite), creating parent directories.",
         Schema(new()
@@ -382,15 +446,18 @@ public static partial class BuiltinTools
             var p = Str(args, "path");
             if (p.Length == 0) return Task.FromResult(ToolResult.Error("write: path is required"));
             var content = args.Get("content") is string s ? s : args.Get("content")?.ToString() ?? "";
-            var dir = Path.GetDirectoryName(Path.GetFullPath(p));
+            string full;
+            try { full = env.ResolvePath(p); }
+            catch (Exception e) { return Task.FromResult(ToolResult.Error($"write: {e.Message}")); }
+            var dir = Path.GetDirectoryName(Path.GetFullPath(full));
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            File.WriteAllText(p, content);
+            File.WriteAllText(full, content);
             var bytes = Encoding.UTF8.GetByteCount(content);
             var meta = new Dictionary<string, object?> { ["bytes"] = (long)bytes };
             return Task.FromResult(ToolResult.Ok($"Wrote {bytes} bytes to {p}", meta));
         });
 
-    private static ITool EditTool() => Builtin(
+    private static ITool EditTool(BuiltinEnv env) => Builtin(
         "edit",
         "Exact-string replace in a file. Default replaces a single unique occurrence; replaceAll replaces all.",
         Schema(new()
@@ -409,7 +476,12 @@ public static partial class BuiltinTools
             var newString = args.Get("newString") is string ns ? ns : args.Get("newString")?.ToString() ?? "";
 
             string content;
-            try { content = File.ReadAllText(p); }
+            string full;
+            try
+            {
+                full = env.ResolvePath(p);
+                content = File.ReadAllText(full);
+            }
             catch (Exception e) { return Task.FromResult(ToolResult.Error($"edit: {e.Message}")); }
 
             var count = CountOccurrences(content, oldString);
@@ -432,7 +504,7 @@ public static partial class BuiltinTools
                 next = content[..idx] + newString + content[(idx + oldString.Length)..];
                 replacements = 1;
             }
-            File.WriteAllText(p, next);
+            File.WriteAllText(full, next);
             var meta = new Dictionary<string, object?> { ["replacements"] = (long)replacements };
             return Task.FromResult(ToolResult.Ok(
                 $"Edited {p} ({replacements} replacement{(replacements == 1 ? "" : "s")})", meta));
@@ -450,7 +522,7 @@ public static partial class BuiltinTools
         return count;
     }
 
-    private static ITool GrepTool() => Builtin(
+    private static ITool GrepTool(BuiltinEnv env) => Builtin(
         "grep",
         "Search file contents by regex under a directory. Output is file:line:text matches.",
         Schema(new()
@@ -468,7 +540,12 @@ public static partial class BuiltinTools
             try { re = new Regex(pattern); }
             catch (Exception e) { return Task.FromResult(ToolResult.Error($"grep: invalid regex: {e.Message}")); }
 
-            var root = args.Get("path") is string rp && rp.Length > 0 ? rp : Directory.GetCurrentDirectory();
+            string root;
+            try
+            {
+                root = args.Get("path") is string rp && rp.Length > 0 ? env.ResolvePath(rp) : env.Dir();
+            }
+            catch (Exception e) { return Task.FromResult(ToolResult.Error($"grep: {e.Message}")); }
             var include = args.Get("include") is string inc && inc.Length > 0 ? inc : null;
             var limit = (int)(NumOrNull(args.Get("limit")) ?? 100);
 
@@ -504,7 +581,7 @@ public static partial class BuiltinTools
             return Task.FromResult(ToolResult.Ok(string.Join("\n", matches), meta));
         });
 
-    private static ITool GlobTool() => Builtin(
+    private static ITool GlobTool(BuiltinEnv env) => Builtin(
         "glob",
         "List files matching a glob under a directory. Output is newline-joined relative paths.",
         Schema(new()
@@ -517,7 +594,12 @@ public static partial class BuiltinTools
         {
             var pattern = Str(args, "pattern");
             if (pattern.Length == 0) return Task.FromResult(ToolResult.Error("glob: pattern is required"));
-            var root = args.Get("path") is string rp && rp.Length > 0 ? rp : Directory.GetCurrentDirectory();
+            string root;
+            try
+            {
+                root = args.Get("path") is string rp && rp.Length > 0 ? env.ResolvePath(rp) : env.Dir();
+            }
+            catch (Exception e) { return Task.FromResult(ToolResult.Error($"glob: {e.Message}")); }
             var limit = (int)(NumOrNull(args.Get("limit")) ?? 100);
 
             // (A26) COLLECT → SORT → TRUNCATE. The mid-walk break used to run UPSTREAM of the
@@ -785,7 +867,7 @@ public static partial class BuiltinTools
         return result;
     }
 
-    private static ITool ApplyPatchTool() => Builtin(
+    private static ITool ApplyPatchTool(BuiltinEnv env) => Builtin(
         "apply_patch",
         "Apply a patch (Begin/End Patch grammar: Add/Update/Delete File). Atomic — a non-matching hunk aborts with no writes.",
         Schema(new()
@@ -798,6 +880,21 @@ public static partial class BuiltinTools
             if (patchText.Length == 0) return Task.FromResult(ToolResult.Error("apply_patch: patchText is required"));
             List<PatchOp> ops;
             try { ops = ParsePatch(patchText); }
+            catch (Exception e) { return Task.FromResult(ToolResult.Error($"apply_patch: {e.Message}")); }
+
+            // The paths live INSIDE the patch text, not in the arguments, so a host cannot
+            // rewrite them from a hook — the one case that genuinely needs the base directory
+            // to be library-side (ADR 0034 D2).
+            try
+            {
+                ops = ops.Select(op => op switch
+                {
+                    AddOp a => (PatchOp)(a with { Path = env.ResolvePath(a.Path) }),
+                    DeleteOp d => d with { Path = env.ResolvePath(d.Path) },
+                    UpdateOp u => u with { Path = env.ResolvePath(u.Path) },
+                    _ => op,
+                }).ToList();
+            }
             catch (Exception e) { return Task.FromResult(ToolResult.Error($"apply_patch: {e.Message}")); }
 
             // Stage every write/delete first; only touch the filesystem once all hunks apply.

@@ -130,7 +130,10 @@ func CreateToolkit(ctx context.Context, opts Options) (*Toolkit, error) {
 			}
 		}
 	}
-	builtins := SelectBuiltins(builtinsCfg)
+	builtins, builtinsErr := SelectBuiltinsChecked(builtinsCfg)
+	if builtinsErr != nil {
+		return nil, builtinsErr
+	}
 
 	// Remote A2A agents come from the `Agents` option plus a top-level `agents`
 	// block on a parsed McpConfig map (mirrors mcpServers). Each is resolved to

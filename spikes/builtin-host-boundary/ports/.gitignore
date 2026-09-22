@@ -1,0 +1,6 @@
+# build output from the probes — the sources and run.sh are what is tracked
+*.class
+bin/
+obj/
+*.exe
+*.dll

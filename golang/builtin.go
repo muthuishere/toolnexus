@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -34,6 +35,28 @@ type BuiltinsConfig struct {
 	Enabled  *bool           `json:"enabled"`
 	Disabled *bool           `json:"disabled"`
 	Tools    map[string]bool `json:"tools"`
+
+	// Shell is the argv prefix `bash` runs a command with — {"sh","-c"},
+	// {"cmd","/d","/s","/c"}, {"powershell","-NoProfile","-Command"},
+	// {"bash","-lc"}. Set, it is used verbatim. Absent, an interpreter is
+	// DETECTED at toolkit construction: `sh -c` on POSIX; on Windows %COMSPEC%
+	// first, then pwsh, powershell, and a POSIX bash if one resolves. SPEC §4A,
+	// ADR 0034 D1.
+	Shell []string `json:"shell"`
+
+	// BaseDir is the directory RELATIVE paths resolve against, for every builtin
+	// that touches the filesystem — including the paths inside apply_patch's
+	// patch text, and as bash's default workdir. Empty ⇒ the host process
+	// working directory, which is the behaviour before ADR 0034, so a host that
+	// sets nothing sees no change.
+	BaseDir string `json:"baseDir"`
+
+	// ConfineToBaseDir refuses any path whose CANONICAL form lies outside
+	// BaseDir — through a symlink or a Windows junction too — and refuses
+	// Windows reserved device names. Default off. It is a guarantee about path
+	// resolution in the file builtins, NOT a sandbox: a command run by `bash`
+	// still reaches the whole filesystem (ADR 0034 D3).
+	ConfineToBaseDir bool `json:"confineToBaseDir"`
 }
 
 // BuiltinsEnabled reports whether the builtin source is on. Default ON. Same
@@ -112,14 +135,20 @@ func builtinsToolMap(cfg any) map[string]bool {
 // tool mapped to false (all-on baseline; true/absent stay on; unknown names are
 // ignored). Mirrors the JS selectBuiltins. SPEC §4A.
 func SelectBuiltins(cfg any) []Tool {
+	tools, _ := SelectBuiltinsChecked(cfg)
+	return tools
+}
+
+// SelectBuiltinsChecked is SelectBuiltins plus the one construction-time
+// failure the host boundary introduces: when `bash` survives the toggles and no
+// interpreter resolves, that is a configuration fact and it is reported HERE,
+// not on turn fourteen of a paid run (ADR 0034 D1).
+func SelectBuiltinsChecked(cfg any) ([]Tool, error) {
 	if !BuiltinsEnabled(cfg) {
-		return nil
+		return nil, nil
 	}
 	toolMap := builtinsToolMap(cfg)
-	all := CreateBuiltinTools()
-	if toolMap == nil {
-		return all
-	}
+	all := CreateBuiltinToolsWith(cfg)
 	out := all[:0]
 	for _, t := range all {
 		if enabled, ok := toolMap[t.Name]; ok && !enabled {
@@ -127,7 +156,181 @@ func SelectBuiltins(cfg any) []Tool {
 		}
 		out = append(out, t)
 	}
-	return out
+	for _, t := range out {
+		if t.Name == "bash" {
+			if _, err := BuiltinShell(cfg); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// the host boundary: interpreter, base directory, confinement (ADR 0034)
+// ---------------------------------------------------------------------------
+
+// builtinKillGraceMs is how long a job gets between "please stop" and "stop".
+// Fixed, and identical in every port, so a timeout means the same thing
+// everywhere: a test runner that gets SIGTERM removes its temp directories, one
+// that gets SIGKILL does not.
+const builtinKillGraceMs = 2000
+
+// builtinEnv is what the builtins may know about the host: which interpreter to
+// run, which directory relative paths mean, and whether to refuse the ones that
+// leave it. A nil *builtinEnv behaves exactly as the pre-0.20 builtins did.
+type builtinEnv struct {
+	shell    []string
+	shellErr error
+	baseDir  string
+	confine  bool
+}
+
+// detectShell returns the first candidate interpreter that resolves on PATH.
+// The error names every candidate tried, because "sh: not found" on turn 14 of
+// a paid run is the expensive place to learn that a box has no shell.
+func detectShell() ([]string, error) {
+	cands := shellCandidates()
+	tried := make([]string, 0, len(cands))
+	for _, argv := range cands {
+		tried = append(tried, argv[0])
+		if _, err := exec.LookPath(argv[0]); err == nil {
+			return argv, nil
+		}
+	}
+	return nil, fmt.Errorf("no shell interpreter found (tried: %s); set Builtins.Shell, or disable the bash builtin with Builtins.Tools{\"bash\": false}",
+		strings.Join(tried, ", "))
+}
+
+// newBuiltinEnv resolves the boundary once, at toolkit construction. A shell
+// that cannot be found is reported as an error only when `bash` is actually
+// enabled — a host that disabled it should run fine on a box with no shell.
+func newBuiltinEnv(cfg any) *builtinEnv {
+	env := &builtinEnv{}
+	switch v := cfg.(type) {
+	case BuiltinsConfig:
+		env.shell, env.baseDir, env.confine = v.Shell, v.BaseDir, v.ConfineToBaseDir
+	case *BuiltinsConfig:
+		if v != nil {
+			env.shell, env.baseDir, env.confine = v.Shell, v.BaseDir, v.ConfineToBaseDir
+		}
+	case map[string]any:
+		if raw, ok := v["shell"].([]any); ok {
+			for _, part := range raw {
+				if s, ok := part.(string); ok {
+					env.shell = append(env.shell, s)
+				}
+			}
+		}
+		if raw, ok := v["shell"].([]string); ok {
+			env.shell = append(env.shell, raw...)
+		}
+		if b, ok := v["baseDir"].(string); ok {
+			env.baseDir = b
+		}
+		if b, ok := v["confineToBaseDir"].(bool); ok {
+			env.confine = b
+		}
+	}
+	if len(env.shell) == 0 {
+		env.shell, env.shellErr = detectShell()
+	}
+	return env
+}
+
+// shellArgv is the interpreter for a bash call: the resolved argv, or the
+// historical `sh -c` when there is no env at all.
+func (e *builtinEnv) shellArgv() ([]string, error) {
+	if e == nil || len(e.shell) == 0 {
+		if e != nil && e.shellErr != nil {
+			return nil, e.shellErr
+		}
+		return []string{"sh", "-c"}, nil
+	}
+	return e.shell, nil
+}
+
+// shellLabel is the human-readable interpreter, for metadata.shell.
+func (e *builtinEnv) shellLabel() string {
+	argv, err := e.shellArgv()
+	if err != nil {
+		return ""
+	}
+	return strings.Join(argv, " ")
+}
+
+// dir is the working directory a command or a walk starts from.
+func (e *builtinEnv) dir() string {
+	if e != nil && e.baseDir != "" {
+		return e.baseDir
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return cwd
+	}
+	return "."
+}
+
+// resolvePath maps a tool-supplied path onto the filesystem: relative to
+// BaseDir (or, with none, to the process cwd exactly as before), and refused
+// when confinement is on and the canonical target is outside the base.
+func (e *builtinEnv) resolvePath(p string) (string, error) {
+	if e == nil {
+		return p, nil
+	}
+	if e.confine && e.baseDir == "" {
+		return "", fmt.Errorf("confineToBaseDir is set but baseDir is empty")
+	}
+	full := p
+	if e.baseDir != "" && !filepath.IsAbs(p) {
+		full = filepath.Join(e.baseDir, p)
+	}
+	if !e.confine {
+		return full, nil
+	}
+	if reservedDeviceName(full) {
+		return "", fmt.Errorf("%s names a reserved device, which is not a file inside %s", p, e.baseDir)
+	}
+	base, err := canonicalPath(e.baseDir)
+	if err != nil {
+		return "", fmt.Errorf("cannot canonicalise baseDir %s: %v", e.baseDir, err)
+	}
+	target, err := canonicalPath(full)
+	if err != nil {
+		return "", fmt.Errorf("cannot canonicalise %s: %v", p, err)
+	}
+	rel, err := filepath.Rel(base, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("%s resolves outside baseDir %s", p, e.baseDir)
+	}
+	return full, nil
+}
+
+// canonicalPath resolves a path to compare it with another. Symlinks — and, on
+// Windows, directory junctions and 8.3 short names — are resolved on the
+// DEEPEST EXISTING ancestor and the remaining segments re-attached, because a
+// file `write` is about to create has no real path, and a check that only works
+// on existing files is not a check for `write`.
+func canonicalPath(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	tail := ""
+	cur := abs
+	for {
+		if resolved, err := realPath(cur); err == nil {
+			if tail == "" {
+				return resolved, nil
+			}
+			return filepath.Join(resolved, tail), nil
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return abs, nil
+		}
+		tail = filepath.Join(filepath.Base(cur), tail)
+		cur = parent
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -182,14 +385,13 @@ func asArray(v any) any {
 	return []any{}
 }
 
-func dirArg(args map[string]any) string {
+// dirArg is the walk root for grep/glob: the `path` argument resolved through
+// the host boundary, or the boundary's own directory when none is given.
+func dirArg(args map[string]any, env *builtinEnv) (string, error) {
 	if p, ok := argString(args, "path"); ok && p != "" {
-		return p
+		return env.resolvePath(p)
 	}
-	if cwd, err := os.Getwd(); err == nil {
-		return cwd
-	}
-	return "."
+	return env.dir(), nil
 }
 
 // builtin wraps a run function into a uniform Tool, recovering from any panic so
@@ -303,7 +505,7 @@ func fileExists(p string) bool {
 // individual tools
 // ---------------------------------------------------------------------------
 
-func bashTool() Tool {
+func bashTool(env *builtinEnv) Tool {
 	return builtin(
 		"bash",
 		"Run a shell command and return its combined stdout+stderr. Non-zero exit is an error.",
@@ -323,7 +525,18 @@ func bashTool() Tool {
 			if command == "" {
 				return bErr("bash: command is required", nil)
 			}
+			argv, shellErr := env.shellArgv()
+			if shellErr != nil {
+				return bErr(fmt.Sprintf("bash: %v", shellErr), nil)
+			}
 			workdir, _ := argString(args, "workdir")
+			if workdir == "" {
+				workdir = env.dir()
+			} else if resolved, err := env.resolvePath(workdir); err != nil {
+				return bErr(fmt.Sprintf("bash: %v", err), nil)
+			} else {
+				workdir = resolved
+			}
 			timeoutMs := 60000.0
 			if t, ok := argNumber(args, "timeout"); ok {
 				timeoutMs = t
@@ -332,31 +545,99 @@ func bashTool() Tool {
 			if tctx != nil && tctx.Ctx != nil {
 				parent = tctx.Ctx
 			}
-			ctx, cancel := context.WithTimeout(parent, time.Duration(timeoutMs)*time.Millisecond)
-			defer cancel()
 
-			cmd := exec.CommandContext(ctx, "sh", "-c", command)
-			if workdir != "" {
-				cmd.Dir = workdir
+			// NOT exec.CommandContext: its kill reaches the direct child only —
+			// the interpreter — and leaves the real command running, reparented.
+			// startJob puts the command in its own process group (POSIX) or Job
+			// Object (Windows) so the whole job can be stopped. SPEC §4A, ADR 0034 D4.
+			cmd := exec.Command(argv[0], append(argv[1:len(argv):len(argv)], command)...)
+			cmd.Dir = workdir
+			var buf lockedBuffer
+			cmd.Stdout = &buf
+			cmd.Stderr = &buf
+			meta := map[string]any{"shell": env.shellLabel()}
+			if err := startJob(cmd); err != nil {
+				return bErr(fmt.Sprintf("bash: %v", err), meta)
 			}
-			out, runErr := cmd.CombinedOutput()
-			output := string(out)
-			if ctx.Err() == context.DeadlineExceeded {
-				return bErr(fmt.Sprintf("bash: command timed out after %dms\n%s", int(timeoutMs), output), nil)
+
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+
+			timer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
+			defer timer.Stop()
+
+			var runErr error
+			stopped := "" // "timeout" | "cancelled"
+			select {
+			case runErr = <-done:
+			case <-timer.C:
+				stopped = "timeout"
+			case <-parent.Done():
+				stopped = "cancelled"
 			}
+
+			killedTree := false
+			if stopped != "" {
+				// Ask, wait out the grace window, then insist. A runner that gets
+				// SIGTERM cleans up its temp directories; one that gets SIGKILL
+				// does not.
+				killedTree = signalJob(cmd, true) == nil
+				grace := time.NewTimer(builtinKillGraceMs * time.Millisecond)
+				select {
+				case runErr = <-done:
+				case <-grace.C:
+					if err := signalJob(cmd, false); err == nil {
+						killedTree = true
+					}
+					runErr = <-done
+				}
+				grace.Stop()
+				meta["timedOut"] = stopped == "timeout"
+				meta["killedTree"] = killedTree
+				output := buf.String()
+				if stopped == "cancelled" {
+					return bErr(fmt.Sprintf("bash: command cancelled\n%s", output), meta)
+				}
+				return bErr(fmt.Sprintf("bash: command timed out after %dms\n%s", int(timeoutMs), output), meta)
+			}
+
+			output := buf.String()
 			if runErr != nil {
 				if exitErr, ok := runErr.(*exec.ExitError); ok {
 					code := exitErr.ExitCode()
-					return bErr(fmt.Sprintf("%s\nbash: command exited with code %d", output, code), map[string]any{"exitCode": code})
+					meta["exitCode"] = code
+					return bErr(fmt.Sprintf("%s\nbash: command exited with code %d", output, code), meta)
 				}
-				return bErr(fmt.Sprintf("bash: %v", runErr), nil)
+				return bErr(fmt.Sprintf("bash: %v", runErr), meta)
 			}
-			return bOk(output, map[string]any{"exitCode": 0})
+			meta["exitCode"] = 0
+			return bOk(output, meta)
 		},
 	)
 }
 
-func readTool() Tool {
+// lockedBuffer collects combined stdout+stderr. CombinedOutput cannot be used
+// any more: it waits for the pipes to close, and an orphaned grandchild holds
+// them open long past the kill — so the call that is supposed to time out at
+// 30s would return when the thing it killed finally lets go.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func readTool(env *builtinEnv) Tool {
 	return builtin(
 		"read",
 		"Read a file. A recognised media file (png/jpg/jpeg/gif/webp/pdf/mp3/wav) comes back as a content part; anything else is read as UTF-8 text, and with offset/limit only that line window.",
@@ -375,14 +656,18 @@ func readTool() Tool {
 			if p == "" {
 				return bErr("read: path is required", nil)
 			}
-			raw, err := os.ReadFile(p)
+			full, rErr := env.resolvePath(p)
+			if rErr != nil {
+				return bErr(fmt.Sprintf("read: %v", rErr), nil)
+			}
+			raw, err := os.ReadFile(full)
 			if err != nil {
 				return bErr(fmt.Sprintf("read: %v", err), nil)
 			}
 			// §6 media table: a recognised media extension comes back as a §1B part,
 			// with output describing it. Fixed table — never sniffed, never resolved
 			// through a platform mime database (which varies per machine).
-			if e, ok := lookupMedia(p); ok {
+			if e, ok := lookupMedia(full); ok {
 				part := encodeBytes(raw, e.mime, e.partType)
 				if part.Err() != nil {
 					return bErr(fmt.Sprintf("read: %v", part.Err()), nil)
@@ -431,7 +716,7 @@ func readTool() Tool {
 	)
 }
 
-func writeTool() Tool {
+func writeTool(env *builtinEnv) Tool {
 	return builtin(
 		"write",
 		"Write content to a file (create/overwrite), creating parent directories.",
@@ -450,10 +735,14 @@ func writeTool() Tool {
 				return bErr("write: path is required", nil)
 			}
 			content, _ := args["content"].(string)
-			if abs, err := filepath.Abs(p); err == nil {
+			full, rErr := env.resolvePath(p)
+			if rErr != nil {
+				return bErr(fmt.Sprintf("write: %v", rErr), nil)
+			}
+			if abs, err := filepath.Abs(full); err == nil {
 				_ = os.MkdirAll(filepath.Dir(abs), 0o755)
 			}
-			if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
 				return bErr(fmt.Sprintf("write: %v", err), nil)
 			}
 			bytes := len(content)
@@ -462,7 +751,7 @@ func writeTool() Tool {
 	)
 }
 
-func editTool() Tool {
+func editTool(env *builtinEnv) Tool {
 	return builtin(
 		"edit",
 		"Exact-string replace in a file. Default replaces a single unique occurrence; replaceAll replaces all.",
@@ -487,7 +776,11 @@ func editTool() Tool {
 				return bErr("edit: oldString is required", nil)
 			}
 			newString, _ := args["newString"].(string)
-			raw, err := os.ReadFile(p)
+			full, rErr := env.resolvePath(p)
+			if rErr != nil {
+				return bErr(fmt.Sprintf("edit: %v", rErr), nil)
+			}
+			raw, err := os.ReadFile(full)
 			if err != nil {
 				return bErr(fmt.Sprintf("edit: %v", err), nil)
 			}
@@ -508,7 +801,7 @@ func editTool() Tool {
 				}
 				next = strings.Replace(content, oldString, newString, 1)
 			}
-			if err := os.WriteFile(p, []byte(next), 0o644); err != nil {
+			if err := os.WriteFile(full, []byte(next), 0o644); err != nil {
 				return bErr(fmt.Sprintf("edit: %v", err), nil)
 			}
 			plural := "s"
@@ -520,7 +813,7 @@ func editTool() Tool {
 	)
 }
 
-func grepTool() Tool {
+func grepTool(env *builtinEnv) Tool {
 	return builtin(
 		"grep",
 		"Search file contents by regex under a directory. Output is file:line:text matches.",
@@ -544,7 +837,10 @@ func grepTool() Tool {
 			if err != nil {
 				return bErr(fmt.Sprintf("grep: invalid regex: %v", err), nil)
 			}
-			root := dirArg(args)
+			root, rootErr := dirArg(args, env)
+			if rootErr != nil {
+				return bErr(fmt.Sprintf("grep: %v", rootErr), nil)
+			}
 			include, _ := argString(args, "include")
 			limit := 100
 			if l, ok := argNumber(args, "limit"); ok {
@@ -576,8 +872,14 @@ func grepTool() Tool {
 				}
 				for i, line := range strings.Split(string(raw), "\n") {
 					if re.MatchString(line) {
-						hits = append(hits, grepHit{rel: filepath.ToSlash(rel), line: i + 1,
-							text: fmt.Sprintf("%s:%d:%s", file, i+1, line)})
+						// The emitted path is the SORT KEY — `/`-separated and
+						// relative to the walk root (SPEC §4A: "SORT ON THE SAME
+						// STRING you emit"). This used to print `file`, the joined
+						// path: absolute on POSIX, backslashed on Windows, and
+						// ordered by a string it did not show.
+						slash := filepath.ToSlash(rel)
+						hits = append(hits, grepHit{rel: slash, line: i + 1,
+							text: fmt.Sprintf("%s:%d:%s", slash, i+1, line)})
 					}
 				}
 			}
@@ -601,7 +903,7 @@ func grepTool() Tool {
 	)
 }
 
-func globTool() Tool {
+func globTool(env *builtinEnv) Tool {
 	return builtin(
 		"glob",
 		"List files matching a glob under a directory. Output is newline-joined relative paths.",
@@ -620,7 +922,10 @@ func globTool() Tool {
 			if pattern == "" {
 				return bErr("glob: pattern is required", nil)
 			}
-			root := dirArg(args)
+			root, rootErr := dirArg(args, env)
+			if rootErr != nil {
+				return bErr(fmt.Sprintf("glob: %v", rootErr), nil)
+			}
 			limit := 100
 			if l, ok := argNumber(args, "limit"); ok {
 				limit = int(l)
@@ -989,7 +1294,7 @@ func applyUpdate(content string, body []string) (string, error) {
 	return result, nil
 }
 
-func applyPatchTool() Tool {
+func applyPatchTool(env *builtinEnv) Tool {
 	return builtin(
 		"apply_patch",
 		"Apply a patch (Begin/End Patch grammar: Add/Update/Delete File). Atomic — a non-matching hunk aborts with no writes.",
@@ -1009,6 +1314,16 @@ func applyPatchTool() Tool {
 			ops, err := parsePatch(patchText)
 			if err != nil {
 				return bErr(fmt.Sprintf("apply_patch: %v", err), nil)
+			}
+			// The paths live INSIDE the patch text, not in the arguments, so a
+			// host cannot rewrite them from a hook — this is the one case that
+			// genuinely needs the base directory to be library-side (ADR 0034 D2).
+			for i := range ops {
+				full, rErr := env.resolvePath(ops[i].path)
+				if rErr != nil {
+					return bErr(fmt.Sprintf("apply_patch: %v", rErr), nil)
+				}
+				ops[i].path = full
 			}
 			// Stage every write/delete first; only touch the filesystem once all
 			// hunks apply.
@@ -1080,16 +1395,33 @@ func applyPatchTool() Tool {
 // The order is fixed for parity: bash, read, write, edit, grep, glob, webfetch,
 // question, apply_patch, todowrite.
 func CreateBuiltinTools() []Tool {
+	return CreateBuiltinToolsWith(nil)
+}
+
+// CreateBuiltinToolsWith builds the ten builtins against a host boundary — the
+// interpreter, base directory and confinement of a BuiltinsConfig (ADR 0034).
+// A nil config is the historical behaviour: `sh -c` (or the platform's detected
+// interpreter), paths relative to the process cwd, no confinement.
+func CreateBuiltinToolsWith(cfg any) []Tool {
+	env := newBuiltinEnv(cfg)
 	return []Tool{
-		bashTool(),
-		readTool(),
-		writeTool(),
-		editTool(),
-		grepTool(),
-		globTool(),
+		bashTool(env),
+		readTool(env),
+		writeTool(env),
+		editTool(env),
+		grepTool(env),
+		globTool(env),
 		webfetchTool(),
 		questionTool(),
-		applyPatchTool(),
+		applyPatchTool(env),
 		todowriteTool(),
 	}
+}
+
+// BuiltinShell reports the interpreter the builtins resolved for `bash` — what
+// a host prints, and what `metadata.shell` carries on every bash result. The
+// error is the one construction fails on when no interpreter resolves.
+func BuiltinShell(cfg any) ([]string, error) {
+	env := newBuiltinEnv(cfg)
+	return env.shellArgv()
 }

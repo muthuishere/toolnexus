@@ -1,0 +1,4 @@
+# cljgo / clojure build output — rebuild with `cljgo build` (run.sh does it)
+.cpcache/
+probe
+target/
