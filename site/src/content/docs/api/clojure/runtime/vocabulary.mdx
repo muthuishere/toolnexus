@@ -93,23 +93,46 @@ no additional API to learn.
 
 ### 1. The smallest useful call — check a spawned task's outcome
 
-```clojure
-(require '[toolnexus.agents.runtime :as rt])
+```clojure test
+(require '[toolnexus.agents.runtime :as rt]
+         '[koine.json :as json])
 
-(let [h (rt/spawn rt agent-def {:toolkit toolkit})
-      r (rt/wait rt h)]
+(println)
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(def runtime
+  (rt/create-runtime
+   {:registry {"w" {:name "w" :does "writes" :model "wm"}}
+    :llm      {:base-url "http://mock.local" :model "default"}
+    :http-client (fn [_url _headers _body]
+                   {:status 200 :headers {} :body (json/write-str (text-response "done writing"))})}))
+
+(def h (rt/spawn runtime rt/root "w"))
+(rt/wake runtime h "go")
+(let [r (rt/wait runtime h)]
   (assert (contains? rt/statuses (:status r)) "unrecognised task status")
   (case (:status r)
     "done"        (println (:text r))
-    "pending"     (queue-for-human! (:pending r))
+    "pending"     (println "parked, waiting on" (:pending r))
     "incomplete"  (println "stopped on limit:" (:limit r))
     (println "ended:" (:status r))))
+(println "OK")
 ```
 
 ### 2. The realistic case — react to WHICH limit stopped the task
 
-```clojure
-(require '[toolnexus.agents.runtime :as rt])
+```clojure test
+(require '[toolnexus.agents.runtime :as rt]
+         '[koine.json :as json])
+
+(println)
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
 
 (defn handle-stop [r]
   (when (= "incomplete" (:status r))
@@ -126,13 +149,33 @@ no additional API to learn.
 
       :else
       (println "stopped on" (:limit r)))))
+
+(def runtime
+  (rt/create-runtime
+   {:registry {"w" {:name "w" :does "writes" :model "wm" :budget {:max-turns 1}}}
+    :llm      {:base-url "http://mock.local" :model "default"}
+    :http-client (fn [_url _headers _body]
+                   {:status 200 :headers {} :body (json/write-str (text-response "ok"))})}))
+
+(def h (rt/spawn runtime rt/root "w"))
+(rt/wake runtime h "first")
+(rt/wait runtime h)
+(rt/wake runtime h "second")   ; exceeds the one-turn budget
+(def r (rt/wait runtime h))
+
+(assert (= "incomplete" (:status r)))
+(assert (= rt/limit-max-turns (:limit r)))
+(handle-stop r)
+(println "OK")
 ```
 
 ### 3. The full surface — distinguishing the two vocabularies side by side
 
-```clojure
+```clojure test
 (require '[toolnexus.agents.runtime :as rt]
          '[toolnexus.client :as client])
+
+(println)
 
 ;; the §7D task-level set (seven statuses, nine limits)
 (assert (= #{"done" "pending" "incomplete" "interrupted" "closed" "timeout" "error"}
@@ -150,6 +193,7 @@ no additional API to learn.
 ;; mis-branching: membership checks against the WRONG set simply never match
 (assert (not (contains? client/limits "maxDepth"))
         "maxDepth is a task-level admission limit; the client run never reports it")
+(println "OK")
 ```
 
 <Aside type="note" title="ACCEPTED ASYMMETRY: maxChildren / maxConcurrent / maxDepth (A17)">

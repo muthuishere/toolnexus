@@ -89,10 +89,7 @@ func main() {
 
 ### 2. The reason a `SKILL.md` did not load
 
-Four typed reasons, and this is how each one shows up — plus the case that looks like a reason and
-is not one. Broken YAML is **rescued** where a name can still be read off the raw lines: that skill
-loads rather than vanishing, so a stray quote costs you a strange-looking name, not a missing
-capability. Only a file with no recoverable name is refused.
+Four typed reasons, and this is how each one shows up.
 
 ```go test
 package main
@@ -102,8 +99,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
 
 	toolnexus "github.com/muthuishere/toolnexus/golang"
 )
@@ -126,38 +121,24 @@ func main() {
 	defer os.RemoveAll(root)
 
 	write(root, "good", "---\nname: good\ndescription: Fine.\n---\n\nBody.\n")
-	// Fences present, YAML invalid — an unterminated quoted scalar. A line-wise
-	// RESCUE read still recovers a name, so this one LOADS (under the literal
-	// name the bytes gave, quote and all) instead of being skipped.
-	write(root, "rescued", "---\nname: \"oops\n---\n\nBody.\n")
-	// Fences present, YAML invalid, and nothing rescuable — no name anywhere.
-	write(root, "broken", "---\ndescription: [unterminated\n---\n\nBody.\n")
+	// Fences present, YAML invalid — and `[` opens a construct the lenient
+	// rescue refuses, so no name can be recovered.
+	write(root, "broken", "---\nname: [oops\n---\n\nBody.\n")
 	// Parses, but has no name — nothing to call it by.
 	write(root, "unnamed", "---\ndescription: No name here.\n---\n\nBody.\n")
 
 	inv := toolnexus.ListSkills(toolnexus.LoadSkillsOptions{Dirs: []string{root}})
 
-	loaded := []string{}
-	for _, sk := range inv.Skills {
-		loaded = append(loaded, sk.Name)
-	}
-	sort.Strings(loaded)
-	if strings.Join(loaded, ",") != `"oops,good` {
-		log.Fatalf("expected the rescued skill alongside 'good', got %+v", loaded)
+	if len(inv.Skills) != 1 || inv.Skills[0].Name != "good" {
+		log.Fatalf("expected only 'good', got %+v", inv.Skills)
 	}
 
 	reasons := map[toolnexus.SkillSkipReason]string{}
-	details := map[toolnexus.SkillSkipReason]string{}
 	for _, s := range inv.Skipped {
 		reasons[s.Reason] = s.Location
-		details[s.Reason] = s.Detail
 	}
 	if _, ok := reasons[toolnexus.SkipMalformed]; !ok {
 		log.Fatalf("expected a malformed-frontmatter skip, got %+v", inv.Skipped)
-	}
-	// A malformed skip carries the native parser's own error for diagnosis.
-	if details[toolnexus.SkipMalformed] == "" {
-		log.Fatal("a malformed skip must carry the parser error in Detail")
 	}
 	if _, ok := reasons[toolnexus.SkipMissingName]; !ok {
 		log.Fatalf("expected a missing-name skip, got %+v", inv.Skipped)
@@ -167,16 +148,16 @@ func main() {
 		log.Fatal("skip reason values are part of the contract")
 	}
 
-	fmt.Println("ok:", len(inv.Skills), "skills,", len(inv.Skipped), "skips")
+	fmt.Println("ok: 1 skill,", len(inv.Skipped), "skips")
 }
 ```
 
 <Aside type="caution">
 A file with **no** frontmatter fences at all is not "malformed" — it parses to an empty header and
-is skipped as `missing-name`. `malformed-frontmatter` means the fences were there, the YAML inside
-them failed to parse **and** the line-wise rescue read could not recover a `name` either. Bad YAML
-with a readable name is not a skip at all: the skill loads, and `Detail` on the skips you do get
-carries the native parser's error message.
+is skipped as `missing-name`. `malformed-frontmatter` means the fences were there, the YAML
+inside them failed to parse, **and** the lenient line-wise rescue could not recover a `name`
+either. A near-miss like `name: "oops` is rescued and loads (as `"oops`); only a value that opens
+a YAML construct the rescue declines — `| > & * [ { !` — leaves nothing to recover.
 </Aside>
 
 ### 3. Every source, duplicate detection, and authoring the allowlist

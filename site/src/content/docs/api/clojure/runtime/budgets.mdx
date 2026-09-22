@@ -112,18 +112,30 @@ where it has the pricing table.
 
 ### 1. The smallest useful call — a hard turn cap with no host hook
 
-```clojure
-(require '[toolnexus.agents.runtime :as rt])
+```clojure test
+(require '[toolnexus.agents.runtime :as rt]
+         '[koine.json :as json])
+
+(println)
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
 
 (def runtime
   (rt/create-runtime {:registry {"w" {:name "w" :does "…" :model "wm" :budget {:max-turns 1}}}
-                      :llm {:base-url "http://mock.local" :model "default"}}))
+                      :llm {:base-url "http://mock.local" :model "default"}
+                      :http-client (fn [_url _headers _body]
+                                     {:status 200 :headers {} :body (json/write-str (text-response "hi"))})}))
 
 (let [h (rt/spawn runtime rt/root "w")]
   (rt/wake runtime h "first") (rt/wait runtime h)          ; => "done", turn 1 of 1 spent
   (let [refusal (rt/wake runtime h "second")]
-    (:ok refusal))                                          ; => false — the SECOND wake exceeds the cap
-  (:status (rt/wait runtime h)))                            ; => "incomplete", :limit "maxTurns"
+    (assert (false? (:ok refusal))))                        ; => false — the SECOND wake exceeds the cap
+  (let [r (rt/wait runtime h)]
+    (assert (= "incomplete" (:status r)))
+    (assert (= "maxTurns" (:limit r)))))
+(println "OK")
 ```
 
 The handle is never closed or crashed by a limit stop — it stays `"idle"`, ready to be woken
@@ -131,44 +143,75 @@ again once the host raises the budget or spawns a successor.
 
 ### 2. The realistic case — a shared pool a sibling can drain out from under you
 
-```clojure
-(let [boss (rt/spawn runtime rt/root "boss")   ; boss's def sets :budget {:max-tokens 20 :max-depth 5}
+```clojure test
+(require '[toolnexus.agents.runtime :as rt]
+         '[koine.json :as json])
+
+(println)
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(def runtime
+  (rt/create-runtime {:registry {"boss" {:name "boss" :does "…" :model "bm" :budget {:max-tokens 10 :max-depth 5}}
+                                  "w"    {:name "w"    :does "…" :model "wm"}}
+                      :llm {:base-url "http://mock.local" :model "default"}
+                      :http-client (fn [_url _headers _body]
+                                     {:status 200 :headers {} :body (json/write-str (text-response "hi"))})}))
+
+(let [boss (rt/spawn runtime rt/root "boss")   ; boss's def sets :budget {:max-tokens 10 :max-depth 5}
       a    (rt/spawn runtime boss "w")
       b    (rt/spawn runtime boss "w")]
-  ;; b was carved BEFORE a spent anything — its own view still says the full 20
-  (:pool-tokens (rt/inspect runtime b))          ; => 20
+  ;; b was carved BEFORE a spent anything — its own view still says the full 10
+  (assert (= 10 (:pool-tokens (rt/inspect runtime b))))
 
   (rt/wake runtime a "burn it") (rt/wait runtime a)
-  (:tokens (rt/inspect runtime a))                ; => 30 (spent more than the pool alone allowed)
-  (:pool-tokens (rt/inspect runtime b))           ; => 20, UNCHANGED — the carve alone would say "fine"
+  (assert (= 15 (:tokens (rt/inspect runtime a))))    ; spent more than the pool alone allowed
+  (assert (= 10 (:pool-tokens (rt/inspect runtime b))))  ; UNCHANGED — the carve alone would say "fine"
 
   ;; but the LIVE ancestor walk at wake time catches it anyway
-  (:ok (rt/wake runtime b "my turn"))              ; => false
-  (:status (rt/wait runtime b)))                   ; => "incomplete", :limit "maxTokens"
+  (assert (false? (:ok (rt/wake runtime b "my turn"))))
+  (let [r (rt/wait runtime b)]
+    (assert (= "incomplete" (:status r)))
+    (assert (= "maxTokens" (:limit r)))))
+(println "OK")
 ```
 
 ### 3. The full surface — an `:on-budget` top-up flow via `"suspend"` and `resume`
 
-```clojure
-(require '[toolnexus.client :as client])
+```clojure test
+(require '[toolnexus.agents.runtime :as rt]
+         '[toolnexus.client :as client]
+         '[koine.json :as json])
+
+(println)
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
 
 (def runtime
   (rt/create-runtime
    {:registry {"w" {:name "w" :does "…" :model "wm" :budget {:max-turns 1}}}
     :llm      {:base-url "http://mock.local" :model "default"}
+    :http-client (fn [_url _headers _body]
+                   {:status 200 :headers {} :body (json/write-str (text-response "hi"))})
     :on-budget (fn [_info] "suspend")}))          ; route every limit hit through §10 approval
 
 (let [h (rt/spawn runtime rt/root "w")]
   (rt/wake runtime h "one") (rt/wait runtime h)
   (rt/wake runtime h "two")                        ; parks rather than failing outright
-  (:state (rt/inspect runtime h))                  ; => "suspended"
+  (assert (= "suspended" (:state (rt/inspect runtime h))))
   (let [req (:pending (rt/wait runtime h))]
-    (:kind req))                                   ; => "approval"
+    (assert (= "approval" (:kind req)))
 
-  ;; the host tops up: an Answer with ok=true buys the exact one turn the limit blocked
-  (rt/resume runtime (client/make-answer (:id (:pending (rt/wait runtime h))) true))
-  (:status (rt/wait runtime h))                    ; => "done" — turns GREW to 2, never reset
-  )
+    ;; the host tops up: an Answer with ok=true buys the exact one turn the limit blocked
+    (rt/resume runtime (client/make-answer (:id req) true))
+    (let [r (rt/wait runtime h)]
+      (assert (= "done" (:status r)))              ; turns GREW to 2, never reset
+      (assert (= 2 (:turns r))))))
+(println "OK")
 ```
 
 ## See also

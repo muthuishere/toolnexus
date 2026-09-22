@@ -456,14 +456,28 @@ test("#92 MUST NOT REGRESS: ClassifierUsage.cost is OPTIONAL — absent is not z
 })
 
 test("#92 the run timeout NAMES the budget it blew", async () => {
+  // This mock has to imitate an in-flight request in TWO ways that a bare pending promise does
+  // not, and getting either wrong takes down the whole test file rather than failing this test:
+  //
+  //  1. It must hold the event loop open. The run-timeout timer is deliberately unref'd
+  //     (`js/src/client.ts:750-751`) so a pending deadline cannot keep a process alive, and a
+  //     promise holds no handle of its own — so with a real socket replaced by a stub there is
+  //     nothing left to run, the loop drains, and Node 22 cancels every remaining test in the
+  //     file with "Promise resolution is still pending but the event loop has already resolved".
+  //     A real fetch keeps an open socket here; the ref'd timer below is its stand-in.
+  //  2. It must honour an ALREADY-aborted signal, as real fetch does — a 1 ms deadline can fire
+  //     before this mock is even called, and a listener registered after the event has dispatched
+  //     never runs.
   const never: any = (_u: string, init: any) =>
     new Promise((_res, rej) => {
-      // A 1 ms budget can abort BEFORE this fetch is ever entered, and a
-      // listener added to an already-aborted signal never fires — leaving this
-      // promise unsettled, the event loop with nothing to do, and every later
-      // test in the file cancelled. Check the flag before subscribing.
-      if (init.signal?.aborted) return rej(init.signal.reason)
-      init.signal?.addEventListener("abort", () => rej(init.signal.reason), { once: true })
+      const s: AbortSignal | undefined = init.signal
+      const inFlight = setTimeout(() => {}, 30_000) // ref'd on purpose — see (1)
+      const fail = (reason: unknown) => {
+        clearTimeout(inFlight)
+        rej(reason)
+      }
+      if (s?.aborted) return fail(s.reason)
+      s?.addEventListener("abort", () => fail(s.reason), { once: true })
     })
   const client = createClient(baseOpts(never, { timeoutMs: 1 }))
   await assert.rejects(() => client.run("hi"), /run timeout after 1ms/)
@@ -784,11 +798,18 @@ test("#90 A18 INVARIANT: a limit stop names its limit; a non-limit stop leaves i
 
   // 5. wait-deadline `timeout` — a LIMIT stop, and the instance that shipped broken in 3 ports.
   {
+    // Same two obligations as the `never` mock above: hold the loop open like a real in-flight
+    // socket would, and honour an already-aborted signal.
     const hang: any = (_u: string, init: any) =>
       new Promise((_res, rej) => {
-        // Same reason as #92 above: an already-aborted signal never fires.
-        if (init.signal?.aborted) return rej(init.signal.reason)
-        init.signal?.addEventListener("abort", () => rej(init.signal.reason), { once: true })
+        const s: AbortSignal | undefined = init.signal
+        const inFlight = setTimeout(() => {}, 30_000) // ref'd on purpose
+        const fail = (reason: unknown) => {
+          clearTimeout(inFlight)
+          rej(reason)
+        }
+        if (s?.aborted) return fail(s.reason)
+        s?.addEventListener("abort", () => fail(s.reason), { once: true })
       })
     const rt = new AgentRuntime({ fetch: hang, registry: { w: { name: "w", does: "x", model: "m" } } })
     const h = rt.spawn(rt.root, "w")

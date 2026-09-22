@@ -153,7 +153,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from toolnexus import ToolResult, audio, create_client, create_toolkit, define_tool
-from toolnexus.content import UnsupportedPartError
+from toolnexus.content import UnsupportedPartError, to_dict
 
 
 class StubServer:
@@ -199,7 +199,7 @@ def clip_tool() -> ToolResult:
     """Returns an audio part — a style-carrying "openai" text style has no shape for it here."""
     return ToolResult(
         output="clip captured", is_error=False,
-        parts=[audio(b"ID3...", mime_type="audio/mpeg", name="clip.mp3")],
+        parts=[to_dict(audio(b"OggS...", mime_type="audio/ogg", name="clip.ogg"))],
     )
 
 

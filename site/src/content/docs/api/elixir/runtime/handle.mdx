@@ -172,7 +172,7 @@ true = r.pending.kind == "approval"
 true = Handle.snapshot(h).state == :suspended
 
 # resume/2 routes the Answer to this (deepest) suspended handle, blocks until it
-# resettles, and RETURNS the settled result — no second wait/2 needed.
+# resettles, and returns the result of the topmost handle the cascade re-ran.
 final = Runtime.resume(rt, %Answer{id: r.pending.id, ok: true})
 
 true = final.status == "done"

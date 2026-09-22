@@ -238,20 +238,17 @@ func main() {
 		log.Fatalf("expected PendingKind=approval, got %q", v.PendingKind)
 	}
 
-	// The out-of-band Answer resumes the DEEPEST suspended handle — and hands
-	// back the TaskResult the run would have produced had it never suspended.
-	resumed, err := rt.Resume(tn.Answer{ID: r.Pending.ID, Ok: true})
+	// The out-of-band Answer resumes the DEEPEST suspended handle, and Resume
+	// hands back the result of the topmost handle the cascade re-ran.
+	final, err := rt.Resume(tn.Answer{ID: r.Pending.ID, Ok: true})
 	if err != nil {
 		log.Fatal(err)
 	}
-	if resumed.Status != "done" {
-		log.Fatalf("expected the resumed run to finish, got %+v", resumed)
-	}
-	if rt.StateOf(h) != agents.StateIdle {
-		log.Fatalf("expected idle after resume, got %s", rt.StateOf(h))
+	if final.Status != "done" || rt.StateOf(h) != agents.StateIdle {
+		log.Fatalf("expected done+idle after resume, got status=%q state=%s", final.Status, rt.StateOf(h))
 	}
 
-	fmt.Println("ok: suspended (", v.PendingKind, ") -> resumed ->", rt.StateOf(h), "->", resumed.Text)
+	fmt.Println("ok: suspended (", v.PendingKind, ") -> resumed ->", rt.StateOf(h))
 }
 ```
 

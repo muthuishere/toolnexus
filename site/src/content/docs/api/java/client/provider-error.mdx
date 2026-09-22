@@ -189,12 +189,14 @@ public class Example {
                 client.run("hi", tk);
                 throw new AssertionError("expected a ProviderException");
             } catch (LlmClient.ProviderException e) {
-                // the MESSAGE is capped at ERROR_BODY_CAP (+ "LLM 400: " + an ellipsis)
-                if (e.getMessage().length() >= LlmClient.ERROR_BODY_CAP + 40) {
+                // The MESSAGE is capped at 200 chars (+ "LLM 400: " + an ellipsis). The cap
+                // itself (ERROR_BODY_CAP) is package-private — it's LlmClient's own policy,
+                // not part of the public surface — so a caller checks against the literal.
+                if (e.getMessage().length() >= 200 + 40) {
                     throw new AssertionError("message should be capped: " + e.getMessage().length());
                 }
                 // the TYPED FIELD is the whole redacted body — A5, never truncated
-                if (e.body.length() <= LlmClient.ERROR_BODY_CAP) {
+                if (e.body.length() <= 200) {
                     throw new AssertionError("typed body must not be capped: " + e.body.length());
                 }
                 System.out.println("ok: message=" + e.getMessage().length()

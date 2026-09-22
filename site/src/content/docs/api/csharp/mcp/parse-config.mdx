@@ -20,9 +20,9 @@ Reads MCP server configuration and normalises it into a flat dictionary of serve
 check you can run before paying for [`LoadAsync`](/api/csharp/mcp/load/).
 
 <Aside type="caution" title="It is ParseConfig, not ParseMcpConfig">
-C# drops the `Mcp` from the method name because it already lives on `McpSource`. The other ports
-spell it `parseMcpConfig` / `parse_mcp_config` / `ParseMcpConfig`. Java does not expose a public
-parser at all — see [the Java page](/api/java/mcp/parse-config/).
+C# drops the `Mcp` from the method name because it already lives on `McpSource`. Java does the same for the same
+reason — [`McpSource.parseConfig`](/api/java/mcp/parse-config/). The remaining ports spell it as a
+free function: `parseMcpConfig` / `parse_mcp_config` / `ParseMcpConfig` / `parse-config`.
 </Aside>
 
 ## When to use it

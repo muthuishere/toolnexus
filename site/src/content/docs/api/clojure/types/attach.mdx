@@ -102,48 +102,97 @@ a silent misread.
 
 ### 1. The smallest useful call — attach a local file to a prompt
 
-```clojure
+```clojure test
 (require '[toolnexus.client :as client]
          '[toolnexus.content :as content]
-         '[toolnexus.tool :as tool])
+         '[toolnexus.tool :as tool]
+         '[koine.fs :as fs]
+         '[koine.json :as json])
 
-(client/run llm
-  [(content/text-part "What is in this image?")
-   (content/attach "screenshot.png")]
-  {:toolkit (tool/toolkit [])})
+(println)
+
+;; the shared cross-language fixture lives at the repo root; walk up to it so
+;; the example runs from wherever it happens to sit inside the tree
+(defn find-up [rel]
+  (->> (iterate (fn [p] (str "../" p)) rel) (take 8) (filter fs/exists?) first))
+
+(def png (find-up "examples/media/fixture.png"))
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(def llm
+  (client/create-client
+    {:base-url "http://mock.local" :style "openai" :model "gpt-4o-mini"
+     :http-client (fn [_url _headers _body]
+                    {:status 200 :headers {} :body (json/write-str (text-response "a diagram"))})}))
+
+(def rr
+  (client/run llm
+    [(content/text-part "What is in this image?")
+     (content/attach png)]
+    {:toolkit (tool/toolkit [])}))
+
+(assert (= "a diagram" (:text rr)))
+(println "OK")
 ```
 
-`attach` sees a string that is neither a `data:` nor an `http(s):` URL, so it reads `screenshot.png`
+`attach` sees a string that is neither a `data:` nor an `http(s):` URL, so it reads the file
 off disk now, base64-encodes it, and looks its mime type up in the fixed extension table
 (`image/png`) — the path itself never reaches the resulting part.
 
 ### 2. The realistic case — bytes already in hand, from a database or a generated buffer
 
-```clojure
+```clojure test
 (require '[toolnexus.content :as content])
+
+(println)
 
 (defn attach-generated-chart [png-bytes]
   ;; bytes carry no extension, so the mime type is required
   (content/from-bytes png-bytes "image/png"))
 
-;; a byte array, a seq of byte values, or a string are all accepted:
-(content/from-bytes (byte-array [137 80 78 71]) "image/png")
-(content/from-bytes (seq (byte-array [137 80 78 71])) "image/png")
-(content/from-bytes "raw text payload" "text/plain")   ; taken as its UTF-8 bytes
+;; a byte array, a seq of byte values, or a string are all accepted, and a
+;; byte array and its own seq encode identically:
+(def p1 (content/from-bytes (byte-array [137 80 78 71]) "image/png"))
+(def p2 (content/from-bytes (seq (byte-array [137 80 78 71])) "image/png"))
+(def p3 (content/from-bytes "raw text payload" "text/plain"))   ; taken as its UTF-8 bytes
+
+(assert (= "image" (:type p1)))
+(assert (= (:data p1) (:data p2)))
+(assert (= "text/plain" (:mimeType p3)))
+(assert (= "image" (:type (attach-generated-chart (byte-array [137 80 78 71])))))
+(println "OK")
 ```
 
 ### 3. The full surface — every constructor, plus the unsupported-part policy on the client
 
-```clojure
+```clojure test
 (require '[toolnexus.client :as client]
-         '[toolnexus.content :as content])
+         '[toolnexus.content :as content]
+         '[koine.fs :as fs])
+
+(println)
+
+(defn find-up [rel]
+  (->> (iterate (fn [p] (str "../" p)) rel) (take 8) (filter fs/exists?) first))
+
+(def png (find-up "examples/media/fixture.png"))
 
 ;; every path attach can take, named explicitly
-(content/from-file "report.pdf")                        ; read + base64'd now
-(content/image-file "logo.png")                         ; from-file, but errors if not an image
-(content/from-data-url "data:image/png;base64,iVBORw0KGgo=")
-(content/from-url "https://example.com/diagram.webp")   ; kept as :url, never downloaded here
-(content/attach {:a 1} {:mimeType "image/png"})         ; unsupported shape -> error part, no throw
+(def f1 (content/from-file png))                          ; read + base64'd now
+(def f2 (content/image-file png))                         ; from-file, but errors if not an image
+(def f3 (content/from-data-url "data:image/png;base64,iVBORw0KGgo="))
+(def f4 (content/from-url "https://example.com/diagram.webp"))   ; kept as :url, never downloaded here
+(def f5 (content/attach {:a 1} {:mimeType "image/png"}))  ; unsupported shape -> error part, no throw
+
+(assert (= "image" (:type f1)))
+(assert (= "image" (:type f2)))
+(assert (= "image/png" (:mimeType f3)))
+(assert (= "https://example.com/diagram.webp" (:url f4)))
+(assert (= "error" (:type f5)))
+(assert (= "unsupported-source" (:code f5)))
 
 ;; a client that DECLARES how to handle a part its style cannot send at all
 (def llm
@@ -153,6 +202,9 @@ off disk now, base64-encodes it, and looks its mime type up in the fixed extensi
      :model                "gpt-4.1"
      :max-part-bytes       5000000   ; §1B — reject a part over this many DECODED bytes
      :on-unsupported-part  "text"})) ; degrade to a text placeholder + warn once, instead of stopping the run
+
+(assert (= "text" (:on-unsupported-part llm)))
+(println "OK")
 ```
 
 `:on-unsupported-part` governs the provenance rule uniformly: unset, an **attached** part the

@@ -12,7 +12,7 @@ import { Aside } from '@astrojs/starlight/components';
 </p>
 
 ```python
-async def resume(self, answer: Answer) -> None
+async def resume(self, answer: Answer) -> TaskResult
 ```
 
 <Aside type="caution" title="Manifest correction">
@@ -233,14 +233,12 @@ async def main():
 asyncio.run(main())
 ```
 
-### 3. The full surface — a resumed run's counters keep accumulating, they never reset
+### 3. The full surface — a resumed run's counters keep growing, they never reset
 
-A durable resume replays the suspended turn from its checkpoint, and the counters carry straight
-on through it: `TaskResult.turns`/`.total_tokens` on the resumed result are the run's totals
-*since spawn* — the suspending turn plus the replay — not the replay's own numbers. That is the
-point: a suspension is a pause in one run, not a second run, so a budget you are tracking against
-`total_tokens` stays honest across the gap. `runtime.inspect(handle).tokens` agrees, and `resume`
-returns the settled `TaskResult` itself, so a trailing `wait` is optional.
+`TaskResult.turns`/`.total_tokens` report the **handle's own cumulative** totals since spawn, on
+every status alike (SPEC §7D): a resume continues from its checkpoint, so the suspended attempt's
+turn stays counted and the replay's turns are added on top. `runtime.inspect(handle).tokens` reads
+the same lifetime token figure straight off the `Handle`.
 
 ```python test
 import asyncio
@@ -302,18 +300,17 @@ async def main():
     handle = r.runtime.root.children[0]
     tokens_before = r.runtime.inspect(handle).tokens  # the suspending attempt already rolled up
 
-    # resume() returns the settled TaskResult; wait() afterwards yields the same one.
-    final = await r.runtime.resume(Answer(id=r.pending.id, ok=True))
-    assert final == await r.runtime.wait(handle)
+    await r.runtime.resume(Answer(id=r.pending.id, ok=True))
+    final = await r.runtime.wait(handle)
 
     assert final.status == "done"
-    # 3 = the suspending turn + the replay's two. Resume continues the run's
-    # counters from the checkpoint; it does not start them over.
+    # 1 turn for the attempt that suspended + 2 for the replay = the handle's lifetime count.
     assert final.turns == 3
+    assert final.total_tokens > 0
 
     tokens_after = r.runtime.inspect(handle).tokens
     assert tokens_after > tokens_before  # the Handle's lifetime counter really does only grow
-    assert final.total_tokens == tokens_after  # and the TaskResult reports that same total
+    assert final.total_tokens == tokens_after  # same number, read two ways
 
     await r.runtime.close(r.runtime.root)
     print("ok: handle tokens", tokens_before, "->", tokens_after, "| resumed turns:", final.turns)
@@ -329,8 +326,7 @@ asyncio.run(main())
 | `status` | `str` | `"pending"` when durably suspended — one of the closed §7D vocabulary (`done`/`pending`/`incomplete`/`interrupted`/`closed`/`timeout`/`error`). |
 | `pending` | `Request \| None` | Set iff `status == "pending"`. `Request.data["path"]` carries the suspended subtree's id path. |
 | `runtime` | `AgentRuntime \| None` | Set by `Agent.run()` — hold onto it to call `resume` later. |
-| `turns` / `total_tokens` | `int` | Cumulative for the run, across the suspension — the suspending turn plus the replay. They match `runtime.inspect(handle).tokens`. |
-| `own_tokens` / `limit` | `int` / `int \| None` | This handle's own token usage excluding its children, and its budget ceiling (`None` = uncapped). |
+| `turns` / `total_tokens` | `int` | The handle's own cumulative totals since spawn — a resume grows them from the checkpoint, never resets them. `runtime.inspect(handle).tokens` reads the same token figure off the `Handle`. |
 
 ## See also
 

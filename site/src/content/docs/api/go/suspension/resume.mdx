@@ -27,10 +27,8 @@ Routes an `Answer` to the **deepest suspended** handle in the runtime's tree, re
 checkpoint (a retry-with-answer of the halted tool — turns and token usage keep accumulating,
 never reset), then cascades upward: each suspended ancestor replays too, and its re-invoked `task`
 delegation call **reattaches** to the already-resumed child by task key rather than spawning a
-duplicate. It **returns that finished `TaskResult`** itself — what `Agent.Run` would have
-returned had the suspension never happened — so there is no need to
-[`rt.Wait(handle, 0)`](/api/go/runtime/runtime/) afterward (that still works, and returns the
-same cached result).
+duplicate. Call [`rt.Wait(handle, 0)`](/api/go/runtime/runtime/) afterward for the finished
+`TaskResult`.
 
 ## When to use it
 
@@ -144,20 +142,15 @@ func main() {
 		log.Fatalf("expected PendingKind=approval, got %q", v.PendingKind)
 	}
 
-	// The out-of-band Answer resumes the DEEPEST suspended handle — and hands
-	// back the TaskResult the run would have produced had it never suspended.
-	resumed, err := rt.Resume(tn.Answer{ID: r.Pending.ID, Ok: true})
-	if err != nil {
+	// The out-of-band Answer resumes the DEEPEST suspended handle.
+	if _, err := rt.Resume(tn.Answer{ID: r.Pending.ID, Ok: true}); err != nil {
 		log.Fatal(err)
-	}
-	if resumed.Status != "done" {
-		log.Fatalf("expected the resumed run to finish, got %+v", resumed)
 	}
 	if rt.StateOf(h) != agents.StateIdle {
 		log.Fatalf("expected idle after resume, got %s", rt.StateOf(h))
 	}
 
-	fmt.Println("ok: suspended (", v.PendingKind, ") -> resumed ->", rt.StateOf(h), "->", resumed.Text)
+	fmt.Println("ok: suspended (", v.PendingKind, ") -> resumed ->", rt.StateOf(h))
 }
 ```
 
@@ -238,12 +231,12 @@ func main() {
 		log.Fatalf("expected pending, got %q", r.Status)
 	}
 
-	// The RUN still completes — it just knows the request was declined. Resume
-	// returns that finished TaskResult directly; no second Wait needed.
-	final, err := rt.Resume(tn.Answer{ID: r.Pending.ID, Ok: false, Reason: "declined"})
-	if err != nil {
+	if _, err := rt.Resume(tn.Answer{ID: r.Pending.ID, Ok: false, Reason: "declined"}); err != nil {
 		log.Fatal(err)
 	}
+
+	// The RUN still completes — it just knows the request was declined.
+	final := rt.Wait(h, 0)
 	if final.Status != "done" || !strings.Contains(final.Text, "declined") {
 		log.Fatalf("unexpected: %+v", final)
 	}
@@ -334,10 +327,10 @@ func main() {
 	}
 
 	last := rt.Wait(h, 0) // fast-path: returns the cached pending TaskResult, does not block
-	settled, err := rt.Resume(tn.Answer{ID: last.Pending.ID, Ok: true})
-	if err != nil {
+	if _, err := rt.Resume(tn.Answer{ID: last.Pending.ID, Ok: true}); err != nil {
 		log.Fatal(err)
 	}
+	settled := rt.Wait(h, 0)
 	if settled.Status != "done" {
 		log.Fatalf("unexpected: %+v", settled)
 	}
@@ -350,9 +343,8 @@ func main() {
 
 | Parameter | Type | What it is |
 |---|---|---|
-| `answer` | `tn.Answer` | Must echo the `ID` of the pending `Request` — routed to the deepest suspended handle. |
-| returns | `TaskResult` | The finished result of the resumed run — exactly what `Agent.Run` would have returned had the suspension never happened. The topmost re-run in a cascade wins. |
-| returns | `error` | Non-nil when no handle in the tree is suspended. |
+| `answer` | `tn.Answer` | Should echo the `ID` of the pending `Request` — routed to the deepest suspended handle. |
+| returns | `(TaskResult, error)` | The topmost re-run's `TaskResult`. The `error` is non-nil when no handle in the tree is suspended — there is nothing to resume. |
 
 ## Go also has a durable, cross-restart resume (preview)
 

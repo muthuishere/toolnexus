@@ -63,12 +63,13 @@ print("ok:", a.id, "|", a.data)
 ### 2. The realistic case — a non-string output errors loudly, not silently
 
 ```python test
-import pytest
-
 from toolnexus import answer_output
 
-with pytest.raises(TypeError):
+try:
     answer_output("pnd-1", {"value": "staging"})  # type: ignore[arg-type]
+    raise AssertionError("expected TypeError")
+except TypeError:
+    pass
 
 # The correct call always carries a plain str:
 a = answer_output("pnd-1", "staging")

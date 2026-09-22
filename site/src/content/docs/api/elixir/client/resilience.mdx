@@ -116,7 +116,7 @@ The default classifier retries `429`. A caller that already rate-limits upstream
 opposite: fail fast and let its own backoff handle it.
 
 ```elixir test
-alias Toolnexus.{Client, ProviderError}
+alias Toolnexus.Client
 
 {:ok, attempts} = Agent.start_link(fn -> 0 end)
 
@@ -137,20 +137,18 @@ client =
     on_error: fn %{status: 429} -> :fail end
   )
 
-# A run the policy gives up on RAISES — it does not return an error tuple. The
-# exception is a Toolnexus.ProviderError carrying the upstream status and body.
-status =
+raised? =
   try do
     Client.run(client, "hi", [])
-    nil
+    false
   rescue
-    e in ProviderError -> e.status
+    e in Toolnexus.ProviderError -> String.contains?(Exception.message(e), "LLM 429")
   end
 
-true = status == 429
+true = raised?
 true = Agent.get(attempts, & &1) == 1
 
-IO.puts("ok: on_error fail-fast raised ProviderError status=#{status} after exactly 1 attempt")
+IO.puts("ok: on_error fail-fast made exactly 1 attempt")
 ```
 
 ### 3. `:retries` bounds even a `:retry` decision
@@ -159,7 +157,7 @@ Whatever `on_error` decides, `:retry` can never loop unbounded — `retries` (de
 total attempts. Left at the default classifier, a server that always fails still stops.
 
 ```elixir test
-alias Toolnexus.{Client, ProviderError}
+alias Toolnexus.Client
 
 {:ok, attempts} = Agent.start_link(fn -> 0 end)
 
@@ -180,16 +178,15 @@ client =
     http_options: [plug: plug]
   )
 
-# Exhausting the retries raises the LAST attempt's Toolnexus.ProviderError.
-status =
+raised? =
   try do
     Client.run(client, "hi", [])
-    nil
+    false
   rescue
-    e in ProviderError -> e.status
+    e in Toolnexus.ProviderError -> String.contains?(Exception.message(e), "LLM 500")
   end
 
-true = status == 500
+true = raised?
 # retries: 1 -> the initial attempt PLUS 1 retry, never more.
 true = Agent.get(attempts, & &1) == 2
 

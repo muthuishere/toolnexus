@@ -1577,7 +1577,20 @@ observable outcome.
 **Provider failures are values, and the credentials guarantee reaches them.** A non-2xx from the
 LLM endpoint surfaces as a **typed** error carrying `status`, `body` and, where the response
 supplied one, `retryAfter` as **fields** — not as a sentence a host has to parse out of a message
-string. On top of that, one policy, identical in all seven ports and identical to the one §8B's
+string.
+
+**`retryAfter` is the raw `Retry-After` header value, verbatim** (idiomatically spelled per port:
+`retryAfter` / `RetryAfter` / `retry_after` / `:retry-after`), and is the port's natural *absent*
+(`undefined` / `null` / `nil` / `None` / `""`) when the response sent no such header. It is
+deliberately **NOT pre-parsed into a number**: `Retry-After` may legitimately be an HTTP-date, or
+fractional, signed, out-of-range or unparseable, and a numeric field would have to null out every
+one of those — destroying information the response actually supplied and which the host may want
+to log or handle itself. The field is for the HOST. **The library's own waiting rule is separate
+and unchanged** — internally each port still parses the header per the `delay-seconds`-only rule
+above (whole seconds, `0` = retry now, everything else falls back to backoff); that behaviour is
+unaffected by what the field carries.
+
+On top of that, one policy, identical in all seven ports and identical to the one §8B's
 classifier already applies:
 
 - **Account identifiers are redacted before the body is interpolated into any message**:

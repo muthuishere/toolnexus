@@ -169,12 +169,12 @@
 				"javascript": "parseMcpConfig",
 				"python": "parse_mcp_config",
 				"golang": "ParseMcpConfig",
-				"java": null,
+				"java": "McpSource.parseConfig",
 				"csharp": "McpSource.ParseConfig",
 				"elixir": "Toolnexus.Mcp.parse_config",
 				"clojure": "toolnexus.mcp/parse-config"
 			},
-			"parityNote": "Java keeps parseConfig package-private (McpSource.java:141) — there is no public config parser. C# exposes it as McpSource.ParseConfig, not ParseMcpConfig."
+			"parityNote": "Every port exposes the parser; only the spelling differs. C# and Java hang it off the type as McpSource.ParseConfig / McpSource.parseConfig rather than a free parseMcpConfig."
 		},
 		{
 			"id": "mcp/elicitation",

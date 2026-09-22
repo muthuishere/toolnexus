@@ -180,8 +180,11 @@ public class Example {
     }
 
     public static void main(String[] args) throws Exception {
-        // Attempt 1 leaves the todo open; the gate retries; attempt 2 closes it.
-        String[] messages = { todoCall("1", "proofread", false), say("done for real") };
+        // Attempt 1 leaves the todo open; the gate retries; attempt 2's todowrite closes it.
+        String[] messages = {
+            todoCall("1", "proofread", false), say("still working on it"),
+            todoCall("1", "proofread", true), say("done for real"),
+        };
         AtomicInteger i = new AtomicInteger();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", ex -> {

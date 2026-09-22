@@ -1,51 +1,202 @@
 ---
-title: "parseMcpConfig — validate an mcp.json"
+title: "McpSource.parseConfig"
 description: "Parse and validate config without connecting — the fast fail for a malformed or misspelled server block. — Java."
 sidebar:
-  label: "mcp / parse-config"
+  label: "McpSource.parseConfig"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/McpSource.java">McpSource.java</a>
 </p>
 
-<Aside type="caution" title="Not available in Java">
-Java keeps parseConfig package-private (McpSource.java:141) — there is no public config parser. C# exposes it as McpSource.ParseConfig, not ParseMcpConfig.
+```java
+public static Map<String, Object> parseConfig(Object input)
+```
+
+Reads MCP configuration and normalises it into a flat map of **server name → server config**. It
+**connects to nothing** — no child process is spawned, no HTTP request is made. That is the whole
+point: it is the cheap check you can run before paying for [`load`](/api/java/mcp/load/).
+
+Three input shapes are accepted: a path to an `mcp.json`, a raw JSON `String`, and an
+already-parsed `Map<String, Object>`. A `String` that is not an existing regular file is treated as
+raw JSON, so the same parameter covers both.
+
+## When to use it
+
+- **Validate at startup or in a test**, so a typo in `mcp.json` fails immediately rather than
+  halfway through connecting to five servers.
+- **Inspect or modify config before loading** — filter servers by environment, inject a header,
+  disable one in CI — then hand the resulting `Map` straight back to `load`.
+- **Accept config from somewhere other than a file** — a database row, an env var, an HTTP
+  response — without writing it to disk first.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="load already parses — use this when you want the config itself">
+[`McpSource.load`](/api/java/mcp/load/) calls `parseConfig` internally, so you never need to call
+it first in the ordinary path. Reach for it when you want the *config as data*: to check it,
+change it, or report on it without launching anything. For "what tools would these servers
+expose", you want [`listMcpTools`](/api/java/mcp/list-tools/) instead — that one does connect.
 </Aside>
 
-Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
+The returned map is **not a defensive copy**. When a wrapper key is present you get the caller's own
+nested map back, exactly as the JS and Go references do; the bare-map form returns a shallow copy so
+your input is left untouched. toolnexus itself only ever reads this map — if you intend to mutate
+the result, copy it first.
 
-## What to use instead
+## Examples
 
-Every other port exposes `parseConfig`/`parseMcpConfig` as a public, synchronous, no-I/O function
-so a host can validate or inspect an `mcp.json` before spending a connection on it. Java's
-`McpSource` has the identical logic (`McpSource.java:141` — accept a path, a raw JSON string, or
-a parsed `Map`; unwrap `mcpServers`/`servers`/`mcp`; strip the sibling `builtins`/`agents`/`a2a`/
-`mcpServer` keys off a bare server map), but the method itself is package-private. There is no
-supported way to call it from outside `io.github.muthuishere.toolnexus` — this is a real gap, not
-a naming difference like C#'s `ParseConfig`.
+### 1. Parse the shared fixture from disk
 
-The closest available outcome is to let [`McpSource.load`](/api/java/mcp/load/) (or
-[`Toolkit.create`](/api/java/toolkit/create/) via `mcpConfig(...)`) parse the config as part of
-connecting, and read the result back through `status()` — every server name in the config shows
-up there as `"connected"`, `"failed"`, or `"disabled"`, which is enough to catch a misspelled
-server block or a bad wrapper key without hand-rolling a second parser. If you genuinely need the
-config as *data* — to filter servers, inject a header, or validate in a test with no network at
-all — disable every server first (`"enabled": false`) and read `load(...).status()`; a bad JSON
-shape still throws before any connection is attempted, so the fast-fail behavior is preserved even
-without the public function.
+This is `examples/mcp.json`, the fixture every port is tested against.
 
-<Aside type="tip" title="Track it, don't work around it silently">
-If your use case genuinely needs the config as a `Map` (rewriting servers, diffing two configs),
-that is a legitimate gap in the Java port — file it rather than reimplementing the unwrap logic
-against `McpSource.java:141`, since the sibling-key stripping list can drift if duplicated.
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        // TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+        String repo = System.getenv().getOrDefault("TOOLNEXUS_REPO", ".");
+        String fixture = Path.of(repo, "examples", "mcp.json").toString();
+
+        Map<String, Object> config = McpSource.parseConfig(fixture);
+
+        // The `mcpServers` wrapper is unwrapped — you get the servers directly.
+        List<String> names = config.keySet().stream().sorted().toList();
+        if (!names.equals(List.of("everything", "example-remote"))) throw new AssertionError(names);
+
+        // Parsing does NOT filter: the disabled remote server is still here.
+        @SuppressWarnings("unchecked")
+        Map<String, Object> remote = (Map<String, Object>) config.get("example-remote");
+        if (!Boolean.FALSE.equals(remote.get("enabled"))) throw new AssertionError(remote);
+
+        System.out.println("ok: " + String.join(", ", names));
+    }
+}
+```
+
+<Aside type="caution">
+Parsing does **not** drop disabled servers. `enabled: false` (and `disabled: true`) is preserved in
+the returned config and is honoured later, by `load`. If you are counting servers, count the enabled
+ones yourself.
 </Aside>
+
+### 2. Wrapper spellings and a raw JSON string
+
+`mcpServers`, `servers` and `mcp` all mean the same thing, and a raw JSON string is accepted too.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        for (String raw : List.of(
+                "{\"mcpServers\":{\"a\":{\"type\":\"local\",\"command\":[\"echo\",\"hi\"]}}}",
+                "{\"servers\":{\"a\":{\"type\":\"local\",\"command\":[\"echo\",\"hi\"]}}}",
+                "{\"mcp\":{\"a\":{\"type\":\"local\",\"command\":[\"echo\",\"hi\"]}}}")) {
+            Map<String, Object> config = McpSource.parseConfig(raw);
+            if (config.size() != 1 || !config.containsKey("a")) throw new AssertionError(config);
+        }
+
+        // A bare map of servers works too — and the sibling toolnexus keys
+        // (builtins/agents/a2a/mcpServer) are stripped, never read as servers.
+        Map<String, Object> bare = McpSource.parseConfig(Map.of(
+                "a", Map.of("type", "local", "command", List.of("echo", "hi")),
+                "builtins", Map.of("bash", true)));
+        if (!bare.keySet().equals(java.util.Set.of("a"))) throw new AssertionError(bare.keySet());
+
+        System.out.println("ok: 3 spellings + bare map -> a");
+    }
+}
+```
+
+### 3. Validate before loading, and fail loudly
+
+The pattern this method exists for — check the config, then decide whether to connect.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    @SuppressWarnings("unchecked")
+    static List<String> problems(String raw) {
+        Map<String, Object> config = McpSource.parseConfig(raw);
+        List<String> problems = new ArrayList<>();
+        for (Map.Entry<String, Object> e : config.entrySet()) {
+            Map<String, Object> cfg = (Map<String, Object>) e.getValue();
+            // Disabled either way round: `enabled: false` or `disabled: true`.
+            if (Boolean.TRUE.equals(cfg.get("disabled"))) continue;
+            if (Boolean.FALSE.equals(cfg.get("enabled"))) continue;
+
+            if ("remote".equals(cfg.get("type"))) {
+                Object url = cfg.get("url");
+                if (!(url instanceof String s) || s.isEmpty())
+                    problems.add(e.getKey() + ": remote server without a url");
+            } else {
+                Object command = cfg.get("command");
+                if (!(command instanceof List<?> l) || l.isEmpty())
+                    problems.add(e.getKey() + ": local server without a command");
+            }
+        }
+        problems.sort(String::compareTo);
+        return problems;
+    }
+
+    public static void main(String[] args) throws Exception {
+        List<String> good = problems("""
+            {"mcpServers":{
+              "ok_local":{"type":"local","command":["npx","server"]},
+              "ok_remote":{"type":"remote","url":"https://example.com/mcp"},
+              "off":{"type":"local","command":[],"enabled":false}}}
+            """);
+        if (!good.isEmpty()) throw new AssertionError(good);
+
+        List<String> bad = problems("""
+            {"mcpServers":{
+              "broken_remote":{"type":"remote"},
+              "broken_local":{"type":"local","command":[]}}}
+            """);
+        if (bad.size() != 2) throw new AssertionError(bad);
+
+        // Malformed JSON is a hard failure, not a silently empty config.
+        boolean threw = false;
+        try {
+            McpSource.parseConfig("{\"mcpServers\": {");
+        } catch (RuntimeException e) {
+            threw = e.getMessage().startsWith("Invalid JSON");
+        }
+        if (!threw) throw new AssertionError("expected an Invalid JSON failure");
+
+        System.out.println("ok: problems=" + bad.size() + ", malformed rejected");
+    }
+}
+```
+
+## Accepted input
+
+| Input | Behaviour |
+|---|---|
+| `"./mcp.json"` | A path — read from disk and parsed. |
+| A raw JSON `String` | Parsed directly (any `String` that is not an existing file). |
+| A parsed `Map<String, Object>` | Normalised only. |
+
+Wrapped under `mcpServers`, `servers` or `mcp` — all three are unwrapped, in that order of
+precedence. A bare map of servers is accepted, with `builtins` / `agents` / `a2a` / `mcpServer`
+stripped.
 
 ## See also
 
-- [`McpSource.load`](/api/java/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
-- [`McpSource.loadWith`](/api/java/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
-- [`McpSource.listMcpTools`](/api/java/mcp/list-tools/) — List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
-- [`McpSource.elicitationToRequest`](/api/java/mcp/elicitation/) — Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.
+- [`McpSource.load`](/api/java/mcp/load/) — parse *and* connect.
+- [`McpSource.loadWith`](/api/java/mcp/load-with-context/) — the ctx-aware `load`.
+- [`McpSource.listMcpTools`](/api/java/mcp/list-tools/) — what each server would expose, without wiring a toolkit.
+- [`McpSource.ParseConfig` (C#)](/api/csharp/mcp/parse-config/) — the same method, same spelling shape.

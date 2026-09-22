@@ -202,11 +202,18 @@ public class Example {
         if (!fromUrl.url().equals("https://example.com/a.png")) throw new AssertionError(fromUrl.url());
 
         // An unknown extension is refused BY NAME — never a silent application/octet-stream.
-        String unknown = rejects(() -> ContentPart.ofFile(Path.of("notes.xyz")));
-        if (!unknown.contains("\"xyz\"")) throw new AssertionError(unknown);
-        // The escape hatch is an explicit mimeType, not sniffing:
-        ContentPart withMime = ContentPart.ofFile(Path.of("notes.xyz"), "text/plain");
-        if (!withMime.mimeType().equals("text/plain")) throw new AssertionError(withMime.mimeType());
+        // (A real file, so the with-mimeType call below has bytes to read.)
+        Path notes = Files.createTempFile("notes", ".xyz");
+        Files.writeString(notes, "just some notes");
+        try {
+            String unknown = rejects(() -> ContentPart.ofFile(notes));
+            if (!unknown.contains("\"xyz\"")) throw new AssertionError(unknown);
+            // The escape hatch is an explicit mimeType, not sniffing:
+            ContentPart withMime = ContentPart.ofFile(notes, "text/plain");
+            if (!withMime.mimeType().equals("text/plain")) throw new AssertionError(withMime.mimeType());
+        } finally {
+            Files.deleteIfExists(notes);
+        }
 
         System.out.println("ok: 4 in-process sources identical, url kept as url, unknown ext named");
     }

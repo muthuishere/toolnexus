@@ -8,95 +8,70 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
-### The builtins stop closing over the host process — the interpreter, the root, and what a kill reaches
+**`retryAfter` on the typed provider error now means the same thing in all seven ports — the raw
+`Retry-After` header, verbatim.** *Breaking for python, elixir, csharp and clojure hosts that read
+this field.* 0.19.0 shipped the field without pinning its representation, and the seven ports
+promptly picked three: js, golang and java carried the raw header string; python and elixir carried
+parsed seconds; csharp and clojure carried milliseconds — csharp under a different name again
+(`RetryAfterMs`). A host porting retry-handling between ports got a number that was off by 1000, or
+a string where it expected a float. Now every port carries the header exactly as the provider sent
+it, on a field spelled `retryAfter` / `RetryAfter` / `retry_after` / `:retry-after`, and the port's
+natural absent (`undefined` / `null` / `nil` / `None`) when the response sent no such header.
 
-Three consumer issues (#100, #101, #102) against `golang` 0.19.0, all from one host running agents
-on Linux, WSL and Windows. They read as three bugs in one file; spikes measured them as one defect
-in three places, **present in all seven ports**. The decisions are in `docs/adr/0034`, every
-measurement (with controls, on macOS and on a native Windows box) in
-`spikes/builtin-host-boundary/SPIKE.md`, and the change is
-`openspec/changes/fix-builtin-host-boundary`.
+What changed per port: **python** `retry_after: float | None` → `str | None`; **elixir**
+`retry_after: non_neg_integer() | nil` → `String.t() | nil`; **csharp** `RetryAfterMs: long?` →
+`RetryAfter: string?` (the member is renamed, deliberately); **clojure** `:retry-after` was
+milliseconds, now the raw header. js, golang and java are unchanged — they were already right.
 
-**`bash` runs on native Windows, and you can say which interpreter it uses.** The new
-`builtins.shell` is an argv prefix — `["sh","-c"]`, `["bash","-lc"]`, `["cmd","/d","/s","/c"]`,
-`["powershell","-NoProfile","-Command"]` — used verbatim when you set it. When you do not, an
-interpreter is **detected at toolkit construction**: `sh -c` on POSIX, and on Windows `%COMSPEC%`
-first, then `pwsh`, `powershell`, and a POSIX `bash` if one resolves. `%COMSPEC%` leads because
-PowerShell is routinely blocked by execution or application-control policy on a managed machine.
-Before this, `bash` on native Windows either failed with `"sh": executable file not found` (go,
-java, csharp, elixir, clojure) or **silently became cmd.exe** (js, python, via `shell:true`), where
-`echo $HOME` prints the literal `$HOME` and exits 0 — one call, two wrong answers. The resolved
-interpreter is reported on every result as `metadata.shell`; if nothing resolves and `bash` is
-enabled, **construction fails naming what it tried**, instead of failing on turn fourteen of a paid
-run. Disable `bash` through `builtins.tools` to run on a box with no shell at all.
+The raw header wins because it is **lossless**. `Retry-After` may legitimately be an HTTP-date, or
+fractional, signed, out-of-range or unparseable; a numeric field has to null all of those out,
+throwing away something the response really did supply and that a host may well want to log or act
+on itself. The field is for the host, not for the library. **The library's own retry/backoff
+behaviour is untouched**: internally every port still honours only the `delay-seconds` form (whole
+seconds, `0` means "retry now") and falls back to exponential backoff for anything else — so
+`Retry-After: Wed, 21 Oct 2026 07:28:00 GMT` still produces a backoff wait *and* now still reaches
+you verbatim on the field. Each changed port has a test pinning exactly that case. `SPEC.md` §8 now
+states the representation outright so it cannot drift again, and `docs/adr/0027` carries a note on
+what D3 left unsaid.
 
-**You can scope the file builtins to a directory.** `builtins.baseDir` is what a *relative* path
-means for `read`, `write`, `edit`, `glob`, `grep`, for the file paths **inside `apply_patch`'s patch
-text**, and as `bash`'s default `workdir`. Absolute paths are unaffected, and an unset `baseDir`
-means the host process working directory — exactly today's behaviour. This existed as an incident
-before it existed as an option: an agent asked to write tests into a run's git worktree used the
-ordinary relative path `apps/api/…_test.go`, and 18 KB landed in the *host platform's own
-repository*, reported as success. A host could pin `bash` with `workdir` but had nothing for the
-file tools, so the workaround was rewriting tool arguments in a `BeforeTool` hook — and parsing
-`apply_patch`'s grammar, because those paths are content, not arguments. The host knows which
-directory; only the library knows which arguments are paths.
+**Java can now parse an `mcp.json` without connecting to anything.**
+`McpSource.parseConfig(Object)` is public, closing the last availability gap in the seven-port MCP
+config parser — Java was the only port where validating config meant either calling `load` (which
+spawns processes and opens connections) or reimplementing the wrapper-key rules yourself. It takes a
+file path, a raw JSON string, or an already-parsed `Map`, unwraps `mcpServers` / `servers` / `mcp`,
+and returns server name → server config. Use it to fail fast on a typo at startup, to filter or
+rewrite config before handing it to `load`, or to accept config from somewhere that is not a file.
+The change is purely additive: the method's behaviour is unchanged, and it is the same one `load`
+and `listMcpTools` have always called. As in the JS and Go references the returned map is not a
+defensive copy — copy it before mutating. One difference survives and is documented: C# and Java
+spell it `McpSource.ParseConfig` / `McpSource.parseConfig`, where the other five ports expose a free
+function (`parseMcpConfig`, `parse_mcp_config`, `ParseMcpConfig`, `parse_config`, `parse-config`).
 
-**Opt into refusing paths that leave it.** `builtins.confineToBaseDir` refuses anything whose
-**canonical** form is outside `baseDir`. Canonical, not lexical: symlinks, Windows **directory
-junctions** (which need no privilege to create) and 8.3 short names are resolved on both sides, and
-a file that does not exist yet is resolved through its deepest existing ancestor — otherwise it is
-not a check for `write` at all. Windows reserved device names (`CON`, `NUL`, `COM1`…) are refused
-outright: measured, writing to `CON` inside a directory succeeds, creates no file, and passes any
-containment check built on path comparison. **This is a guarantee about path resolution in the file
-builtins, not a sandbox**: a command run by `bash` still reaches the whole filesystem (`cd ..`,
-`env -C`, an absolute path — all measured), which is a different problem, tracked in
-`docs/adr/0033`.
+**Four API-reference pages documented signatures that do not exist, and one documented the wrong
+rule.** No library behaviour changed here — but if you copied these, you got code that would not
+compile, or a wrong mental model, so they are worth naming. `resume` was written up as returning
+nothing in Go (`suspension/resume`, `runtime/handle`) and Python (`suspension/resume`); it returns
+the result of the topmost handle the cascade re-ran (`SPEC.md` §7D) — `(TaskResult, error)` in Go, a
+`TaskResult` in Python, a result map in Elixir. Go's page also claimed `Resume` errors on an
+`answer.ID` mismatch; it never inspects `answer.ID`, and errors only when no handle in the tree is
+suspended. Python's `suspension/resume` claimed a resumed `TaskResult`'s counters are per-call; they
+are the handle's **own cumulative** totals and grow across a resume, never reset (`SPEC.md`:1078).
+Elixir's `client/resilience` still rescued `RuntimeError`, which 0.19.0's typed provider errors
+replaced with `Toolnexus.ProviderError`. And the Go and C# `skills/list` pages said a skill is
+`malformed-frontmatter` when YAML fails to parse — it is malformed only when YAML refuses it **and**
+the lenient line-wise rescue also recovers no `name` (`SPEC.md`:409-416, ADR 0028); both pages
+illustrated the rule with a fixture the rescue happily recovers, so they documented the opposite of
+what the ports do.
 
-**A `bash` timeout now stops the work instead of reporting that it did.** Every port killed only
-the interpreter, so `{"command":"go test ./...","timeout":30000}` returned "timed out" at 30 s while
-the compiler and test binaries carried on, reparented, still writing into the workspace after the
-step was recorded as finished — and cancelling a run left the machine loaded. The command now runs
-in its own process group (POSIX) or Job Object (Windows), and a timeout or cancellation stops the
-whole job: ask (SIGTERM), wait **2000 ms**, insist (SIGKILL). `metadata.timedOut` and
-`metadata.killedTree` distinguish the two outcomes; `output` is unchanged.
-
-**Fixed: `grep` in the Go port printed a path it had not sorted by.** It ordered matches by the
-walk-root-relative path and emitted the joined one — absolute on POSIX
-(`/tmp/x/tree/sub/a.txt:1:…`), backslash-separated on Windows (`tree\sub\a.txt:1:…`). `SPEC.md §4A`
-requires the `/`-separated walk-root-relative path, and *"SORT ON THE SAME STRING you emit"*. The
-other ports were already correct.
-
-**Verified on native Windows, not just reasoned about.** The go, js and python ports were
-cross-compiled or copied onto a real Windows machine and run there with their shipped code: the
-interpreter detected as `cmd /d /s /c`, a relative write landing in `baseDir`, `..\..` and `CON`
-refused, no orphan left after a timeout, and `grep` emitting `sub/a.txt:1:x` where it previously
-emitted `tree\sub\a.txt:1:x`. Doing that found two Windows-only defects that every POSIX test
-suite passed straight through: js invoked `taskkill` **without `/PID`**, so every kill failed
-silently, and a "graceful" first step turned out to be actively harmful there — `taskkill /T`
-without `/F` refuses every console process in the tree while still being able to take the *parent*
-down, reparenting the grandchild. All seven ports now stop the job outright on Windows, and the
-TERM → 2000 ms → KILL sequence is documented as a POSIX effect.
-
-**Stress-tested in all seven ports, and it found one more parity break.** A harness per port
-(`spikes/builtin-host-boundary/stress/`) throws 30 concurrent timeouts, 40 interleaved
-success/timeout calls, a 5 MB-output command that times out (the shape that used to deadlock),
-repeated rounds watching threads/children/file descriptors, and 500+ concurrent path resolutions
-at the confinement check. All seven pass, including clojure on both of its hosts — 0 orphans of
-30, no leak, no crossed results, no escape allowed and no legal path refused. What it caught:
-**elixir and clojure slept through the whole 2 s kill grace whether or not the job had already
-died**, so a 1 s timeout cost the caller 3 s where the other five returned in 1 s. Both now wait
-for the job to be gone rather than sleeping, `SPEC.md §4A` says which of the two it is, and all
-seven ports have a test pinning it.
-
-**What is not done.** Java, C#, Elixir and Clojure are **unverified on Windows** — those runtimes
-are not installed on the Windows machine available to us; their implementations follow documented
-platform APIs and the gap is real until someone runs them. Nothing here confines commands run by
-`bash`. Nothing here ran on Linux: the POSIX measurements are macOS, plus one `dash` data point —
-which is the one that refuted a `set -m` process-group trick this change originally planned to use
-(under dash it reports "job control turned off", the kill fails, and the job survives). Clojure's
-canonical paths are lower-cased because koine's `real-path` disagrees between the JVM and cljgo on
-case; a koine fix is the better home and is not yet filed. Per-port READMEs still describe the
-builtins without these options.
+**The API reference now has a coverage gate, and it blocks CI.** `site/scripts/coverage-gate.mjs`
+(new `docs-coverage` job) fails the build when a manifest entry has no page in some port, when a
+page is still an unfilled generator scaffold, when a page is an orphan nothing points at, or when a
+declared parity gap does not say it is one. It also runs `verify-symbols.mjs --strict`, which
+existed but ran nowhere, so a renamed export used to surface as a broken page rather than a failed
+build. This is the check that was missing when fifteen pages — `client/create` and `toolkit/create`
+among them, in five ports — sat as empty `TODO` scaffolds without anything noticing. Page *depth*
+(when-to-use / why / three examples) is reported but not yet blocking; the gate prints the
+outstanding count on every run.
 
 ## 0.19.0 — 2026-09-22
 

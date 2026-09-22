@@ -97,34 +97,114 @@ silent success.
 
 ### 1. The smallest useful call — read one handle's state after spawning it
 
-```clojure
-(require '[toolnexus.agents.runtime :as rt])
+```clojure test
+(require '[toolnexus.agents.runtime :as rt]
+         '[koine.json :as json])
+
+(println)
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(def runtime
+  (rt/create-runtime {:registry {"w" {:name "w" :does "writes" :model "wm"}}
+                      :llm {:base-url "http://mock.local" :model "default"}
+                      :http-client (fn [_url _headers _body]
+                                     {:status 200 :headers {} :body (json/write-str (text-response "done"))})}))
 
 (let [h (rt/spawn runtime rt/root "w")]
-  (:state (rt/inspect runtime h)))   ; => "idle" — a fresh handle is idle, not running
+  (assert (= "idle" (:state (rt/inspect runtime h)))))   ; => "idle" — a fresh handle is idle, not running
+(println "OK")
 ```
 
 ### 2. The realistic case — watch a handle move through running to idle
 
-```clojure
+```clojure test
+(require '[toolnexus.agents.runtime :as rt]
+         '[koine.json :as json])
+
+(println)
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(def runtime
+  (rt/create-runtime {:registry {"w" {:name "w" :does "writes" :model "wm"}}
+                      :llm {:base-url "http://mock.local" :model "default"}
+                      :http-client (fn [_url _headers _body]
+                                     {:status 200 :headers {} :body (json/write-str (text-response "done"))})}))
+
 (let [h (rt/spawn runtime rt/root "w")]
   (rt/wake runtime h "go")
   (let [r (rt/wait runtime h)]
-    (:status r))                    ; => "done"
-  (:state (rt/inspect runtime h)))  ; => "idle" — a settled handle returns to idle, never "closed"
+    (assert (= "done" (:status r))))
+  (assert (= "idle" (:state (rt/inspect runtime h)))))  ; a settled handle returns to idle, never "closed"
+(println "OK")
 ```
 
 ### 3. The full surface — inspecting a suspended handle's pending request, then a whole tree
 
-```clojure
-;; after a §10 approval request suspends the handle mid-turn:
-(let [detail (rt/inspect runtime "root/boss.1/worker.1")]
-  (:state detail)                    ; => "suspended"
-  (:pending detail))                 ; => {:kind "approval" :prompt "…" :id "…" :data {...}}
+```clojure test
+(require '[toolnexus.agents.runtime :as rt]
+         '[toolnexus.client :as client]
+         '[toolnexus.tool :as tool]
+         '[koine.json :as json])
 
-;; enumerate the whole subtree under boss, tree order, root excluded
-(rt/handles runtime "root/boss.1")
-;; => [{:id "root/boss.1/worker.1" :state "suspended" :tokens 30 :inbox 0}]
+(println)
+
+(defn- calls-response [calls]
+  {:choices [{:message {:role "assistant" :content nil
+                        :tool_calls (mapv (fn [c] {:id (:id c) :type "function"
+                                                   :function {:name (:name c)
+                                                              :arguments (json/write-str (or (:args c) {}))}})
+                                          calls)}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(def script {"bm" [{:calls [{:id "c1" :name "task" :args {:agent "worker" :prompt "risky"}}]}]
+             "wm" [{:calls [{:id "w1" :name "approve" :args {}}]}]})
+
+(defn- mock-http []
+  (let [counts (atom {})]
+    (fn [_url _headers body]
+      (let [b     (json/read-str body)
+            model (:model b)
+            n     (get (swap! counts update model (fnil inc 0)) model)
+            spec  (get (get script model) (dec n))]
+        {:status 200 :headers {}
+         :body (json/write-str (if (seq (:calls spec)) (calls-response (:calls spec)) (text-response "done")))}))))
+
+(def approve-tool
+  (tool/tool {:name "approve" :description "needs approval"
+              :execute (fn ([_args] (client/suspend (client/make-request "approval" "Approve the impossible")))
+                         ([_args ctx] (tool/success "approved")))}))
+
+(def runtime
+  (rt/create-runtime
+   {:registry {"boss"   {:name "boss" :does "coordinates" :model "bm" :team ["worker"] :budget {:max-depth 5}}
+               "worker" {:name "worker" :does "does the risky part" :model "wm" :tools [approve-tool]}}
+    :llm      {:base-url "http://mock.local" :model "default"}
+    :http-client (mock-http)}))
+
+;; after a §10 approval request suspends the handle mid-turn:
+(let [boss (rt/spawn runtime rt/root "boss")]
+  (rt/wake runtime boss "go")
+  (rt/wait runtime boss)
+  (let [worker (str boss "/worker.1")
+        detail (rt/inspect runtime worker)]
+    (assert (= "suspended" (:state detail)))
+    (assert (= "approval" (:kind (:pending detail))))  ; {:kind "approval" :prompt "…" :id "…" :data {...}}
+
+    ;; enumerate the whole subtree rooted AT boss — includes boss itself, then its descendants
+    (let [hs (rt/handles runtime boss)]
+      (assert (= [boss worker] (mapv :id hs)))
+      (assert (= "suspended" (:state (second hs)))))))
+(println "OK")
 ```
 
 ## See also

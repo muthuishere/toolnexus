@@ -1,6 +1,6 @@
 ---
 title: "ProviderException"
-description: "A non-2xx response from the model endpoint raises a typed provider error carrying the status code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception. — C#."
+description: "A non-2xx response from the model endpoint raises a typed provider error carrying the status code, a redacted+capped body, and the raw `Retry-After` header — never a bare unstructured exception. — C#."
 sidebar:
   label: "ProviderException"
 ---
@@ -16,9 +16,9 @@ public sealed class ProviderException : InvalidOperationException
 {
     public int Status { get; }              // the HTTP status the provider returned
     public string Body { get; }              // REDACTED but UNCAPPED — the raw shape, minus account ids
-    public long? RetryAfterMs { get; }       // the honoured Retry-After delay, in MILLISECONDS
+    public string? RetryAfter { get; }        // the RAW Retry-After header, verbatim
 
-    public ProviderException(int status, string body, long? retryAfterMs, string message);
+    public ProviderException(int status, string body, string? retryAfter, string message);
 }
 
 // Shared redaction policy (ADR 0027), also usable directly:
@@ -28,7 +28,7 @@ public const int ErrorBodyCap = 200;
 ```
 
 A non-2xx response from the model endpoint raises a typed `ProviderException` carrying the status
-code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception.
+code, a redacted+capped body, and the raw `Retry-After` header — never a bare unstructured exception.
 Before this type existed the only interface to a failed call was `InvalidOperationException.Message`,
 so a host that wanted to log the status or honor a retry delay had to parse prose. `ProviderException`
 still derives from `InvalidOperationException`, so existing `catch` blocks and message matching
@@ -44,19 +44,20 @@ alerting rule keyed on status, a support tool that needs the provider's real err
 
 ## Why this and not the alternative
 
-<Aside type="caution" title="RetryAfterMs is MILLISECONDS — and that is a documented divergence from the other six ports">
-Every other port (js, python, golang, java, elixir, clojure) keeps the `Retry-After` signal as the
-**raw header string** (or, in elixir's case, parsed seconds as an integer). **C# is the one port
-that converts it to milliseconds** on a `long?` field named `RetryAfterMs`. This is not a bug and
-not something this doc papers over: it is a real, existing behavioral difference, present because
-the C# client's own backoff math (`SleepAsync`) already works in milliseconds end to end, and
-`ProviderException` reuses the same parsed value rather than re-deriving it from a string a second
-time. A host porting retry-handling logic from another language's example must convert: `long?
-retryAfterMs = e.RetryAfterMs` where another port would read `e.retryAfter` as seconds or as the
-literal header text. Only the delay-seconds form of `Retry-After` (RFC 9110 §10.2.3 — a run of
-ASCII digits, `0`…`2147483647`) is honoured; a fractional, signed, HTTP-date, or out-of-range value
-returns `null` rather than a guess, and `0` is returned as `0` (not `null`) because "retry now" is a
-real answer.
+<Aside type="note" title="RetryAfter is the RAW header — identical in all seven ports">
+`RetryAfter` is the `Retry-After` header value **exactly as the provider sent it**, or `null` when
+the response sent no such header. It is deliberately not pre-parsed into a number: `Retry-After`
+may legitimately be an HTTP-date, or fractional, signed, out-of-range or unparseable, and a numeric
+field would have to null out every one of those — destroying information the response actually
+supplied and which a host may well want to log or handle itself. The field is for the HOST.
+
+The library's own **waiting** rule is separate and unchanged: internally the client still honours
+only the delay-seconds form (RFC 9110 §10.2.3 — a run of ASCII digits, `0`…`2147483647`, waited as
+whole seconds, `0` meaning "retry now") and falls back to exponential backoff for anything else.
+An HTTP-date therefore still produces a backoff wait *and* still arrives verbatim on `RetryAfter`.
+
+This field previously spelled itself `RetryAfterMs` (a `long?` in milliseconds) in this port only.
+That was a divergence from the other six ports and is now corrected — see the changelog.
 </Aside>
 
 <Aside type="tip" title="Prefer OnError (client/resilience) for retry-vs-fail policy — ProviderException is the escape hatch">
@@ -139,7 +140,7 @@ sealed class Stub : IDisposable
 }
 ```
 
-### 2. The realistic case — Retry-After arrives in milliseconds, and the body is redacted but not capped
+### 2. The realistic case — the raw Retry-After, and a body redacted but not capped
 
 ```csharp test
 using System.Net;
@@ -168,8 +169,8 @@ try { await client.RunAsync("p", tk); }
 catch (LlmClient.ProviderException e) { caught = e; }
 if (caught is null) throw new Exception("expected a ProviderException");
 
-// The header said "3" (seconds) — this port hands it back as 3000 (milliseconds), NOT "3".
-if (caught.RetryAfterMs != 3000) throw new Exception($"RetryAfterMs: {caught.RetryAfterMs}");
+// The header said "3" — the field hands back that string verbatim, in every port.
+if (caught.RetryAfter != "3") throw new Exception($"RetryAfter: {caught.RetryAfter}");
 
 // The typed Body field is REDACTED (account keys replaced) but UNCAPPED — the full shape survives.
 if (caught.Body.Contains("user_2abcdefghijkl")) throw new Exception("account id leaked into Body");
@@ -179,7 +180,7 @@ if (!caught.Body.Contains("no credit")) throw new Exception("the real cause must
 // Message is the redacted AND capped rendering — the one that reaches logs by default.
 if (caught.Message.Contains("user_2abcdefghijkl")) throw new Exception("account id leaked into Message");
 
-Console.WriteLine($"ok: status={caught.Status} retryAfterMs={caught.RetryAfterMs} body-len={caught.Body.Length}");
+Console.WriteLine($"ok: status={caught.Status} retryAfter={caught.RetryAfter} body-len={caught.Body.Length}");
 
 sealed class Stub : IDisposable
 {
@@ -311,7 +312,7 @@ sealed class Stub : IDisposable
 |---|---|---|
 | `Status` | `int` | The HTTP status the provider returned. |
 | `Body` | `string` | The response body, redacted but **uncapped** (ADR 0027 A5). Empty on 401/403, where the body may reflect the credential that was sent. |
-| `RetryAfterMs` | `long?` | The honoured `Retry-After` delay, **in milliseconds** — see the caution above; every other port keeps this as the raw header string (or elixir's parsed seconds). |
+| `RetryAfter` | `string?` | The raw `Retry-After` header, verbatim, or `null` when the response sent none. Not pre-parsed — see the note above. Identical in all seven ports. |
 | `Message` (inherited) | `string` | The redacted **and capped** rendering — the one that reaches logs by default. |
 
 ## Redaction policy (ADR 0027)

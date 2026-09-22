@@ -62,8 +62,6 @@ print("ok:", a.id, "|", a.reason)
 ### 2. The realistic case — an explicit reason, and an invalid one rejected
 
 ```python test
-import pytest
-
 from toolnexus import answer_declined
 
 cancelled = answer_declined("pnd-1", "cancelled")
@@ -72,8 +70,11 @@ assert cancelled.ok is False and cancelled.reason == "cancelled"
 expired = answer_declined("pnd-1", "expired")
 assert expired.reason == "expired"
 
-with pytest.raises(ValueError):
+try:
     answer_declined("pnd-1", "nope")  # not in the closed vocabulary
+    raise AssertionError("expected ValueError")
+except ValueError:
+    pass
 
 print("ok:", cancelled.reason, "/", expired.reason, "| invalid reason rejected")
 ```
@@ -97,15 +98,13 @@ class RecordingTransport:
         raise NotImplementedError
 
 
-seen = {}
+calls = {"n": 0}
 
 
 async def approve_deploy(args=None, ctx=None):
+    calls["n"] += 1
     if ctx is not None and ctx.answer is not None:
-        seen["answer"] = ctx.answer
-        if ctx.answer.ok:
-            return ToolResult(output="deployed", is_error=False)
-        return ToolResult(output=f"deploy skipped: {ctx.answer.reason}", is_error=False)
+        return ToolResult(output="deployed", is_error=False)
     return pending(kind="approval", prompt="OK to deploy to prod?")
 
 
@@ -134,9 +133,13 @@ async def main():
         )
         result = await client.run("deploy the latest build", tk)
 
+        # A decline resolves the pending call directly — it does NOT re-invoke the tool.
+        # `answer_output`'s accepted case re-runs the tool with `ctx.answer` set; a decline
+        # never reaches that second call at all, so `approve_deploy` ran exactly once.
+        assert calls["n"] == 1
         assert result.status == "done"
-        assert seen["answer"].ok is False
-        assert result.tool_calls[0]["output"] == "deploy skipped: declined"
+        assert result.tool_calls[0]["is_error"] is True
+        assert result.tool_calls[0]["output"] == "declined/expired: OK to deploy to prod?"
 
         print("ok:", result.tool_calls[0]["output"])
     finally:
