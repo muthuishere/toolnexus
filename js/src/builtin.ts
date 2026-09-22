@@ -364,8 +364,17 @@ function bashTool(env: BuiltinEnv): Tool {
         let killedTree = false
         let settled = false
 
+        // Captured once, at spawn: `detached` makes the child a process-group
+        // LEADER, so its pid is the pgid. Reading it later from `child` would
+        // risk signalling by a pid the runtime has already let go of.
+        const pgid = child.pid
+
         const killJob = (graceful: boolean): boolean => {
-          if (child.pid === undefined) return false
+          // Nothing may be signalled once this call has settled: a stale timer
+          // firing after the fact would aim at a pid the OS may have reissued,
+          // and a NEGATED pid is a whole process group.
+          if (settled) return false
+          if (typeof pgid !== "number" || !Number.isInteger(pgid) || pgid <= 1) return false
           try {
             if (process.platform === "win32") {
               // Windows has NO graceful termination for a console process, and
@@ -375,7 +384,7 @@ function bashTool(env: BuiltinEnv): Tool {
               // still being able to take the parent down — which reparents the
               // grandchild and leaves it running. So the job is terminated at
               // once there, and the grace window is a POSIX effect (ADR 0034 D4).
-              const r = spawnSync("taskkill", ["/T", "/F", "/PID", String(child.pid)])
+              const r = spawnSync("taskkill", ["/T", "/F", "/PID", String(pgid)])
               return r.status === 0
             }
             // Never signal a REAPED child by negated pid: that pid may belong to
@@ -384,7 +393,7 @@ function bashTool(env: BuiltinEnv): Tool {
             // is merely an error, so the same guard is not needed there — and
             // must not be applied, because the tree can outlive the child.)
             if (child.exitCode !== null || child.signalCode !== null) return false
-            process.kill(-child.pid, graceful ? "SIGTERM" : "SIGKILL")
+            process.kill(-pgid, graceful ? "SIGTERM" : "SIGKILL")
             return true
           } catch {
             return false
