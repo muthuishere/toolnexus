@@ -1,0 +1,3 @@
+# built probe binaries — rebuild with the go build lines in SPIKE.md
+*.exe
+probe-go
