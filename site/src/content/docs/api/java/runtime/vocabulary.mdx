@@ -1,0 +1,182 @@
+---
+title: "TaskResult.STATUSES / TaskResult.LIMITS / TaskResult.canonicalLimit"
+description: "The canonical, byte-identical-across-ports string constants a host branches on: task statuses, run statuses, and the nine stop-limit reasons a task can end on, plus the helper that canonicalizes a limit name. — Java."
+sidebar:
+  label: "TaskResult.STATUSES / TaskResult.LIMITS / TaskResult.canonicalLimit"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/agents/TaskResult.java">TaskResult.java</a>
+</p>
+
+```java
+// TaskResult (agents package) — the §7D AGENT-RUNTIME status vocabulary, SEVEN values
+public static final String STATUS_DONE = "done";
+public static final String STATUS_PENDING = "pending";
+public static final String STATUS_INCOMPLETE = "incomplete";
+public static final String STATUS_INTERRUPTED = "interrupted";
+public static final String STATUS_CLOSED = "closed";
+public static final String STATUS_TIMEOUT = "timeout";
+public static final String STATUS_ERROR = "error";
+public static final List<String> STATUSES; // the 7, in SPEC §7D order
+
+// the CLOSED `limit` vocabulary — NINE values, identical in all seven ports
+public static final String LIMIT_MAX_TURNS = "maxTurns";
+public static final String LIMIT_MAX_TOKENS = "maxTokens";
+public static final String LIMIT_MAX_TOOL_CALLS = "maxToolCalls";
+public static final String LIMIT_MAX_WALL_MS = "maxWallMs";
+public static final String LIMIT_MAX_CHILDREN = "maxChildren";
+public static final String LIMIT_MAX_CONCURRENT = "maxConcurrent";
+public static final String LIMIT_MAX_DEPTH = "maxDepth";
+public static final String LIMIT_COMPLETION = "completion";
+public static final String LIMIT_TIMEOUT = "timeout";
+public static final List<String> LIMITS; // the 9, in the order above
+
+static String canonicalLimit(String internal); // package-private — maps an internal pool
+                                                 // name onto the canonical spelling above
+```
+
+The canonical, byte-identical-across-ports string constants a host branches on: `TaskResult.STATUSES`
+is the closed **seven**-string §7D agent/task vocabulary (`done, pending, incomplete, interrupted,
+closed, timeout, error`), `TaskResult.LIMITS` is the closed **nine**-string stop-limit vocabulary a
+task can end on, and `canonicalLimit` maps an internal pool/dimension name (`"tokens"`, `"wallMs"`,
+…) onto the pinned spelling before it ever reaches a `TaskResult.limit` field. A `TaskResult`'s
+compact constructor (`TaskResult.java`, the record body) enforces both rules structurally, on
+**every** construction site: a limit-stop status (`incomplete` / `timeout`) gets its `limit`
+canonicalised through this function, and every other status gets `limit` explicitly emptied — so a
+`done` or `pending` result can never carry a stale limit that contradicts its own status (ADR 0025 /
+A18 / A21).
+
+## When to use it
+
+Reference `TaskResult.STATUSES` / `TaskResult.LIMITS` — instead of retyping the string literals —
+anywhere a host validates or displays what a sub-agent run ended on: a dashboard rendering a task's
+final state, a switch/`case` over `taskResult.status()`, or an assertion in a test that wants to
+fail loudly if a ninth limit or an eighth status is ever added without updating the doc. Use
+`canonicalLimit` only if you are implementing a NEW driver over the §7D runtime that produces its
+own internal limit names — ordinary callers never call it directly; it runs automatically inside
+every `TaskResult` construction.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Java has no dedicated RUN_STATUSES constant — say so, don't invent one">
+There is a **second**, smaller, unrelated vocabulary in this codebase: the §8 CLIENT/run status on
+`LlmClient.RunResult.status` — three values, `done | pending | incomplete`, and critically **no**
+`"timeout"` (a §8 run deadline throws `TimeoutException` instead of settling with a status). It
+shares the field name `status` with the seven-value agent vocabulary above and nothing else
+(ADR 0027) — don't conflate them. Unlike js/python/golang/csharp/elixir/clojure, **the Java port
+does not export a named `RUN_STATUSES` constant for this second vocabulary** — it appears only as
+inline string literals and a doc comment (`Loop.java:87`: `// done | incomplete | pending | error`,
+itself describing `Loop.Outcome.status`, a *third*, `Loop`-specific spelling that reuses the
+shipped strings without minting new ones). This is a real per-port gap, not a naming choice to
+paper over — if your host needs to branch on the three-value client vocabulary, spell the three
+literals `"done"`, `"pending"`, `"incomplete"` directly; there is no Java constant to import for it.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — read the two closed vocabularies
+
+```java test
+import io.github.muthuishere.toolnexus.agents.TaskResult;
+
+public class Example {
+    public static void main(String[] args) {
+        if (TaskResult.STATUSES.size() != 7) throw new AssertionError(TaskResult.STATUSES);
+        if (!TaskResult.STATUSES.contains(TaskResult.STATUS_DONE)) throw new AssertionError("done missing");
+        if (!TaskResult.STATUSES.contains(TaskResult.STATUS_ERROR)) throw new AssertionError("error missing");
+
+        if (TaskResult.LIMITS.size() != 9) throw new AssertionError(TaskResult.LIMITS);
+        if (!TaskResult.LIMITS.contains(TaskResult.LIMIT_MAX_TURNS)) throw new AssertionError("maxTurns missing");
+        if (!TaskResult.LIMITS.contains(TaskResult.LIMIT_TIMEOUT)) throw new AssertionError("timeout missing");
+
+        System.out.println("ok: " + TaskResult.STATUSES.size() + " statuses, "
+                + TaskResult.LIMITS.size() + " limits");
+    }
+}
+```
+
+### 2. The realistic case — a host validates a TaskResult against the vocabulary
+
+```java test
+import io.github.muthuishere.toolnexus.Request;
+import io.github.muthuishere.toolnexus.agents.TaskResult;
+import java.util.List;
+
+public class Example {
+    static String describe(TaskResult r) {
+        if (!TaskResult.STATUSES.contains(r.status())) {
+            throw new IllegalStateException("unknown status: " + r.status());
+        }
+        boolean limitStop = TaskResult.STATUS_INCOMPLETE.equals(r.status())
+                || TaskResult.STATUS_TIMEOUT.equals(r.status());
+        if (limitStop && !TaskResult.LIMITS.contains(r.limit())) {
+            throw new IllegalStateException("unknown limit: " + r.limit());
+        }
+        return r.status() + (r.limit() != null ? " (limit=" + r.limit() + ")" : "");
+    }
+
+    public static void main(String[] args) {
+        TaskResult done = new TaskResult("finished", false, TaskResult.STATUS_DONE,
+                null, List.of(), 3, 100);
+        TaskResult stopped = new TaskResult("ran out of turns", false, TaskResult.STATUS_INCOMPLETE,
+                null, List.of(), 10, 500, 500, "turns"); // "turns" is an internal name
+
+        if (!describe(done).equals("done")) throw new AssertionError(describe(done));
+        // canonicalLimit runs INSIDE the constructor: "turns" -> the canonical "maxTurns"
+        if (!"maxTurns".equals(stopped.limit())) throw new AssertionError(stopped.limit());
+        if (!describe(stopped).equals("incomplete (limit=maxTurns)")) throw new AssertionError(describe(stopped));
+
+        System.out.println("ok: " + describe(done) + " / " + describe(stopped));
+    }
+}
+```
+
+### 3. The full surface — the structural guarantee: status and limit can never contradict
+
+```java test
+import io.github.muthuishere.toolnexus.agents.TaskResult;
+import java.util.List;
+
+public class Example {
+    public static void main(String[] args) {
+        // A `done` result is constructed WITH a limit anyway — the compact constructor empties
+        // it, because a settled result contradicting itself is the bug this guarantee prevents.
+        TaskResult done = new TaskResult("ok", false, TaskResult.STATUS_DONE,
+                null, List.of(), 1, 10, 10, "maxTokens");
+        if (done.limit() != null) throw new AssertionError("done must never carry a limit: " + done.limit());
+
+        // A limit-stop status canonicalises an internal pool name automatically.
+        TaskResult timedOut = new TaskResult("too slow", true, TaskResult.STATUS_TIMEOUT,
+                null, List.of(), 5, 200, 200, "wallMs");
+        if (!"maxWallMs".equals(timedOut.limit())) throw new AssertionError(timedOut.limit());
+
+        // An already-canonical name passes through unchanged.
+        TaskResult noTokens = new TaskResult("budget exhausted", true, TaskResult.STATUS_INCOMPLETE,
+                null, List.of(), 5, 200, 200, TaskResult.LIMIT_MAX_TOKENS);
+        if (!TaskResult.LIMIT_MAX_TOKENS.equals(noTokens.limit())) throw new AssertionError(noTokens.limit());
+
+        System.out.println("ok: done=" + done.limit() + ", timeout=" + timedOut.limit()
+                + ", incomplete=" + noTokens.limit());
+    }
+}
+```
+
+## Notes
+
+- The three §8 client-level run statuses (`done`, `pending`, `incomplete` — no `timeout`) exist in
+  Java only as inline literals; there is no `RunStatuses`/`RUN_STATUSES` constant to import, unlike
+  most of the other six ports. Spell them directly if you need them.
+- `Loop.Outcome.status` reuses these same shipped strings (`done | incomplete | pending | error`,
+  per its doc comment at `Loop.java:87`) rather than minting a fourth vocabulary — see
+  [`Loop`](/api/java/runtime/loop/).
+
+## See also
+
+- [`Loop`](/api/java/runtime/loop/) — The gated door beside the plain agent run; `Loop.Outcome.status` reuses these same shipped strings.
+- [`agents.Agent`](/api/java/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`agents.Runtime`](/api/java/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`agents.Handle`](/api/java/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`agents.Budget`](/api/java/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

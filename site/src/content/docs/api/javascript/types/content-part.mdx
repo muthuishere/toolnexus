@@ -33,7 +33,7 @@ Two directions, one type.
 
 **Into a run** — a `prompt` is a `string` *or* a `ContentPart[]`, so attaching a screenshot, a PDF
 or an audio clip to a turn is a list rather than a second API. Build the parts with
-[`attach`](/api/javascript/content/attach/) and the loop translates them into each provider's
+[`attach`](/api/javascript/types/attach/) and the loop translates them into each provider's
 block shape (§8A) on the way out.
 
 **Out of a tool** — [`ToolResult.parts`](/api/javascript/types/tool-result/) is how a tool hands
@@ -49,7 +49,7 @@ A path is the obvious design and it fails in four places at once. A transcript i
 often three different machines, none of which can open your `/tmp/shot.png`. Bytes survive all
 four; a path survives none.
 
-So the convenience lives at the *edge* instead. [`attach`](/api/javascript/content/attach/) reads
+So the convenience lives at the *edge* instead. [`attach`](/api/javascript/types/attach/) reads
 the file and base64s it **immediately**, which keeps the disk touch to one legible call at the
 place you actually have the file — rather than a lazy read that fires somewhere unknowable, or
 does not fire at all.

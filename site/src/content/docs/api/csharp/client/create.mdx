@@ -12,49 +12,180 @@ import { Aside } from '@astrojs/starlight/components';
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public sealed class LlmClient
+{
+    public static LlmClient Create(Options opts);
+
+    public sealed class Options
+    {
+        public string BaseUrl { get; set; } = "";
+        public string Style { get; set; } = "openai";  // "openai" | "anthropic"
+        public string Model { get; set; } = "";
+        public string? ApiKey { get; set; }             // from env if null
+        public IDictionary<string, string>? Headers { get; set; }
+        public string? SystemPrompt { get; set; }
+        public int? MaxTurns { get; set; }              // default 10
+        public Hooks? Hooks { get; set; }
+
+        // Resilience — see LlmClient.ErrorInfo
+        public int? Retries { get; set; }               // default 2
+        public IReadOnlyCollection<int>? RetryableStatuses { get; set; }
+        public int? RetryBaseMs { get; set; }           // default 500
+        public long? TimeoutMs { get; set; }            // whole-run deadline; null = none
+        public Func<ErrorInfo, Tier>? OnError { get; set; }
+
+        // Memory — see LlmClient.Conversation / IConversationStore
+        public IConversationStore? Store { get; set; }
+
+        // Observability — see MetricEvent
+        public Action<MetricEvent>? OnMetric { get; set; }
+
+        // Suspension (§10) — see LlmClient.WaitFor
+        public Func<Request, Task<Answer>>? WaitFor { get; set; }
+
+        // Request shaping (§8 Gap 1/2)
+        public IReadOnlyDictionary<string, object?>? RequestParams { get; set; }
+        public Func<IDictionary<string, object?>, IDictionary<string, object?>?>? BodyTransform { get; set; }
+        public HttpClient? HttpClient { get; set; }
+        public HttpMessageHandler? HttpHandler { get; set; }
+
+        // Multimodal parts (§1B / §8A)
+        public long? MaxPartBytes { get; set; }
+        public string? OnUnsupportedPart { get; set; }
+    }
+}
 ```
 
 The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+`LlmClient.Create` is the one entry point that turns a `BaseUrl` + `Style` + `Model` into a client
+that can run a [`Toolkit`](/api/csharp/toolkit/create/) to completion — everything else on
+`Options` is either required wiring (the four fields above) or an opt-in override of a documented
+default, with its own page for the deep dive.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `LlmClient.Create` whenever you need to talk to an LLM through the tool-calling loop —
+which is almost always, since [`RunAsync`](/api/csharp/client/run/) and
+[`StreamAsync`](/api/csharp/client/stream/) both hang off the client it returns. Point it at any
+OpenAI-shape endpoint (OpenAI itself, OpenRouter, a local vLLM/Ollama server) with
+`Style = "openai"`, or at Anthropic's Messages API with `Style = "anthropic"` — the client speaks
+both wire formats from the same options shape, so switching providers is a two-field change, not a
+rewrite.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Calling the provider's HTTP API directly">
+Skip `LlmClient` only when you genuinely want a raw request/response with no tool-calling loop —
+a one-shot completion, a health check, a place where you'd rather hand-roll retries yourself.
+The moment tools, streaming, suspension, or a multi-turn conversation enter the picture, those are
+exactly what `LlmClient` exists to give you for free: `Options` only ever *adds* behavior to a
+byte-identical baseline (no `Store` ⇒ default in-memory history; no `OnError` ⇒ the default
+retry-vs-fail classifier; no `WaitFor` ⇒ a suspension returns `Status = "pending"` instead of
+hanging), so leaving every optional field unset is itself a valid, fully-supported configuration.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — required fields only
 
-{/* TODO:example1 */}
 ```csharp
-// TODO
+using Toolnexus;
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = "https://openrouter.ai/api/v1",
+    Style = "openai",                       // or "anthropic"
+    Model = "anthropic/claude-3.5-sonnet",
+    ApiKey = Environment.GetEnvironmentVariable("OPENROUTER_API_KEY"),
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+var res = await client.RunAsync("List the files in the current folder, then summarise the README.", tk);
+Console.WriteLine(res.Text);
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — a bounded, observable run
 
-{/* TODO:example2 */}
 ```csharp
-// TODO
+using Toolnexus;
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = "https://api.openai.com/v1",
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY"),
+    SystemPrompt = "You are a careful, concise coding assistant.",
+    MaxTurns = 6,
+    Retries = 3,
+    TimeoutMs = 30_000,
+    OnMetric = ev => Console.Error.WriteLine($"[metric] {ev.Kind} {ev.Model}"),
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    McpConfig = "mcp.json",
+    SkillsDir = new[] { "skills" },
+});
+
+var res = await client.RunAsync("Triage the open issues and propose a fix plan.", tk);
+Console.WriteLine(res.Text);
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — every optional slot named
 
-{/* TODO:example3 */}
 ```csharp
-// TODO
+using Toolnexus;
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = "https://api.anthropic.com/v1",
+    Style = "anthropic",
+    Model = "claude-sonnet-4-5",
+    ApiKey = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY"),
+    Headers = new Dictionary<string, string> { ["anthropic-version"] = "2023-06-01" },
+    SystemPrompt = "You are the on-call triage agent.",
+    MaxTurns = 12,
+
+    // resilience — see LlmClient.ErrorInfo
+    Retries = 3,
+    RetryBaseMs = 500,
+    RetryableStatuses = new[] { 520, 521 },       // widen the default 429/500/502/503/504/529 set
+    TimeoutMs = 60_000,
+    OnError = info => info.Status == 402 ? LlmClient.Tier.Fail : LlmClient.Tier.Retry,
+
+    // memory — see LlmClient.Conversation / IConversationStore
+    Store = new MyDurableStore(),
+
+    // observability — see MetricEvent
+    OnMetric = ev => Metrics.Record(ev),
+
+    // suspension (§10) — see LlmClient.WaitFor
+    WaitFor = async request => await MyApprovalQueue.ResolveAsync(request),
+
+    // request shaping — see the "See also" pages below
+    RequestParams = new Dictionary<string, object?> { ["max_tokens"] = 8192 },
+    BodyTransform = body => { body["metadata"] = new { team = "triage" }; return body; },
+    HttpClient = MySharedHttpClient,
+
+    // multimodal parts (§1B/§8A)
+    MaxPartBytes = 5 * 1024 * 1024,
+    OnUnsupportedPart = "text",
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { McpConfig = "mcp.json" });
+var res = await client.RunAsync("go", tk);
+Console.WriteLine(res.Text);
 ```
 
 ## See also
 
+- [`Toolkit.CreateAsync`](/api/csharp/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list — the `tk` every example above passes to `RunAsync`.
 - [`LlmClient.RunAsync`](/api/csharp/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
 - [`LlmClient.StreamAsync`](/api/csharp/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
-- [`LlmClient.Hooks`](/api/csharp/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+- [`LlmClient.ErrorInfo`](/api/csharp/client/resilience/) — Classify an LLM error into retry/fail, bound a run with a deadline, and cancel cleanly.
+- [`LlmClient.IConversationStore`](/api/csharp/client/store/) — Swap in-memory history for your own store so a conversation survives a process restart.
 - [`LlmClient.Conversation`](/api/csharp/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.
+- [`MetricEvent`](/api/csharp/client/metrics/) — Emit one metric event per model call and per tool call: tokens, latency, outcome.
+- [`LlmClient.Hooks`](/api/csharp/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+- [`ProviderException`](/api/csharp/client/provider-error/) — The typed error a failed provider call raises, including the port-specific `RetryAfterMs` (milliseconds).

@@ -668,7 +668,7 @@ done = Toolnexus.Client.ask(resume, ticket_text, tk, ticket_id)
 </Tabs>
 
 <Aside type="note" title="Why this survives a restart">
-`Request` and `Answer` are **fixed-key, plain serializable data** across all six ports —
+`Request` and `Answer` are **fixed-key, plain serializable data** across all seven ports —
 not objects holding a live connection. That is the entire reason the durable posture works: the
 pending approval can sit in Postgres over a deploy, be rendered by a React queue written by another
 team, and be resolved by a different process in a different language.

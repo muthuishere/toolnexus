@@ -8,49 +8,233 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/client.go">golang/client.go</a>
 </p>
 
 ```go
-{/* TODO:signature */}
+func CreateClient(opts ClientOptions) *Client
+
+type ClientOptions struct {
+	BaseURL string
+	Style   ClientStyle // StyleOpenAI | StyleAnthropic
+	Model   string
+	APIKey  string // "" ⇒ read from OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY
+
+	Headers      map[string]string
+	SystemPrompt string
+	MaxTurns     int // 0 ⇒ 10
+
+	// ... the full option list is below
+}
 ```
 
-The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+`CreateClient` builds the host loop — the one entry point that turns a `Toolkit` (from
+`CreateToolkit`) plus a wire style into something that can hold a conversation, call tools, retry
+transient failures, and report what it did. Everything else in `client/` — `Run`, `Stream`,
+`Hooks`, `Conversation`, `MetricEvent`, `ErrorInfo`, `ProviderError` — is a facet of the `Client`
+this call returns.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Reach for `CreateClient` the moment you have a `Toolkit` and want the model to actually drive it —
+send a prompt, let the loop call tools until the model stops, and get back a result. It is the
+first call in almost every non-trivial example in this repo: `CreateToolkit` builds the tool list,
+`CreateClient` builds the thing that talks to the LLM and uses that list.
+
+`CreateClient` is required (not optional) the moment any of these are true: you want retries on a
+flaky provider, you want a running conversation across turns (`Store`/`Conversation`), you want
+hooks around model/tool calls, you want metrics, or you want streaming. Hand-rolling the OpenAI/
+Anthropic HTTP calls yourself gets you none of that for free.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Don't need the loop at all? Call the provider directly">
+`CreateClient` exists for the **tool-calling loop** — parallel/chained calls, retries, suspension
+resume, metrics. If you only need the toolkit's schema (`tk.ToOpenAI()` / `tk.ToAnthropic()` /
+`tk.ToGemini()`) to feed your own hand-rolled request/response cycle against a provider SDK you
+already use, skip `CreateClient` and call the provider yourself — the toolkit's adapters work
+standalone. Reach for `CreateClient` as soon as you want the loop to keep going after a tool call
+without you writing that loop.
 </Aside>
+
+`CreateClient` takes no `context.Context` and returns no error — construction is synchronous and
+cannot fail (no I/O happens here; the client is a plain struct with defaults filled in). Contexts
+are supplied per call, to `Run`/`Ask`/`Stream`, exactly where a real network request happens —
+mirroring `CreateToolkit`'s `ctx` argument, but scoped to each turn instead of the whole client's
+lifetime.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — one prompt, one turn
 
-{/* TODO:example1 */}
-```go
-// TODO
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer srv.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL,
+		Style:   toolnexus.StyleOpenAI,
+		Model:   "gpt-x",
+		APIKey:  "test-key",
+	})
+
+	res, err := client.Run(context.Background(), "hi", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("ok:", res.Text)
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — MCP + skills + a native tool, driven by the loop
 
-{/* TODO:example2 */}
+This is `golang/examples/agent/main.go`, run against the shared `examples/` fixtures — the same
+fixtures every port is tested on. `CreateToolkit` aggregates the tool sources; `CreateClient` is
+what actually calls them.
+
 ```go
-// TODO
+ctx := context.Background()
+tk, err := toolnexus.CreateToolkit(ctx, toolnexus.Options{
+	McpConfig: filepath.Join(root, "mcp.json"),
+	SkillsDir: []string{filepath.Join(root, "skills")},
+})
+if err != nil {
+	log.Fatal(err)
+}
+defer tk.Close()
+
+tk.Register(toolnexus.NativeToolReflect("add",
+	"Add two numbers and return the sum.",
+	func(_ context.Context, in addArgs) (string, error) {
+		return strconv.FormatFloat(in.A+in.B, 'f', -1, 64), nil
+	},
+))
+
+agent := toolnexus.CreateClient(toolnexus.ClientOptions{
+	BaseURL:      "https://openrouter.ai/api/v1",
+	Style:        toolnexus.StyleOpenAI,
+	Model:        os.Getenv("OPENROUTER_MODEL"),
+	APIKey:       os.Getenv("OPENROUTER_API_KEY"),
+	SystemPrompt: "You are a precise agent. Prefer issuing independent tool calls together in one step.",
+})
+
+res, err := agent.Run(ctx, "Add 2 and 3, then tell me the sum.", tk)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(res.Text, res.Turns, res.ToolCallCount)
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — every option at once
 
-{/* TODO:example3 */}
+Not all of these combine meaningfully in one real client, but this shows every field
+`ClientOptions` exposes, grouped by what it controls.
+
 ```go
-// TODO
+client := toolnexus.CreateClient(toolnexus.ClientOptions{
+	// Required: where and how to call the model.
+	BaseURL: "https://openrouter.ai/api/v1",
+	Style:   toolnexus.StyleOpenAI, // or toolnexus.StyleAnthropic
+	Model:   "openai/gpt-4o-mini",
+	APIKey:  os.Getenv("OPENROUTER_API_KEY"), // "" ⇒ env fallback chain
+	Headers: map[string]string{"X-Org": "acme"},
+
+	// Prompting + loop shape.
+	SystemPrompt: "You are a precise agent.",
+	MaxTurns:     10, // 0 ⇒ 10
+
+	// Resilience — see resilience.mdx and provider-error.mdx.
+	Retries:           2,                      // 0 ⇒ 2
+	RetryBaseMs:       500,                    // 0 ⇒ 500
+	RetryableStatuses: []int{520, 521},        // ADDED to the default set
+	TimeoutMs:         30_000,                 // whole-run deadline; 0 ⇒ none
+	OnError:           func(toolnexus.ErrorInfo) toolnexus.Tier { return toolnexus.TierRetry },
+	HTTPClient:        &http.Client{Timeout: 10 * time.Second},
+
+	// Memory across turns — see conversation.mdx and store.mdx.
+	Store: myPersistentStore,
+
+	// Observability — see metrics.mdx.
+	OnMetric: func(ev toolnexus.MetricEvent) { forwardToStatsd(ev) },
+
+	// Interception — see hooks.mdx.
+	Hooks: &toolnexus.Hooks{
+		BeforeToolCall: func(ctx context.Context, call toolnexus.ToolCall) (*toolnexus.ToolCall, error) {
+			return &call, nil
+		},
+	},
+
+	// §10 suspension resolver — resumes a tool that returned metadata.pending.
+	WaitFor: func(req toolnexus.Request) (toolnexus.Answer, error) {
+		return promptTheUser(req)
+	},
+
+	// Request shaping (§8 gaps) — merge extra body keys or rewrite the body
+	// just before it is sent, without a proxy in front of the provider.
+	RequestParams: map[string]any{"max_tokens": 4096},
+	BodyTransform: func(body map[string]any) map[string]any {
+		body["stream_options"] = map[string]any{"include_usage": true}
+		return body
+	},
+
+	// Multimodal content parts (§1B/§8A).
+	MaxPartBytes:      0, // 0 ⇒ DefaultMaxPartBytes
+	OnUnsupportedPart: "", // "" default | "error" | "text"
+})
 ```
+
+## Options
+
+The required fields are `BaseURL`, `Style`, `Model`, and `APIKey` (or an env var fallback). Every
+other field has a documented zero-value default, so an empty `ClientOptions{}` beyond those four
+is a valid, minimal client.
+
+| Field | Type | What it does |
+|---|---|---|
+| `BaseURL` | `string` | The provider endpoint to call. |
+| `Style` | `ClientStyle` | `StyleOpenAI` \| `StyleAnthropic` — selects the wire format. |
+| `Model` | `string` | The model id sent with every request. |
+| `APIKey` | `string` | `""` ⇒ read from `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`. Never printed. |
+| `Headers` | `map[string]string` | Extra request headers. |
+| `SystemPrompt` | `string` | Prepended to the toolkit's `SkillsPrompt()`. |
+| `MaxTurns` | `int` | Caps the tool-calling loop. `0` ⇒ 10. |
+| `Retries`, `RetryBaseMs`, `RetryableStatuses` | resilience | Transient-failure retry budget and backoff. See [`ErrorInfo`](/api/go/client/resilience/). |
+| `TimeoutMs` | `int` | Whole-run deadline in ms. `0` ⇒ no deadline. |
+| `OnError` | `func(ErrorInfo) Tier` | Classify a failed LLM attempt as retry or fail. `nil` ⇒ default classifier. See [`ErrorInfo`](/api/go/client/resilience/). |
+| `HTTPClient` | `*http.Client` | Overrides the client used for LLM requests. `nil` ⇒ `http.DefaultClient`. |
+| `Store` | `ConversationStore` | Conversation provider for `Ask(prompt, id)`. `nil` ⇒ in-memory. See [`Conversation`](/api/go/client/conversation/) and [`NewInMemoryConversationStore`](/api/go/client/store/). |
+| `OnMetric` | `func(MetricEvent)` | Semantic observability sink, one event per LLM/tool/run. See [`MetricEvent`](/api/go/client/metrics/). |
+| `Hooks` | `*Hooks` | Lifecycle callbacks before/after model and tool calls. See [`Hooks`](/api/go/client/hooks/). |
+| `WaitFor` | `func(Request) (Answer, error)` | §10 suspension resolver; resumes a tool whose result carries `metadata.pending`. |
+| `RequestParams` | `map[string]any` | Extra top-level keys shallow-merged into every request body; wins on collision. |
+| `BodyTransform` | `func(map[string]any) map[string]any` | Rewrites the assembled body just before marshal, on every LLM call. |
+| `MaxPartBytes` | `int` | Caps a content part's decoded byte length. `0` ⇒ `DefaultMaxPartBytes`. |
+| `OnUnsupportedPart` | `string` | `""` default (attached parts error, tool/MCP-derived parts degrade) \| `"error"` \| `"text"`. |
+
+A non-2xx provider response surfaces as a typed [`ProviderError`](/api/go/client/provider-error/),
+regardless of which of the options above is set.
 
 ## See also
 
@@ -58,3 +242,6 @@ _TODO: name the alternative and when to prefer it._
 - [`Client.Stream`](/api/go/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
 - [`Hooks`](/api/go/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
 - [`Conversation`](/api/go/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.
+- [`ErrorInfo`](/api/go/client/resilience/) — Classify an LLM error into retry / fail, bound a run with a deadline, and cancel cleanly.
+- [`ProviderError`](/api/go/client/provider-error/) — A non-2xx response from the model endpoint raises a typed provider error.
+- [`MetricEvent`](/api/go/client/metrics/) — Emit one metric event per model call and per tool call: tokens, latency, outcome.

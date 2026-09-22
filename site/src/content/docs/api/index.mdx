@@ -131,6 +131,11 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
 </TabItem>
 </Tabs>
 
+Two more options prune the assembled toolkit after the sources above have run: `disableTools` drops
+tools by their final exposed name, `disableSkills` drops skills by name from the `skill` catalog —
+both cheaper than filtering at the source. See
+[`toolkit/create`](/api/javascript/toolkit/create/) for the full field list per language.
+
 ## Skills — load, supply as data, filter, inventory
 
 Directories, in-memory `SkillDef`s, and a lazy provider all compose (first-wins dedupe). See the
@@ -361,20 +366,21 @@ tools = Toolnexus.Adapters.to_openai(tk.tools)   # to_anthropic · to_gemini
 <TabItem label="JavaScript">
 ```ts
 import { createClient } from "toolnexus"
-const client = createClient({ model: "gpt-5", baseURL: "…", apiKey: "…" })
-const res = await client.ask("…", tk)
+const client = createClient({ style: "openai", model: "gpt-5", baseUrl: "…", apiKey: "…" })
+const res = await client.ask("…", { toolkit: tk })
 ```
 </TabItem>
 <TabItem label="Python">
 ```python
 from toolnexus import create_client
-client = create_client(model="gpt-5", base_url="…", api_key="…")
+client = create_client(style="openai", model="gpt-5", base_url="…", api_key="…")
 res = await client.ask("…", tk)
 ```
 </TabItem>
 <TabItem label="Go">
 ```go
 client := toolnexus.CreateClient(toolnexus.ClientOptions{
+    Style:   "openai",
     Model:   "gpt-5",
     BaseURL: "…",
     APIKey:  "…",
@@ -384,7 +390,8 @@ res, _ := client.Ask(ctx, "…", tk, "")
 </TabItem>
 <TabItem label="Java">
 ```java
-Client client = Client.create(new Client.Options()
+LlmClient client = LlmClient.create(new LlmClient.Options()
+        .style("openai")
         .model("gpt-5")
         .baseUrl("…")
         .apiKey("…"));
@@ -393,7 +400,8 @@ var res = client.ask("…", tk);
 </TabItem>
 <TabItem label="C#">
 ```csharp
-var client = Client.Create(new Client.Options {
+var client = LlmClient.Create(new LlmClient.Options {
+    Style = "openai",
     Model = "gpt-5",
     BaseUrl = "…",
     ApiKey = "…",
@@ -419,6 +427,30 @@ res = Toolnexus.Client.run(client, "…", tk)
 ```
 </TabItem>
 </Tabs>
+
+`ClientOptions` carries more than `style`/`model`/`baseUrl`/`apiKey` — the rest of the surface, by area:
+
+- **Resilience** — `retries`, `retryBaseMs`, `retryableStatuses`, `onError`, `timeoutMs`: the
+  retry/backoff/classification layer around transient LLM errors. See
+  [`client/resilience`](/api/javascript/client/resilience/).
+- **Conversation memory** — a `ConversationStore` (in-memory by default) keyed by `ask`'s `id`, so a
+  second `ask` with the same id continues the transcript. See
+  [`client/store`](/api/javascript/client/store/) and [`client/conversation`](/api/javascript/client/conversation/).
+- **Observability** — `onMetric` reports per-call token/cost/latency metrics as the loop runs. See
+  [`client/metrics`](/api/javascript/client/metrics/).
+- **Streaming** — `stream()` yields `StreamEvent`s instead of a single `RunResult`. See
+  [`client/stream`](/api/javascript/client/stream/).
+- **Hooks** — `beforeLLM`/`beforeTool` run ahead of each request/tool call and can veto or rewrite it.
+  See [`client/hooks`](/api/javascript/client/hooks/).
+- **Request shaping** — `requestParams`, `bodyTransform`, and a custom `fetch` reshape or intercept
+  the outbound HTTP call itself (SPEC §8). See [`client/create`](/api/javascript/client/create/).
+- **Multimodal content** — `ContentPart` and `attach()` let a prompt carry images/files alongside
+  text. See [`types/content-part`](/api/javascript/types/content-part/) and
+  [`types/attach`](/api/javascript/types/attach/).
+- **Typed provider errors** — failed LLM calls raise a typed error with the redacted response body
+  attached, not a bare exception. See [`client/provider-error`](/api/javascript/client/provider-error/).
+- **Classifier (§8B)** — a lighter-weight `Classifier` for yes/no and multiple-choice decisions that
+  don't need the full tool-calling loop. See [`judge/classifier`](/api/javascript/judge/classifier/).
 
 ## Your own functions — native tools
 
@@ -718,6 +750,12 @@ as parity debt (see the [Clojure API page](/api/clojure/)). The cross-process fo
 does ship is **A2A remote agents** (below): expose a toolkit with `toolnexus.serve/serve` and consume
 a peer with `toolnexus.a2a/remote-agent`.
 </Aside>
+
+Underneath `agents.agent`/`team` sits the actual run loop: a gated `Loop` that only calls the model
+again when a `Guardrail` says the turn isn't a real `Completion` yet (e.g. all todos aren't `done`).
+`loopUnsupported` names the ports/configurations where a given loop shape isn't wired up, instead of
+silently no-op'ing. See the [harness](/harness/) guide for the concept and
+[`runtime/loop`](/api/javascript/runtime/loop/) for the per-language surface.
 
 ## A2A — serve inbound, consume remote agents
 

@@ -48,7 +48,7 @@ interface TranslateResult {
 **one** provider call ([`style: "openai"` or `style: "anthropic"`](/api/javascript/client/create/)
 on the same `Client`), OpenAI shapes out. No agent loop, no tool execution, no conversation state
 — every call is self-contained, so it may be run statelessly and concurrently. It is the
-**inbound** half of the [adapters](/api/javascript/adapters/to-openai/): those send tool
+**inbound** half of the [adapters](/api/javascript/adapters/openai/): those send tool
 declarations *out*; this reads the provider's tool calls back *in*.
 
 ## When to use it

@@ -1,0 +1,188 @@
+---
+title: "AnswerDeclined"
+description: "Wraps a human's refusal into the Answer a suspended run resumes with, carrying a reason string that defaults to \"declined\". — Go."
+sidebar:
+  label: "AnswerDeclined"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/relay.go">golang/relay.go</a>
+</p>
+
+```go
+func AnswerDeclined(id, reason string) Answer // reason == "" ⇒ "declined"
+
+type Answer struct {
+	ID     string         `json:"id"`
+	Ok     bool           `json:"ok"`              // false here — a refusal, not an error
+	Data   map[string]any `json:"data,omitempty"`
+	Reason string         `json:"reason,omitempty"`
+}
+```
+
+`AnswerDeclined(id, reason)` builds the `Answer` a host returns when a human — or the host itself
+— **refused** the suspended request: no payload, `Ok: false`, and a `Reason` the loop feeds back to
+the model. An empty `reason` defaults to `"declined"` rather than an empty string, so the model
+never sees a refusal with nothing attached to explain it.
+
+A declined relay is an **error tool_result, not an aborted run** (§10, ADR-0010 D6): the run keeps
+going, the model reads the refusal in its next turn, and can recover — try something else, ask a
+follow-up, or report back to the user that access was denied.
+
+## When to use it
+
+Reach for `AnswerDeclined` any time the party who would resolve a suspension says no: a human
+declines an approval prompt, a login was cancelled, a durable request expired unanswered and you
+want to close it out explicitly rather than leave it parked forever. Pass it to whichever resume
+path you're using — inline as the return value of a `WaitFor` function, or out-of-band via
+[`Runtime.Resume`](/api/go/suspension/resume/) / `Client.RunWithAnswer`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="The tool succeeded, just with a real answer? Use AnswerOutput">
+`AnswerDeclined` is specifically for a **refusal** — nobody produced a result. When the human (or
+the executed tool) *did* produce a value and you want to hand it back as a success, reach for
+[`AnswerOutput`](/api/go/suspension/answer-output/) instead: `Ok: true` plus the output string,
+not `Ok: false` plus a reason. Building `Answer{ID: id, Ok: false}` by hand still works — the
+constructor changes nothing about the wire shape — but then you own remembering to default the
+empty-reason case yourself, which is the one behavior `AnswerDeclined` exists to fix in one place
+rather than at every call site (DECISIONS A9).
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — build the Answer and inspect its shape
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	ans := toolnexus.AnswerDeclined("req-1", "not authorized")
+
+	if ans.ID != "req-1" || ans.Ok {
+		log.Fatalf("unexpected answer: %+v", ans)
+	}
+	if ans.Reason != "not authorized" {
+		log.Fatalf("Reason = %q, want %q", ans.Reason, "not authorized")
+	}
+
+	// An empty reason defaults rather than shipping blank.
+	def := toolnexus.AnswerDeclined("req-2", "")
+	if def.Reason != "declined" {
+		log.Fatalf("default Reason = %q, want %q", def.Reason, "declined")
+	}
+
+	fmt.Println("ok:", ans.Reason, "/", def.Reason)
+}
+```
+
+### 2. The realistic case — decline a relayed tool call and let the run finish anyway
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"refund","arguments":"{}"}}]}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"understood, no refund issued"}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`))
+	}))
+	defer srv.Close()
+
+	refund := toolnexus.RelayTool("refund", "issue a refund", nil)
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false, ExtraTools: []toolnexus.Tool{refund}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "stub", APIKey: "k"})
+
+	halted, err := client.Run(context.Background(), "refund the customer", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if halted.Status != "pending" {
+		log.Fatalf("expected a durable halt, got %q", halted.Status)
+	}
+
+	// The approver said no — the run still completes, it just knows it was refused.
+	resumed, err := client.RunWithAnswer(context.Background(), tk, halted.Messages, *halted.Pending,
+		toolnexus.AnswerDeclined(halted.Pending.ID, "amount exceeds refund policy"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if resumed.Status != "done" || !strings.Contains(resumed.Text, "no refund") {
+		log.Fatalf("unexpected: %+v", resumed)
+	}
+
+	fmt.Println("ok:", resumed.Text)
+}
+```
+
+### 3. The full surface — comparing a decline against a successful answer for the same call
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	declined := toolnexus.AnswerDeclined("req-1", "")
+	output := toolnexus.AnswerOutput("req-1", "approved")
+
+	if declined.Ok {
+		log.Fatal("a decline must carry Ok:false")
+	}
+	if !output.Ok {
+		log.Fatal("a real output must carry Ok:true")
+	}
+	if declined.Data != nil {
+		log.Fatalf("a decline carries no payload, got %+v", declined.Data)
+	}
+	if output.Reason != "" {
+		log.Fatalf("a success carries no Reason, got %q", output.Reason)
+	}
+
+	fmt.Println("ok: declined.Ok =", declined.Ok, "output.Ok =", output.Ok)
+}
+```
+
+## See also
+
+- [`Pending`](/api/go/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`AuthRequired`](/api/go/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`WaitFor`](/api/go/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`PendingOf`](/api/go/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`AnswerOutput`](/api/go/suspension/answer-output/) — The success counterpart: wrap a real result instead of a refusal.
+- [`Runtime.Resume` / `RunWithAnswer`](/api/go/suspension/resume/) — Where a built `Answer` actually gets applied to a halted run.

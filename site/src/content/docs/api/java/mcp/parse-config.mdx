@@ -19,8 +19,29 @@ Parse and validate config without connecting — the fast fail for a malformed o
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Every other port exposes `parseConfig`/`parseMcpConfig` as a public, synchronous, no-I/O function
+so a host can validate or inspect an `mcp.json` before spending a connection on it. Java's
+`McpSource` has the identical logic (`McpSource.java:141` — accept a path, a raw JSON string, or
+a parsed `Map`; unwrap `mcpServers`/`servers`/`mcp`; strip the sibling `builtins`/`agents`/`a2a`/
+`mcpServer` keys off a bare server map), but the method itself is package-private. There is no
+supported way to call it from outside `io.github.muthuishere.toolnexus` — this is a real gap, not
+a naming difference like C#'s `ParseConfig`.
+
+The closest available outcome is to let [`McpSource.load`](/api/java/mcp/load/) (or
+[`Toolkit.create`](/api/java/toolkit/create/) via `mcpConfig(...)`) parse the config as part of
+connecting, and read the result back through `status()` — every server name in the config shows
+up there as `"connected"`, `"failed"`, or `"disabled"`, which is enough to catch a misspelled
+server block or a bad wrapper key without hand-rolling a second parser. If you genuinely need the
+config as *data* — to filter servers, inject a header, or validate in a test with no network at
+all — disable every server first (`"enabled": false`) and read `load(...).status()`; a bad JSON
+shape still throws before any connection is attempted, so the fast-fail behavior is preserved even
+without the public function.
+
+<Aside type="tip" title="Track it, don't work around it silently">
+If your use case genuinely needs the config as a `Map` (rewriting servers, diffing two configs),
+that is a legitimate gap in the Java port — file it rather than reimplementing the unwrap logic
+against `McpSource.java:141`, since the sibling-key stripping list can drift if duplicated.
+</Aside>
 
 ## See also
 

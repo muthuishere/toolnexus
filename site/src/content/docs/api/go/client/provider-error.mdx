@@ -1,0 +1,236 @@
+---
+title: "ProviderError"
+description: "A non-2xx response from the model endpoint raises a typed provider error carrying the status code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception. — Go."
+sidebar:
+  label: "ProviderError"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```go
+type ProviderError struct {
+	Status     int    // the HTTP status of the failed response
+	Body       string // whole body, already redacted; NOT capped (Error() caps it)
+	RetryAfter string // the raw Retry-After header, empty when absent
+}
+
+func (e *ProviderError) Error() string // "LLM <status>: <redacted+capped body>"
+
+// RedactProviderBody(status int, body string) string — the standalone policy fn,
+// for a host that logs its own provider calls and wants the same redaction.
+const RedactedMarker = "«redacted»" // U+00AB / U+00BB
+```
+
+A non-2xx response from the model endpoint raises a typed `*ProviderError` carrying the status
+code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception a
+host has to string-match. It is built by the internal `newProviderError(status, body, retryAfter)`
+at every place a request fails against the provider, so the shape is the same whether the failure
+came from OpenAI, Anthropic or a proxy in front of either.
+
+## When to use it
+
+Reach for `*ProviderError` any time you need to branch on **why** an LLM call failed rather than
+just knowing that it did: rate limiting (429) with `RetryAfter`, a billing failure (402), an
+account-suspended body worth surfacing to an operator, or simply deciding whether a failure is
+retryable. Match it with `errors.As` on whatever `error` your `Client.Run`/`Ask`/`Stream` call
+returned — it is a plain Go error value, not a panic and not a sentinel string.
+
+```go
+var pe *toolnexus.ProviderError
+if errors.As(err, &pe) && pe.Status == 429 {
+    // pe.RetryAfter is the raw header value, e.g. "20" or an HTTP-date
+}
+```
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Just logging the error? Body is already safe to print">
+You don't need to build your own redaction pass before logging `pe.Body` or `pe.Error()` — both
+already have account identifiers (`user_id`, `account_id`, `org_id`, `organization`) replaced with
+`«redacted»`, and a 401/403 body is dropped to `""` entirely (ADR 0027: an auth failure routinely
+echoes back the credential or header that was sent). `pe.Error()` additionally caps the rendered
+message at 200 characters; the typed `Body` field is uncapped, so a host that explicitly reached
+for the struct gets the whole (still-redacted) body if it wants more than the message shows. If you
+log your **own** provider calls outside this client, call the exported
+`toolnexus.RedactProviderBody(status, body)` directly rather than re-deriving the same two rules
+differently.
+</Aside>
+
+A `*ProviderError` is what you get back from `Run`/`Ask`/`Stream` **after** retries are exhausted.
+While a call is still being retried, [`Resilience`](/api/go/client/resilience/)'s `OnError(info)`
+sees the same `Status` as a plain int on `ErrorInfo`, not yet wrapped — the two features classify
+the identical failure at two different points (mid-retry vs. final return), rather than each
+inventing its own status representation.
+
+## Examples
+
+### 1. The smallest useful call — match the type and read `Status`
+
+```go test
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"rate limited"}`))
+	}))
+	defer srv.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "stub", APIKey: "k",
+		Retries: -1, RetryBaseMs: 1,
+	})
+	_, err = client.Run(context.Background(), "hi", tk)
+
+	var pe *toolnexus.ProviderError
+	if !errors.As(err, &pe) {
+		log.Fatalf("expected a *ProviderError, got %T: %v", err, err)
+	}
+	if pe.Status != 429 {
+		log.Fatalf("Status = %d, want 429", pe.Status)
+	}
+
+	fmt.Println("ok: status", pe.Status)
+}
+```
+
+### 2. The realistic case — reading `RetryAfter` to back off
+
+```go test
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "20")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"rate limited"}`))
+	}))
+	defer srv.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "stub", APIKey: "k",
+		Retries: -1, RetryBaseMs: 1,
+	})
+	_, err = client.Run(context.Background(), "hi", tk)
+
+	var pe *toolnexus.ProviderError
+	if !errors.As(err, &pe) {
+		log.Fatal("expected a *ProviderError")
+	}
+	if pe.RetryAfter != "20" {
+		log.Fatalf("RetryAfter = %q, want %q", pe.RetryAfter, "20")
+	}
+
+	fmt.Println("ok: retry after", pe.RetryAfter, "seconds")
+}
+```
+
+### 3. The full surface — an account-identifier body gets redacted, an auth body gets dropped
+
+```go test
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		if turn == 1 {
+			// A 500 with an account_id in the body: redacted, not dropped.
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"internal","account_id":"acct_12345"}`))
+			return
+		}
+		// A 401: the whole body is dropped, since it routinely echoes the credential.
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid api key sk-abc123"}`))
+	}))
+	defer srv.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "stub", APIKey: "k",
+		Retries: -1, RetryBaseMs: 1,
+	})
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	_, err = client.Run(context.Background(), "hi", tk)
+	var pe *toolnexus.ProviderError
+	if !errors.As(err, &pe) {
+		log.Fatal("expected a *ProviderError")
+	}
+	if strings.Contains(pe.Body, "acct_12345") || !strings.Contains(pe.Body, toolnexus.RedactedMarker) {
+		log.Fatalf("account_id must be redacted, got: %s", pe.Body)
+	}
+
+	_, err = client.Run(context.Background(), "hi", tk)
+	if !errors.As(err, &pe) {
+		log.Fatal("expected a *ProviderError")
+	}
+	if pe.Body != "" {
+		log.Fatalf("a 401 body must be dropped in full, got: %q", pe.Body)
+	}
+
+	fmt.Println("ok: redacted, and auth body dropped")
+}
+```
+
+## See also
+
+- [`CreateClient`](/api/go/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.Run`](/api/go/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Client.Stream`](/api/go/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Hooks`](/api/go/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+- [`Resilience`](/api/go/client/resilience/) — The retry/fail policy that classifies the same status mid-retry, before it would ever become a `*ProviderError`.

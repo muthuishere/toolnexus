@@ -1,0 +1,221 @@
+---
+title: "ofFile"
+description: "The authoring side of multimodal content: constructors that turn a path, bytes, a blob, a data URL, or a remote URL into the ContentPart a prompt or tool result carries — the write half of the read-only ContentPart shape. — Java."
+sidebar:
+  label: "ofFile"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/ContentPart.java">ContentPart.java</a>
+</p>
+
+```java
+// Edge constructors — read now, base64 now, store no handle.
+public static ContentPart ofFile(Path path);                       // + (Path, String mimeType)
+public static ContentPart ofFile(java.io.File file);                // + (File, String mimeType)
+public static ContentPart ofStream(InputStream in, String mimeType);
+public static ContentPart ofStream(InputStream in, String name, String mimeType);
+public static ContentPart ofBytes(String type, String mimeType, byte[] bytes);
+public static ContentPart ofBase64(String type, String mimeType, String base64);
+public static ContentPart ofUrl(String type, String url);          // + (type, mimeType, url)
+
+// Checked siblings, for callers who want IOException on the signature.
+public static ContentPart ofFileChecked(Path path) throws IOException;       // + File, + mimeType
+public static ContentPart ofStreamChecked(InputStream in, String mimeType) throws IOException;
+
+// Named shorthands, from raw bytes.
+public static ContentPart image(String mimeType, byte[] bytes);
+public static ContentPart audio(String mimeType, byte[] bytes);
+public static ContentPart file(String mimeType, byte[] bytes, String name);
+
+public long bytes();  // DECODED byte length — what .text() is to a text part
+
+// LlmClient.Options — what happens when a style can't represent a part
+public Options onUnsupportedPart(String v); // "error" | "text" | null (by provenance)
+```
+
+The authoring side of multimodal content: constructors that turn a path, bytes, a blob (an
+`InputStream`), a `data:` URL, or a remote `https:` URL into the `ContentPart` a prompt or tool
+result carries — the write half of the read-only [`ContentPart`](/api/java/types/content-part/)
+shape. Every edge constructor **accepts broadly and stores narrowly**: `ofFile`/`ofStream` read the
+source **eagerly, right now**, and the resulting part holds only `mimeType` + base64 `data` — never
+a `Path`, a `File`, or an open stream. A path or a half-read stream does not survive a persisted
+transcript, a subagent handoff, or an A2A boundary; base64 bytes do.
+
+Mime type comes from a **fixed** extension table (`png jpg jpeg gif webp pdf mp3 wav`) — never
+sniffed from content, never read from a platform mime database (`/etc/mime.types` varies per
+machine, which would break cross-port parity). An extension outside that table is an
+`IllegalArgumentException` **naming the extension**; the escape hatch is passing an explicit
+`mimeType`, never silent `application/octet-stream`.
+
+There are always **two spellings** of each reader: `ofFile`/`ofStream` throw `UncheckedIOException`
+(so a literal-argument call like `ContentPart.ofFile(Path.of("shot.png"))` doesn't force a
+`try`/`catch`, matching the precedent `Files.lines`/`Files.walk` already set), and
+`ofFileChecked`/`ofStreamChecked` are the identical calls with `throws IOException` on the
+signature, for code that wants the checked form.
+
+## When to use it
+
+Two places, and they are the same `ContentPart` type on both ends:
+
+- **Attaching** an image, a PDF, or an audio clip to a run — `LlmClient` takes a
+  `List<ContentPart>` wherever it takes a `String` prompt (`run`, `stream`, `ask`, `send`). Reach
+  for `ofFile`/`ofFile(File)` for something already on disk, `ofStream` for an in-memory or
+  network source you're already holding as a stream, `ofBytes`/`image`/`audio`/`file` for raw
+  `byte[]` you already have, and `ofUrl` for a remote asset the provider itself should fetch.
+- **Returning** one from a tool — [`ToolResult`](/api/java/types/tool-result/) has a `parts` list,
+  so a screenshot tool hands back the image itself rather than a description of it.
+
+Reach for `Options.onUnsupportedPart` on the client side when a provider *style* (e.g. one that
+can't represent `audio`) meets a part it cannot send: leave it `null` for the default
+provenance-based behaviour, set `"error"` to always fail fast at request assembly, or `"text"` to
+always degrade to a placeholder instead of ever throwing.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="A part never holds a path — and that is not a style choice">
+The obvious design is to keep the `Path` and read it lazily when the request is assembled. It
+breaks the moment the message stops being in-process: a transcript persisted by a
+`ConversationStore`, replayed later, handed to a subagent, served over `toolkit.serve`, or forwarded
+to an A2A peer all put the path on the far side of a boundary where it names a file that is not
+there, or worse, a different one. So the edge constructors normalise **at construction** instead —
+read now, base64 now, store narrowly. This is also why a stream is read **eagerly**: a half-read
+stream survives the transcript boundary no better than a path does, and it is **not closed** by
+`ofStream` — the caller opened it, so the caller's `try`-with-resources still governs its lifetime.
+</Aside>
+
+<Aside type="note" title="onUnsupportedPart: error for what YOU attached, text for what a tool handed you">
+Left at its default (`null`), the client's behaviour is by **provenance**: a part the *caller*
+attached to the prompt fails loudly (`"error"`) — you asked for something the provider style can't
+carry, and silently dropping it would be a worse bug than an exception. A part that arrived from a
+*tool or MCP result* degrades to a text placeholder instead, because failing the whole run because
+a server volunteered an audio clip the style can't represent would be a regression, not a safety
+feature. Override with `"error"` or `"text"` only when you want ONE behaviour unconditionally,
+regardless of where the part came from.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — a file path becomes an attachable ContentPart
+
+```java test
+import io.github.muthuishere.toolnexus.ContentPart;
+import java.nio.file.Path;
+import java.util.List;
+
+public class Example {
+    public static void main(String[] args) {
+        Path fixture = Path.of("examples/media/fixture.png");
+
+        // This is the shape LlmClient.run(List<ContentPart>, toolkit) takes.
+        List<ContentPart> prompt = List.of(
+            ContentPart.text("What colour is the top-left quadrant?"),
+            ContentPart.ofFile(fixture)   // read now, base64 now — the part holds no path
+        );
+
+        ContentPart image = prompt.get(1);
+        if (!image.type().equals("image")) throw new AssertionError(image.type());
+        if (!image.mimeType().equals("image/png")) throw new AssertionError(image.mimeType());
+        if (image.bytes() <= 0) throw new AssertionError("expected decoded bytes: " + image.bytes());
+
+        System.out.println("ok: " + image.describe());
+    }
+}
+```
+
+### 2. The realistic case — a tool returns a screenshot it captured in memory
+
+A tool that never touches the filesystem hands back the bytes it already has, via the raw-`byte[]`
+shorthand, rather than round-tripping through a temp file just to call `ofFile`.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    static byte[] fakeScreenshotBytes() {
+        return new byte[]{(byte) 0x89, 'P', 'N', 'G'}; // stands in for a captured PNG
+    }
+
+    public static void main(String[] args) {
+        Tool screenshot = new Tool() {
+            @Override public String name() { return "screenshot"; }
+            @Override public String description() { return "Capture the current screen."; }
+            @Override public Map<String, Object> inputSchema() {
+                return Map.of("type", "object", "properties", Map.of());
+            }
+            @Override public String source() { return "custom"; }
+            @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
+                ContentPart shot = ContentPart.image("image/png", fakeScreenshotBytes());
+                return new ToolResult("screenshot captured", false, null, List.of(shot));
+            }
+        };
+
+        ToolResult result = screenshot.execute(Map.of(), null);
+        if (result.isError()) throw new AssertionError(result);
+        if (result.parts() == null || result.parts().size() != 1) throw new AssertionError(result.parts());
+        if (!result.parts().get(0).type().equals("image")) throw new AssertionError(result.parts());
+
+        System.out.println("ok: tool returned " + result.parts().get(0).describe());
+    }
+}
+```
+
+### 3. The full surface — every source normalises the same, and unknown extensions are refused
+
+```java test
+import io.github.muthuishere.toolnexus.ContentPart;
+import java.io.ByteArrayInputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+public class Example {
+    static String rejects(Runnable r) {
+        try {
+            r.run();
+        } catch (IllegalArgumentException e) {
+            return e.getMessage();
+        }
+        throw new AssertionError("expected a rejection");
+    }
+
+    public static void main(String[] args) throws Exception {
+        Path fixture = Path.of("examples/media/fixture.png");
+        byte[] bytes = Files.readAllBytes(fixture);
+
+        ContentPart fromPath = ContentPart.ofFile(fixture);
+        ContentPart fromBytes = ContentPart.image("image/png", bytes);
+        ContentPart fromStream = ContentPart.ofStream(new ByteArrayInputStream(bytes), "image/png");
+        ContentPart fromDataUrl = ContentPart.ofUrl("image",
+                "data:image/png;base64," + java.util.Base64.getEncoder().encodeToString(bytes));
+        ContentPart fromUrl = ContentPart.ofUrl("image", "image/png", "https://example.com/a.png");
+
+        // Four in-process sources normalise to the identical bytes; the fifth stays a url.
+        for (ContentPart p : java.util.List.of(fromPath, fromBytes, fromStream, fromDataUrl)) {
+            if (!p.data().equals(fromPath.data())) throw new AssertionError("differs: " + p);
+            if (p.url() != null) throw new AssertionError("data and url are exclusive");
+        }
+        if (fromUrl.data() != null) throw new AssertionError("a remote https: URL keeps url(), not data()");
+        if (!fromUrl.url().equals("https://example.com/a.png")) throw new AssertionError(fromUrl.url());
+
+        // An unknown extension is refused BY NAME — never a silent application/octet-stream.
+        String unknown = rejects(() -> ContentPart.ofFile(Path.of("notes.xyz")));
+        if (!unknown.contains("\"xyz\"")) throw new AssertionError(unknown);
+        // The escape hatch is an explicit mimeType, not sniffing:
+        ContentPart withMime = ContentPart.ofFile(Path.of("notes.xyz"), "text/plain");
+        if (!withMime.mimeType().equals("text/plain")) throw new AssertionError(withMime.mimeType());
+
+        System.out.println("ok: 4 in-process sources identical, url kept as url, unknown ext named");
+    }
+}
+```
+
+## See also
+
+- [`ContentPart`](/api/java/types/content-part/) — The read-only shape these constructors produce: `text | image | file | audio`, carrying base64 bytes or a URL plus a mimeType.
+- [`Tool`](/api/java/types/tool/) — The uniform shape every tool source collapses to: name, description, JSON-Schema parameters, execute.
+- [`ToolResult`](/api/java/types/tool-result/) — The result envelope: output text, optional error flag, optional non-text parts, and optional metadata that can carry a suspension.
+- [`ToolContext`](/api/java/types/context/) — Optional per-call context handed to execute: cancellation, identity, and host-supplied state.

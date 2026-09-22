@@ -1,0 +1,216 @@
+---
+title: "LlmClient.ProviderException"
+description: "A non-2xx response from the model endpoint raises a typed provider error carrying the status code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception. — Java."
+sidebar:
+  label: "LlmClient.ProviderException"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/LlmClient.java">LlmClient.java</a>
+</p>
+
+```java
+public static final class ProviderException extends RuntimeException {
+    public final int status;        // the HTTP status the provider answered with
+    public final String body;       // redacted, NOT capped — the whole thing (A5)
+    public final String retryAfter; // the raw Retry-After header value, or null
+}
+```
+
+A non-2xx response from the model endpoint raises a typed provider error carrying the status
+code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception.
+`ProviderException` is nested inside `LlmClient` (`LlmClient.java:332`) and built by the private
+`providerError(status, rawBody, retryAfter)` factory (`:350`) from every non-2xx response the
+client sees.
+
+Before the exception is ever constructed, the body goes through the ONE error-body policy shared
+by the §8 client path and the §8B classifier path (`redactErrorBody()`, `:300`):
+
+1. a `401`/`403` body is **blanked outright** — a gateway routinely reflects the very
+   `Authorization` header it just rejected back into its own error text;
+2. account identifiers (`user_id`, `account_id`, `org_id`, `organization`) are replaced with the
+   constant `LlmClient.REDACTED` (`«redacted»`, `:279`) — the key stays so a reader can see
+   *which* identifier was withheld, only the value goes;
+3. the exception's `getMessage()` is additionally capped at `LlmClient.ERROR_BODY_CAP` (`200`
+   characters, `:287`) — but `ProviderException.body` itself is **never truncated** (ADR 0027).
+   A cap is a message-display policy; redaction is a leak policy. They are separate for a reason:
+   a host that opted into the typed field asked for the whole (redacted) body, not a preview of it.
+
+## When to use it
+
+Catch `LlmClient.ProviderException` whenever a host needs to branch on *why* the model provider
+rejected a call rather than regex-parsing `getMessage()` — telling a `402` (top up) from a `429`
+(back off) from a `500` (retry), reading the raw `Retry-After` header to schedule a resume, or
+surfacing the provider's own error text to an end user without leaking the account identifier or
+API key it echoed back. It is thrown after retries are exhausted (or immediately, for a
+non-retryable status) — the same 200-char-capped, redacted body reaches both the exception's
+`getMessage()` and its `body` field, just capped differently.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="A typed exception, not a parsed message">
+The obvious alternative is to let a non-2xx response surface as a generic `RuntimeException` whose
+message happens to contain the status and body — which forces every host to regex a string it
+never validated the shape of. `ProviderException` makes `status`, `body` and `retryAfter` typed
+fields instead, so a host branches on `e.status == 402` rather than `e.getMessage().contains("402")`.
+Reach for the plain `RuntimeException` surface only if you genuinely don't care what failed — e.g.
+a fire-and-forget background job that just logs and gives up; anything that needs to *react*
+differently per status wants the typed fields. See also
+[`ErrorInfo`/`onError`](/api/java/client/resilience/) — that's the RETRY-CLASSIFICATION seam (runs
+*before* a `ProviderException` would even be thrown, for a status the default classifier still
+finds retryable); this page is what a host catches once retries are exhausted or the status was
+never retryable to begin with.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — catch it and read the typed fields
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            byte[] b = "{\"error\":\"slow down\"}".getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.getResponseHeaders().add("Retry-After", "1");
+            ex.sendResponseHeaders(429, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort())
+                    .style("openai").model("test-model").apiKey("test-key")
+                    .retries(0));
+
+            try {
+                client.run("hi", tk);
+                throw new AssertionError("expected a ProviderException");
+            } catch (LlmClient.ProviderException e) {
+                if (e.status != 429) throw new AssertionError(e.status);
+                if (!e.body.contains("slow down")) throw new AssertionError(e.body);
+                if (!"1".equals(e.retryAfter)) throw new AssertionError(e.retryAfter);
+                System.out.println("ok: status=" + e.status + " retryAfter=" + e.retryAfter);
+            }
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 2. The realistic case — account identifiers never leave the process
+
+The provider's own 4xx body routinely echoes back an account or org id. `ProviderException.body`
+carries the redacted body, with the key preserved so the caller still knows *which* field was
+withheld — the value itself never reaches a log line.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        String leaky = "{\"error\":{\"message\":\"not a valid model ID\",\"code\":400},"
+                + "\"user_id\":\"user_2FAKEFAKEFAKEFAKEFAKE\"}";
+
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            byte[] b = leaky.getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(400, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort())
+                    .style("openai").model("test-model").apiKey("test-key"));
+
+            try {
+                client.run("hi", tk);
+                throw new AssertionError("expected a ProviderException");
+            } catch (LlmClient.ProviderException e) {
+                if (e.body.contains("user_2FAKE")) throw new AssertionError("leaked: " + e.body);
+                if (!e.body.contains(LlmClient.REDACTED)) throw new AssertionError(e.body);
+                // the cause survives — only the identifier goes
+                if (!e.body.contains("not a valid model ID")) throw new AssertionError(e.body);
+                System.out.println("ok: redacted body=" + e.body);
+            }
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 3. The full surface — the message is capped, the typed body is not
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        String longBody = "{\"error\":\"" + "x".repeat(500) + "\"}";
+
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            byte[] b = longBody.getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(400, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort())
+                    .style("openai").model("test-model").apiKey("test-key"));
+
+            try {
+                client.run("hi", tk);
+                throw new AssertionError("expected a ProviderException");
+            } catch (LlmClient.ProviderException e) {
+                // the MESSAGE is capped at ERROR_BODY_CAP (+ "LLM 400: " + an ellipsis)
+                if (e.getMessage().length() >= LlmClient.ERROR_BODY_CAP + 40) {
+                    throw new AssertionError("message should be capped: " + e.getMessage().length());
+                }
+                // the TYPED FIELD is the whole redacted body — A5, never truncated
+                if (e.body.length() <= LlmClient.ERROR_BODY_CAP) {
+                    throw new AssertionError("typed body must not be capped: " + e.body.length());
+                }
+                System.out.println("ok: message=" + e.getMessage().length()
+                        + " chars, body=" + e.body.length() + " chars");
+            }
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+## See also
+
+- [`LlmClient.create`](/api/java/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`LlmClient.run`](/api/java/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`LlmClient.stream`](/api/java/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`ErrorInfo` / resilience](/api/java/client/resilience/) — The retry-classification seam: `onError`, `retries`, `retryableStatuses`, `timeoutMs`, `CancelToken` — runs before a `ProviderException` is thrown.
+- [`LlmClient.Hooks`](/api/java/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

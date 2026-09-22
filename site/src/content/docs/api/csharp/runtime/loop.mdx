@@ -1,0 +1,330 @@
+---
+title: "Loop"
+description: "Agent.Loop(...).Run drives the agent under a Guardrail policy that vets every tool call and a Completion check that decides when the task is done — the gated door beside the plain Agent.Run, with unsupported spec fields (tools, team, waitFor, onMetric) named explicitly rather than silently dropped. — C#."
+sidebar:
+  label: "Loop"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+</p>
+
+```csharp
+namespace Toolnexus.Agents;
+
+public delegate string? Guardrail(LlmClient.BeforeToolEvent ev); // "allow"/null permits; any other string denies with that reason
+
+public sealed record Verdict(bool Ok, string Reason = "");
+
+public sealed class Completion
+{
+    public Func<LlmClient.RunResult, Verdict> Verify { get; set; }
+    public int MaxAttempts { get; set; }             // REQUIRED — an unbounded verify loop is a DoS on the bill
+}
+
+public sealed class LoopRunOptions
+{
+    public string? Model { get; set; }               // per-call model override; null = the agent's
+}
+
+public sealed record Outcome(
+    string Text, string Status, string? StoppedBy, int Attempts, int Turns, LlmClient.RunResult? Result);
+
+public sealed class Loop
+{
+    public const string InheritModel = "inherit";
+    public string Status { get; }                    // observed only: "idle" | "running" | "error" | ...
+    public int Turns { get; }
+    public IReadOnlyList<string> Unsupported { get; } // = LoopSupport.LoopUnsupported(agent.Spec)
+
+    public Task<Outcome> RunAsync(string prompt, LoopRunOptions? opts = null);
+}
+
+// Opened via the extension on Agent:
+public sealed class Agent { public Loop Loop(LlmClient.Options options, Toolkit toolkit); }
+
+public static class LoopSupport
+{
+    public static LlmClient.Hooks? GuardedHooks(List<Guardrail>? guardrails, LlmClient.Hooks? hooks);
+    public static IReadOnlyList<string> LoopUnsupported(AgentSpec? spec); // "tools" | "team" | "waitFor" | "onMetric"
+    public static Verdict AllTodosDone(LlmClient.RunResult result);      // the built-in completion verifier
+}
+```
+
+`agent.Loop(options, toolkit).RunAsync(prompt)` drives the agent under a `Guardrail` policy that
+vets every tool call and a `Completion` check that decides when the task is done — the gated door
+beside the plain [`Agent.RunAsync`](/api/csharp/runtime/agent/), with unsupported spec fields
+(`tools`, `team`, `waitFor`, `onMetric`) named explicitly on `Loop.Unsupported` rather than silently
+dropped.
+
+The placement law this encodes (see the narrative [Harness & loop](/harness/) page for the full
+rationale): the `AgentSpec` answers *"may it?"* — capability, ceilings, fixed per problem;
+`LoopRunOptions` answers *"with what?"* — the model for this one call; the `Loop` answers *"did
+it?"* — status, turns, stop reason, purely observed. None of them answers *"is it right?"* — that
+is what `Completion.Verify` is for.
+
+## When to use it
+
+Reach for `agent.Loop(options, toolkit)` instead of `agent.RunAsync(...)` when a task needs a
+**completion gate**: the model claiming "done" is not enough, and you need the run retried (with
+the failure reason fed back as the next prompt) until an independent check passes, up to
+`Completion.MaxAttempts`. The built-in [`LoopSupport.AllTodosDone`](#membership) verifier is the
+common case — it reads the shipped `todowrite` tool's plan and requires every item checked before
+letting the run report `"done"`. Reach for `Guardrails` on the same spec when you need a *policy*
+check ("may this tool run at all?") rather than a completion check ("is the finished work
+correct?") — the two compose: guardrails run on every tool call, `Completion` runs once the model
+stops calling tools.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="C# has no standalone harness() factory function">
+Five of the seven ports (js, python, golang, elixir, clojure) ship a `harness(spec)`/`Harness(spec)`
+identity function that returns its argument unchanged — a name for something that already exists,
+so a spec built through it and one written inline are indistinguishable. **C# and Java skip it.**
+`AgentSpec` is a plain class built through object initializers (or a fluent builder), and that
+construction style already makes an identity-wrapper redundant: there is nothing `harness(spec)`
+could do here that `new AgentSpec { ... }` does not already do just as plainly. This is a
+deliberate per-language idiom difference, not a missing feature — see the [Harness & loop](/harness/)
+narrative page, which documents both ports as intentionally skipping the factory.
+</Aside>
+
+<Aside type="caution" title="Loop.Unsupported is advisory, not enforced — nothing throws at construction">
+`Team`, `Uses` (tools), `WaitFor` and `OnMetric` describe a toolkit and a runtime that `Loop` does
+not own — it is driven over a toolkit and client the **caller** built, so a spec's `Team` declared
+for delegation silently cannot delegate when driven through `Loop` instead of the §7D
+`AgentRuntime`. `Loop.Unsupported` names exactly which of those fields the spec set that this Loop
+cannot honour — but by decision, nothing throws at construction, because a construction-time error
+would break every existing caller. A host that cares checks `Unsupported` and decides; one that
+doesn't, doesn't have to. Honoured on the Loop path regardless: `Soul`/`SoulFile`, `Guardrails`,
+`Hooks`, `Completion`, `Model`, `Budget.MaxTurns`.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — a plain agent with no completion gate
+
+```csharp test
+using Toolnexus;
+using Toolnexus.Agents;
+
+var handler = new Scripted(Say("hello"));
+var toolkitOpts = new Toolkit.Options { Builtins = false };
+await using var tk = await Toolkit.CreateAsync(toolkitOpts);
+
+var agent = new Agent("plain", new AgentSpec { Does = "answers" });
+var clientOpts = new LlmClient.Options
+{
+    BaseUrl = "http://scripted.invalid", Style = "openai", Model = "test-model",
+    ApiKey = "unused", HttpHandler = handler,
+};
+
+var outcome = await agent.Loop(clientOpts, tk).RunAsync("hi");
+
+if (outcome.Status != "done") throw new Exception(outcome.Status);
+if (outcome.Text != "hello") throw new Exception(outcome.Text);
+if (outcome.Attempts != 1) throw new Exception($"attempts: {outcome.Attempts}"); // no Completion => one attempt
+if (outcome.StoppedBy != null) throw new Exception("no gate => no StoppedBy reason");
+
+Console.WriteLine($"ok: {outcome.Status} after {outcome.Attempts} attempt(s), turns={outcome.Turns}");
+
+static string Say(string content) => $"{{\"role\":\"assistant\",\"content\":\"{content}\"}}";
+
+sealed class Scripted : HttpMessageHandler
+{
+    readonly string[] _messages;
+    int _i;
+    public Scripted(params string[] messages) => _messages = messages;
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var message = _messages[Math.Min(_i, _messages.Length - 1)];
+        _i++;
+        var finish = message.Contains("tool_calls") ? "tool_calls" : "stop";
+        var json = "{\"choices\":[{\"index\":0,\"message\":" + message
+                 + ",\"finish_reason\":\"" + finish + "\"}],"
+                 + "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}";
+        return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json"),
+        };
+    }
+}
+```
+
+### 2. The realistic case — `Completion.Verify` gates on the built-in todo plan, and retries
+
+```csharp test
+using Toolnexus;
+using Toolnexus.Agents;
+
+// Attempt 1 ends with an open item ("proofread" not done). The gate fails it, feeds the reason
+// back as the next prompt, and attempt 2's fully-checked plan passes.
+var handler = new Scripted(
+    CallTodo(("1", "draft", true), ("2", "proofread", false)),
+    Say("I think I am finished"),
+    CallTodo(("1", "draft", true), ("2", "proofread", true)),
+    Say("all done"));
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Builtins = new Dictionary<string, object?>
+    {
+        ["tools"] = new Dictionary<string, object?>
+        {
+            ["todowrite"] = true, ["bash"] = false, ["read"] = false, ["write"] = false,
+            ["edit"] = false, ["glob"] = false, ["grep"] = false, ["webfetch"] = false,
+            ["apply_patch"] = false, ["question"] = false,
+        },
+    },
+});
+
+var agent = new Agent("gated", new AgentSpec
+{
+    Does = "plans",
+    // AllTodosDone is structural, not domain: it counts unchecked boxes in the LATEST todowrite
+    // call, judged against the ACCUMULATED tool calls across every attempt.
+    Completion = new Completion { Verify = LoopSupport.AllTodosDone, MaxAttempts = 3 },
+});
+var clientOpts = new LlmClient.Options
+{
+    BaseUrl = "http://scripted.invalid", Style = "openai", Model = "test-model",
+    ApiKey = "unused", HttpHandler = handler,
+};
+
+var outcome = await agent.Loop(clientOpts, tk).RunAsync("do the thing");
+
+if (outcome.Status != "done") throw new Exception(outcome.Status);
+if (outcome.Attempts < 2) throw new Exception($"expected a retry, got {outcome.Attempts}");
+
+Console.WriteLine($"ok: {outcome.Status} after {outcome.Attempts} attempts (one retry on the open todo)");
+
+static string Say(string content) => $"{{\"role\":\"assistant\",\"content\":\"{content}\"}}";
+static string CallTodo(params (string Id, string Text, bool Done)[] todos)
+{
+    var items = string.Join(",", todos.Select(t =>
+        $"{{\\\"id\\\":\\\"{t.Id}\\\",\\\"text\\\":\\\"{t.Text}\\\",\\\"completed\\\":{(t.Done ? "true" : "false")}}}"));
+    return "{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"t1\",\"type\":\"function\","
+         + "\"function\":{\"name\":\"todowrite\",\"arguments\":\"{\\\"todos\\\":[" + items + "]}\"}}]}";
+}
+
+sealed class Scripted : HttpMessageHandler
+{
+    readonly string[] _messages;
+    int _i;
+    public Scripted(params string[] messages) => _messages = messages;
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var message = _messages[Math.Min(_i, _messages.Length - 1)];
+        _i++;
+        var finish = message.Contains("tool_calls") ? "tool_calls" : "stop";
+        var json = "{\"choices\":[{\"index\":0,\"message\":" + message
+                 + ",\"finish_reason\":\"" + finish + "\"}],"
+                 + "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}";
+        return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json"),
+        };
+    }
+}
+```
+
+### 3. Full surface — an unverifiable run stops loudly, `MaxAttempts` is required, and `Unsupported` names the gap
+
+```csharp test
+using Toolnexus;
+using Toolnexus.Agents;
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false });
+var clientOpts = new LlmClient.Options
+{
+    BaseUrl = "http://scripted.invalid", Style = "openai", Model = "test-model",
+    ApiKey = "unused", HttpHandler = new Scripted(Say("done!")),
+};
+
+// (a) A completion check that never passes exhausts MaxAttempts and reports "incomplete" with
+// Limit == "completion" — structured, so a caller branches on Limit rather than parsing StoppedBy.
+var never = new Agent("never", new AgentSpec
+{
+    Does = "never verifies",
+    Completion = new Completion { Verify = _ => new Verdict(false, "always red"), MaxAttempts = 2 },
+});
+var outcome = await never.Loop(clientOpts, tk).RunAsync("go");
+if (outcome.Status != "incomplete") throw new Exception(outcome.Status);
+if (outcome.Attempts != 2) throw new Exception($"attempts: {outcome.Attempts}");
+if (outcome.Result!.Limit != "completion") throw new Exception(outcome.Result.Limit);
+if (!outcome.StoppedBy!.Contains("always red")) throw new Exception(outcome.StoppedBy);
+
+// (b) MaxAttempts is REQUIRED — an unbounded verify loop is a denial-of-service on the caller's bill.
+var bad = new Agent("bad", new AgentSpec
+{
+    Does = "x",
+    Completion = new Completion { Verify = _ => new Verdict(true), MaxAttempts = 0 },
+});
+try
+{
+    await bad.Loop(clientOpts, tk).RunAsync("go");
+    throw new Exception("expected ArgumentException for MaxAttempts = 0");
+}
+catch (ArgumentException) { /* expected */ }
+
+// (c) Unsupported names exactly which spec fields THIS Loop cannot honour — advisory, not thrown.
+var delegator = new Agent("delegator", new AgentSpec
+{
+    Does = "x",
+    Team = new List<Agent> { new("child", new AgentSpec { Does = "helps" }) },
+});
+var unsupported = delegator.Loop(clientOpts, tk).Unsupported;
+if (!unsupported.Contains("team")) throw new Exception(string.Join(",", unsupported));
+
+Console.WriteLine($"ok: incomplete after {outcome.Attempts} attempts (limit={outcome.Result.Limit}); " +
+    $"MaxAttempts=0 rejected; delegator's Loop cannot honour: {string.Join(", ", unsupported)}");
+
+static string Say(string content) => $"{{\"role\":\"assistant\",\"content\":\"{content}\"}}";
+
+sealed class Scripted : HttpMessageHandler
+{
+    readonly string[] _messages;
+    int _i;
+    public Scripted(params string[] messages) => _messages = messages;
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var message = _messages[Math.Min(_i, _messages.Length - 1)];
+        _i++;
+        var finish = message.Contains("tool_calls") ? "tool_calls" : "stop";
+        var json = "{\"choices\":[{\"index\":0,\"message\":" + message
+                 + ",\"finish_reason\":\"" + finish + "\"}],"
+                 + "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}";
+        return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json"),
+        };
+    }
+}
+```
+
+## Members
+
+| Member | What it is |
+|---|---|
+| `Guardrail` | `delegate string? Guardrail(LlmClient.BeforeToolEvent ev)` — a POLICY check, "may it?", never "is it right?". `"allow"` or `null` permits; any other string denies with that reason as the tool result. |
+| `Verdict(Ok, Reason)` | What `Completion.Verify` returns. `Reason` feeds back as the next retry's prompt when `Ok` is false. |
+| `Completion.Verify` | `Func<LlmClient.RunResult, Verdict>` — judges the run against the tool calls **accumulated across every attempt**, so an agent cannot escape the gate by declining to re-declare its plan on a retry. |
+| `Completion.MaxAttempts` | Required, `>= 1`. Exhausting it returns `Status = "incomplete"`, `Limit = "completion"`. |
+| `LoopRunOptions.Model` | Per-call model override. `"inherit"` and absence are treated identically — both mean "no opinion, use the spec's/client's default." |
+| `Outcome` | `Text`, `Status` (reuses `AgentStatus`/`RunStatus` — no new strings minted), `StoppedBy` (human-readable, null when nothing stopped it early), `Attempts`, `Turns`, `Result` (the underlying `RunResult`). |
+| `Loop.Status` | Observed only: `"idle"` → `"running"` → `"idle"`/`"error"`/the run's own non-done status. Never set by the caller. |
+| `Loop.Unsupported` | The spec fields this Loop cannot honour, from the closed vocabulary `"tools"` \| `"team"` \| `"waitFor"` \| `"onMetric"` — identical strings in all seven ports. Empty ⇒ the whole spec is honoured. |
+| `LoopSupport.GuardedHooks` | Compiles `AgentSpec.Guardrails` into one `BeforeTool` hook, first-deny-wins, composed ahead of any hook already set. |
+| `LoopSupport.AllTodosDone` | The built-in completion verifier: reads the shipped `todowrite` tool's plan metadata, requires every item checked. No plan declared ⇒ nothing to verify ⇒ passes — an agent that never uses `todowrite` is never punished by this gate. |
+
+## See also
+
+- [Harness & loop](/harness/) — The narrative page: the placement law, the four-row table, and why the model is per-call, not per-loop.
+- [`Agent`](/api/csharp/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`AgentRuntime`](/api/csharp/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`Handle`](/api/csharp/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`Budget`](/api/csharp/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

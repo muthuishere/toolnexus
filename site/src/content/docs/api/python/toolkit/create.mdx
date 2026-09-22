@@ -8,50 +8,195 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/toolkit.py">python/src/toolnexus/toolkit.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+async def create_toolkit(
+    mcp_config: str | dict[str, Any] | None = None,
+    skills_dir: str | list[str] | None = None,
+    skills: list[SkillDef] | None = None,
+    skill_provider: SkillProvider | None = None,
+    skills_filter: dict[str, bool] | None = None,
+    skill_sample_limit: int = 0,
+    extra_tools: list[Tool] | None = None,
+    builtins: BuiltinsConfig | None = None,
+    agents: list[Agent] | None = None,
+    wait_for: Any | None = None,
+    disable_tools: list[str] | None = None,
+    disable_skills: list[str] | None = None,
+    cancel: Any | None = None,
+) -> Toolkit
 ```
 
-Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+`create_toolkit` is the other entry point: it gathers every tool source you point it at — MCP
+servers, a skills directory or an in-memory skill list, built-in tools, remote A2A agents, and any
+of your own `Tool`s — and hands back one `Toolkit` with a single flat, deduplicated tool list. Pass
+that `Toolkit` into `client.run(prompt, toolkit)` and the model sees one uniform surface no matter
+how many sources fed it.
+
+It is `async` because connecting MCP servers and globbing/reading skill files are I/O; the
+returned `Toolkit` is also an async context manager, and `await tk.close()` tears every source
+(MCP subprocesses/HTTP connections, served A2A handles) back down.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- You have one or more MCP servers (`mcp.json`, local stdio or remote streamable-HTTP) and want
+  every tool they expose as a plain `Tool`, without hand-writing the MCP client dance.
+- You have a `skills/` directory (or a static/dynamic list of `SkillDef`s) and want them exposed
+  as one `skill` tool with progressive disclosure, instead of dumping every skill's full body into
+  the system prompt.
+- You want built-in tools (shell, file read/write, …), your own `define_tool`/`http_tool`
+  functions, and remote A2A agents' skills to show up in the *same* tool list as the above — so the
+  model sees one surface regardless of where a tool actually lives.
+- You need to scope that surface down per audience — a per-skill allow/deny map (`skills_filter`),
+  a global `disable_tools` / `disable_skills` drop-list, or `builtins=False` to turn off the whole
+  built-in source.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="create_toolkit vs. wiring sources by hand">
+You *can* call `load_mcp`, `load_skills`, `create_builtin_tools`, and `agent(...)` yourself and
+merge the lists — `create_toolkit` is exactly that, done once, with naming collisions resolved,
+close-down ordering handled, and the `disable_tools`/`disable_skills` drop-lists applied
+consistently across every source. Reach for the individual loaders directly only when you need to
+inspect or transform one source's tools before they're merged (e.g. filter MCP tools by a custom
+predicate `load_mcp` alone doesn't support) — otherwise `create_toolkit` is the one call you want.
+</Aside>
+
+## The option surface
+
+| Option | What it's for | Depth |
+|---|---|---|
+| `mcp_config` | A path to `mcp.json`, or an already-parsed config dict — connects every server it names. | [`load_mcp`](/api/python/mcp/load/), [`parse_mcp_config`](/api/python/mcp/parse-config/) |
+| `skills_dir` | One or more directories to glob for `**/SKILL.md`; exposed as one `skill` tool. | [`load_skills`](/api/python/skills/load/) |
+| `skills` | A static in-memory list of `SkillDef` — same `skill` tool, no filesystem. | [`load_skills`](/api/python/skills/load/) |
+| `skill_provider` | A callable (sync or async) returning `list[SkillDef]` on demand — for a dynamic/remote skill catalog. | [`load_skills`](/api/python/skills/load/) |
+| `skills_filter` | Per-skill allow/deny map, composed with `disable_skills`. | [`load_skills`](/api/python/skills/load/) |
+| `skill_sample_limit` | Caps how many example skills are sampled into the catalog summary (`0` = no cap). | [`load_skills`](/api/python/skills/load/) |
+| `extra_tools` | Your own `Tool`s (from `define_tool` / `http_tool`, or built by hand) merged straight in. | [`Tool`](/api/python/types/tool/) |
+| `builtins` | `True`/`False`/`None` or a `{"enabled": ...}` / `{"disabled": ...}` dict — the whole built-in source is on by default. | [`create_builtin_tools`](/api/python/builtins/create/), [`select_builtins`](/api/python/builtins/select/) |
+| `agents` | A list of `agent(cardUrl)` descriptors — each remote skill becomes an `<agent>_<skill>` tool (source `"a2a"`). | [`agent`](/api/python/agents/agent/) |
+| `wait_for` | Same §10 suspension hook as `create_client` — set here if this toolkit's own tools (not just the client's) can suspend. | [`WaitFor`](/api/python/suspension/wait-for/) |
+| `disable_tools` | Drops tools by their *final exposed name*, across every source, after merging. | — |
+| `disable_skills` | Drops skills by name from the `skill` catalog (composes with `skills_filter`). | — |
+| `cancel` | An `asyncio.Event` — set it to abort an in-flight MCP connect/load (SPEC §2 Gap 3). | — |
+
+<Aside type="note" title="Cancellation is cancel=, not signal=">
+This port's cancellation knob is a keyword-only `cancel: asyncio.Event | None`, propagated into
+the MCP load — there is no `signal=` parameter here (that's a JS/AbortSignal-shaped name; the
+Pythonic equivalent is the asyncio `Event`). Setting it aborts the whole `create_toolkit` call,
+not just one server, per `test_mcp_serve`/`test_rag_consumer` in `python/tests/`.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+<Aside type="note" title="Hermetic on purpose">
+Examples 1–2 use only in-memory `SkillDef`s and `define_tool` — no subprocess, no network. Example
+3 mirrors `python/examples/basic.py`, which does spawn a real (sandboxed) MCP stdio server via
+`npx` against the repo's shared `examples/` fixtures.
+</Aside>
 
-{/* TODO:example1 */}
-```python
-// TODO
+### 1. The smallest useful call — no sources, just built-ins
+
+```python test
+import asyncio
+
+from toolnexus import create_toolkit
+
+
+async def main():
+    tk = await create_toolkit()
+    try:
+        names = sorted(t.name for t in tk.tools())
+        print("built-in tools:", names)
+        assert len(names) > 0  # builtins are on by default
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — your own tool, a static skill, and a drop-list
 
-{/* TODO:example2 */}
-```python
-// TODO
+```python test
+from toolnexus import create_toolkit, define_tool
+from toolnexus.skill import SkillDef
+import asyncio
+
+
+async def main():
+    def add(a: float, b: float) -> str:
+        """Add two numbers and return the sum."""
+        return str(a + b)
+
+    tk = await create_toolkit(
+        builtins=False,
+        extra_tools=[define_tool(add, name="add")],
+        skills=[
+            SkillDef(name="keep", description="a skill worth keeping", content="k"),
+            SkillDef(name="drop", description="a skill to hide from this agent", content="d"),
+        ],
+        disable_skills=["drop"],
+    )
+    try:
+        assert tk.get("add") is not None
+        prompt = tk.skills_prompt()
+        assert "keep" in prompt and "**drop**" not in prompt
+        print("tools:", [t.name for t in tk.tools()])
+        print("skill catalog mentions 'keep':", "keep" in prompt, "| mentions 'drop':", "**drop**" in prompt)
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — MCP servers + skills directory + tool-name drop-list
 
-{/* TODO:example3 */}
 ```python
-// TODO
+import asyncio
+import json
+import os
+
+from toolnexus import create_toolkit
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_EXAMPLES = os.path.normpath(os.path.join(_HERE, "..", "..", "examples"))
+
+
+async def main() -> None:
+    tk = await create_toolkit(
+        mcp_config=os.path.join(_EXAMPLES, "mcp.json"),
+        skills_dir=os.path.join(_EXAMPLES, "skills"),
+        skill_sample_limit=5,
+        disable_tools=["everything_echo"],  # drop one tool by its exposed name
+    )
+
+    print("MCP status:", tk.mcp_status())
+    print("Tools:", [f"{t.name} ({t.source})" for t in tk.tools()])
+    print("\nSystem-prompt skill catalog:\n" + tk.skills_prompt())
+
+    print("\nOpenAI tool schema (first 2):")
+    print(json.dumps(tk.to_openai()[:2], indent=2))
+
+    res = await tk.execute("skill", {"name": "hello-world"})
+    print("\nskill(hello-world) ->\n" + res.output)
+
+    await tk.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 ## See also
 
-- _TODO: related entry points_
+- [`create_client`](/api/python/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`load_mcp`](/api/python/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+- [`parse_mcp_config`](/api/python/mcp/parse-config/) — Parse and validate an mcp.json without connecting to anything.
+- [`load_skills`](/api/python/skills/load/) — Glob a skills directory and expose one skill tool with progressive disclosure.
+- [`create_builtin_tools`](/api/python/builtins/create/) — Construct every built-in tool directly, outside a toolkit.
+- [`agent`](/api/python/agents/agent/) — Point at a remote agent's card and use it exactly like a local tool.
+- [`WaitFor`](/api/python/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.

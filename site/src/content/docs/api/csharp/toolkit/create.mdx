@@ -12,46 +12,147 @@ import { Aside } from '@astrojs/starlight/components';
 </p>
 
 ```csharp
-{/* TODO:signature */}
+public sealed class Toolkit : IAsyncDisposable
+{
+    public static Task<Toolkit> CreateAsync(Options opts, CancellationToken cancellationToken = default);
+
+    public sealed class Options
+    {
+        public object? McpConfig { get; set; }                              // path, raw JSON, or parsed dict
+
+        public List<string>? SkillsDir { get; set; }                        // one or more skill roots
+        public IReadOnlyList<SkillSource.SkillDef>? Skills { get; set; }    // skills as data (§3 S1)
+        public Func<IEnumerable<SkillSource.SkillDef>>? SkillProvider { get; set; }
+        public IReadOnlyDictionary<string, bool>? SkillsFilter { get; set; }
+        public int SkillSampleLimit { get; set; }                           // 0=default 10, n>0=cap, -1=omit
+
+        public IReadOnlyList<string>? DisableTools { get; set; }            // drop by final exposed name
+        public IReadOnlyList<string>? DisableSkills { get; set; }           // drop by skill name
+
+        public List<ITool>? ExtraTools { get; set; }                        // custom/native/http tools
+        public List<object>? AnnotatedObjects { get; set; }                 // scanned via Tools.FromObject
+
+        public object? Builtins { get; set; }                               // bool | {disabled|enabled|tools:{...}}
+        public List<Agent>? Agents { get; set; }                            // remote A2A agents
+
+        public Func<Request, Task<Answer>>? WaitFor { get; set; }           // §10 MCP elicitation bridge
+    }
+}
 ```
 
 Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+`Toolkit.CreateAsync` is the one entry point that turns every tool source toolnexus knows about —
+a connected `mcp.json`, a `skills/` folder, the 10 built-in file/shell/web tools, remote A2A agent
+skills, and plain C# methods — into a single flat `ITool` list, deduped and ready to hand to
+[`LlmClient.RunAsync`](/api/csharp/client/run/).
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Call it once per agent, before the first `RunAsync`/`StreamAsync`. Leave every field but the ones
+you need unset: an empty `new Toolkit.Options()` still gives you all 10 built-ins (SPEC §4A), and
+each additional field only turns on one more source — an `mcp.json`, a skills directory, your own
+`ITool`s — composed onto that baseline rather than replacing it.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Wiring a source directly (McpSource.LoadAsync / SkillSource.Load / BuiltinTools.Create)">
+Reach for the lower-level `McpSource`/`SkillSource`/`BuiltinTools` APIs only when you need ONE
+source in isolation — inspecting what an `mcp.json` resolves to, unit-testing a skill directory, or
+assembling built-ins for a non-toolkit caller. The moment an agent needs more than one source
+together (which is almost every real agent), `Toolkit.CreateAsync` is the aggregator: it applies
+the documented precedence (MCP → skill → builtin → agents → extraTools, first name wins, an
+`ExtraTools` entry shadows a same-named builtin) and the `DisableTools`/`DisableSkills` drop-lists
+in one place, so two agents built from the same options always see the same tool set.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — built-ins only
 
-{/* TODO:example1 */}
 ```csharp
-// TODO
+using Toolnexus;
+
+// no fields set: the 10 built-in tools (bash/read/write/edit/grep/glob/webfetch/question/
+// apply_patch/todowrite) are on by default (SPEC §4A) — nothing else to configure.
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+Console.WriteLine(tk.Tools().Count); // 10
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — MCP servers + a skills folder
 
-{/* TODO:example2 */}
 ```csharp
-// TODO
+using Toolnexus;
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    McpConfig = "mcp.json",                 // connects every server, local stdio + remote HTTP
+    SkillsDir = new[] { "skills" },          // globs **/SKILL.md, exposes one `skill` tool
+});
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = "https://api.openai.com/v1",
+    Style = "openai",
+    Model = "gpt-4o-mini",
+    ApiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY"),
+});
+
+var res = await client.RunAsync("Use the available tools to triage today's alerts.", tk);
+Console.WriteLine(res.Text);
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — filters, drop-lists, extras, and the §10 bridge
 
-{/* TODO:example3 */}
 ```csharp
-// TODO
+using Toolnexus;
+
+await using var mcp = await StartMcp(); // a connected MCP server exposing tools "a", "b", "c"
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    McpConfig = new Dictionary<string, object?>
+    {
+        ["srv"] = new Dictionary<string, object?> { ["url"] = mcp.Url },
+    },
+
+    SkillsDir = new[] { "skills" },
+    Skills = new List<SkillSource.SkillDef>
+    {
+        new("inline-skill", "short desc", "full instructions"),
+    },
+    SkillsFilter = new Dictionary<string, bool> { ["inline-skill"] = true },
+    SkillSampleLimit = 5,
+
+    // drop by final exposed name / skill name, after aggregation
+    DisableTools = new[] { "srv_b" },
+    DisableSkills = new[] { "some-noisy-skill" },
+
+    // your own C# functions, alongside every other source
+    ExtraTools = new List<ITool> { NativeTool.Of("ping", "health check", null, _ => "pong") },
+
+    // turn off the whole built-in source (an ExtraTools entry with the same name always wins anyway)
+    Builtins = false,
+
+    // remote A2A agents — each advertised skill becomes a tool (source "a2a")
+    Agents = new List<Agent> { remoteAgent },
+
+    // §10: bridge MCP server elicitation onto the same WaitFor the client uses
+    WaitFor = async request => await MyApprovalQueue.ResolveAsync(request),
+});
+
+Console.WriteLine(tk.Get("srv_b"));   // null — dropped by DisableTools
+Console.WriteLine(tk.Get("srv_a"));   // present — other tools from the same server are untouched
+Console.WriteLine(tk.Get("ping"));    // present — extra tool
 ```
 
 ## See also
 
-- _TODO: related entry points_
+- [`LlmClient.Create`](/api/csharp/client/create/) — The unified client this toolkit's tool list is meant to be passed to.
+- [`McpSource.LoadAsync`](/api/csharp/mcp/load/) — Read an `mcp.json`, connect every local stdio and remote streamable-HTTP server, expose each server tool as a `Tool`.
+- [`McpSource.ParseConfig`](/api/csharp/mcp/parse-config/) — Parse an `mcp.json` path/string/object into the normalized server config `McpConfig` accepts.
+- [`SkillSource.Load`](/api/csharp/skills/load/) — Discover every `SKILL.md` under one or more directories and expose a single `skill` tool with progressive disclosure.
+- [`SkillSource.LoadWith`](/api/csharp/skills/load-with/) — The options-object form behind `SkillsDir`/`Skills`/`SkillProvider`/`SkillsFilter`/`SkillSampleLimit`.
+- [`SkillSource.ListSkills`](/api/csharp/skills/list/) — Inventory every discovered skill — and the candidates that were skipped and why.
+- [`BuiltinTools.Create`](/api/csharp/builtins/create/) — Construct every built-in tool directly, outside a toolkit.
+- [`BuiltinTools.Select`](/api/csharp/builtins/select/) — The selection logic behind the `Builtins` option (bool / disabled / enabled / per-tool map).
+- [`LlmClient.WaitFor`](/api/csharp/suspension/wait-for/) — The single hook where the host resolves a suspension — the same function this toolkit's `WaitFor` bridges MCP elicitation onto.

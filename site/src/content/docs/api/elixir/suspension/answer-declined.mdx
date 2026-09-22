@@ -1,0 +1,154 @@
+---
+title: "Toolnexus.Answer.answer_declined/2"
+description: "Wraps a human's refusal into the Answer a suspended run resumes with, carrying a reason string that defaults to \"declined\". — Elixir."
+sidebar:
+  label: "Toolnexus.Answer.answer_declined/2"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+```elixir
+@spec answer_declined(String.t(), String.t() | nil) :: Toolnexus.Answer.t()
+def answer_declined(id, reason \\ "declined")
+
+# %Toolnexus.Answer{id: id, ok: false, reason: reason}
+```
+
+Wraps a human's refusal into the Answer a suspended run resumes with, carrying a reason string that defaults to "declined".
+
+## When to use it
+
+- **A human (or a policy) refused a [`pending`](/api/elixir/suspension/pending/) suspension** —
+  they declined an authorization request, cancelled an input prompt, or rejected a proposed
+  action. `answer_declined/2` builds the `ok: false` half of the §10 answer contract, the
+  counterpart to [`answer_output/2`](/api/elixir/suspension/answer-output/) for when there is no
+  reply to resume with, only a refusal.
+- **You want the default spelling `"declined"`** without hand-writing it — the second argument
+  defaults to `"declined"` (`elixir/lib/toolnexus/types.ex:105`), which is also the one string
+  every port's MCP elicitation bridge maps back to a `decline` action; any other string maps to
+  `cancel` instead, so pass an explicit reason when you mean something more specific ("policy:
+  amount over threshold") but still want it to read as a decline rather than a cancel upstream.
+- **`reason` may be `nil` or a string** — anything else (a map, a number) raises an
+  `ArgumentError` rather than silently coercing.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use answer_output/2 when the human actually answered">
+`answer_declined/2` is for a suspension the human REFUSED — `ok: false`. If they instead typed a
+reply to resume the run with, reach for
+[`Toolnexus.Answer.answer_output/2`](/api/elixir/suspension/answer-output/), which builds
+`ok: true` with the reply as `data`. There is no third, partial shape between the two.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — the default reason
+
+```elixir test
+alias Toolnexus.Answer
+
+answer = Answer.answer_declined("req-1")
+
+true = answer.id == "req-1"
+true = answer.ok == false
+true = answer.reason == "declined"
+
+IO.puts("ok: #{inspect(answer)}")
+```
+
+### 2. The realistic case — an explicit reason, and a non-string reason raises
+
+```elixir test
+alias Toolnexus.Answer
+
+with_reason = Answer.answer_declined("req-1", "budget exceeded")
+true = with_reason.ok == false
+true = with_reason.reason == "budget exceeded"
+
+raised? =
+  try do
+    Answer.answer_declined("req-1", %{})
+    false
+  rescue
+    e in ArgumentError -> Exception.message(e) =~ "must be a string"
+  end
+
+true = raised?
+
+IO.puts("ok: explicit reason kept, non-string reason raised")
+```
+
+### 3. The full surface — a decline resolves to an error result, never re-invoking the tool
+
+Unlike `answer_output/2`, an `Answer` where `ok: false` never reaches the tool's `execute` a
+second time — `Toolnexus.Client` resolves it straight to
+`%ToolResult{output: "declined/expired: <prompt>", is_error: true}` and feeds that back to the
+model, which is free to say something sensible about the refusal.
+
+```elixir test
+alias Toolnexus.{Client, Context, Tool, ToolResult, Request, Answer}
+
+{:ok, invocations} = Agent.start_link(fn -> 0 end)
+
+delete_account = %Tool{
+  name: "delete_account",
+  description: "delete the user's account",
+  input_schema: %{"type" => "object", "properties" => %{}},
+  source: "native",
+  execute: fn _args, %Context{} ->
+    Agent.update(invocations, &(&1 + 1))
+    %ToolResult{
+      output: "approval required",
+      is_error: true,
+      metadata: %{pending: %Request{id: "req-1", kind: "authorization", prompt: "Delete this account?"}}
+    }
+  end
+}
+
+{:ok, turn} = Agent.start_link(fn -> 0 end)
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  n = Agent.get_and_update(turn, fn c -> {c, c + 1} end)
+
+  message =
+    if n == 0 do
+      %{"role" => "assistant", "content" => nil, "tool_calls" => [
+        %{"id" => "c1", "type" => "function", "function" => %{"name" => "delete_account", "arguments" => "{}"}}
+      ]}
+    else
+      %{"role" => "assistant", "content" => "understood, cancelled"}
+    end
+
+  resp = %{"choices" => [%{"message" => message}], "usage" => %{"prompt_tokens" => 4, "completion_tokens" => 2, "total_tokens" => 6}}
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "openai",
+    model: "gpt-x",
+    api_key: "test-key",
+    http_options: [plug: plug],
+    wait_for: fn _req -> Answer.answer_declined("req-1", "not authorized") end
+  )
+
+result = Client.run(client, "delete my account", [delete_account])
+
+true = result.status == "done"
+true = result.text == "understood, cancelled"
+true = Agent.get(invocations, & &1) == 1, "execute never re-runs on a decline"
+
+IO.puts("ok: #{result.text}")
+```
+
+## See also
+
+- [`Toolnexus.Client.create`](/api/elixir/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`Toolnexus.Agents.Runtime.resume`](/api/elixir/suspension/resume/) — Route an Answer to the deepest suspended sub-agent handle and resume it in place.
+- [`Toolnexus.Answer.answer_output/2`](/api/elixir/suspension/answer-output/) — Wraps a human's typed string reply into the Answer a suspended run resumes with — the success counterpart to answerDeclined.

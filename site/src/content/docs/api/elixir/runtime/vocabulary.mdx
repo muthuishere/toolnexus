@@ -1,0 +1,151 @@
+---
+title: "Toolnexus.Status.task/0 / run/0 / limits/0 / canonical_limit/1"
+description: "The canonical, byte-identical-across-ports string constants a host branches on: task statuses, run statuses, and the nine stop-limit reasons a task can end on, plus the helper that canonicalizes a limit name. — Elixir."
+sidebar:
+  label: "Toolnexus.Status.task/0 / run/0 / limits/0 / canonical_limit/1"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+</p>
+
+```elixir
+Toolnexus.Status.run()               #=> ["done", "pending", "incomplete"]
+Toolnexus.Status.task()              #=> ["done", "pending", "incomplete", "interrupted", "closed", "timeout", "error"]
+Toolnexus.Status.limits()            #=> ["maxTurns", "maxTokens", "maxToolCalls", "maxWallMs",
+                                      #    "maxChildren", "maxConcurrent", "maxDepth", "completion", "timeout"]
+
+Toolnexus.Status.run?("pending")     #=> true
+Toolnexus.Status.task?("timeout")    #=> true
+Toolnexus.Status.limit?("maxTurns")  #=> true
+
+Toolnexus.Status.Limit.max_turns()   #=> "maxTurns"
+Toolnexus.Status.Limit.completion()  #=> "completion"
+Toolnexus.Status.Limit.timeout()     #=> "timeout"
+```
+
+The canonical, byte-identical-across-ports string constants a host branches on: task statuses, run statuses, and the nine stop-limit reasons a task can end on, plus the helper that canonicalizes a limit name.
+
+`Toolnexus.Status` (`elixir/lib/toolnexus/errors.ex:129-212`) exists because the two vocabularies
+share a field name — `status` — but are **not the same closed set**, and reading the §7D task
+set while holding a §8 `RunResult` was a real defect (issue #92). `run/0` is
+[`Toolnexus.Client.run/4`](/api/elixir/client/run/)'s `RunResult.status` (3 values); `task/0` is
+[`Toolnexus.Agents.Runtime`](/api/elixir/runtime/runtime/)'s `TaskResult.status` (7 values, the
+task set is a strict superset). `limits/0` is a third, separate vocabulary: the 9 canonical
+strings that name *which* budget field (or non-budget stop) ended a task whose status is
+`"incomplete"`.
+
+## When to use it
+
+- **You're branching on a `RunResult.status`** from the plain [`Client.run/4`](/api/elixir/client/run/)
+  loop — compare against `Toolnexus.Status.run/0`'s three members
+  (`"done"`, `"pending"`, `"incomplete"`). `"timeout"` is never one of them: a whole-run
+  `:timeout_ms` deadline raises `Toolnexus.TimeoutError` instead of settling as a status.
+- **You're branching on a `TaskResult.status`** from
+  [`Toolnexus.Agents.Runtime`](/api/elixir/runtime/runtime/) or
+  [`Toolnexus.Agents.Handle`](/api/elixir/runtime/handle/) — use `Toolnexus.Status.task/0`'s
+  seven members instead. Here `"timeout"` DOES appear, but it means something narrower than it
+  sounds: a `wait/2` deadline expired while **the child keeps running** — it is not a terminal
+  failure the way a §8 run's deadline is.
+- **A task's status is `"incomplete"`** and you want to know *why* — read `TaskResult.limit`
+  and compare it against `Toolnexus.Status.limits/0` (or the named constants under
+  `Toolnexus.Status.Limit`, e.g. `Limit.max_turns/0`) rather than a string literal, so a typo in
+  your own code can't silently fail to match.
+- **You're constructing or comparing a limit value in your own code** — reach for
+  `Toolnexus.Status.Limit.max_turns/0` etc. instead of writing `"maxTurns"` by hand; the module
+  exists specifically so a spelling mistake becomes a compile-time typo (`UndefinedFunctionError`)
+  rather than a silent mismatch at runtime.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Don't reuse the §7D task vocabulary for a §8 RunResult, or vice versa">
+The two sets overlap on `"done"`, `"pending"` and `"incomplete"`, which is exactly what makes the
+mistake easy: a host that always treats `status` as the 7-member task set will silently accept
+`"interrupted"`, `"closed"`, `"timeout"` or `"error"` as valid readings of a plain `Client.run/4`
+result, even though those four can never appear there. Use `Toolnexus.Status.run?/1` /
+`Toolnexus.Status.task?/1` to check membership explicitly rather than assuming which set you're
+looking at.
+</Aside>
+
+`canonical_limit/1` itself is private (`elixir/lib/toolnexus/agents/handle.ex:714-718`) — it is
+the internal normalizer the runtime calls on every `TaskResult.limit` before it is ever handed
+back to a caller (`handle.ex:529`, `:870`), so by the time you read `limit` off a `TaskResult` it
+is already one of the nine canonical strings. A host never calls it directly; the guarantee is
+that the *field* is always canonical, not that you need to canonicalize it yourself.
+
+## Examples
+
+### 1. The smallest useful call — read the three vocabularies
+
+```elixir test
+alias Toolnexus.Status
+
+true = Status.run() == ["done", "pending", "incomplete"]
+true = Status.task() == ["done", "pending", "incomplete", "interrupted", "closed", "timeout", "error"]
+
+true =
+  Status.limits() ==
+    ["maxTurns", "maxTokens", "maxToolCalls", "maxWallMs", "maxChildren", "maxConcurrent",
+     "maxDepth", "completion", "timeout"]
+
+IO.puts("ok: run=#{length(Status.run())} task=#{length(Status.task())} limits=#{length(Status.limits())}")
+```
+
+### 2. The realistic case — branch on which set a status belongs to
+
+```elixir test
+alias Toolnexus.Status
+
+defmodule VocabDemo do
+  def describe(status) do
+    cond do
+      Status.run?(status) and Status.task?(status) -> "shared: #{status}"
+      Status.task?(status) -> "task-only: #{status}"
+      Status.run?(status) -> "run-only: #{status}"
+      true -> "unknown: #{status}"
+    end
+  end
+end
+
+true = VocabDemo.describe("pending") == "shared: pending"
+true = VocabDemo.describe("timeout") == "task-only: timeout"
+true = VocabDemo.describe("nonsense") == "unknown: nonsense"
+
+IO.puts("ok: #{VocabDemo.describe("pending")} / #{VocabDemo.describe("timeout")}")
+```
+
+### 3. The full surface — named limit constants instead of string literals
+
+```elixir test
+alias Toolnexus.Status.Limit
+
+named = [
+  Limit.max_turns(),
+  Limit.max_tokens(),
+  Limit.max_tool_calls(),
+  Limit.max_wall_ms(),
+  Limit.max_children(),
+  Limit.max_concurrent(),
+  Limit.max_depth(),
+  Limit.completion(),
+  Limit.timeout()
+]
+
+true = named == Toolnexus.Status.limits()
+true = Toolnexus.Status.limit?(Limit.max_turns())
+
+# a task that hit its turn ceiling reports the SAME spelling `Limit.max_turns/0` returns
+task_result = %{status: "incomplete", limit: "maxTurns"}
+true = task_result.limit == Limit.max_turns()
+
+IO.puts("ok: #{inspect(named)}")
+```
+
+## See also
+
+- [`Toolnexus.Agents`](/api/elixir/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`Toolnexus.Agents.Runtime`](/api/elixir/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`Toolnexus.Agents.Handle`](/api/elixir/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`Toolnexus.Agents budget`](/api/elixir/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

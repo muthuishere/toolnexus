@@ -1,0 +1,167 @@
+---
+title: "agents.runtime/statuses / agents.runtime/limits"
+description: "The canonical, byte-identical-across-ports string constants a host branches on: task statuses, run statuses, and the nine stop-limit reasons a task can end on, plus the helper that canonicalizes a limit name. — Clojure."
+sidebar:
+  label: "agents.runtime/statuses / agents.runtime/limits"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/agents/runtime.cljc">clojure/src/toolnexus/agents/runtime.cljc</a>
+</p>
+
+```clojure
+;; the §7D TaskResult status vocabulary — SEVEN values
+toolnexus.agents.runtime/statuses
+;; => #{"done" "pending" "incomplete" "interrupted" "closed" "timeout" "error"}
+
+;; the §7D TaskResult.limit vocabulary — NINE values, WHICH limit stopped the task
+toolnexus.agents.runtime/limits
+;; => #{"maxTurns" "maxTokens" "maxToolCalls" "maxWallMs"
+;;      "maxChildren" "maxConcurrent" "maxDepth" "completion" "timeout"}
+
+;; the named values, so a caller never types the string literal
+toolnexus.agents.runtime/limit-max-turns       ; "maxTurns"
+toolnexus.agents.runtime/limit-max-tokens      ; "maxTokens"
+toolnexus.agents.runtime/limit-max-tool-calls  ; "maxToolCalls"
+toolnexus.agents.runtime/limit-max-wall-ms     ; "maxWallMs"
+toolnexus.agents.runtime/limit-max-children    ; "maxChildren"
+toolnexus.agents.runtime/limit-max-concurrent  ; "maxConcurrent"
+toolnexus.agents.runtime/limit-max-depth       ; "maxDepth"
+toolnexus.agents.runtime/limit-completion      ; "completion"
+toolnexus.agents.runtime/limit-timeout         ; "timeout"
+
+;; a SEPARATE, smaller §8 client-level vocabulary — do not confuse the two
+toolnexus.client/statuses  ; => #{"done" "pending" "incomplete"}          — never "timeout"
+toolnexus.client/limits    ; => #{"maxTurns" "contentPart" "timeout"}
+```
+
+The canonical, byte-identical-across-ports string constants a host branches on: task statuses, run
+statuses, and the nine stop-limit reasons a task can end on. These are the closed vocabularies a
+[`toolnexus.agents.runtime`](/api/clojure/runtime/runtime/) `TaskResult` — the value `spawn`, `wait`
+and `close` hand back — reports on its `:status` and (when the status is a limit stop) its
+`:limit` fields.
+
+<Aside type="caution" title="Two vocabularies, both spelled status — do not conflate them">
+`toolnexus.agents.runtime/statuses` is the **task/agent** vocabulary (§7D) — seven values, including
+`"timeout"` for an expired `wait` (the child keeps running) and `"error"` for a failed turn.
+`toolnexus.client/statuses` is the **separate, smaller §8 client/run** vocabulary — three values,
+`"done"`/`"pending"`/`"incomplete"`, and it **never** contains `"timeout"`: a §8 whole-run deadline
+throws a typed error instead of returning a status. Two different closed sets on two fields both
+spelled `status` was the collision behind issue #92.1 — the fix was to name both explicitly rather
+than rename either (D5), so a host reading a value learns from the field's *owner* which vocabulary
+it is holding.
+
+The limit sets have the same split: `agents.runtime/limits` is the full nine-value §7D set;
+`client/limits` is the client's own three-value set (`maxTurns`, `contentPart`, `timeout`) — it adds
+`contentPart` for a §8A oversized-content-part stop, a case that only exists at the client layer and
+has no §7D equivalent.
+</Aside>
+
+## When to use it
+
+- **Branching on a `TaskResult`'s `:status`** returned by `spawn`/`wait`/`interrupt`/`close` on
+  [`toolnexus.agents.runtime`](/api/clojure/runtime/runtime/) — check membership in `statuses`
+  rather than hardcoding the string, so a host fails loudly if it ever meets an eighth value instead
+  of silently falling through a `case`.
+  When the status is `"incomplete"` or `"timeout"`, the same result carries a `:limit` naming
+  *which* budget stopped it — check that against `limits`.
+- **Building a dashboard or a log line** that needs to render every possible outcome a spawned
+  agent can reach, exhaustively, without guessing at undocumented strings.
+- **Writing a completion/guardrail check** in [`toolnexus.agents.loop`](/api/clojure/runtime/loop/)
+  that inspects `:limit` to decide whether a stop is retryable (e.g. `"maxTurns"` might be worth
+  bumping and re-running; `"maxDepth"` is a structural ceiling, not a transient one).
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for toolnexus.client/statuses at the §8 client layer instead">
+If you are inspecting the return of a plain [`client/run`](/api/clojure/client/run/) — not a
+runtime-spawned task — you want `toolnexus.client/statuses` (three values, no `"timeout"`), not
+this namespace's seven-value set. Importing the wrong one and checking `(contains? statuses
+"timeout")` against a §8 `RunResult` will always be false, because a §8 whole-run deadline is a
+thrown `ex-info`, never a returned status.
+</Aside>
+
+The vocabularies are plain `#{}` sets and named `def`s rather than an enum type or a keyword
+namespace, matching this port's general style of carrying closed vocabularies as data
+(`clojure/src/toolnexus/agents/runtime.cljc:142`, `:174`) — a host checks membership with
+`contains?` the same way it would check `.contains()` on any other port's array/list constant, with
+no additional API to learn.
+
+## Examples
+
+### 1. The smallest useful call — check a spawned task's outcome
+
+```clojure
+(require '[toolnexus.agents.runtime :as rt])
+
+(let [h (rt/spawn rt agent-def {:toolkit toolkit})
+      r (rt/wait rt h)]
+  (assert (contains? rt/statuses (:status r)) "unrecognised task status")
+  (case (:status r)
+    "done"        (println (:text r))
+    "pending"     (queue-for-human! (:pending r))
+    "incomplete"  (println "stopped on limit:" (:limit r))
+    (println "ended:" (:status r))))
+```
+
+### 2. The realistic case — react to WHICH limit stopped the task
+
+```clojure
+(require '[toolnexus.agents.runtime :as rt])
+
+(defn handle-stop [r]
+  (when (= "incomplete" (:status r))
+    (assert (contains? rt/limits (:limit r)) "unrecognised limit reason")
+    (cond
+      (= rt/limit-max-turns (:limit r))
+      (println "hit the turn budget — consider raising it and re-running")
+
+      (= rt/limit-max-depth (:limit r))
+      (println "hit the delegation depth ceiling — this is structural, don't retry blindly")
+
+      (= rt/limit-max-wall-ms (:limit r))
+      (println "ran out of wall-clock time")
+
+      :else
+      (println "stopped on" (:limit r)))))
+```
+
+### 3. The full surface — distinguishing the two vocabularies side by side
+
+```clojure
+(require '[toolnexus.agents.runtime :as rt]
+         '[toolnexus.client :as client])
+
+;; the §7D task-level set (seven statuses, nine limits)
+(assert (= #{"done" "pending" "incomplete" "interrupted" "closed" "timeout" "error"}
+           rt/statuses))
+(assert (= #{"maxTurns" "maxTokens" "maxToolCalls" "maxWallMs"
+             "maxChildren" "maxConcurrent" "maxDepth" "completion" "timeout"}
+           rt/limits))
+
+;; the §8 client-level set — smaller, and NEVER contains "timeout" as a status
+(assert (= #{"done" "pending" "incomplete"} client/statuses))
+(assert (= #{"maxTurns" "contentPart" "timeout"} client/limits))
+(assert (not (contains? client/statuses "timeout")))
+
+;; a host that gets this wrong learns immediately rather than silently
+;; mis-branching: membership checks against the WRONG set simply never match
+(assert (not (contains? client/limits "maxDepth"))
+        "maxDepth is a task-level admission limit; the client run never reports it")
+```
+
+<Aside type="note" title="ACCEPTED ASYMMETRY: maxChildren / maxConcurrent / maxDepth (A17)">
+Those three limit strings are spawn/admission refusals — a host that hits them sees a **throw** from
+`spawn`, not a settled `TaskResult` carrying `:limit`. The vocabulary still pins their spelling for
+wherever a port does report such a stop; this batch deliberately does not invent a settle path just
+to make the strings appear in a returned value.
+</Aside>
+
+## See also
+
+- [`toolnexus.agents.loop`](/api/clojure/runtime/loop/) — `run-gated` drives a run under a
+  completion check and reads these same status/limit strings to decide whether the gate has passed.
+- [`toolnexus.agents.runtime`](/api/clojure/runtime/runtime/) — The host verbs (`spawn`, `wait`,
+  `interrupt`, `close`) whose `TaskResult` carries `:status` and, on a limit stop, `:limit`.
