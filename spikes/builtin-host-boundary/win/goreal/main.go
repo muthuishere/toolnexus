@@ -37,7 +37,18 @@ func main() {
 	cwd, _ := os.Getwd()
 	fmt.Printf("HOST_CWD=%s\n", cwd)
 
-	tk, err := tn.CreateToolkit(context.Background(), tn.Options{})
+	scratchArg := "."
+	if len(os.Args) > 1 {
+		scratchArg = os.Args[1]
+	}
+	if shell, shErr := tn.BuiltinShell(nil); shErr != nil {
+		fmt.Println("SHELL_DETECT_ERR=", shErr)
+	} else {
+		fmt.Printf("SHELL_DETECTED=%q\n", shell)
+	}
+	tk, err := tn.CreateToolkit(context.Background(), tn.Options{
+		Builtins: tn.BuiltinsConfig{BaseDir: scratchArg},
+	})
 	if err != nil {
 		fmt.Println("CREATE_TOOLKIT_ERR=", err)
 		return
@@ -48,33 +59,48 @@ func main() {
 	out, isErr := call(tk, "bash", map[string]any{"command": "echo hello-from-bash-builtin"})
 	fmt.Printf("BASH_ISERROR=%v BASH_OUTPUT=%q\n", isErr, out)
 
-	// 2 — relative-path resolution. Write with a relative path from a scratch dir
-	// passed as argv[1], then report which directory the bytes actually landed in.
-	scratch := "."
-	if len(os.Args) > 1 {
-		scratch = os.Args[1]
-	}
+	// 2 — relative-path resolution, now with BaseDir set to the scratch dir.
+	scratch := scratchArg
 	_ = os.MkdirAll(filepath.Join(scratch, "elsewhere"), 0o755)
 	rel := "relative-probe.txt"
 	out, isErr = call(tk, "write", map[string]any{"path": rel, "content": "landed"})
 	fmt.Printf("WRITE_ISERROR=%v WRITE_OUTPUT=%q\n", isErr, out)
+	inBase := filepath.Join(scratch, rel)
 	inCwd := filepath.Join(cwd, rel)
-	if _, err := os.Stat(inCwd); err == nil {
+	switch {
+	case fileThere(inBase):
+		fmt.Printf("RELATIVE_LANDED_IN=baseDir (%s)\n", inBase)
+		_ = os.Remove(inBase)
+	case fileThere(inCwd):
 		fmt.Printf("RELATIVE_LANDED_IN=host_cwd (%s)\n", inCwd)
 		_ = os.Remove(inCwd)
+	default:
+		fmt.Println("RELATIVE_LANDED_IN=nowhere")
+	}
+
+	// 2b — confinement, which only exists when the host asks for it.
+	tkC, cErr := tn.CreateToolkit(context.Background(), tn.Options{
+		Builtins: tn.BuiltinsConfig{BaseDir: scratch, ConfineToBaseDir: true},
+	})
+	if cErr != nil {
+		fmt.Println("CONFINE_TOOLKIT_ERR=", cErr)
 	} else {
-		fmt.Printf("RELATIVE_LANDED_IN=unknown (%v)\n", err)
+		out, isErr := call(tkC, "read", map[string]any{"path": "..\\..\\escape.txt"})
+		fmt.Printf("CONFINE_DOTDOT_ISERROR=%v OUTPUT=%q\n", isErr, out)
+		out, isErr = call(tkC, "write", map[string]any{"path": "CON", "content": "x"})
+		fmt.Printf("CONFINE_DEVICE_ISERROR=%v OUTPUT=%q\n", isErr, out)
+		tkC.Close()
 	}
 
 	// 3 — timeout and the grandchild. Only meaningful if bash works at all.
 	marker := filepath.Join(scratch, "orphan.marker")
 	_ = os.Remove(marker)
-	// cmd.exe sequencing: `&` runs the next command regardless; the inner `cmd /c`
-	// is a grandchild that outlives its parent if only the parent is killed.
-	command := fmt.Sprintf(`ping -n 2 127.0.0.1 >NUL & cmd /c "ping -n 4 127.0.0.1 >NUL & echo x > %s"`, marker)
+	// child.cmd detaches a grandchild and then waits — see win/orphan/child.cmd
+	// for why this is plain cmd and not `start ""` or PowerShell.
+	command := fmt.Sprintf(`child.cmd %s`, marker)
 	out, isErr = call(tk, "bash", map[string]any{"command": command, "timeout": 700})
 	fmt.Printf("TIMEOUT_ISERROR=%v TIMEOUT_OUTPUT=%q\n", isErr, out)
-	time.Sleep(4 * time.Second)
+	time.Sleep(9 * time.Second)
 	if _, err := os.Stat(marker); err == nil {
 		fmt.Println("ORPHAN=SURVIVED")
 		_ = os.Remove(marker)
@@ -89,4 +115,11 @@ func main() {
 	fmt.Printf("GLOB_ISERROR=%v GLOB_OUTPUT=%q\n", isErr, out)
 	out, isErr = call(tk, "grep", map[string]any{"pattern": "x", "path": filepath.Join(scratch, "tree")})
 	fmt.Printf("GREP_ISERROR=%v GREP_OUTPUT=%q\n", isErr, out)
+}
+
+// fileThere is os.Stat with the error thrown away — the probe only asks whether
+// the bytes landed, never why they did not.
+func fileThere(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
