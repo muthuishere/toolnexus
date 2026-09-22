@@ -378,6 +378,12 @@ function bashTool(env: BuiltinEnv): Tool {
               const r = spawnSync("taskkill", ["/T", "/F", "/PID", String(child.pid)])
               return r.status === 0
             }
+            // Never signal a REAPED child by negated pid: that pid may belong to
+            // something else by now, and the blast radius is a whole process
+            // GROUP. (On Windows above, taskkill targets one pid and a dead pid
+            // is merely an error, so the same guard is not needed there — and
+            // must not be applied, because the tree can outlive the child.)
+            if (child.exitCode !== null || child.signalCode !== null) return false
             process.kill(-child.pid, graceful ? "SIGTERM" : "SIGKILL")
             return true
           } catch {
@@ -416,13 +422,18 @@ function bashTool(env: BuiltinEnv): Tool {
         child.on("error", (e) => finish(err(`bash: ${e.message}`, meta)))
         child.on("close", (code) => {
           if (stopped) {
-            // The direct child closing does NOT mean the job is gone: on Windows
-            // a detached grandchild outlives it, and the graceful `taskkill /T`
-            // (no /F) is refused for a console process — measured on a native
-            // Windows box, where this path reported killedTree=false and the
-            // grandchild wrote its marker anyway. So insist here rather than
-            // relying on a grace timer that `finish` is about to clear.
-            if (!killedTree) killedTree = killJob(false)
+            // WINDOWS ONLY, and the platform guard is the point. There, the
+            // direct child closing does not mean the job is gone — a detached
+            // grandchild outlives it — so the tree is terminated here by pid.
+            //
+            // On POSIX this must NOT run. `close` only fires once the stdio the
+            // grandchild inherited has closed, so the job is already gone; and
+            // signalling `-pid` after the child has been reaped aims at whatever
+            // process now owns that pid. PIDs recycle fast on a busy CI box, and
+            // the blast radius of a negated pid is a whole process GROUP — which
+            // is how this killed sibling test workers on the GitHub runner while
+            // passing on macOS, in a container, and on its own.
+            if (!killedTree && process.platform === "win32") killedTree = killJob(false)
             meta.timedOut = stopped === "timeout"
             meta.killedTree = killedTree
             return finish(
