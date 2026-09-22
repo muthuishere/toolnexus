@@ -1,7 +1,7 @@
 defmodule Toolnexus.MixProject do
   use Mix.Project
 
-  @version "0.18.1"
+  @version "0.19.0"
   @source_url "https://github.com/muthuishere/toolnexus"
 
   def project do

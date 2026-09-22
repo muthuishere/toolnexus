@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.19.0 — 2026-09-22
+
 ### Eight things that went wrong for people building on 0.18.x, fixed in all seven ports
 
 Eight consumer-reported issues (#86–#93), every one of them found by someone shipping on the
